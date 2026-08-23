@@ -47,6 +47,11 @@ use crate::metal::{
     encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk16_f32, kernel_trace_begin,
     kernel_trace_snapshot, kernel_trace_take_delta,
 };
+#[cfg(feature = "dflash-k0s-diagnostics")]
+use crate::metal::{
+    dispatch_census_begin, dispatch_census_is_active, dispatch_census_tag_scope,
+    dispatch_census_take,
+};
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, LmHeadTail, LmHeadTailEvidence, MetalBlock, MetalForward, MetalModel,
     MetalMoeFfn, MetalSession, MfError, RMS_EPS, checked_u64_add, checked_u64_double,
@@ -60,6 +65,8 @@ use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLResource,
     MTLStorageMode,
 };
+#[cfg(feature = "dflash-k0s-diagnostics")]
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -2122,6 +2129,9 @@ pub enum DFlashError {
         production: i32,
         reconstructed: i32,
     },
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[error("dflash K0-S diagnostic: {0}")]
+    K0sDiagnostic(String),
 }
 
 /// All DFlash drafter weights resident on Metal. Loaded once at session
@@ -2185,6 +2195,235 @@ pub struct MetalDFlash2Selector {
     pub successor: DFlash2Codebook,
     pub rank: usize,
     pub top_k: usize,
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    hidden_provenance: DFlashK0sTensorProvenance,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub const DFLASH_K0S_BLOCK_SIZE: usize = 8;
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub const DFLASH_K0S_TOP_K: usize = 16;
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub const DFLASH_K0S_RANK: usize = 256;
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub const DFLASH_K0S_HIDDEN: usize = 5120;
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub const DFLASH_K0S_VOCAB: usize = 248_320;
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub const DFLASH_K0S_LATTICE_ROWS: usize = 97;
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub const DFLASH_K0S_DISPATCH_CENSUS_MAX: usize = 256;
+#[cfg(feature = "dflash-k0s-diagnostics")]
+const DFLASH_K0S_SELECTOR_DISPATCH_TAG: &str = "dflash_k0s.selector_hidden_projection.v1";
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sTensorProvenance {
+    pub descriptor: TensorDesc,
+    pub full_tensor_sha256: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DFlashK0sCodebookSide {
+    Predecessor,
+    Successor,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sRawRow {
+    pub side: DFlashK0sCodebookSide,
+    pub depth: usize,
+    pub predecessor_slot: Option<usize>,
+    pub candidate_slot: Option<usize>,
+    pub token_id: i32,
+    pub bytes: Vec<u8>,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DFlashK0sNonFiniteClass {
+    PositiveInfinity,
+    NegativeInfinity,
+    Nan,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DFlashK0sSlotIssue {
+    DuplicateId {
+        candidate_slot: usize,
+        first_slot: usize,
+        token_id: i32,
+    },
+    Sentinel {
+        candidate_slot: usize,
+        token_id: i32,
+    },
+    NonFiniteScore {
+        candidate_slot: usize,
+        token_id: i32,
+        score_bits: u32,
+        class: DFlashK0sNonFiniteClass,
+    },
+    NoValidChoice,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sSlot {
+    pub candidate_slot: usize,
+    pub token_id: i32,
+    pub unary_bits: u32,
+    pub score_bits: Option<u32>,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sLatticeRow {
+    /// Global positional row index in the canonical 97-row packet, `0..=96`.
+    pub row_index: usize,
+    pub depth: usize,
+    pub predecessor_slot: Option<usize>,
+    pub predecessor_token: i32,
+    pub slots: Vec<DFlashK0sSlot>,
+    pub issues: Vec<DFlashK0sSlotIssue>,
+    pub greedy_slot: usize,
+    pub has_valid_choice: bool,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DFlashK0sTopKIssue {
+    NonFiniteLogit {
+        token_id: usize,
+        bits: u32,
+    },
+    IdMismatch {
+        slot: usize,
+        expected: i32,
+        observed: i32,
+    },
+    UnaryMismatch {
+        slot: usize,
+        expected_bits: u32,
+        observed_bits: u32,
+    },
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sDepth {
+    pub depth: usize,
+    pub position: u32,
+    pub full_logits_bits: Vec<u32>,
+    pub top_k_ids: Vec<i32>,
+    pub unary_bits: Vec<u32>,
+    pub selector_hidden_bits: Vec<u32>,
+    pub top_k_issues: Vec<DFlashK0sTopKIssue>,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DFlashK0sChainEvent {
+    InvalidCarry {
+        depth: usize,
+        token_id: i32,
+    },
+    MissingPredecessorRow {
+        depth: usize,
+        token_id: i32,
+        predecessor_slot: Option<usize>,
+    },
+    SlotZeroTermination {
+        depth: usize,
+        token_id: i32,
+        slot: usize,
+    },
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sChain {
+    pub requested_slots: Vec<usize>,
+    pub visited_row_indices: Vec<usize>,
+    pub tokens: Vec<i32>,
+    pub event: Option<DFlashK0sChainEvent>,
+    pub terminated: bool,
+    pub packet_geometry_valid: bool,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DFlashK0sDispatchCensusRow {
+    pub family: String,
+    pub tag: Option<String>,
+    pub encoder_ordinal: u64,
+    pub encoder_concurrent: bool,
+    pub kernel: String,
+    pub grid: [u64; 3],
+    pub threads: [u64; 3],
+    pub grid_threadgroups: u64,
+    pub threadgroup_threads: u64,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sStateIdentity {
+    pub carry_token: i32,
+    pub noise_start_position: u32,
+    pub target_context_len: usize,
+    pub context_hidden_watermark: usize,
+    pub kv_context_watermark: usize,
+    pub draft_tokens_sha256: [u8; 32],
+    pub noise_input_sha256: [u8; 32],
+    pub synchronized_event_sha256: [u8; 32],
+    pub diagnostic_state_sha256: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DFlashK0sScalarContractCase {
+    pub name: &'static str,
+    pub a_bits: Vec<u32>,
+    pub z_bits: Vec<u32>,
+    pub successor_bits: Vec<u32>,
+    pub unary_bits: u32,
+    pub score_bits: u32,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DFlashK0sScalarContractFixture {
+    pub cases: Vec<DFlashK0sScalarContractCase>,
+    pub fixture_sha256: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sProvenance {
+    pub selector_hidden: DFlashK0sTensorProvenance,
+    pub predecessor: DFlashK0sTensorProvenance,
+    pub successor: DFlashK0sTensorProvenance,
+    pub embedded_metallib_sha256: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct DFlashK0sCapture {
+    pub draft_tokens: Vec<i32>,
+    pub draft_token_bits: Vec<u32>,
+    pub depths: Vec<DFlashK0sDepth>,
+    pub lattice: Vec<DFlashK0sLatticeRow>,
+    pub production_chain: DFlashK0sChain,
+    pub raw_rows: Vec<DFlashK0sRawRow>,
+    pub provenance: DFlashK0sProvenance,
+    pub dispatch_census: Vec<DFlashK0sDispatchCensusRow>,
+    pub selector_hidden_dispatch: DFlashK0sDispatchCensusRow,
+    pub kernel_trace: crate::metal::KernelTraceCounters,
+    pub state_identity: DFlashK0sStateIdentity,
+    pub capture_sha256: [u8; 32],
 }
 
 /// Read-only evidence from one DFlash 2 greedy selector walk.
@@ -2246,6 +2485,10 @@ pub struct DFlash2Codebook {
     n_rows: usize,
     row_bytes: usize,
     row_desc: TensorDesc,
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    original_desc: TensorDesc,
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    full_tensor_sha256: [u8; 32],
 }
 
 impl DFlash2Codebook {
@@ -2336,6 +2579,10 @@ impl DFlash2Codebook {
             n_rows,
             row_bytes,
             row_desc,
+            #[cfg(feature = "dflash-k0s-diagnostics")]
+            original_desc: desc.clone(),
+            #[cfg(feature = "dflash-k0s-diagnostics")]
+            full_tensor_sha256: Sha256::digest(bytes).into(),
         })
     }
 
@@ -2408,6 +2655,20 @@ impl DFlash2Codebook {
             _ => unreachable!("dtype validated in from_gguf"),
         }
         Ok(())
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn raw_row(&self, row: usize) -> Result<Vec<u8>, DFlashError> {
+        let base = row
+            .checked_mul(self.row_bytes)
+            .ok_or_else(|| DFlashError::K0sDiagnostic("codebook raw-row offset overflow".into()))?;
+        let end = base
+            .checked_add(self.row_bytes)
+            .ok_or_else(|| DFlashError::K0sDiagnostic("codebook raw-row end overflow".into()))?;
+        let raw = &bytemuck::cast_slice::<u32, u8>(&self.raw_words)[..self.raw_len];
+        raw.get(base..end)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| DFlashError::K0sDiagnostic("codebook raw row is out of range".into()))
     }
 }
 
@@ -2670,6 +2931,855 @@ fn diagnose_dflash2_selector_walk(
     Ok((reconstructed, depths))
 }
 
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_error(detail: impl Into<String>) -> DFlashError {
+    DFlashError::K0sDiagnostic(detail.into())
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_check_dispatch_census_len(rows: usize) -> Result<(), DFlashError> {
+    if rows > DFLASH_K0S_DISPATCH_CENSUS_MAX {
+        return Err(dflash_k0s_error(format!(
+            "dispatch census has {rows} rows, exceeding the v1 cap of {}",
+            DFLASH_K0S_DISPATCH_CENSUS_MAX
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+struct DFlashK0sObserverGuard {
+    baseline: [usize; 3],
+    trace: Option<crate::metal::KernelTraceGuard>,
+    census_active: bool,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+impl DFlashK0sObserverGuard {
+    fn begin() -> Result<Self, DFlashError> {
+        let baseline = crate::metal::diagnostics_observer_active_counts();
+        if baseline[0] != 0 || baseline[1] != 0 || dispatch_census_is_active() {
+            return Err(dflash_k0s_error(
+                "dispatch census or kernel trace is already active",
+            ));
+        }
+        dispatch_census_begin();
+        let trace = kernel_trace_begin();
+        Ok(Self {
+            baseline,
+            trace: Some(trace),
+            census_active: true,
+        })
+    }
+
+    fn finish(
+        mut self,
+    ) -> Result<
+        (
+            Vec<crate::metal::DispatchCensusRow>,
+            crate::metal::KernelTraceCounters,
+        ),
+        DFlashError,
+    > {
+        let counters = kernel_trace_snapshot();
+        drop(self.trace.take());
+        let rows = dispatch_census_take();
+        self.census_active = false;
+        if crate::metal::diagnostics_observer_active_counts() != self.baseline {
+            return Err(dflash_k0s_error(
+                "diagnostic observers did not return to their baseline",
+            ));
+        }
+        Ok((rows, counters))
+    }
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+impl Drop for DFlashK0sObserverGuard {
+    fn drop(&mut self) {
+        drop(self.trace.take());
+        if self.census_active {
+            let _ = dispatch_census_take();
+            self.census_active = false;
+        }
+    }
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_positions(noise_start_pos: u32) -> Result<[u32; 7], DFlashError> {
+    let mut positions = [0u32; 7];
+    for (offset, position) in positions.iter_mut().enumerate() {
+        *position = noise_start_pos
+            .checked_add((offset + 1) as u32)
+            .ok_or_else(|| dflash_k0s_error("K0-S depth position overflows u32"))?;
+    }
+    Ok(positions)
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_nonfinite_class(value: f32) -> DFlashK0sNonFiniteClass {
+    if value.is_nan() {
+        DFlashK0sNonFiniteClass::Nan
+    } else if value.is_sign_positive() {
+        DFlashK0sNonFiniteClass::PositiveInfinity
+    } else {
+        DFlashK0sNonFiniteClass::NegativeInfinity
+    }
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_reconstruct_top_k(
+    logits: &[f32],
+    observed_ids: &[i32],
+    observed_unary: &[f32],
+) -> Vec<DFlashK0sTopKIssue> {
+    let mut issues = Vec::new();
+    for (token_id, &value) in logits.iter().enumerate() {
+        if !value.is_finite() {
+            issues.push(DFlashK0sTopKIssue::NonFiniteLogit {
+                token_id,
+                bits: value.to_bits(),
+            });
+        }
+    }
+    if !issues.is_empty() {
+        return issues;
+    }
+    let mut order: Vec<usize> = (0..logits.len()).collect();
+    order.sort_unstable_by(|&left, &right| {
+        logits[right]
+            .partial_cmp(&logits[left])
+            .expect("finite logits have an ordinary ordering")
+            .then_with(|| left.cmp(&right))
+    });
+    for (slot, &expected) in order.iter().take(DFLASH_K0S_TOP_K).enumerate() {
+        if observed_ids.get(slot).copied() != Some(expected as i32) {
+            issues.push(DFlashK0sTopKIssue::IdMismatch {
+                slot,
+                expected: expected as i32,
+                observed: observed_ids.get(slot).copied().unwrap_or(-1),
+            });
+        }
+        let expected_bits = logits[expected].to_bits();
+        let observed_bits = observed_unary
+            .get(slot)
+            .map(|v| v.to_bits())
+            .unwrap_or(u32::MAX);
+        if observed_bits != expected_bits {
+            issues.push(DFlashK0sTopKIssue::UnaryMismatch {
+                slot,
+                expected_bits,
+                observed_bits,
+            });
+        }
+    }
+    issues
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_classify_slots(
+    token_ids: &[i32],
+    scores: &[Option<f32>],
+    vocab: usize,
+) -> (Vec<DFlashK0sSlotIssue>, usize, bool) {
+    let mut issues = Vec::new();
+    let mut best_score = f32::NEG_INFINITY;
+    let mut best_slot = 0usize;
+    let mut has_valid_choice = false;
+    for candidate_slot in 0..token_ids.len() {
+        let token_id = token_ids[candidate_slot];
+        if let Some(first_slot) = token_ids[..candidate_slot]
+            .iter()
+            .position(|&prior| prior == token_id)
+        {
+            issues.push(DFlashK0sSlotIssue::DuplicateId {
+                candidate_slot,
+                first_slot,
+                token_id,
+            });
+        }
+        if token_id < 0 || token_id as usize >= vocab {
+            issues.push(DFlashK0sSlotIssue::Sentinel {
+                candidate_slot,
+                token_id,
+            });
+        } else if let Some(score) = scores[candidate_slot] {
+            if !score.is_finite() {
+                issues.push(DFlashK0sSlotIssue::NonFiniteScore {
+                    candidate_slot,
+                    token_id,
+                    score_bits: score.to_bits(),
+                    class: dflash_k0s_nonfinite_class(score),
+                });
+            }
+            if score > best_score {
+                best_score = score;
+                best_slot = candidate_slot;
+                has_valid_choice = true;
+            }
+        }
+    }
+    if !has_valid_choice {
+        issues.push(DFlashK0sSlotIssue::NoValidChoice);
+    }
+    (issues, best_slot, has_valid_choice)
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_scalar_score(gate: &[f32], successor: &[f32], unary: f32) -> f32 {
+    let mut dot = 0.0f32;
+    for rank in 0..gate.len() {
+        let product = gate[rank] * successor[rank];
+        dot += product;
+    }
+    unary + dot
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+trait DFlashK0sRowProvider {
+    fn rank(&self) -> usize;
+    fn row_count(&self) -> usize;
+    fn dequant_row_for_k0s(&self, row: usize, out: &mut [f32]) -> Result<(), DFlashError>;
+    fn raw_row_for_k0s(&self, row: usize) -> Result<Vec<u8>, DFlashError>;
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+impl DFlashK0sRowProvider for DFlash2Codebook {
+    fn rank(&self) -> usize {
+        self.rank
+    }
+
+    fn row_count(&self) -> usize {
+        self.n_rows
+    }
+
+    fn dequant_row_for_k0s(&self, row: usize, out: &mut [f32]) -> Result<(), DFlashError> {
+        self.dequant_row(row, out)
+    }
+
+    fn raw_row_for_k0s(&self, row: usize) -> Result<Vec<u8>, DFlashError> {
+        self.raw_row(row)
+    }
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_build_lattice(
+    predecessor: &DFlash2Codebook,
+    successor: &DFlash2Codebook,
+    carry_token: i32,
+    ids: &[i32],
+    unary: &[f32],
+    selector_hidden: &[f32],
+) -> Result<(Vec<DFlashK0sLatticeRow>, Vec<DFlashK0sRawRow>), DFlashError> {
+    if predecessor.rank != DFLASH_K0S_RANK
+        || successor.rank != DFLASH_K0S_RANK
+        || predecessor.n_rows != DFLASH_K0S_VOCAB
+        || successor.n_rows != DFLASH_K0S_VOCAB
+    {
+        return Err(dflash_k0s_error("malformed K0-S codebook geometry"));
+    }
+    dflash_k0s_build_lattice_core(
+        predecessor,
+        successor,
+        carry_token,
+        ids,
+        unary,
+        selector_hidden,
+    )
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_build_lattice_core<P: DFlashK0sRowProvider, S: DFlashK0sRowProvider>(
+    predecessor: &P,
+    successor: &S,
+    carry_token: i32,
+    ids: &[i32],
+    unary: &[f32],
+    selector_hidden: &[f32],
+) -> Result<(Vec<DFlashK0sLatticeRow>, Vec<DFlashK0sRawRow>), DFlashError> {
+    let candidate_elements = DFLASH_K0S_BLOCK_SIZE
+        .checked_mul(DFLASH_K0S_TOP_K)
+        .ok_or_else(|| dflash_k0s_error("candidate geometry overflow"))?;
+    let hidden_elements = DFLASH_K0S_BLOCK_SIZE
+        .checked_mul(DFLASH_K0S_RANK)
+        .ok_or_else(|| dflash_k0s_error("selector-hidden geometry overflow"))?;
+    if ids.len() != candidate_elements
+        || unary.len() != candidate_elements
+        || selector_hidden.len() != hidden_elements
+    {
+        return Err(dflash_k0s_error("malformed K0-S input geometry"));
+    }
+    if predecessor.rank() != DFLASH_K0S_RANK
+        || successor.rank() != DFLASH_K0S_RANK
+        || predecessor.row_count() != DFLASH_K0S_VOCAB
+        || successor.row_count() != DFLASH_K0S_VOCAB
+    {
+        return Err(dflash_k0s_error("malformed K0-S codebook geometry"));
+    }
+    if carry_token < 0 || carry_token as usize >= DFLASH_K0S_VOCAB {
+        return Err(dflash_k0s_error("invalid K0-S carry token"));
+    }
+
+    let mut rows = Vec::with_capacity(DFLASH_K0S_LATTICE_ROWS);
+    let mut raw_rows = Vec::new();
+    let mut pred = vec![0.0f32; DFLASH_K0S_RANK];
+    let mut succ = vec![0.0f32; DFLASH_K0S_RANK];
+    let mut gate = vec![0.0f32; DFLASH_K0S_RANK];
+    for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+        let predecessor_count = if depth == 1 { 1 } else { DFLASH_K0S_TOP_K };
+        for predecessor_position in 0..predecessor_count {
+            let predecessor_slot = (depth > 1).then_some(predecessor_position);
+            let predecessor_token = if depth == 1 {
+                carry_token
+            } else {
+                ids[(depth - 1) * DFLASH_K0S_TOP_K + predecessor_position]
+            };
+            let predecessor_valid =
+                predecessor_token >= 0 && (predecessor_token as usize) < DFLASH_K0S_VOCAB;
+            if predecessor_valid {
+                predecessor.dequant_row_for_k0s(predecessor_token as usize, &mut pred)?;
+                raw_rows.push(DFlashK0sRawRow {
+                    side: DFlashK0sCodebookSide::Predecessor,
+                    depth,
+                    predecessor_slot,
+                    candidate_slot: None,
+                    token_id: predecessor_token,
+                    bytes: predecessor.raw_row_for_k0s(predecessor_token as usize)?,
+                });
+                let z = &selector_hidden[depth * DFLASH_K0S_RANK..(depth + 1) * DFLASH_K0S_RANK];
+                for rank in 0..DFLASH_K0S_RANK {
+                    gate[rank] = pred[rank] * z[rank];
+                }
+            }
+
+            let row_ids = &ids[depth * DFLASH_K0S_TOP_K..(depth + 1) * DFLASH_K0S_TOP_K];
+            let row_unary = &unary[depth * DFLASH_K0S_TOP_K..(depth + 1) * DFLASH_K0S_TOP_K];
+            let mut slots = Vec::with_capacity(DFLASH_K0S_TOP_K);
+            let mut scores = Vec::with_capacity(DFLASH_K0S_TOP_K);
+            for candidate_slot in 0..DFLASH_K0S_TOP_K {
+                let token_id = row_ids[candidate_slot];
+                let candidate_valid = token_id >= 0 && (token_id as usize) < DFLASH_K0S_VOCAB;
+                let score_bits = if !candidate_valid {
+                    None
+                } else if predecessor_valid {
+                    successor.dequant_row_for_k0s(token_id as usize, &mut succ)?;
+                    raw_rows.push(DFlashK0sRawRow {
+                        side: DFlashK0sCodebookSide::Successor,
+                        depth,
+                        predecessor_slot,
+                        candidate_slot: Some(candidate_slot),
+                        token_id,
+                        bytes: successor.raw_row_for_k0s(token_id as usize)?,
+                    });
+                    let score = dflash_k0s_scalar_score(&gate, &succ, row_unary[candidate_slot]);
+                    Some(score.to_bits())
+                } else {
+                    None
+                };
+                scores.push(score_bits.map(f32::from_bits));
+                slots.push(DFlashK0sSlot {
+                    candidate_slot,
+                    token_id,
+                    unary_bits: row_unary[candidate_slot].to_bits(),
+                    score_bits,
+                });
+            }
+            let (issues, best_slot, has_valid_choice) =
+                dflash_k0s_classify_slots(row_ids, &scores, DFLASH_K0S_VOCAB);
+            rows.push(DFlashK0sLatticeRow {
+                row_index: rows.len(),
+                depth,
+                predecessor_slot,
+                predecessor_token,
+                slots,
+                issues,
+                greedy_slot: best_slot,
+                has_valid_choice,
+            });
+        }
+    }
+    if rows.len() != DFLASH_K0S_LATTICE_ROWS {
+        return Err(dflash_k0s_error("K0-S lattice did not produce 97 rows"));
+    }
+    Ok((rows, raw_rows))
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_traverse_slots(
+    rows: &[DFlashK0sLatticeRow],
+    carry_token: i32,
+    requested_slots: &[usize],
+) -> DFlashK0sChain {
+    dflash_k0s_traverse_slots_mode(
+        rows,
+        carry_token,
+        requested_slots,
+        DFlashK0sChainMode::Fixed,
+    )
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DFlashK0sChainMode {
+    Fixed,
+    Production,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_traverse_slots_mode(
+    rows: &[DFlashK0sLatticeRow],
+    carry_token: i32,
+    requested_slots: &[usize],
+    mode: DFlashK0sChainMode,
+) -> DFlashK0sChain {
+    let packet_geometry_valid = rows.len() == DFLASH_K0S_LATTICE_ROWS
+        && (1..DFLASH_K0S_BLOCK_SIZE).all(|depth| {
+            let expected = if depth == 1 { 1 } else { DFLASH_K0S_TOP_K };
+            rows.iter().filter(|row| row.depth == depth).count() == expected
+                && (0..expected).all(|position| {
+                    let slot = (depth > 1).then_some(position);
+                    rows.iter()
+                        .filter(|row| row.depth == depth && row.predecessor_slot == slot)
+                        .count()
+                        == 1
+                })
+        });
+    let mut chain = DFlashK0sChain {
+        requested_slots: requested_slots.to_vec(),
+        visited_row_indices: Vec::new(),
+        tokens: Vec::new(),
+        event: None,
+        terminated: false,
+        packet_geometry_valid,
+    };
+    if carry_token < 0 || carry_token as usize >= DFLASH_K0S_VOCAB {
+        chain.event = Some(DFlashK0sChainEvent::InvalidCarry {
+            depth: 1,
+            token_id: carry_token,
+        });
+        chain.terminated = true;
+        return chain;
+    }
+    let mut predecessor_slot = None;
+    let mut predecessor_token = carry_token;
+    for (offset, &slot) in requested_slots.iter().enumerate() {
+        let depth = offset + 1;
+        let Some(row) = rows
+            .iter()
+            .find(|row| row.depth == depth && row.predecessor_slot == predecessor_slot)
+        else {
+            chain.event = Some(DFlashK0sChainEvent::MissingPredecessorRow {
+                depth,
+                token_id: predecessor_token,
+                predecessor_slot,
+            });
+            chain.terminated = true;
+            return chain;
+        };
+        chain.visited_row_indices.push(row.row_index);
+        let Some(candidate) = row.slots.get(slot) else {
+            chain.event = Some(DFlashK0sChainEvent::MissingPredecessorRow {
+                depth,
+                token_id: predecessor_token,
+                predecessor_slot,
+            });
+            chain.terminated = true;
+            return chain;
+        };
+        let candidate_valid =
+            candidate.token_id >= 0 && (candidate.token_id as usize) < DFLASH_K0S_VOCAB;
+        if mode == DFlashK0sChainMode::Production
+            && !row.has_valid_choice
+            && slot == 0
+            && !candidate_valid
+        {
+            chain.event = Some(DFlashK0sChainEvent::SlotZeroTermination {
+                depth,
+                token_id: candidate.token_id,
+                slot,
+            });
+            chain.terminated = true;
+            return chain;
+        }
+        if !candidate_valid {
+            chain.terminated = true;
+            return chain;
+        }
+        chain.tokens.push(candidate.token_id);
+        predecessor_slot = Some(slot);
+        predecessor_token = candidate.token_id;
+    }
+    chain
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_verify_production_replay(
+    draft_tokens: &[i32],
+    chain: &DFlashK0sChain,
+) -> Result<(), DFlashError> {
+    if draft_tokens.len() != DFLASH_K0S_BLOCK_SIZE
+        || chain.terminated
+        || chain.event.is_some()
+        || chain.tokens.len() != DFLASH_K0S_BLOCK_SIZE - 1
+        || chain.tokens.as_slice() != &draft_tokens[1..]
+    {
+        return Err(dflash_k0s_error(
+            "production draft tokens differ from the complete K0-S greedy replay",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_hash_bytes(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_le_bytes());
+    hash.update(bytes);
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_hash_dispatch(hash: &mut Sha256, row: &DFlashK0sDispatchCensusRow) {
+    dflash_k0s_hash_bytes(hash, row.family.as_bytes());
+    match &row.tag {
+        Some(tag) => {
+            hash.update([1]);
+            dflash_k0s_hash_bytes(hash, tag.as_bytes());
+        }
+        None => hash.update([0]),
+    }
+    hash.update(row.encoder_ordinal.to_le_bytes());
+    hash.update([u8::from(row.encoder_concurrent)]);
+    dflash_k0s_hash_bytes(hash, row.kernel.as_bytes());
+    for value in row.grid.into_iter().chain(row.threads) {
+        hash.update(value.to_le_bytes());
+    }
+    hash.update(row.grid_threadgroups.to_le_bytes());
+    hash.update(row.threadgroup_threads.to_le_bytes());
+}
+
+/// Canonical K0-S capture digest. The domain is the literal ASCII string
+/// `qwen.dflash_k0s.capture.v1`. Integers and f32 bit patterns are fixed-width
+/// little-endian; booleans and option tags are one byte; byte strings are
+/// prefixed by a little-endian u64 length. Vectors are prefixed by a u64 count
+/// and retain capture order. `capture_sha256` itself is not hashed.
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_capture_sha256(capture: &DFlashK0sCapture) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"qwen.dflash_k0s.capture.v1");
+    hash.update(capture.state_identity.carry_token.to_le_bytes());
+    hash.update(capture.state_identity.noise_start_position.to_le_bytes());
+    for value in [
+        capture.state_identity.target_context_len,
+        capture.state_identity.context_hidden_watermark,
+        capture.state_identity.kv_context_watermark,
+    ] {
+        hash.update((value as u64).to_le_bytes());
+    }
+    hash.update(capture.state_identity.draft_tokens_sha256);
+    hash.update(capture.state_identity.noise_input_sha256);
+    hash.update(capture.state_identity.synchronized_event_sha256);
+    hash.update(capture.state_identity.diagnostic_state_sha256);
+    hash.update((capture.draft_token_bits.len() as u64).to_le_bytes());
+    for bits in &capture.draft_token_bits {
+        hash.update(bits.to_le_bytes());
+    }
+    hash.update((capture.depths.len() as u64).to_le_bytes());
+    for depth in &capture.depths {
+        hash.update((depth.depth as u64).to_le_bytes());
+        hash.update(depth.position.to_le_bytes());
+        hash.update((depth.full_logits_bits.len() as u64).to_le_bytes());
+        for bits in &depth.full_logits_bits {
+            hash.update(bits.to_le_bytes());
+        }
+        hash.update((depth.top_k_ids.len() as u64).to_le_bytes());
+        for token in &depth.top_k_ids {
+            hash.update(token.to_le_bytes());
+        }
+        hash.update((depth.unary_bits.len() as u64).to_le_bytes());
+        for bits in &depth.unary_bits {
+            hash.update(bits.to_le_bytes());
+        }
+        hash.update((depth.selector_hidden_bits.len() as u64).to_le_bytes());
+        for bits in &depth.selector_hidden_bits {
+            hash.update(bits.to_le_bytes());
+        }
+    }
+    hash.update((capture.dispatch_census.len() as u64).to_le_bytes());
+    for row in &capture.dispatch_census {
+        dflash_k0s_hash_dispatch(&mut hash, row);
+    }
+    dflash_k0s_hash_dispatch(&mut hash, &capture.selector_hidden_dispatch);
+    hash.update(capture.kernel_trace.encoders.to_le_bytes());
+    hash.update(capture.kernel_trace.concurrent_encoders.to_le_bytes());
+    hash.update(capture.kernel_trace.dispatches.to_le_bytes());
+    hash.update(capture.provenance.selector_hidden.full_tensor_sha256);
+    hash.update(capture.provenance.predecessor.full_tensor_sha256);
+    hash.update(capture.provenance.successor.full_tensor_sha256);
+    hash.update(capture.provenance.embedded_metallib_sha256);
+    hash.finalize().into()
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_hash_state_tensor_material(
+    hash: &mut Sha256,
+    label: &str,
+    dtype: GgmlType,
+    shape: &[u64],
+    bytes: &[u8],
+) {
+    dflash_k0s_hash_bytes(hash, label.as_bytes());
+    hash.update((dtype as u32).to_le_bytes());
+    hash.update((shape.len() as u64).to_le_bytes());
+    for dimension in shape {
+        hash.update(dimension.to_le_bytes());
+    }
+    let elements = shape
+        .iter()
+        .try_fold(1u64, |product, dimension| product.checked_mul(*dimension))
+        .unwrap_or(u64::MAX);
+    hash.update(elements.to_le_bytes());
+    dflash_k0s_hash_bytes(hash, bytes);
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_hash_state_tensor(
+    hash: &mut Sha256,
+    label: &str,
+    tensor: &MetalTensor,
+) -> Result<(), DFlashError> {
+    if tensor.buffer.storageMode() != MTLStorageMode::Shared {
+        return Err(dflash_k0s_error(format!(
+            "state tensor {label} is not shared"
+        )));
+    }
+    let element_bytes = match tensor.dtype {
+        GgmlType::F32 | GgmlType::I32 => 4usize,
+        GgmlType::F16 | GgmlType::BF16 => 2usize,
+        _ => return Err(dflash_k0s_error("unsupported state-digest tensor dtype")),
+    };
+    let elements = usize::try_from(tensor.n_elements())
+        .map_err(|_| dflash_k0s_error("state-digest tensor length overflow"))?;
+    let bytes = elements
+        .checked_mul(element_bytes)
+        .ok_or_else(|| dflash_k0s_error("state-digest byte count overflow"))?;
+    let offset = usize::try_from(tensor.offset)
+        .map_err(|_| dflash_k0s_error("state-digest tensor offset overflow"))?;
+    let end = offset
+        .checked_add(bytes)
+        .ok_or_else(|| dflash_k0s_error("state-digest tensor range overflow"))?;
+    if end > tensor.buffer.length() {
+        return Err(dflash_k0s_error("state-digest tensor exceeds its buffer"));
+    }
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (tensor.buffer.contents().as_ptr() as *const u8).add(offset),
+            bytes,
+        )
+    };
+    dflash_k0s_hash_state_tensor_material(hash, label, tensor.dtype, &tensor.shape, bytes);
+    Ok(())
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+const DFLASH_K0S_REQUIRED_STATE_TENSORS: &[&str] = &[
+    "target_ctx_stacked",
+    "pos_ctx",
+    "ctx_h",
+    "noise_ids",
+    "x",
+    "h",
+    "q_buf",
+    "k_noise",
+    "v_noise",
+    "k_ctx_buf",
+    "v_ctx_buf",
+    "attn_o",
+    "mixer_out",
+    "draft_logits",
+    "draft_argmax",
+    "k_full",
+    "v_full",
+    "pos_k",
+    "attn_o_full",
+    "ffn_gate_buf",
+    "ffn_up_buf",
+    "ffn_inner_buf",
+    "ffn_out_buf",
+];
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_state_sha256(session: &MetalDFlashSession) -> Result<[u8; 32], DFlashError> {
+    let mut hash = Sha256::new();
+    hash.update(b"qwen.dflash_k0s.state.v2");
+    for value in [
+        session.target_ctx_n,
+        session.target_ctx_capacity,
+        session.ctx_h_ready_n,
+        session.kv_ctx_ready_n,
+    ] {
+        hash.update((value as u64).to_le_bytes());
+    }
+    hash.update([u8::from(session.enable_phase_timers)]);
+    hash.update((session.phase_timings.len() as u64).to_le_bytes());
+    for (name, milliseconds) in &session.phase_timings {
+        dflash_k0s_hash_bytes(&mut hash, name.as_bytes());
+        hash.update(milliseconds.to_bits().to_le_bytes());
+    }
+
+    for (index, (label, tensor)) in [
+        ("target_ctx_stacked", &session.target_ctx_stacked),
+        ("pos_ctx", &session.pos_ctx),
+        ("ctx_h", &session.ctx_h),
+        ("noise_ids", &session.noise_ids),
+        ("x", &session.x),
+        ("h", &session.h),
+        ("q_buf", &session.q_buf),
+        ("k_noise", &session.k_noise),
+        ("v_noise", &session.v_noise),
+        ("k_ctx_buf", &session.k_ctx_buf),
+        ("v_ctx_buf", &session.v_ctx_buf),
+        ("attn_o", &session.attn_o),
+        ("mixer_out", &session.mixer_out),
+        ("draft_logits", &session.draft_logits),
+        ("draft_argmax", &session.draft_argmax),
+        ("k_full", &session.k_full),
+        ("v_full", &session.v_full),
+        ("pos_k", &session.pos_k),
+        ("attn_o_full", &session.attn_o_full),
+        ("ffn_gate_buf", &session.ffn_gate_buf),
+        ("ffn_up_buf", &session.ffn_up_buf),
+        ("ffn_inner_buf", &session.ffn_inner_buf),
+        ("ffn_out_buf", &session.ffn_out_buf),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        debug_assert_eq!(label, DFLASH_K0S_REQUIRED_STATE_TENSORS[index]);
+        dflash_k0s_hash_state_tensor(&mut hash, label, tensor)?;
+    }
+    for (index, tensor) in session.k_ctx_cache.iter().enumerate() {
+        dflash_k0s_hash_state_tensor(&mut hash, &format!("k_ctx_cache.{index}"), tensor)?;
+    }
+    for (index, tensor) in session.v_ctx_cache.iter().enumerate() {
+        dflash_k0s_hash_state_tensor(&mut hash, &format!("v_ctx_cache.{index}"), tensor)?;
+    }
+    for (label, tensor) in [
+        ("conv_buf", session.conv_buf.as_ref()),
+        ("conv_dyn_attn", session.conv_dyn_attn.as_ref()),
+        ("conv_dyn_ffn", session.conv_dyn_ffn.as_ref()),
+        ("topk_ids", session.topk_ids.as_ref()),
+        ("topk_vals", session.topk_vals.as_ref()),
+        ("sel_h", session.sel_h.as_ref()),
+    ] {
+        dflash_k0s_hash_bytes(&mut hash, label.as_bytes());
+        hash.update([u8::from(tensor.is_some())]);
+        if let Some(tensor) = tensor {
+            dflash_k0s_hash_state_tensor(&mut hash, label, tensor)?;
+        }
+    }
+    Ok(hash.finalize().into())
+}
+
+/// Executes the compiled rank-256 scalar graph used by K0-S: first `A * z`
+/// in rank order, then separate `gate * B` and accumulator additions, then
+/// unary addition. The digest domain is the literal ASCII string
+/// `qwen.dflash_k0s.scalar_contract_fixture.v2`, followed by the case count as
+/// little-endian u64. Each case hashes its u64-length-prefixed ASCII name,
+/// then each rank-256 A/z/successor vector as a u64 count and little-endian
+/// u32 bits, followed by unary and score u32 bits. Case and rank order are
+/// fixed as returned.
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_scalar_contract_fixture() -> DFlashK0sScalarContractFixture {
+    let mut inputs = Vec::with_capacity(6);
+    let blank = || {
+        (
+            [0.0f32; DFLASH_K0S_RANK],
+            [1.0f32; DFLASH_K0S_RANK],
+            [0.0f32; DFLASH_K0S_RANK],
+            0.0f32,
+        )
+    };
+
+    let mut cancellation = blank();
+    cancellation.0[0] = -1.0;
+    cancellation.2[0] = 1.0;
+    cancellation.0[1] = f32::from_bits(0x3f80_0001);
+    cancellation.2[1] = f32::from_bits(0x3f7f_ffff);
+    inputs.push(("fma_sensitive_cancellation", cancellation));
+
+    let mut subnormal = blank();
+    subnormal.0[0] = f32::from_bits(1);
+    subnormal.2[0] = 1.0;
+    subnormal.0[1] = f32::from_bits(2);
+    subnormal.2[1] = -1.0;
+    inputs.push(("subnormal_signed_result", subnormal));
+
+    let mut signed_zero = blank();
+    signed_zero.3 = -0.0;
+    signed_zero.2.fill(-1.0);
+    inputs.push(("signed_zero", signed_zero));
+
+    let mut adjacent = blank();
+    adjacent.0[0] = f32::MAX;
+    adjacent.0[1] = f32::MAX;
+    adjacent.1[0] = 0.5;
+    adjacent.1[1] = 0.5;
+    adjacent.2[0] = 1.0;
+    adjacent.2[1] = 1.0;
+    inputs.push(("overflow_adjacent_finite", adjacent));
+
+    let mut rank_order = blank();
+    rank_order.0[0] = 1.0e20;
+    rank_order.2[0] = 1.0;
+    rank_order.0[1] = -1.0e20;
+    rank_order.2[1] = 1.0;
+    rank_order.0[2] = 3.25;
+    rank_order.2[2] = 1.0;
+    inputs.push(("rank_order_cancellation", rank_order));
+
+    let mut halfway = blank();
+    halfway.0[0] = 1.0;
+    halfway.2[0] = 1.0;
+    halfway.0[1] = f32::from_bits(0x3380_0000);
+    halfway.2[1] = 1.0;
+    inputs.push(("halfway_round_to_even", halfway));
+
+    let mut hash = Sha256::new();
+    hash.update(b"qwen.dflash_k0s.scalar_contract_fixture.v2");
+    hash.update((inputs.len() as u64).to_le_bytes());
+    let mut cases = Vec::with_capacity(inputs.len());
+    for (name, (a, z, successor, unary)) in inputs {
+        let mut gate = [0.0f32; DFLASH_K0S_RANK];
+        for rank in 0..DFLASH_K0S_RANK {
+            gate[rank] = a[rank] * z[rank];
+        }
+        let score = dflash_k0s_scalar_score(&gate, &successor, unary);
+        let a_bits: Vec<u32> = a.iter().map(|value| value.to_bits()).collect();
+        let z_bits: Vec<u32> = z.iter().map(|value| value.to_bits()).collect();
+        let successor_bits: Vec<u32> = successor.iter().map(|value| value.to_bits()).collect();
+        dflash_k0s_hash_bytes(&mut hash, name.as_bytes());
+        for bits in [&a_bits, &z_bits, &successor_bits] {
+            hash.update((bits.len() as u64).to_le_bytes());
+            for value in bits {
+                hash.update(value.to_le_bytes());
+            }
+        }
+        hash.update(unary.to_bits().to_le_bytes());
+        hash.update(score.to_bits().to_le_bytes());
+        cases.push(DFlashK0sScalarContractCase {
+            name,
+            a_bits,
+            z_bits,
+            successor_bits,
+            unary_bits: unary.to_bits(),
+            score_bits: score.to_bits(),
+        });
+    }
+    DFlashK0sScalarContractFixture {
+        cases,
+        fixture_sha256: hash.finalize().into(),
+    }
+}
+
 impl MetalDFlashHead {
     pub fn load(
         ctx: &MetalContext,
@@ -2757,6 +3867,11 @@ impl MetalDFlashHead {
                     )?,
                     rank: head.config.selector_rank as usize,
                     top_k: head.config.selector_top_k as usize,
+                    #[cfg(feature = "dflash-k0s-diagnostics")]
+                    hidden_provenance: DFlashK0sTensorProvenance {
+                        descriptor: sel.hidden.clone(),
+                        full_tensor_sha256: Sha256::digest(drafter_gguf.slice(sel.hidden)).into(),
+                    },
                 })
             }
             None => None,
@@ -14950,16 +16065,21 @@ impl<'a> DFlashDecoder<'a> {
                 n,
                 v,
             )?;
-            encode_mat_mat_dispatch(
-                ctx_metal,
-                &enc,
-                &sel.hidden,
-                &self.session.h,
-                self.session.sel_h.as_ref().expect("dflash2 sel_h"),
-                h,
-                sel.rank,
-                n,
-            )?;
+            {
+                #[cfg(feature = "dflash-k0s-diagnostics")]
+                let _selector_dispatch_tag =
+                    dispatch_census_tag_scope(|| DFLASH_K0S_SELECTOR_DISPATCH_TAG.to_owned());
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &sel.hidden,
+                    &self.session.h,
+                    self.session.sel_h.as_ref().expect("dflash2 sel_h"),
+                    h,
+                    sel.rank,
+                    n,
+                )?;
+            }
         } else {
             encode_argmax_f32(
                 ctx_metal,
@@ -15165,6 +16285,327 @@ impl<'a> DFlashDecoder<'a> {
         })
     }
 
+    /// Hash every CPU-readable DFlash session tensor and relevant CPU state
+    /// without encoding, committing, or waiting for Metal work. The domain is
+    /// `qwen.dflash_k0s.state.v2`; integers and f64 timer bits are
+    /// little-endian, strings/bytes have u64 lengths, and each tensor commits
+    /// its deterministic label, GGML dtype, shape rank/dimensions, element
+    /// count, byte count, and complete logical bytes. Vector tensors retain
+    /// layer order and optional tensors commit presence before material.
+    /// Callers must invoke this only after the production synchronization they
+    /// intend to compare. Non-shared tensors fail closed.
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    pub fn dflash_k0s_diagnostic_state_sha256(&self) -> Result<[u8; 32], DFlashError> {
+        dflash_k0s_state_sha256(&self.session)
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    pub fn draft_block_with_k0s_diagnostic(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+    ) -> Result<DFlashK0sCapture, DFlashError> {
+        dflash_k0s_positions(noise_start_pos)?;
+        if dflash2_selector_disabled() {
+            return Err(DFlashError::SelectorDiagnosticDisabled);
+        }
+        let (selector_top_k, selector_rank, predecessor_rows, successor_rows) = {
+            let sel = self
+                .head
+                .selector
+                .as_ref()
+                .ok_or_else(|| dflash_k0s_error("K0-S requires a DFlash 2 selector"))?;
+            (
+                sel.top_k,
+                sel.rank,
+                sel.predecessor.n_rows,
+                sel.successor.n_rows,
+            )
+        };
+        let cfg = self.head.config;
+        let vocab = self.base.model.arch.vocab_size as usize;
+        if cfg.block_size as usize != DFLASH_K0S_BLOCK_SIZE
+            || selector_top_k != DFLASH_K0S_TOP_K
+            || selector_rank != DFLASH_K0S_RANK
+            || cfg.hidden_size as usize != DFLASH_K0S_HIDDEN
+            || vocab != DFLASH_K0S_VOCAB
+            || predecessor_rows != DFLASH_K0S_VOCAB
+            || successor_rows != DFLASH_K0S_VOCAB
+        {
+            return Err(dflash_k0s_error(format!(
+                "required geometry is N=8,K=16,R=256,H=5120,V=248320; got N={},K={},R={},H={},V={},A={},B={}",
+                cfg.block_size,
+                selector_top_k,
+                selector_rank,
+                cfg.hidden_size,
+                vocab,
+                predecessor_rows,
+                successor_rows
+            )));
+        }
+        let (draft_tokens, dispatch_census, kernel_trace) =
+            self.observe_k0s_production_draft(carry_tok, noise_start_pos)?;
+        Self::extract_k0s_post_sync(
+            self.head,
+            &self.session,
+            vocab,
+            carry_tok,
+            noise_start_pos,
+            draft_tokens,
+            dispatch_census,
+            kernel_trace,
+        )
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn observe_k0s_production_draft(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+    ) -> Result<
+        (
+            Vec<i32>,
+            Vec<DFlashK0sDispatchCensusRow>,
+            crate::metal::KernelTraceCounters,
+        ),
+        DFlashError,
+    > {
+        let observer_guard = DFlashK0sObserverGuard::begin()?;
+        let draft_result = self.draft_block(carry_tok, noise_start_pos);
+        let (dispatch_rows, kernel_trace) = observer_guard.finish()?;
+        dflash_k0s_check_dispatch_census_len(dispatch_rows.len())?;
+        let dispatch_census: Vec<DFlashK0sDispatchCensusRow> = dispatch_rows
+            .into_iter()
+            .map(|row| DFlashK0sDispatchCensusRow {
+                family: row.family.to_owned(),
+                tag: row.tag,
+                encoder_ordinal: row.encoder_ordinal,
+                encoder_concurrent: row.encoder_concurrent,
+                kernel: row.kernel,
+                grid: [row.grid_width, row.grid_height, row.grid_depth],
+                threads: [row.threads_width, row.threads_height, row.threads_depth],
+                grid_threadgroups: row.grid_tgs,
+                threadgroup_threads: row.tg_threads,
+            })
+            .collect();
+        let draft_tokens = draft_result?;
+        Ok((draft_tokens, dispatch_census, kernel_trace))
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn extract_k0s_post_sync(
+        head: &MetalDFlashHead,
+        session: &MetalDFlashSession,
+        vocab: usize,
+        carry_tok: i32,
+        noise_start_pos: u32,
+        draft_tokens: Vec<i32>,
+        dispatch_census: Vec<DFlashK0sDispatchCensusRow>,
+        kernel_trace: crate::metal::KernelTraceCounters,
+    ) -> Result<DFlashK0sCapture, DFlashError> {
+        let depth_positions = dflash_k0s_positions(noise_start_pos)?;
+        let sel = head
+            .selector
+            .as_ref()
+            .ok_or_else(|| dflash_k0s_error("K0-S requires a DFlash 2 selector"))?;
+        let cfg = head.config;
+        if cfg.block_size as usize != DFLASH_K0S_BLOCK_SIZE
+            || sel.top_k != DFLASH_K0S_TOP_K
+            || sel.rank != DFLASH_K0S_RANK
+            || cfg.hidden_size as usize != DFLASH_K0S_HIDDEN
+            || vocab != DFLASH_K0S_VOCAB
+            || sel.predecessor.n_rows != DFLASH_K0S_VOCAB
+            || sel.successor.n_rows != DFLASH_K0S_VOCAB
+        {
+            return Err(dflash_k0s_error("malformed K0-S extraction geometry"));
+        }
+        dflash_k0s_check_dispatch_census_len(dispatch_census.len())?;
+        let active_logits = (DFLASH_K0S_BLOCK_SIZE - 1)
+            .checked_mul(DFLASH_K0S_VOCAB)
+            .ok_or_else(|| dflash_k0s_error("active-logit geometry overflow"))?;
+        let active_candidates = (DFLASH_K0S_BLOCK_SIZE - 1)
+            .checked_mul(DFLASH_K0S_TOP_K)
+            .ok_or_else(|| dflash_k0s_error("active-candidate geometry overflow"))?;
+        let active_hidden = (DFLASH_K0S_BLOCK_SIZE - 1)
+            .checked_mul(DFLASH_K0S_RANK)
+            .ok_or_else(|| dflash_k0s_error("active-selector-hidden geometry overflow"))?;
+        let tagged_dispatches: Vec<&DFlashK0sDispatchCensusRow> = dispatch_census
+            .iter()
+            .filter(|row| row.tag.as_deref() == Some(DFLASH_K0S_SELECTOR_DISPATCH_TAG))
+            .collect();
+        if tagged_dispatches.len() != 1 {
+            return Err(dflash_k0s_error(format!(
+                "expected exactly one tagged selector-hidden dispatch, observed {}",
+                tagged_dispatches.len()
+            )));
+        }
+        let selector_hidden_dispatch = (*tagged_dispatches[0]).clone();
+
+        let logits_view = session
+            .draft_logits
+            .view_subrange(DFLASH_K0S_VOCAB as u64, vec![active_logits as u64]);
+        let ids_view = session
+            .topk_ids
+            .as_ref()
+            .ok_or_else(|| dflash_k0s_error("K0-S top-k IDs buffer is absent"))?
+            .view_subrange(DFLASH_K0S_TOP_K as u64, vec![active_candidates as u64]);
+        let unary_view = session
+            .topk_vals
+            .as_ref()
+            .ok_or_else(|| dflash_k0s_error("K0-S unary buffer is absent"))?
+            .view_subrange(DFLASH_K0S_TOP_K as u64, vec![active_candidates as u64]);
+        let hidden_view = session
+            .sel_h
+            .as_ref()
+            .ok_or_else(|| dflash_k0s_error("K0-S selector-hidden buffer is absent"))?
+            .view_subrange(DFLASH_K0S_RANK as u64, vec![active_hidden as u64]);
+        let active_logits_values = read_shared_selector_tensor::<f32>(
+            &logits_view,
+            GgmlType::F32,
+            active_logits,
+            "k0s_full_logits",
+        )?;
+        let active_ids = read_shared_selector_tensor::<i32>(
+            &ids_view,
+            GgmlType::I32,
+            active_candidates,
+            "k0s_topk_ids",
+        )?;
+        let active_unary = read_shared_selector_tensor::<f32>(
+            &unary_view,
+            GgmlType::F32,
+            active_candidates,
+            "k0s_unary",
+        )?;
+        let active_z = read_shared_selector_tensor::<f32>(
+            &hidden_view,
+            GgmlType::F32,
+            active_hidden,
+            "k0s_selector_hidden",
+        )?;
+
+        let mut depths = Vec::with_capacity(DFLASH_K0S_BLOCK_SIZE - 1);
+        for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            let active_depth = depth - 1;
+            let logits = &active_logits_values
+                [active_depth * DFLASH_K0S_VOCAB..(active_depth + 1) * DFLASH_K0S_VOCAB];
+            let ids =
+                &active_ids[active_depth * DFLASH_K0S_TOP_K..(active_depth + 1) * DFLASH_K0S_TOP_K];
+            let unary = &active_unary
+                [active_depth * DFLASH_K0S_TOP_K..(active_depth + 1) * DFLASH_K0S_TOP_K];
+            let z = &active_z[active_depth * DFLASH_K0S_RANK..(active_depth + 1) * DFLASH_K0S_RANK];
+            depths.push(DFlashK0sDepth {
+                depth,
+                position: depth_positions[active_depth],
+                full_logits_bits: logits.iter().map(|value| value.to_bits()).collect(),
+                top_k_ids: ids.to_vec(),
+                unary_bits: unary.iter().map(|value| value.to_bits()).collect(),
+                selector_hidden_bits: z.iter().map(|value| value.to_bits()).collect(),
+                top_k_issues: dflash_k0s_reconstruct_top_k(logits, ids, unary),
+            });
+        }
+
+        let total_candidates = DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_TOP_K;
+        let total_hidden = DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_RANK;
+        let mut ids = vec![0i32; total_candidates];
+        let mut unary = vec![0.0f32; total_candidates];
+        let mut z = vec![0.0f32; total_hidden];
+        ids[DFLASH_K0S_TOP_K..].copy_from_slice(&active_ids);
+        unary[DFLASH_K0S_TOP_K..].copy_from_slice(&active_unary);
+        z[DFLASH_K0S_RANK..].copy_from_slice(&active_z);
+        let (lattice, raw_rows) = dflash_k0s_build_lattice(
+            &sel.predecessor,
+            &sel.successor,
+            carry_tok,
+            &ids,
+            &unary,
+            &z,
+        )?;
+
+        let mut greedy_slots = Vec::with_capacity(DFLASH_K0S_BLOCK_SIZE - 1);
+        let mut predecessor_slot = None;
+        for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            let row = lattice
+                .iter()
+                .find(|row| row.depth == depth && row.predecessor_slot == predecessor_slot)
+                .ok_or_else(|| dflash_k0s_error("production chain predecessor row is absent"))?;
+            greedy_slots.push(row.greedy_slot);
+            predecessor_slot = Some(row.greedy_slot);
+        }
+        let production_chain = dflash_k0s_traverse_slots_mode(
+            &lattice,
+            carry_tok,
+            &greedy_slots,
+            DFlashK0sChainMode::Production,
+        );
+        dflash_k0s_verify_production_replay(&draft_tokens, &production_chain)?;
+
+        let mut token_hasher = Sha256::new();
+        for token in &draft_tokens {
+            token_hasher.update(token.to_le_bytes());
+        }
+        let mut noise_hasher = Sha256::new();
+        noise_hasher.update(carry_tok.to_le_bytes());
+        for _ in 1..DFLASH_K0S_BLOCK_SIZE {
+            noise_hasher.update(cfg.mask_token_id.to_le_bytes());
+        }
+        let noise_input_sha256 = noise_hasher.finalize().into();
+        let mut event_hasher = Sha256::new();
+        event_hasher.update(carry_tok.to_le_bytes());
+        event_hasher.update(noise_start_pos.to_le_bytes());
+        event_hasher.update((session.target_ctx_n as u64).to_le_bytes());
+        event_hasher.update((session.ctx_h_ready_n as u64).to_le_bytes());
+        event_hasher.update((session.kv_ctx_ready_n as u64).to_le_bytes());
+        event_hasher.update(noise_input_sha256);
+        for token_id in &active_ids {
+            event_hasher.update(token_id.to_le_bytes());
+        }
+        for value in active_unary.iter().chain(&active_z) {
+            event_hasher.update(value.to_bits().to_le_bytes());
+        }
+        let synchronized_event_sha256 = event_hasher.finalize().into();
+        let diagnostic_state_sha256 = dflash_k0s_state_sha256(session)?;
+        let draft_token_bits: Vec<u32> = draft_tokens.iter().map(|token| *token as u32).collect();
+        let provenance = DFlashK0sProvenance {
+            selector_hidden: sel.hidden_provenance.clone(),
+            predecessor: DFlashK0sTensorProvenance {
+                descriptor: sel.predecessor.original_desc.clone(),
+                full_tensor_sha256: sel.predecessor.full_tensor_sha256,
+            },
+            successor: DFlashK0sTensorProvenance {
+                descriptor: sel.successor.original_desc.clone(),
+                full_tensor_sha256: sel.successor.full_tensor_sha256,
+            },
+            embedded_metallib_sha256: Sha256::digest(crate::KERNELS_METALLIB).into(),
+        };
+        let mut capture = DFlashK0sCapture {
+            draft_tokens,
+            draft_token_bits,
+            depths,
+            lattice,
+            production_chain,
+            raw_rows,
+            provenance,
+            dispatch_census,
+            selector_hidden_dispatch,
+            kernel_trace,
+            state_identity: DFlashK0sStateIdentity {
+                carry_token: carry_tok,
+                noise_start_position: noise_start_pos,
+                target_context_len: session.target_ctx_n,
+                context_hidden_watermark: session.ctx_h_ready_n,
+                kv_context_watermark: session.kv_ctx_ready_n,
+                draft_tokens_sha256: token_hasher.finalize().into(),
+                noise_input_sha256,
+                synchronized_event_sha256,
+                diagnostic_state_sha256,
+            },
+            capture_sha256: [0; 32],
+        };
+        capture.capture_sha256 = dflash_k0s_capture_sha256(&capture);
+        Ok(capture)
+    }
+
     /// Same as `draft_block` but returns full `[N, V]` logits (CPU readback)
     /// for cosine validation against `Forward::dflash_draft`. Used by the
     /// H5.1.5 cosine gate.
@@ -15201,6 +16642,1638 @@ mod tests {
     };
     use crate::metal_forward::{MetalModel, MetalSession};
     use std::time::Instant;
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    struct K0sSyntheticRowProvider {
+        side: DFlashK0sCodebookSide,
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    impl DFlashK0sRowProvider for K0sSyntheticRowProvider {
+        fn rank(&self) -> usize {
+            DFLASH_K0S_RANK
+        }
+
+        fn row_count(&self) -> usize {
+            DFLASH_K0S_VOCAB
+        }
+
+        fn dequant_row_for_k0s(&self, row: usize, out: &mut [f32]) -> Result<(), DFlashError> {
+            if out.len() != DFLASH_K0S_RANK || row >= DFLASH_K0S_VOCAB {
+                return Err(dflash_k0s_error("synthetic row request is out of range"));
+            }
+            out.fill(0.0);
+            match self.side {
+                DFlashK0sCodebookSide::Predecessor => {
+                    out[0] = (row % 17) as f32;
+                    out[1] = 1.0;
+                    out[DFLASH_K0S_RANK - 1] = -0.5;
+                }
+                DFlashK0sCodebookSide::Successor => {
+                    out[0] = (row % 13) as f32;
+                    out[1] = 2.0;
+                    out[DFLASH_K0S_RANK - 1] = 4.0;
+                }
+            }
+            Ok(())
+        }
+
+        fn raw_row_for_k0s(&self, row: usize) -> Result<Vec<u8>, DFlashError> {
+            let mut bytes = vec![match self.side {
+                DFlashK0sCodebookSide::Predecessor => 0xa0,
+                DFlashK0sCodebookSide::Successor => 0xb0,
+            }];
+            bytes.extend_from_slice(&(row as u32).to_le_bytes());
+            Ok(bytes)
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synthetic_rows() -> Vec<DFlashK0sLatticeRow> {
+        let mut rows = Vec::new();
+        for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            let count = if depth == 1 { 1 } else { DFLASH_K0S_TOP_K };
+            for predecessor_position in 0..count {
+                let slots = (0..DFLASH_K0S_TOP_K)
+                    .map(|candidate_slot| DFlashK0sSlot {
+                        candidate_slot,
+                        token_id: (depth * 100 + predecessor_position * 16 + candidate_slot) as i32,
+                        unary_bits: (candidate_slot as f32).to_bits(),
+                        score_bits: Some((candidate_slot as f32).to_bits()),
+                    })
+                    .collect();
+                rows.push(DFlashK0sLatticeRow {
+                    row_index: rows.len(),
+                    depth,
+                    predecessor_slot: (depth > 1).then_some(predecessor_position),
+                    predecessor_token: predecessor_position as i32,
+                    slots,
+                    issues: Vec::new(),
+                    greedy_slot: 15,
+                    has_valid_choice: true,
+                });
+            }
+        }
+        rows
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synthetic_capture() -> DFlashK0sCapture {
+        let descriptor = || TensorDesc {
+            name: "synthetic".into(),
+            shape: vec![1],
+            dtype: GgmlType::F32,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: 4,
+        };
+        let dispatch = DFlashK0sDispatchCensusRow {
+            family: "draft".into(),
+            tag: Some(DFLASH_K0S_SELECTOR_DISPATCH_TAG.into()),
+            encoder_ordinal: 2,
+            encoder_concurrent: false,
+            kernel: "selector_kernel".into(),
+            grid: [8, 256, 1],
+            threads: [32, 1, 1],
+            grid_threadgroups: 64,
+            threadgroup_threads: 32,
+        };
+        let provenance = DFlashK0sProvenance {
+            selector_hidden: DFlashK0sTensorProvenance {
+                descriptor: descriptor(),
+                full_tensor_sha256: [1; 32],
+            },
+            predecessor: DFlashK0sTensorProvenance {
+                descriptor: descriptor(),
+                full_tensor_sha256: [2; 32],
+            },
+            successor: DFlashK0sTensorProvenance {
+                descriptor: descriptor(),
+                full_tensor_sha256: [3; 32],
+            },
+            embedded_metallib_sha256: [4; 32],
+        };
+        let mut capture = DFlashK0sCapture {
+            draft_tokens: (0..8).collect(),
+            draft_token_bits: (0..8).collect(),
+            depths: (1..8)
+                .map(|depth| DFlashK0sDepth {
+                    depth,
+                    position: 100 + depth as u32,
+                    full_logits_bits: vec![depth as u32, 0x8000_0000],
+                    top_k_ids: vec![depth as i32],
+                    unary_bits: vec![0x3f80_0000],
+                    selector_hidden_bits: vec![0x4000_0000],
+                    top_k_issues: Vec::new(),
+                })
+                .collect(),
+            lattice: Vec::new(),
+            production_chain: DFlashK0sChain {
+                requested_slots: vec![0; 7],
+                visited_row_indices: vec![0; 7],
+                tokens: (1..8).collect(),
+                event: None,
+                terminated: false,
+                packet_geometry_valid: true,
+            },
+            raw_rows: Vec::new(),
+            provenance,
+            dispatch_census: vec![dispatch.clone()],
+            selector_hidden_dispatch: dispatch,
+            kernel_trace: crate::metal::KernelTraceCounters {
+                encoders: 1,
+                concurrent_encoders: 0,
+                dispatches: 3,
+            },
+            state_identity: DFlashK0sStateIdentity {
+                carry_token: 7,
+                noise_start_position: 100,
+                target_context_len: 9,
+                context_hidden_watermark: 9,
+                kv_context_watermark: 9,
+                draft_tokens_sha256: [5; 32],
+                noise_input_sha256: [6; 32],
+                synchronized_event_sha256: [7; 32],
+                diagnostic_state_sha256: [8; 32],
+            },
+            capture_sha256: [0; 32],
+        };
+        capture.capture_sha256 = dflash_k0s_capture_sha256(&capture);
+        capture
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_positional_lattice_has_exact_97_by_16_geometry() {
+        let rows = k0s_synthetic_rows();
+        assert_eq!(rows.len(), DFLASH_K0S_LATTICE_ROWS);
+        assert!(
+            rows.iter()
+                .enumerate()
+                .all(|(global_index, row)| row.row_index == global_index)
+        );
+        assert!(rows.iter().all(|row| row.slots.len() == DFLASH_K0S_TOP_K));
+        assert_eq!(rows.iter().filter(|row| row.depth == 1).count(), 1);
+        for depth in 2..DFLASH_K0S_BLOCK_SIZE {
+            assert_eq!(rows.iter().filter(|row| row.depth == depth).count(), 16);
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_lattice_builder_core_integrates_all_rows_scores_raw_data_and_chains() {
+        let predecessor = K0sSyntheticRowProvider {
+            side: DFlashK0sCodebookSide::Predecessor,
+        };
+        let successor = K0sSyntheticRowProvider {
+            side: DFlashK0sCodebookSide::Successor,
+        };
+        let mut ids = vec![0i32; DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_TOP_K];
+        let mut unary = vec![0.0f32; ids.len()];
+        for depth in 0..DFLASH_K0S_BLOCK_SIZE {
+            for slot in 0..DFLASH_K0S_TOP_K {
+                let offset = depth * DFLASH_K0S_TOP_K + slot;
+                ids[offset] = (100 + depth * 32 + slot) as i32;
+                unary[offset] = slot as f32 * 0.125;
+            }
+        }
+        let mut z = vec![0.0f32; DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_RANK];
+        for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            z[depth * DFLASH_K0S_RANK] = 0.5;
+            z[depth * DFLASH_K0S_RANK + 1] = 3.0;
+            z[(depth + 1) * DFLASH_K0S_RANK - 1] = 0.25;
+        }
+
+        let carry = 7;
+        let (rows, raw_rows) =
+            dflash_k0s_build_lattice_core(&predecessor, &successor, carry, &ids, &unary, &z)
+                .unwrap();
+        assert_eq!(rows.len(), 97);
+        assert!(rows.iter().all(|row| row.slots.len() == 16));
+        assert!(
+            rows.iter()
+                .enumerate()
+                .all(|(global_index, row)| row.row_index == global_index)
+        );
+        assert_eq!(raw_rows.len(), 97 + 97 * 16);
+        assert_eq!(raw_rows[0].side, DFlashK0sCodebookSide::Predecessor);
+        assert_eq!(raw_rows[0].depth, 1);
+        assert_eq!(raw_rows[0].predecessor_slot, None);
+        assert_eq!(raw_rows[0].token_id, carry);
+        assert_eq!(raw_rows[0].bytes, [0xa0, 7, 0, 0, 0]);
+        assert_eq!(raw_rows[1].side, DFlashK0sCodebookSide::Successor);
+        assert_eq!(raw_rows[1].candidate_slot, Some(0));
+
+        let first_candidate = ids[DFLASH_K0S_TOP_K];
+        let expected_first_score = 12.5f32;
+        assert_eq!(first_candidate, 132);
+        assert_eq!(
+            rows[0].slots[0].score_bits,
+            Some(expected_first_score.to_bits())
+        );
+
+        let depth_two_slot_zero = rows
+            .iter()
+            .find(|row| row.depth == 2 && row.predecessor_slot == Some(0))
+            .unwrap();
+        let depth_two_slot_one = rows
+            .iter()
+            .find(|row| row.depth == 2 && row.predecessor_slot == Some(1))
+            .unwrap();
+        assert_ne!(
+            depth_two_slot_zero.slots[0].score_bits,
+            depth_two_slot_one.slots[0].score_bits
+        );
+
+        let mut greedy_slots = Vec::new();
+        let mut predecessor_slot = None;
+        for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            let row = rows
+                .iter()
+                .find(|row| row.depth == depth && row.predecessor_slot == predecessor_slot)
+                .unwrap();
+            greedy_slots.push(row.greedy_slot);
+            predecessor_slot = Some(row.greedy_slot);
+        }
+        let production = dflash_k0s_traverse_slots_mode(
+            &rows,
+            carry,
+            &greedy_slots,
+            DFlashK0sChainMode::Production,
+        );
+        let mut draft_tokens = vec![ids[0]];
+        draft_tokens.extend_from_slice(&production.tokens);
+        dflash_k0s_verify_production_replay(&draft_tokens, &production).unwrap();
+
+        let mut non_greedy_slots = greedy_slots;
+        non_greedy_slots[0] = if non_greedy_slots[0] == 0 { 1 } else { 0 };
+        let non_greedy = dflash_k0s_traverse_slots(&rows, carry, &non_greedy_slots);
+        assert_ne!(
+            production.visited_row_indices[1],
+            non_greedy.visited_row_indices[1]
+        );
+        let production_downstream = &rows[production.visited_row_indices[1]].slots[0];
+        let non_greedy_downstream = &rows[non_greedy.visited_row_indices[1]].slots[0];
+        assert_ne!(
+            production_downstream.score_bits,
+            non_greedy_downstream.score_bits
+        );
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_fixed_non_greedy_chain_is_positional_and_rng_free() {
+        let rows = k0s_synthetic_rows();
+        let slots = [1, 2, 3, 4, 5, 6, 7];
+        let chain = dflash_k0s_traverse_slots(&rows, 42, &slots);
+        assert_eq!(chain.requested_slots, slots);
+        assert_eq!(chain.tokens.len(), 7);
+        assert_eq!(chain.visited_row_indices, vec![0, 2, 19, 36, 53, 70, 87]);
+        assert!(chain.event.is_none());
+        assert!(chain.packet_geometry_valid);
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_topk_orders_boundary_ties_and_signed_zero_by_token_id() {
+        let mut logits = vec![-1.0f32; 20];
+        for value in &mut logits[..17] {
+            *value = 1.0;
+        }
+        let ids: Vec<i32> = (0..16).collect();
+        let unary: Vec<f32> = ids.iter().map(|&id| logits[id as usize]).collect();
+        assert!(dflash_k0s_reconstruct_top_k(&logits, &ids, &unary).is_empty());
+        let mut zeros = vec![-1.0f32; 18];
+        zeros[0] = -0.0;
+        zeros[1] = 0.0;
+        let mut zero_ids: Vec<i32> = (0..18).collect();
+        zero_ids.sort_by_key(|&id| if id < 2 { (0, id) } else { (1, id) });
+        zero_ids.truncate(16);
+        let zero_unary: Vec<f32> = zero_ids.iter().map(|&id| zeros[id as usize]).collect();
+        assert!(dflash_k0s_reconstruct_top_k(&zeros, &zero_ids, &zero_unary).is_empty());
+        assert_eq!(&zero_ids[..2], &[0, 1]);
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_nonfinite_logits_remain_raw_and_support_is_undefined() {
+        for value in [
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::from_bits(0x7fc0_1234),
+        ] {
+            let mut logits = vec![0.0; 16];
+            logits[3] = value;
+            let issues =
+                dflash_k0s_reconstruct_top_k(&logits, &(0..16).collect::<Vec<_>>(), &logits);
+            assert_eq!(
+                issues,
+                vec![DFlashK0sTopKIssue::NonFiniteLogit {
+                    token_id: 3,
+                    bits: value.to_bits()
+                }]
+            );
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_topk_reports_deliberate_id_and_unary_mismatches() {
+        let logits: Vec<f32> = (0..20).map(|value| value as f32).collect();
+        let mut ids: Vec<i32> = (4..20).rev().collect();
+        let mut unary: Vec<f32> = ids.iter().map(|&id| logits[id as usize]).collect();
+        ids[0] = 18;
+        unary[1] = -123.0;
+        let issues = dflash_k0s_reconstruct_top_k(&logits, &ids, &unary);
+        assert!(matches!(
+            issues[0],
+            DFlashK0sTopKIssue::IdMismatch {
+                slot: 0,
+                expected: 19,
+                observed: 18
+            }
+        ));
+        assert!(matches!(
+            issues[1],
+            DFlashK0sTopKIssue::UnaryMismatch { slot: 1, .. }
+        ));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_issue_order_and_nonfinite_classes_are_exact() {
+        let ids = [5, 5, -1, -1, 6, 7];
+        let nan = f32::from_bits(0x7fc0_4321);
+        let scores = [
+            Some(0.0),
+            Some(nan),
+            None,
+            None,
+            Some(f32::INFINITY),
+            Some(f32::NEG_INFINITY),
+        ];
+        let (issues, best, valid) = dflash_k0s_classify_slots(&ids, &scores, 10);
+        assert!(matches!(
+            issues[0],
+            DFlashK0sSlotIssue::DuplicateId {
+                candidate_slot: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            issues[1],
+            DFlashK0sSlotIssue::NonFiniteScore {
+                class: DFlashK0sNonFiniteClass::Nan,
+                score_bits: 0x7fc0_4321,
+                ..
+            }
+        ));
+        assert!(matches!(
+            issues[2],
+            DFlashK0sSlotIssue::Sentinel {
+                candidate_slot: 2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            issues[3],
+            DFlashK0sSlotIssue::DuplicateId {
+                candidate_slot: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            issues[4],
+            DFlashK0sSlotIssue::Sentinel {
+                candidate_slot: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            issues[5],
+            DFlashK0sSlotIssue::NonFiniteScore {
+                class: DFlashK0sNonFiniteClass::PositiveInfinity,
+                ..
+            }
+        ));
+        assert!(matches!(
+            issues[6],
+            DFlashK0sSlotIssue::NonFiniteScore {
+                class: DFlashK0sNonFiniteClass::NegativeInfinity,
+                ..
+            }
+        ));
+        assert_eq!(best, 4);
+        assert!(valid);
+
+        let (issues, _, valid) =
+            dflash_k0s_classify_slots(&[1, 2, -1], &[Some(f32::NEG_INFINITY), Some(nan), None], 10);
+        assert!(!valid);
+        assert_eq!(issues.last(), Some(&DFlashK0sSlotIssue::NoValidChoice));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    #[allow(clippy::assign_op_pattern)]
+    fn k0s_finite_score_preserves_scalar_operation_bits_and_first_tie() {
+        let score = dflash_k0s_scalar_score(&[1.5, -2.0, 0.25], &[2.0, 3.0, 4.0], 0.5);
+        let mut expected = 0.0f32;
+        expected = expected + 1.5f32 * 2.0f32;
+        expected = expected + -2.0f32 * 3.0f32;
+        expected = expected + 0.25f32 * 4.0f32;
+        expected = 0.5f32 + expected;
+        assert_eq!(score.to_bits(), expected.to_bits());
+        let (_, best, valid) = dflash_k0s_classify_slots(&[1, 2], &[Some(-0.0), Some(0.0)], 10);
+        assert!(valid);
+        assert_eq!(best, 0);
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_chain_classifies_invalid_carry_missing_row_and_slot_zero() {
+        let rows = k0s_synthetic_rows();
+        let invalid = dflash_k0s_traverse_slots(&rows, -1, &[0]);
+        assert!(matches!(
+            invalid.event,
+            Some(DFlashK0sChainEvent::InvalidCarry { .. })
+        ));
+        assert!(invalid.terminated);
+        assert!(invalid.tokens.is_empty());
+
+        let mut missing_depth_one = rows.clone();
+        missing_depth_one.retain(|row| row.depth != 1);
+        let missing_depth_one = dflash_k0s_traverse_slots(&missing_depth_one, 1, &[0]);
+        assert!(matches!(
+            missing_depth_one.event,
+            Some(DFlashK0sChainEvent::MissingPredecessorRow {
+                depth: 1,
+                predecessor_slot: None,
+                ..
+            })
+        ));
+
+        let mut missing = rows.clone();
+        missing.retain(|row| !(row.depth == 2 && row.predecessor_slot == Some(3)));
+        let missing = dflash_k0s_traverse_slots(&missing, 1, &[3, 0]);
+        assert!(!missing.packet_geometry_valid);
+        assert!(matches!(
+            missing.event,
+            Some(DFlashK0sChainEvent::MissingPredecessorRow {
+                depth: 2,
+                predecessor_slot: Some(3),
+                ..
+            })
+        ));
+        assert!(missing.terminated);
+
+        let mut terminating = rows;
+        terminating[0].has_valid_choice = false;
+        terminating[0].slots[0].token_id = -1;
+        let fixed = dflash_k0s_traverse_slots(&terminating, 1, &[0, 1]);
+        assert!(fixed.terminated);
+        assert!(fixed.tokens.is_empty());
+        assert!(fixed.event.is_none());
+        let terminating = dflash_k0s_traverse_slots_mode(
+            &terminating,
+            1,
+            &[0, 1],
+            DFlashK0sChainMode::Production,
+        );
+        assert!(matches!(
+            terminating.event,
+            Some(DFlashK0sChainEvent::SlotZeroTermination {
+                depth: 1,
+                slot: 0,
+                ..
+            })
+        ));
+        assert!(terminating.terminated);
+        assert!(terminating.tokens.is_empty());
+
+        let mut sentinel = k0s_synthetic_rows();
+        sentinel[0].slots[3].token_id = -1;
+        let sentinel = dflash_k0s_traverse_slots(&sentinel, 1, &[3, 0]);
+        assert!(sentinel.terminated);
+        assert!(sentinel.tokens.is_empty());
+        assert!(sentinel.event.is_none());
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_production_replay_is_required_despite_unrelated_issues() {
+        let mut rows = k0s_synthetic_rows();
+        rows[96].issues.push(DFlashK0sSlotIssue::DuplicateId {
+            candidate_slot: 1,
+            first_slot: 0,
+            token_id: 9,
+        });
+        let slots = vec![1, 2, 3, 4, 5, 6, 7];
+        let chain =
+            dflash_k0s_traverse_slots_mode(&rows, 42, &slots, DFlashK0sChainMode::Production);
+        let mut draft = vec![999];
+        draft.extend_from_slice(&chain.tokens);
+        assert!(dflash_k0s_verify_production_replay(&draft, &chain).is_ok());
+        draft[7] ^= 1;
+        assert!(dflash_k0s_verify_production_replay(&draft, &chain).is_err());
+        let mut shortened = chain;
+        shortened.terminated = true;
+        shortened.tokens.pop();
+        assert!(dflash_k0s_verify_production_replay(&draft, &shortened).is_err());
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_positions_use_checked_u32_arithmetic() {
+        assert_eq!(dflash_k0s_positions(u32::MAX - 7).unwrap()[6], u32::MAX);
+        assert!(dflash_k0s_positions(u32::MAX - 6).is_err());
+        assert!(dflash_k0s_positions(u32::MAX).is_err());
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_observer_guard_restores_baseline_on_all_cpu_exit_paths() {
+        let baseline = crate::metal::diagnostics_observer_active_counts();
+        let guard = DFlashK0sObserverGuard::begin().unwrap();
+        let _ = guard.finish().unwrap();
+        assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
+
+        fn result_error() -> Result<(), DFlashError> {
+            let _guard = DFlashK0sObserverGuard::begin()?;
+            Err(dflash_k0s_error("synthetic result error"))
+        }
+        assert!(result_error().is_err());
+        assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
+
+        let guard = DFlashK0sObserverGuard::begin().unwrap();
+        let _ = guard.finish().unwrap();
+        let _: Result<(), DFlashError> = Err(dflash_k0s_error("synthetic post-draft error"));
+        assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
+
+        let unwind = std::panic::catch_unwind(|| {
+            let _guard = DFlashK0sObserverGuard::begin().unwrap();
+            panic!("synthetic observer unwind");
+        });
+        assert!(unwind.is_err());
+        assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_dispatch_census_v1_cap_is_inclusive_at_256() {
+        assert!(dflash_k0s_check_dispatch_census_len(256).is_ok());
+        assert!(dflash_k0s_check_dispatch_census_len(257).is_err());
+        assert!(dflash_k0s_check_dispatch_census_len(usize::MAX).is_err());
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_capture_hash_commits_every_synchronized_input_family() {
+        let capture = k0s_synthetic_capture();
+        assert_eq!(capture.capture_sha256, dflash_k0s_capture_sha256(&capture));
+        let original = capture.capture_sha256;
+
+        let mut mutated = capture.clone();
+        mutated.depths[0].full_logits_bits[0] ^= 1;
+        assert_ne!(dflash_k0s_capture_sha256(&mutated), original);
+        let mut mutated = capture.clone();
+        mutated.depths[0].top_k_ids[0] ^= 1;
+        assert_ne!(dflash_k0s_capture_sha256(&mutated), original);
+        let mut mutated = capture.clone();
+        mutated.depths[0].selector_hidden_bits[0] ^= 1;
+        assert_ne!(dflash_k0s_capture_sha256(&mutated), original);
+        let mut mutated = capture.clone();
+        mutated.dispatch_census[0].grid[0] ^= 1;
+        assert_ne!(dflash_k0s_capture_sha256(&mutated), original);
+        let mut mutated = capture;
+        mutated.provenance.embedded_metallib_sha256[0] ^= 1;
+        assert_ne!(dflash_k0s_capture_sha256(&mutated), original);
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_compiled_scalar_contract_matches_independent_fixture() {
+        let fixture = dflash_k0s_scalar_contract_fixture();
+        assert_eq!(fixture.cases.len(), 6);
+        assert!(fixture.cases.iter().all(|case| {
+            case.a_bits.len() == DFLASH_K0S_RANK
+                && case.z_bits.len() == DFLASH_K0S_RANK
+                && case.successor_bits.len() == DFLASH_K0S_RANK
+        }));
+        assert_eq!(
+            fixture
+                .cases
+                .iter()
+                .map(|case| (case.name, case.score_bits))
+                .collect::<Vec<_>>(),
+            vec![
+                ("fma_sensitive_cancellation", 0x0000_0000),
+                ("subnormal_signed_result", 0x8000_0001),
+                ("signed_zero", 0x0000_0000),
+                ("overflow_adjacent_finite", 0x7f7f_ffff),
+                ("rank_order_cancellation", 0x4050_0000),
+                ("halfway_round_to_even", 0x3f80_0000),
+            ]
+        );
+        assert_eq!(fixture.cases[0].a_bits[1], 0x3f80_0001);
+        assert_eq!(fixture.cases[1].a_bits[0], 1);
+        assert_eq!(fixture.cases[2].unary_bits, 0x8000_0000);
+        assert_eq!(fixture.cases[5].a_bits[1], 0x3380_0000);
+        assert_eq!(
+            fixture.fixture_sha256,
+            [
+                0x8c, 0x22, 0xbf, 0x3b, 0x4e, 0xe5, 0x1e, 0xfa, 0xf3, 0x15, 0x13, 0x7a, 0x86, 0x6f,
+                0xee, 0xf8, 0xfc, 0x80, 0x19, 0xd5, 0xb2, 0x1c, 0x88, 0x74, 0x11, 0xb5, 0x32, 0xbd,
+                0x79, 0xfa, 0x60, 0xe9,
+            ]
+        );
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_state_digest_material_commits_label_dtype_shape_elements_and_bytes() {
+        let digest = |label: &str, dtype: GgmlType, shape: &[u64], bytes: &[u8]| {
+            let mut hash = Sha256::new();
+            hash.update(b"state-material-test");
+            dflash_k0s_hash_state_tensor_material(&mut hash, label, dtype, shape, bytes);
+            <[u8; 32]>::from(hash.finalize())
+        };
+        let original = digest("x", GgmlType::F32, &[2, 2], &[0; 16]);
+        assert_ne!(original, digest("h", GgmlType::F32, &[2, 2], &[0; 16]));
+        assert_ne!(original, digest("x", GgmlType::I32, &[2, 2], &[0; 16]));
+        assert_ne!(original, digest("x", GgmlType::F32, &[4], &[0; 16]));
+        let mut bytes = [0; 16];
+        bytes[15] = 1;
+        assert_ne!(original, digest("x", GgmlType::F32, &[2, 2], &bytes));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_state_digest_source_covers_all_session_tensor_families() {
+        assert_eq!(
+            DFLASH_K0S_REQUIRED_STATE_TENSORS,
+            [
+                "target_ctx_stacked",
+                "pos_ctx",
+                "ctx_h",
+                "noise_ids",
+                "x",
+                "h",
+                "q_buf",
+                "k_noise",
+                "v_noise",
+                "k_ctx_buf",
+                "v_ctx_buf",
+                "attn_o",
+                "mixer_out",
+                "draft_logits",
+                "draft_argmax",
+                "k_full",
+                "v_full",
+                "pos_k",
+                "attn_o_full",
+                "ffn_gate_buf",
+                "ffn_up_buf",
+                "ffn_inner_buf",
+                "ffn_out_buf",
+            ]
+        );
+        let source = include_str!("metal_dflash.rs");
+        let state_digest = source
+            .split("fn dflash_k0s_state_sha256")
+            .nth(1)
+            .unwrap()
+            .split("pub fn dflash_k0s_scalar_contract_fixture")
+            .next()
+            .unwrap();
+        for label in DFLASH_K0S_REQUIRED_STATE_TENSORS.iter().copied().chain([
+            "k_ctx_cache",
+            "v_ctx_cache",
+            "conv_buf",
+            "conv_dyn_attn",
+            "conv_dyn_ffn",
+            "topk_ids",
+            "topk_vals",
+            "sel_h",
+            "phase_timings",
+        ]) {
+            assert!(state_digest.contains(label), "missing state field {label}");
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_codebook_retains_exact_descriptor_hash_and_raw_rows() {
+        let desc = TensorDesc {
+            name: "selector_test".into(),
+            shape: vec![2, 2],
+            dtype: GgmlType::F32,
+            shard_idx: 3,
+            data_offset: 4096,
+            n_bytes: 16,
+        };
+        let bytes: Vec<u8> = (0..16).collect();
+        let codebook = DFlash2Codebook::from_gguf(&desc, &bytes).unwrap();
+        assert_eq!(codebook.original_desc.name, desc.name);
+        assert_eq!(codebook.original_desc.data_offset, 4096);
+        assert_eq!(
+            codebook.full_tensor_sha256,
+            <[u8; 32]>::from(Sha256::digest(&bytes))
+        );
+        assert_eq!(codebook.raw_row(1).unwrap(), bytes[8..].to_vec());
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_rejects_malformed_geometry_before_lattice_allocation() {
+        let desc = TensorDesc {
+            name: "small".into(),
+            shape: vec![2, 1],
+            dtype: GgmlType::F32,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: 8,
+        };
+        let codebook = DFlash2Codebook::from_gguf(&desc, &[0; 8]).unwrap();
+        assert!(dflash_k0s_build_lattice(&codebook, &codebook, 0, &[], &[], &[]).is_err());
+        assert!(usize::MAX.checked_mul(DFLASH_K0S_TOP_K).is_none());
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum K0sMetalLeaseDecision {
+        Proceed,
+        Skip,
+        FailRequired,
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_metal_lease_decision(
+        lease_wait: Option<&str>,
+        require_metal_tests: Option<&str>,
+    ) -> K0sMetalLeaseDecision {
+        if lease_wait == Some("1") {
+            K0sMetalLeaseDecision::Proceed
+        } else if require_metal_tests == Some("1") {
+            K0sMetalLeaseDecision::FailRequired
+        } else {
+            K0sMetalLeaseDecision::Skip
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_metal_test_context() -> Option<MetalContext> {
+        match k0s_metal_lease_decision(
+            std::env::var("QWEN_METAL_LEASE_WAIT").ok().as_deref(),
+            std::env::var("QWEN_REQUIRE_METAL_TESTS").ok().as_deref(),
+        ) {
+            K0sMetalLeaseDecision::Proceed => {}
+            K0sMetalLeaseDecision::Skip => return None,
+            K0sMetalLeaseDecision::FailRequired => {
+                panic!("Metal tests require QWEN_METAL_LEASE_WAIT=1 before Metal initialization")
+            }
+        }
+        match MetalContext::new() {
+            Ok(ctx) => Some(ctx),
+            Err(MetalError::EmptyLibrary | MetalError::NoDevice) => {
+                let required = std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref() == Ok("1");
+                if required {
+                    panic!("Metal is required but unavailable");
+                }
+                None
+            }
+            Err(error) => panic!("Metal context: {error}"),
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_metal_lease_guard_decides_before_context_creation() {
+        assert_eq!(
+            k0s_metal_lease_decision(Some("1"), Some("1")),
+            K0sMetalLeaseDecision::Proceed
+        );
+        assert_eq!(
+            k0s_metal_lease_decision(Some("1"), None),
+            K0sMetalLeaseDecision::Proceed
+        );
+        for lease in [None, Some("0"), Some("true"), Some(" 1"), Some("1 ")] {
+            assert_eq!(
+                k0s_metal_lease_decision(lease, None),
+                K0sMetalLeaseDecision::Skip
+            );
+            assert_eq!(
+                k0s_metal_lease_decision(lease, Some("1")),
+                K0sMetalLeaseDecision::FailRequired
+            );
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synthetic_f32_tensor(ctx: &MetalContext, label: &str, elements: usize) -> MetalTensor {
+        let seed = label
+            .bytes()
+            .fold(1u32, |sum, byte| sum.wrapping_add(byte as u32));
+        let values: Vec<f32> = (0..elements)
+            .map(|index| seed as f32 * 0.001 + index as f32 * 0.000_001)
+            .collect();
+        MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&values),
+            vec![elements as u64],
+            GgmlType::F32,
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synthetic_i32_tensor(ctx: &MetalContext, label: &str, elements: usize) -> MetalTensor {
+        let seed = label
+            .bytes()
+            .fold(1i32, |sum, byte| sum.wrapping_add(byte as i32));
+        let values: Vec<i32> = (0..elements).map(|index| seed + index as i32).collect();
+        MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&values),
+            vec![elements as u64],
+            GgmlType::I32,
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_zero_q4_codebook(name: &str) -> DFlash2Codebook {
+        let row_bytes = 144usize;
+        let raw_len = row_bytes * DFLASH_K0S_VOCAB;
+        let raw_words = vec![0u32; raw_len / 4];
+        let full_tensor_sha256 = Sha256::digest(bytemuck::cast_slice::<u32, u8>(&raw_words)).into();
+        let original_desc = TensorDesc {
+            name: name.into(),
+            shape: vec![DFLASH_K0S_RANK as u64, DFLASH_K0S_VOCAB as u64],
+            dtype: GgmlType::Q4_K,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: raw_len as u64,
+        };
+        DFlash2Codebook {
+            raw_words,
+            raw_len,
+            dtype: GgmlType::Q4_K,
+            rank: DFLASH_K0S_RANK,
+            n_rows: DFLASH_K0S_VOCAB,
+            row_bytes,
+            row_desc: TensorDesc {
+                name: format!("{name}.row"),
+                shape: vec![DFLASH_K0S_RANK as u64],
+                dtype: GgmlType::Q4_K,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: row_bytes as u64,
+            },
+            original_desc,
+            full_tensor_sha256,
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synthetic_head(ctx: &MetalContext) -> MetalDFlashHead {
+        let mut hidden_values = vec![0.0f32; DFLASH_K0S_HIDDEN * DFLASH_K0S_RANK];
+        for rank in 0..DFLASH_K0S_RANK {
+            hidden_values[rank * DFLASH_K0S_HIDDEN] = (rank + 1) as f32;
+        }
+        let hidden_sha256 = Sha256::digest(bytemuck::cast_slice(&hidden_values)).into();
+        let hidden = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&hidden_values),
+            vec![DFLASH_K0S_HIDDEN as u64, DFLASH_K0S_RANK as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let hidden_desc = TensorDesc {
+            name: "synthetic.selector_hidden.weight".into(),
+            shape: vec![DFLASH_K0S_HIDDEN as u64, DFLASH_K0S_RANK as u64],
+            dtype: GgmlType::F32,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: (hidden_values.len() * 4) as u64,
+        };
+        drop(hidden_values);
+        MetalDFlashHead {
+            config: crate::loader::DFlashConfig {
+                n_layer: 0,
+                hidden_size: DFLASH_K0S_HIDDEN as u32,
+                intermediate_size: 1,
+                n_q_heads: 1,
+                n_kv_heads: 1,
+                head_dim: 1,
+                rope_theta: 10_000.0,
+                swa_window: 0,
+                block_size: DFLASH_K0S_BLOCK_SIZE as u32,
+                mask_token_id: 99,
+                n_target_features_layers: 0,
+                conv_kernel_size: 1,
+                conv_group_size: DFLASH_K0S_HIDDEN as u32,
+                selector_rank: DFLASH_K0S_RANK as u32,
+                selector_top_k: DFLASH_K0S_TOP_K as u32,
+            },
+            target_layer_ids: Vec::new(),
+            fc: k0s_synthetic_f32_tensor(ctx, "head.fc", 1),
+            hidden_norm: k0s_synthetic_f32_tensor(ctx, "head.hidden_norm", 1),
+            output_norm: k0s_synthetic_f32_tensor(ctx, "head.output_norm", 1),
+            layers: Vec::new(),
+            selector: Some(MetalDFlash2Selector {
+                hidden,
+                predecessor: k0s_zero_q4_codebook("synthetic.selector_predecessor.weight"),
+                successor: k0s_zero_q4_codebook("synthetic.selector_successor.weight"),
+                rank: DFLASH_K0S_RANK,
+                top_k: DFLASH_K0S_TOP_K,
+                hidden_provenance: DFlashK0sTensorProvenance {
+                    descriptor: hidden_desc,
+                    full_tensor_sha256: hidden_sha256,
+                },
+            }),
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synthetic_session(ctx: &MetalContext) -> MetalDFlashSession {
+        let mut h_values = vec![0.0f32; DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_HIDDEN];
+        for depth in 0..DFLASH_K0S_BLOCK_SIZE {
+            h_values[depth * DFLASH_K0S_HIDDEN] = (depth + 1) as f32;
+        }
+        let h = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&h_values),
+            vec![(DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_HIDDEN) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let mut logits = vec![0.0f32; DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_VOCAB];
+        for depth in 0..DFLASH_K0S_BLOCK_SIZE {
+            for token in 0..DFLASH_K0S_VOCAB {
+                logits[depth * DFLASH_K0S_VOCAB + token] =
+                    depth as f32 * 1_000_000.0 - token as f32;
+            }
+        }
+        let draft_logits = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&logits),
+            vec![logits.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        drop(logits);
+        let mut topk_ids = vec![0i32; DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_TOP_K];
+        let mut topk_vals = vec![0.0f32; topk_ids.len()];
+        for depth in 0..DFLASH_K0S_BLOCK_SIZE {
+            for slot in 0..DFLASH_K0S_TOP_K {
+                let offset = depth * DFLASH_K0S_TOP_K + slot;
+                topk_ids[offset] = slot as i32;
+                topk_vals[offset] = depth as f32 * 1_000_000.0 - slot as f32;
+            }
+        }
+        let topk_ids = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&topk_ids),
+            vec![(DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_TOP_K) as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let topk_vals = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&topk_vals),
+            vec![(DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_TOP_K) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let noise: Vec<i32> = std::iter::once(7)
+            .chain(std::iter::repeat_n(99, DFLASH_K0S_BLOCK_SIZE - 1))
+            .collect();
+        MetalDFlashSession {
+            target_ctx_stacked: k0s_synthetic_f32_tensor(ctx, "target_ctx_stacked", 37),
+            target_ctx_n: 1,
+            target_ctx_capacity: 1,
+            pos_ctx: k0s_synthetic_i32_tensor(ctx, "pos_ctx", 1),
+            ctx_h: k0s_synthetic_f32_tensor(ctx, "ctx_h", DFLASH_K0S_HIDDEN),
+            ctx_h_ready_n: 1,
+            k_ctx_cache: vec![
+                k0s_synthetic_f32_tensor(ctx, "k_ctx_cache.0", 31),
+                k0s_synthetic_f32_tensor(ctx, "k_ctx_cache.1", 29),
+            ],
+            v_ctx_cache: vec![
+                k0s_synthetic_f32_tensor(ctx, "v_ctx_cache.0", 31),
+                k0s_synthetic_f32_tensor(ctx, "v_ctx_cache.1", 29),
+            ],
+            kv_ctx_ready_n: 1,
+            noise_ids: MetalTensor::from_bytes(
+                ctx,
+                bytemuck::cast_slice(&noise),
+                vec![DFLASH_K0S_BLOCK_SIZE as u64],
+                GgmlType::I32,
+            )
+            .unwrap(),
+            x: k0s_synthetic_f32_tensor(ctx, "x", DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_HIDDEN),
+            h,
+            q_buf: k0s_synthetic_f32_tensor(ctx, "q_buf", 43),
+            k_noise: k0s_synthetic_f32_tensor(ctx, "k_noise", 47),
+            v_noise: k0s_synthetic_f32_tensor(ctx, "v_noise", 53),
+            k_ctx_buf: k0s_synthetic_f32_tensor(ctx, "k_ctx_buf", 59),
+            v_ctx_buf: k0s_synthetic_f32_tensor(ctx, "v_ctx_buf", 61),
+            attn_o: k0s_synthetic_f32_tensor(ctx, "attn_o", 67),
+            mixer_out: k0s_synthetic_f32_tensor(ctx, "mixer_out", 71),
+            draft_logits,
+            draft_argmax: k0s_synthetic_i32_tensor(ctx, "draft_argmax", DFLASH_K0S_BLOCK_SIZE),
+            conv_buf: Some(k0s_synthetic_f32_tensor(ctx, "conv_buf", 73)),
+            conv_dyn_attn: Some(k0s_synthetic_f32_tensor(ctx, "conv_dyn_attn", 79)),
+            conv_dyn_ffn: Some(k0s_synthetic_f32_tensor(ctx, "conv_dyn_ffn", 83)),
+            topk_ids: Some(topk_ids),
+            topk_vals: Some(topk_vals),
+            sel_h: Some(
+                MetalTensor::zeros_f32(ctx, vec![(DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_RANK) as u64])
+                    .unwrap(),
+            ),
+            k_full: k0s_synthetic_f32_tensor(ctx, "k_full", 89),
+            v_full: k0s_synthetic_f32_tensor(ctx, "v_full", 97),
+            pos_k: k0s_synthetic_i32_tensor(ctx, "pos_k", 101),
+            attn_o_full: k0s_synthetic_f32_tensor(ctx, "attn_o_full", 103),
+            ffn_gate_buf: k0s_synthetic_f32_tensor(ctx, "ffn_gate_buf", 107),
+            ffn_up_buf: k0s_synthetic_f32_tensor(ctx, "ffn_up_buf", 109),
+            ffn_inner_buf: k0s_synthetic_f32_tensor(ctx, "ffn_inner_buf", 113),
+            ffn_out_buf: k0s_synthetic_f32_tensor(ctx, "ffn_out_buf", 127),
+            enable_phase_timers: false,
+            phase_timings: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synthetic_dispatch(
+        ctx: &MetalContext,
+        head: &MetalDFlashHead,
+        session: &MetalDFlashSession,
+    ) -> (
+        Vec<DFlashK0sDispatchCensusRow>,
+        crate::metal::KernelTraceCounters,
+    ) {
+        let observer = DFlashK0sObserverGuard::begin().unwrap();
+        crate::metal::dispatch_census_set_family("dflash_k0s_synthetic");
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .expect("synthetic K0-S command buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        {
+            let _tag = dispatch_census_tag_scope(|| DFLASH_K0S_SELECTOR_DISPATCH_TAG.to_owned());
+            let selector = head.selector.as_ref().unwrap();
+            encode_mat_mat_dispatch(
+                ctx,
+                &enc,
+                &selector.hidden,
+                &session.h,
+                session.sel_h.as_ref().unwrap(),
+                DFLASH_K0S_HIDDEN,
+                DFLASH_K0S_RANK,
+                DFLASH_K0S_BLOCK_SIZE,
+            )
+            .unwrap();
+        }
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        require_prefill_command_completed(&cmd).unwrap();
+        let (rows, counters) = observer.finish().unwrap();
+        let rows = rows
+            .into_iter()
+            .map(|row| DFlashK0sDispatchCensusRow {
+                family: row.family.to_owned(),
+                tag: row.tag,
+                encoder_ordinal: row.encoder_ordinal,
+                encoder_concurrent: row.encoder_concurrent,
+                kernel: row.kernel,
+                grid: [row.grid_width, row.grid_height, row.grid_depth],
+                threads: [row.threads_width, row.threads_height, row.threads_depth],
+                grid_threadgroups: row.grid_tgs,
+                threadgroup_threads: row.tg_threads,
+            })
+            .collect();
+        (rows, counters)
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synthetic_tensor_sha256(tensor: &MetalTensor) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        dflash_k0s_hash_state_tensor(&mut hash, "synthetic_target_state", tensor).unwrap();
+        hash.finalize().into()
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_synchronized_inputs_sha256(session: &MetalDFlashSession, draft: &[i32]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"qwen.dflash_k0s.synthetic_inputs.v1");
+        for (label, tensor) in [
+            ("draft_logits", &session.draft_logits),
+            ("topk_ids", session.topk_ids.as_ref().unwrap()),
+            ("topk_vals", session.topk_vals.as_ref().unwrap()),
+            ("sel_h", session.sel_h.as_ref().unwrap()),
+        ] {
+            dflash_k0s_hash_state_tensor(&mut hash, label, tensor).unwrap();
+        }
+        for token in draft {
+            hash.update(token.to_le_bytes());
+        }
+        hash.finalize().into()
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_stream_zeroes(hash: &mut Sha256, mut bytes: usize) {
+        let zeroes = [0u8; 4096];
+        while bytes != 0 {
+            let chunk = bytes.min(zeroes.len());
+            hash.update(&zeroes[..chunk]);
+            bytes -= chunk;
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_expected_zero_codebook_sha256() -> [u8; 32] {
+        let mut hash = Sha256::new();
+        k0s_stream_zeroes(&mut hash, 144 * DFLASH_K0S_VOCAB);
+        hash.finalize().into()
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_expected_selector_hidden_sha256() -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for rank in 0..DFLASH_K0S_RANK {
+            hash.update(((rank + 1) as f32).to_bits().to_le_bytes());
+            k0s_stream_zeroes(&mut hash, (DFLASH_K0S_HIDDEN - 1) * 4);
+        }
+        hash.finalize().into()
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_assert_synthetic_capture(
+        capture: &DFlashK0sCapture,
+        head: &MetalDFlashHead,
+        state_digest: [u8; 32],
+    ) {
+        assert_eq!(capture.draft_tokens, vec![0; DFLASH_K0S_BLOCK_SIZE]);
+        assert_eq!(capture.draft_token_bits, vec![0; DFLASH_K0S_BLOCK_SIZE]);
+        let mut expected_draft_hash = Sha256::new();
+        for _ in 0..DFLASH_K0S_BLOCK_SIZE {
+            expected_draft_hash.update(0i32.to_le_bytes());
+        }
+        let expected_draft_hash: [u8; 32] = expected_draft_hash.finalize().into();
+        assert_eq!(
+            capture.state_identity.draft_tokens_sha256,
+            expected_draft_hash
+        );
+        assert_eq!(capture.state_identity.carry_token, 7);
+        assert_eq!(capture.state_identity.noise_start_position, 200);
+        assert_eq!(capture.state_identity.target_context_len, 1);
+        assert_eq!(capture.state_identity.context_hidden_watermark, 1);
+        assert_eq!(capture.state_identity.kv_context_watermark, 1);
+        let mut expected_noise_hash = Sha256::new();
+        expected_noise_hash.update(7i32.to_le_bytes());
+        for _ in 1..DFLASH_K0S_BLOCK_SIZE {
+            expected_noise_hash.update(99i32.to_le_bytes());
+        }
+        let expected_noise_hash: [u8; 32] = expected_noise_hash.finalize().into();
+        assert_eq!(
+            capture.state_identity.noise_input_sha256,
+            expected_noise_hash
+        );
+        let mut expected_event_hash = Sha256::new();
+        expected_event_hash.update(7i32.to_le_bytes());
+        expected_event_hash.update(200u32.to_le_bytes());
+        expected_event_hash.update(1u64.to_le_bytes());
+        expected_event_hash.update(1u64.to_le_bytes());
+        expected_event_hash.update(1u64.to_le_bytes());
+        expected_event_hash.update(expected_noise_hash);
+        for _depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            for slot in 0..DFLASH_K0S_TOP_K {
+                expected_event_hash.update((slot as i32).to_le_bytes());
+            }
+        }
+        for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            for slot in 0..DFLASH_K0S_TOP_K {
+                expected_event_hash.update(
+                    (depth as f32 * 1_000_000.0 - slot as f32)
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+            }
+        }
+        for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            for rank in 0..DFLASH_K0S_RANK {
+                expected_event_hash.update(
+                    ((depth + 1) as f32 * (rank + 1) as f32)
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+            }
+        }
+        let expected_event_hash: [u8; 32] = expected_event_hash.finalize().into();
+        assert_eq!(
+            capture.state_identity.synchronized_event_sha256,
+            expected_event_hash
+        );
+        assert_eq!(capture.state_identity.diagnostic_state_sha256, state_digest);
+        assert_eq!(capture.depths.len(), 7);
+        for depth in 1..DFLASH_K0S_BLOCK_SIZE {
+            let row = &capture.depths[depth - 1];
+            assert_eq!(row.depth, depth);
+            assert_eq!(row.position, 200 + depth as u32);
+            assert_eq!(row.full_logits_bits.len(), DFLASH_K0S_VOCAB);
+            for (token, &bits) in row.full_logits_bits.iter().enumerate() {
+                assert_eq!(
+                    bits,
+                    (depth as f32 * 1_000_000.0 - token as f32).to_bits(),
+                    "depth={depth} token={token}"
+                );
+            }
+            assert_eq!(row.top_k_ids, (0..16).collect::<Vec<_>>());
+            for slot in 0..DFLASH_K0S_TOP_K {
+                assert_eq!(
+                    row.unary_bits[slot],
+                    (depth as f32 * 1_000_000.0 - slot as f32).to_bits()
+                );
+            }
+            assert_eq!(row.selector_hidden_bits.len(), DFLASH_K0S_RANK);
+            for rank in 0..DFLASH_K0S_RANK {
+                assert_eq!(
+                    row.selector_hidden_bits[rank],
+                    ((depth + 1) as f32 * (rank + 1) as f32).to_bits()
+                );
+            }
+            assert!(row.top_k_issues.is_empty());
+        }
+        assert_eq!(capture.lattice.len(), 97);
+        for (row_index, row) in capture.lattice.iter().enumerate() {
+            assert_eq!(row.row_index, row_index);
+            assert_eq!(row.slots.len(), 16);
+            assert!(row.issues.is_empty());
+            assert_eq!(row.greedy_slot, 0);
+            for slot in &row.slots {
+                assert_eq!(slot.score_bits, Some(slot.unary_bits));
+            }
+        }
+        assert_eq!(capture.raw_rows.len(), 97 + 97 * 16);
+        let mut raw_index = 0usize;
+        for row in &capture.lattice {
+            let predecessor = &capture.raw_rows[raw_index];
+            raw_index += 1;
+            assert_eq!(predecessor.side, DFlashK0sCodebookSide::Predecessor);
+            assert_eq!(predecessor.bytes.len(), 144);
+            assert_eq!(predecessor.depth, row.depth);
+            assert_eq!(predecessor.predecessor_slot, row.predecessor_slot);
+            assert_eq!(predecessor.candidate_slot, None);
+            assert_eq!(predecessor.token_id, row.predecessor_token);
+            assert!(predecessor.bytes.iter().all(|&byte| byte == 0));
+            for slot in &row.slots {
+                let successor = &capture.raw_rows[raw_index];
+                raw_index += 1;
+                assert_eq!(successor.side, DFlashK0sCodebookSide::Successor);
+                assert_eq!(successor.depth, row.depth);
+                assert_eq!(successor.predecessor_slot, row.predecessor_slot);
+                assert_eq!(successor.candidate_slot, Some(slot.candidate_slot));
+                assert_eq!(successor.token_id, slot.token_id);
+                assert_eq!(successor.bytes.len(), 144);
+                assert!(successor.bytes.iter().all(|&byte| byte == 0));
+            }
+        }
+        assert_eq!(raw_index, capture.raw_rows.len());
+        assert_eq!(capture.production_chain.tokens, vec![0; 7]);
+        assert_eq!(capture.production_chain.requested_slots, vec![0; 7]);
+        assert!(!capture.production_chain.terminated);
+        assert!(capture.production_chain.event.is_none());
+        assert_eq!(capture.dispatch_census.len(), 1);
+        let dispatch = &capture.dispatch_census[0];
+        assert_eq!(dispatch.family, "dflash_k0s_synthetic");
+        assert_eq!(dispatch.encoder_ordinal, 0);
+        assert!(!dispatch.encoder_concurrent);
+        assert_eq!(dispatch.kernel, "kernel_mat_mat_f32_f32");
+        assert_eq!(dispatch.grid, [DFLASH_K0S_RANK as u64, 1, 1]);
+        assert_eq!(dispatch.threads, [32, 1, 1]);
+        assert_eq!(dispatch.grid_threadgroups, DFLASH_K0S_RANK as u64);
+        assert_eq!(dispatch.threadgroup_threads, 32);
+        assert_eq!(
+            capture.selector_hidden_dispatch.tag.as_deref(),
+            Some(DFLASH_K0S_SELECTOR_DISPATCH_TAG)
+        );
+        assert_eq!(&capture.selector_hidden_dispatch, dispatch);
+        assert_eq!(capture.kernel_trace.encoders, 1);
+        assert_eq!(capture.kernel_trace.concurrent_encoders, 0);
+        assert_eq!(capture.kernel_trace.dispatches, 1);
+        let selector = head.selector.as_ref().unwrap();
+        let expected_hidden_hash = k0s_expected_selector_hidden_sha256();
+        let expected_codebook_hash = k0s_expected_zero_codebook_sha256();
+        assert_eq!(
+            capture.provenance.selector_hidden.full_tensor_sha256,
+            expected_hidden_hash
+        );
+        assert_eq!(
+            selector.hidden_provenance.full_tensor_sha256,
+            expected_hidden_hash
+        );
+        assert_eq!(
+            capture.provenance.selector_hidden.descriptor.name,
+            "synthetic.selector_hidden.weight"
+        );
+        assert_eq!(
+            capture.provenance.selector_hidden.descriptor.dtype,
+            GgmlType::F32
+        );
+        assert_eq!(
+            capture.provenance.selector_hidden.descriptor.shape,
+            [DFLASH_K0S_HIDDEN as u64, DFLASH_K0S_RANK as u64]
+        );
+        assert_eq!(capture.provenance.selector_hidden.descriptor.shard_idx, 0);
+        assert_eq!(capture.provenance.selector_hidden.descriptor.data_offset, 0);
+        assert_eq!(
+            capture.provenance.selector_hidden.descriptor.n_bytes,
+            (DFLASH_K0S_HIDDEN * DFLASH_K0S_RANK * 4) as u64
+        );
+        assert_eq!(
+            capture.provenance.predecessor.full_tensor_sha256,
+            expected_codebook_hash
+        );
+        assert_eq!(
+            capture.provenance.successor.full_tensor_sha256,
+            expected_codebook_hash
+        );
+        assert_eq!(
+            selector.predecessor.full_tensor_sha256,
+            expected_codebook_hash
+        );
+        assert_eq!(
+            selector.successor.full_tensor_sha256,
+            expected_codebook_hash
+        );
+        assert_eq!(
+            capture.provenance.predecessor.descriptor.name,
+            "synthetic.selector_predecessor.weight"
+        );
+        assert_eq!(
+            capture.provenance.successor.descriptor.name,
+            "synthetic.selector_successor.weight"
+        );
+        assert_eq!(
+            capture.provenance.predecessor.descriptor.dtype,
+            GgmlType::Q4_K
+        );
+        assert_eq!(
+            capture.provenance.successor.descriptor.dtype,
+            GgmlType::Q4_K
+        );
+        assert_eq!(
+            capture.provenance.predecessor.descriptor.shape,
+            [DFLASH_K0S_RANK as u64, DFLASH_K0S_VOCAB as u64]
+        );
+        assert_eq!(
+            capture.provenance.successor.descriptor.shape,
+            [DFLASH_K0S_RANK as u64, DFLASH_K0S_VOCAB as u64]
+        );
+        for descriptor in [
+            &capture.provenance.predecessor.descriptor,
+            &capture.provenance.successor.descriptor,
+        ] {
+            assert_eq!(descriptor.shard_idx, 0);
+            assert_eq!(descriptor.data_offset, 0);
+            assert_eq!(descriptor.n_bytes, (144 * DFLASH_K0S_VOCAB) as u64);
+        }
+        assert_eq!(
+            capture.provenance.embedded_metallib_sha256,
+            <[u8; 32]>::from(Sha256::digest(crate::KERNELS_METALLIB))
+        );
+        assert_eq!(capture.capture_sha256, dflash_k0s_capture_sha256(capture));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct K0sSyntheticArmSummary {
+        draft: Vec<i32>,
+        first_rows: Vec<DFlashK0sDispatchCensusRow>,
+        first_counters: (u64, u64, u64),
+        synchronized_inputs: [u8; 32],
+        state_before_extraction: [u8; 32],
+        state_after_extraction: [u8; 32],
+        target_before: [u8; 32],
+        target_after: [u8; 32],
+        continuation_rows: Vec<DFlashK0sDispatchCensusRow>,
+        continuation_counters: (u64, u64, u64),
+        continuation_bits: Vec<u32>,
+        continuation_token: i32,
+        final_state: [u8; 32],
+        final_target: [u8; 32],
+        capture_sha256: Option<[u8; 32]>,
+        rng_draws: u64,
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_run_synthetic_arm(
+        ctx: &MetalContext,
+        head: &MetalDFlashHead,
+        diagnostic_on: bool,
+    ) -> K0sSyntheticArmSummary {
+        let baseline = crate::metal::diagnostics_observer_active_counts();
+        let session = k0s_synthetic_session(ctx);
+        let target_state = k0s_synthetic_f32_tensor(ctx, "target_state", 257);
+        let target_values = read_f32_tensor(&target_state);
+        let target_seed = "target_state"
+            .bytes()
+            .fold(1u32, |sum, byte| sum.wrapping_add(byte as u32));
+        for (index, value) in target_values.iter().enumerate() {
+            assert_eq!(
+                value.to_bits(),
+                (target_seed as f32 * 0.001 + index as f32 * 0.000_001).to_bits()
+            );
+        }
+        let draft = vec![0i32; DFLASH_K0S_BLOCK_SIZE];
+        let (first_rows, first_trace) = k0s_synthetic_dispatch(ctx, head, &session);
+        assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
+        let synchronized_inputs = k0s_synchronized_inputs_sha256(&session, &draft);
+        let state_before_extraction = dflash_k0s_state_sha256(&session).unwrap();
+        let target_before = k0s_synthetic_tensor_sha256(&target_state);
+        let capture = diagnostic_on.then(|| {
+            DFlashDecoder::extract_k0s_post_sync(
+                head,
+                &session,
+                DFLASH_K0S_VOCAB,
+                7,
+                200,
+                draft.clone(),
+                first_rows.clone(),
+                first_trace,
+            )
+            .unwrap()
+        });
+        let state_after_extraction = dflash_k0s_state_sha256(&session).unwrap();
+        let target_after = k0s_synthetic_tensor_sha256(&target_state);
+        assert_eq!(state_before_extraction, state_after_extraction);
+        assert_eq!(target_before, target_after);
+        if let Some(capture) = capture.as_ref() {
+            k0s_assert_synthetic_capture(capture, head, state_before_extraction);
+        }
+        assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
+
+        let (continuation_rows, continuation_trace) = k0s_synthetic_dispatch(ctx, head, &session);
+        assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
+        let continuation = read_f32_tensor(session.sel_h.as_ref().unwrap());
+        let continuation_bits: Vec<u32> =
+            continuation.iter().map(|value| value.to_bits()).collect();
+        let continuation_token =
+            (continuation[DFLASH_K0S_RANK].to_bits() % DFLASH_K0S_VOCAB as u32) as i32;
+        let final_state = dflash_k0s_state_sha256(&session).unwrap();
+        let final_target = k0s_synthetic_tensor_sha256(&target_state);
+        let capture_sha256 = capture.as_ref().map(|capture| capture.capture_sha256);
+        drop(capture);
+        K0sSyntheticArmSummary {
+            draft,
+            first_rows,
+            first_counters: (
+                first_trace.encoders,
+                first_trace.concurrent_encoders,
+                first_trace.dispatches,
+            ),
+            synchronized_inputs,
+            state_before_extraction,
+            state_after_extraction,
+            target_before,
+            target_after,
+            continuation_rows,
+            continuation_counters: (
+                continuation_trace.encoders,
+                continuation_trace.concurrent_encoders,
+                continuation_trace.dispatches,
+            ),
+            continuation_bits,
+            continuation_token,
+            final_state,
+            final_target,
+            capture_sha256,
+            rng_draws: 0,
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_synthetic_metal_diagnostic_parity_both_orders() {
+        let Some(ctx) = k0s_metal_test_context() else {
+            return;
+        };
+        let baseline = crate::metal::diagnostics_observer_active_counts();
+        let head = k0s_synthetic_head(&ctx);
+
+        let off_a = k0s_run_synthetic_arm(&ctx, &head, false);
+        let on_a = k0s_run_synthetic_arm(&ctx, &head, true);
+        let on_b = k0s_run_synthetic_arm(&ctx, &head, true);
+        let off_b = k0s_run_synthetic_arm(&ctx, &head, false);
+
+        let without_capture = |mut summary: K0sSyntheticArmSummary| {
+            summary.capture_sha256 = None;
+            summary
+        };
+        assert_eq!(
+            without_capture(off_a.clone()),
+            without_capture(on_a.clone())
+        );
+        assert_eq!(
+            without_capture(on_b.clone()),
+            without_capture(off_b.clone())
+        );
+        assert_eq!(
+            without_capture(off_a.clone()),
+            without_capture(off_b.clone())
+        );
+        assert_eq!(without_capture(on_a.clone()), without_capture(on_b.clone()));
+        assert_eq!(on_a.capture_sha256, on_b.capture_sha256);
+        assert!(on_a.capture_sha256.is_some());
+        assert!(off_a.capture_sha256.is_none());
+        assert!(off_b.capture_sha256.is_none());
+        for summary in [&off_a, &on_a, &on_b, &off_b] {
+            assert_eq!(summary.first_rows, summary.continuation_rows);
+            assert_eq!(summary.first_counters, (1, 0, 1));
+            assert_eq!(summary.continuation_counters, (1, 0, 1));
+            assert_eq!(
+                summary.state_before_extraction,
+                summary.state_after_extraction
+            );
+            assert_eq!(summary.state_after_extraction, summary.final_state);
+            assert_eq!(summary.target_before, summary.target_after);
+            assert_eq!(summary.target_after, summary.final_target);
+            assert_eq!(summary.rng_draws, 0);
+            assert_eq!(
+                summary.continuation_bits.len(),
+                DFLASH_K0S_BLOCK_SIZE * DFLASH_K0S_RANK
+            );
+            for depth in 0..DFLASH_K0S_BLOCK_SIZE {
+                for rank in 0..DFLASH_K0S_RANK {
+                    assert_eq!(
+                        summary.continuation_bits[depth * DFLASH_K0S_RANK + rank],
+                        ((depth + 1) as f32 * (rank + 1) as f32).to_bits()
+                    );
+                }
+            }
+            assert_eq!(
+                summary.continuation_token,
+                (2.0f32.to_bits() % DFLASH_K0S_VOCAB as u32) as i32
+            );
+        }
+        assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_wrapper_source_has_one_draft_and_no_metal_tail_work() {
+        let source = include_str!("metal_dflash.rs");
+        let wrapper = source
+            .split("pub fn draft_block_with_k0s_diagnostic")
+            .nth(1)
+            .unwrap()
+            .split("fn observe_k0s_production_draft")
+            .next()
+            .unwrap();
+        assert_eq!(wrapper.matches("observe_k0s_production_draft(").count(), 1);
+        assert_eq!(wrapper.matches("self.draft_block(").count(), 0);
+        let observation = source
+            .split("fn observe_k0s_production_draft")
+            .nth(1)
+            .unwrap()
+            .split("fn extract_k0s_post_sync")
+            .next()
+            .unwrap();
+        assert_eq!(observation.matches("self.draft_block(").count(), 1);
+        let extraction = source
+            .split("fn extract_k0s_post_sync")
+            .nth(1)
+            .unwrap()
+            .split("pub fn draft_block_with_logits")
+            .next()
+            .unwrap();
+        for forbidden in [
+            ".commit()",
+            "waitUntilCompleted",
+            "KernelEncoder::begin",
+            "BlitEncoder::begin",
+            "commandBuffer()",
+            "self.draft_block(",
+            "encode_",
+            "Sampler",
+            "rng",
+        ] {
+            assert!(
+                !extraction.contains(forbidden),
+                "extraction contains {forbidden}"
+            );
+        }
+        assert!(
+            observation
+                .find("dflash_k0s_check_dispatch_census_len")
+                .unwrap()
+                < observation.find("let dispatch_census:").unwrap()
+        );
+        assert!(source.contains("DFLASH_K0S_SELECTOR_DISPATCH_TAG.to_owned()"));
+        assert!(source.contains("let observer_guard = DFlashK0sObserverGuard::begin()?"));
+    }
 
     fn memory_estimate_config() -> crate::loader::DFlashConfig {
         crate::loader::DFlashConfig {

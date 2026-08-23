@@ -76,6 +76,53 @@ pub struct SampledToken {
     pub candidate_index: usize,
 }
 
+/// A caller-supplied categorical draw in the same half-open interval produced
+/// by sampler-v1's request-local RNG.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SamplingUniform(f64);
+
+impl SamplingUniform {
+    pub fn new(value: f64) -> Result<Self, SamplingError> {
+        if value.is_finite() && (0.0..1.0).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(SamplingError::InvalidUniform(value))
+        }
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeightedCandidate {
+    pub token: i32,
+    /// The unnormalized sampler-v1 categorical weight.
+    pub weight: f64,
+}
+
+/// Immutable diagnostic output for one supplied categorical draw.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SamplingDistribution {
+    /// Candidates in sampler-v1 categorical order, after every filter.
+    pub candidates: Vec<WeightedCandidate>,
+    pub total_weight: f64,
+    pub sampled: SampledToken,
+}
+
+/// The exact request-local RNG transition used to select one diagnostic
+/// distribution, without applying that transition to the live sampler.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SamplingRngDiagnostic {
+    pub draws_before: usize,
+    pub state_before: [u64; 4],
+    pub state_after: [u64; 4],
+    pub raw_u64: u64,
+    pub unit_f64_bits: u64,
+    pub unit_f64: f64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BoundedTopKEvidence {
     pub input_logits: usize,
@@ -149,6 +196,8 @@ pub enum SamplingError {
     InvalidTopP(f32),
     #[error("min_p must be finite and in [0, 1], got {0}")]
     InvalidMinP(f32),
+    #[error("sampling uniform must be finite and in [0, 1), got {0}")]
+    InvalidUniform(f64),
     #[error("logit at token {token} is NaN")]
     NanLogit { token: usize },
     #[error("vocabulary size {0} exceeds i32 token ids")]
@@ -191,6 +240,114 @@ impl Sampler {
 
     pub fn draws(&self) -> usize {
         self.draws
+    }
+
+    /// Inspect the exact sampler-v1 distribution and select with a supplied
+    /// uniform without reading or advancing request-local RNG state.
+    pub fn diagnose(
+        &self,
+        logits: &[f32],
+        uniform: SamplingUniform,
+    ) -> Result<SamplingDistribution, SamplingError> {
+        if self.config.temperature == 0.0 {
+            let token = greedy_token(logits)?;
+            return Ok(SamplingDistribution {
+                candidates: vec![WeightedCandidate { token, weight: 1.0 }],
+                total_weight: 1.0,
+                sampled: SampledToken {
+                    token,
+                    candidate_index: 0,
+                },
+            });
+        }
+
+        let candidates = sorted_candidates(logits, self.config.top_k)?;
+        diagnose_candidates(self.config, candidates, uniform)
+    }
+
+    /// Diagnose the next sampler-v1 draw without advancing the live sampler.
+    /// Greedy decoding does not use RNG and therefore returns no RNG diagnostic.
+    pub fn diagnose_next(
+        &self,
+        logits: &[f32],
+    ) -> Result<(SamplingDistribution, Option<SamplingRngDiagnostic>), SamplingError> {
+        if self.config.temperature == 0.0 {
+            return Ok((self.diagnose(logits, SamplingUniform(0.0))?, None));
+        }
+
+        let state_before = self.rng.state;
+        let mut diagnostic_rng = self.rng.clone();
+        let raw_u64 = diagnostic_rng.next_u64();
+        const DENOMINATOR: f64 = (1u64 << 53) as f64;
+        let unit_f64 = (raw_u64 >> 11) as f64 / DENOMINATOR;
+        let distribution = self.diagnose(logits, SamplingUniform(unit_f64))?;
+        Ok((
+            distribution,
+            Some(SamplingRngDiagnostic {
+                draws_before: self.draws,
+                state_before,
+                state_after: diagnostic_rng.state,
+                raw_u64,
+                unit_f64_bits: unit_f64.to_bits(),
+                unit_f64,
+            }),
+        ))
+    }
+
+    /// Diagnose sampler-v1 using the same bounded top-k candidate construction
+    /// as [`Self::sample_bounded_top_k`], without advancing RNG state.
+    pub fn diagnose_bounded_top_k(
+        &self,
+        logits: &[f32],
+        uniform: SamplingUniform,
+    ) -> Result<(SamplingDistribution, BoundedTopKEvidence), SamplingError> {
+        if self.config.temperature == 0.0
+            || self.config.top_k == 0
+            || self.config.top_k >= logits.len()
+        {
+            return Ok((
+                self.diagnose(logits, uniform)?,
+                BoundedTopKEvidence {
+                    input_logits: logits.len(),
+                    ..BoundedTopKEvidence::default()
+                },
+            ));
+        }
+
+        validate_logits_shape(logits)?;
+        let top_k = self.config.top_k;
+        let mut heap = BinaryHeap::with_capacity(top_k);
+        let mut max_heap_len = 0usize;
+        for (token, &logit) in logits.iter().enumerate() {
+            if logit.is_nan() {
+                return Err(SamplingError::NanLogit { token });
+            }
+            let candidate = HeapCandidate(Candidate {
+                token: token as i32,
+                logit: f64::from(logit),
+            });
+            if heap.len() < top_k {
+                heap.push(candidate);
+                max_heap_len = max_heap_len.max(heap.len());
+            } else if candidate_better(&candidate.0, &heap.peek().expect("full heap").0) {
+                heap.pop();
+                heap.push(candidate);
+            }
+        }
+        let heap_capacity = heap.capacity();
+        let mut candidates: Vec<Candidate> = heap.into_iter().map(|entry| entry.0).collect();
+        candidates.sort_unstable_by(candidate_order);
+        let distribution = diagnose_candidates(self.config, candidates, uniform)?;
+        Ok((
+            distribution,
+            BoundedTopKEvidence {
+                input_logits: logits.len(),
+                retained_top_k: top_k,
+                max_heap_len,
+                heap_capacity,
+                used_bounded_path: true,
+            },
+        ))
     }
 
     /// Select one token using the version-1 chain:
@@ -713,6 +870,82 @@ fn probability_weights(candidates: &[Candidate]) -> Result<Vec<f64>, SamplingErr
         return Err(SamplingError::NoCandidates);
     }
     Ok(weights)
+}
+
+fn diagnose_candidates(
+    config: SamplingConfig,
+    mut candidates: Vec<Candidate>,
+    uniform: SamplingUniform,
+) -> Result<SamplingDistribution, SamplingError> {
+    if config.min_p > 0.0 {
+        let max_logit = candidates[0].logit;
+        if max_logit.is_finite() {
+            let threshold = max_logit + f64::from(config.min_p).ln();
+            candidates.retain(|candidate| candidate.logit >= threshold);
+        }
+    }
+    if candidates.is_empty() {
+        return Err(SamplingError::NoCandidates);
+    }
+
+    if candidates[0].logit == f64::INFINITY {
+        candidates.retain(|candidate| candidate.logit == f64::INFINITY);
+    }
+
+    let temperature = f64::from(config.temperature);
+    for candidate in &mut candidates {
+        candidate.logit /= temperature;
+    }
+    let mut weights = probability_weights(&candidates)?;
+
+    if config.top_p < 1.0 {
+        let total: f64 = weights.iter().sum();
+        let target = total * f64::from(config.top_p);
+        let mut cumulative = 0.0;
+        let mut keep = 0usize;
+        for weight in &weights {
+            cumulative += *weight;
+            keep += 1;
+            if cumulative >= target {
+                break;
+            }
+        }
+        candidates.truncate(keep.max(1));
+        weights.truncate(candidates.len());
+    }
+
+    let total_weight: f64 = weights.iter().sum();
+    if !(total_weight.is_finite() && total_weight > 0.0) {
+        return Err(SamplingError::NoCandidates);
+    }
+    let target = uniform.get() * total_weight;
+    let mut cumulative = 0.0;
+    let mut candidate_index = candidates.len() - 1;
+    for (index, weight) in weights.iter().enumerate() {
+        cumulative += *weight;
+        if target < cumulative {
+            candidate_index = index;
+            break;
+        }
+    }
+    let sampled = SampledToken {
+        token: candidates[candidate_index].token,
+        candidate_index,
+    };
+    let candidates = candidates
+        .into_iter()
+        .zip(weights)
+        .map(|(candidate, weight)| WeightedCandidate {
+            token: candidate.token,
+            weight,
+        })
+        .collect();
+
+    Ok(SamplingDistribution {
+        candidates,
+        total_weight,
+        sampled,
+    })
 }
 
 /// Fixed request-local RNG. The algorithm is part of
@@ -1527,5 +1760,329 @@ mod tests {
             assert_eq!(profile.after_top_k, 2);
         }
         assert_eq!(ordinary.draws(), profiled.draws());
+    }
+
+    fn uniform(value: f64) -> SamplingUniform {
+        SamplingUniform::new(value).unwrap()
+    }
+
+    fn next_uniform(sampler: &Sampler) -> SamplingUniform {
+        let mut rng = sampler.rng.clone();
+        uniform(rng.next_unit_f64())
+    }
+
+    #[test]
+    fn sampling_uniform_validates_the_rng_half_open_interval() {
+        assert_eq!(uniform(0.0).get().to_bits(), 0.0f64.to_bits());
+        assert_eq!(uniform(-0.0).get().to_bits(), (-0.0f64).to_bits());
+        let below_one = f64::from_bits(1.0f64.to_bits() - 1);
+        assert_eq!(uniform(below_one).get(), below_one);
+        for value in [-f64::MIN_POSITIVE, 1.0, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                SamplingUniform::new(value),
+                Err(SamplingError::InvalidUniform(value))
+            );
+        }
+        assert!(matches!(
+            SamplingUniform::new(f64::NAN),
+            Err(SamplingError::InvalidUniform(value)) if value.is_nan()
+        ));
+    }
+
+    #[test]
+    fn diagnostics_leave_the_golden_stream_and_rng_state_unchanged() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 0x1234_5678_9abc_def0,
+        };
+        let logits = [2.0, 1.5, 1.0, 0.5];
+        let expected = [0, 1, 1, 1, 3, 1, 3, 0, 0, 3, 0, 0, 2, 0, 2, 1];
+        let mut diagnosed = sampler(config);
+        let mut untouched = diagnosed.clone();
+
+        for boundary in [0.0, 0.5, f64::from_bits(1.0f64.to_bits() - 1)] {
+            diagnosed.diagnose(&logits, uniform(boundary)).unwrap();
+            diagnosed
+                .diagnose_bounded_top_k(&logits, uniform(boundary))
+                .unwrap();
+        }
+        assert_eq!(diagnosed.draws(), 0);
+        let actual: Vec<_> = expected
+            .iter()
+            .map(|_| diagnosed.sample(&logits).unwrap().token)
+            .collect();
+        let control: Vec<_> = expected
+            .iter()
+            .map(|_| untouched.sample(&logits).unwrap().token)
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(actual, control);
+        assert_eq!(diagnosed.draws(), expected.len());
+        assert_eq!(diagnosed.rng.state, untouched.rng.state);
+    }
+
+    #[test]
+    fn ordinary_bounded_and_profiled_paths_match_the_diagnostic_distribution() {
+        let config = SamplingConfig {
+            temperature: 0.7,
+            top_k: 4,
+            top_p: 0.8,
+            min_p: 0.05,
+            seed: 42,
+        };
+        let logits = [3.0, 2.0, 2.0, 1.0, 0.0, -1.0];
+        let ordinary = sampler(config);
+        let bounded = sampler(config);
+        let supplied = next_uniform(&ordinary);
+        let expected = ordinary.diagnose(&logits, supplied).unwrap();
+        let (bounded_distribution, evidence) =
+            bounded.diagnose_bounded_top_k(&logits, supplied).unwrap();
+        assert_eq!(bounded_distribution, expected);
+        assert!(evidence.used_bounded_path);
+        assert_eq!(ordinary.draws(), 0);
+        assert_eq!(bounded.draws(), 0);
+
+        let mut sampled = sampler(config);
+        let mut sampled_bounded = sampler(config);
+        let mut sampled_profiled = sampler(config);
+        assert_eq!(sampled.sample(&logits).unwrap(), expected.sampled);
+        assert_eq!(
+            sampled_bounded.sample_bounded_top_k(&logits).unwrap().0,
+            expected.sampled
+        );
+        assert_eq!(
+            sampled_profiled.sample_profiled(&logits).unwrap().0,
+            expected.sampled
+        );
+        assert_eq!(sampled.rng.state, sampled_bounded.rng.state);
+        assert_eq!(sampled.rng.state, sampled_profiled.rng.state);
+    }
+
+    #[test]
+    fn diagnostics_pin_filters_ties_infinities_and_uniform_boundaries() {
+        let ties = sampler(SamplingConfig {
+            temperature: 1.0,
+            top_k: 2,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 0,
+        });
+        let low = ties.diagnose(&[2.0, 2.0, 2.0], uniform(0.0)).unwrap();
+        let boundary = ties.diagnose(&[2.0, 2.0, 2.0], uniform(0.5)).unwrap();
+        let high = ties
+            .diagnose(
+                &[2.0, 2.0, 2.0],
+                uniform(f64::from_bits(1.0f64.to_bits() - 1)),
+            )
+            .unwrap();
+        assert_eq!(
+            low.candidates,
+            vec![
+                WeightedCandidate {
+                    token: 0,
+                    weight: 1.0
+                },
+                WeightedCandidate {
+                    token: 1,
+                    weight: 1.0
+                },
+            ]
+        );
+        assert_eq!(low.sampled.token, 0);
+        assert_eq!(boundary.sampled.token, 1);
+        assert_eq!(high.sampled.token, 1);
+
+        let filtered = sampler(SamplingConfig {
+            temperature: 2.0,
+            top_k: 3,
+            top_p: 0.6,
+            min_p: 0.3,
+            seed: 0,
+        })
+        .diagnose(&[3.0, 2.0, 1.0, 0.0], uniform(0.9))
+        .unwrap();
+        assert_eq!(
+            filtered.candidates,
+            vec![WeightedCandidate {
+                token: 0,
+                weight: 1.0
+            }]
+        );
+
+        let infinities = sampler(SamplingConfig {
+            temperature: 1.0,
+            ..SamplingConfig::default()
+        })
+        .diagnose(
+            &[f32::INFINITY, 1000.0, f32::INFINITY, f32::NEG_INFINITY],
+            uniform(0.75),
+        )
+        .unwrap();
+        assert_eq!(
+            infinities.candidates,
+            vec![
+                WeightedCandidate {
+                    token: 0,
+                    weight: 1.0
+                },
+                WeightedCandidate {
+                    token: 2,
+                    weight: 1.0
+                },
+            ]
+        );
+        assert_eq!(
+            infinities.sampled,
+            SampledToken {
+                token: 2,
+                candidate_index: 1
+            }
+        );
+
+        let finite = sampler(SamplingConfig {
+            temperature: 1.0,
+            ..SamplingConfig::default()
+        })
+        .diagnose(&[0.0, f32::NEG_INFINITY], uniform(0.99))
+        .unwrap();
+        assert_eq!(finite.candidates[1].weight, 0.0);
+        assert_eq!(finite.sampled.token, 0);
+    }
+
+    #[test]
+    fn diagnostics_preserve_nan_no_candidate_and_singleton_behavior() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 1,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 7,
+        };
+        let sampler = sampler(config);
+        for supplied in [uniform(0.0), uniform(f64::from_bits(1.0f64.to_bits() - 1))] {
+            let distribution = sampler.diagnose(&[0.0, 3.0, 1.0], supplied).unwrap();
+            assert_eq!(
+                distribution.candidates,
+                vec![WeightedCandidate {
+                    token: 1,
+                    weight: 1.0
+                }]
+            );
+            assert_eq!(
+                distribution.sampled,
+                SampledToken {
+                    token: 1,
+                    candidate_index: 0
+                }
+            );
+        }
+        assert_eq!(sampler.draws(), 0);
+        assert_eq!(
+            sampler.diagnose(&[0.0, f32::NAN], uniform(0.0)),
+            Err(SamplingError::NanLogit { token: 1 })
+        );
+        assert_eq!(
+            sampler.diagnose(&[f32::NEG_INFINITY; 2], uniform(0.0)),
+            Err(SamplingError::NoCandidates)
+        );
+        assert_eq!(
+            sampler.diagnose(&[], uniform(0.0)),
+            Err(SamplingError::EmptyLogits)
+        );
+        assert_eq!(sampler.draws(), 0);
+    }
+
+    #[test]
+    fn diagnose_next_captures_the_exact_next_draw_without_advancing_state() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 0x1234_5678_9abc_def0,
+        };
+        let logits = [2.0, 1.5, 1.0, 0.5];
+        let mut sampler = sampler(config);
+        let state_before = sampler.rng.state;
+
+        let (distribution, rng) = sampler.diagnose_next(&logits).unwrap();
+        let rng = rng.expect("positive-temperature sampling uses one draw");
+        assert_eq!(rng.draws_before, 0);
+        assert_eq!(rng.state_before, state_before);
+        assert_eq!(rng.raw_u64, 0x4d4f_7607_a97a_1bd6);
+        let expected_unit = (rng.raw_u64 >> 11) as f64 / (1u64 << 53) as f64;
+        assert_eq!(rng.unit_f64_bits, expected_unit.to_bits());
+        assert_eq!(rng.unit_f64.to_bits(), rng.unit_f64_bits);
+        assert_eq!(sampler.draws(), 0);
+        assert_eq!(sampler.rng.state, state_before);
+
+        let repeated = sampler.diagnose_next(&logits).unwrap();
+        assert_eq!(repeated, (distribution.clone(), Some(rng)));
+        assert_eq!(sampler.draws(), 0);
+        assert_eq!(sampler.rng.state, state_before);
+
+        assert_eq!(sampler.sample(&logits).unwrap(), distribution.sampled);
+        assert_eq!(sampler.draws(), 1);
+        assert_eq!(sampler.rng.state, rng.state_after);
+    }
+
+    #[test]
+    fn diagnose_next_preserves_failed_call_behavior_and_state() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 91,
+        };
+        for (logits, expected) in [
+            (&[][..], SamplingError::EmptyLogits),
+            (&[0.0, f32::NAN][..], SamplingError::NanLogit { token: 1 }),
+            (
+                &[f32::NEG_INFINITY, f32::NEG_INFINITY][..],
+                SamplingError::NoCandidates,
+            ),
+        ] {
+            let sampler = sampler(config);
+            let state_before = sampler.rng.state;
+            assert_eq!(sampler.diagnose_next(logits), Err(expected.clone()));
+            assert_eq!(sampler.draws(), 0);
+            assert_eq!(sampler.rng.state, state_before);
+
+            let mut production = sampler.clone();
+            assert_eq!(production.sample(logits), Err(expected));
+            assert_eq!(production.draws(), 0);
+            assert_eq!(production.rng.state, state_before);
+        }
+    }
+
+    #[test]
+    fn diagnose_next_reports_no_rng_draw_for_greedy() {
+        let mut sampler = sampler(SamplingConfig {
+            temperature: 0.0,
+            seed: 17,
+            ..SamplingConfig::default()
+        });
+        let state_before = sampler.rng.state;
+        let (distribution, rng) = sampler.diagnose_next(&[1.0, 3.0, 3.0]).unwrap();
+        assert_eq!(rng, None);
+        assert_eq!(
+            distribution.sampled,
+            SampledToken {
+                token: 1,
+                candidate_index: 0
+            }
+        );
+        assert_eq!(sampler.draws(), 0);
+        assert_eq!(sampler.rng.state, state_before);
+        assert_eq!(
+            sampler.sample(&[1.0, 3.0, 3.0]).unwrap(),
+            distribution.sampled
+        );
+        assert_eq!(sampler.draws(), 0);
+        assert_eq!(sampler.rng.state, state_before);
     }
 }

@@ -22,6 +22,7 @@ mod attn_stage_floor;
 mod batch_probe;
 mod dense_block_batch;
 mod dense_whole_batch;
+mod dflash_sampled_oracle;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_mhc_delete;
 #[cfg(feature = "dsv4-diagnostics")]
@@ -619,6 +620,9 @@ enum Cmd {
     /// in drafter logits (for the future DDTree decision), effective-N
     /// sweep, and an apples-to-apples no-spec baseline.
     DflashLazy(DflashLazyArgs),
+    /// Exact serial E1a sampled one-hot DFlash development oracle. E0 is
+    /// explicitly unmeasured; this is not a performance benchmark.
+    DflashSampledOracle(dflash_sampled_oracle::DflashSampledOracleArgs),
     /// **H5.5 production DFlash decode**: end-to-end DFlash speculative
     /// decode using the H5.3 packed_verify + H5.4 restore_after_partial_accept
     /// primitives. Greedy accept-prefix per plan §1.3.
@@ -1698,6 +1702,24 @@ mod stop_token_cli_tests {
         ])
         .expect("comma-delimited stop tokens");
         assert_eq!(multiple.stop_tokens, Some(vec![248046, 248044]));
+    }
+
+    #[test]
+    fn bench_parses_dflash_sampled_oracle_subcommand() {
+        let parsed = Args::try_parse_from([
+            "qwen-bench",
+            "dflash-sampled-oracle",
+            "--model",
+            "target.gguf",
+            "--drafter",
+            "draft.gguf",
+            "--prompt",
+            "hello",
+            "--output",
+            "evidence.jsonl",
+        ])
+        .expect("sampled oracle command");
+        assert!(matches!(parsed.cmd, Cmd::DflashSampledOracle(_)));
     }
 }
 
@@ -2895,6 +2917,11 @@ fn run() -> Result<()> {
         Cmd::Mtp(a) => run_mtp(a),
         Cmd::Pld(a) => run_pld(a),
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
+        Cmd::DflashSampledOracle(a) => dflash_sampled_oracle::run(
+            a,
+            serde_json::to_value(recorded_build_identity())?,
+            capture_qwen_env(),
+        ),
         Cmd::Dflash(a) => run_dflash(a),
         Cmd::Tok(a) => run_tok(a),
         Cmd::AttnPrefillMicro(a) => run_attn_prefill_micro(a),

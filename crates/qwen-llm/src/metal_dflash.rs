@@ -56,7 +56,10 @@ use crate::metal_forward::{
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
+use objc2_metal::{
+    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLResource,
+    MTLStorageMode,
+};
 use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -2109,6 +2112,16 @@ pub enum DFlashError {
     CtxOverflow(usize, usize),
     #[error("dflash2 drafter: {0}")]
     BadDrafter(&'static str),
+    #[error("dflash2 selector diagnostic is disabled by QWEN_DFLASH2_NO_SELECTOR")]
+    SelectorDiagnosticDisabled,
+    #[error(
+        "dflash2 selector diagnostic mismatch at depth {depth}: production={production}, replay={reconstructed}"
+    )]
+    SelectorDiagnosticMismatch {
+        depth: usize,
+        production: i32,
+        reconstructed: i32,
+    },
 }
 
 /// All DFlash drafter weights resident on Metal. Loaded once at session
@@ -2172,6 +2185,53 @@ pub struct MetalDFlash2Selector {
     pub successor: DFlash2Codebook,
     pub rank: usize,
     pub top_k: usize,
+}
+
+/// Read-only evidence from one DFlash 2 greedy selector walk.
+#[derive(Clone, Debug)]
+pub struct DFlash2SelectorDiagnostic {
+    /// Tokens returned by the production `draft_block` call.
+    pub draft_tokens: Vec<i32>,
+    /// One record for each causal selector row, `1..block_size`.
+    pub depths: Vec<DFlash2SelectorDepthDiagnostic>,
+}
+
+/// Exact scalar inputs and outputs for one causal depth of the selector.
+#[derive(Clone, Debug)]
+pub struct DFlash2SelectorDepthDiagnostic {
+    pub depth: usize,
+    pub predecessor_token: Option<i32>,
+    /// Top-k slot that selected the predecessor at the preceding depth;
+    /// `None` at depth 1, where the predecessor is the carry token.
+    pub predecessor_choice_index: Option<usize>,
+    pub top_k_ids: Vec<i32>,
+    pub unary_logits: Vec<f32>,
+    /// Predecessor-conditioned `unary + dot` scores. Sentinel IDs have no
+    /// score; non-finite computed scores are retained exactly.
+    pub final_scores: Vec<Option<f32>>,
+    pub greedy_score: Option<f32>,
+    pub greedy_index: Option<usize>,
+    pub greedy_token: Option<i32>,
+    pub issues: Vec<DFlash2SelectorIssue>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DFlash2SelectorIssue {
+    Sentinel {
+        candidate_index: usize,
+        token_id: i32,
+    },
+    DuplicateId {
+        candidate_index: usize,
+        first_index: usize,
+        token_id: i32,
+    },
+    NonFiniteScore {
+        candidate_index: usize,
+        token_id: i32,
+        score: f32,
+    },
+    NoValidChoice,
 }
 
 /// CPU-side row-dequantizable copy of a selector codebook tensor
@@ -2349,6 +2409,265 @@ impl DFlash2Codebook {
         }
         Ok(())
     }
+}
+
+fn checked_selector_read_layout(
+    dtype: GgmlType,
+    expected_dtype: GgmlType,
+    elements: u64,
+    expected_elements: usize,
+    offset: u64,
+    backing_len: usize,
+    element_size: usize,
+    element_align: usize,
+    label: &'static str,
+) -> Result<(usize, usize), DFlashError> {
+    let bad_shape = |detail: String| {
+        DFlashError::Metal(MetalError::BadShape {
+            kernel: "dflash2_selector_diagnostic_read",
+            detail: format!("{label}: {detail}"),
+        })
+    };
+    if dtype != expected_dtype {
+        return Err(bad_shape(format!(
+            "expected dtype {expected_dtype:?}, got {dtype:?}"
+        )));
+    }
+    let expected_elements_u64 = u64::try_from(expected_elements)
+        .map_err(|_| bad_shape("expected element count does not fit u64".into()))?;
+    if elements != expected_elements_u64 {
+        return Err(bad_shape(format!(
+            "expected {expected_elements} elements, got {elements}"
+        )));
+    }
+    let byte_len = expected_elements
+        .checked_mul(element_size)
+        .ok_or_else(|| bad_shape("byte length overflow".into()))?;
+    let offset = usize::try_from(offset)
+        .map_err(|_| bad_shape("tensor offset does not fit usize".into()))?;
+    if element_align == 0 || !offset.is_multiple_of(element_align) {
+        return Err(bad_shape(format!(
+            "offset {offset} is not aligned to {element_align} bytes"
+        )));
+    }
+    let end = offset
+        .checked_add(byte_len)
+        .ok_or_else(|| bad_shape("offset + byte length overflow".into()))?;
+    if end > backing_len {
+        return Err(bad_shape(format!(
+            "byte range {offset}..{end} exceeds backing buffer length {backing_len}"
+        )));
+    }
+    Ok((offset, byte_len))
+}
+
+fn read_shared_selector_tensor<T: Copy>(
+    tensor: &MetalTensor,
+    expected_dtype: GgmlType,
+    expected_elements: usize,
+    label: &'static str,
+) -> Result<Vec<T>, DFlashError> {
+    if tensor.buffer.storageMode() != MTLStorageMode::Shared {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "dflash2_selector_diagnostic_read",
+            detail: format!("{label}: backing buffer is not StorageModeShared"),
+        }));
+    }
+    let (offset, _) = checked_selector_read_layout(
+        tensor.dtype,
+        expected_dtype,
+        tensor.n_elements(),
+        expected_elements,
+        tensor.offset,
+        tensor.buffer.length(),
+        std::mem::size_of::<T>(),
+        std::mem::align_of::<T>(),
+        label,
+    )?;
+    let mut out = Vec::<T>::with_capacity(expected_elements);
+    unsafe {
+        let src = (tensor.buffer.contents().as_ptr() as *const u8)
+            .add(offset)
+            .cast::<T>();
+        std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), expected_elements);
+        out.set_len(expected_elements);
+    }
+    Ok(out)
+}
+
+fn verify_dflash2_selector_replay(
+    production: &[i32],
+    reconstructed: &[i32],
+) -> Result<(), DFlashError> {
+    if production.len() != reconstructed.len() {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "dflash2_selector_diagnostic_replay",
+            detail: format!(
+                "production token count {} != replay token count {}",
+                production.len(),
+                reconstructed.len()
+            ),
+        }));
+    }
+    if let Some((depth, (&production, &reconstructed))) = production
+        .iter()
+        .zip(reconstructed)
+        .enumerate()
+        .find(|(_, (production, reconstructed))| production != reconstructed)
+    {
+        return Err(DFlashError::SelectorDiagnosticMismatch {
+            depth,
+            production,
+            reconstructed,
+        });
+    }
+    Ok(())
+}
+
+fn diagnose_dflash2_selector_walk(
+    predecessor: &DFlash2Codebook,
+    successor: &DFlash2Codebook,
+    top_k: usize,
+    rank: usize,
+    carry_tok: i32,
+    n: usize,
+    ids: &[i32],
+    vals: &[f32],
+    sel_h: &[f32],
+) -> Result<(Vec<i32>, Vec<DFlash2SelectorDepthDiagnostic>), DFlashError> {
+    let bad_replay_shape = |detail: String| {
+        DFlashError::Metal(MetalError::BadShape {
+            kernel: "dflash2_selector_diagnostic_replay",
+            detail,
+        })
+    };
+    if n == 0 || top_k == 0 {
+        return Err(bad_replay_shape(
+            "block size and selector top-k must be nonzero".into(),
+        ));
+    }
+    let candidate_elements = n
+        .checked_mul(top_k)
+        .ok_or_else(|| bad_replay_shape("candidate element count overflow".into()))?;
+    let gate_elements = n
+        .checked_mul(rank)
+        .ok_or_else(|| bad_replay_shape("gate element count overflow".into()))?;
+    if ids.len() != candidate_elements
+        || vals.len() != candidate_elements
+        || sel_h.len() != gate_elements
+    {
+        return Err(bad_replay_shape(format!(
+            "expected ids/vals/gate lengths {candidate_elements}/{candidate_elements}/{gate_elements}, got {}/{}/{}",
+            ids.len(),
+            vals.len(),
+            sel_h.len()
+        )));
+    }
+
+    let mut reconstructed = vec![ids[0]; n];
+    let mut depths = Vec::with_capacity(n.saturating_sub(1));
+    let mut predecessor_token = Some(carry_tok);
+    let mut predecessor_choice_index = None;
+    let mut pred = vec![0f32; rank];
+    let mut succ = vec![0f32; rank];
+    let mut gate = vec![0f32; rank];
+    predecessor.dequant_row(carry_tok as usize, &mut pred)?;
+
+    for depth in 1..n {
+        let row_ids = ids[depth * top_k..(depth + 1) * top_k].to_vec();
+        let unary_logits = vals[depth * top_k..(depth + 1) * top_k].to_vec();
+        let mut final_scores = vec![None; top_k];
+        let mut issues = Vec::new();
+        let mut best_index = None;
+        let mut best_score = f32::NEG_INFINITY;
+
+        if predecessor_token.is_some() {
+            let hrow = &sel_h[depth * rank..(depth + 1) * rank];
+            for r in 0..rank {
+                gate[r] = pred[r] * hrow[r];
+            }
+        }
+        for candidate_index in 0..top_k {
+            let token_id = row_ids[candidate_index];
+            if let Some(first_index) = row_ids[..candidate_index]
+                .iter()
+                .position(|&prior| prior == token_id)
+            {
+                issues.push(DFlash2SelectorIssue::DuplicateId {
+                    candidate_index,
+                    first_index,
+                    token_id,
+                });
+            }
+            if token_id < 0 || token_id as usize >= successor.n_rows {
+                issues.push(DFlash2SelectorIssue::Sentinel {
+                    candidate_index,
+                    token_id,
+                });
+                continue;
+            }
+            if predecessor_token.is_some() {
+                successor.dequant_row(token_id as usize, &mut succ)?;
+                let mut dot = 0f32;
+                for r in 0..rank {
+                    dot += gate[r] * succ[r];
+                }
+                let score = unary_logits[candidate_index] + dot;
+                final_scores[candidate_index] = Some(score);
+                if !score.is_finite() {
+                    issues.push(DFlash2SelectorIssue::NonFiniteScore {
+                        candidate_index,
+                        token_id,
+                        score,
+                    });
+                }
+                // Match the production selector exactly: strict comparison
+                // preserves top-k order on ties and naturally rejects NaN.
+                if score > best_score {
+                    best_score = score;
+                    best_index = Some(candidate_index);
+                }
+            }
+        }
+
+        let no_valid_choice = best_index.is_none();
+        if no_valid_choice {
+            issues.push(DFlash2SelectorIssue::NoValidChoice);
+        }
+        // Production initializes its choice index to zero. Preserve that
+        // fallback in the reconstructed tokens while explicitly diagnosing
+        // that no score won the strict comparison.
+        let greedy_index = if top_k == 0 {
+            None
+        } else {
+            Some(best_index.unwrap_or(0))
+        };
+        let greedy_token = greedy_index.map(|index| row_ids[index]);
+        depths.push(DFlash2SelectorDepthDiagnostic {
+            depth,
+            predecessor_token,
+            predecessor_choice_index,
+            top_k_ids: row_ids,
+            unary_logits,
+            final_scores,
+            greedy_score: greedy_index.map(|_| best_score),
+            greedy_index,
+            greedy_token,
+            issues,
+        });
+
+        let index = greedy_index.expect("top_k checked nonzero");
+        let token = greedy_token.expect("top_k checked nonzero");
+        reconstructed[depth] = token;
+        // Production performs this dequant unconditionally, including its
+        // slot-zero fallback when no score wins. Propagate the same failure
+        // rather than manufacturing records for unreachable later depths.
+        predecessor.dequant_row(token as usize, &mut pred)?;
+        predecessor_token = Some(token);
+        predecessor_choice_index = Some(index);
+    }
+
+    Ok((reconstructed, depths))
 }
 
 impl MetalDFlashHead {
@@ -14767,6 +15086,85 @@ impl<'a> DFlashDecoder<'a> {
         Ok(out)
     }
 
+    /// Run the production DFlash 2 draft path, then re-read its synchronized
+    /// selector buffers and replay the scalar greedy walk as diagnostic
+    /// evidence. This does not alter selector inputs or production choices.
+    pub fn draft_block_with_selector_diagnostic(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+    ) -> Result<DFlash2SelectorDiagnostic, DFlashError> {
+        if dflash2_selector_disabled() {
+            return Err(DFlashError::SelectorDiagnosticDisabled);
+        }
+        if self.head.selector.is_none() {
+            return Err(DFlashError::BadDrafter(
+                "selector diagnostic requires a DFlash 2 selector",
+            ));
+        }
+        let draft_tokens = self.draft_block(carry_tok, noise_start_pos)?;
+        let sel = self.head.selector.as_ref().expect("selector checked above");
+        let n = self.head.config.block_size as usize;
+        let candidate_elements = n.checked_mul(sel.top_k).ok_or_else(|| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "dflash2_selector_diagnostic_read",
+                detail: "candidate element count overflow".into(),
+            })
+        })?;
+        let gate_elements = n.checked_mul(sel.rank).ok_or_else(|| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "dflash2_selector_diagnostic_read",
+                detail: "gate element count overflow".into(),
+            })
+        })?;
+        let ids = read_shared_selector_tensor::<i32>(
+            self.session
+                .topk_ids
+                .as_ref()
+                .ok_or(DFlashError::BadDrafter(
+                    "selector diagnostic missing topk_ids buffer",
+                ))?,
+            GgmlType::I32,
+            candidate_elements,
+            "topk_ids",
+        )?;
+        let vals = read_shared_selector_tensor::<f32>(
+            self.session
+                .topk_vals
+                .as_ref()
+                .ok_or(DFlashError::BadDrafter(
+                    "selector diagnostic missing topk_vals buffer",
+                ))?,
+            GgmlType::F32,
+            candidate_elements,
+            "topk_vals",
+        )?;
+        let sel_h = read_shared_selector_tensor::<f32>(
+            self.session.sel_h.as_ref().ok_or(DFlashError::BadDrafter(
+                "selector diagnostic missing sel_h buffer",
+            ))?,
+            GgmlType::F32,
+            gate_elements,
+            "sel_h",
+        )?;
+        let (reconstructed, depths) = diagnose_dflash2_selector_walk(
+            &sel.predecessor,
+            &sel.successor,
+            sel.top_k,
+            sel.rank,
+            carry_tok,
+            n,
+            &ids,
+            &vals,
+            &sel_h,
+        )?;
+        verify_dflash2_selector_replay(&draft_tokens, &reconstructed)?;
+        Ok(DFlash2SelectorDiagnostic {
+            draft_tokens,
+            depths,
+        })
+    }
+
     /// Same as `draft_block` but returns full `[N, V]` logits (CPU readback)
     /// for cosine validation against `Forward::dflash_draft`. Used by the
     /// H5.1.5 cosine gate.
@@ -15005,6 +15403,221 @@ mod tests {
         for (index, value) in q8_row.iter().enumerate() {
             assert_eq!(value.to_bits(), (0.5 * (index as f32 - 11.0)).to_bits());
         }
+    }
+
+    fn selector_test_codebook(rows: &[&[f32]]) -> DFlash2Codebook {
+        let rank = rows.first().expect("at least one row").len();
+        let mut raw = Vec::with_capacity(rows.len() * rank * 4);
+        for row in rows {
+            assert_eq!(row.len(), rank);
+            for value in *row {
+                raw.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let desc = TensorDesc {
+            name: "selector_test_codebook".into(),
+            shape: vec![rank as u64, rows.len() as u64],
+            dtype: GgmlType::F32,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: raw.len() as u64,
+        };
+        DFlash2Codebook::from_gguf(&desc, &raw).unwrap()
+    }
+
+    #[test]
+    fn dflash2_selector_diagnostic_scores_and_tracks_predecessors() {
+        let predecessor =
+            selector_test_codebook(&[&[1.0, 2.0], &[2.0, 0.0], &[0.0, 3.0], &[1.0, 1.0]]);
+        let successor =
+            selector_test_codebook(&[&[0.0, 0.0], &[1.0, 1.0], &[2.0, 0.0], &[0.0, 1.0]]);
+        let ids = [0, 0, 1, 2, 3, 1];
+        let unary = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let gates = [0.0, 0.0, 2.0, 0.5, 1.0, 2.0];
+        let (tokens, depths) = diagnose_dflash2_selector_walk(
+            &predecessor,
+            &successor,
+            2,
+            2,
+            0,
+            3,
+            &ids,
+            &unary,
+            &gates,
+        )
+        .unwrap();
+
+        assert_eq!(tokens, vec![0, 2, 3]);
+        assert_eq!(depths[0].final_scores, vec![Some(3.0), Some(4.0)]);
+        assert_eq!(depths[0].greedy_index, Some(1));
+        assert_eq!(depths[1].predecessor_token, Some(2));
+        assert_eq!(depths[1].predecessor_choice_index, Some(1));
+        assert_eq!(depths[1].final_scores, vec![Some(6.0), Some(6.0)]);
+        assert_eq!(depths[1].greedy_index, Some(0));
+    }
+
+    #[test]
+    fn dflash2_selector_diagnostic_keeps_first_tie_and_flags_candidates() {
+        let predecessor = selector_test_codebook(&[&[1.0], &[1.0]]);
+        let successor = selector_test_codebook(&[&[0.0], &[1.0]]);
+        let ids = [0, 0, 0, 0, 1, 1, -1, 9];
+        let unary = [0.0; 8];
+        let gates = [0.0, 1.0];
+        let (_, depths) = diagnose_dflash2_selector_walk(
+            &predecessor,
+            &successor,
+            4,
+            1,
+            0,
+            2,
+            &ids,
+            &unary,
+            &gates,
+        )
+        .unwrap();
+        let depth = &depths[0];
+
+        assert_eq!(depth.greedy_index, Some(0));
+        assert_eq!(depth.greedy_token, Some(1));
+        assert!(depth.issues.contains(&DFlash2SelectorIssue::DuplicateId {
+            candidate_index: 1,
+            first_index: 0,
+            token_id: 1,
+        }));
+        assert!(depth.issues.contains(&DFlash2SelectorIssue::Sentinel {
+            candidate_index: 2,
+            token_id: -1,
+        }));
+        assert!(depth.issues.contains(&DFlash2SelectorIssue::Sentinel {
+            candidate_index: 3,
+            token_id: 9,
+        }));
+        assert_eq!(depth.final_scores, vec![Some(1.0), Some(1.0), None, None]);
+    }
+
+    #[test]
+    fn dflash2_selector_diagnostic_reports_nonfinite_and_no_choice() {
+        let predecessor = selector_test_codebook(&[&[1.0], &[1.0], &[1.0]]);
+        let successor = selector_test_codebook(&[&[0.0], &[0.0], &[0.0]]);
+        let ids = [0, 0, 1, 2, 1, 2];
+        let unary = [0.0, 0.0, f32::INFINITY, 0.0, f32::NAN, f32::NEG_INFINITY];
+        let gates = [0.0, 1.0, 1.0];
+        let (_, depths) = diagnose_dflash2_selector_walk(
+            &predecessor,
+            &successor,
+            2,
+            1,
+            0,
+            3,
+            &ids,
+            &unary,
+            &gates,
+        )
+        .unwrap();
+
+        assert_eq!(depths[0].greedy_index, Some(0));
+        assert!(matches!(
+            depths[0].issues.as_slice(),
+            [DFlash2SelectorIssue::NonFiniteScore {
+                candidate_index: 0,
+                token_id: 1,
+                score,
+            }] if score.is_infinite() && score.is_sign_positive()
+        ));
+        assert_eq!(depths[1].greedy_index, Some(0));
+        assert_eq!(depths[1].greedy_token, Some(1));
+        assert_eq!(depths[1].greedy_score, Some(f32::NEG_INFINITY));
+        assert!(depths[1]
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, DFlash2SelectorIssue::NonFiniteScore { score, .. } if score.is_nan())));
+        assert!(
+            depths[1]
+                .issues
+                .contains(&DFlash2SelectorIssue::NoValidChoice)
+        );
+    }
+
+    #[test]
+    fn dflash2_selector_diagnostic_returns_first_replay_mismatch() {
+        let error = verify_dflash2_selector_replay(&[10, 20, 30], &[10, 21, 31]).unwrap_err();
+        assert!(matches!(
+            error,
+            DFlashError::SelectorDiagnosticMismatch {
+                depth: 1,
+                production: 20,
+                reconstructed: 21,
+            }
+        ));
+    }
+
+    #[test]
+    fn dflash2_selector_diagnostic_replay_rejects_invalid_predecessor() {
+        let predecessor = selector_test_codebook(&[&[1.0], &[1.0]]);
+        let successor = selector_test_codebook(&[&[0.0], &[0.0], &[1.0]]);
+        let error = diagnose_dflash2_selector_walk(
+            &predecessor,
+            &successor,
+            1,
+            1,
+            0,
+            2,
+            &[0, 2],
+            &[0.0, 1.0],
+            &[0.0, 1.0],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            DFlashError::BadDrafter("selector codebook row out of range")
+        ));
+    }
+
+    #[test]
+    fn dflash2_selector_diagnostic_checked_layout_honors_view_offset() {
+        assert_eq!(
+            checked_selector_read_layout(
+                GgmlType::F32,
+                GgmlType::F32,
+                2,
+                2,
+                8,
+                16,
+                4,
+                4,
+                "synthetic_view",
+            )
+            .unwrap(),
+            (8, 8)
+        );
+        assert!(
+            checked_selector_read_layout(
+                GgmlType::F32,
+                GgmlType::F32,
+                2,
+                2,
+                12,
+                16,
+                4,
+                4,
+                "synthetic_view",
+            )
+            .is_err()
+        );
+        assert!(
+            checked_selector_read_layout(
+                GgmlType::I32,
+                GgmlType::F32,
+                2,
+                2,
+                8,
+                16,
+                4,
+                4,
+                "synthetic_view",
+            )
+            .is_err()
+        );
     }
 
     #[test]

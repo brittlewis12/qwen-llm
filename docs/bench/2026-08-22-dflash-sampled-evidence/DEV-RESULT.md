@@ -3,9 +3,10 @@
 Status: development diagnostics only. Post-incident Q4 E0 sentinels now pass the
 strict lockstep reducer under both execution orders on one narrow computational
 fixture. Four-token fixtures also pass under both orders with three intermediate
-generated target transitions. K0 remains a local reference diagnostic without
-cross-implementation parity, and no G1, product, serve, default-selection,
-model-wide, or held-out authority exists.
+generated target transitions, plus one serial-first alternate one-token prompt.
+K0 remains a local reference diagnostic without cross-implementation parity,
+and no G1, product, serve, default-selection, model-wide, or held-out authority
+exists.
 
 ## What The Development Runs Establish
 
@@ -148,6 +149,12 @@ generated-history depth on the same exposed fixture. This is paired development
 diagnostics, not independent replication or general order invariance. See
 `E0-Q4-V5-GENERATED-REVERSE-RESULT.md`.
 
+V6 held the four-token serial-first treatment fixed and changed the prompt from
+`Hello` to one-token `def`. It passed three generated target transitions and
+produced a different sampled stream. This is minimal token/trajectory diversity,
+not meaningful code-task, multi-token-prompt, reverse-order-on-`def`, or broad
+prompt evidence. See `E0-Q4-V6-DEF-RESULT.md`.
+
 ## Development Recommendation
 
 Keep Q4_K_M in the prospective drafter matrix. It is materially smaller, loads
@@ -156,8 +163,8 @@ chosen as a default from these clusters.
 
 The next go/no-go boundary is now:
 
-1. Add a distinct development prompt at four-token depth before increasing
-   length or seeds.
+1. If buying more E0 breadth, use a meaningful short multi-token development
+   prompt rather than more one-token or `Hello` repetitions.
 2. Independently pin and cross-check the actual causal sparse-q contract before
    E1b; the current selector softmax is local-reference-only. The one-hot lane
    does not depend on K0.

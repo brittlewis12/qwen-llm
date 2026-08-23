@@ -13,9 +13,10 @@ replication, held-out, verifier, serving, or product authority.
 - **NO-GO:** do not infer general order invariance, independent replication,
   prompt/seed/quantization-wide E0, hidden semantic correctness, or product
   readiness.
-- **Next gate:** a distinct development prompt at the same four-token depth.
-  K0 remains independently required before sparse-q work; lane-labeled
-  economics follows only after the applicable correctness breadth.
+- **Next gate at acquisition time:** a distinct development prompt at the same
+  four-token depth. The subsequent one-token `def` v6 fixture passed, buying
+  minimal trajectory diversity; meaningful multi-token breadth remains open.
+  K0 remains independently required before sparse-q work.
 
 ## Frozen Run
 
@@ -85,3 +86,10 @@ computational treatment. Prompt/seed diversity, sustained contexts, Q8/BF16,
 independent hidden residual semantics, sparse-q/K0, packed verification,
 rollback, acceptance, economics, performance, serving, held-out behavior, and
 product integration remain open.
+
+## Subsequent Alternate-Prompt Diagnostic
+
+The serial-first v6 fixture changed the prompt to one-token `def` and also passed
+three generated target transitions, with a different sampled stream. This is
+minimal alternate-token coverage, not meaningful code-task or broad prompt
+evidence. See `E0-Q4-V6-DEF-RESULT.md`.

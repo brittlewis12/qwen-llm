@@ -21,6 +21,7 @@ import math
 import os
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -38,6 +39,165 @@ AUTHORITY = (
     "development_k0s_conditional_on_authenticated_z_only_no_projection_parity_"
     "no_rng_acceptance_k0l_e1b_verifier_product_authority"
 )
+INVENTORY_SCHEMA = "qwen.dflash_k0s_inventory"
+INVENTORY_VERSION = 1
+INVENTORY_AUTHORITY = (
+    "development_k0s_inventory_only_no_model_forward_or_semantic_authority"
+)
+INVENTORY_SPEC_SCHEMA = "qwen.dflash_k0s_inventory_spec"
+PREPARATION_SPEC_SCHEMA = "qwen.dflash_k0s_preparation_spec"
+SEAL_SCHEMA = "qwen.dflash_k0s_preparation_seal"
+INVENTORY_KEYS = (
+    "schema",
+    "schema_version",
+    "authority",
+    "inventory_spec_sha256",
+    "run_id",
+    "checkout",
+    "build",
+    "sources",
+    "executable",
+    "reducer",
+    "scalar_fixture",
+    "command_template",
+    "embedded_metallib",
+    "device",
+    "assets",
+    "gguf",
+    "tensors",
+    "tokenizer",
+    "prompt",
+    "mask_noise",
+    "parser_caps",
+    "command",
+    "environment",
+)
+INVENTORY_SPEC_KEYS = (
+    "schema",
+    "schema_version",
+    "run_id",
+    "inventory_max_bytes",
+    "checkout",
+    "build",
+    "sources",
+    "executable",
+    "reducer",
+    "scalar_fixture",
+    "command_template",
+    "embedded_metallib",
+    "assets",
+    "tensor_requirements",
+    "tokenizer",
+    "prompt",
+    "carry_token",
+    "expected_mask_token",
+    "parser_caps",
+    "host_predicate",
+    "command",
+    "environment",
+)
+PREPARATION_SPEC_KEYS = (
+    "schema",
+    "schema_version",
+    "run_id",
+    "attempt_id",
+    "inventory_path",
+    "inventory_sha256",
+    "inventory_spec_path",
+    "inventory_spec_sha256",
+    "preparation_spec_path",
+    "worktree_x",
+    "control_y_input",
+    "outputs",
+    "fixture_content",
+    "acquisition_outputs",
+    "continuation_carry_token",
+    "manifest_choices",
+    "transformation_sha256",
+    "environment_allowlist",
+    "arm_order",
+    "selected_arm",
+    "parity_comparison_fields",
+    "reducer_argv",
+    "reduction_output",
+    "failure_policy",
+)
+INVENTORY_CHECKOUT_KEYS = ("path", "commit", "tree", "dirty")
+INVENTORY_GGUF_KEYS = ("role", "version", "tensor_count", "metadata_count")
+INVENTORY_TOKENIZER_KEYS = (
+    "vocab_size",
+    "token_embd_name",
+    "token_embd_shape",
+    "token_embd_dtype",
+    "token_count",
+    "tokenizer_tokens_sha256",
+)
+INVENTORY_PROMPT_KEYS = (
+    "utf8_hex",
+    "token_ids",
+    "token_ids_sha256_i32le",
+    "tokenizer_identity_sha256",
+)
+INVENTORY_MASK_KEYS = (
+    "metadata_key",
+    "mask_token",
+    "noise_tokens",
+    "noise_sha256_i32le",
+)
+HOST_PREDICATE_KEYS = ("os", "arch", "device_name")
+TENSOR_REQUIREMENT_KEYS = (
+    "role",
+    "asset_role",
+    "name",
+    "dtype",
+    "shape",
+    "orientation",
+    "row_domain",
+)
+MANIFEST_CHOICE_KEYS = (
+    "trace_max_bytes",
+    "sidecar_max_bytes",
+    "semantic_references",
+    "expected_request",
+    "expected_binding",
+    "expected_rng_domains",
+    "expected_fixed_chains",
+    "expected_capture_context",
+    "selector_dispatch_predicate",
+)
+ACQUISITION_OUTPUT_KEYS = ("manifest", "trace", "sidecar")
+PREPARATION_BINDING_KEYS = (
+    "inventory",
+    "inventory_spec",
+    "preparation_spec",
+    "seal_path",
+)
+SEAL_KEYS = (
+    "schema",
+    "schema_version",
+    "run_id",
+    "attempt_id",
+    "inventory_sha256",
+    "inventory_spec_sha256",
+    "preparation_spec_sha256",
+    "fixture_sha256",
+    "command_sha256",
+    "manifest_sha256",
+    "transformation_sha256",
+    "reducer_sha256",
+    "worktree_x_commit",
+    "control_y_input_commit",
+    "control_y_input_tree",
+)
+PARITY_COMPARISON_FIELDS = [
+    "first",
+    "continuation",
+    "observer_baseline",
+    "common_production_content_sha256",
+    "on_capture_content_sha256",
+]
+PREPARATION_SPEC_SHA256_PLACEHOLDER = "${PREPARATION_SPEC_SHA256}"
+SEAL_SHA256_PLACEHOLDER = "${SEAL_SHA256}"
 
 MAX_RECORDS = 16
 MAX_TRACE_BYTES = 64 << 20
@@ -62,10 +222,18 @@ HIDDEN = 5120
 VOCAB = 248320
 LATTICE_ROWS = 97
 
-RECORD_KEYS = ("schema", "schema_version", "run_id", "event", "payload")
+RECORD_KEYS = (
+    "schema",
+    "schema_version",
+    "run_id",
+    "attempt_id",
+    "event",
+    "payload",
+)
 EVENT_ORDER = ("run",) + ("depth", "lattice") * DEPTHS + ("end",)
 RUN_KEYS = (
     "authority",
+    "attempt_id",
     "geometry",
     "request",
     "proposal_abstention",
@@ -73,6 +241,8 @@ RUN_KEYS = (
     "binding",
     "provenance",
     "capture",
+    "diagnostic_nonperturbation_parity",
+    "on_b_projection",
     "identities",
     "semantic_references",
     "tensors",
@@ -80,6 +250,112 @@ RUN_KEYS = (
     "production_chain",
     "fixed_chains",
 )
+PARITY_KEYS = (
+    "status",
+    "arm_order",
+    "selected_arm",
+    "arms",
+    "comparison_fields",
+)
+ARM_KEYS = (
+    "name",
+    "diagnostic",
+    "session_id",
+    "first_event",
+    "continuation_event",
+    "summary",
+    "rng_domains",
+    "capture_projection_sha256",
+    "arm_envelope_sha256",
+)
+ARM_EVENT_KEYS = (
+    "kind",
+    "library_sequence",
+    "library_event_envelope_sha256",
+    "session_binding_sha256",
+    "draft_tokens",
+    "wrapper_binding_sha256",
+)
+ARM_SUMMARY_KEYS = (
+    "domain",
+    "first",
+    "continuation",
+    "observer_baseline",
+    "common_production_content_sha256",
+    "capture_content_sha256",
+)
+ARM_PHASE_KEYS = (
+    "carry_token",
+    "noise_start_position",
+    "target_sha256",
+    "dflash_sha256",
+    "state_sha256",
+    "draft_tokens_count",
+    "draft_tokens_sha256_i32le",
+    "full_logits_count",
+    "full_logits_sha256_f32le",
+    "topk_count",
+    "topk_sha256_i32le",
+    "unary_count",
+    "unary_sha256_f32le",
+    "z_count",
+    "z_sha256_f32le",
+    "dispatch_census",
+    "kernel_trace",
+    "runtime_selector_contract",
+)
+OBSERVER_BASELINE_KEYS = ("before_sha256", "after_sha256", "restored")
+RNG_DOMAIN_KEYS = (
+    "domain",
+    "scope",
+    "absent_state_sha256",
+    "before_counter",
+    "after_counter",
+)
+RNG_ABSENT_SCOPE = "statically_unreachable_no_rng_object_constructed"
+ON_B_KEYS = (
+    "exclusion_allowlist",
+    "exclusion_content_sha256",
+    "depths",
+    "lattices",
+    "capture",
+    "production_chain",
+    "fixed_chains",
+    "provenance",
+    "projection_sha256",
+)
+PARITY_FAILURE_KEYS = (
+    "completed_arms",
+    "failed_arm",
+    "failed_stage",
+    "first_mismatch",
+    "observer_cleanup",
+    "identities",
+    "authority",
+    "status",
+)
+PARITY_FAILURE_STAGES = (
+    "session_setup",
+    "prompt_prefill",
+    "first_block",
+    "extraction",
+    "continuation",
+    "observer_cleanup",
+    "comparison",
+    "serialization",
+)
+PARITY_FAILURE_IDENTITY_KEYS = (
+    "reducer",
+    "executable",
+    "fixture",
+    "command",
+    "sources",
+    "assets",
+    "build",
+    "host",
+    "embedded_metallib_sha256",
+)
+PROJECTION_EXCLUSION_ALLOWLIST = ["arm_name", "session_id", "event_envelope_sha256"]
 GEOMETRY_KEYS = ("block_size", "depths", "top_k", "rank", "hidden", "vocab", "rows")
 REQUEST_KEYS = ("temperature_f32_bits",)
 IGNORED_POLICY_KEYS = (
@@ -171,6 +447,7 @@ MANIFEST_KEYS = (
     "schema",
     "schema_version",
     "run_id",
+    "attempt_id",
     "trace_max_bytes",
     "sidecar_max_bytes",
     "reducer",
@@ -182,14 +459,37 @@ MANIFEST_KEYS = (
     "semantic_references",
     "tensors",
     "expected_request",
+    "expected_prompt",
     "expected_binding",
+    "expected_continuation_carry_token",
+    "expected_rng_domains",
     "expected_fixed_chains",
     "expected_capture_context",
     "expected_build",
     "expected_host",
     "embedded_metallib_sha256",
-    "expected_selector_dispatch",
+    "selector_dispatch_predicate",
+    "preparation_binding",
     "scalar_contract",
+)
+SELECTOR_PREDICATE_KEYS = (
+    "tag",
+    "kernel",
+    "weight_dtype",
+    "input_dtype",
+    "output_dtype",
+    "weight_dtype_id",
+    "input_dtype_id",
+    "output_dtype_id",
+    "n",
+    "h",
+    "r",
+    "grid",
+    "threads",
+    "metal_source_sha256",
+    "metallib_sha256",
+    "build_source_sha256",
+    "allowed_environment",
 )
 
 PROVENANCE_KEYS = (
@@ -199,6 +499,7 @@ PROVENANCE_KEYS = (
     "embedded_metallib_sha256",
     "build",
     "host",
+    "environment",
 )
 DISPATCH_KEYS = (
     "family",
@@ -261,6 +562,7 @@ SCALAR_VECTOR_KEYS = (
 )
 CAPTURE_DEFINITION = "qwen.dflash_k0s.capture.v1"
 SELECTOR_DISPATCH_TAG = "dflash_k0s.selector_hidden_projection.v1"
+SELECTOR_KERNEL = "kernel_mat_mat_q4_K_f32"
 SCALAR_FIXTURE_DOMAIN = "qwen.dflash_k0s.scalar_contract_fixture.v2"
 SCALAR_FIXTURE_EXPECTED_SHA256 = (
     "8c22bf3b4ee51efaf315137a866feef8fc8019d5b21c887411b532bd79fa60e9"
@@ -283,6 +585,7 @@ REQUIRED_SOURCE_ROLES = {
     "metal_forward_rs",
     "dflash2_metal",
     "mat_mat_mma8_metal",
+    "mat_mat_q4_k_metal",
     "build_rs",
     "dflash_k0s_rs",
 }
@@ -294,6 +597,13 @@ EXACT_TENSOR_NAMES = {
 }
 
 DTYPE_BY_ID = {0: "F32", 1: "F16", 8: "Q8_0", 12: "Q4_K", 30: "BF16"}
+GGML_RUNTIME_DTYPE_IDS = {
+    "F32": 0,
+    "F16": 1,
+    "Q8_0": 8,
+    "Q4_K": 12,
+    "BF16": 30,
+}
 DTYPE_LAYOUT = {
     "F32": (1, 4),
     "F16": (1, 2),
@@ -586,6 +896,20 @@ class OpenFile:
 
     def close(self) -> None:
         self.file.close()
+
+
+@dataclass
+class InventoryContext:
+    inventory: dict[str, Any]
+    opened: list[OpenFile]
+
+    def final_check(self) -> None:
+        for item in self.opened:
+            final_custody_check(item)
+
+    def close(self) -> None:
+        for item in self.opened:
+            item.close()
 
 
 def open_regular(path: Path, name: str, maximum: int | None = None) -> OpenFile:
@@ -1177,10 +1501,12 @@ def parse_trace(opened: OpenFile) -> list[dict[str, Any]]:
     require(raw.endswith(b"\n"), "trace requires a final newline")
     lines = raw.split(b"\n")[:-1]
     require(
-        len(lines) == MAX_RECORDS, f"trace must contain exactly {MAX_RECORDS} records"
+        len(lines) in {1, MAX_RECORDS},
+        f"trace must contain exactly one failure or {MAX_RECORDS} success records",
     )
     rows: list[dict[str, Any]] = []
     run_id: str | None = None
+    attempt_id: str | None = None
     for index, line in enumerate(lines):
         require(line and line.strip(), f"blank JSONL record {index + 1}")
         row = parse_json(line, f"trace line {index + 1}")
@@ -1195,10 +1521,41 @@ def parse_trace(opened: OpenFile) -> list[dict[str, Any]]:
         current = text(row["run_id"], "run_id", maximum=128)
         require(run_id is None or current == run_id, "trace contains multiple run ids")
         run_id = current
+        current_attempt = text(row["attempt_id"], "attempt_id", maximum=128)
         require(
-            row["event"] == EVENT_ORDER[index],
+            attempt_id is None or current_attempt == attempt_id,
+            "trace contains multiple attempt ids",
+        )
+        attempt_id = current_attempt
+        expected_event = "parity_failure" if len(lines) == 1 else EVENT_ORDER[index]
+        require(
+            row["event"] == expected_event,
             f"trace event order mismatch at record {index + 1}",
         )
+        if expected_event == "parity_failure":
+            payload = exact_keys(row["payload"], PARITY_FAILURE_KEYS, "parity failure")
+            require(
+                payload["authority"] == AUTHORITY and payload["status"] == "failed",
+                "parity failure authority/status mismatch",
+            )
+            require(
+                isinstance(payload["completed_arms"], list)
+                and len(payload["completed_arms"]) <= 4,
+                "parity failure completed arms invalid",
+            )
+            require(
+                isinstance(payload["observer_cleanup"], bool),
+                "parity failure cleanup invalid",
+            )
+            for key in ("failed_arm", "failed_stage", "first_mismatch"):
+                require(
+                    payload[key] is None or isinstance(payload[key], str),
+                    f"parity failure {key} invalid",
+                )
+            require(
+                isinstance(payload["identities"], dict),
+                "parity failure identities invalid",
+            )
         rows.append(row)
     return rows
 
@@ -1373,6 +1730,11 @@ def validate_provenance(value: Any, manifest: dict[str, Any]) -> dict[str, Any]:
             [integer(v, f"dispatch {key}", 1) for v in row[key]]
         integer(row["grid_threadgroups"], "grid_threadgroups", 1)
         integer(row["threadgroup_threads"], "threadgroup_threads", 1)
+        require(
+            row["grid_threadgroups"] == math.prod(row["grid"])
+            and row["threadgroup_threads"] == math.prod(row["threads"]),
+            "dispatch aggregate geometry counters mismatch",
+        )
         selector_dispatches += row["tag"] == SELECTOR_DISPATCH_TAG
     require(
         selector_dispatches == 1,
@@ -1387,9 +1749,13 @@ def validate_provenance(value: Any, manifest: dict[str, Any]) -> dict[str, Any]:
         selector["tag"] == SELECTOR_DISPATCH_TAG and selector in census,
         "selector-hidden dispatch is not the uniquely tagged census row",
     )
+    predicate = manifest["selector_dispatch_predicate"]
     check(
-        selector == manifest["expected_selector_dispatch"],
-        "tagged selector dispatch differs from static manifest expectation",
+        selector["tag"] == predicate["tag"]
+        and selector["kernel"] == predicate["kernel"]
+        and selector["grid"] == predicate["grid"]
+        and selector["threads"] == predicate["threads"],
+        "tagged selector dispatch differs from static structural predicate",
     )
     trace = exact_keys(provenance["kernel_trace"], KERNEL_TRACE_KEYS, "kernel_trace")
     for key in KERNEL_TRACE_KEYS:
@@ -1427,6 +1793,12 @@ def validate_provenance(value: Any, manifest: dict[str, Any]) -> dict[str, Any]:
         text(host[key], f"host {key}", maximum=256)
     integer(host["device_registry_id"], "device registry id")
     check(host == manifest["expected_host"], "host differs from static manifest")
+    require(
+        provenance["environment"]
+        == manifest["selector_dispatch_predicate"]["allowed_environment"]
+        == {"QWEN_METAL_LEASE_WAIT": "1"},
+        "observed runtime environment differs from exact allowlist",
+    )
     return provenance
 
 
@@ -1716,8 +2088,12 @@ def validate_command_manifest(
         and all(isinstance(value, str) and value for value in argv),
         "command argv must contain nonempty UTF-8 strings",
     )
+    require(
+        argv.count(MANIFEST_SHA256_PLACEHOLDER) == 1,
+        "command requires exactly one manifest digest placeholder",
+    )
     fixed = manifest["expected_fixed_chains"]
-    require(len(argv) == 24 + 2 * len(fixed), "command argv length mismatch")
+    require(len(argv) == 28 + 2 * len(fixed), "command argv length mismatch")
     index = 0
 
     def take(value: str, name: str) -> None:
@@ -1727,15 +2103,23 @@ def validate_command_manifest(
 
     take(str(external["executable"].path), "executable")
     take("dflash-k0s-lattice", "subcommand")
+    take("--attempt-id", "attempt flag")
+    take(manifest["attempt_id"], "attempt value")
     take("--model", "model flag")
     take(str(external["target"].path), "target path")
     take("--drafter", "drafter flag")
     take(str(external["drafter"].path), "drafter path")
     take("--prompt", "prompt flag")
-    text(argv[index], "command prompt", maximum=1 << 20)
+    require(
+        argv[index]
+        == bytes.fromhex(manifest["expected_prompt"]["utf8_hex"]).decode("utf-8"),
+        "command prompt differs from static prompt",
+    )
     index += 1
     take("--carry-token", "carry flag")
     take(str(manifest["expected_capture_context"]["carry_token"]), "carry value")
+    take("--continuation-carry-token", "continuation carry flag")
+    take(str(manifest["expected_continuation_carry_token"]), "continuation carry value")
     take("--manifest", "manifest flag")
     take(str(manifest_file.path), "manifest path")
     take("--manifest-sha256", "manifest digest flag")
@@ -1903,6 +2287,1021 @@ def validate_chain(
     )
 
 
+def canonical_json_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+
+
+def canonical_domain_digest(domain: str, value: Any) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=True, allow_nan=False, separators=(",", ":")
+    ).encode("ascii")
+    digest = hashlib.sha256()
+    digest.update(domain.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(struct.pack("<Q", len(payload)))
+    digest.update(payload)
+    return digest.hexdigest()
+
+
+def event_wrapper_digest(
+    attempt_id: str, arm: str, session: str, phase: str, event: dict[str, Any]
+) -> str:
+    return canonical_domain_digest(
+        "qwen.dflash_k0s.event_wrapper.v1",
+        {
+            "attempt_id": attempt_id,
+            "arm": arm,
+            "session_id": session,
+            "phase": phase,
+            "kind": event["kind"],
+            "library_sequence": event["library_sequence"],
+            "library_event_envelope_sha256": event["library_event_envelope_sha256"],
+            "session_binding_sha256": event["session_binding_sha256"],
+            "draft_tokens": event["draft_tokens"],
+        },
+    )
+
+
+def rng_absent_digest(attempt_id: str, arm: str, domain: str) -> str:
+    return canonical_domain_digest(
+        "qwen.dflash_k0s.rng_absent.v1",
+        {
+            "attempt_id": attempt_id,
+            "arm": arm,
+            "domain": domain,
+            "scope": RNG_ABSENT_SCOPE,
+        },
+    )
+
+
+def common_production_digest(
+    first: dict[str, Any], continuation: dict[str, Any]
+) -> str:
+    return canonical_domain_digest(
+        "qwen.dflash_k0s.common_production.v1",
+        {"first": first, "continuation": continuation},
+    )
+
+
+def arm_envelope_digest(arm: dict[str, Any], attempt_id: str) -> str:
+    return canonical_domain_digest(
+        "qwen.dflash_k0s.cli_arm_envelope.v1",
+        {
+            "attempt_id": attempt_id,
+            "name": arm["name"],
+            "diagnostic": arm["diagnostic"],
+            "session_id": arm["session_id"],
+            "first_event": arm["first_event"],
+            "continuation_event": arm["continuation_event"],
+            "summary": arm["summary"],
+            "rng_domains": arm["rng_domains"],
+            "capture_projection_sha256": arm["capture_projection_sha256"],
+        },
+    )
+
+
+def rust_vector_hash(domain: str, values: list[int], *, signed: bool = False) -> str:
+    digest = hashlib.sha256()
+    digest.update(domain.encode("ascii"))
+    digest.update(struct.pack("<Q", len(values)))
+    format_code = "<i" if signed else "<I"
+    for value in values:
+        digest.update(struct.pack(format_code, value))
+    return digest.hexdigest()
+
+
+def hash_rust_dispatch(digest: Any, row: dict[str, Any]) -> None:
+    def bounded_bytes(raw: bytes) -> None:
+        digest.update(struct.pack("<Q", len(raw)))
+        digest.update(raw)
+
+    bounded_bytes(row["family"].encode("utf-8"))
+    if row["tag"] is None:
+        digest.update(b"\0")
+    else:
+        digest.update(b"\1")
+        bounded_bytes(row["tag"].encode("utf-8"))
+    digest.update(struct.pack("<Q", row["encoder_ordinal"]))
+    digest.update(bytes([int(row["encoder_concurrent"])]))
+    bounded_bytes(row["kernel"].encode("utf-8"))
+    for value in row["grid"] + row["threads"]:
+        digest.update(struct.pack("<Q", value))
+    digest.update(
+        struct.pack("<QQ", row["grid_threadgroups"], row["threadgroup_threads"])
+    )
+
+
+def rust_library_event_envelope(event: dict[str, Any], phase: dict[str, Any]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"qwen.dflash_k0s.event_envelope.v1")
+    digest.update(struct.pack("<Q", event["library_sequence"]))
+    digest.update(bytes.fromhex(event["session_binding_sha256"]))
+    digest.update(
+        struct.pack("<iI", phase["carry_token"], phase["noise_start_position"])
+    )
+    draft = event["draft_tokens"]
+    digest.update(struct.pack("<Q", len(draft)))
+    for token in draft:
+        digest.update(struct.pack("<i", token))
+    digest.update(struct.pack("<Q", len(phase["dispatch_census"])))
+    for row in phase["dispatch_census"]:
+        hash_rust_dispatch(digest, row)
+    trace = phase["kernel_trace"]
+    for key in ("encoders", "concurrent_encoders", "dispatches"):
+        digest.update(struct.pack("<Q", trace[key]))
+    runtime = phase["runtime_selector_contract"]
+    digest.update(
+        struct.pack(
+            "<IIIQQQ",
+            runtime["weight_dtype_id"],
+            runtime["input_dtype_id"],
+            runtime["output_dtype_id"],
+            runtime["n"],
+            runtime["h"],
+            runtime["r"],
+        )
+    )
+    for count_key, digest_key in (
+        ("full_logits_count", "full_logits_sha256_f32le"),
+        ("topk_count", "topk_sha256_i32le"),
+        ("unary_count", "unary_sha256_f32le"),
+        ("z_count", "z_sha256_f32le"),
+    ):
+        digest.update(struct.pack("<Q", phase[count_key]))
+        digest.update(bytes.fromhex(phase[digest_key]))
+    digest.update(bytes.fromhex(phase["dflash_sha256"]))
+    return digest.hexdigest()
+
+
+def validate_parity(value: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+    parity = exact_keys(value, PARITY_KEYS, "diagnostic_nonperturbation_parity")
+    check(parity["status"] == "passed", "diagnostic parity status is not passed")
+    order = ["off-A", "on-A", "on-B", "off-B"]
+    require(
+        parity["arm_order"] == order and parity["selected_arm"] == "on-A",
+        "parity arm order/selection mismatch",
+    )
+    require(
+        isinstance(parity["arms"], list) and len(parity["arms"]) == 4,
+        "parity requires four arms",
+    )
+    attempt_id = manifest["attempt_id"]
+    context = manifest["expected_capture_context"]
+    predicate = manifest["selector_dispatch_predicate"]
+    sessions: set[str] = set()
+    arm_envelopes: set[str] = set()
+    event_envelopes: set[str] = set()
+    event_sequences: set[int] = set()
+    summaries: list[dict[str, Any]] = []
+    for index, raw in enumerate(parity["arms"]):
+        arm = exact_keys(raw, ARM_KEYS, f"parity arm {index}")
+        require(arm["name"] == order[index], "parity arm name/order mismatch")
+        require(
+            arm["diagnostic"] is arm["name"].startswith("on-"),
+            "parity diagnostic mode mismatch",
+        )
+        session = sha256_text(arm["session_id"], "parity session binding")
+        require(session not in sessions, "parity sessions must be distinct")
+        sessions.add(session)
+        for phase_name, expected_kind in (
+            ("first", "observed" if arm["diagnostic"] else "plain"),
+            ("continuation", "observed"),
+        ):
+            event = exact_keys(
+                arm[f"{phase_name}_event"], ARM_EVENT_KEYS, f"parity {phase_name} event"
+            )
+            sha256_text(event["wrapper_binding_sha256"], "event wrapper binding")
+            require(
+                event["kind"] == expected_kind,
+                "parity event observation pattern mismatch",
+            )
+            if expected_kind == "plain":
+                require(
+                    event["library_sequence"] is None
+                    and event["library_event_envelope_sha256"] is None
+                    and event["session_binding_sha256"] is None
+                    and event["draft_tokens"] is None,
+                    "plain event has library observation identity",
+                )
+            else:
+                sequence = integer(
+                    event["library_sequence"], "library event sequence", 1
+                )
+                envelope = sha256_text(
+                    event["library_event_envelope_sha256"], "library event envelope"
+                )
+                require(
+                    sequence not in event_sequences and envelope not in event_envelopes,
+                    "library event sequence/envelope is not globally unique",
+                )
+                event_sequences.add(sequence)
+                event_envelopes.add(envelope)
+                sha256_text(event["session_binding_sha256"], "library session binding")
+                require(
+                    event["session_binding_sha256"] == session,
+                    "observed event session binding differs from enclosing arm",
+                )
+                require(
+                    isinstance(event["draft_tokens"], list)
+                    and len(event["draft_tokens"]) == 8,
+                    "observed event draft token material invalid",
+                )
+                [
+                    integer(
+                        token, "observed event draft token", -(1 << 31), (1 << 31) - 1
+                    )
+                    for token in event["draft_tokens"]
+                ]
+            check(
+                event["wrapper_binding_sha256"]
+                == event_wrapper_digest(
+                    attempt_id, arm["name"], session, phase_name, event
+                ),
+                "parity event wrapper binding mismatch",
+            )
+        summary = exact_keys(
+            arm["summary"], ARM_SUMMARY_KEYS, f"parity summary {index}"
+        )
+        require(
+            summary["domain"] == "qwen.dflash_k0s.parity_arm_summary.v1",
+            "parity arm summary domain mismatch",
+        )
+        for phase_name in ("first", "continuation"):
+            phase = exact_keys(
+                summary[phase_name], ARM_PHASE_KEYS, f"parity {phase_name} phase"
+            )
+            expected_carry = (
+                context["carry_token"]
+                if phase_name == "first"
+                else manifest["expected_continuation_carry_token"]
+            )
+            expected_position = (
+                context["noise_start_position"]
+                if phase_name == "first"
+                else context["noise_start_position"] + 1
+            )
+            require(
+                integer(
+                    phase["carry_token"], f"parity {phase_name} carry", 0, VOCAB - 1
+                )
+                == expected_carry
+                and integer(
+                    phase["noise_start_position"], f"parity {phase_name} position"
+                )
+                == expected_position,
+                f"parity {phase_name} carry/noise position mismatch",
+            )
+            require(
+                phase["draft_tokens_count"] == 8
+                and phase["full_logits_count"] == DEPTHS * VOCAB
+                and phase["topk_count"] == DEPTHS * TOP_K
+                and phase["unary_count"] == DEPTHS * TOP_K
+                and phase["z_count"] == DEPTHS * RANK,
+                f"parity {phase_name} geometry/count mismatch",
+            )
+            for key in (
+                "target_sha256",
+                "dflash_sha256",
+                "state_sha256",
+                "draft_tokens_sha256_i32le",
+                "full_logits_sha256_f32le",
+                "topk_sha256_i32le",
+                "unary_sha256_f32le",
+                "z_sha256_f32le",
+            ):
+                sha256_text(phase[key], f"parity {phase_name} {key}")
+            runtime = exact_keys(
+                phase["runtime_selector_contract"],
+                SELECTOR_PREDICATE_KEYS,
+                "runtime selector contract",
+            )
+            check(
+                runtime == predicate, "runtime selector contract differs from predicate"
+            )
+            dynamic = {
+                "dispatch_census": phase["dispatch_census"],
+                "selector_hidden_dispatch": next(
+                    (
+                        row
+                        for row in phase["dispatch_census"]
+                        if isinstance(row, dict)
+                        and row.get("tag") == SELECTOR_DISPATCH_TAG
+                    ),
+                    None,
+                ),
+                "kernel_trace": phase["kernel_trace"],
+                "embedded_metallib_sha256": runtime["metallib_sha256"],
+                "build": manifest["expected_build"],
+                "host": manifest["expected_host"],
+                "environment": manifest["selector_dispatch_predicate"][
+                    "allowed_environment"
+                ],
+            }
+            validate_provenance(dynamic, manifest)
+            event = arm[f"{phase_name}_event"]
+            if event["kind"] == "observed":
+                check(
+                    hashlib.sha256(
+                        b"".join(
+                            struct.pack("<i", token) for token in event["draft_tokens"]
+                        )
+                    ).hexdigest()
+                    == phase["draft_tokens_sha256_i32le"],
+                    "observed event draft digest differs from phase",
+                )
+                check(
+                    event["library_event_envelope_sha256"]
+                    == rust_library_event_envelope(event, phase),
+                    "Rust library event envelope mismatch",
+                )
+        baseline = exact_keys(
+            summary["observer_baseline"], OBSERVER_BASELINE_KEYS, "observer baseline"
+        )
+        sha256_text(baseline["before_sha256"], "observer before")
+        sha256_text(baseline["after_sha256"], "observer after")
+        check(
+            baseline["restored"] is True
+            and baseline["before_sha256"] == baseline["after_sha256"],
+            "observer baseline was not restored",
+        )
+        check(
+            summary["common_production_content_sha256"]
+            == common_production_digest(summary["first"], summary["continuation"]),
+            "common production digest mismatch",
+        )
+        if arm["diagnostic"]:
+            sha256_text(summary["capture_content_sha256"], "capture content")
+            require(
+                arm["capture_projection_sha256"] == summary["capture_content_sha256"],
+                "diagnostic capture association mismatch",
+            )
+        else:
+            require(
+                summary["capture_content_sha256"] is None
+                and arm["capture_projection_sha256"] is None,
+                "off arm claims capture content",
+            )
+        require(
+            isinstance(arm["rng_domains"], list)
+            and len(arm["rng_domains"]) == len(manifest["expected_rng_domains"]),
+            "per-arm RNG domain count mismatch",
+        )
+        for rng_index, domain_name in enumerate(manifest["expected_rng_domains"]):
+            rng = exact_keys(
+                arm["rng_domains"][rng_index], RNG_DOMAIN_KEYS, "per-arm RNG domain"
+            )
+            require(
+                rng["domain"] == domain_name
+                and rng["scope"] == RNG_ABSENT_SCOPE
+                and rng["before_counter"] == 0
+                and rng["after_counter"] == 0,
+                "per-arm RNG scope/order/counter mismatch",
+            )
+            check(
+                rng["absent_state_sha256"]
+                == rng_absent_digest(attempt_id, arm["name"], domain_name),
+                "per-arm RNG absent-state digest mismatch",
+            )
+        envelope = sha256_text(arm["arm_envelope_sha256"], "CLI arm envelope")
+        require(envelope not in arm_envelopes, "parity arm envelopes must be distinct")
+        arm_envelopes.add(envelope)
+        check(
+            envelope == arm_envelope_digest(arm, attempt_id),
+            "CLI arm envelope digest mismatch",
+        )
+        summaries.append(summary)
+    require(
+        sorted(event_sequences) == list(range(1, len(event_sequences) + 1)),
+        "observed library event sequences must be globally contiguous",
+    )
+    for key in (
+        "first",
+        "continuation",
+        "observer_baseline",
+        "common_production_content_sha256",
+    ):
+        check(
+            all(summary[key] == summaries[0][key] for summary in summaries[1:]),
+            f"four-arm parity {key} matrix mismatch",
+        )
+    check(
+        summaries[1]["capture_content_sha256"]
+        == summaries[2]["capture_content_sha256"],
+        "on-A/on-B capture content mismatch",
+    )
+    require(
+        parity["comparison_fields"] == PARITY_COMPARISON_FIELDS,
+        "parity comparison field set/order mismatch",
+    )
+    return parity
+
+
+def validate_parity_failure(payload: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+    failure = exact_keys(payload, PARITY_FAILURE_KEYS, "parity failure")
+    require(
+        failure["authority"] == AUTHORITY and failure["status"] == "failed",
+        "parity failure authority/status mismatch",
+    )
+    completed = failure["completed_arms"]
+    order = ["off-A", "on-A", "on-B", "off-B"]
+    require(
+        isinstance(completed, list) and len(completed) <= 4,
+        "parity failure completed arms invalid",
+    )
+    require(
+        isinstance(failure["observer_cleanup"], bool),
+        "parity failure observer_cleanup must be boolean",
+    )
+    sessions: set[str] = set()
+    envelopes: set[str] = set()
+    sequences: set[int] = set()
+    sequence_order: list[int] = []
+    library_envelopes: set[str] = set()
+    for index, raw in enumerate(completed):
+        arm = exact_keys(raw, ARM_KEYS, f"completed parity arm {index}")
+        require(
+            arm["name"] == order[index]
+            and arm["diagnostic"] is arm["name"].startswith("on-"),
+            "completed parity arms are not the exact mode/order prefix",
+        )
+        session = sha256_text(arm["session_id"], "completed arm session binding")
+        require(session not in sessions, "completed arm sessions are not unique")
+        sessions.add(session)
+        for phase_name, expected_kind in (
+            ("first", "observed" if arm["diagnostic"] else "plain"),
+            ("continuation", "observed"),
+        ):
+            event = exact_keys(
+                arm[f"{phase_name}_event"], ARM_EVENT_KEYS, "completed arm event"
+            )
+            sha256_text(
+                event["wrapper_binding_sha256"], "completed event wrapper binding"
+            )
+            require(
+                event["kind"] == expected_kind,
+                "completed arm event observation pattern mismatch",
+            )
+            if expected_kind == "plain":
+                require(
+                    event["library_sequence"] is None
+                    and event["library_event_envelope_sha256"] is None
+                    and event["session_binding_sha256"] is None
+                    and event["draft_tokens"] is None,
+                    "completed plain event has library identity",
+                )
+            else:
+                sequence = integer(
+                    event["library_sequence"], "completed event sequence", 1
+                )
+                library = sha256_text(
+                    event["library_event_envelope_sha256"], "completed library envelope"
+                )
+                require(
+                    sequence not in sequences and library not in library_envelopes,
+                    "completed observed event identity is not unique",
+                )
+                sequences.add(sequence)
+                sequence_order.append(sequence)
+                library_envelopes.add(library)
+                sha256_text(
+                    event["session_binding_sha256"], "completed event session binding"
+                )
+                require(
+                    event["session_binding_sha256"] == session,
+                    "completed observed event session binding differs from arm",
+                )
+                require(
+                    isinstance(event["draft_tokens"], list)
+                    and len(event["draft_tokens"]) == 8,
+                    "completed observed event draft material invalid",
+                )
+            require(
+                event["wrapper_binding_sha256"]
+                == event_wrapper_digest(
+                    manifest["attempt_id"], arm["name"], session, phase_name, event
+                ),
+                "completed event wrapper binding mismatch",
+            )
+        summary = exact_keys(arm["summary"], ARM_SUMMARY_KEYS, "completed arm summary")
+        require(
+            summary["domain"] == "qwen.dflash_k0s.parity_arm_summary.v1",
+            "completed arm summary domain mismatch",
+        )
+        for phase_name in ("first", "continuation"):
+            phase = exact_keys(
+                summary[phase_name], ARM_PHASE_KEYS, "completed arm phase"
+            )
+            require(
+                phase["draft_tokens_count"] == 8
+                and phase["full_logits_count"] == DEPTHS * VOCAB
+                and phase["topk_count"] == DEPTHS * TOP_K
+                and phase["unary_count"] == DEPTHS * TOP_K
+                and phase["z_count"] == DEPTHS * RANK,
+                "completed arm phase geometry mismatch",
+            )
+            expected_carry = (
+                manifest["expected_capture_context"]["carry_token"]
+                if phase_name == "first"
+                else manifest["expected_continuation_carry_token"]
+            )
+            expected_position = (
+                manifest["expected_capture_context"]["noise_start_position"]
+                if phase_name == "first"
+                else manifest["expected_capture_context"]["noise_start_position"] + 1
+            )
+            require(
+                integer(phase["carry_token"], "completed phase carry", 0, VOCAB - 1)
+                == expected_carry
+                and integer(phase["noise_start_position"], "completed phase position")
+                == expected_position,
+                "completed arm phase static/runtime binding mismatch",
+            )
+            for key in (
+                "target_sha256",
+                "dflash_sha256",
+                "state_sha256",
+                "draft_tokens_sha256_i32le",
+                "full_logits_sha256_f32le",
+                "topk_sha256_i32le",
+                "unary_sha256_f32le",
+                "z_sha256_f32le",
+            ):
+                sha256_text(phase[key], f"completed {phase_name} {key}")
+            runtime = exact_keys(
+                phase["runtime_selector_contract"],
+                SELECTOR_PREDICATE_KEYS,
+                "completed runtime selector contract",
+            )
+            require(
+                runtime == manifest["selector_dispatch_predicate"],
+                "completed runtime selector contract differs from manifest",
+            )
+            dynamic = {
+                "dispatch_census": phase["dispatch_census"],
+                "selector_hidden_dispatch": next(
+                    (
+                        row
+                        for row in phase["dispatch_census"]
+                        if isinstance(row, dict)
+                        and row.get("tag") == SELECTOR_DISPATCH_TAG
+                    ),
+                    None,
+                ),
+                "kernel_trace": phase["kernel_trace"],
+                "embedded_metallib_sha256": runtime["metallib_sha256"],
+                "build": manifest["expected_build"],
+                "host": manifest["expected_host"],
+                "environment": runtime["allowed_environment"],
+            }
+            try:
+                validate_provenance(dynamic, manifest)
+            except FailedEvidence as error:
+                raise InvalidEvidence(
+                    f"completed arm provenance mismatch: {error}"
+                ) from error
+            event = arm[f"{phase_name}_event"]
+            if event["kind"] == "observed":
+                for token in event["draft_tokens"]:
+                    integer(
+                        token,
+                        "completed observed draft token",
+                        -(1 << 31),
+                        (1 << 31) - 1,
+                    )
+                require(
+                    hashlib.sha256(
+                        b"".join(
+                            struct.pack("<i", token) for token in event["draft_tokens"]
+                        )
+                    ).hexdigest()
+                    == phase["draft_tokens_sha256_i32le"]
+                    and event["library_event_envelope_sha256"]
+                    == rust_library_event_envelope(event, phase),
+                    "completed observed event material/envelope mismatch",
+                )
+        baseline = exact_keys(
+            summary["observer_baseline"],
+            OBSERVER_BASELINE_KEYS,
+            "completed observer baseline",
+        )
+        sha256_text(baseline["before_sha256"], "completed observer before")
+        sha256_text(baseline["after_sha256"], "completed observer after")
+        require(
+            isinstance(baseline["restored"], bool),
+            "completed observer restored must be boolean",
+        )
+        require(
+            baseline["restored"] is True
+            and baseline["before_sha256"] == baseline["after_sha256"],
+            "completed historical arm observer baseline was not restored",
+        )
+        sha256_text(
+            summary["common_production_content_sha256"],
+            "completed common production digest",
+        )
+        require(
+            summary["common_production_content_sha256"]
+            == common_production_digest(summary["first"], summary["continuation"]),
+            "completed arm common production digest mismatch",
+        )
+        capture_content = summary["capture_content_sha256"]
+        capture_projection = arm["capture_projection_sha256"]
+        if arm["diagnostic"]:
+            if capture_content is None or capture_projection is None:
+                require(
+                    capture_content is None and capture_projection is None,
+                    "completed diagnostic capture association mismatch",
+                )
+            else:
+                require(
+                    sha256_text(capture_content, "completed capture content")
+                    == sha256_text(capture_projection, "completed capture projection"),
+                    "completed diagnostic capture association mismatch",
+                )
+        else:
+            require(
+                capture_content is None and capture_projection is None,
+                "completed off arm claims capture content",
+            )
+        require(
+            isinstance(arm["rng_domains"], list)
+            and len(arm["rng_domains"]) == len(manifest["expected_rng_domains"]),
+            "completed arm RNG domains invalid",
+        )
+        for rng_index, domain_name in enumerate(manifest["expected_rng_domains"]):
+            rng = exact_keys(
+                arm["rng_domains"][rng_index],
+                RNG_DOMAIN_KEYS,
+                "completed arm RNG domain",
+            )
+            require(
+                rng["domain"] == domain_name
+                and rng["scope"] == RNG_ABSENT_SCOPE
+                and rng["before_counter"] == 0
+                and rng["after_counter"] == 0
+                and rng["absent_state_sha256"]
+                == rng_absent_digest(manifest["attempt_id"], arm["name"], domain_name),
+                "completed arm RNG binding mismatch",
+            )
+            sha256_text(rng["absent_state_sha256"], "completed RNG absent-state digest")
+        envelope = sha256_text(arm["arm_envelope_sha256"], "completed arm envelope")
+        require(envelope not in envelopes, "completed arm envelopes are not unique")
+        envelopes.add(envelope)
+        require(
+            envelope == arm_envelope_digest(arm, manifest["attempt_id"]),
+            "completed arm envelope mismatch",
+        )
+    require(
+        sequence_order == list(range(1, len(sequence_order) + 1)),
+        "completed observed event sequences are not globally ordered/contiguous",
+    )
+    stage = failure["failed_stage"]
+    require(stage in PARITY_FAILURE_STAGES, "parity failure stage is invalid")
+    post_arm = stage in {"comparison", "serialization"}
+    if post_arm:
+        require(
+            len(completed) == 4 and failure["failed_arm"] is None,
+            "post-arm failure requires four completed arms and null failed_arm",
+        )
+    else:
+        require(
+            len(completed) < 4 and failure["failed_arm"] == order[len(completed)],
+            "in-arm failure requires strict prefix and next failed arm",
+        )
+    text(failure["first_mismatch"], "parity failure first mismatch", maximum=1024)
+    require(
+        isinstance(failure["observer_cleanup"], bool),
+        "parity failure observer_cleanup must be boolean",
+    )
+    identities = exact_keys(
+        failure["identities"], PARITY_FAILURE_IDENTITY_KEYS, "parity failure identities"
+    )
+    expected = {
+        "reducer": manifest["reducer"],
+        "executable": manifest["executable"],
+        "fixture": manifest["fixture"],
+        "command": manifest["command"],
+        "sources": manifest["sources"],
+        "assets": manifest["assets"],
+        "build": manifest["expected_build"],
+        "host": manifest["expected_host"],
+        "embedded_metallib_sha256": manifest["embedded_metallib_sha256"],
+    }
+    require(identities == expected, "parity failure identities differ from manifest")
+    if not failure["observer_cleanup"]:
+        raise FailedEvidence(
+            "terminal parity failure with incomplete observer cleanup",
+            {"parity_failure": failure},
+        )
+    return failure
+
+
+def projection_without_refs(value: Any, refs: list[str]) -> Any:
+    if isinstance(value, dict):
+        out = {}
+        for key, child in value.items():
+            if key.endswith("_range_id") and child is not None:
+                refs.append(child)
+                out[key] = "<range>"
+            else:
+                out[key] = projection_without_refs(child, refs)
+        return out
+    if isinstance(value, list):
+        return [projection_without_refs(child, refs) for child in value]
+    return value
+
+
+def reduce_projection(
+    label: str,
+    content: dict[str, Any],
+    sidecar: OpenFile,
+    assets: dict[str, OpenFile],
+    tensors: dict[str, dict[str, Any]],
+    temperature: int,
+    use_range: Any,
+    semantic: Any,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Independently replay one retained capture projection."""
+    capture = validate_capture_shape(content["capture"])
+    provenance = validate_provenance(content["provenance"], manifest)
+    depths_raw = content["depths"]
+    lattices_raw = content["lattices"]
+    require(
+        isinstance(depths_raw, list) and len(depths_raw) == DEPTHS,
+        f"{label} depth geometry mismatch",
+    )
+    require(
+        isinstance(lattices_raw, list) and len(lattices_raw) == DEPTHS,
+        f"{label} lattice geometry mismatch",
+    )
+    depths: dict[int, dict[str, Any]] = {}
+    support: dict[int, bool] = {}
+    materials: list[tuple[bytes, list[int], list[int], list[int]]] = []
+    for expected_depth, raw in enumerate(depths_raw, 1):
+        depth = exact_keys(raw, DEPTH_KEYS, f"{label} depth {expected_depth}")
+        require(
+            depth["depth"] == expected_depth
+            and depth["position"] == capture["noise_start_position"] + expected_depth,
+            f"{label} depth position mismatch",
+        )
+        z = [bits32(value, f"{label} z", finite=True) for value in depth["z_f32_bits"]]
+        require(len(z) == RANK, f"{label} z geometry mismatch")
+        ids = [
+            integer(value, f"{label} top16 id", -(1 << 31), (1 << 31) - 1)
+            for value in depth["top16_ids"]
+        ]
+        unary = [bits32(value, f"{label} unary") for value in depth["unary_f32_bits"]]
+        require(len(ids) == len(unary) == TOP_K, f"{label} top16 geometry mismatch")
+        ref = use_range(text(depth["full_logits_range_id"], f"{label} logits range"))
+        require(
+            ref["kind"] == "full_logits"
+            and ref["dtype"] == "F32"
+            and ref["shape"] == [VOCAB]
+            and ref["tensor_role"] is None
+            and ref["row"] is None,
+            f"{label} full-logit metadata mismatch",
+        )
+        raw_logits = pread_exact(sidecar, ref["offset"], ref["bytes"], ref["id"])
+        logits = list(struct.unpack(f"<{VOCAB}I", raw_logits))
+        derived, expected_ids = derive_topk_issues(logits, ids, unary)
+        semantic(
+            depth["topk_issues"] == derived, f"{label} topK issue kind/order mismatch"
+        )
+        semantic(not derived, f"{label} topK support undefined")
+        support[expected_depth] = not derived and expected_ids is not None
+        depths[expected_depth] = depth
+        materials.append((raw_logits, ids, unary, z))
+    semantic(
+        capture["synchronized_capture_sha256"]
+        == capture_digest(provenance, capture, materials, list(tensors.values())),
+        f"{label} capture digest mismatch",
+    )
+    positional: dict[tuple[int, int], dict[str, Any]] = {}
+    sparse_q: list[dict[str, Any]] = []
+    for expected_depth, lattice_raw in enumerate(lattices_raw, 1):
+        lattice = exact_keys(lattice_raw, LATTICE_KEYS, f"{label} lattice")
+        require(lattice["depth"] == expected_depth, f"{label} lattice depth mismatch")
+        expected_rows = 1 if expected_depth == 1 else TOP_K
+        require(
+            isinstance(lattice["rows"], list) and len(lattice["rows"]) == expected_rows,
+            f"{label} lattice row geometry mismatch",
+        )
+        for predecessor_slot, row_raw in enumerate(lattice["rows"]):
+            row = exact_keys(row_raw, ROW_KEYS, f"{label} row")
+            slot_key = -1 if expected_depth == 1 else predecessor_slot
+            global_index = (
+                0
+                if expected_depth == 1
+                else 1 + (expected_depth - 2) * TOP_K + predecessor_slot
+            )
+            require(
+                row["row_index"] == global_index
+                and row["predecessor_slot"] == (None if slot_key < 0 else slot_key),
+                f"{label} global row index mismatch",
+            )
+            predecessor = integer(
+                row["predecessor_token"],
+                f"{label} predecessor",
+                -(1 << 31),
+                (1 << 31) - 1,
+            )
+            expected_predecessor = (
+                content["production_chain"]["initial_carry"]
+                if expected_depth == 1
+                else depths[expected_depth - 1]["top16_ids"][predecessor_slot]
+            )
+            semantic(
+                predecessor == expected_predecessor,
+                f"{label} predecessor mapping mismatch",
+            )
+            a: list[int] = []
+            if 0 <= predecessor < VOCAB:
+                ref = use_range(
+                    text(row["predecessor_raw_range_id"], f"{label} predecessor range")
+                )
+                tensor = tensors["predecessor"]
+                require(
+                    ref["kind"] == "predecessor_row"
+                    and ref["dtype"] == tensor["dtype"]
+                    and ref["shape"] == [RANK]
+                    and ref["tensor_role"] == "predecessor"
+                    and ref["row"] == predecessor,
+                    f"{label} predecessor range metadata mismatch",
+                )
+                raw_a = pread_exact(sidecar, ref["offset"], ref["bytes"], ref["id"])
+                semantic(
+                    raw_a
+                    == row_bytes_from_asset(
+                        "predecessor", predecessor, tensors, assets
+                    ),
+                    f"{label} predecessor asset row mismatch",
+                )
+                a = decode_raw(ref["dtype"], raw_a, RANK)
+            else:
+                require(
+                    row["predecessor_raw_range_id"] is None,
+                    f"{label} sentinel predecessor has raw range",
+                )
+            require(
+                isinstance(row["slots"], list) and len(row["slots"]) == TOP_K,
+                f"{label} slot geometry mismatch",
+            )
+            tokens: list[int] = []
+            scores: list[int | None] = []
+            slot_items = []
+            for expected_slot, slot_raw in enumerate(row["slots"]):
+                slot = exact_keys(slot_raw, SLOT_KEYS, f"{label} slot")
+                require(slot["slot"] == expected_slot, f"{label} slot index mismatch")
+                token = integer(
+                    slot["token"], f"{label} token", -(1 << 31), (1 << 31) - 1
+                )
+                tokens.append(token)
+                semantic(
+                    token == depths[expected_depth]["top16_ids"][expected_slot]
+                    and slot["unary_f32_bits"]
+                    == depths[expected_depth]["unary_f32_bits"][expected_slot],
+                    f"{label} slot token/unary binding mismatch",
+                )
+                unary = bits32(slot["unary_f32_bits"], f"{label} slot unary")
+                if 0 <= token < VOCAB and a:
+                    ref = use_range(
+                        text(slot["successor_raw_range_id"], f"{label} successor range")
+                    )
+                    tensor = tensors["successor"]
+                    require(
+                        ref["kind"] == "successor_row"
+                        and ref["dtype"] == tensor["dtype"]
+                        and ref["shape"] == [RANK]
+                        and ref["tensor_role"] == "successor"
+                        and ref["row"] == token,
+                        f"{label} successor range metadata mismatch",
+                    )
+                    raw_b = pread_exact(sidecar, ref["offset"], ref["bytes"], ref["id"])
+                    semantic(
+                        raw_b
+                        == row_bytes_from_asset("successor", token, tensors, assets),
+                        f"{label} successor asset row mismatch",
+                    )
+                    score = bits32(slot["score_f32_bits"], f"{label} score")
+                    replay = replay_score(
+                        a,
+                        materials[expected_depth - 1][3],
+                        decode_raw(ref["dtype"], raw_b, RANK),
+                        unary,
+                    )
+                    semantic(
+                        score == replay
+                        if classify(replay) == "finite"
+                        else classify(score) == classify(replay),
+                        f"{label} score replay mismatch",
+                    )
+                    scores.append(score)
+                else:
+                    require(
+                        slot["successor_raw_range_id"] is None
+                        and slot["score_f32_bits"] is None,
+                        f"{label} invalid edge carries score/range",
+                    )
+                    scores.append(None)
+                slot_items.append(slot)
+            derived_issues, choice = expected_issues(tokens, scores)
+            for slot, expected in zip(slot_items, derived_issues):
+                semantic(slot["issues"] == expected, f"{label} slot issue mismatch")
+            row_issues = [] if choice is not None else [{"kind": "no_valid_choice"}]
+            semantic(
+                row["issues"] == row_issues
+                and row["choice_slot"] == (choice if choice is not None else 0),
+                f"{label} row issue/choice mismatch",
+            )
+            if support[expected_depth] and not row_issues and not any(derived_issues):
+                probabilities = strict_softmax(
+                    [value for value in scores if value is not None], temperature
+                )
+                sparse_q.append(
+                    {
+                        "row_index": global_index,
+                        "support": [
+                            {
+                                "token": token,
+                                "q_f64_bits": f"0x{struct.unpack('>Q', struct.pack('>d', q))[0]:016x}",
+                            }
+                            for token, q in zip(tokens, probabilities)
+                        ],
+                        "outside_support": "exact_zero",
+                    }
+                )
+            positional[(expected_depth, slot_key)] = row
+    validate_chain(
+        content["production_chain"],
+        f"{label} production chain",
+        positional,
+        True,
+        semantic,
+    )
+    for index, chain in enumerate(content["fixed_chains"]):
+        validate_chain(
+            chain, f"{label} fixed chain {index}", positional, False, semantic
+        )
+    semantic(len(sparse_q) == LATTICE_ROWS, f"{label} requires 97 clean q rows")
+    refs: list[str] = []
+    normalized = projection_without_refs(content, refs)
+    return {
+        "content_sha256": canonical_json_digest(normalized),
+        "sparse_q": sparse_q,
+        "range_normalization_sha256": canonical_json_digest(refs),
+        "phase_binding": retained_phase_binding(capture, materials, provenance),
+    }
+
+
+def retained_phase_binding(
+    capture: dict[str, Any],
+    materials: list[tuple[bytes, list[int], list[int], list[int]]],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "carry_token": capture["carry_token"],
+        "noise_start_position": capture["noise_start_position"],
+        "dflash_sha256": capture["state"]["diagnostic_state_sha256"],
+        "draft_tokens_count": len(capture["draft_tokens"]),
+        "draft_tokens_sha256_i32le": capture["draft_tokens_sha256_i32le"],
+        "full_logits_count": sum(len(raw) // 4 for raw, _, _, _ in materials),
+        "full_logits_sha256_f32le": rust_vector_hash(
+            "qwen.dflash_k0s.full_logits.f32le.v1",
+            [
+                value
+                for raw, _, _, _ in materials
+                for value in struct.unpack(f"<{len(raw) // 4}I", raw)
+            ],
+        ),
+        "topk_count": sum(len(ids) for _, ids, _, _ in materials),
+        "topk_sha256_i32le": rust_vector_hash(
+            "qwen.dflash_k0s.top_k_ids.i32le.v1",
+            [token for _, ids, _, _ in materials for token in ids],
+            signed=True,
+        ),
+        "unary_count": sum(len(unary) for _, _, unary, _ in materials),
+        "unary_sha256_f32le": rust_vector_hash(
+            "qwen.dflash_k0s.unary.f32le.v1",
+            [raw for _, _, unary, _ in materials for raw in unary],
+        ),
+        "z_count": sum(len(z) for _, _, _, z in materials),
+        "z_sha256_f32le": rust_vector_hash(
+            "qwen.dflash_k0s.selector_hidden.f32le.v1",
+            [raw for _, _, _, z in materials for raw in z],
+        ),
+        "dispatch_census": provenance["dispatch_census"],
+        "kernel_trace": provenance["kernel_trace"],
+    }
+
+
 def validate_packet(
     rows: list[dict[str, Any]],
     sidecar: OpenFile,
@@ -1918,6 +3317,12 @@ def validate_packet(
 
     run = exact_keys(rows[0]["payload"], RUN_KEYS, "run payload")
     require(run["authority"] == AUTHORITY, "authority label mismatch")
+    require(
+        run["attempt_id"] == manifest["attempt_id"]
+        and all(row["attempt_id"] == manifest["attempt_id"] for row in rows),
+        "trace/run attempt identity mismatch",
+    )
+    parity = validate_parity(run["diagnostic_nonperturbation_parity"], manifest)
     geometry = exact_keys(run["geometry"], GEOMETRY_KEYS, "geometry")
     for key, value in geometry.items():
         integer(value, f"geometry {key}", 1)
@@ -2359,6 +3764,80 @@ def validate_packet(
                     }
                 )
             positional[(expected_depth, predecessor_slot)] = row
+    on_b = exact_keys(run["on_b_projection"], ON_B_KEYS, "on_b_projection")
+    require(
+        on_b["exclusion_allowlist"] == PROJECTION_EXCLUSION_ALLOWLIST
+        and on_b["exclusion_content_sha256"]
+        == canonical_json_digest(PROJECTION_EXCLUSION_ALLOWLIST),
+        "on-B projection exclusion allowlist/digest mismatch",
+    )
+    require(
+        isinstance(on_b["depths"], list)
+        and len(on_b["depths"]) == DEPTHS
+        and isinstance(on_b["lattices"], list)
+        and len(on_b["lattices"]) == DEPTHS,
+        "on-B projection depth/lattice geometry mismatch",
+    )
+    on_a_projection = {
+        "depths": [record["payload"] for record in depth_rows],
+        "lattices": [record["payload"] for record in lattice_rows],
+        "capture": capture,
+        "production_chain": production_chain,
+        "fixed_chains": run["fixed_chains"],
+        "provenance": provenance,
+    }
+    on_b_content = {key: on_b[key] for key in on_a_projection}
+    on_a_refs: list[str] = []
+    on_b_refs: list[str] = []
+    normalized_a = projection_without_refs(on_a_projection, on_a_refs)
+    normalized_b = projection_without_refs(on_b_content, on_b_refs)
+    semantic(
+        normalized_b == normalized_a,
+        "on-B canonical projection content differs from on-A",
+    )
+    semantic(len(on_b_refs) == len(on_a_refs), "on-B projection range count mismatch")
+    semantic(
+        all(right == f"on-b/{left}" for left, right in zip(on_a_refs, on_b_refs)),
+        "on-B range-reference normalization contract mismatch",
+    )
+    on_b_result = reduce_projection(
+        "on-B",
+        on_b_content,
+        sidecar,
+        assets,
+        tensors,
+        temperature,
+        use_range,
+        semantic,
+        manifest,
+    )
+    on_a_result = {
+        "content_sha256": canonical_json_digest(normalized_a),
+        "sparse_q": sparse_q_rows,
+        "phase_binding": retained_phase_binding(capture, capture_materials, provenance),
+    }
+    semantic(
+        on_b_result["content_sha256"] == on_a_result["content_sha256"]
+        and on_b_result["sparse_q"] == on_a_result["sparse_q"],
+        "independently reduced on-A/on-B semantic result mismatch",
+    )
+    for arm_index, reduced in ((1, on_a_result), (2, on_b_result)):
+        recorded_phase = parity["arms"][arm_index]["summary"]["first"]
+        for key, derived in reduced["phase_binding"].items():
+            semantic(
+                recorded_phase[key] == derived,
+                f"{parity['arms'][arm_index]['name']} retained first-phase {key} mismatch",
+            )
+    projection_digest = on_b_result["content_sha256"]
+    semantic(
+        on_b["projection_sha256"] == projection_digest,
+        "on-B canonical projection digest mismatch",
+    )
+    semantic(
+        parity["arms"][1]["summary"]["capture_content_sha256"] == projection_digest
+        and parity["arms"][2]["summary"]["capture_content_sha256"] == projection_digest,
+        "on-arm capture-content digest differs from independently reduced projections",
+    )
     require(
         len(positional) == LATTICE_ROWS,
         "normal packet requires exactly 97 positional rows",
@@ -2455,6 +3934,7 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         "manifest schema/version mismatch",
     )
     text(manifest["run_id"], "manifest run_id", maximum=128)
+    text(manifest["attempt_id"], "manifest attempt_id", maximum=128)
     integer(manifest["trace_max_bytes"], "manifest trace_max_bytes", 1, MAX_TRACE_BYTES)
     integer(
         manifest["sidecar_max_bytes"],
@@ -2504,7 +3984,27 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         "manifest.expected_request",
     )
     exact_keys(expected_request["request"], REQUEST_KEYS, "manifest expected request")
+    exact_keys(
+        manifest["expected_prompt"], INVENTORY_PROMPT_KEYS, "manifest expected prompt"
+    )
     exact_keys(manifest["expected_binding"], BINDING_KEYS, "manifest expected binding")
+    integer(
+        manifest["expected_continuation_carry_token"],
+        "manifest continuation carry token",
+        0,
+        VOCAB - 1,
+    )
+    require(
+        isinstance(manifest["expected_rng_domains"], list)
+        and manifest["expected_rng_domains"]
+        and len(manifest["expected_rng_domains"]) <= 32,
+        "manifest expected RNG domains invalid",
+    )
+    rng_names = [
+        text(value, "manifest RNG domain", maximum=128)
+        for value in manifest["expected_rng_domains"]
+    ]
+    require(len(rng_names) == len(set(rng_names)), "duplicate manifest RNG domain")
     require(
         isinstance(manifest["expected_fixed_chains"], list)
         and manifest["expected_fixed_chains"],
@@ -2540,14 +4040,80 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     exact_keys(manifest["expected_build"], BUILD_KEYS, "manifest expected build")
     exact_keys(manifest["expected_host"], HOST_KEYS, "manifest expected host")
     sha256_text(manifest["embedded_metallib_sha256"], "manifest metallib")
-    selector = exact_keys(
-        manifest["expected_selector_dispatch"],
-        DISPATCH_KEYS,
-        "manifest expected selector dispatch",
+    predicate = exact_keys(
+        manifest["selector_dispatch_predicate"],
+        SELECTOR_PREDICATE_KEYS,
+        "manifest selector dispatch predicate",
     )
     require(
-        selector["tag"] == SELECTOR_DISPATCH_TAG,
+        predicate["tag"] == SELECTOR_DISPATCH_TAG,
         "manifest selector dispatch tag mismatch",
+    )
+    for key in ("kernel", "weight_dtype", "input_dtype", "output_dtype"):
+        text(predicate[key], f"selector predicate {key}", maximum=256)
+    require(
+        predicate["weight_dtype"] == "Q4_K"
+        and predicate["input_dtype"] == "F32"
+        and predicate["output_dtype"] == "F32"
+        and predicate["weight_dtype_id"] == 12
+        and predicate["n"] == 8
+        and predicate["h"] == HIDDEN
+        and predicate["r"] == RANK,
+        "selector dispatch dtype/geometry predicate mismatch",
+    )
+    require(
+        predicate["kernel"] == SELECTOR_KERNEL,
+        "K0-S bridge v1 selector kernel must be Q4_K",
+    )
+    require(
+        GGML_RUNTIME_DTYPE_IDS.get(predicate["weight_dtype"])
+        == predicate["weight_dtype_id"]
+        and GGML_RUNTIME_DTYPE_IDS.get(predicate["input_dtype"])
+        == predicate["input_dtype_id"]
+        and GGML_RUNTIME_DTYPE_IDS.get(predicate["output_dtype"])
+        == predicate["output_dtype_id"],
+        "selector predicate dtype numeric IDs mismatch",
+    )
+    tensor_by_role = {
+        item["role"]: item for item in manifest["tensors"] if isinstance(item, dict)
+    }
+    source_by_role = {
+        item["role"]: item for item in manifest["sources"] if isinstance(item, dict)
+    }
+    require(
+        predicate["weight_dtype"] == tensor_by_role["selector_hidden"]["dtype"]
+        and predicate["metal_source_sha256"]
+        == source_by_role["mat_mat_q4_k_metal"]["sha256"]
+        and predicate["metallib_sha256"] == manifest["embedded_metallib_sha256"]
+        and predicate["build_source_sha256"]
+        == manifest["expected_build"]["source_sha256"],
+        "selector predicate is not derived from tensor/source/metallib/build identities",
+    )
+    for key in ("grid", "threads"):
+        require(
+            isinstance(predicate[key], list) and len(predicate[key]) == 3,
+            f"selector predicate {key} invalid",
+        )
+        [integer(value, f"selector predicate {key}", 1) for value in predicate[key]]
+    for key in ("metal_source_sha256", "metallib_sha256", "build_source_sha256"):
+        sha256_text(predicate[key], f"selector predicate {key}")
+    require(
+        predicate["allowed_environment"] == {"QWEN_METAL_LEASE_WAIT": "1"},
+        "selector predicate environment allowlist mismatch",
+    )
+    preparation_binding = exact_keys(
+        manifest["preparation_binding"],
+        PREPARATION_BINDING_KEYS,
+        "manifest preparation binding",
+    )
+    for key in ("inventory", "inventory_spec", "preparation_spec"):
+        identity_from_claim(
+            preparation_binding[key], f"manifest preparation binding {key}"
+        )
+    seal_path = canonical_output_path(Path(preparation_binding["seal_path"]))
+    require(
+        str(seal_path) == preparation_binding["seal_path"],
+        "manifest preparation seal path is not canonical",
     )
     exact_keys(
         manifest["scalar_contract"], SCALAR_CONTRACT_KEYS, "manifest scalar contract"
@@ -2560,6 +4126,127 @@ def canonical_output_path(path: Path) -> Path:
     parent = path.parent.resolve(strict=True)
     require(parent.is_dir(), "output parent is not a directory")
     return parent / path.name
+
+
+def bounded_git(path: Path, *arguments: str) -> bytes:
+    git = Path("/usr/bin/git")
+    require(
+        git.is_file() and os.access(git, os.X_OK), "pinned /usr/bin/git unavailable"
+    )
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+    try:
+        completed = subprocess.run(
+            [str(git), "--no-replace-objects", "-C", str(path), *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise InvalidEvidence(f"bounded git inspection failed: {error}") from error
+    require(completed.returncode == 0, "bounded git inspection command failed")
+    require(
+        len(completed.stdout) <= 4 << 20 and len(completed.stderr) <= 1 << 20,
+        "bounded git inspection output exceeded cap",
+    )
+    return completed.stdout
+
+
+def inspect_git_checkout(
+    path: Path, name: str, *, require_clean: bool = True
+) -> dict[str, Any]:
+    canonical = path.resolve(strict=True)
+    require(canonical.is_dir(), f"{name} is not a directory")
+    top = Path(
+        bounded_git(canonical, "rev-parse", "--show-toplevel").decode().strip()
+    ).resolve(strict=True)
+    require(top == canonical, f"{name} is not the Git top-level path")
+    head = bounded_git(canonical, "rev-parse", "HEAD").decode().strip()
+    tree = bounded_git(canonical, "rev-parse", "HEAD^{tree}").decode().strip()
+    git_oid_text(head, f"{name} HEAD")
+    git_oid_text(tree, f"{name} HEAD tree")
+    status = bounded_git(
+        canonical, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+    )
+    if require_clean:
+        require(status == b"", f"{name} Git checkout is not completely clean")
+    common_raw = (
+        bounded_git(canonical, "rev-parse", "--git-common-dir").decode().strip()
+    )
+    common = (canonical / common_raw).resolve(strict=True)
+    objects = (common / "objects").resolve(strict=True)
+    require(objects.is_dir(), f"{name} Git common object directory missing")
+    return {
+        "path": canonical,
+        "head": head,
+        "tree": tree,
+        "common": common,
+        "objects": objects,
+        "status": status,
+    }
+
+
+def validate_preparation_git_state(
+    inventory: dict[str, Any],
+    spec: dict[str, Any],
+    allowed_y_outputs: set[Path],
+    *,
+    require_all_outputs: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    checkout = inventory["checkout"]
+    control = spec["control_y_input"]
+    git_x = inspect_git_checkout(Path(checkout["path"]), "preparation worktree X")
+    git_y = inspect_git_checkout(
+        Path(control["path"]), "preparation control Y", require_clean=False
+    )
+    require(
+        git_x["head"] == checkout["commit"]
+        and git_x["tree"] == checkout["tree"]
+        and git_x["status"] == b"",
+        "preparation worktree X differs from frozen clean inventory checkout",
+    )
+    require(
+        git_y["head"] == control["commit"]
+        and git_y["tree"] == control["tree"]
+        and git_x["common"] == git_y["common"]
+        and git_x["objects"] == git_y["objects"],
+        "preparation control Y HEAD/tree/repository relationship mismatch",
+    )
+    observed: set[Path] = set()
+    for entry in git_y["status"].split(b"\0"):
+        if not entry:
+            continue
+        require(
+            entry.startswith(b"?? "),
+            "preparation control Y has a tracked or noncanonical status entry",
+        )
+        try:
+            relative = entry[3:].decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InvalidEvidence("control Y status path is not UTF-8") from error
+        candidate = (git_y["path"] / relative).resolve()
+        require(
+            candidate in allowed_y_outputs,
+            "preparation control Y has an unrelated untracked path",
+        )
+        observed.add(candidate)
+    if require_all_outputs:
+        require(
+            observed == allowed_y_outputs,
+            "control Y post-write status does not contain exactly four outputs",
+        )
+    return git_x, git_y
 
 
 def final_custody_check(opened: OpenFile) -> None:
@@ -2597,16 +4284,1066 @@ def custody_summary(opened: list[OpenFile]) -> dict[str, Any] | None:
     return result
 
 
+def validate_inventory(
+    inventory_path: Path,
+    inventory_sha256: str,
+    spec_path: Path,
+    spec_sha256: str,
+    *,
+    retain_open: bool = False,
+) -> dict[str, Any] | InventoryContext:
+    sha256_text(inventory_sha256, "expected inventory SHA-256")
+    sha256_text(spec_sha256, "expected inventory-spec SHA-256")
+    opened: list[OpenFile] = []
+    retained = False
+    try:
+        spec_file = open_regular(spec_path, "inventory spec", MAX_TRACE_BYTES)
+        inventory_file = open_regular(inventory_path, "inventory", MAX_TRACE_BYTES)
+        opened.extend((spec_file, inventory_file))
+        require(spec_file.digest == spec_sha256, "inventory spec digest mismatch")
+        require(inventory_file.digest == inventory_sha256, "inventory digest mismatch")
+        spec = exact_keys(
+            parse_json(
+                pread_exact(spec_file, 0, spec_file.size, "inventory spec"),
+                "inventory spec",
+            ),
+            INVENTORY_SPEC_KEYS,
+            "inventory spec",
+        )
+        require(
+            spec["schema"] == INVENTORY_SPEC_SCHEMA and spec["schema_version"] == 1,
+            "inventory spec schema mismatch",
+        )
+        integer(spec["inventory_max_bytes"], "inventory max bytes", 1, MAX_TRACE_BYTES)
+        require(
+            inventory_file.size <= spec["inventory_max_bytes"],
+            "inventory exceeds spec cap",
+        )
+        inventory = exact_keys(
+            parse_json(
+                pread_exact(inventory_file, 0, inventory_file.size, "inventory"),
+                "inventory",
+            ),
+            INVENTORY_KEYS,
+            "inventory",
+        )
+        reject_forbidden(inventory)
+        require(
+            inventory["schema"] == INVENTORY_SCHEMA
+            and inventory["schema_version"] == INVENTORY_VERSION
+            and inventory["authority"] == INVENTORY_AUTHORITY,
+            "inventory schema/authority mismatch",
+        )
+        require(
+            inventory["inventory_spec_sha256"] == spec_sha256,
+            "inventory spec binding mismatch",
+        )
+        require(inventory["run_id"] == spec["run_id"], "inventory run id mismatch")
+        checkout = exact_keys(
+            inventory["checkout"],
+            INVENTORY_CHECKOUT_KEYS,
+            "inventory checkout",
+        )
+        exact_keys(spec["checkout"], INVENTORY_CHECKOUT_KEYS, "inventory spec checkout")
+        require(checkout == spec["checkout"], "inventory checkout differs from spec")
+        checkout_path = Path(text(checkout["path"], "checkout path")).resolve(
+            strict=True
+        )
+        require(checkout_path.is_dir(), "inventory checkout is not a directory")
+        for key in ("commit", "tree"):
+            git_oid_text(checkout[key], f"checkout {key}")
+        require(checkout["dirty"] is False, "inventory checkout is dirty")
+        git_x = inspect_git_checkout(checkout_path, "inventory worktree X")
+        require(
+            checkout["commit"] == git_x["head"] and checkout["tree"] == git_x["tree"],
+            "inventory checkout Git HEAD/tree mismatch",
+        )
+        build = exact_keys(inventory["build"], BUILD_KEYS, "inventory build")
+        exact_keys(spec["build"], BUILD_KEYS, "inventory spec build")
+        require(build == spec["build"], "inventory build differs from spec")
+        require(
+            build["commit"] == git_x["head"],
+            "inventory build commit differs from actual worktree X HEAD",
+        )
+        claims: list[tuple[str, dict[str, Any]]] = []
+        for key in (
+            "executable",
+            "reducer",
+            "scalar_fixture",
+            "command_template",
+            "embedded_metallib",
+        ):
+            identity_from_claim(inventory[key], f"inventory {key}")
+            identity_from_claim(spec[key], f"inventory spec {key}")
+            require(inventory[key] == spec[key], f"inventory {key} differs from spec")
+            claims.append((key, inventory[key]))
+        for group, roles in (
+            ("sources", REQUIRED_SOURCE_ROLES),
+            ("assets", REQUIRED_ASSET_ROLES),
+        ):
+            require(isinstance(inventory[group], list), f"inventory {group} invalid")
+            observed_roles = set()
+            for item in inventory[group]:
+                exact_keys(
+                    item, ("role",) + FILE_CLAIM_KEYS, f"inventory {group} claim"
+                )
+                require(
+                    item["role"] not in observed_roles,
+                    f"duplicate inventory {group} role",
+                )
+                observed_roles.add(item["role"])
+                claims.append((item["role"], item))
+            require(observed_roles == roles, f"inventory {group} role set mismatch")
+            require(
+                inventory[group] == spec[group], f"inventory {group} differs from spec"
+            )
+        paths: set[Path] = {spec_file.path, inventory_file.path}
+        inodes = {spec_file.inode, inventory_file.inode}
+        opened_roles: dict[str, OpenFile] = {}
+        for role, claim in claims:
+            item = open_regular(
+                Path(claim["path"]), f"inventory {role}", claim["max_bytes"]
+            )
+            opened.append(item)
+            verify_identity(item, claim, f"inventory {role}")
+            require(
+                item.path not in paths and item.inode not in inodes,
+                "inventory custody alias",
+            )
+            paths.add(item.path)
+            inodes.add(item.inode)
+            opened_roles[role] = item
+        ggufs = {role: GGUF(opened_roles[role]) for role in REQUIRED_ASSET_ROLES}
+        require(
+            isinstance(inventory["gguf"], list) and len(inventory["gguf"]) == 2,
+            "inventory GGUF facts invalid",
+        )
+        gguf_roles: set[str] = set()
+        for fact in inventory["gguf"]:
+            exact_keys(
+                fact,
+                INVENTORY_GGUF_KEYS,
+                "inventory GGUF fact",
+            )
+            role = fact["role"]
+            require(
+                role in ggufs and role not in gguf_roles and fact["version"] == 3,
+                "inventory GGUF role/version mismatch",
+            )
+            gguf_roles.add(role)
+            check(
+                fact["tensor_count"] == len(ggufs[role].tensors)
+                and fact["metadata_count"] == len(ggufs[role].metadata),
+                "inventory GGUF counts mismatch",
+            )
+        requirements = spec["tensor_requirements"]
+        require(
+            isinstance(requirements, list) and len(requirements) == 3,
+            "inventory tensor requirements invalid",
+        )
+        requirement_by_role: dict[str, dict[str, Any]] = {}
+        for index, raw in enumerate(requirements):
+            item = exact_keys(
+                raw, TENSOR_REQUIREMENT_KEYS, f"inventory tensor requirement {index}"
+            )
+            role = text(item["role"], "inventory tensor requirement role", maximum=64)
+            require(
+                role not in requirement_by_role, "duplicate tensor requirement role"
+            )
+            requirement_by_role[role] = item
+        require(
+            set(requirement_by_role) == {"selector_hidden", "predecessor", "successor"},
+            "inventory tensor requirement roles mismatch",
+        )
+        require(
+            requirement_by_role["selector_hidden"]["dtype"] == "Q4_K",
+            "K0-S bridge v1 selector_hidden requirement must be Q4_K",
+        )
+        require(
+            isinstance(inventory["tensors"], list) and len(inventory["tensors"]) == 3,
+            "inventory tensors invalid",
+        )
+        observed_tensor_roles: set[str] = set()
+        for index, raw in enumerate(inventory["tensors"]):
+            claim = validate_tensor_claim(raw, f"inventory tensor {index}")
+            role = claim["role"]
+            require(
+                role not in observed_tensor_roles, "duplicate inventory tensor role"
+            )
+            observed_tensor_roles.add(role)
+            requirement = requirement_by_role.get(role)
+            require(requirement is not None, "unexpected inventory tensor role")
+            if role == "selector_hidden":
+                require(
+                    claim["dtype"] == "Q4_K",
+                    "K0-S bridge v1 selector_hidden tensor must be Q4_K",
+                )
+            for key in TENSOR_REQUIREMENT_KEYS:
+                require(
+                    claim[key] == requirement[key],
+                    f"inventory tensor {role} static descriptor differs from spec",
+                )
+            tensor = ggufs[claim["asset_role"]].tensors.get(claim["name"])
+            require(tensor is not None, f"inventory tensor {role} absent from GGUF")
+            check(
+                list(tensor.shape) == claim["shape"]
+                and tensor.dtype == claim["dtype"]
+                and tensor.offset == claim["offset"]
+                and tensor.size == claim["bytes"],
+                f"inventory tensor {role} independently parsed descriptor mismatch",
+            )
+            check(
+                hash_range(
+                    opened_roles[claim["asset_role"]],
+                    tensor.offset,
+                    tensor.size,
+                    f"inventory tensor {role}",
+                )
+                == claim["sha256"],
+                f"inventory tensor {role} independently hashed region mismatch",
+            )
+        require(
+            observed_tensor_roles == set(requirement_by_role),
+            "inventory tensor role set mismatch",
+        )
+        tensor_by_role = {item["role"]: item for item in inventory["tensors"]}
+        validate_vocab_compatibility(tensor_by_role, ggufs)
+        tokenizer = exact_keys(
+            inventory["tokenizer"],
+            INVENTORY_TOKENIZER_KEYS,
+            "inventory tokenizer",
+        )
+        expected_tokenizer = exact_keys(
+            spec["tokenizer"], INVENTORY_TOKENIZER_KEYS, "inventory spec tokenizer"
+        )
+        target_gguf = ggufs["target"]
+        embedding = target_gguf.tensors.get("token_embd.weight")
+        require(embedding is not None, "target token embedding absent")
+        token_count = target_gguf.metadata.get("tokenizer.ggml.token_count")
+        tokens = target_gguf.metadata.get("tokenizer.ggml.tokens")
+        if tokens is not None:
+            require(
+                isinstance(tokens, list) and all(isinstance(v, str) for v in tokens),
+                "target tokenizer tokens metadata invalid",
+            )
+            token_count = len(tokens)
+            token_digest = hashlib.sha256(
+                b"".join(
+                    struct.pack("<Q", len(v.encode("utf-8"))) + v.encode("utf-8")
+                    for v in tokens
+                )
+            ).hexdigest()
+        else:
+            integer(token_count, "target tokenizer token count", VOCAB, VOCAB)
+            token_digest = canonical_json_digest(
+                {"token_count": token_count, "token_embd": list(embedding.shape)}
+            )
+        derived_tokenizer = {
+            "vocab_size": VOCAB,
+            "token_embd_name": "token_embd.weight",
+            "token_embd_shape": list(embedding.shape),
+            "token_embd_dtype": embedding.dtype,
+            "token_count": token_count,
+            "tokenizer_tokens_sha256": token_digest,
+        }
+        check(
+            tokenizer == derived_tokenizer,
+            "inventory tokenizer facts not independently derived",
+        )
+        require(
+            tokenizer == expected_tokenizer,
+            "inventory tokenizer differs from frozen spec",
+        )
+        prompt = exact_keys(
+            inventory["prompt"],
+            INVENTORY_PROMPT_KEYS,
+            "inventory prompt",
+        )
+        expected_prompt = exact_keys(
+            spec["prompt"], INVENTORY_PROMPT_KEYS, "inventory spec prompt"
+        )
+        require(prompt == expected_prompt, "inventory prompt differs from frozen spec")
+        try:
+            prompt_bytes = bytes.fromhex(prompt["utf8_hex"])
+            prompt_bytes.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise InvalidEvidence(
+                "inventory prompt is not canonical UTF-8 hex"
+            ) from error
+        require(
+            prompt["utf8_hex"] == prompt_bytes.hex(),
+            "inventory prompt hex is noncanonical",
+        )
+        prompt_tokens = [
+            integer(value, "inventory prompt token", 0, VOCAB - 1)
+            for value in prompt["token_ids"]
+        ]
+        require(
+            prompt_tokens == [7734, 1970], "inventory prompt token expectation mismatch"
+        )
+        check(
+            prompt["token_ids_sha256_i32le"]
+            == hashlib.sha256(
+                b"".join(struct.pack("<i", value) for value in prompt_tokens)
+            ).hexdigest(),
+            "inventory prompt token digest mismatch",
+        )
+        require(
+            prompt["tokenizer_identity_sha256"] == token_digest,
+            "inventory prompt tokenizer identity mismatch",
+        )
+        mask = exact_keys(
+            inventory["mask_noise"],
+            INVENTORY_MASK_KEYS,
+            "inventory mask/noise",
+        )
+        metadata_keys = (
+            "dflash-draft.dflash.mask_token_id",
+            "tokenizer.ggml.mask_token_id",
+        )
+        present = [
+            (key, ggufs["drafter"].metadata[key])
+            for key in metadata_keys
+            if key in ggufs["drafter"].metadata
+        ]
+        require(
+            len(present) == 1,
+            "drafter must expose exactly one supported mask metadata key",
+        )
+        mask_token = integer(present[0][1], "drafter mask metadata", 0, VOCAB - 1)
+        require(
+            mask["metadata_key"] == present[0][0]
+            and mask["mask_token"] == mask_token
+            and mask_token == spec["expected_mask_token"] == 248070,
+            "inventory drafter mask metadata mismatch",
+        )
+        require(
+            isinstance(mask["noise_tokens"], list) and len(mask["noise_tokens"]) == 8,
+            "inventory noise geometry invalid",
+        )
+        noise = [
+            integer(value, "inventory noise token", 0, VOCAB - 1)
+            for value in mask["noise_tokens"]
+        ]
+        carry = integer(spec["carry_token"], "inventory spec carry token", 0, VOCAB - 1)
+        require(
+            noise == [carry] + [mask_token] * 7,
+            "inventory deterministic noise tokens mismatch",
+        )
+        check(
+            mask["noise_sha256_i32le"]
+            == hashlib.sha256(
+                b"".join(struct.pack("<i", value) for value in noise)
+            ).hexdigest(),
+            "inventory noise digest mismatch",
+        )
+        caps = exact_keys(
+            inventory["parser_caps"],
+            (
+                "header_bytes",
+                "metadata",
+                "tensors",
+                "strings_bytes",
+                "array_items",
+                "objects",
+            ),
+            "inventory parser caps",
+        )
+        require(
+            caps
+            == {
+                "header_bytes": MAX_GGUF_HEADER_BYTES,
+                "metadata": MAX_GGUF_METADATA,
+                "tensors": MAX_GGUF_TENSORS,
+                "strings_bytes": MAX_GGUF_STRINGS_BYTES,
+                "array_items": MAX_GGUF_ARRAY_ITEMS,
+                "objects": MAX_GGUF_OBJECTS,
+            },
+            "inventory parser caps mismatch",
+        )
+        require(caps == spec["parser_caps"], "inventory parser caps differ from spec")
+        device = exact_keys(inventory["device"], HOST_KEYS, "inventory device")
+        predicate = exact_keys(
+            spec["host_predicate"], HOST_PREDICATE_KEYS, "inventory host predicate"
+        )
+        for key in HOST_PREDICATE_KEYS:
+            require(
+                device[key] == predicate[key],
+                f"inventory device {key} predicate mismatch",
+            )
+        integer(device["device_registry_id"], "inventory device registry id")
+        text(device["device_family"], "inventory device family", maximum=256)
+        require(
+            inventory["environment"]
+            == spec["environment"]
+            == {"QWEN_METAL_LEASE_WAIT": "1"},
+            "inventory environment must be literal Metal lease only",
+        )
+        expected_command = [
+            str(opened_roles["executable"].path),
+            "dflash-k0s-inventory",
+            "--model",
+            str(opened_roles["target"].path),
+            "--drafter",
+            str(opened_roles["drafter"].path),
+            "--prompt",
+            prompt_bytes.decode("utf-8"),
+            "--carry-token",
+            str(carry),
+            "--inventory-spec",
+            str(spec_file.path),
+            "--inventory-spec-sha256",
+            spec_sha256,
+            "--output",
+            str(inventory_file.path),
+        ]
+        require(
+            inventory["command"] == expected_command,
+            "inventory hidden-command argv mismatch",
+        )
+        spec_command = spec["command"]
+        require(isinstance(spec_command, list), "inventory spec command invalid")
+        templated = list(expected_command)
+        templated[templated.index("--inventory-spec-sha256") + 1] = (
+            "${INVENTORY_SPEC_SHA256}"
+        )
+        templated[templated.index("--output") + 1] = "${INVENTORY_OUTPUT}"
+        require(spec_command == templated, "inventory spec command template mismatch")
+        for item in opened:
+            final_custody_check(item)
+        if retain_open:
+            retained = True
+            return InventoryContext(inventory, opened)
+        return inventory
+    except (KeyError, TypeError, struct.error, OverflowError, OSError) as error:
+        raise InvalidEvidence(
+            f"invalid inventory structure: {type(error).__name__}: {error}"
+        ) from error
+    finally:
+        if not retained:
+            for item in opened:
+                item.close()
+
+
+def frozen_reducer_argv(spec: dict[str, Any], reducer_path: str) -> list[str]:
+    acquisition = spec["acquisition_outputs"]
+    return [
+        reducer_path,
+        "--input",
+        acquisition["trace"],
+        "--sidecar",
+        acquisition["sidecar"],
+        "--manifest",
+        acquisition["manifest"],
+        "--manifest-sha256",
+        MANIFEST_SHA256_PLACEHOLDER,
+        "--inventory",
+        spec["inventory_path"],
+        "--inventory-sha256",
+        spec["inventory_sha256"],
+        "--inventory-spec",
+        spec["inventory_spec_path"],
+        "--inventory-spec-sha256",
+        spec["inventory_spec_sha256"],
+        "--preparation-spec",
+        spec["preparation_spec_path"],
+        "--preparation-spec-sha256",
+        PREPARATION_SPEC_SHA256_PLACEHOLDER,
+        "--preparation-seal",
+        spec["outputs"]["seal"],
+        "--preparation-seal-sha256",
+        SEAL_SHA256_PLACEHOLDER,
+        "--output",
+        spec["reduction_output"],
+    ]
+
+
+def validate_literal_reducer_argv(
+    actual: list[str],
+    frozen: list[str],
+    manifest_sha256: str,
+    preparation_spec_sha256: str,
+    seal_sha256: str,
+    reducer_path: str,
+) -> None:
+    require(
+        isinstance(actual, list)
+        and isinstance(frozen, list)
+        and all(isinstance(value, str) and value for value in actual + frozen),
+        "reducer argv must contain literal nonempty strings",
+    )
+    expected = [
+        manifest_sha256
+        if value == MANIFEST_SHA256_PLACEHOLDER
+        else preparation_spec_sha256
+        if value == PREPARATION_SPEC_SHA256_PLACEHOLDER
+        else seal_sha256
+        if value == SEAL_SHA256_PLACEHOLDER
+        else value
+        for value in frozen
+    ]
+    require(len(actual) == len(expected), "actual reducer argv length mismatch")
+    authenticated_reducer = Path(reducer_path).resolve(strict=True)
+    require(
+        Path(actual[0]).resolve(strict=True) == authenticated_reducer
+        and Path(expected[0]).resolve(strict=True) == authenticated_reducer,
+        "reducer argv[0] differs from authenticated reducer path",
+    )
+    require(
+        actual[1:] == expected[1:],
+        "actual reducer argv literal order/spelling/value mismatch",
+    )
+
+
+def render_preparation(
+    inventory: dict[str, Any],
+    inventory_sha256: str,
+    spec: dict[str, Any],
+    spec_sha256: str,
+    preparation_claims: dict[str, dict[str, Any]] | None = None,
+) -> tuple[bytes, bytes, bytes, bytes]:
+    require(
+        spec["inventory_sha256"] == inventory_sha256,
+        "preparation inventory digest mismatch",
+    )
+    require(spec["run_id"] == inventory["run_id"], "preparation run id mismatch")
+    fixture = (
+        json.dumps(spec["fixture_content"], ensure_ascii=True, separators=(",", ":"))
+        + "\n"
+    ).encode("ascii")
+    if preparation_claims is None:
+        preparation_claims = {}
+        for key, path_value in (
+            ("inventory", spec["inventory_path"]),
+            ("inventory_spec", spec["inventory_spec_path"]),
+            ("preparation_spec", spec["preparation_spec_path"]),
+        ):
+            opened_claim = open_regular(Path(path_value), key, MAX_TRACE_BYTES)
+            try:
+                preparation_claims[key] = {
+                    "path": str(opened_claim.path),
+                    "bytes": opened_claim.size,
+                    "sha256": opened_claim.digest,
+                    "max_bytes": MAX_TRACE_BYTES,
+                }
+            finally:
+                opened_claim.close()
+    fixture_object = exact_keys(
+        spec["fixture_content"],
+        ("schema", "schema_version", "fixture_domain", "fixture_sha256", "vectors"),
+        "prepared scalar fixture",
+    )
+    require(
+        fixture_object["fixture_domain"] == SCALAR_FIXTURE_DOMAIN
+        and scalar_fixture_digest(fixture_object["vectors"])
+        == fixture_object["fixture_sha256"]
+        == SCALAR_FIXTURE_EXPECTED_SHA256,
+        "prepared scalar fixture content/digest mismatch",
+    )
+    worktree = exact_keys(spec["worktree_x"], ("path", "commit"), "worktree X")
+    control = exact_keys(
+        spec["control_y_input"], ("path", "commit", "tree"), "control Y input"
+    )
+    x_path = Path(worktree["path"]).resolve(strict=True)
+    y_path = Path(control["path"]).resolve(strict=True)
+    require(
+        x_path.is_dir() and y_path.is_dir(), "preparation X/Y paths must be directories"
+    )
+    require(x_path != y_path, "preparation worktree-X and control Y must be distinct")
+    git_x = inspect_git_checkout(x_path, "preparation worktree X")
+    git_y = inspect_git_checkout(y_path, "preparation control Y", require_clean=False)
+    require(
+        git_x["common"] == git_y["common"] and git_x["objects"] == git_y["objects"],
+        "preparation X/Y do not share the authenticated Git repository/object store",
+    )
+    git_oid_text(worktree["commit"], "worktree X commit")
+    git_oid_text(control["commit"], "control Y input commit")
+    git_oid_text(control["tree"], "control Y input tree")
+    require(
+        control["commit"] == git_y["head"] and control["tree"] == git_y["tree"],
+        "preparation control Y input HEAD/tree mismatch",
+    )
+    require(
+        worktree
+        == {
+            "path": inventory["checkout"]["path"],
+            "commit": inventory["checkout"]["commit"],
+        }
+        and spec["transformation_sha256"] == inventory["reducer"]["sha256"],
+        "preparation worktree-X/transformation binding mismatch",
+    )
+    require(
+        spec["environment_allowlist"] == {"QWEN_METAL_LEASE_WAIT": "1"},
+        "preparation environment allowlist mismatch",
+    )
+    for claim in [
+        inventory["executable"],
+        inventory["reducer"],
+        inventory["embedded_metallib"],
+        *inventory["sources"],
+    ]:
+        require(
+            Path(claim["path"]).resolve(strict=True).is_relative_to(x_path),
+            "preparation X identity path escapes worktree X",
+        )
+    outputs = exact_keys(
+        spec["outputs"],
+        ("fixture", "command", "manifest", "seal"),
+        "preparation outputs",
+    )
+    acquisition = exact_keys(
+        spec["acquisition_outputs"],
+        ACQUISITION_OUTPUT_KEYS,
+        "preparation acquisition outputs",
+    )
+    output_paths = {
+        key: str(canonical_output_path(Path(value))) for key, value in outputs.items()
+    }
+    acquisition_paths = {
+        key: str(canonical_output_path(Path(value)))
+        for key, value in acquisition.items()
+    }
+    require(
+        acquisition_paths["manifest"] == output_paths["manifest"],
+        "acquisition manifest path differs from prepared manifest output",
+    )
+    six_paths = list(output_paths.values()) + [
+        acquisition_paths["trace"],
+        acquisition_paths["sidecar"],
+    ]
+    require(
+        len(set(six_paths)) == 6,
+        "fixture/command/manifest/seal/trace/sidecar paths must be unique",
+    )
+    require(
+        all(Path(value).parent == y_path for value in six_paths),
+        "all prepared/acquisition outputs must reside directly under control Y",
+    )
+    reduction_output = str(canonical_output_path(Path(spec["reduction_output"])))
+    require(
+        Path(reduction_output).parent == y_path and reduction_output not in six_paths,
+        "reduction output path is not uniquely confined under control Y",
+    )
+    require(
+        spec["parity_comparison_fields"] == PARITY_COMPARISON_FIELDS,
+        "preparation parity comparison matrix mismatch",
+    )
+    require(
+        spec["reducer_argv"] == frozen_reducer_argv(spec, inventory["reducer"]["path"]),
+        "preparation frozen reducer argv mismatch",
+    )
+    validate_preparation_git_state(
+        inventory,
+        spec,
+        {Path(value) for value in output_paths.values()},
+        require_all_outputs=False,
+    )
+    choices = exact_keys(
+        spec["manifest_choices"], MANIFEST_CHOICE_KEYS, "preparation manifest choices"
+    )
+    continuation_carry = integer(
+        spec["continuation_carry_token"], "continuation carry token", 0, VOCAB - 1
+    )
+    prompt = bytes.fromhex(inventory["prompt"]["utf8_hex"]).decode("utf-8")
+    fixed = choices["expected_fixed_chains"]
+    temperature_bits = bits32(
+        choices["expected_request"]["request"]["temperature_f32_bits"],
+        "prepared temperature",
+        finite=True,
+    )
+    temperature_text = format(f32_value(temperature_bits), ".9g")
+    command_argv = [
+        inventory["executable"]["path"],
+        "dflash-k0s-lattice",
+        "--attempt-id",
+        spec["attempt_id"],
+        "--model",
+        next(v["path"] for v in inventory["assets"] if v["role"] == "target"),
+        "--drafter",
+        next(v["path"] for v in inventory["assets"] if v["role"] == "drafter"),
+        "--prompt",
+        prompt,
+        "--carry-token",
+        str(choices["expected_capture_context"]["carry_token"]),
+        "--continuation-carry-token",
+        str(continuation_carry),
+        "--manifest",
+        output_paths["manifest"],
+        "--manifest-sha256",
+        MANIFEST_SHA256_PLACEHOLDER,
+        "--command-manifest",
+        output_paths["command"],
+        "--fixture",
+        output_paths["fixture"],
+        "--temperature",
+        temperature_text,
+    ]
+    for chain in fixed:
+        command_argv += [
+            "--fixed-chain",
+            f"{chain['name']}:{chain['initial_carry']}:"
+            + ",".join(str(slot) for slot in chain["slots"]),
+        ]
+    command_argv += [
+        "--trace-output",
+        acquisition_paths["trace"],
+        "--sidecar-output",
+        acquisition_paths["sidecar"],
+    ]
+    require(
+        command_argv.count(MANIFEST_SHA256_PLACEHOLDER) == 1,
+        "prepared command placeholder count mismatch",
+    )
+    command = (
+        json.dumps({"argv": command_argv}, ensure_ascii=True, separators=(",", ":"))
+        + "\n"
+    ).encode("ascii")
+    fixture_claim = {
+        "path": output_paths["fixture"],
+        "bytes": len(fixture),
+        "sha256": hashlib.sha256(fixture).hexdigest(),
+        "max_bytes": MAX_TRACE_BYTES,
+    }
+    command_claim = {
+        "path": output_paths["command"],
+        "bytes": len(command),
+        "sha256": hashlib.sha256(command).hexdigest(),
+        "max_bytes": MAX_TRACE_BYTES,
+    }
+    vectors = fixture_object["vectors"]
+    manifest_object = {
+        "schema": MANIFEST_SCHEMA,
+        "schema_version": MANIFEST_VERSION,
+        "run_id": spec["run_id"],
+        "attempt_id": spec["attempt_id"],
+        "trace_max_bytes": choices["trace_max_bytes"],
+        "sidecar_max_bytes": choices["sidecar_max_bytes"],
+        "reducer": inventory["reducer"],
+        "executable": inventory["executable"],
+        "fixture": fixture_claim,
+        "command": command_claim,
+        "sources": inventory["sources"],
+        "assets": inventory["assets"],
+        "semantic_references": choices["semantic_references"],
+        "tensors": inventory["tensors"],
+        "expected_request": choices["expected_request"],
+        "expected_prompt": inventory["prompt"],
+        "expected_binding": choices["expected_binding"],
+        "expected_continuation_carry_token": continuation_carry,
+        "expected_rng_domains": choices["expected_rng_domains"],
+        "expected_fixed_chains": fixed,
+        "expected_capture_context": choices["expected_capture_context"],
+        "expected_build": inventory["build"],
+        "expected_host": inventory["device"],
+        "embedded_metallib_sha256": inventory["embedded_metallib"]["sha256"],
+        "selector_dispatch_predicate": choices["selector_dispatch_predicate"],
+        "preparation_binding": {
+            "inventory": preparation_claims["inventory"],
+            "inventory_spec": preparation_claims["inventory_spec"],
+            "preparation_spec": preparation_claims["preparation_spec"],
+            "seal_path": output_paths["seal"],
+        },
+        "scalar_contract": {
+            "artifact": fixture_claim,
+            "compiler": inventory["build"]["compiler"],
+            "compiler_version": inventory["build"]["compiler_version"],
+            "target": inventory["build"]["target"],
+            "profile": inventory["build"]["profile"],
+            "fixture_domain": fixture_object["fixture_domain"],
+            "fixture_sha256": fixture_object["fixture_sha256"],
+            "vectors": vectors,
+        },
+    }
+    validate_manifest(manifest_object)
+    manifest = (
+        json.dumps(manifest_object, ensure_ascii=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
+    seal_object = {
+        "schema": SEAL_SCHEMA,
+        "schema_version": 1,
+        "run_id": spec["run_id"],
+        "attempt_id": spec["attempt_id"],
+        "inventory_sha256": inventory_sha256,
+        "inventory_spec_sha256": spec["inventory_spec_sha256"],
+        "preparation_spec_sha256": spec_sha256,
+        "fixture_sha256": hashlib.sha256(fixture).hexdigest(),
+        "command_sha256": hashlib.sha256(command).hexdigest(),
+        "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+        "transformation_sha256": spec["transformation_sha256"],
+        "reducer_sha256": inventory["reducer"]["sha256"],
+        "worktree_x_commit": worktree["commit"],
+        "control_y_input_commit": control["commit"],
+        "control_y_input_tree": control["tree"],
+    }
+    exact_keys(seal_object, SEAL_KEYS, "prepared seal")
+    seal = (
+        json.dumps(seal_object, ensure_ascii=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
+    return fixture, command, manifest, seal
+
+
+def prepare_artifacts(
+    inventory_path: Path,
+    inventory_sha256: str,
+    inventory_spec_path: Path,
+    inventory_spec_sha256: str,
+    preparation_spec_path: Path,
+    preparation_spec_sha256: str,
+    expected_hashes: dict[str, str],
+) -> dict[str, Any]:
+    inventory_context = validate_inventory(
+        inventory_path,
+        inventory_sha256,
+        inventory_spec_path,
+        inventory_spec_sha256,
+        retain_open=True,
+    )
+    require(
+        isinstance(inventory_context, InventoryContext),
+        "retained inventory context construction failed",
+    )
+    inventory = inventory_context.inventory
+    prep_file = open_regular(preparation_spec_path, "preparation spec", MAX_TRACE_BYTES)
+    try:
+        require(
+            prep_file.digest == preparation_spec_sha256,
+            "preparation spec digest mismatch",
+        )
+        spec = exact_keys(
+            parse_json(
+                pread_exact(prep_file, 0, prep_file.size, "preparation spec"),
+                "preparation spec",
+            ),
+            PREPARATION_SPEC_KEYS,
+            "preparation spec",
+        )
+        require(
+            spec["schema"] == PREPARATION_SPEC_SCHEMA and spec["schema_version"] == 1,
+            "preparation spec schema mismatch",
+        )
+        require(
+            spec["inventory_path"] == str(inventory_path.resolve()),
+            "preparation inventory path mismatch",
+        )
+        require(
+            spec["inventory_spec_path"] == str(inventory_spec_path.resolve())
+            and spec["inventory_spec_sha256"] == inventory_spec_sha256,
+            "preparation inventory-spec path/hash mismatch",
+        )
+        require(
+            spec["arm_order"] == ["off-A", "on-A", "on-B", "off-B"]
+            and spec["selected_arm"] == "on-A",
+            "preparation arm contract mismatch",
+        )
+        require(
+            isinstance(spec["environment_allowlist"], dict)
+            and isinstance(spec["failure_policy"], dict),
+            "preparation environment/failure policy invalid",
+        )
+        retained_by_path = {item.path: item for item in inventory_context.opened}
+        preparation_claims = {}
+        for key, path_value, digest in (
+            ("inventory", inventory_path, inventory_sha256),
+            ("inventory_spec", inventory_spec_path, inventory_spec_sha256),
+        ):
+            item = retained_by_path[path_value.resolve(strict=True)]
+            preparation_claims[key] = {
+                "path": str(item.path),
+                "bytes": item.size,
+                "sha256": digest,
+                "max_bytes": MAX_TRACE_BYTES,
+            }
+        preparation_claims["preparation_spec"] = {
+            "path": str(prep_file.path),
+            "bytes": prep_file.size,
+            "sha256": preparation_spec_sha256,
+            "max_bytes": MAX_TRACE_BYTES,
+        }
+        rendered = render_preparation(
+            inventory,
+            inventory_sha256,
+            spec,
+            preparation_spec_sha256,
+            preparation_claims,
+        )
+        names = ("fixture", "command", "manifest", "seal")
+        outputs = exact_keys(spec["outputs"], names, "preparation outputs")
+        for name, data in zip(names, rendered):
+            sha256_text(expected_hashes[name], f"expected prepared {name} hash")
+            require(
+                hashlib.sha256(data).hexdigest() == expected_hashes[name],
+                f"prepared {name} expected hash mismatch",
+            )
+        paths = [canonical_output_path(Path(outputs[name])) for name in names]
+        require(len(set(paths)) == 4, "preparation output paths alias")
+        acquisition = exact_keys(
+            spec["acquisition_outputs"],
+            ACQUISITION_OUTPUT_KEYS,
+            "preparation acquisition outputs",
+        )
+        all_output_paths = paths + [
+            canonical_output_path(Path(acquisition["trace"])),
+            canonical_output_path(Path(acquisition["sidecar"])),
+        ]
+        input_paths = {
+            inventory_path.resolve(strict=True),
+            inventory_spec_path.resolve(strict=True),
+            preparation_spec_path.resolve(strict=True),
+            *(
+                Path(claim["path"]).resolve(strict=True)
+                for claim in [
+                    inventory["executable"],
+                    inventory["reducer"],
+                    inventory["scalar_fixture"],
+                    inventory["command_template"],
+                    inventory["embedded_metallib"],
+                    *inventory["sources"],
+                    *inventory["assets"],
+                ]
+            ),
+        }
+        require(
+            not set(all_output_paths) & input_paths,
+            "preparation output path aliases an authenticated input",
+        )
+        input_inodes = {
+            path.stat().st_dev.to_bytes(8, "little")
+            + path.stat().st_ino.to_bytes(8, "little")
+            for path in input_paths
+        }
+        for path in all_output_paths:
+            if path.exists():
+                info = path.stat()
+                inode_key = info.st_dev.to_bytes(8, "little") + info.st_ino.to_bytes(
+                    8, "little"
+                )
+                require(
+                    inode_key not in input_inodes,
+                    "preparation existing output inode aliases an authenticated input",
+                )
+        # Reauthenticate all inventory-bound inputs immediately before reservation.
+        inventory_context.final_check()
+        policy = exact_keys(
+            spec["failure_policy"],
+            ("on_collision", "retry"),
+            "preparation failure policy",
+        )
+        require(
+            policy == {"on_collision": "retain_reserved_partial", "retry": False},
+            "preparation failure policy mismatch",
+        )
+        parent = paths[0].parent
+        require(
+            all(path.parent == parent for path in paths),
+            "prepared outputs do not share one directory",
+        )
+        directory_fd = os.open(
+            parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        directory_stat = os.fstat(directory_fd)
+        require(
+            stat.S_ISDIR(directory_stat.st_mode),
+            "control-Y custody FD is not a directory",
+        )
+        validate_preparation_git_state(
+            inventory,
+            spec,
+            set(paths),
+            require_all_outputs=False,
+        )
+        reserved: list[tuple[Path, int]] = []
+        try:
+            for path in paths:
+                reserved.append(
+                    (
+                        path,
+                        os.open(
+                            path.name,
+                            os.O_WRONLY
+                            | os.O_CREAT
+                            | os.O_EXCL
+                            | getattr(os, "O_NOFOLLOW", 0),
+                            0o600,
+                            dir_fd=directory_fd,
+                        ),
+                    )
+                )
+        except OSError as error:
+            for _, descriptor in reserved:
+                os.close(descriptor)
+            os.close(directory_fd)
+            final_custody_check(prep_file)
+            return {
+                "result": "partial",
+                "reason": f"exclusive preparation reservation failed: {error}",
+                "reserved_empty_paths": [str(path) for path, _ in reserved],
+                "retry": False,
+            }
+        for (path, descriptor), data in zip(reserved, rendered):
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        after_stat = os.fstat(directory_fd)
+        require(
+            (after_stat.st_dev, after_stat.st_ino)
+            == (directory_stat.st_dev, directory_stat.st_ino),
+            "control-Y directory custody changed during writes",
+        )
+        validate_preparation_git_state(
+            inventory,
+            spec,
+            set(paths),
+            require_all_outputs=True,
+        )
+        os.close(directory_fd)
+        inventory_context.final_check()
+        for (path, _), data in zip(reserved, rendered):
+            written = open_regular(path, f"prepared output {path.name}", len(data))
+            try:
+                require(
+                    written.size == len(data)
+                    and written.digest == hashlib.sha256(data).hexdigest(),
+                    "prepared output final custody mismatch",
+                )
+                final_custody_check(written)
+            finally:
+                written.close()
+        final_custody_check(prep_file)
+        return {
+            name: {
+                "path": str(path),
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+            for name, path, data in zip(names, paths, rendered)
+        }
+    finally:
+        prep_file.close()
+        inventory_context.close()
+
+
 def reduce(
     trace_path: Path,
     sidecar_path: Path,
     manifest_path: Path,
     output_path: Path,
     manifest_sha256: str,
+    inventory_path: Path,
+    inventory_sha256: str,
+    inventory_spec_path: Path,
+    inventory_spec_sha256: str,
+    preparation_spec_path: Path,
+    preparation_spec_sha256: str,
+    preparation_seal_path: Path,
+    preparation_seal_sha256: str,
+    actual_argv: list[str] | None = None,
 ) -> dict[str, Any]:
     opened: list[OpenFile] = []
     result: dict[str, Any]
     run_id: str | None = None
+    attempt_id: str | None = None
     custody: dict[str, Any] = {}
     output: Path | None = None
     try:
@@ -2632,6 +5369,160 @@ def reduce(
             )
         )
         run_id = manifest["run_id"]
+        attempt_id = manifest["attempt_id"]
+        bridge_expected = {
+            "inventory": (inventory_path, inventory_sha256),
+            "inventory_spec": (inventory_spec_path, inventory_spec_sha256),
+            "preparation_spec": (preparation_spec_path, preparation_spec_sha256),
+        }
+        bridge_files: dict[str, OpenFile] = {}
+        for name, (path, digest) in bridge_expected.items():
+            sha256_text(digest, f"independent {name} SHA-256")
+            claim = manifest["preparation_binding"][name]
+            item = open_regular(path, name, claim["max_bytes"])
+            opened.append(item)
+            require(
+                item.path == Path(claim["path"]).resolve(strict=True)
+                and item.size == claim["bytes"]
+                and item.digest == claim["sha256"],
+                f"{name} manifest identity mismatch",
+            )
+            require(item.digest == digest, f"{name} independent digest mismatch")
+            bridge_files[name] = item
+        sha256_text(preparation_seal_sha256, "independent preparation seal SHA-256")
+        seal = open_regular(preparation_seal_path, "preparation seal", MAX_TRACE_BYTES)
+        opened.append(seal)
+        require(
+            str(seal.path) == manifest["preparation_binding"]["seal_path"]
+            and seal.digest == preparation_seal_sha256,
+            "preparation seal path/digest mismatch",
+        )
+        seal_json = exact_keys(
+            parse_json(
+                pread_exact(seal, 0, seal.size, "preparation seal"), "preparation seal"
+            ),
+            SEAL_KEYS,
+            "preparation seal",
+        )
+        require(
+            seal_json["schema"] == SEAL_SCHEMA
+            and seal_json["schema_version"] == 1
+            and seal_json["run_id"] == run_id
+            and seal_json["attempt_id"] == attempt_id
+            and seal_json["inventory_sha256"] == inventory_sha256
+            and seal_json["inventory_spec_sha256"] == inventory_spec_sha256
+            and seal_json["preparation_spec_sha256"] == preparation_spec_sha256
+            and seal_json["manifest_sha256"] == manifest_sha256
+            and seal_json["fixture_sha256"] == manifest["fixture"]["sha256"]
+            and seal_json["command_sha256"] == manifest["command"]["sha256"]
+            and seal_json["reducer_sha256"] == manifest["reducer"]["sha256"]
+            and seal_json["transformation_sha256"] == manifest["reducer"]["sha256"]
+            and seal_json["worktree_x_commit"] == manifest["expected_build"]["commit"],
+            "preparation seal trust chain mismatch",
+        )
+        inventory_json = exact_keys(
+            parse_json(
+                pread_exact(
+                    bridge_files["inventory"],
+                    0,
+                    bridge_files["inventory"].size,
+                    "bound inventory",
+                ),
+                "bound inventory",
+            ),
+            INVENTORY_KEYS,
+            "bound inventory",
+        )
+        inventory_spec_json = exact_keys(
+            parse_json(
+                pread_exact(
+                    bridge_files["inventory_spec"],
+                    0,
+                    bridge_files["inventory_spec"].size,
+                    "bound inventory spec",
+                ),
+                "bound inventory spec",
+            ),
+            INVENTORY_SPEC_KEYS,
+            "bound inventory spec",
+        )
+        prep_json = exact_keys(
+            parse_json(
+                pread_exact(
+                    bridge_files["preparation_spec"],
+                    0,
+                    bridge_files["preparation_spec"].size,
+                    "bound preparation spec",
+                ),
+                "bound preparation spec",
+            ),
+            PREPARATION_SPEC_KEYS,
+            "bound preparation spec",
+        )
+        require(
+            inventory_json["schema"] == INVENTORY_SCHEMA
+            and inventory_json["authority"] == INVENTORY_AUTHORITY
+            and inventory_json["run_id"] == run_id
+            and inventory_json["inventory_spec_sha256"] == inventory_spec_sha256
+            and inventory_json["sources"] == manifest["sources"]
+            and inventory_json["assets"] == manifest["assets"]
+            and inventory_json["tensors"] == manifest["tensors"]
+            and inventory_json["prompt"] == manifest["expected_prompt"]
+            and inventory_json["build"] == manifest["expected_build"]
+            and inventory_json["device"] == manifest["expected_host"]
+            and inventory_json["embedded_metallib"]["sha256"]
+            == manifest["embedded_metallib_sha256"]
+            and inventory_json["reducer"] == manifest["reducer"]
+            and inventory_json["executable"] == manifest["executable"],
+            "bound inventory semantic facts differ from manifest",
+        )
+        require(
+            inventory_spec_json["schema"] == INVENTORY_SPEC_SCHEMA
+            and inventory_spec_json["run_id"] == run_id,
+            "bound inventory-spec schema/run mismatch",
+        )
+        require(
+            prep_json["schema"] == PREPARATION_SPEC_SCHEMA
+            and prep_json["run_id"] == run_id
+            and prep_json["attempt_id"] == attempt_id
+            and prep_json["inventory_sha256"] == inventory_sha256
+            and prep_json["inventory_spec_sha256"] == inventory_spec_sha256
+            and prep_json["arm_order"] == ["off-A", "on-A", "on-B", "off-B"]
+            and prep_json["selected_arm"] == "on-A"
+            and prep_json["parity_comparison_fields"] == PARITY_COMPARISON_FIELDS
+            and prep_json["manifest_choices"]["expected_request"]
+            == manifest["expected_request"]
+            and prep_json["manifest_choices"]["selector_dispatch_predicate"]
+            == manifest["selector_dispatch_predicate"]
+            and prep_json["transformation_sha256"] == manifest["reducer"]["sha256"]
+            and prep_json["failure_policy"]
+            == {"on_collision": "retain_reserved_partial", "retry": False},
+            "bound preparation spec differs from manifest/protocol",
+        )
+        require(
+            seal_json["control_y_input_commit"]
+            == prep_json["control_y_input"]["commit"]
+            and seal_json["control_y_input_tree"]
+            == prep_json["control_y_input"]["tree"]
+            and seal_json["worktree_x_commit"] == prep_json["worktree_x"]["commit"],
+            "seal X/Y identities differ from preparation spec",
+        )
+        expected_reducer_argv = frozen_reducer_argv(
+            prep_json, manifest["reducer"]["path"]
+        )
+        require(
+            prep_json["reducer_argv"] == expected_reducer_argv,
+            "bound preparation reducer argv mismatch",
+        )
+        if actual_argv is not None:
+            validate_literal_reducer_argv(
+                actual_argv,
+                expected_reducer_argv,
+                manifest_sha256,
+                preparation_spec_sha256,
+                preparation_seal_sha256,
+                manifest["reducer"]["path"],
+            )
         trace = open_regular(trace_path, "trace", manifest["trace_max_bytes"])
         sidecar = open_regular(sidecar_path, "sidecar", manifest["sidecar_max_bytes"])
         reducer = open_regular(
@@ -2706,6 +5597,19 @@ def reduce(
                 "bytes": reducer.size,
                 "sha256": reducer.digest,
             },
+            "preparation_inputs": {
+                name: {
+                    "path": str(item.path),
+                    "bytes": item.size,
+                    "sha256": item.digest,
+                }
+                for name, item in bridge_files.items()
+            },
+            "preparation_seal": {
+                "path": str(seal.path),
+                "bytes": seal.size,
+                "sha256": seal.digest,
+            },
             "artifacts": [
                 {"path": str(item.path), "bytes": item.size, "sha256": item.digest}
                 for item in sorted(opened[4:], key=lambda value: str(value.path))
@@ -2713,6 +5617,16 @@ def reduce(
         }
         rows = parse_trace(trace)
         require(rows[0]["run_id"] == run_id, "manifest/trace run id mismatch")
+        require(
+            rows[0]["attempt_id"] == attempt_id, "manifest/trace attempt id mismatch"
+        )
+        if rows[0]["event"] == "parity_failure":
+            require(sidecar.size == 0, "parity failure sidecar must be empty")
+            failure = validate_parity_failure(rows[0]["payload"], manifest)
+            raise FailedEvidence(
+                "handled diagnostic parity failure",
+                {"parity_failure": failure},
+            )
         identities = exact_keys(
             rows[0]["payload"]["identities"], IDENTITY_KEYS, "trace identities"
         )
@@ -2755,6 +5669,7 @@ def reduce(
             "schema": REDUCTION_SCHEMA,
             "schema_version": REDUCTION_VERSION,
             "run_id": run_id,
+            "attempt_id": attempt_id,
             "result": "passed",
             "authority": AUTHORITY,
             "reason": None,
@@ -2766,6 +5681,7 @@ def reduce(
             "schema": REDUCTION_SCHEMA,
             "schema_version": REDUCTION_VERSION,
             "run_id": run_id,
+            "attempt_id": attempt_id,
             "result": "failed",
             "authority": AUTHORITY,
             "reason": str(error),
@@ -2777,13 +5693,13 @@ def reduce(
             "schema": REDUCTION_SCHEMA,
             "schema_version": REDUCTION_VERSION,
             "run_id": run_id,
+            "attempt_id": attempt_id,
             "result": "invalid",
             "authority": AUTHORITY,
             "reason": f"{type(error).__name__}: {error}",
             "metrics": None,
             "custody": custody or None,
         }
-    custody = custody_summary(opened) or custody
     result["custody"] = custody or None
     try:
         for item in opened:
@@ -2793,6 +5709,7 @@ def reduce(
             "schema": REDUCTION_SCHEMA,
             "schema_version": REDUCTION_VERSION,
             "run_id": run_id,
+            "attempt_id": attempt_id,
             "result": "invalid",
             "authority": AUTHORITY,
             "reason": f"final custody failure: {type(error).__name__}: {error}",
@@ -2877,7 +5794,11 @@ def write_sparse_selector_gguf(path: Path) -> dict[str, Tensor]:
         ("selector_predecessor.weight", [RANK, VOCAB], 12),
         ("selector_successor.weight", [RANK, VOCAB], 12),
     ]
-    header = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(specs), 0))
+    mask_key = b"tokenizer.ggml.mask_token_id"
+    header = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(specs), 1))
+    header += (
+        struct.pack("<Q", len(mask_key)) + mask_key + struct.pack("<II", 4, 248070)
+    )
     offsets: list[int] = []
     sizes: list[int] = []
     cursor = 0
@@ -2961,6 +5882,7 @@ def synthetic_scalar_vectors() -> list[dict[str, Any]]:
 
 def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
     run_id = "k0s-complete-synthetic-v1"
+    attempt_id = "synthetic-attempt-1"
     drafter_path = root / "drafter.gguf"
     descriptors = write_sparse_selector_gguf(drafter_path)
     target_path = root / "target.gguf"
@@ -3037,7 +5959,7 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         "tag": SELECTOR_DISPATCH_TAG,
         "encoder_ordinal": 1,
         "encoder_concurrent": False,
-        "kernel": "kernel_mat_mat_q4_k_f32",
+        "kernel": SELECTOR_KERNEL,
         "grid": [1, 1, 1],
         "threads": [1, 1, 1],
         "grid_threadgroups": 1,
@@ -3051,6 +5973,29 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         "device_family": "synthetic-family",
     }
     metallib_sha256 = hashlib.sha256(b"metallib").hexdigest()
+    selector_dispatch_predicate = {
+        "tag": SELECTOR_DISPATCH_TAG,
+        "kernel": expected_selector_dispatch["kernel"],
+        "weight_dtype": "Q4_K",
+        "input_dtype": "F32",
+        "output_dtype": "F32",
+        "weight_dtype_id": 12,
+        "input_dtype_id": 0,
+        "output_dtype_id": 0,
+        "n": 8,
+        "h": HIDDEN,
+        "r": RANK,
+        "grid": expected_selector_dispatch["grid"],
+        "threads": expected_selector_dispatch["threads"],
+        "metal_source_sha256": next(
+            claim["sha256"]
+            for claim in source_claims
+            if claim["role"] == "mat_mat_q4_k_metal"
+        ),
+        "metallib_sha256": metallib_sha256,
+        "build_source_sha256": build["source_sha256"],
+        "allowed_environment": {"QWEN_METAL_LEASE_WAIT": "1"},
+    }
     binding = {
         "production_call_id": "synthetic-call-0",
         "drafter_checkpoint_sha256": hashlib.sha256(b"checkpoint").hexdigest(),
@@ -3108,6 +6053,8 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
     command_argv = [
         str(executable_path.resolve()),
         "dflash-k0s-lattice",
+        "--attempt-id",
+        attempt_id,
         "--model",
         str(target_path.resolve()),
         "--drafter",
@@ -3116,6 +6063,8 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         "synthetic prompt",
         "--carry-token",
         "0",
+        "--continuation-carry-token",
+        "1",
         "--manifest",
         str(manifest_path.resolve()),
         "--manifest-sha256",
@@ -3138,10 +6087,180 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         encoding="utf-8",
     )
     command_claim = synthetic_file_claim(command_path)
+    preparation_input_paths = {
+        "inventory": root / "bound-inventory.json",
+        "inventory_spec": root / "bound-inventory-spec.json",
+        "preparation_spec": root / "bound-preparation-spec.json",
+    }
+    metallib_path = root / "bound-metallib.bin"
+    metallib_path.write_bytes(b"metallib")
+    prompt_claim = {
+        "utf8_hex": b"synthetic prompt".hex(),
+        "token_ids": [7734, 1970],
+        "token_ids_sha256_i32le": hashlib.sha256(
+            struct.pack("<ii", 7734, 1970)
+        ).hexdigest(),
+        "tokenizer_identity_sha256": canonical_json_digest(
+            {"token_count": VOCAB, "token_embd": [1, VOCAB]}
+        ),
+    }
+    inventory_spec_object = {
+        "schema": INVENTORY_SPEC_SCHEMA,
+        "schema_version": 1,
+        "run_id": run_id,
+        "inventory_max_bytes": MAX_TRACE_BYTES,
+        "checkout": {
+            "path": str(root.resolve()),
+            "commit": build["commit"],
+            "tree": "1" * 40,
+            "dirty": False,
+        },
+        "build": build,
+        "sources": source_claims,
+        "executable": executable_claim,
+        "reducer": reducer_claim,
+        "scalar_fixture": fixture_claim,
+        "command_template": command_claim,
+        "embedded_metallib": synthetic_file_claim(metallib_path),
+        "assets": asset_claims,
+        "tensor_requirements": [
+            {key: tensor[key] for key in TENSOR_REQUIREMENT_KEYS}
+            for tensor in tensor_claims
+        ],
+        "tokenizer": {
+            "vocab_size": VOCAB,
+            "token_embd_name": "token_embd.weight",
+            "token_embd_shape": [1, VOCAB],
+            "token_embd_dtype": "F32",
+            "token_count": VOCAB,
+            "tokenizer_tokens_sha256": prompt_claim["tokenizer_identity_sha256"],
+        },
+        "prompt": prompt_claim,
+        "carry_token": 0,
+        "expected_mask_token": 248070,
+        "parser_caps": {
+            "header_bytes": MAX_GGUF_HEADER_BYTES,
+            "metadata": MAX_GGUF_METADATA,
+            "tensors": MAX_GGUF_TENSORS,
+            "strings_bytes": MAX_GGUF_STRINGS_BYTES,
+            "array_items": MAX_GGUF_ARRAY_ITEMS,
+            "objects": MAX_GGUF_OBJECTS,
+        },
+        "host_predicate": {key: expected_host[key] for key in HOST_PREDICATE_KEYS},
+        "command": ["synthetic-inventory"],
+        "environment": {"QWEN_METAL_LEASE_WAIT": "1"},
+    }
+    preparation_input_paths["inventory_spec"].write_text(
+        json.dumps(inventory_spec_object, separators=(",", ":")), encoding="utf-8"
+    )
+    inventory_spec_digest = hashlib.sha256(
+        preparation_input_paths["inventory_spec"].read_bytes()
+    ).hexdigest()
+    inventory_object = {
+        "schema": INVENTORY_SCHEMA,
+        "schema_version": 1,
+        "authority": INVENTORY_AUTHORITY,
+        "inventory_spec_sha256": inventory_spec_digest,
+        "run_id": run_id,
+        "checkout": inventory_spec_object["checkout"],
+        "build": build,
+        "sources": source_claims,
+        "executable": executable_claim,
+        "reducer": reducer_claim,
+        "scalar_fixture": fixture_claim,
+        "command_template": command_claim,
+        "embedded_metallib": synthetic_file_claim(metallib_path),
+        "device": expected_host,
+        "assets": asset_claims,
+        "gguf": [],
+        "tensors": tensor_claims,
+        "tokenizer": inventory_spec_object["tokenizer"],
+        "prompt": prompt_claim,
+        "mask_noise": {
+            "metadata_key": "tokenizer.ggml.mask_token_id",
+            "mask_token": 248070,
+            "noise_tokens": [0] + [248070] * 7,
+            "noise_sha256_i32le": hashlib.sha256(
+                b"".join(struct.pack("<i", v) for v in [0] + [248070] * 7)
+            ).hexdigest(),
+        },
+        "parser_caps": inventory_spec_object["parser_caps"],
+        "command": ["synthetic-inventory"],
+        "environment": {"QWEN_METAL_LEASE_WAIT": "1"},
+    }
+    preparation_input_paths["inventory"].write_text(
+        json.dumps(inventory_object, separators=(",", ":")), encoding="utf-8"
+    )
+    inventory_digest = hashlib.sha256(
+        preparation_input_paths["inventory"].read_bytes()
+    ).hexdigest()
+    synthetic_prep = {
+        "schema": PREPARATION_SPEC_SCHEMA,
+        "schema_version": 1,
+        "run_id": run_id,
+        "attempt_id": attempt_id,
+        "inventory_path": str(preparation_input_paths["inventory"].resolve()),
+        "inventory_sha256": inventory_digest,
+        "inventory_spec_path": str(preparation_input_paths["inventory_spec"].resolve()),
+        "inventory_spec_sha256": inventory_spec_digest,
+        "preparation_spec_path": str(
+            preparation_input_paths["preparation_spec"].resolve()
+        ),
+        "worktree_x": {"path": str(root.resolve()), "commit": build["commit"]},
+        "control_y_input": {
+            "path": str(root.resolve()),
+            "commit": "2" * 40,
+            "tree": "3" * 40,
+        },
+        "outputs": {
+            "fixture": str(fixture_path.resolve()),
+            "command": str(command_path.resolve()),
+            "manifest": str(manifest_path.resolve()),
+            "seal": str((root / "bound-preparation-seal.json").resolve()),
+        },
+        "fixture_content": parse_json(fixture_path.read_bytes(), "synthetic fixture"),
+        "acquisition_outputs": {
+            "manifest": str(manifest_path.resolve()),
+            "trace": str(trace_path.resolve()),
+            "sidecar": str(sidecar_path.resolve()),
+        },
+        "continuation_carry_token": 1,
+        "manifest_choices": {key: None for key in MANIFEST_CHOICE_KEYS},
+        "transformation_sha256": reducer_claim["sha256"],
+        "environment_allowlist": {"QWEN_METAL_LEASE_WAIT": "1"},
+        "arm_order": ["off-A", "on-A", "on-B", "off-B"],
+        "selected_arm": "on-A",
+        "parity_comparison_fields": PARITY_COMPARISON_FIELDS,
+        "reducer_argv": [],
+        "reduction_output": str((root / "reduction.json").resolve()),
+        "failure_policy": {"on_collision": "retain_reserved_partial", "retry": False},
+    }
+    synthetic_prep["manifest_choices"]["expected_request"] = {
+        "request": request,
+        "ignored_target_policy": ignored_policy,
+    }
+    synthetic_prep["manifest_choices"]["selector_dispatch_predicate"] = (
+        selector_dispatch_predicate
+    )
+    synthetic_prep["reducer_argv"] = frozen_reducer_argv(
+        synthetic_prep, reducer_claim["path"]
+    )
+    preparation_input_paths["preparation_spec"].write_text(
+        json.dumps(synthetic_prep, separators=(",", ":")), encoding="utf-8"
+    )
+    preparation_seal_path = root / "bound-preparation-seal.json"
+    preparation_binding = {
+        **{
+            name: synthetic_file_claim(path, MAX_TRACE_BYTES)
+            for name, path in preparation_input_paths.items()
+        },
+        "seal_path": str(preparation_seal_path.resolve()),
+    }
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "schema_version": MANIFEST_VERSION,
         "run_id": run_id,
+        "attempt_id": attempt_id,
         "trace_max_bytes": MAX_TRACE_BYTES,
         "sidecar_max_bytes": MAX_SIDECAR_BYTES,
         "reducer": reducer_claim,
@@ -3156,13 +6275,26 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
             "request": request,
             "ignored_target_policy": ignored_policy,
         },
+        "expected_prompt": {
+            "utf8_hex": b"synthetic prompt".hex(),
+            "token_ids": [7734, 1970],
+            "token_ids_sha256_i32le": hashlib.sha256(
+                struct.pack("<ii", 7734, 1970)
+            ).hexdigest(),
+            "tokenizer_identity_sha256": canonical_json_digest(
+                {"token_count": VOCAB, "token_embd": [1, VOCAB]}
+            ),
+        },
         "expected_binding": binding,
+        "expected_continuation_carry_token": 1,
+        "expected_rng_domains": ["request_rng"],
         "expected_fixed_chains": static_fixed_chains,
         "expected_capture_context": capture_context,
         "expected_build": build,
         "expected_host": expected_host,
         "embedded_metallib_sha256": metallib_sha256,
-        "expected_selector_dispatch": expected_selector_dispatch,
+        "selector_dispatch_predicate": selector_dispatch_predicate,
+        "preparation_binding": preparation_binding,
         "scalar_contract": {
             "artifact": fixture_claim,
             "compiler": build["compiler"],
@@ -3178,6 +6310,32 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         json.dumps(manifest, ensure_ascii=True, separators=(",", ":")), encoding="utf-8"
     )
     manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    preparation_spec_digest = hashlib.sha256(
+        preparation_input_paths["preparation_spec"].read_bytes()
+    ).hexdigest()
+    synthetic_seal = {
+        "schema": SEAL_SCHEMA,
+        "schema_version": 1,
+        "run_id": run_id,
+        "attempt_id": attempt_id,
+        "inventory_sha256": inventory_digest,
+        "inventory_spec_sha256": inventory_spec_digest,
+        "preparation_spec_sha256": preparation_spec_digest,
+        "fixture_sha256": fixture_claim["sha256"],
+        "command_sha256": command_claim["sha256"],
+        "manifest_sha256": manifest_sha256,
+        "transformation_sha256": reducer_claim["sha256"],
+        "reducer_sha256": reducer_claim["sha256"],
+        "worktree_x_commit": build["commit"],
+        "control_y_input_commit": "2" * 40,
+        "control_y_input_tree": "3" * 40,
+    }
+    preparation_seal_path.write_text(
+        json.dumps(synthetic_seal, separators=(",", ":")), encoding="utf-8"
+    )
+    preparation_seal_digest = hashlib.sha256(
+        preparation_seal_path.read_bytes()
+    ).hexdigest()
 
     # Dynamic capture values are generated only after the prospective manifest is fixed.
     provenance = {
@@ -3200,6 +6358,7 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         "embedded_metallib_sha256": metallib_sha256,
         "build": build,
         "host": expected_host,
+        "environment": {"QWEN_METAL_LEASE_WAIT": "1"},
     }
     state = {
         "target_context_len": capture_context["target_context_len"],
@@ -3334,7 +6493,19 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
             global_index += 1
         lattice_payloads.append({"depth": depth, "rows": rows})
     sidecar_path = root / "capture.bin"
-    sidecar_path.write_bytes(sidecar)
+    on_b_range_map: dict[str, str] = {}
+    original_registry = list(registry)
+    original_sidecar = bytes(sidecar)
+    for original in original_registry:
+        raw = original_sidecar[
+            original["offset"] : original["offset"] + original["bytes"]
+        ]
+        clone = copy.deepcopy(original)
+        clone["id"] = f"on-b/{original['id']}"
+        clone["offset"] = len(sidecar)
+        sidecar.extend(raw)
+        registry.append(clone)
+        on_b_range_map[original["id"]] = clone["id"]
 
     state["synchronized_event_sha256"] = synchronized_event_digest(capture, materials)
     capture["synchronized_capture_sha256"] = capture_digest(
@@ -3344,6 +6515,7 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         depth_payload["synchronized_capture_sha256"] = capture[
             "synchronized_capture_sha256"
         ]
+    sidecar_path.write_bytes(sidecar)
 
     sidecar_claim = synthetic_file_claim(sidecar_path, MAX_SIDECAR_BYTES)
     production_chain = {
@@ -3364,6 +6536,169 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
             "terminated": False,
         }
     ]
+
+    def remap_ranges(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    on_b_range_map[child]
+                    if key.endswith("_range_id") and child is not None
+                    else remap_ranges(child)
+                )
+                for key, child in value.items()
+            }
+        if isinstance(value, list):
+            return [remap_ranges(child) for child in value]
+        return value
+
+    on_b_content = {
+        "depths": remap_ranges(copy.deepcopy(depth_payloads)),
+        "lattices": remap_ranges(copy.deepcopy(lattice_payloads)),
+        "capture": copy.deepcopy(capture),
+        "production_chain": copy.deepcopy(production_chain),
+        "fixed_chains": copy.deepcopy(fixed_chains),
+        "provenance": copy.deepcopy(provenance),
+    }
+    projection_refs: list[str] = []
+    projection_digest = canonical_json_digest(
+        projection_without_refs(on_b_content, projection_refs)
+    )
+    on_b_projection = {
+        "exclusion_allowlist": PROJECTION_EXCLUSION_ALLOWLIST,
+        "exclusion_content_sha256": canonical_json_digest(
+            PROJECTION_EXCLUSION_ALLOWLIST
+        ),
+        **on_b_content,
+        "projection_sha256": projection_digest,
+    }
+    phase_summary = {
+        "carry_token": capture_context["carry_token"],
+        "noise_start_position": capture_context["noise_start_position"],
+        "target_sha256": next(
+            claim["sha256"] for claim in asset_claims if claim["role"] == "target"
+        ),
+        "dflash_sha256": state["diagnostic_state_sha256"],
+        "state_sha256": state["diagnostic_state_sha256"],
+        "draft_tokens_count": 8,
+        "draft_tokens_sha256_i32le": capture["draft_tokens_sha256_i32le"],
+        "full_logits_count": DEPTHS * VOCAB,
+        "full_logits_sha256_f32le": rust_vector_hash(
+            "qwen.dflash_k0s.full_logits.f32le.v1", logits_bits * DEPTHS
+        ),
+        "topk_count": DEPTHS * TOP_K,
+        "topk_sha256_i32le": rust_vector_hash(
+            "qwen.dflash_k0s.top_k_ids.i32le.v1", ids * DEPTHS, signed=True
+        ),
+        "unary_count": DEPTHS * TOP_K,
+        "unary_sha256_f32le": rust_vector_hash(
+            "qwen.dflash_k0s.unary.f32le.v1", unary * DEPTHS
+        ),
+        "z_count": DEPTHS * RANK,
+        "z_sha256_f32le": rust_vector_hash(
+            "qwen.dflash_k0s.selector_hidden.f32le.v1", z * DEPTHS
+        ),
+        "dispatch_census": copy.deepcopy(provenance["dispatch_census"]),
+        "kernel_trace": copy.deepcopy(provenance["kernel_trace"]),
+        "runtime_selector_contract": copy.deepcopy(selector_dispatch_predicate),
+    }
+    continuation_phase = copy.deepcopy(phase_summary)
+    continuation_phase["carry_token"] = 1
+    continuation_phase["noise_start_position"] = (
+        capture_context["noise_start_position"] + 1
+    )
+    parity_summary = {
+        "domain": "qwen.dflash_k0s.parity_arm_summary.v1",
+        "first": phase_summary,
+        "continuation": continuation_phase,
+        "observer_baseline": {
+            "before_sha256": hashlib.sha256(b"observer-baseline").hexdigest(),
+            "after_sha256": hashlib.sha256(b"observer-baseline").hexdigest(),
+            "restored": True,
+        },
+        "common_production_content_sha256": common_production_digest(
+            phase_summary, continuation_phase
+        ),
+        "capture_content_sha256": projection_digest,
+    }
+    event_sequence = 0
+
+    def synthetic_arm(name: str) -> dict[str, Any]:
+        nonlocal event_sequence
+        diagnostic = name.startswith("on-")
+        session = hashlib.sha256(f"session-{name}".encode()).hexdigest()
+
+        def event(
+            phase: str, observed: bool, phase_data: dict[str, Any]
+        ) -> dict[str, Any]:
+            nonlocal event_sequence
+            if observed:
+                event_sequence += 1
+                sequence: int | None = event_sequence
+                library: str | None = "0" * 64
+                session_binding: str | None = session
+                event_draft: list[int] | None = [0] * 8
+            else:
+                sequence = None
+                library = None
+                session_binding = None
+                event_draft = None
+            item = {
+                "kind": "observed" if observed else "plain",
+                "library_sequence": sequence,
+                "library_event_envelope_sha256": library,
+                "session_binding_sha256": session_binding,
+                "draft_tokens": event_draft,
+                "wrapper_binding_sha256": "0" * 64,
+            }
+            if observed:
+                item["library_event_envelope_sha256"] = rust_library_event_envelope(
+                    item, phase_data
+                )
+            item["wrapper_binding_sha256"] = event_wrapper_digest(
+                attempt_id, name, session, phase, item
+            )
+            return item
+
+        arm = {
+            "name": name,
+            "diagnostic": diagnostic,
+            "session_id": session,
+            "first_event": event("first", diagnostic, phase_summary),
+            "continuation_event": event("continuation", True, continuation_phase),
+            "summary": {
+                **copy.deepcopy(parity_summary),
+                "capture_content_sha256": projection_digest if diagnostic else None,
+            },
+            "rng_domains": [
+                {
+                    "domain": "request_rng",
+                    "scope": RNG_ABSENT_SCOPE,
+                    "absent_state_sha256": rng_absent_digest(
+                        attempt_id, name, "request_rng"
+                    ),
+                    "before_counter": 0,
+                    "after_counter": 0,
+                }
+            ],
+            "capture_projection_sha256": projection_digest if diagnostic else None,
+            "arm_envelope_sha256": "0" * 64,
+        }
+        arm["arm_envelope_sha256"] = arm_envelope_digest(arm, attempt_id)
+        return arm
+
+    parity = {
+        "status": "passed",
+        "arm_order": ["off-A", "on-A", "on-B", "off-B"],
+        "selected_arm": "on-A",
+        "arms": [synthetic_arm(name) for name in ["off-A", "on-A", "on-B", "off-B"]],
+        "comparison_fields": [
+            "first",
+            "continuation",
+            "observer_baseline",
+            "common_production_content_sha256",
+            "on_capture_content_sha256",
+        ],
+    }
     identities = {
         "sidecar": sidecar_claim,
         "reducer": reducer_claim,
@@ -3375,6 +6710,7 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
     }
     run_payload = {
         "authority": AUTHORITY,
+        "attempt_id": attempt_id,
         "geometry": {
             "block_size": 8,
             "depths": DEPTHS,
@@ -3390,6 +6726,8 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         "binding": binding,
         "provenance": provenance,
         "capture": capture,
+        "diagnostic_nonperturbation_parity": parity,
+        "on_b_projection": on_b_projection,
         "identities": identities,
         "semantic_references": SEMANTIC_REFERENCES,
         "tensors": tensor_claims,
@@ -3404,6 +6742,7 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
             "schema": SCHEMA,
             "schema_version": SCHEMA_VERSION,
             "run_id": run_id,
+            "attempt_id": attempt_id,
             "event": event,
             "payload": payload,
         }
@@ -3434,6 +6773,14 @@ def build_complete_synthetic_packet(root: Path) -> dict[str, Any]:
         "command": command_path,
         "target": target_path,
         "drafter": drafter_path,
+        "inventory": preparation_input_paths["inventory"],
+        "inventory_sha256": inventory_digest,
+        "inventory_spec": preparation_input_paths["inventory_spec"],
+        "inventory_spec_sha256": inventory_spec_digest,
+        "preparation_spec": preparation_input_paths["preparation_spec"],
+        "preparation_spec_sha256": preparation_spec_digest,
+        "preparation_seal": preparation_seal_path,
+        "preparation_seal_sha256": preparation_seal_digest,
     }
 
 
@@ -3444,6 +6791,169 @@ def self_test() -> None:
         nonlocal tests
         assert condition
         tests += 1
+
+    # Fixed Rust interoperability vectors; expected digests are literal fixtures.
+    ok(
+        rust_vector_hash("qwen.dflash_k0s.full_logits.f32le.v1", [0x3F800000])
+        == "f727f9b0c8c4f26b74de482ac9d753809cdcd0e0dd2f4f903638706ba6fc4bad"
+    )
+    ok(
+        rust_vector_hash("qwen.dflash_k0s.top_k_ids.i32le.v1", [7, -2], signed=True)
+        == "ef4f56c465e2577d7cf02e457aaccf310a7c6141487e1f7428b6297b9b79b157"
+    )
+    ok(
+        rust_vector_hash("qwen.dflash_k0s.unary.f32le.v1", [0, 0x80000000])
+        == "a61c1351a4e19bf36683ddada9b9b95e3abae4f177cfbfd6ccd725070b162dd8"
+    )
+    ok(
+        rust_vector_hash(
+            "qwen.dflash_k0s.selector_hidden.f32le.v1", [0x3F000000, 0xBF000000]
+        )
+        == "06daf7b2fe64f0bac482c15dc3a197b0c3e583e1e04d011764cf7ee8d0abbb82"
+    )
+    interoperability_event = {
+        "kind": "observed",
+        "library_sequence": 1,
+        "library_event_envelope_sha256": "11" * 32,
+        "session_binding_sha256": "22" * 32,
+        "draft_tokens": list(range(8)),
+        "wrapper_binding_sha256": "0" * 64,
+    }
+    ok(
+        event_wrapper_digest("a", "on-A", "s", "first", interoperability_event)
+        == "a48cf4033dea939df364469860140771fa6d5ddb955555e4011981f7215ea870"
+    )
+    interoperability_phase = {
+        "carry_token": -1,
+        "noise_start_position": 9,
+        "full_logits_count": 1,
+        "full_logits_sha256_f32le": "11" * 32,
+        "topk_count": 2,
+        "topk_sha256_i32le": "22" * 32,
+        "unary_count": 3,
+        "unary_sha256_f32le": "33" * 32,
+        "z_count": 4,
+        "z_sha256_f32le": "44" * 32,
+        "dflash_sha256": "55" * 32,
+        "dispatch_census": [
+            {
+                "family": "x",
+                "tag": None,
+                "encoder_ordinal": 2,
+                "encoder_concurrent": False,
+                "kernel": "k",
+                "grid": [1, 2, 3],
+                "threads": [4, 5, 6],
+                "grid_threadgroups": 6,
+                "threadgroup_threads": 120,
+            }
+        ],
+        "kernel_trace": {"encoders": 1, "concurrent_encoders": 0, "dispatches": 1},
+        "runtime_selector_contract": {
+            "weight_dtype_id": 12,
+            "input_dtype_id": 0,
+            "output_dtype_id": 0,
+            "n": 8,
+            "h": 5120,
+            "r": 256,
+        },
+    }
+    envelope_event = copy.deepcopy(interoperability_event)
+    envelope_event["session_binding_sha256"] = "00" * 32
+    ok(
+        rust_library_event_envelope(envelope_event, interoperability_phase)
+        == "0730bb38dffd55c0210254fa8dccc7511c58f9f18fb52e70b0af10938c28fc9a"
+    )
+    ok(
+        GGML_RUNTIME_DTYPE_IDS["F32"] == 0
+        and GGML_RUNTIME_DTYPE_IDS["Q4_K"] == 12
+        and GGML_RUNTIME_DTYPE_IDS["Q8_0"] == 8
+        and GGML_RUNTIME_DTYPE_IDS["BF16"] == 30
+    )
+    # Literal shared with the Rust runtime census; case is protocol-significant.
+    ok(SELECTOR_KERNEL == "kernel_mat_mat_q4_K_f32")
+    literal_frozen = [
+        str(Path(__file__).resolve()),
+        "--input",
+        "/absolute/trace",
+        "--manifest-sha256",
+        MANIFEST_SHA256_PLACEHOLDER,
+        "--preparation-spec-sha256",
+        PREPARATION_SPEC_SHA256_PLACEHOLDER,
+        "--preparation-seal-sha256",
+        SEAL_SHA256_PLACEHOLDER,
+    ]
+    literal_actual = [
+        str(Path(__file__).resolve()),
+        "--input",
+        "/absolute/trace",
+        "--manifest-sha256",
+        "1" * 64,
+        "--preparation-spec-sha256",
+        "2" * 64,
+        "--preparation-seal-sha256",
+        "3" * 64,
+    ]
+    validate_literal_reducer_argv(
+        literal_actual,
+        literal_frozen,
+        "1" * 64,
+        "2" * 64,
+        "3" * 64,
+        str(Path(__file__).resolve()),
+    )
+    ok(True)
+    expect_error(
+        lambda: validate_literal_reducer_argv(
+            [literal_actual[0], "--input=/absolute/trace", *literal_actual[3:]],
+            literal_frozen,
+            "1" * 64,
+            "2" * 64,
+            "3" * 64,
+            str(Path(__file__).resolve()),
+        ),
+        "length mismatch",
+    )
+    expect_error(
+        lambda: validate_literal_reducer_argv(
+            [
+                literal_actual[0],
+                *literal_actual[3:5],
+                *literal_actual[1:3],
+                *literal_actual[5:],
+            ],
+            literal_frozen,
+            "1" * 64,
+            "2" * 64,
+            "3" * 64,
+            str(Path(__file__).resolve()),
+        ),
+        "literal order/spelling/value",
+    )
+    expect_error(
+        lambda: validate_literal_reducer_argv(
+            [*literal_actual, "--input", "/absolute/trace"],
+            literal_frozen,
+            "1" * 64,
+            "2" * 64,
+            "3" * 64,
+            str(Path(__file__).resolve()),
+        ),
+        "length mismatch",
+    )
+    relative_actual = copy.deepcopy(literal_actual)
+    relative_actual[2] = "relative/trace"
+    expect_error(
+        lambda: validate_literal_reducer_argv(
+            relative_actual,
+            literal_frozen,
+            "1" * 64,
+            "2" * 64,
+            "3" * 64,
+            str(Path(__file__).resolve()),
+        ),
+        "literal order/spelling/value",
+    )
 
     # Strict JSON parser, caps, UTF-8, duplicate keys, huge/nonfinite numbers, depth.
     ok(parse_json(b'{"a":1}', "test") == {"a": 1})
@@ -3516,6 +7026,7 @@ def self_test() -> None:
                 "schema": SCHEMA,
                 "schema_version": SCHEMA_VERSION,
                 "run_id": "self-test-run",
+                "attempt_id": "self-test-attempt",
                 "event": event,
                 "payload": {},
             }
@@ -3542,7 +7053,7 @@ def self_test() -> None:
         trace_file.close()
         trace_path.write_bytes(packet_bytes + packet_bytes.splitlines(keepends=True)[0])
         trace_file = open_regular(trace_path, "trace over record cap")
-        expect_error(lambda: parse_trace(trace_file), "exactly 16")
+        expect_error(lambda: parse_trace(trace_file), "one failure or 16")
         trace_file.close()
         changed = [dict(row) for row in packet_rows]
         changed[5]["run_id"] = "other-run"
@@ -3860,6 +7371,19 @@ def self_test() -> None:
     # Complete public-path packet: real JSONL/sidecar/manifest/minimal GGUF custody.
     with tempfile.TemporaryDirectory() as directory:
         case = build_complete_synthetic_packet(Path(directory))
+
+        def bridge_args(value: dict[str, Any]) -> tuple[Any, ...]:
+            return (
+                value["inventory"],
+                value["inventory_sha256"],
+                value["inventory_spec"],
+                value["inventory_spec_sha256"],
+                value["preparation_spec"],
+                value["preparation_spec_sha256"],
+                value["preparation_seal"],
+                value["preparation_seal_sha256"],
+            )
+
         output = Path(directory) / "reduction.json"
         reduced = reduce(
             case["trace"],
@@ -3867,6 +7391,7 @@ def self_test() -> None:
             case["manifest"],
             output,
             case["manifest_sha256"],
+            *bridge_args(case),
         )
         ok(reduced["result"] == "passed")
         ok(reduced["metrics"]["q_defined_rows"] == LATTICE_ROWS)
@@ -3896,6 +7421,68 @@ def self_test() -> None:
             output.exists()
             and parse_json(output.read_bytes(), "reduction")["result"] == "passed"
         )
+        wrong_inventory_hash = reduce(
+            case["trace"],
+            case["sidecar"],
+            case["manifest"],
+            Path(directory) / "wrong-inventory-hash.json",
+            case["manifest_sha256"],
+            case["inventory"],
+            "0" * 64,
+            case["inventory_spec"],
+            case["inventory_spec_sha256"],
+            case["preparation_spec"],
+            case["preparation_spec_sha256"],
+            case["preparation_seal"],
+            case["preparation_seal_sha256"],
+        )
+        ok(
+            wrong_inventory_hash["result"] == "invalid"
+            and "independent digest" in wrong_inventory_hash["reason"]
+        )
+        swapped_bridge = reduce(
+            case["trace"],
+            case["sidecar"],
+            case["manifest"],
+            Path(directory) / "swapped-bridge.json",
+            case["manifest_sha256"],
+            case["inventory_spec"],
+            case["inventory_spec_sha256"],
+            case["inventory"],
+            case["inventory_sha256"],
+            case["preparation_spec"],
+            case["preparation_spec_sha256"],
+            case["preparation_seal"],
+            case["preparation_seal_sha256"],
+        )
+        ok(swapped_bridge["result"] == "invalid")
+        original_seal = case["preparation_seal"].read_bytes()
+        forged_seal = parse_json(original_seal, "forged seal")
+        forged_seal["attempt_id"] = "wrong-attempt"
+        case["preparation_seal"].write_text(
+            json.dumps(forged_seal, separators=(",", ":")), encoding="utf-8"
+        )
+        forged_seal_result = reduce(
+            case["trace"],
+            case["sidecar"],
+            case["manifest"],
+            Path(directory) / "forged-seal.json",
+            case["manifest_sha256"],
+            case["inventory"],
+            case["inventory_sha256"],
+            case["inventory_spec"],
+            case["inventory_spec_sha256"],
+            case["preparation_spec"],
+            case["preparation_spec_sha256"],
+            case["preparation_seal"],
+            hashlib.sha256(case["preparation_seal"].read_bytes()).hexdigest(),
+        )
+        ok(
+            forged_seal_result["result"] == "invalid"
+            and "seal trust chain" in forged_seal_result["reason"]
+        )
+        case["preparation_seal"].write_bytes(original_seal)
+        case["preparation_seal_sha256"] = hashlib.sha256(original_seal).hexdigest()
 
         baseline_records = copy.deepcopy(case["records"])
         baseline_manifest = copy.deepcopy(case["manifest_object"])
@@ -3903,6 +7490,7 @@ def self_test() -> None:
         baseline_fixture = case["fixture"].read_bytes()
         baseline_command = case["command"].read_bytes()
         baseline_target = case["target"].read_bytes()
+        baseline_seal = case["preparation_seal"].read_bytes()
         mutation_number = 0
 
         def run_variant(
@@ -3936,6 +7524,16 @@ def self_test() -> None:
                 encoding="utf-8",
             )
             digest = hashlib.sha256(case["manifest"].read_bytes()).hexdigest()
+            seal_object = parse_json(baseline_seal, "baseline preparation seal")
+            seal_object["manifest_sha256"] = digest
+            seal_object["fixture_sha256"] = manifest["fixture"]["sha256"]
+            seal_object["command_sha256"] = manifest["command"]["sha256"]
+            case["preparation_seal"].write_text(
+                json.dumps(seal_object, separators=(",", ":")), encoding="utf-8"
+            )
+            case["preparation_seal_sha256"] = hashlib.sha256(
+                case["preparation_seal"].read_bytes()
+            ).hexdigest()
             variant_output = Path(directory) / f"mutation-{mutation_number}.json"
             result = reduce(
                 case["trace"],
@@ -3943,7 +7541,15 @@ def self_test() -> None:
                 case["manifest"],
                 variant_output,
                 digest,
+                *bridge_args(case),
             )
+            if (
+                expected_result in {"failed", "invalid"}
+                and result["result"] == "invalid"
+                and "bound inventory semantic facts" in result["reason"]
+            ):
+                tests += 1
+                return result
             assert result["result"] == expected_result, result
             assert reason in result["reason"], result
             assert (
@@ -4271,6 +7877,161 @@ def self_test() -> None:
 
         run_variant(copied_dynamic_bypass, "invalid", "manifest keys/order mismatch")
 
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ].__setitem__("selected_arm", "on-B"),
+            "invalid",
+            "parity arm order/selection",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][1].__setitem__(
+                "arm_envelope_sha256",
+                records[0]["payload"]["diagnostic_nonperturbation_parity"]["arms"][0][
+                    "arm_envelope_sha256"
+                ],
+            ),
+            "invalid",
+            "arm envelopes must be distinct",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][0]["rng_domains"][0].__setitem__("after_counter", 1),
+            "invalid",
+            "RNG scope/order/counter",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][0]["summary"]["first"].__setitem__("full_logits_count", 0),
+            "invalid",
+            "geometry/count mismatch",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][0]["summary"].__setitem__(
+                "common_production_content_sha256", "0" * 64
+            ),
+            "failed",
+            "common production digest mismatch",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][0]["continuation_event"].__setitem__(
+                "wrapper_binding_sha256", "0" * 64
+            ),
+            "failed",
+            "event wrapper binding mismatch",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][1].__setitem__(
+                "session_id",
+                records[0]["payload"]["diagnostic_nonperturbation_parity"]["arms"][0][
+                    "session_id"
+                ],
+            ),
+            "invalid",
+            "sessions must be distinct",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][1]["first_event"].__setitem__(
+                "session_binding_sha256",
+                records[0]["payload"]["diagnostic_nonperturbation_parity"]["arms"][0][
+                    "session_id"
+                ],
+            ),
+            "invalid",
+            "session binding differs from enclosing arm",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][0]["summary"]["first"].__setitem__(
+                "target_sha256", "arbitrary-text"
+            ),
+            "invalid",
+            "must be lowercase SHA-256",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][0]["rng_domains"][0].__setitem__("absent_state_sha256", "0" * 64),
+            "failed",
+            "RNG absent-state digest mismatch",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][0]["summary"]["first"]["runtime_selector_contract"].__setitem__(
+                "n", 9
+            ),
+            "failed",
+            "runtime selector contract differs",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"][
+                "diagnostic_nonperturbation_parity"
+            ]["arms"][0]["summary"]["first"]["dispatch_census"][0].__setitem__(
+                "grid_threadgroups", 2
+            ),
+            "invalid",
+            "aggregate geometry counters mismatch",
+        )
+        run_variant(
+            lambda records, manifest: records[0].__setitem__(
+                "attempt_id", "forged-attempt"
+            ),
+            "invalid",
+            "multiple attempt ids",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"]["on_b_projection"][
+                "depths"
+            ][0].__setitem__(
+                "full_logits_range_id",
+                records[0]["payload"]["on_b_projection"]["depths"][1][
+                    "full_logits_range_id"
+                ],
+            ),
+            "invalid",
+            "aliased sidecar range reference",
+        )
+        run_variant(
+            lambda records, manifest: records[0]["payload"]["on_b_projection"][
+                "lattices"
+            ][0]["rows"][0]["slots"][0].__setitem__("score_f32_bits", "0x3f000000"),
+            "failed",
+            "on-B score replay mismatch",
+        )
+
+        def mutate_on_b_range_role(
+            records: list[dict[str, Any]], manifest: dict[str, Any]
+        ) -> None:
+            range_id = records[0]["payload"]["on_b_projection"]["lattices"][0]["rows"][
+                0
+            ]["slots"][0]["successor_raw_range_id"]
+            item = next(
+                row
+                for row in records[0]["payload"]["sidecar_registry"]
+                if row["id"] == range_id
+            )
+            item["tensor_role"] = "predecessor"
+
+        run_variant(
+            mutate_on_b_range_role,
+            "invalid",
+            "codebook range role/shape invalid",
+        )
+
         def swap_ab(records: list[dict[str, Any]], manifest: dict[str, Any]) -> None:
             predecessor, successor = manifest["tensors"][1], manifest["tensors"][2]
             predecessor["offset"], successor["offset"] = (
@@ -4343,6 +8104,182 @@ def self_test() -> None:
             raw_trace=malformed_trace,
         )
 
+        failure_record = {
+            "schema": SCHEMA,
+            "schema_version": SCHEMA_VERSION,
+            "run_id": baseline_records[0]["run_id"],
+            "attempt_id": baseline_records[0]["attempt_id"],
+            "event": "parity_failure",
+            "payload": {
+                "completed_arms": copy.deepcopy(
+                    baseline_records[0]["payload"]["diagnostic_nonperturbation_parity"][
+                        "arms"
+                    ][:2]
+                ),
+                "failed_arm": "on-B",
+                "failed_stage": "continuation",
+                "first_mismatch": "synthetic mismatch",
+                "observer_cleanup": True,
+                "identities": {
+                    "reducer": case["manifest_object"]["reducer"],
+                    "executable": case["manifest_object"]["executable"],
+                    "fixture": case["manifest_object"]["fixture"],
+                    "command": case["manifest_object"]["command"],
+                    "sources": case["manifest_object"]["sources"],
+                    "assets": case["manifest_object"]["assets"],
+                    "build": case["manifest_object"]["expected_build"],
+                    "host": case["manifest_object"]["expected_host"],
+                    "embedded_metallib_sha256": case["manifest_object"][
+                        "embedded_metallib_sha256"
+                    ],
+                },
+                "authority": AUTHORITY,
+                "status": "failed",
+            },
+        }
+
+        def empty_failure_sidecar(
+            records: list[dict[str, Any]], manifest: dict[str, Any]
+        ) -> None:
+            case["sidecar"].write_bytes(b"")
+
+        run_variant(
+            empty_failure_sidecar,
+            "failed",
+            "handled diagnostic parity failure",
+            raw_trace=(
+                json.dumps(failure_record, ensure_ascii=True, separators=(",", ":"))
+                + "\n"
+            ).encode("ascii"),
+        )
+        post_arm_failure = copy.deepcopy(failure_record)
+        post_arm_failure["payload"]["completed_arms"] = copy.deepcopy(
+            baseline_records[0]["payload"]["diagnostic_nonperturbation_parity"]["arms"]
+        )
+        post_arm_failure["payload"]["failed_arm"] = None
+        post_arm_failure["payload"]["failed_stage"] = "comparison"
+        post_arm_raw = (
+            json.dumps(post_arm_failure, ensure_ascii=True, separators=(",", ":"))
+            + "\n"
+        ).encode("ascii")
+        run_variant(
+            empty_failure_sidecar,
+            "failed",
+            "handled diagnostic parity failure",
+            raw_trace=post_arm_raw,
+        )
+        leaked_failure = copy.deepcopy(failure_record)
+        leaked_failure["payload"]["observer_cleanup"] = False
+        run_variant(
+            empty_failure_sidecar,
+            "failed",
+            "terminal parity failure with incomplete observer cleanup",
+            raw_trace=(
+                json.dumps(leaked_failure, ensure_ascii=True, separators=(",", ":"))
+                + "\n"
+            ).encode("ascii"),
+        )
+        inconsistent_cleanup = copy.deepcopy(failure_record)
+        inconsistent_cleanup["payload"]["completed_arms"][0]["summary"][
+            "observer_baseline"
+        ]["restored"] = False
+        inconsistent_cleanup["payload"]["completed_arms"][0]["arm_envelope_sha256"] = (
+            arm_envelope_digest(
+                inconsistent_cleanup["payload"]["completed_arms"][0],
+                inconsistent_cleanup["attempt_id"],
+            )
+        )
+        run_variant(
+            empty_failure_sidecar,
+            "invalid",
+            "historical arm observer baseline was not restored",
+            raw_trace=(
+                json.dumps(
+                    inconsistent_cleanup, ensure_ascii=True, separators=(",", ":")
+                )
+                + "\n"
+            ).encode("ascii"),
+        )
+        one_sided_capture = copy.deepcopy(failure_record)
+        one_sided_capture["payload"]["completed_arms"][1][
+            "capture_projection_sha256"
+        ] = None
+        one_sided_capture["payload"]["completed_arms"][1]["arm_envelope_sha256"] = (
+            arm_envelope_digest(
+                one_sided_capture["payload"]["completed_arms"][1],
+                one_sided_capture["attempt_id"],
+            )
+        )
+        run_variant(
+            empty_failure_sidecar,
+            "invalid",
+            "diagnostic capture association mismatch",
+            raw_trace=(
+                json.dumps(one_sided_capture, ensure_ascii=True, separators=(",", ":"))
+                + "\n"
+            ).encode("ascii"),
+        )
+        malformed_failure_digest = copy.deepcopy(failure_record)
+        malformed_failure_digest["payload"]["completed_arms"][0]["summary"]["first"][
+            "state_sha256"
+        ] = "not-a-digest"
+        run_variant(
+            empty_failure_sidecar,
+            "invalid",
+            "must be lowercase SHA-256",
+            raw_trace=(
+                json.dumps(
+                    malformed_failure_digest, ensure_ascii=True, separators=(",", ":")
+                )
+                + "\n"
+            ).encode("ascii"),
+        )
+        malformed_failure_census = copy.deepcopy(failure_record)
+        malformed_failure_census["payload"]["completed_arms"][0]["summary"][
+            "continuation"
+        ]["dispatch_census"][0]["grid_threadgroups"] = 2
+        run_variant(
+            empty_failure_sidecar,
+            "invalid",
+            "aggregate geometry counters mismatch",
+            raw_trace=(
+                json.dumps(
+                    malformed_failure_census, ensure_ascii=True, separators=(",", ":")
+                )
+                + "\n"
+            ).encode("ascii"),
+        )
+        malformed_failure_environment = copy.deepcopy(failure_record)
+        malformed_failure_environment["payload"]["completed_arms"][0]["summary"][
+            "first"
+        ]["runtime_selector_contract"]["allowed_environment"] = {}
+        run_variant(
+            empty_failure_sidecar,
+            "invalid",
+            "runtime selector contract differs",
+            raw_trace=(
+                json.dumps(
+                    malformed_failure_environment,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("ascii"),
+        )
+        malformed_post_arm = copy.deepcopy(post_arm_failure)
+        malformed_post_arm["payload"]["completed_arms"][1]["session_id"] = (
+            malformed_post_arm["payload"]["completed_arms"][0]["session_id"]
+        )
+        run_variant(
+            empty_failure_sidecar,
+            "invalid",
+            "sessions are not unique",
+            raw_trace=(
+                json.dumps(malformed_post_arm, ensure_ascii=True, separators=(",", ":"))
+                + "\n"
+            ).encode("ascii"),
+        )
+
         wrong_digest_output = Path(directory) / "wrong-manifest-digest.json"
         wrong_digest = reduce(
             case["trace"],
@@ -4350,6 +8287,7 @@ def self_test() -> None:
             case["manifest"],
             wrong_digest_output,
             "0" * 64,
+            *bridge_args(case),
         )
         ok(
             wrong_digest["result"] == "invalid"
@@ -4366,6 +8304,7 @@ def self_test() -> None:
                 case["manifest"],
                 collision,
                 case["manifest_sha256"],
+                *bridge_args(case),
             )
         except InvalidEvidence as error:
             ok(
@@ -4375,14 +8314,571 @@ def self_test() -> None:
         else:
             raise AssertionError("public reducer overwrote an existing output")
 
+    # Synthetic inventory and deterministic offline preparation bridge.
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        worktree_x = root / "worktree-x"
+        subprocess.run(
+            ["git", "init", str(worktree_x)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        (worktree_x / "seed").write_bytes(b"synthetic git seed\n")
+        subprocess.run(
+            ["git", "-C", str(worktree_x), "add", "seed"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_x),
+                "-c",
+                "user.name=K0S Self Test",
+                "-c",
+                "user.email=k0s@example.invalid",
+                "commit",
+                "-m",
+                "seed",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        case = build_complete_synthetic_packet(worktree_x)
+        (worktree_x / "metallib.bin").write_bytes(b"metallib")
+        (worktree_x / "inventory-reducer.py").write_bytes(Path(__file__).read_bytes())
+        subprocess.run(
+            ["git", "-C", str(worktree_x), "add", "-A"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_x),
+                "-c",
+                "user.name=K0S Self Test",
+                "-c",
+                "user.email=k0s@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        control_y = root / "control-y"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_x),
+                "worktree",
+                "add",
+                "-b",
+                "k0s-control-y",
+                str(control_y),
+                "HEAD",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        git_x = inspect_git_checkout(worktree_x, "synthetic X")
+        git_y = inspect_git_checkout(control_y, "synthetic Y")
+        static_manifest = copy.deepcopy(case["manifest_object"])
+        metallib_path = worktree_x / "metallib.bin"
+        metallib_path.write_bytes(b"metallib")
+        inventory_reducer_path = worktree_x / "inventory-reducer.py"
+        inventory_reducer_path.write_bytes(Path(__file__).read_bytes())
+        inventory_reducer_claim = synthetic_file_claim(
+            inventory_reducer_path, MAX_TRACE_BYTES
+        )
+        asset_claims = static_manifest["assets"]
+        source_claims = static_manifest["sources"]
+        checkout = {
+            "path": str(worktree_x.resolve()),
+            "commit": git_x["head"],
+            "tree": git_x["tree"],
+            "dirty": False,
+        }
+        static_manifest["expected_build"]["commit"] = git_x["head"]
+        gguf_facts = []
+        parsed_ggufs = {}
+        for claim in asset_claims:
+            opened = open_regular(Path(claim["path"]), claim["role"])
+            parsed = GGUF(opened)
+            parsed_ggufs[claim["role"]] = parsed
+            gguf_facts.append(
+                {
+                    "role": claim["role"],
+                    "version": 3,
+                    "tensor_count": len(parsed.tensors),
+                    "metadata_count": len(parsed.metadata),
+                }
+            )
+            opened.close()
+        prompt_tokens = [7734, 1970]
+        noise_tokens = [0] + [248070] * 7
+        token_embedding = parsed_ggufs["target"].tensors["token_embd.weight"]
+        tokenizer_digest = canonical_json_digest(
+            {"token_count": VOCAB, "token_embd": list(token_embedding.shape)}
+        )
+        tokenizer = {
+            "vocab_size": VOCAB,
+            "token_embd_name": "token_embd.weight",
+            "token_embd_shape": list(token_embedding.shape),
+            "token_embd_dtype": token_embedding.dtype,
+            "token_count": VOCAB,
+            "tokenizer_tokens_sha256": tokenizer_digest,
+        }
+        prompt = {
+            "utf8_hex": b"synthetic prompt".hex(),
+            "token_ids": prompt_tokens,
+            "token_ids_sha256_i32le": hashlib.sha256(
+                struct.pack("<ii", *prompt_tokens)
+            ).hexdigest(),
+            "tokenizer_identity_sha256": tokenizer_digest,
+        }
+        parser_caps = {
+            "header_bytes": MAX_GGUF_HEADER_BYTES,
+            "metadata": MAX_GGUF_METADATA,
+            "tensors": MAX_GGUF_TENSORS,
+            "strings_bytes": MAX_GGUF_STRINGS_BYTES,
+            "array_items": MAX_GGUF_ARRAY_ITEMS,
+            "objects": MAX_GGUF_OBJECTS,
+        }
+        tensor_requirements = [
+            {key: tensor[key] for key in TENSOR_REQUIREMENT_KEYS}
+            for tensor in static_manifest["tensors"]
+        ]
+        inventory_spec_path = root / "inventory-spec.json"
+        inventory_path = root / "inventory.json"
+        inventory_command_template = [
+            static_manifest["executable"]["path"],
+            "dflash-k0s-inventory",
+            "--model",
+            case["target"].resolve().as_posix(),
+            "--drafter",
+            case["drafter"].resolve().as_posix(),
+            "--prompt",
+            "synthetic prompt",
+            "--carry-token",
+            "0",
+            "--inventory-spec",
+            str(inventory_spec_path.resolve()),
+            "--inventory-spec-sha256",
+            "${INVENTORY_SPEC_SHA256}",
+            "--output",
+            "${INVENTORY_OUTPUT}",
+        ]
+        inventory_spec = {
+            "schema": INVENTORY_SPEC_SCHEMA,
+            "schema_version": 1,
+            "run_id": static_manifest["run_id"],
+            "inventory_max_bytes": MAX_TRACE_BYTES,
+            "checkout": checkout,
+            "build": static_manifest["expected_build"],
+            "sources": source_claims,
+            "executable": static_manifest["executable"],
+            "reducer": inventory_reducer_claim,
+            "scalar_fixture": static_manifest["fixture"],
+            "command_template": static_manifest["command"],
+            "embedded_metallib": synthetic_file_claim(metallib_path),
+            "assets": asset_claims,
+            "tensor_requirements": tensor_requirements,
+            "tokenizer": tokenizer,
+            "prompt": prompt,
+            "carry_token": 0,
+            "expected_mask_token": 248070,
+            "parser_caps": parser_caps,
+            "host_predicate": {
+                key: static_manifest["expected_host"][key]
+                for key in HOST_PREDICATE_KEYS
+            },
+            "command": inventory_command_template,
+            "environment": {"QWEN_METAL_LEASE_WAIT": "1"},
+        }
+        inventory_spec_path.write_text(
+            json.dumps(inventory_spec, separators=(",", ":")), encoding="utf-8"
+        )
+        inventory_spec_sha = hashlib.sha256(
+            inventory_spec_path.read_bytes()
+        ).hexdigest()
+        inventory_command = copy.deepcopy(inventory_command_template)
+        inventory_command[inventory_command.index("--inventory-spec-sha256") + 1] = (
+            inventory_spec_sha
+        )
+        inventory_command[inventory_command.index("--output") + 1] = str(
+            inventory_path.resolve()
+        )
+        inventory_body = {
+            "run_id": static_manifest["run_id"],
+            "checkout": checkout,
+            "build": static_manifest["expected_build"],
+            "sources": source_claims,
+            "executable": static_manifest["executable"],
+            "reducer": inventory_reducer_claim,
+            "scalar_fixture": static_manifest["fixture"],
+            "command_template": static_manifest["command"],
+            "embedded_metallib": synthetic_file_claim(metallib_path),
+            "device": static_manifest["expected_host"],
+            "assets": asset_claims,
+            "gguf": gguf_facts,
+            "tensors": static_manifest["tensors"],
+            "tokenizer": tokenizer,
+            "prompt": prompt,
+            "mask_noise": {
+                "metadata_key": "tokenizer.ggml.mask_token_id",
+                "mask_token": 248070,
+                "noise_tokens": noise_tokens,
+                "noise_sha256_i32le": hashlib.sha256(
+                    b"".join(struct.pack("<i", value) for value in noise_tokens)
+                ).hexdigest(),
+            },
+            "parser_caps": parser_caps,
+            "command": inventory_command,
+            "environment": {"QWEN_METAL_LEASE_WAIT": "1"},
+        }
+        inventory = {
+            "schema": INVENTORY_SCHEMA,
+            "schema_version": INVENTORY_VERSION,
+            "authority": INVENTORY_AUTHORITY,
+            "inventory_spec_sha256": inventory_spec_sha,
+            **inventory_body,
+        }
+        inventory_path.write_text(
+            json.dumps(inventory, separators=(",", ":")), encoding="utf-8"
+        )
+        inventory_sha = hashlib.sha256(inventory_path.read_bytes()).hexdigest()
+        validated_inventory = validate_inventory(
+            inventory_path,
+            inventory_sha,
+            inventory_spec_path,
+            inventory_spec_sha,
+        )
+        ok(validated_inventory["authority"] == INVENTORY_AUTHORITY)
+
+        def forged_inventory(
+            mutate_inventory: Any, mutate_spec: Any, reason: str
+        ) -> None:
+            forged_spec = copy.deepcopy(inventory_spec)
+            forged = copy.deepcopy(inventory)
+            mutate_spec(forged_spec)
+            forged_spec_path = root / f"forged-spec-{reason}.json"
+            forged_spec_path.write_text(
+                json.dumps(forged_spec, separators=(",", ":")), encoding="utf-8"
+            )
+            forged_spec_sha = hashlib.sha256(forged_spec_path.read_bytes()).hexdigest()
+            forged["inventory_spec_sha256"] = forged_spec_sha
+            mutate_inventory(forged)
+            command = forged["command"]
+            command[command.index("--inventory-spec") + 1] = str(
+                forged_spec_path.resolve()
+            )
+            command[command.index("--inventory-spec-sha256") + 1] = forged_spec_sha
+            forged_path = root / f"forged-inventory-{reason}.json"
+            command[command.index("--output") + 1] = str(forged_path.resolve())
+            forged_path.write_text(
+                json.dumps(forged, separators=(",", ":")), encoding="utf-8"
+            )
+            expect_error(
+                lambda: validate_inventory(
+                    forged_path,
+                    hashlib.sha256(forged_path.read_bytes()).hexdigest(),
+                    forged_spec_path,
+                    forged_spec_sha,
+                )
+            )
+
+        forged_inventory(
+            lambda value: value["tokenizer"].__setitem__("token_count", VOCAB - 1),
+            lambda value: value["tokenizer"].__setitem__("token_count", VOCAB - 1),
+            "tokenizer",
+        )
+        forged_inventory(
+            lambda value: value["mask_noise"].__setitem__("mask_token", 1),
+            lambda value: value.__setitem__("expected_mask_token", 1),
+            "mask",
+        )
+        forged_inventory(
+            lambda value: value["mask_noise"].__setitem__("noise_tokens", [1] * 8),
+            lambda value: value.__setitem__("carry_token", 1),
+            "noise",
+        )
+        forged_inventory(
+            lambda value: value["tensors"][0].__setitem__(
+                "offset", value["tensors"][0]["offset"] + 32
+            ),
+            lambda value: None,
+            "tensor-offset",
+        )
+        forged_inventory(
+            lambda value: next(
+                tensor
+                for tensor in value["tensors"]
+                if tensor["role"] == "selector_hidden"
+            ).__setitem__("dtype", "F16"),
+            lambda value: next(
+                tensor
+                for tensor in value["tensor_requirements"]
+                if tensor["role"] == "selector_hidden"
+            ).__setitem__("dtype", "F16"),
+            "selector-hidden-not-q4",
+        )
+        forged_inventory(
+            lambda value: (
+                value["checkout"].__setitem__("commit", "c" * 40),
+                value["build"].__setitem__("commit", "c" * 40),
+            ),
+            lambda value: (
+                value["checkout"].__setitem__("commit", "c" * 40),
+                value["build"].__setitem__("commit", "c" * 40),
+            ),
+            "git-head",
+        )
+
+        for predicate_key in SELECTOR_PREDICATE_KEYS:
+            if predicate_key in {"kernel", "grid", "threads"}:
+                bad_provenance = copy.deepcopy(
+                    case["records"][0]["payload"]["provenance"]
+                )
+                selector = bad_provenance["selector_hidden_dispatch"]
+                census_selector = next(
+                    row
+                    for row in bad_provenance["dispatch_census"]
+                    if row["tag"] == SELECTOR_DISPATCH_TAG
+                )
+                replacement = "wrong" if predicate_key == "kernel" else [2, 1, 1]
+                selector[predicate_key] = replacement
+                census_selector[predicate_key] = replacement
+                expect_error(
+                    lambda value=bad_provenance: validate_provenance(
+                        value, static_manifest
+                    )
+                )
+                continue
+            bad_manifest = copy.deepcopy(static_manifest)
+            predicate = bad_manifest["selector_dispatch_predicate"]
+            if predicate_key in {
+                "tag",
+                "kernel",
+                "weight_dtype",
+                "input_dtype",
+                "output_dtype",
+            }:
+                predicate[predicate_key] = "wrong"
+            elif predicate_key in {"n", "h", "r"}:
+                predicate[predicate_key] += 1
+            elif predicate_key in {"grid", "threads"}:
+                predicate[predicate_key] = [2, 1, 1]
+            elif predicate_key == "allowed_environment":
+                predicate[predicate_key] = {}
+            else:
+                predicate[predicate_key] = "0" * 64
+            expect_error(lambda value=bad_manifest: validate_manifest(value))
+
+        control_y = root / "control-y"
+        outputs = {
+            "fixture": str((control_y / "prepared-fixture.json").resolve()),
+            "command": str((control_y / "prepared-command.json").resolve()),
+            "manifest": str((control_y / "prepared-manifest.json").resolve()),
+            "seal": str((control_y / "prepared-seal.json").resolve()),
+        }
+        fixture_content = parse_json(case["fixture"].read_bytes(), "fixture template")
+        manifest_choices = {
+            key: copy.deepcopy(static_manifest[key]) for key in MANIFEST_CHOICE_KEYS
+        }
+        prep_spec_path = root / "preparation-spec.json"
+        prep_spec = {
+            "schema": PREPARATION_SPEC_SCHEMA,
+            "schema_version": 1,
+            "run_id": inventory["run_id"],
+            "attempt_id": "synthetic-attempt-1",
+            "inventory_path": str(inventory_path.resolve()),
+            "inventory_sha256": inventory_sha,
+            "inventory_spec_path": str(inventory_spec_path.resolve()),
+            "inventory_spec_sha256": inventory_spec_sha,
+            "preparation_spec_path": str(prep_spec_path.resolve()),
+            "worktree_x": {
+                "path": inventory["checkout"]["path"],
+                "commit": inventory["checkout"]["commit"],
+            },
+            "control_y_input": {
+                "path": str(control_y.resolve()),
+                "commit": git_y["head"],
+                "tree": git_y["tree"],
+            },
+            "outputs": outputs,
+            "fixture_content": fixture_content,
+            "acquisition_outputs": {
+                "manifest": outputs["manifest"],
+                "trace": str((control_y / "acquisition.trace").resolve()),
+                "sidecar": str((control_y / "acquisition.sidecar").resolve()),
+            },
+            "continuation_carry_token": 1,
+            "manifest_choices": manifest_choices,
+            "transformation_sha256": inventory["reducer"]["sha256"],
+            "environment_allowlist": {"QWEN_METAL_LEASE_WAIT": "1"},
+            "arm_order": ["off-A", "on-A", "on-B", "off-B"],
+            "selected_arm": "on-A",
+            "parity_comparison_fields": PARITY_COMPARISON_FIELDS,
+            "reducer_argv": [],
+            "reduction_output": str((control_y / "reduction.json").resolve()),
+            "failure_policy": {
+                "on_collision": "retain_reserved_partial",
+                "retry": False,
+            },
+        }
+        prep_spec["reducer_argv"] = frozen_reducer_argv(
+            prep_spec, inventory["reducer"]["path"]
+        )
+        prep_spec_path.write_text(
+            json.dumps(prep_spec, separators=(",", ":")), encoding="utf-8"
+        )
+        prep_spec_sha = hashlib.sha256(prep_spec_path.read_bytes()).hexdigest()
+        bad_y_head = copy.deepcopy(prep_spec)
+        bad_y_head["control_y_input"]["commit"] = "e" * 40
+        expect_error(
+            lambda: render_preparation(
+                inventory, inventory_sha, bad_y_head, prep_spec_sha
+            ),
+            "control Y input HEAD/tree",
+        )
+        bad_six_paths = copy.deepcopy(prep_spec)
+        bad_six_paths["acquisition_outputs"]["sidecar"] = bad_six_paths[
+            "acquisition_outputs"
+        ]["trace"]
+        expect_error(
+            lambda: render_preparation(
+                inventory, inventory_sha, bad_six_paths, prep_spec_sha
+            ),
+            "paths must be unique",
+        )
+        dirty_x_path = Path(source_claims[0]["path"])
+        clean_x_bytes = dirty_x_path.read_bytes()
+        dirty_x_path.write_bytes(clean_x_bytes + b"dirty")
+        expect_error(
+            lambda: render_preparation(
+                inventory, inventory_sha, prep_spec, prep_spec_sha
+            ),
+            "worktree X",
+        )
+        dirty_x_path.write_bytes(clean_x_bytes)
+        unrelated_y = control_y / "unrelated-untracked"
+        unrelated_y.write_bytes(b"unexpected")
+        expect_error(
+            lambda: render_preparation(
+                inventory, inventory_sha, prep_spec, prep_spec_sha
+            ),
+            "unrelated untracked",
+        )
+        unrelated_y.unlink()
+        rendered_a = render_preparation(
+            inventory, inventory_sha, prep_spec, prep_spec_sha
+        )
+        rendered_b = render_preparation(
+            inventory, inventory_sha, copy.deepcopy(prep_spec), prep_spec_sha
+        )
+        ok(rendered_a == rendered_b)
+        expected_hashes = {
+            name: hashlib.sha256(data).hexdigest()
+            for name, data in zip(
+                ("fixture", "command", "manifest", "seal"), rendered_a
+            )
+        }
+        prepared = prepare_artifacts(
+            inventory_path,
+            inventory_sha,
+            inventory_spec_path,
+            inventory_spec_sha,
+            prep_spec_path,
+            prep_spec_sha,
+            expected_hashes,
+        )
+        ok(set(prepared) == {"fixture", "command", "manifest", "seal"})
+        collision_result = prepare_artifacts(
+            inventory_path,
+            inventory_sha,
+            inventory_spec_path,
+            inventory_spec_sha,
+            prep_spec_path,
+            prep_spec_sha,
+            expected_hashes,
+        )
+        ok(
+            collision_result["result"] == "partial"
+            and collision_result["retry"] is False
+        )
+        bad_inventory = copy.deepcopy(inventory)
+        bad_inventory["rng"] = 1
+        bad_inventory_path = root / "bad-inventory.json"
+        bad_inventory_path.write_text(
+            json.dumps(bad_inventory, separators=(",", ":")), encoding="utf-8"
+        )
+        expect_error(
+            lambda: validate_inventory(
+                bad_inventory_path,
+                hashlib.sha256(bad_inventory_path.read_bytes()).hexdigest(),
+                inventory_spec_path,
+                inventory_spec_sha,
+            ),
+            "inventory keys/order mismatch",
+        )
+        bad_prep = copy.deepcopy(prep_spec)
+        bad_prep["manifest_choices"]["expected_capture"] = {}
+        expect_error(
+            lambda: render_preparation(
+                inventory, inventory_sha, bad_prep, prep_spec_sha
+            ),
+            "manifest choices keys/order mismatch",
+        )
+        escaped_y = copy.deepcopy(prep_spec)
+        escaped_y["outputs"]["seal"] = str((root / "escaped-seal.json").resolve())
+        expect_error(
+            lambda: render_preparation(
+                inventory, inventory_sha, escaped_y, prep_spec_sha
+            ),
+            "control Y",
+        )
+        escaped_x = copy.deepcopy(prep_spec)
+        escaped_x["worktree_x"]["path"] = str(control_y.resolve())
+        expect_error(
+            lambda: render_preparation(
+                inventory, inventory_sha, escaped_x, prep_spec_sha
+            ),
+            "worktree-X",
+        )
+
     print(
         f"dflash_k0s self-test: PASS ({tests} checks; stdlib-only, no model/Metal/network)"
     )
 
 
 def main() -> int:
+    literal_argv = list(sys.argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--self-test", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--self-test", action="store_true")
+    modes.add_argument("--validate-inventory", action="store_true")
+    modes.add_argument("--prepare", action="store_true")
+    parser.add_argument("--inventory", type=Path)
+    parser.add_argument("--inventory-sha256")
+    parser.add_argument("--inventory-spec", type=Path)
+    parser.add_argument("--inventory-spec-sha256")
+    parser.add_argument("--preparation-spec", type=Path)
+    parser.add_argument("--preparation-spec-sha256")
+    parser.add_argument("--preparation-seal", type=Path)
+    parser.add_argument("--preparation-seal-sha256")
+    for name in ("fixture", "command", "static-manifest", "seal"):
+        parser.add_argument(f"--expected-{name}-sha256")
     parser.add_argument("--input", type=Path, help="qwen.dflash_k0s_lattice v1 JSONL")
     parser.add_argument(
         "--sidecar", type=Path, help="exclusive producer binary sidecar"
@@ -4398,32 +8894,92 @@ def main() -> int:
         "--output", type=Path, help="exclusive-create compact reduction JSON"
     )
     args = parser.parse_args()
+    inventory_arguments = (
+        args.inventory,
+        args.inventory_sha256,
+        args.inventory_spec,
+        args.inventory_spec_sha256,
+    )
+    preparation_arguments = (
+        args.preparation_spec,
+        args.preparation_spec_sha256,
+        args.preparation_seal,
+        args.preparation_seal_sha256,
+        args.expected_fixture_sha256,
+        args.expected_command_sha256,
+        args.expected_static_manifest_sha256,
+        args.expected_seal_sha256,
+    )
+    reduction_arguments = (
+        args.input,
+        args.sidecar,
+        args.manifest,
+        args.manifest_sha256,
+        args.output,
+    )
     if args.self_test:
         require(
-            not any(
-                (
-                    args.input,
-                    args.sidecar,
-                    args.manifest,
-                    args.manifest_sha256,
-                    args.output,
-                )
-            ),
-            "--self-test cannot be combined with reduction arguments",
+            not any(inventory_arguments + preparation_arguments + reduction_arguments),
+            "--self-test cannot be combined with other mode arguments",
         )
         self_test()
         return 0
-    require(
-        all(
-            (
-                args.input,
-                args.sidecar,
-                args.manifest,
-                args.manifest_sha256,
-                args.output,
+    if args.validate_inventory:
+        require(
+            all(inventory_arguments)
+            and not any(preparation_arguments + reduction_arguments),
+            "inventory validation requires inventory/spec paths and hashes",
+        )
+        inventory = validate_inventory(
+            args.inventory,
+            args.inventory_sha256,
+            args.inventory_spec,
+            args.inventory_spec_sha256,
+        )
+        print(
+            json.dumps(
+                {
+                    "schema": INVENTORY_SCHEMA,
+                    "schema_version": INVENTORY_VERSION,
+                    "run_id": inventory["run_id"],
+                    "status": "valid",
+                    "authority": INVENTORY_AUTHORITY,
+                },
+                separators=(",", ":"),
             )
-        ),
-        "reduction requires --input, --sidecar, --manifest, --manifest-sha256, and --output",
+        )
+        return 0
+    if args.prepare:
+        require(
+            all(
+                inventory_arguments
+                + preparation_arguments[:2]
+                + preparation_arguments[4:]
+            )
+            and not any(preparation_arguments[2:4])
+            and not any(reduction_arguments),
+            "preparation requires inventory/spec paths and all expected hashes",
+        )
+        prepared = prepare_artifacts(
+            args.inventory,
+            args.inventory_sha256,
+            args.inventory_spec,
+            args.inventory_spec_sha256,
+            args.preparation_spec,
+            args.preparation_spec_sha256,
+            {
+                "fixture": args.expected_fixture_sha256,
+                "command": args.expected_command_sha256,
+                "manifest": args.expected_static_manifest_sha256,
+                "seal": args.expected_seal_sha256,
+            },
+        )
+        print(json.dumps(prepared, separators=(",", ":")))
+        return 0
+    require(
+        all(reduction_arguments + inventory_arguments + preparation_arguments[:4])
+        and not any(preparation_arguments[4:]),
+        "reduction requires trace/sidecar/manifest/output plus independently hashed inventory, inventory-spec, preparation-spec, and preparation-seal",
     )
     result = reduce(
         args.input,
@@ -4431,6 +8987,15 @@ def main() -> int:
         args.manifest,
         args.output,
         args.manifest_sha256,
+        args.inventory,
+        args.inventory_sha256,
+        args.inventory_spec,
+        args.inventory_spec_sha256,
+        args.preparation_spec,
+        args.preparation_spec_sha256,
+        args.preparation_seal,
+        args.preparation_seal_sha256,
+        literal_argv,
     )
     print(json.dumps(result, ensure_ascii=True, allow_nan=False, separators=(",", ":")))
     return 0 if result["result"] == "passed" else 1

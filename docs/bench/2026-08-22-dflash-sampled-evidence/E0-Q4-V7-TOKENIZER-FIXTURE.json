@@ -1,0 +1,55 @@
+{
+  "authority": "development_fixture_preparation_only",
+  "backend_contract": "native_and_llama_cpp_encode_decode_exact",
+  "build_identity": {
+    "build_commit": "43a2b78e9f1b413ed9c5755d628820642546672f",
+    "build_dirty": false,
+    "build_source_state": "git-source-sha256-v2:b31ea04859590d666f647686547f6bc2d9cc943562996fef5e38bd79c925f08a",
+    "overrides": [],
+    "problems": [],
+    "runtime_commit": "43a2b78e9f1b413ed9c5755d628820642546672f",
+    "runtime_dirty": false,
+    "runtime_source_state": "git-source-sha256-v2:b31ea04859590d666f647686547f6bc2d9cc943562996fef5e38bd79c925f08a",
+    "status": "match"
+  },
+  "command": [
+    "target/debug/qwen-bench",
+    "tok",
+    "--model",
+    "/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf",
+    "--prompt",
+    "Write code",
+    "--iters",
+    "1",
+    "--print-token-ids"
+  ],
+  "executable": {
+    "bytes": 48084232,
+    "path": "/Users/tito/code/qwen-llm-dflash-sampled-evidence/target/debug/qwen-bench",
+    "sha256": "47f25e151ade0a4fe9835f032fc76d20ee6f7fd3f68724687850f94428ef2847"
+  },
+  "lease_env": {
+    "QWEN_METAL_LEASE_WAIT": "1"
+  },
+  "observed_utc": "2026-08-23T04:54:12Z",
+  "prompt": {
+    "add_special": false,
+    "text": "Write code",
+    "token_count": 2,
+    "token_ids": [
+      7734,
+      1970
+    ],
+    "token_ids_sha256_i32le": "39400964f33473f82888817289bca3bba220e3e9f51856ce1e5f88dc8b411f2c",
+    "utf8_hex": "577269746520636f6465",
+    "utf8_len": 10,
+    "utf8_sha256": "b365a7d68fd699d7938042031965dac164cac0696dab1fb9be239b62c31e2734"
+  },
+  "schema": "qwen.e0_tokenizer_fixture",
+  "schema_version": 1,
+  "target": {
+    "aggregate_sha256_index_size_digest_le": "fb9bcd41434a7fc1c2ed3b2d19a4ceb6cd8adb9cc55b9363ff1042acc2b3e048",
+    "shard_bytes": 17106773984,
+    "shard_sha256": "7b2aec3b9ababdfd75aa17552ee95607d866e44decf547f6f12fcef85cc89f1b"
+  }
+}

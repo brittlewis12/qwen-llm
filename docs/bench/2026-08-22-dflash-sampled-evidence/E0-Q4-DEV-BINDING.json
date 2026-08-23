@@ -1,0 +1,48 @@
+{
+  "allowed_arm_orders": [
+    "serial_then_capture",
+    "capture_then_serial"
+  ],
+  "drafter": {
+    "block_size": 8,
+    "conv_group_size": 16,
+    "conv_kernel_size": 2,
+    "hidden_size": 5120,
+    "n_layer": 5,
+    "selector_rank": 256,
+    "selector_top_k": 16,
+    "swa_window": 2048,
+    "target_layer_ids": [
+      6,
+      20,
+      34,
+      48,
+      62
+    ]
+  },
+  "drafter_arm": "dflash2-q4_k_m-post-prereg-development",
+  "drafter_asset_sha256": "51f00de02d311528ff23560395600804bb1d79af63b37e9f0f99c431f8d4ed62",
+  "evidence_role": "development",
+  "fixture_id": "e0-q4-token-major-smoke-v1",
+  "fixture_role": "development-sentinel",
+  "schema": "qwen.dflash_e0_binding_manifest",
+  "schema_version": 1,
+  "snapshot_abi": {
+    "gdn_conv_elements_per_layer": 30720,
+    "gdn_state_elements_per_layer": 786432,
+    "kv_bytes_per_token": 2048,
+    "kv_dim_elements": 1024,
+    "kv_storage_kind": "F16",
+    "layout_version": 4,
+    "n_attn_layers": 16,
+    "n_gdn_layers": 48
+  },
+  "target": {
+    "architecture": "qwen35",
+    "hidden_size": 5120,
+    "n_layer": 64,
+    "vocab_size": 248320
+  },
+  "target_arm": "qwen3.8-27b-q4_k_m",
+  "target_asset_sha256": "fb9bcd41434a7fc1c2ed3b2d19a4ceb6cd8adb9cc55b9363ff1042acc2b3e048"
+}

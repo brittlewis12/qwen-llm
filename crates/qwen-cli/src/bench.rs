@@ -22,6 +22,7 @@ mod attn_stage_floor;
 mod batch_probe;
 mod dense_block_batch;
 mod dense_whole_batch;
+mod dflash_e0_lockstep;
 mod dflash_sampled_oracle;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_mhc_delete;
@@ -623,6 +624,9 @@ enum Cmd {
     /// Exact serial E1a sampled one-hot DFlash development oracle. E0 is
     /// explicitly unmeasured; this is not a performance benchmark.
     DflashSampledOracle(dflash_sampled_oracle::DflashSampledOracleArgs),
+    /// Exact token-major E0 lockstep development harness for ordinary target
+    /// decode versus multi-hidden capture. Grants no product authority.
+    DflashE0Lockstep(dflash_e0_lockstep::DflashE0LockstepArgs),
     /// **H5.5 production DFlash decode**: end-to-end DFlash speculative
     /// decode using the H5.3 packed_verify + H5.4 restore_after_partial_accept
     /// primitives. Greedy accept-prefix per plan §1.3.
@@ -1720,6 +1724,28 @@ mod stop_token_cli_tests {
         ])
         .expect("sampled oracle command");
         assert!(matches!(parsed.cmd, Cmd::DflashSampledOracle(_)));
+    }
+
+    #[test]
+    fn bench_parses_dflash_e0_lockstep_subcommand() {
+        let parsed = Args::try_parse_from([
+            "qwen-bench",
+            "dflash-e0-lockstep",
+            "--model",
+            "target.gguf",
+            "--drafter",
+            "draft.gguf",
+            "--binding-manifest",
+            "e0-binding.json",
+            "--prompt",
+            "hello",
+            "--output",
+            "e0.jsonl",
+            "--state-sidecar",
+            "e0-state.bin",
+        ])
+        .expect("E0 lockstep command");
+        assert!(matches!(parsed.cmd, Cmd::DflashE0Lockstep(_)));
     }
 }
 
@@ -2836,7 +2862,10 @@ fn run() -> Result<()> {
         allow_unverifiable: args.allow_unverifiable_build,
     };
     let _ = BUILD_IDENTITY_POLICY.set(policy);
-    if !matches!(&args.cmd, Cmd::BuildInfo(_) | Cmd::LmHeadScreeningOracle(_)) {
+    if !matches!(
+        &args.cmd,
+        Cmd::BuildInfo(_) | Cmd::LmHeadScreeningOracle(_) | Cmd::DflashE0Lockstep(_)
+    ) {
         validate_build_identity(qwen_build_identity_packet(), policy)?;
     }
     match args.cmd {
@@ -2918,6 +2947,11 @@ fn run() -> Result<()> {
         Cmd::Pld(a) => run_pld(a),
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
         Cmd::DflashSampledOracle(a) => dflash_sampled_oracle::run(
+            a,
+            serde_json::to_value(recorded_build_identity())?,
+            capture_qwen_env(),
+        ),
+        Cmd::DflashE0Lockstep(a) => dflash_e0_lockstep::run(
             a,
             serde_json::to_value(recorded_build_identity())?,
             capture_qwen_env(),

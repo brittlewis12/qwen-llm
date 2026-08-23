@@ -84,12 +84,21 @@ pub struct DflashSampledOracleArgs {
     drafter_arm: String,
 }
 
-struct JsonlAppender {
+pub(super) struct JsonlAppender {
     file: File,
 }
 
 impl JsonlAppender {
-    fn open(path: &Path) -> Result<Self> {
+    pub(super) fn create_exclusive(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("exclusive-create JSONL {}", path.display()))?;
+        Ok(Self { file })
+    }
+
+    pub(super) fn open(path: &Path) -> Result<Self> {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -110,14 +119,14 @@ impl JsonlAppender {
         Ok(Self { file })
     }
 
-    fn write(&mut self, value: &Value) -> Result<()> {
+    pub(super) fn write(&mut self, value: &Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(value)?;
         bytes.push(b'\n');
         self.file.write_all(&bytes)?;
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<()> {
+    pub(super) fn finish(&mut self) -> Result<()> {
         self.file.flush()?;
         self.file.sync_all()?;
         Ok(())
@@ -183,23 +192,23 @@ fn stop_outcome(
     }
 }
 
-fn position_u32(position: usize, label: &str) -> Result<u32> {
+pub(super) fn position_u32(position: usize, label: &str) -> Result<u32> {
     u32::try_from(position).with_context(|| format!("{label} position {position} exceeds u32"))
 }
 
-fn f32_bits(value: f32) -> String {
+pub(super) fn f32_bits(value: f32) -> String {
     format!("0x{:08x}", value.to_bits())
 }
 
-fn f64_bits(value: f64) -> String {
+pub(super) fn f64_bits(value: f64) -> String {
     format!("0x{:016x}", value.to_bits())
 }
 
-fn u64_hex(value: u64) -> String {
+pub(super) fn u64_hex(value: u64) -> String {
     format!("0x{value:016x}")
 }
 
-fn logits_sha256(logits: &[f32]) -> String {
+pub(super) fn logits_sha256(logits: &[f32]) -> String {
     let mut hash = Sha256::new();
     for value in logits {
         hash.update(value.to_bits().to_le_bytes());
@@ -207,7 +216,7 @@ fn logits_sha256(logits: &[f32]) -> String {
     format!("{:x}", hash.finalize())
 }
 
-fn bytes_sha256(bytes: &[u8]) -> String {
+pub(super) fn bytes_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -220,12 +229,12 @@ fn digest_hex(digest: &[u8; 32]) -> String {
     result
 }
 
-struct GgufAssetIdentity {
-    digest: [u8; 32],
-    json: Value,
+pub(super) struct GgufAssetIdentity {
+    pub(super) digest: [u8; 32],
+    pub(super) json: Value,
 }
 
-fn gguf_asset_identity(gguf: &GgufFile) -> GgufAssetIdentity {
+pub(super) fn gguf_asset_identity(gguf: &GgufFile) -> GgufAssetIdentity {
     let mut aggregate = Sha256::new();
     let mut shards = Vec::with_capacity(gguf.shards.len());
     for (index, shard) in gguf.shards.iter().enumerate() {
@@ -251,7 +260,7 @@ fn gguf_asset_identity(gguf: &GgufFile) -> GgufAssetIdentity {
     }
 }
 
-fn regular_file_identity(path: &Path) -> Result<Value> {
+pub(super) fn regular_file_identity(path: &Path) -> Result<Value> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut file = File::open(&canonical)
         .with_context(|| format!("open identity input {}", canonical.display()))?;
@@ -272,14 +281,14 @@ fn regular_file_identity(path: &Path) -> Result<Value> {
     }))
 }
 
-fn digest_identity_word(digest: &[u8; 32], offset: usize) -> u64 {
+pub(super) fn digest_identity_word(digest: &[u8; 32], offset: usize) -> u64 {
     let bytes: [u8; 8] = digest[offset..offset + 8]
         .try_into()
         .expect("fixed SHA-256 identity word");
     u64::from_le_bytes(bytes)
 }
 
-fn validate_development_label(value: &str, flag: &str) -> Result<()> {
+pub(super) fn validate_development_label(value: &str, flag: &str) -> Result<()> {
     ensure!(!value.is_empty(), "{flag} must be nonempty");
     ensure!(
         value.len() <= 128
@@ -291,14 +300,14 @@ fn validate_development_label(value: &str, flag: &str) -> Result<()> {
     Ok(())
 }
 
-fn event(common: &Value, kind: &str, payload: Value) -> Value {
+pub(super) fn event(common: &Value, kind: &str, payload: Value) -> Value {
     let mut object = common.as_object().expect("common event object").clone();
     object.insert("event".into(), Value::String(kind.into()));
     object.insert("payload".into(), payload);
     Value::Object(object)
 }
 
-fn distribution_json(distribution: &SamplingDistribution) -> Value {
+pub(super) fn distribution_json(distribution: &SamplingDistribution) -> Value {
     json!({
         "selected_token": distribution.sampled.token,
         "candidate_index": distribution.sampled.candidate_index,
@@ -310,7 +319,7 @@ fn distribution_json(distribution: &SamplingDistribution) -> Value {
     })
 }
 
-fn rng_json(rng: Option<SamplingRngDiagnostic>) -> Value {
+pub(super) fn rng_json(rng: Option<SamplingRngDiagnostic>) -> Value {
     match rng {
         Some(rng) => json!({
             "draws_before": rng.draws_before,
@@ -481,7 +490,7 @@ fn selector_depth_json(depth: &qwen_llm::metal_dflash::DFlash2SelectorDepthDiagn
     })
 }
 
-fn canonical_or_original(path: &Path) -> String {
+pub(super) fn canonical_or_original(path: &Path) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
         .display()
@@ -530,7 +539,7 @@ fn positions_sha256(positions: &[usize]) -> String {
     format!("{:x}", hash.finalize())
 }
 
-fn pending_token_sha256(pending: Option<i32>) -> String {
+pub(super) fn pending_token_sha256(pending: Option<i32>) -> String {
     let mut hash = Sha256::new();
     match pending {
         Some(token) => {
@@ -542,7 +551,7 @@ fn pending_token_sha256(pending: Option<i32>) -> String {
     format!("{:x}", hash.finalize())
 }
 
-fn snapshot_json(snapshot: &SessionSnapshot) -> Value {
+pub(super) fn snapshot_json(snapshot: &SessionSnapshot) -> Value {
     json!({
         "identity": snapshot_identity_json(&snapshot.identity),
         "identity_sha256_canonical_le": snapshot_identity_sha256(&snapshot.identity),
@@ -564,7 +573,7 @@ fn snapshot_json(snapshot: &SessionSnapshot) -> Value {
 }
 
 #[derive(Clone, Copy)]
-struct SnapshotComparisons {
+pub(super) struct SnapshotComparisons {
     identity: bool,
     prefix: bool,
     pending_token: bool,
@@ -576,7 +585,7 @@ struct SnapshotComparisons {
 }
 
 impl SnapshotComparisons {
-    fn compare(oracle: &SessionSnapshot, reference: &SessionSnapshot) -> Self {
+    pub(super) fn compare(oracle: &SessionSnapshot, reference: &SessionSnapshot) -> Self {
         Self {
             identity: oracle.identity == reference.identity,
             prefix: oracle.prefix_tokens == reference.prefix_tokens,
@@ -589,7 +598,7 @@ impl SnapshotComparisons {
         }
     }
 
-    fn all(self) -> bool {
+    pub(super) fn all(self) -> bool {
         self.identity
             && self.prefix
             && self.pending_token
@@ -600,7 +609,7 @@ impl SnapshotComparisons {
             && self.gdn_state
     }
 
-    fn json(self) -> Value {
+    pub(super) fn json(self) -> Value {
         json!({
             "identity": self.identity,
             "prefix": self.prefix,

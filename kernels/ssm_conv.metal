@@ -130,6 +130,69 @@ kernel void kernel_gdn_prep_packed_f32(
     }
 }
 
+struct gdn_prep_packed_ckpt_args {
+    uint n_tokens;
+    uint n_checkpoints;
+    uint n_k_heads;
+    uint n_v_heads;
+    uint head_dim;
+    uint conv_dim;
+};
+
+kernel void kernel_gdn_prep_packed_ckpt_f32(
+        constant gdn_prep_packed_ckpt_args & args [[buffer(0)]],
+        device const float * qkv_pack  [[buffer(1)]], // [n_tokens, conv_dim]
+        device       float * conv_buf  [[buffer(2)]], // [K-1, conv_dim] mutated
+        device const float * conv_w    [[buffer(3)]], // [conv_dim, K]
+        device       float * q_pack    [[buffer(4)]], // [n_tokens, n_k_heads, head_dim]
+        device       float * k_pack    [[buffer(5)]], // [n_tokens, n_k_heads, head_dim]
+        device       float * v_pack    [[buffer(6)]], // [n_tokens, n_v_heads, head_dim]
+        device       float * conv_ckpt [[buffer(7)]], // [n_checkpoints, K-1, conv_dim]
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.conv_dim) return;
+
+    const uint c = tid;
+    const uint cd = args.conv_dim;
+    const uint qk_dim = args.n_k_heads * args.head_dim;
+    const uint v_dim = args.n_v_heads * args.head_dim;
+
+    float t[CONV_K];
+    for (int i = 0; i < CONV_K - 1; ++i) {
+        t[i] = conv_buf[i * cd + c];
+    }
+    device const float * w = conv_w + (ulong)c * CONV_K;
+
+    for (uint tok = 0; tok < args.n_tokens; ++tok) {
+        t[CONV_K - 1] = qkv_pack[(ulong)tok * cd + c];
+        float s = 0.0f;
+        for (int k = 0; k < CONV_K; ++k) {
+            s += w[k] * t[k];
+        }
+        const float out = s / (1.0f + exp(-s));
+        if (c < qk_dim) {
+            q_pack[(ulong)tok * qk_dim + c] = out;
+        } else if (c < 2 * qk_dim) {
+            k_pack[(ulong)tok * qk_dim + (c - qk_dim)] = out;
+        } else {
+            v_pack[(ulong)tok * v_dim + (c - 2 * qk_dim)] = out;
+        }
+
+        for (int i = 0; i < CONV_K - 1; ++i) {
+            t[i] = t[i + 1];
+        }
+        if (tok < args.n_checkpoints) {
+            for (int i = 0; i < CONV_K - 1; ++i) {
+                const ulong off = ((ulong)tok * (CONV_K - 1) + i) * cd + c;
+                conv_ckpt[off] = t[i];
+            }
+        }
+    }
+
+    for (int i = 0; i < CONV_K - 1; ++i) {
+        conv_buf[i * cd + c] = t[i];
+    }
+}
+
 kernel void kernel_gdn_prep_parallel_f32(
         constant gdn_prep_packed_args & args [[buffer(0)]],
         device const float * qkv_pack  [[buffer(1)]], // [n_tokens, conv_dim]

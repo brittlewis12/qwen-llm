@@ -35,9 +35,10 @@ use crate::metal::{
     encode_copy_offset_f32, encode_dflash_attn_f32, encode_dflash_attn_full_gqa_split4_f32,
     encode_dflash_attn_online_two_range_scan_f32, encode_dflash_attn_two_range_f32,
     encode_dflash2_conv_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
-    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32,
-    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32,
-    encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
+    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_ckpt_f32, encode_gdn_prep_packed_f32,
+    encode_gdn_step_decay_packed_ckpt_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32,
+    encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
     encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
@@ -435,6 +436,10 @@ crate::env_flag!(default_on prefill_gdn_batched_enabled, "QWEN_PREFILL_GDN_BATCH
 crate::env_flag!(
     default_on mtp_verify_q8_gdn_alpha_beta_batched_enabled,
     "QWEN_MTP_VERIFY_Q8_GDN_ALPHA_BETA_BATCHED"
+);
+crate::env_flag!(
+    default_on dflash_verify_packed_gdn_enabled,
+    "QWEN_DFLASH_VERIFY_PACKED_GDN"
 );
 
 fn prefill_gdn_proj_oracle_layer_enabled(layer_idx: usize) -> bool {
@@ -8940,6 +8945,18 @@ pub fn encode_packed_verify_layer_major_inner(
                     let gdn_normed_pack = layer_scratch
                         .gdn_normed_pack
                         .view_subrange(0, vec![(n * v_dim) as u64]);
+                    let gdn_q_norm_pack = layer_scratch
+                        .gdn_q_norm_pack
+                        .view_subrange(0, vec![(n * n_k_u * head_dim_u) as u64]);
+                    let gdn_k_norm_pack = layer_scratch
+                        .gdn_k_norm_pack
+                        .view_subrange(0, vec![(n * n_k_u * head_dim_u) as u64]);
+                    let gdn_v_pack = layer_scratch
+                        .gdn_v_pack
+                        .view_subrange(0, vec![(n * v_dim) as u64]);
+                    let gdn_out_pack = layer_scratch
+                        .gdn_out_pack
+                        .view_subrange(0, vec![(n * v_dim) as u64]);
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         encode_mat_mat_dispatch(
@@ -8971,10 +8988,20 @@ pub fn encode_packed_verify_layer_major_inner(
                     // entering the sequential recurrence loop. This deletes
                     // repeated projection/transform encoder structure while
                     // leaving recurrence and rollback unchanged.
-                    let q8_alpha_beta_batched = mtp_verify_q8_gdn_alpha_beta_batched_enabled()
+                    let packed_gdn = dflash_verify_packed_gdn_enabled()
                         && n > 1
-                        && g.beta_proj.dtype == GgmlType::Q8_0
-                        && g.alpha_proj.dtype == GgmlType::Q8_0;
+                        && head_dim_u == 128
+                        && n_k_u > 0
+                        && n_v.is_multiple_of(n_k_u)
+                        && g.conv1d.n_elements() as usize == 4 * conv_dim
+                        && target_session.gdn_conv[gi].n_elements() as usize == 3 * conv_dim
+                        && target_session.gdn_state[gi].n_elements() as usize
+                            == n_v * head_dim_u * head_dim_u;
+                    let q8_alpha_beta_batched = n > 1
+                        && (packed_gdn
+                            || (mtp_verify_q8_gdn_alpha_beta_batched_enabled()
+                                && g.beta_proj.dtype == GgmlType::Q8_0
+                                && g.alpha_proj.dtype == GgmlType::Q8_0));
                     let gdn_beta_pack = layer_scratch
                         .gdn_beta_pack
                         .view_subrange(0, vec![(n * n_v) as u64]);
@@ -9027,94 +9054,192 @@ pub fn encode_packed_verify_layer_major_inner(
                     // Step B: alpha/beta (per-token by default, or packed Q8
                     // views above) + post-projection recurrence body +
                     // checkpoint blit.
-                    for n_idx in 0..n {
-                        // Compute pass.
-                        {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            let (alpha_n, beta_n) = if q8_alpha_beta_batched {
-                                (
-                                    gdn_alpha_pack
-                                        .view_subrange((n_idx * n_v) as u64, vec![n_v as u64]),
-                                    gdn_beta_pack
-                                        .view_subrange((n_idx * n_v) as u64, vec![n_v as u64]),
-                                )
-                            } else {
-                                // Per-row view of h_pack for the default
-                                // alpha/beta mat-vecs.
-                                let h_n = layer_scratch
-                                    .h_pack
-                                    .view_subrange((n_idx * h) as u64, vec![h as u64]);
-                                encode_mat_vec_dispatch(
-                                    base.ctx,
-                                    &enc,
-                                    &g.beta_proj,
-                                    &h_n,
-                                    &target_session.gdn_b,
-                                    h,
-                                    n_v,
-                                )?;
-                                encode_sigmoid_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &target_session.gdn_b,
-                                    &target_session.gdn_beta,
-                                )?;
-                                encode_mat_vec_dispatch(
-                                    base.ctx,
-                                    &enc,
-                                    &g.alpha_proj,
-                                    &h_n,
-                                    &target_session.gdn_a,
-                                    h,
-                                    n_v,
-                                )?;
-                                encode_gdn_decay_chain_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &target_session.gdn_a,
-                                    &g.dt_bias,
-                                    &g.a_log,
-                                    &target_session.gdn_alpha,
-                                )?;
-                                (
-                                    target_session.gdn_alpha.clone(),
-                                    target_session.gdn_beta.clone(),
-                                )
-                            };
-                            // Per-row views of the batched pack buffers (zero-copy
-                            // F32 view_subrange — F32 is supported, no super-block
-                            // alignment needed).
-                            let qkv_n = layer_scratch
-                                .gdn_qkv_pack
-                                .view_subrange((n_idx * conv_dim) as u64, vec![conv_dim as u64]);
-                            let z_n = layer_scratch
-                                .gdn_z_pack
-                                .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
-                            let normed_n = layer_scratch
-                                .gdn_normed_pack
-                                .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
-                            base.encode_gdn_tail(
+                    if packed_gdn {
+                        let n_checkpoints = if packed_verify_skip_final_ckpt_enabled() {
+                            n - 1
+                        } else {
+                            n
+                        };
+                        let state_elems = verify_scratch.ssm_state_elems as usize;
+                        let conv_elems = verify_scratch.conv_state_elems as usize;
+                        let state_ckpt = verify_scratch.gdn_ckpt.view_subrange(
+                            (gi * verify_scratch.n as usize * state_elems) as u64,
+                            vec![(n_checkpoints * state_elems) as u64],
+                        );
+                        let conv_ckpt = verify_scratch.conv_ckpt.view_subrange(
+                            (gi * verify_scratch.n as usize * conv_elems) as u64,
+                            vec![(n_checkpoints * conv_elems) as u64],
+                        );
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_gdn_prep_packed_ckpt_f32(
+                            base.ctx,
+                            &enc,
+                            &gdn_qkv_pack,
+                            &target_session.gdn_conv[gi],
+                            &g.conv1d,
+                            &gdn_q_norm_pack,
+                            &gdn_k_norm_pack,
+                            &gdn_v_pack,
+                            &conv_ckpt,
+                            n,
+                            n_checkpoints,
+                            n_k_u,
+                            n_v,
+                            head_dim_u,
+                        )?;
+                        if prefill_gdn_pair_l2_enabled() {
+                            encode_l2_norm_pair_batched_f32(
+                                base.ctx,
                                 &enc,
-                                g,
-                                gi,
-                                target_session,
-                                &qkv_n,
-                                &z_n,
-                                &alpha_n,
-                                &beta_n,
-                                &normed_n,
+                                &gdn_q_norm_pack,
+                                &gdn_q_norm_pack,
+                                &gdn_k_norm_pack,
+                                &gdn_k_norm_pack,
+                                n * n_k_u,
+                                head_dim_u,
+                                RMS_EPS,
                             )?;
-                            enc.end();
+                        } else {
+                            encode_l2_norm_batched_f32(
+                                base.ctx,
+                                &enc,
+                                &gdn_q_norm_pack,
+                                &gdn_q_norm_pack,
+                                n * n_k_u,
+                                head_dim_u,
+                                RMS_EPS,
+                            )?;
+                            encode_l2_norm_batched_f32(
+                                base.ctx,
+                                &enc,
+                                &gdn_k_norm_pack,
+                                &gdn_k_norm_pack,
+                                n * n_k_u,
+                                head_dim_u,
+                                RMS_EPS,
+                            )?;
                         }
-                        // The final row already resides in the live session and
-                        // cannot be a partial-restore source.
-                        if !packed_verify_skip_final_ckpt_enabled() || n_idx + 1 < n {
-                            let blit = BlitEncoder::begin(&cmd_buf);
-                            let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
-                            blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
-                            let conv_dst = verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32);
-                            blit.copy_tensor(&target_session.gdn_conv[gi], &conv_dst);
-                            blit.end();
+                        encode_gdn_step_decay_packed_ckpt_f32(
+                            base.ctx,
+                            &enc,
+                            &gdn_q_norm_pack,
+                            &gdn_k_norm_pack,
+                            &gdn_v_pack,
+                            &gdn_alpha_pack,
+                            &gdn_beta_pack,
+                            &target_session.gdn_state[gi],
+                            &gdn_out_pack,
+                            &state_ckpt,
+                            n_checkpoints,
+                            n,
+                            n_v,
+                            n_k_u,
+                            head_dim_u,
+                        )?;
+                        encode_rmsnorm_gated_f32(
+                            base.ctx,
+                            &enc,
+                            &gdn_out_pack,
+                            &g.norm,
+                            &gdn_z_pack,
+                            &gdn_normed_pack,
+                            n * n_v,
+                            head_dim_u,
+                            RMS_EPS * head_dim_u as f32,
+                        )?;
+                        enc.end();
+                    } else {
+                        for n_idx in 0..n {
+                            // Compute pass.
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                let (alpha_n, beta_n) = if q8_alpha_beta_batched {
+                                    (
+                                        gdn_alpha_pack
+                                            .view_subrange((n_idx * n_v) as u64, vec![n_v as u64]),
+                                        gdn_beta_pack
+                                            .view_subrange((n_idx * n_v) as u64, vec![n_v as u64]),
+                                    )
+                                } else {
+                                    // Per-row view of h_pack for the default
+                                    // alpha/beta mat-vecs.
+                                    let h_n = layer_scratch
+                                        .h_pack
+                                        .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                                    encode_mat_vec_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &g.beta_proj,
+                                        &h_n,
+                                        &target_session.gdn_b,
+                                        h,
+                                        n_v,
+                                    )?;
+                                    encode_sigmoid_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &target_session.gdn_b,
+                                        &target_session.gdn_beta,
+                                    )?;
+                                    encode_mat_vec_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &g.alpha_proj,
+                                        &h_n,
+                                        &target_session.gdn_a,
+                                        h,
+                                        n_v,
+                                    )?;
+                                    encode_gdn_decay_chain_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &target_session.gdn_a,
+                                        &g.dt_bias,
+                                        &g.a_log,
+                                        &target_session.gdn_alpha,
+                                    )?;
+                                    (
+                                        target_session.gdn_alpha.clone(),
+                                        target_session.gdn_beta.clone(),
+                                    )
+                                };
+                                // Per-row views of the batched pack buffers (zero-copy
+                                // F32 view_subrange — F32 is supported, no super-block
+                                // alignment needed).
+                                let qkv_n = layer_scratch.gdn_qkv_pack.view_subrange(
+                                    (n_idx * conv_dim) as u64,
+                                    vec![conv_dim as u64],
+                                );
+                                let z_n = layer_scratch
+                                    .gdn_z_pack
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                let normed_n = layer_scratch
+                                    .gdn_normed_pack
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                base.encode_gdn_tail(
+                                    &enc,
+                                    g,
+                                    gi,
+                                    target_session,
+                                    &qkv_n,
+                                    &z_n,
+                                    &alpha_n,
+                                    &beta_n,
+                                    &normed_n,
+                                )?;
+                                enc.end();
+                            }
+                            // The final row already resides in the live session and
+                            // cannot be a partial-restore source.
+                            if !packed_verify_skip_final_ckpt_enabled() || n_idx + 1 < n {
+                                let blit = BlitEncoder::begin(&cmd_buf);
+                                let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
+                                blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
+                                let conv_dst =
+                                    verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32);
+                                blit.copy_tensor(&target_session.gdn_conv[gi], &conv_dst);
+                                blit.end();
+                            }
                         }
                     }
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "gdn", "tail_ckpt");
@@ -30339,6 +30464,168 @@ mod tests {
                     "G3: sess_B kv_n_pos[{i}] != expected {expected_kv}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
+        if !dflash_verify_packed_gdn_enabled() {
+            eprintln!("[packed-gdn-restore] skipped — packed GDN disabled");
+            return;
+        }
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        const M: u32 = 2;
+        const N: u32 = 4;
+        let prime_tokens: [i32; M as usize] = [9419, 1];
+        let verify_tokens: [i32; N as usize] = [1234, 7, 999, 42];
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let k_target = target_layer_ids.len() as u32;
+
+        for n_keep in 1..N {
+            let mut sess_restored = MetalSession::fresh(&ctx, &mm, 64).expect("restored session");
+            let mut sess_prefix = MetalSession::fresh(&ctx, &mm, 64).expect("prefix session");
+            for (i, &tok) in prime_tokens.iter().enumerate() {
+                mf.single_token(tok, i as u32, &mut sess_restored)
+                    .expect("prime restored");
+                mf.single_token(tok, i as u32, &mut sess_prefix)
+                    .expect("prime prefix");
+            }
+
+            let mut verify_full =
+                MetalDFlashVerifyScratch::fresh(&ctx, &mm, N, k_target).expect("verify full");
+            let mut layer_full =
+                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, N).expect("layer full");
+            encode_packed_verify_layer_major_inner(
+                &mf,
+                &target_layer_ids,
+                &verify_tokens,
+                M,
+                &mut verify_full,
+                &mut layer_full,
+                &mut sess_restored,
+                None,
+                None,
+            )
+            .expect("full packed verify");
+            encode_restore_after_partial_accept_inner(
+                &mf,
+                &verify_full,
+                n_keep,
+                M,
+                &mut sess_restored,
+                None,
+            )
+            .expect("restore packed checkpoint");
+
+            let mut verify_prefix =
+                MetalDFlashVerifyScratch::fresh(&ctx, &mm, N, k_target).expect("verify prefix");
+            let mut layer_prefix =
+                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, N).expect("layer prefix");
+            encode_packed_verify_layer_major_inner(
+                &mf,
+                &target_layer_ids,
+                &verify_tokens[..n_keep as usize],
+                M,
+                &mut verify_prefix,
+                &mut layer_prefix,
+                &mut sess_prefix,
+                None,
+                Some(n_keep),
+            )
+            .expect("prefix packed verify");
+
+            assert_eq!(
+                sess_restored.kv_n_pos, sess_prefix.kv_n_pos,
+                "kv position mismatch after restoring {n_keep} rows"
+            );
+            let mut state_max_abs = 0.0f32;
+            for (restored, prefix) in sess_restored
+                .gdn_state
+                .iter()
+                .zip(sess_prefix.gdn_state.iter())
+            {
+                unsafe {
+                    let a = restored.buffer.contents().as_ptr() as *const f32;
+                    let b = prefix.buffer.contents().as_ptr() as *const f32;
+                    for i in 0..restored.n_elements() as usize {
+                        state_max_abs = state_max_abs.max((*a.add(i) - *b.add(i)).abs());
+                    }
+                }
+            }
+            let mut conv_max_abs = 0.0f32;
+            for (restored, prefix) in sess_restored
+                .gdn_conv
+                .iter()
+                .zip(sess_prefix.gdn_conv.iter())
+            {
+                unsafe {
+                    let a = restored.buffer.contents().as_ptr() as *const f32;
+                    let b = prefix.buffer.contents().as_ptr() as *const f32;
+                    for i in 0..restored.n_elements() as usize {
+                        conv_max_abs = conv_max_abs.max((*a.add(i) - *b.add(i)).abs());
+                    }
+                }
+            }
+            assert!(
+                state_max_abs <= 1e-3,
+                "GDN state drift {state_max_abs:.3e} after restoring {n_keep} rows"
+            );
+            assert!(
+                conv_max_abs <= 4e-3,
+                "GDN conv drift {conv_max_abs:.3e} after restoring {n_keep} rows"
+            );
+
+            let marker = 555;
+            let logits_restored = mf
+                .single_token(marker, M + n_keep, &mut sess_restored)
+                .expect("marker after restore");
+            let logits_prefix = mf
+                .single_token(marker, M + n_keep, &mut sess_prefix)
+                .expect("marker after prefix");
+            let mut dot = 0.0f64;
+            let mut norm_restored = 0.0f64;
+            let mut norm_prefix = 0.0f64;
+            for (&a, &b) in logits_restored.iter().zip(&logits_prefix) {
+                dot += (a as f64) * (b as f64);
+                norm_restored += (a as f64).powi(2);
+                norm_prefix += (b as f64).powi(2);
+            }
+            let cosine = dot / (norm_restored.sqrt() * norm_prefix.sqrt() + 1e-30);
+            let argmax = |logits: &[f32]| {
+                logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(i, _)| i)
+                    .unwrap()
+            };
+            eprintln!(
+                "[packed-gdn-restore] n_keep={n_keep} state_max={state_max_abs:.3e} \
+                 conv_max={conv_max_abs:.3e} continuation_cos={cosine:.10}"
+            );
+            assert_eq!(
+                argmax(&logits_restored),
+                argmax(&logits_prefix),
+                "continuation argmax mismatch after restoring {n_keep} rows"
+            );
+            assert!(
+                cosine >= 0.999_999_9,
+                "continuation cosine {cosine:.10} after restoring {n_keep} rows"
+            );
         }
     }
 

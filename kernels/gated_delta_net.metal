@@ -46,6 +46,7 @@ struct gdn_step_args {
 
 struct gdn_step_packed_args {
     uint n_tokens;
+    uint n_checkpoints;
     uint n_v_heads;
     uint n_k_heads;
 };
@@ -208,6 +209,7 @@ kernel void kernel_gdn_step_decay_packed_f32(
         device const float * beta     [[buffer(5)]], // [n_tokens, n_v_heads]
         device float       * state    [[buffer(6)]], // [n_v_heads, head_dim, head_dim]
         device float       * out_pack [[buffer(7)]], // [n_tokens, n_v_heads, head_dim]
+        device float       * state_ckpt [[buffer(8)]], // [n_checkpoints, n_v_heads, head_dim, head_dim]
         uint2  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]]) {
     const uint dv = tgpig.x;
@@ -267,6 +269,13 @@ kernel void kernel_gdn_step_decay_packed_f32(
         if (tiisg == 0) {
             *out_t = o;
         }
+        if (t < args.n_checkpoints) {
+            device float * ckpt_row = state_ckpt
+                + (((ulong)t * args.n_v_heads + hi) * HEAD_DIM + dv) * HEAD_DIM;
+            for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+                ckpt_row[dk_base + j] = s_reg[j];
+            }
+        }
 
         q_lane += qk_stride;
         k_lane += qk_stride;
@@ -291,6 +300,7 @@ kernel void kernel_gdn_step_decay_packed_nsg4_f32(
         device const float * beta     [[buffer(5)]], // [n_tokens, n_v_heads]
         device float       * state    [[buffer(6)]], // [n_v_heads, head_dim, head_dim]
         device float       * out_pack [[buffer(7)]], // [n_tokens, n_v_heads, head_dim]
+        device float       * state_ckpt [[buffer(8)]], // [n_checkpoints, n_v_heads, head_dim, head_dim]
         uint3  tgpig [[threadgroup_position_in_grid]],
         uint3  tpitg [[thread_position_in_threadgroup]]) {
     const uint dv = tgpig.x * 4u + tpitg.y;
@@ -350,6 +360,13 @@ kernel void kernel_gdn_step_decay_packed_nsg4_f32(
         const float o = simd_sum(o_partial);
         if (lane == 0) {
             *out_t = o;
+        }
+        if (t < args.n_checkpoints) {
+            device float * ckpt_row = state_ckpt
+                + (((ulong)t * args.n_v_heads + hi) * HEAD_DIM + dv) * HEAD_DIM;
+            for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+                ckpt_row[dk_base + j] = s_reg[j];
+            }
         }
 
         q_lane += qk_stride;

@@ -20889,6 +20889,89 @@ pub fn encode_gdn_prep_packed_f32(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn encode_gdn_prep_packed_ckpt_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    qkv_pack: &MetalTensor,
+    conv_buf: &MetalTensor,
+    conv_w: &MetalTensor,
+    q_pack: &MetalTensor,
+    k_pack: &MetalTensor,
+    v_pack: &MetalTensor,
+    conv_ckpt: &MetalTensor,
+    n_tokens: usize,
+    n_checkpoints: usize,
+    n_k_heads: usize,
+    n_v_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    let qk_dim = n_k_heads * head_dim;
+    let v_dim = n_v_heads * head_dim;
+    let conv_dim = (2 * n_k_heads + n_v_heads) * head_dim;
+    if n_checkpoints > n_tokens
+        || qkv_pack.n_elements() as usize != n_tokens * conv_dim
+        || conv_buf.n_elements() as usize != 3 * conv_dim
+        || conv_w.n_elements() as usize != 4 * conv_dim
+        || q_pack.n_elements() as usize != n_tokens * qk_dim
+        || k_pack.n_elements() as usize != n_tokens * qk_dim
+        || v_pack.n_elements() as usize != n_tokens * v_dim
+        || conv_ckpt.n_elements() as usize != n_checkpoints * 3 * conv_dim
+    {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_prep_packed_ckpt",
+            detail: format!(
+                "invalid packed checkpoint geometry: tokens={n_tokens} checkpoints={n_checkpoints} conv_dim={conv_dim}"
+            ),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_tokens: u32,
+        n_checkpoints: u32,
+        n_k_heads: u32,
+        n_v_heads: u32,
+        head_dim: u32,
+        conv_dim: u32,
+    }
+    let pso = ctx.pipeline("kernel_gdn_prep_packed_ckpt_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_tokens: n_tokens as u32,
+            n_checkpoints: n_checkpoints as u32,
+            n_k_heads: n_k_heads as u32,
+            n_v_heads: n_v_heads as u32,
+            head_dim: head_dim as u32,
+            conv_dim: conv_dim as u32,
+        },
+    );
+    enc.set_tensor(1, qkv_pack);
+    enc.set_tensor(2, conv_buf);
+    enc.set_tensor(3, conv_w);
+    enc.set_tensor(4, q_pack);
+    enc.set_tensor(5, k_pack);
+    enc.set_tensor(6, v_pack);
+    enc.set_tensor(7, conv_ckpt);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: conv_dim.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 crate::env_flag!(default_on rmsnorm_gated_hd128_r4_enabled, "QWEN_RMSNORM_GATED_HD128_R4");
 
 /// RMSNormGated: per-head RMSNorm of `o` with weight, multiplied by
@@ -21230,6 +21313,67 @@ pub fn encode_gdn_step_decay_packed_f32(
     n_k_heads: usize,
     head_dim: usize,
 ) -> Result<(), MetalError> {
+    encode_gdn_step_decay_packed_inner(
+        ctx, enc, q_pack, k_pack, v_pack, decay_pack, beta_pack, state, out_pack, None, 0,
+        n_tokens, n_v_heads, n_k_heads, head_dim,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_gdn_step_decay_packed_ckpt_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_pack: &MetalTensor,
+    k_pack: &MetalTensor,
+    v_pack: &MetalTensor,
+    decay_pack: &MetalTensor,
+    beta_pack: &MetalTensor,
+    state: &MetalTensor,
+    out_pack: &MetalTensor,
+    state_ckpt: &MetalTensor,
+    n_checkpoints: usize,
+    n_tokens: usize,
+    n_v_heads: usize,
+    n_k_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    encode_gdn_step_decay_packed_inner(
+        ctx,
+        enc,
+        q_pack,
+        k_pack,
+        v_pack,
+        decay_pack,
+        beta_pack,
+        state,
+        out_pack,
+        Some(state_ckpt),
+        n_checkpoints,
+        n_tokens,
+        n_v_heads,
+        n_k_heads,
+        head_dim,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_gdn_step_decay_packed_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_pack: &MetalTensor,
+    k_pack: &MetalTensor,
+    v_pack: &MetalTensor,
+    decay_pack: &MetalTensor,
+    beta_pack: &MetalTensor,
+    state: &MetalTensor,
+    out_pack: &MetalTensor,
+    state_ckpt: Option<&MetalTensor>,
+    n_checkpoints: usize,
+    n_tokens: usize,
+    n_v_heads: usize,
+    n_k_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
     if head_dim != 128 {
         return Err(MetalError::BadShape {
             kernel: "gdn_step_decay_packed",
@@ -21279,11 +21423,25 @@ pub fn encode_gdn_step_decay_packed_f32(
             detail: format!("out expected {} elements", n_tokens * v_per_token),
         });
     }
+    if n_checkpoints > n_tokens
+        || state_ckpt.is_some_and(|checkpoint| {
+            checkpoint.n_elements() as usize != n_checkpoints * want_state
+        })
+        || (n_checkpoints > 0 && state_ckpt.is_none())
+    {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step_decay_packed",
+            detail: format!(
+                "checkpoint geometry mismatch: checkpoints={n_checkpoints} state_elems={want_state}"
+            ),
+        });
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
         n_tokens: u32,
+        n_checkpoints: u32,
         n_v_heads: u32,
         n_k_heads: u32,
     }
@@ -21299,6 +21457,7 @@ pub fn encode_gdn_step_decay_packed_f32(
         0,
         &Args {
             n_tokens: n_tokens as u32,
+            n_checkpoints: n_checkpoints as u32,
             n_v_heads: n_v_heads as u32,
             n_k_heads: n_k_heads as u32,
         },
@@ -21310,6 +21469,7 @@ pub fn encode_gdn_step_decay_packed_f32(
     enc.set_tensor(5, beta_pack);
     enc.set_tensor(6, state);
     enc.set_tensor(7, out_pack);
+    enc.set_tensor(8, state_ckpt.unwrap_or(state));
     if use_nsg4 {
         enc.dispatch(
             MTLSize {
@@ -31944,6 +32104,283 @@ mod tests {
             assert!(max_out < 1e-5, "out drift {max_out}");
             assert!(max_buf < 1e-7, "buf drift {max_buf}");
         }
+    }
+
+    #[test]
+    fn gdn_prep_packed_checkpoints_match_token_steps() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N: usize = 4;
+        const HEAD_DIM: usize = 128;
+        const N_K_HEADS: usize = 1;
+        const N_V_HEADS: usize = 4;
+        let qk_dim = N_K_HEADS * HEAD_DIM;
+        let v_dim = N_V_HEADS * HEAD_DIM;
+        let conv_dim = 2 * qk_dim + v_dim;
+        let conv_state_elems = 3 * conv_dim;
+
+        let qkv: Vec<f32> = (0..N * conv_dim)
+            .map(|i| ((i % 37) as f32 - 18.0) * 0.003)
+            .collect();
+        let conv_initial: Vec<f32> = (0..conv_state_elems)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.002)
+            .collect();
+        let conv_w: Vec<f32> = (0..4 * conv_dim)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.004)
+            .collect();
+
+        let qkv_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&qkv),
+            vec![(N * conv_dim) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let conv_w_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&conv_w),
+            vec![(4 * conv_dim) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let conv_packed = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&conv_initial),
+            vec![conv_state_elems as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let q_packed = MetalTensor::zeros_f32(&ctx, vec![(N * qk_dim) as u64]).unwrap();
+        let k_packed = MetalTensor::zeros_f32(&ctx, vec![(N * qk_dim) as u64]).unwrap();
+        let v_packed = MetalTensor::zeros_f32(&ctx, vec![(N * v_dim) as u64]).unwrap();
+        let ckpt_packed =
+            MetalTensor::zeros_f32(&ctx, vec![(N * conv_state_elems) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_gdn_prep_packed_ckpt_f32(
+                &ctx,
+                enc,
+                &qkv_t,
+                &conv_packed,
+                &conv_w_t,
+                &q_packed,
+                &k_packed,
+                &v_packed,
+                &ckpt_packed,
+                N,
+                N,
+                N_K_HEADS,
+                N_V_HEADS,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+
+        let conv_token = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&conv_initial),
+            vec![conv_state_elems as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let out_token = MetalTensor::zeros_f32(&ctx, vec![(N * conv_dim) as u64]).unwrap();
+        let ckpt_token = MetalTensor::zeros_f32(&ctx, vec![(N * conv_state_elems) as u64]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        for token in 0..N {
+            let enc = KernelEncoder::begin(&cmd);
+            let qkv_row = qkv_t.view_subrange((token * conv_dim) as u64, vec![conv_dim as u64]);
+            let out_row = out_token.view_subrange((token * conv_dim) as u64, vec![conv_dim as u64]);
+            encode_ssm_conv_silu_f32(
+                &ctx,
+                &enc,
+                &qkv_row,
+                &conv_token,
+                &conv_w_t,
+                &out_row,
+                conv_dim,
+            )
+            .unwrap();
+            enc.end();
+            let blit = BlitEncoder::begin(&cmd);
+            let ckpt_row = ckpt_token.view_subrange(
+                (token * conv_state_elems) as u64,
+                vec![conv_state_elems as u64],
+            );
+            blit.copy_tensor(&conv_token, &ckpt_row);
+            blit.end();
+        }
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let packed_conv = read_back_f32(&conv_packed.buffer, conv_state_elems);
+        let token_conv = read_back_f32(&conv_token.buffer, conv_state_elems);
+        let packed_ckpt = read_back_f32(&ckpt_packed.buffer, N * conv_state_elems);
+        let token_ckpt = read_back_f32(&ckpt_token.buffer, N * conv_state_elems);
+        let packed_q = read_back_f32(&q_packed.buffer, N * qk_dim);
+        let packed_k = read_back_f32(&k_packed.buffer, N * qk_dim);
+        let packed_v = read_back_f32(&v_packed.buffer, N * v_dim);
+        let token_out = read_back_f32(&out_token.buffer, N * conv_dim);
+
+        assert!(
+            packed_conv
+                .iter()
+                .zip(&token_conv)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "packed conv final state differs from token steps"
+        );
+        assert!(
+            packed_ckpt
+                .iter()
+                .zip(&token_ckpt)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "packed conv checkpoints differ from token steps"
+        );
+        for token in 0..N {
+            for channel in 0..conv_dim {
+                let packed = if channel < qk_dim {
+                    packed_q[token * qk_dim + channel]
+                } else if channel < 2 * qk_dim {
+                    packed_k[token * qk_dim + channel - qk_dim]
+                } else {
+                    packed_v[token * v_dim + channel - 2 * qk_dim]
+                };
+                assert_eq!(
+                    packed.to_bits(),
+                    token_out[token * conv_dim + channel].to_bits(),
+                    "packed conv output mismatch at token={token} channel={channel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gdn_recurrence_packed_checkpoints_match_token_steps() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N: usize = 4;
+        const HEAD_DIM: usize = 128;
+        const N_K_HEADS: usize = 1;
+        const N_V_HEADS: usize = 4;
+        let qk_per_token = N_K_HEADS * HEAD_DIM;
+        let v_per_token = N_V_HEADS * HEAD_DIM;
+        let state_elems = N_V_HEADS * HEAD_DIM * HEAD_DIM;
+
+        let q: Vec<f32> = (0..N * qk_per_token)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.004)
+            .collect();
+        let k: Vec<f32> = (0..N * qk_per_token)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.003)
+            .collect();
+        let v: Vec<f32> = (0..N * v_per_token)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.002)
+            .collect();
+        let decay: Vec<f32> = (0..N * N_V_HEADS)
+            .map(|i| 0.9 + (i % 7) as f32 * 0.01)
+            .collect();
+        let beta: Vec<f32> = (0..N * N_V_HEADS)
+            .map(|i| 0.2 + (i % 5) as f32 * 0.1)
+            .collect();
+        let state_initial: Vec<f32> = (0..state_elems)
+            .map(|i| ((i % 13) as f32 - 6.0) * 0.001)
+            .collect();
+
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let q_t = tensor(&q);
+        let k_t = tensor(&k);
+        let v_t = tensor(&v);
+        let decay_t = tensor(&decay);
+        let beta_t = tensor(&beta);
+        let state_packed = tensor(&state_initial);
+        let out_packed = MetalTensor::zeros_f32(&ctx, vec![(N * v_per_token) as u64]).unwrap();
+        let ckpt_packed = MetalTensor::zeros_f32(&ctx, vec![(N * state_elems) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_gdn_step_decay_packed_ckpt_f32(
+                &ctx,
+                enc,
+                &q_t,
+                &k_t,
+                &v_t,
+                &decay_t,
+                &beta_t,
+                &state_packed,
+                &out_packed,
+                &ckpt_packed,
+                N,
+                N,
+                N_V_HEADS,
+                N_K_HEADS,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+
+        let state_token = tensor(&state_initial);
+        let out_token = MetalTensor::zeros_f32(&ctx, vec![(N * v_per_token) as u64]).unwrap();
+        let ckpt_token = MetalTensor::zeros_f32(&ctx, vec![(N * state_elems) as u64]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        for token in 0..N {
+            let enc = KernelEncoder::begin(&cmd);
+            encode_gdn_step_decay_f32(
+                &ctx,
+                &enc,
+                &q_t.view_subrange((token * qk_per_token) as u64, vec![qk_per_token as u64]),
+                &k_t.view_subrange((token * qk_per_token) as u64, vec![qk_per_token as u64]),
+                &v_t.view_subrange((token * v_per_token) as u64, vec![v_per_token as u64]),
+                &decay_t.view_subrange((token * N_V_HEADS) as u64, vec![N_V_HEADS as u64]),
+                &beta_t.view_subrange((token * N_V_HEADS) as u64, vec![N_V_HEADS as u64]),
+                &state_token,
+                &out_token.view_subrange((token * v_per_token) as u64, vec![v_per_token as u64]),
+                N_V_HEADS,
+                N_K_HEADS,
+                HEAD_DIM,
+            )
+            .unwrap();
+            enc.end();
+            let blit = BlitEncoder::begin(&cmd);
+            let ckpt_row =
+                ckpt_token.view_subrange((token * state_elems) as u64, vec![state_elems as u64]);
+            blit.copy_tensor(&state_token, &ckpt_row);
+            blit.end();
+        }
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let packed_state = read_back_f32(&state_packed.buffer, state_elems);
+        let token_state = read_back_f32(&state_token.buffer, state_elems);
+        let packed_out = read_back_f32(&out_packed.buffer, N * v_per_token);
+        let token_out = read_back_f32(&out_token.buffer, N * v_per_token);
+        let packed_ckpt = read_back_f32(&ckpt_packed.buffer, N * state_elems);
+        let token_ckpt = read_back_f32(&ckpt_token.buffer, N * state_elems);
+        assert!(
+            packed_state
+                .iter()
+                .zip(&token_state)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "packed recurrence final state differs from token steps"
+        );
+        assert!(
+            packed_out
+                .iter()
+                .zip(&token_out)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "packed recurrence outputs differ from token steps"
+        );
+        assert!(
+            packed_ckpt
+                .iter()
+                .zip(&token_ckpt)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "packed recurrence checkpoints differ from token steps"
+        );
     }
 
     /// CPU reference for rmsnorm_gated — per-head RMSNorm of `o` * silu(z).

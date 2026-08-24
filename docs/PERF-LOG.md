@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-24 - DFlash Packed GDN Removes the Verifier Bottleneck
+
+- Packing all N GDN conv/recurrence rows and publishing rollback checkpoints
+  directly from the kernels removes eight compute encoders and seven checkpoint
+  blits per GDN layer. A/B/A medians moved verify `105.3 -> 89.8` ms, total step
+  `119.4 -> 103.9` ms, and throughput `29.79 -> 34.22` tok/s (`+14.9%`).
+- On Qwen3.8-27B Q4_K_M + DFlash2 Q4, a 64-token code run remained greedily
+  identical and reached `34.44` vs `25.95` tok/s serial (`1.327x`). A nine-cell
+  sampled matrix moved to mean/median `1.120x/1.170x` (range `0.875-1.445x`);
+  low-acceptance regions still need adaptive backoff.
+- Direct kernel tests prove every packed conv and recurrence checkpoint bitwise
+  matches token-step snapshots; partial-restore continuation, zero-checkpoint
+  prefill ABI, forced exact fallback, and the full DFlash test group pass.
+- DFlash2 top-16 support was already high (`0.97` at depth 1, `0.55` at depth 7),
+  while maximal overlap was only `0.73 -> 0.32`. Proposal-temperature scales
+  `0.4-1.7` did not beat the trained `1.0`; future acceptance work should target
+  ranking/shape calibration rather than support width or scalar temperature.
+
 ## 2026-08-23 — Sampled DFlash2: Sparse Coupling Works; Q4 Wins, N=8 Stays
 
 - Positive-temperature DFlash is distribution-correct against the verifier via

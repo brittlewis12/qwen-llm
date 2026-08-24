@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-24 - DFlash N=8 Q4 FFN Fusion Cuts Verify Another 5%
+
+- A dense-FFN no-op ablation reduced packed verification from `89.8` to
+  `40.5` ms, identifying gate/up/down FFN work as `49.3` ms (`55%`) of the
+  remaining verifier rather than dispatch or rollback bookkeeping.
+- The N=8 Q4_K path now fuses gate + up + SwiGLU into one Metal dispatch,
+  shares activation-tile loads, and avoids two `[8, F]` intermediates. Vec4
+  Q4_K dequantization also wins across the production small-N shapes (for
+  example gate `0.2503 -> 0.2395` ms and GDN qkv `0.1559 -> 0.1425` ms).
+- Final default/rollback/default product A/B/A measured verify
+  `85.5/90.2/85.2` ms and decode `29.21/27.93/29.31` tok/s: about `-5.4%`
+  verifier time and `+4.8%` throughput from this change. The broader sampled
+  nine-cell matrix reached mean/median `1.160x/1.219x` serial (range
+  `0.884-1.508x`), up from `1.120x/1.170x` after packed GDN alone.
+- Fused output is bitwise identical to the unfused scalar-dequant path; the
+  full DFlash Metal group and all 23 CLI/sampled DFlash tests pass. Full
+  rollback uses `QWEN_DFLASH_VERIFY_FUSED_FFN_Q4=0` and
+  `QWEN_MATMAT_Q4_VEC4=0` together.
+- Short-window sampled backoff retuning was rejected: block acceptance is
+  strongly nonstationary, and an apparently favorable 64-token threshold
+  produced mixed 256-token ratios (`0.800-1.212x` versus the current policy).
+  Any later acceptance controller needs hysteresis or explicit expected-cost
+  state, not a lower fixed cutoff.
+
 ## 2026-08-24 - DFlash Packed GDN Removes the Verifier Bottleneck
 
 - Packing all N GDN conv/recurrence rows and publishing rollback checkpoints

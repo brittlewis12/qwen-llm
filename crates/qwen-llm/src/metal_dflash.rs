@@ -34,8 +34,9 @@ use crate::metal::{
     encode_add_inplace_f32, encode_argmax_f32, encode_argmax_top2_f32, encode_axpy_rowwise_f32,
     encode_copy_offset_f32, encode_dflash_attn_f32, encode_dflash_attn_full_gqa_split4_f32,
     encode_dflash_attn_online_two_range_scan_f32, encode_dflash_attn_two_range_f32,
-    encode_dflash2_conv_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
-    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_ckpt_f32, encode_gdn_prep_packed_f32,
+    encode_dflash2_conv_f32, encode_ffn_fused_swiglu_q4_k_mma8_f32, encode_fill_f32,
+    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
+    encode_gdn_prep_packed_ckpt_f32, encode_gdn_prep_packed_f32,
     encode_gdn_step_decay_packed_ckpt_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
     encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32,
     encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
@@ -440,6 +441,10 @@ crate::env_flag!(
 crate::env_flag!(
     default_on dflash_verify_packed_gdn_enabled,
     "QWEN_DFLASH_VERIFY_PACKED_GDN"
+);
+crate::env_flag!(
+    default_on dflash_verify_fused_ffn_q4_enabled,
+    "QWEN_DFLASH_VERIFY_FUSED_FFN_Q4"
 );
 
 fn prefill_gdn_proj_oracle_layer_enabled(layer_idx: usize) -> bool {
@@ -10071,15 +10076,34 @@ pub fn encode_packed_verify_layer_major_inner(
         {
             let enc = KernelEncoder::begin(&cmd_buf);
             if mat_mat_path {
-                encode_mat_mat_dispatch(base.ctx, &enc, g_w, &h_pack, &ffn_gate_pack, h, f, n)?;
-                encode_mat_mat_dispatch(base.ctx, &enc, u_w, &h_pack, &ffn_up_pack, h, f, n)?;
-                encode_silu_mul_f32(
-                    base.ctx,
-                    &enc,
-                    &ffn_gate_pack,
-                    &ffn_up_pack,
-                    &ffn_inner_pack,
-                )?;
+                let fused_q4 = dflash_verify_fused_ffn_q4_enabled()
+                    && n == 8
+                    && h.is_multiple_of(256)
+                    && f.is_multiple_of(8)
+                    && g_w.dtype == GgmlType::Q4_K
+                    && u_w.dtype == GgmlType::Q4_K;
+                if fused_q4 {
+                    encode_ffn_fused_swiglu_q4_k_mma8_f32(
+                        base.ctx,
+                        &enc,
+                        g_w,
+                        u_w,
+                        &h_pack,
+                        &ffn_inner_pack,
+                        h,
+                        f,
+                    )?;
+                } else {
+                    encode_mat_mat_dispatch(base.ctx, &enc, g_w, &h_pack, &ffn_gate_pack, h, f, n)?;
+                    encode_mat_mat_dispatch(base.ctx, &enc, u_w, &h_pack, &ffn_up_pack, h, f, n)?;
+                    encode_silu_mul_f32(
+                        base.ctx,
+                        &enc,
+                        &ffn_gate_pack,
+                        &ffn_up_pack,
+                        &ffn_inner_pack,
+                    )?;
+                }
                 encode_mat_mat_dispatch(
                     base.ctx,
                     &enc,

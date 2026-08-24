@@ -49,8 +49,8 @@ struct mat_mat_mma8_args {
 
 // --- Q4_K dequant (identical math to mat_mat_q4_k.metal's helper) -------
 inline void mma8_dequantize_q4_K_half(device const uchar * blk_bytes,
-                                      short il,
-                                      thread half4x4 & reg) {
+                                       short il,
+                                       thread half4x4 & reg) {
     const half d_h    = ((device const half *)blk_bytes)[0];
     const half dmin_h = ((device const half *)blk_bytes)[1];
     device const uchar * scales = blk_bytes + 4;
@@ -77,6 +77,39 @@ inline void mma8_dequantize_q4_K_half(device const uchar * blk_bytes,
 
     FOR_UNROLL (int i = 0; i < 16; ++i) {
         reg[i / 4][i % 4] = (half)(dl * (float)(qs[i] & mask) - ml);
+    }
+}
+
+inline void mma8_dequantize_q4_K_half_vec4(device const uchar * blk_bytes,
+                                            short il,
+                                            thread half4x4 & reg) {
+    const half d_h    = ((device const half *)blk_bytes)[0];
+    const half dmin_h = ((device const half *)blk_bytes)[1];
+    device const uchar * scales = blk_bytes + 4;
+    device const uchar * qs     = blk_bytes + 4 + 12;
+
+    const short is  = (il / 4) * 2;
+    const short k01 = (il / 2) & 1;
+    uchar sc_u, m_u;
+    if (is < 4) {
+        sc_u = scales[is + k01] & 63;
+        m_u  = scales[is + k01 + 4] & 63;
+    } else {
+        sc_u = (scales[is + k01 + 4] & 0x0F) | ((scales[is + k01 - 4] >> 6) << 4);
+        m_u  = (scales[is + k01 + 4] >>   4) | ((scales[is + k01    ] >> 6) << 4);
+    }
+
+    qs = qs + (il / 4) * 32 + 16 * (il & 1);
+    const short il_inner = il & 3;
+    const float d    = il_inner < 2 ? (float)d_h : (float)d_h / 16.0f;
+    const float dl   = d * (float)sc_u;
+    const float ml   = (float)dmin_h * (float)m_u;
+    const uchar mask = il_inner < 2 ? 0x0F : 0xF0;
+
+    FOR_UNROLL (int i = 0; i < 4; ++i) {
+        const uchar4 packed = *((device const uchar4 *)(qs + i * 4));
+        const float4 quant = float4(packed & uchar4(mask));
+        reg[i] = half4(quant * dl - ml);
     }
 }
 
@@ -389,6 +422,8 @@ MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r1c1k128_f32,
                      mma8_dequantize_q4_K_half, 144, 1, 1, 128, 1)
 MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r1c1k128_f32,
                      mma8_dequantize_q6_K_half, 210, 1, 1, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r1c1k128_vec4_f32,
+                     mma8_dequantize_q4_K_half_vec4, 144, 1, 1, 128, 1)
 // A6: A-dequant amortization across 2 column tiles (16 cols; DFlash-16).
 MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r1c2k64_f32,
                      mma8_dequantize_q4_K_half, 144, 1, 2, 64, 1)
@@ -399,6 +434,10 @@ MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r1c1k64_sg2_f32,
                      mma8_dequantize_q4_K_half, 144, 1, 1, 64, 2)
 MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r1c1k64_sg2_f32,
                      mma8_dequantize_q6_K_half, 210, 1, 1, 64, 2)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r1c1k64_sg2_vec4_f32,
+                     mma8_dequantize_q4_K_half_vec4, 144, 1, 1, 64, 2)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r2c1k64_vec4_f32,
+                     mma8_dequantize_q4_K_half_vec4, 144, 2, 1, 64, 1)
 // A7 (conditional tier, pre-instantiated): both amortizations combined.
 MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r2c2k64_f32,
                      mma8_dequantize_q4_K_half, 144, 2, 2, 64, 1)
@@ -445,3 +484,73 @@ MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q8_0_mma8v_r2c1k128_f32,
                      mma8_dequantize_q8_0_half, 272, 2, 1, 128, 1)
 MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q8_0_mma8v_r4c1k64_f32,
                      mma8_dequantize_q8_0_half, 272, 4, 1, 64, 1)
+
+// N=8 dense FFN gate+up+SwiGLU. Gate and up retain independent Q4_K
+// weight streams, but share each activation tile load and publish only the
+// final inner activation instead of two [8, F] intermediates.
+kernel void kernel_ffn_fused_swiglu_q4_K_mma8_f32(
+        constant mat_mat_mma8_args & args   [[buffer(0)]],
+        device const uchar         * gate_w [[buffer(1)]],
+        device const uchar         * up_w   [[buffer(2)]],
+        device const float         * x      [[buffer(3)]],
+        device       float         * inner  [[buffer(4)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint r0 = tgpig * 8;
+    if (r0 >= args.n_out) return;
+    const uint nb = args.n_in / QK_K_MMA8;
+    const ulong row_stride_bytes = (ulong)nb * 144;
+    const short lrow = tiisg / 4;
+    const short lchnk = tiisg % 4;
+    device const uchar * gate_row = gate_w + (r0 + lrow) * row_stride_bytes;
+    device const uchar * up_row = up_w + (r0 + lrow) * row_stride_bytes;
+
+    threadgroup float sa_gate[8 * 64];
+    threadgroup float sa_up[8 * 64];
+    simdgroup_float8x8 acc_gate = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    simdgroup_float8x8 acc_up = make_filled_simdgroup_matrix<float, 8>(0.0f);
+
+    for (uint k0 = 0; k0 < args.n_in; k0 += 64) {
+        const uint kbase = k0 + (uint)lchnk * 16;
+        const ulong block_off = (ulong)(kbase / QK_K_MMA8) * 144;
+        const short il = (short)((kbase % QK_K_MMA8) / 16);
+        half4x4 gate_tmp;
+        half4x4 up_tmp;
+        mma8_dequantize_q4_K_half_vec4(gate_row + block_off, il, gate_tmp);
+        mma8_dequantize_q4_K_half_vec4(up_row + block_off, il, up_tmp);
+        FOR_UNROLL (int i = 0; i < 16; ++i) {
+            const uint dst = (uint)lrow * 64 + (uint)lchnk * 16 + (uint)i;
+            sa_gate[dst] = (float)gate_tmp[i / 4][i % 4];
+            sa_up[dst] = (float)up_tmp[i / 4][i % 4];
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        FOR_UNROLL (short kt = 0; kt < 8; ++kt) {
+            simdgroup_float8x8 ma_gate;
+            simdgroup_float8x8 ma_up;
+            simdgroup_float8x8 mb;
+            simdgroup_load(ma_gate, sa_gate + kt * 8, 64);
+            simdgroup_load(ma_up, sa_up + kt * 8, 64);
+            simdgroup_load(mb, x + k0 + (uint)kt * 8, args.n_in,
+                           ulong2(0, 0), true);
+            simdgroup_multiply_accumulate(acc_gate, ma_gate, mb, acc_gate);
+            simdgroup_multiply_accumulate(acc_up, ma_up, mb, acc_up);
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    simdgroup_store(acc_gate, sa_gate, 8);
+    simdgroup_store(acc_up, sa_up, 8);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    FOR_UNROLL (short e = 0; e < 2; ++e) {
+        const short cell = (short)tiisg * 2 + e;
+        const short row = cell / 8;
+        const short col = cell % 8;
+        if (r0 + (uint)row < args.n_out) {
+            const float gate = sa_gate[row * 8 + col];
+            const float up = sa_up[row * 8 + col];
+            inner[(ulong)col * args.n_out + r0 + (uint)row] =
+                (gate / (1.0f + exp(-gate))) * up;
+        }
+    }
+}

@@ -13513,6 +13513,7 @@ pub fn encode_mat_vec_dispatch(
 }
 
 crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TABLE");
+crate::env_flag!(default_on matmat_q4_vec4_enabled, "QWEN_MATMAT_Q4_VEC4");
 crate::env_flag!(default_on matmat_q5_k_n2_seq_enabled, "QWEN_MATMAT_Q5_K_N2_SEQ");
 crate::env_flag!(default_on matmat_n1_matvec_enabled, "QWEN_MATMAT_N1_MATVEC");
 crate::env_flag!(default_on matmat_iq2_s_n2_nc2_enabled, "QWEN_MATMAT_IQ2_S_N2_NC2");
@@ -13658,7 +13659,18 @@ pub fn encode_mat_mat_dispatch(
             // vs 0.194, [5120,17408] 0.247 vs 0.263).
             8 if weight.dtype == GgmlType::Q4_K && n_in > n_out && n_out.is_multiple_of(8) => {
                 return Ok(crate::metal::encode_mat_mat_mma8_variant(
-                    ctx, enc, weight, x, y, n_in, n_out, "r1c1k128",
+                    ctx,
+                    enc,
+                    weight,
+                    x,
+                    y,
+                    n_in,
+                    n_out,
+                    if matmat_q4_vec4_enabled() {
+                        "r1c1k128_vec4"
+                    } else {
+                        "r1c1k128"
+                    },
                 )?);
             }
             8 if weight.dtype == GgmlType::Q4_K && n_out.is_multiple_of(16) => {
@@ -13672,7 +13684,15 @@ pub fn encode_mat_mat_dispatch(
                     y,
                     n_in,
                     n_out,
-                    "r1c1k64_sg2",
+                    if matmat_q4_vec4_enabled() {
+                        if n_in.checked_mul(2) == Some(n_out) {
+                            "r2c1k64_vec4"
+                        } else {
+                            "r1c1k64_sg2_vec4"
+                        }
+                    } else {
+                        "r1c1k64_sg2"
+                    },
                 )?);
             }
             // ct=2 variants (16 columns) exist only for Q4_K/Q6_K — the

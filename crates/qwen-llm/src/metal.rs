@@ -6827,9 +6827,10 @@ pub fn encode_mat_mat_mma8_dispatch(
     Ok(())
 }
 
-/// v0.500 sweep (bench-only, no production call sites): dispatch a named
-/// mma8v variant. `variant` ∈ {"r2c1k64", "r1c1k128", "r1c2k64",
-/// "r1c1k64_sg2", "r2c2k64", "r2c1k128", "r4c1k64", "r2c2k128"};
+/// Dispatch a named small-N mma8v variant. `variant` ∈ {"r2c1k64",
+/// "r1c1k128", "r1c2k64",
+/// "r1c1k128_vec4", "r1c1k64_sg2", "r1c1k64_sg2_vec4",
+/// "r2c1k64_vec4", "r2c2k64", "r2c1k128", "r4c1k64", "r2c2k128"};
 /// column count = 8*CT (x/y must carry exactly that many columns),
 /// rows per TG = 8*RT*SGS.
 pub fn encode_mat_mat_mma8_variant(
@@ -6845,8 +6846,11 @@ pub fn encode_mat_mat_mma8_variant(
     let (rt, ct, sgs) = match variant {
         "r2c1k64" => (2usize, 1usize, 1usize),
         "r1c1k128" => (1, 1, 1),
+        "r1c1k128_vec4" => (1, 1, 1),
         "r1c2k64" => (1, 2, 1),
         "r1c1k64_sg2" => (1, 1, 2),
+        "r1c1k64_sg2_vec4" => (1, 1, 2),
+        "r2c1k64_vec4" => (2, 1, 1),
         "r2c2k64" => (2, 2, 1),
         "r2c1k128" => (2, 1, 1),
         "r4c1k64" => (4, 1, 1),
@@ -6892,6 +6896,12 @@ pub fn encode_mat_mat_mma8_variant(
             ),
         });
     }
+    if variant.ends_with("vec4") && weight.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8v",
+            detail: format!("variant {variant} only supports Q4_K"),
+        });
+    }
     let dt = match weight.dtype {
         GgmlType::Q4_K => "q4_K",
         GgmlType::Q6_K => "q6_K",
@@ -6934,6 +6944,70 @@ pub fn encode_mat_mat_mma8_variant(
         },
         MTLSize {
             width: 32 * sgs,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_ffn_fused_swiglu_q4_k_mma8_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    x: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    const N: usize = 8;
+    if gate.dtype != GgmlType::Q4_K
+        || up.dtype != GgmlType::Q4_K
+        || x.dtype != GgmlType::F32
+        || inner.dtype != GgmlType::F32
+        || !n_in.is_multiple_of(256)
+        || !n_out.is_multiple_of(8)
+        || gate.n_elements() as usize != n_in * n_out
+        || up.n_elements() as usize != n_in * n_out
+        || x.n_elements() as usize != N * n_in
+        || inner.n_elements() as usize != N * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_k_mma8",
+            detail: format!(
+                "expected Q4_K gate/up [{n_in},{n_out}] and F32 [8,{n_in}] -> [8,{n_out}]"
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_ffn_fused_swiglu_q4_K_mma8_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, gate);
+    enc.set_tensor(2, up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, inner);
+    enc.dispatch(
+        MTLSize {
+            width: n_out / 8,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
             height: 1,
             depth: 1,
         },
@@ -30546,6 +30620,141 @@ mod tests {
             "fused FFN cos too low: {cos} (max|Δ|={max_abs})"
         );
         assert!(max_abs < 1e-3, "fused FFN diverged: max|Δ|={max_abs}");
+    }
+
+    #[test]
+    fn ffn_fused_swiglu_q4_k_mma8_matches_unfused_n8() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let path = "/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let gate = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate.weight" && t.dtype == GgmlType::Q4_K)
+            .expect("Q4_K gate");
+        let up = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up.weight" && t.dtype == GgmlType::Q4_K)
+            .expect("Q4_K up");
+        assert_eq!(gate.shape, up.shape);
+        let n_in = gate.shape[0] as usize;
+        let n_out = gate.shape[1] as usize;
+        const N: usize = 8;
+        let x: Vec<f32> = (0..N * n_in)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.01)
+            .collect();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(N * n_in) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let gate_w = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(gate),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q4_K,
+        )
+        .unwrap();
+        let up_w = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(up),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q4_K,
+        )
+        .unwrap();
+
+        let gate_ref = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+        let up_ref = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+        let inner_ref = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_mat_mat_mma8_variant(
+                &ctx,
+                enc,
+                &gate_w,
+                &x_t,
+                &gate_ref,
+                n_in,
+                n_out,
+                "r1c1k64_sg2",
+            )?;
+            encode_mat_mat_mma8_variant(
+                &ctx,
+                enc,
+                &up_w,
+                &x_t,
+                &up_ref,
+                n_in,
+                n_out,
+                "r1c1k64_sg2",
+            )?;
+            encode_silu_mul_f32(&ctx, enc, &gate_ref, &up_ref, &inner_ref)
+        })
+        .unwrap();
+
+        let inner_fused = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_ffn_fused_swiglu_q4_k_mma8_f32(
+                &ctx,
+                enc,
+                &gate_w,
+                &up_w,
+                &x_t,
+                &inner_fused,
+                n_in,
+                n_out,
+            )
+        })
+        .unwrap();
+        let reference = read_back_f32(&inner_ref.buffer, N * n_out);
+        let fused = read_back_f32(&inner_fused.buffer, N * n_out);
+        let max_abs = reference
+            .iter()
+            .zip(&fused)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let bit_mismatches = reference
+            .iter()
+            .zip(&fused)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        eprintln!("[ffn-fused-mma8-n8] max_abs={max_abs:.3e} bit_mismatches={bit_mismatches}");
+        assert_eq!(bit_mismatches, 0, "fused N8 SwiGLU must be bitwise equal");
+
+        let scalar = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+        let vec4 = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_mat_mat_mma8_variant(
+                &ctx, enc, &gate_w, &x_t, &scalar, n_in, n_out, "r1c1k128",
+            )?;
+            encode_mat_mat_mma8_variant(
+                &ctx,
+                enc,
+                &gate_w,
+                &x_t,
+                &vec4,
+                n_in,
+                n_out,
+                "r1c1k128_vec4",
+            )
+        })
+        .unwrap();
+        let scalar = read_back_f32(&scalar.buffer, N * n_out);
+        let vec4 = read_back_f32(&vec4.buffer, N * n_out);
+        assert!(
+            scalar
+                .iter()
+                .zip(&vec4)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "vectorized Q4_K dequant changed K128 matmul output"
+        );
     }
 
     /// v0.73c.2 gate: layer-major fused SwiGLU FFN at N=16 must match

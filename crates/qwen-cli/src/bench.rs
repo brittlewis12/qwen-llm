@@ -5323,7 +5323,21 @@ fn run_matmat_smalln_micro(args: MatmatSmallnMicroArgs) -> Result<()> {
         let y = y8.view_subrange(0, vec![(N_COLS * n_out) as u64]);
 
         let candidates: Vec<&'static str> = match dtype {
-            GgmlType::Q4_K | GgmlType::Q6_K => vec![
+            GgmlType::Q4_K => vec![
+                "table",
+                "generic",
+                "seq8",
+                "nc8",
+                "mma8_r2c1k64",
+                "mma8_r1c1k128",
+                "mma8_r1c1k128_vec4",
+                "mma8_r1c1k64_sg2",
+                "mma8_r1c1k64_sg2_vec4",
+                "mma8_r2c1k64_vec4",
+                "mma8_r2c1k128",
+                "mma8_r4c1k64",
+            ],
+            GgmlType::Q6_K => vec![
                 "table",
                 "generic",
                 "seq8",

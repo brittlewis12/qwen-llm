@@ -6584,6 +6584,7 @@ fn execute_single_turn_request(
                 args.tokens,
                 &stop_tokens,
                 None,
+                None,
                 shadow.as_mut(),
                 |token| {
                     let callback_t0 = Instant::now();
@@ -6609,7 +6610,7 @@ fn execute_single_turn_request(
                 target: "qwen_diag",
                 concat!(
                     "dflash: spec_steps={} off_steps={} accepted={}/{} ",
-                     "mean_emitted={:.2} alpha_backoff={} fallback={} ",
+                    "mean_emitted={:.2} prefix_replay={}/{}/{}/{} alpha_backoff={} fallback={} ",
                     "draft_ms={:.1} draft_first_ms={:.1} verify_ms={:.1} ",
                     "read_ms={:.1} sample_ms={:.1} ",
                     "append_ms={:.1} restore_ms={:.1} serial_ms={:.1}",
@@ -6619,6 +6620,10 @@ fn execute_single_turn_request(
                 s.accepted_drafts,
                 s.drafts_scored,
                 1.0 + s.accepted_drafts as f64 / steps,
+                s.prefix_replay_steps,
+                s.prefix_replay_accepted_drafts,
+                s.prefix_replay_drafts_scored,
+                s.prefix_replay_mismatches,
                 s.alpha_backoff,
                 s.fallback_calls,
                 s.draft_ms / steps,
@@ -8715,6 +8720,26 @@ fn dflash_speculation_enabled(
         && (!backoff_active || backoff_probe_due)
 }
 
+fn dflash_prefix_replay_drafts<'a>(
+    history: &'a [i32],
+    emitted: &[i32],
+    draft_tokens: usize,
+) -> Option<&'a [i32]> {
+    if history.get(..emitted.len())? != emitted {
+        return None;
+    }
+    history.get(emitted.len()..emitted.len().checked_add(draft_tokens)?)
+}
+
+fn dflash_prefix_replay_allowed(
+    spec_disabled: bool,
+    position: usize,
+    remaining_context_tokens: usize,
+    block_size: usize,
+) -> bool {
+    !spec_disabled && position < DFLASH_OFF_CTX && remaining_context_tokens >= block_size
+}
+
 /// **v0.77** DFlash speculative-decode statistics for one request.
 #[derive(Clone, Debug, Default, Serialize)]
 struct DflashDecodeStats {
@@ -8728,6 +8753,10 @@ struct DflashDecodeStats {
     serial_ms: f64,
     scratch_allocation_ms: f64,
     drafter_calls: usize,
+    prefix_replay_steps: usize,
+    prefix_replay_accepted_drafts: usize,
+    prefix_replay_drafts_scored: usize,
+    prefix_replay_mismatches: usize,
     verify_calls: usize,
     restore_calls: usize,
     spec_steps: usize,
@@ -8815,6 +8844,7 @@ fn generate_dflash<OnToken>(
     max_tokens: usize,
     stop_tokens: &[i32],
     capture_ring: Option<(MetalTensor, usize, usize, usize)>,
+    prefix_replay: Option<&[i32]>,
     mut shadow_probe: Option<&mut Sequence>,
     mut on_token: OnToken,
 ) -> Result<DflashGeneration>
@@ -8922,14 +8952,19 @@ where
             && off_steps_since_backoff > 0
             && off_steps_since_backoff.is_multiple_of(reprobe_interval);
         let remaining_context_tokens = sequence.remaining_context_tokens();
-        let spec_enabled = dflash_speculation_enabled(
-            spec_disabled,
-            position,
-            remaining_context_tokens,
-            n_block,
-            backoff_active,
-            backoff_probe_due,
-        );
+        let prefix_replay_drafts = prefix_replay.and_then(|history| {
+            dflash_prefix_replay_allowed(spec_disabled, position, remaining_context_tokens, n_block)
+                .then(|| dflash_prefix_replay_drafts(history, &tokens, n_block.saturating_sub(1)))?
+        });
+        let spec_enabled = prefix_replay_drafts.is_some()
+            || dflash_speculation_enabled(
+                spec_disabled,
+                position,
+                remaining_context_tokens,
+                n_block,
+                backoff_active,
+                backoff_probe_due,
+            );
 
         if !spec_enabled {
             // Off step: exact single-token decode with multi-hidden
@@ -9000,9 +9035,24 @@ where
 
         // ---- Draft ----
         let drafter_pos = position as u32;
-        let draft_t0 = Instant::now();
-        let (draft_tokens, sparse_proposals) =
+        let prefix_replay_step = prefix_replay_drafts.is_some();
+        let (draft_tokens, sparse_proposals) = if let Some(replay) = prefix_replay_drafts {
             if let Some(proposal_sampler) = proposal_sampler.as_mut() {
+                let draws = proposal_sampler
+                    .draws()
+                    .checked_add(replay.len())
+                    .context("DFlash proposal draw count overflow")?;
+                *proposal_sampler = Sampler::at_draw(proposal_sampler.config(), draws)
+                    .context("advance DFlash proposal RNG across prefix replay")?;
+            }
+            let mut drafts = Vec::with_capacity(n_block);
+            drafts.push(carry);
+            drafts.extend_from_slice(replay);
+            stats.prefix_replay_steps += 1;
+            (drafts, None)
+        } else {
+            let draft_t0 = Instant::now();
+            let drafted = if let Some(proposal_sampler) = proposal_sampler.as_mut() {
                 let block = decoder
                     .draft_block_sampled(carry, drafter_pos, proposal_sampler)
                     .context("sample dflash2 proposal path")?;
@@ -9015,14 +9065,16 @@ where
                     None,
                 )
             };
-        let draft_ms = draft_t0.elapsed().as_secs_f64() * 1e3;
-        if stats.drafter_calls == 0 {
-            // One-time prompt projection through the drafter caches.
-            stats.draft_first_call_ms = draft_ms;
-        } else {
-            stats.draft_ms += draft_ms;
-        }
-        stats.drafter_calls += 1;
+            let draft_ms = draft_t0.elapsed().as_secs_f64() * 1e3;
+            if stats.drafter_calls == 0 {
+                // One-time prompt projection through the drafter caches.
+                stats.draft_first_call_ms = draft_ms;
+            } else {
+                stats.draft_ms += draft_ms;
+            }
+            stats.drafter_calls += 1;
+            drafted
+        };
         stats.spec_steps += 1;
 
         // ---- Packed verify: [carry, drafts...] ----
@@ -9151,7 +9203,6 @@ where
         } else {
             n_accepted + 1
         };
-
         // ---- Margin-guarded exact fallback ----
         // The batched verify arithmetic diverges from token-major by up to
         // ~1e-1 absolute on low-confidence rows (shadow probe, 2026-08-21).
@@ -9261,6 +9312,13 @@ where
                 if fallback_targets.len() < n_keep {
                     fallback_targets.resize(n_keep, 0);
                 }
+            }
+        }
+        if prefix_replay_step {
+            stats.prefix_replay_accepted_drafts += n_accepted;
+            stats.prefix_replay_drafts_scored += n_drafts_scored;
+            if terminal.is_none() && n_accepted < n_drafts_scored {
+                stats.prefix_replay_mismatches += 1;
             }
         }
 
@@ -10643,6 +10701,24 @@ mod tests {
         assert!(dflash_speculation_enabled(
             false, 100, BLOCK, BLOCK, true, true
         ));
+    }
+
+    #[test]
+    fn dflash_prefix_replay_requires_an_exact_emitted_prefix() {
+        let history = [10, 11, 12, 13, 14, 15, 16, 17, 18];
+        assert_eq!(
+            dflash_prefix_replay_drafts(&history, &[10, 11], 7),
+            Some(&history[2..9])
+        );
+        assert_eq!(dflash_prefix_replay_drafts(&history, &[10, 99], 7), None);
+        assert_eq!(
+            dflash_prefix_replay_drafts(&history, &[10, 11, 12], 7),
+            None
+        );
+        assert!(dflash_prefix_replay_allowed(false, 100, 8, 8));
+        assert!(!dflash_prefix_replay_allowed(true, 100, 8, 8));
+        assert!(!dflash_prefix_replay_allowed(false, DFLASH_OFF_CTX, 8, 8));
+        assert!(!dflash_prefix_replay_allowed(false, 100, 7, 8));
     }
 
     #[test]

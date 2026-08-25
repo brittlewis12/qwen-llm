@@ -145,6 +145,10 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   token-major arithmetic. The per-request
   `serve phases:` line reports `decode_path=dflash|serial`, with a
   `serve dflash:` line carrying acceptance and backoff counters.
+  `QWEN_DFLASH_PREFIX_REPLAY=1` additionally enables a default-off,
+  single-process experiment that verifies repeated exact-prompt completions
+  before falling back to DFlash; sampled use requires two distinct-seed outputs
+  with a 32-token consensus prefix. It is not a multi-tenant cache contract.
   DFlash starts only after the required full-prompt or trailing SWA window has
   been captured and the target sequence is at prompt length. The old 25-token performance run is
   retracted: its short-prompt serial-tail path did not seed prompt hiddens, so it

@@ -23,14 +23,149 @@ use qwen_llm::metal_dflash::{
 };
 use qwen_llm::metal_forward::MetalForward;
 use qwen_llm::runtime::{LoadedModel, Sequence, SequenceConfig};
-use qwen_llm::sampling::{Sampler, SamplingConfig};
-use qwen_llm::tokenizer::Tokenizer;
+use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
+use qwen_llm::tokenizer::{Tokenizer, token_ids_sha256_i32le};
+use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
 
 const DFLASH_FIXED_SCRATCH_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 const SERIAL_TAIL_THRESHOLD: usize = 48;
+const DFLASH_PREFIX_REPLAY_ENV: &str = "QWEN_DFLASH_PREFIX_REPLAY";
+const DFLASH_PREFIX_REPLAY_MAX_ENTRIES: usize = 4;
+const DFLASH_PREFIX_REPLAY_MAX_TOKENS: usize = 4096;
+const DFLASH_PREFIX_REPLAY_MIN_SAMPLED_ENTRIES: usize = 2;
+const DFLASH_PREFIX_REPLAY_MIN_SAMPLED_TOKENS: usize = 32;
 type DflashPromptCapture = (MetalTensor, usize, usize, usize, Option<usize>);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DflashPrefixReplayKey {
+    prompt_sha256: String,
+    sampler_version: u32,
+    temperature_bits: u32,
+    top_k: usize,
+    top_p_bits: u32,
+    min_p_bits: u32,
+}
+
+// Seed is intentionally excluded so repeated sampling runs can share history;
+// sampled admission separately requires consensus from distinct seeds.
+fn dflash_prefix_replay_key(prompt_ids: &[i32], sampling: SamplingConfig) -> DflashPrefixReplayKey {
+    DflashPrefixReplayKey {
+        prompt_sha256: token_ids_sha256_i32le(prompt_ids),
+        sampler_version: SAMPLER_ALGORITHM_VERSION,
+        temperature_bits: sampling.temperature.to_bits(),
+        top_k: sampling.top_k,
+        top_p_bits: sampling.top_p.to_bits(),
+        min_p_bits: sampling.min_p.to_bits(),
+    }
+}
+
+#[derive(Default)]
+struct DflashPrefixReplayCache {
+    enabled: bool,
+    entry: Option<(DflashPrefixReplayKey, VecDeque<DflashPrefixReplayHistory>)>,
+}
+
+struct DflashPrefixReplayHistory {
+    seed: u64,
+    tokens: Box<[i32]>,
+}
+
+impl DflashPrefixReplayCache {
+    fn from_env() -> Self {
+        let enabled = match std::env::var(DFLASH_PREFIX_REPLAY_ENV) {
+            Err(std::env::VarError::NotPresent) => false,
+            Ok(value) if matches!(value.as_str(), "0" | "false" | "off") => false,
+            Ok(value) if matches!(value.as_str(), "1" | "true" | "on") => true,
+            Err(std::env::VarError::NotUnicode(_)) | Ok(_) => {
+                tracing::warn!(
+                    "serve: {DFLASH_PREFIX_REPLAY_ENV} must be 0/1, false/true, or off/on; disabling"
+                );
+                false
+            }
+        };
+        Self {
+            enabled,
+            entry: None,
+        }
+    }
+
+    fn lookup(&self, key: &DflashPrefixReplayKey) -> Option<Vec<i32>> {
+        let (_, histories) = self
+            .enabled
+            .then_some(())
+            .and_then(|()| self.entry.as_ref())
+            .filter(|(cached_key, _)| cached_key == key)?;
+        let sampled = key.temperature_bits != 0.0f32.to_bits();
+        let distinct_seeds = histories
+            .iter()
+            .enumerate()
+            .filter(|(index, history)| {
+                !histories
+                    .iter()
+                    .take(*index)
+                    .any(|prior| prior.seed == history.seed)
+            })
+            .count();
+        if sampled && distinct_seeds < DFLASH_PREFIX_REPLAY_MIN_SAMPLED_ENTRIES {
+            return None;
+        }
+        let first = histories.front()?;
+        let mut common = first.tokens.len();
+        for history in histories.iter().skip(1) {
+            common = common.min(history.tokens.len()).min(
+                first
+                    .tokens
+                    .iter()
+                    .zip(history.tokens.iter())
+                    .take_while(|(a, b)| a == b)
+                    .count(),
+            );
+        }
+        let minimum = if sampled {
+            DFLASH_PREFIX_REPLAY_MIN_SAMPLED_TOKENS
+        } else {
+            qwen_llm::prompt_lookup::DRAFT_TOKENS + 1
+        };
+        (common >= minimum).then(|| first.tokens[..common].to_vec())
+    }
+
+    fn insert(&mut self, key: DflashPrefixReplayKey, seed: u64, tokens: &[i32]) {
+        if self.enabled
+            && (qwen_llm::prompt_lookup::DRAFT_TOKENS + 1..=DFLASH_PREFIX_REPLAY_MAX_TOKENS)
+                .contains(&tokens.len())
+        {
+            match self.entry.as_mut() {
+                Some((cached_key, histories)) if *cached_key == key => {
+                    if let Some(index) = histories.iter().position(|history| history.seed == seed) {
+                        histories.remove(index);
+                    }
+                    if histories.len() == DFLASH_PREFIX_REPLAY_MAX_ENTRIES {
+                        histories.pop_front();
+                    }
+                    histories.push_back(DflashPrefixReplayHistory {
+                        seed,
+                        tokens: tokens.into(),
+                    });
+                }
+                _ => {
+                    self.entry = Some((
+                        key,
+                        VecDeque::from([DflashPrefixReplayHistory {
+                            seed,
+                            tokens: tokens.into(),
+                        }]),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
 
 impl ServeError {
     pub(crate) fn server_error(message: impl Into<String>) -> Self {
@@ -59,6 +194,7 @@ pub(crate) struct EngineBackend {
     /// rejection sampling against the packed target forward, whose numerics
     /// can differ slightly from serial token-major decoding.
     dflash_head: Option<MetalDFlashHead>,
+    dflash_prefix_replay: DflashPrefixReplayCache,
 }
 
 impl EngineBackend {
@@ -108,6 +244,7 @@ impl EngineBackend {
             template,
             no_thinking_supported,
             dflash_head,
+            dflash_prefix_replay: DflashPrefixReplayCache::from_env(),
         })
     }
 }
@@ -418,6 +555,13 @@ impl GenerationBackend for EngineBackend {
             )
             .into());
         }
+        let replay_sampling = sampler.config();
+        let dflash_prefix_replay_key = (self.dflash_prefix_replay.enabled()
+            && self.dflash_head.is_some())
+        .then(|| dflash_prefix_replay_key(&prompt_ids, replay_sampling));
+        let dflash_prefix_replay = dflash_prefix_replay_key
+            .as_ref()
+            .and_then(|key| self.dflash_prefix_replay.lookup(key));
 
         // Context admission fails closed (S0 F3 == spec truncation:"disabled").
         let capacity = request_capacity(prompt_ids.len(), max_tokens, self.max_context_tokens)
@@ -963,6 +1107,7 @@ impl GenerationBackend for EngineBackend {
                             .and_then(|(dst, wstart, _, n_features, ring)| {
                                 ring.map(|window| (dst.clone(), *wstart, *n_features, window))
                             }),
+                        dflash_prefix_replay.as_deref(),
                         None,
                         |token| {
                             let bytes = tokenizer
@@ -1009,6 +1154,8 @@ impl GenerationBackend for EngineBackend {
                         .and_then(|(dst, wstart, _, n_features, ring)| {
                             ring.map(|window| (dst.clone(), *wstart, *n_features, window))
                         }),
+                    dflash_prefix_replay_key.as_ref(),
+                    replay_sampling.seed,
                     format!(
                         "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=dflash"
                     ),
@@ -1103,6 +1250,8 @@ impl GenerationBackend for EngineBackend {
                 .and_then(|(dst, wstart, _, n_features, ring)| {
                     ring.map(|window| (dst.clone(), *wstart, *n_features, window))
                 }),
+            dflash_prefix_replay_key.as_ref(),
+            replay_sampling.seed,
             format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=serial"),
         )
     }
@@ -1204,7 +1353,7 @@ impl EngineBackend {
     /// phase/stats lines, and the outcome.
     #[allow(clippy::too_many_arguments)]
     fn finish_generation(
-        &self,
+        &mut self,
         generation: crate::GenerationResult,
         dflash: Option<crate::DflashDecodeStats>,
         sequence: qwen_llm::runtime::Sequence,
@@ -1212,9 +1361,11 @@ impl EngineBackend {
         matched_tokens: usize,
         restore_ms: f64,
         capture_ring: Option<(MetalTensor, usize, usize, usize)>,
+        dflash_prefix_replay_key: Option<&DflashPrefixReplayKey>,
+        dflash_prefix_replay_seed: u64,
         phases: String,
     ) -> Result<GenerationOutcome, BackendFailure> {
-        match crate::derive_completed_checkpoint_boundary(
+        let completed_boundary_valid = match crate::derive_completed_checkpoint_boundary(
             prompt_ids.len(),
             &generation.tokens,
             generation.transitions,
@@ -1245,8 +1396,19 @@ impl EngineBackend {
                     features,
                     "completed",
                 );
+                true
             }
-            Err(error) => tracing::warn!("serve: completed boundary derivation failed: {error}"),
+            Err(error) => {
+                tracing::warn!("serve: completed boundary derivation failed: {error}");
+                false
+            }
+        };
+        if let Some(key) = dflash_prefix_replay_key.filter(|_| completed_boundary_valid) {
+            self.dflash_prefix_replay.insert(
+                key.clone(),
+                dflash_prefix_replay_seed,
+                &generation.tokens,
+            );
         }
 
         let stop_reason = match generation.stop_reason {
@@ -1275,13 +1437,19 @@ impl EngineBackend {
         if let Some(stats) = dflash {
             tracing::info!(
                 target: "qwen_diag",
-                "serve dflash: spec_steps={} off_steps={} accepted={}/{} alpha_backoff={} fallback={} draft_ms={:.1} verify_ms={:.1}",
+                "serve dflash: spec_steps={} off_steps={} accepted={}/{} prefix_replay={}/{}/{}/{} drafter_calls={} alpha_backoff={} fallback={} draft_first_ms={:.1} draft_steady_ms={:.1} verify_ms={:.1}",
                 stats.spec_steps,
                 stats.off_steps,
                 stats.accepted_drafts,
                 stats.drafts_scored,
+                stats.prefix_replay_steps,
+                stats.prefix_replay_accepted_drafts,
+                stats.prefix_replay_drafts_scored,
+                stats.prefix_replay_mismatches,
+                stats.drafter_calls,
                 stats.alpha_backoff,
                 stats.fallback_calls,
+                stats.draft_first_call_ms,
                 stats.draft_ms,
                 stats.verify_ms,
             );
@@ -1305,6 +1473,103 @@ impl EngineBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn replay_cache() -> DflashPrefixReplayCache {
+        DflashPrefixReplayCache {
+            enabled: true,
+            entry: None,
+        }
+    }
+
+    #[test]
+    fn dflash_prefix_replay_key_allows_new_seeds_but_not_new_sampling_shapes() {
+        let first = dflash_prefix_replay_key(
+            &[1, 2, 3],
+            SamplingConfig {
+                temperature: 0.7,
+                top_k: 200,
+                top_p: 1.0,
+                min_p: 0.05,
+                seed: 101,
+            },
+        );
+        let mut changed_seed = SamplingConfig {
+            temperature: 0.7,
+            top_k: 200,
+            top_p: 1.0,
+            min_p: 0.05,
+            seed: 102,
+        };
+        assert_eq!(first, dflash_prefix_replay_key(&[1, 2, 3], changed_seed));
+        changed_seed.min_p = 0.1;
+        assert_ne!(first, dflash_prefix_replay_key(&[1, 2, 3], changed_seed));
+    }
+
+    #[test]
+    fn dflash_prefix_replay_cache_is_single_entry_and_bounded() {
+        let mut cache = replay_cache();
+        let config = SamplingConfig::default();
+        let first = dflash_prefix_replay_key(&[1], config);
+        let second = dflash_prefix_replay_key(&[2], config);
+        cache.insert(first.clone(), 1, &[7; 8]);
+        assert_eq!(cache.lookup(&first), Some(vec![7; 8]));
+
+        cache.insert(second.clone(), 1, &[8; 9]);
+        assert_eq!(cache.lookup(&first), None);
+        assert_eq!(cache.lookup(&second), Some(vec![8; 9]));
+
+        cache.insert(first.clone(), 1, &[9; 7]);
+        assert_eq!(cache.lookup(&first), None);
+        cache.insert(
+            first.clone(),
+            1,
+            &vec![9; DFLASH_PREFIX_REPLAY_MAX_TOKENS + 1],
+        );
+        assert_eq!(cache.lookup(&first), None);
+        assert_eq!(cache.lookup(&second), Some(vec![8; 9]));
+    }
+
+    #[test]
+    fn dflash_prefix_replay_uses_only_prior_consensus() {
+        let mut cache = replay_cache();
+        let key = dflash_prefix_replay_key(&[1], SamplingConfig::default());
+        cache.insert(key.clone(), 1, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        cache.insert(key.clone(), 2, &[1, 2, 3, 4, 5, 6, 7, 8, 20, 21]);
+        assert_eq!(cache.lookup(&key), Some(vec![1, 2, 3, 4, 5, 6, 7, 8]));
+
+        cache.insert(key.clone(), 3, &[1, 2, 3, 4, 5, 6, 30, 31, 32]);
+        assert_eq!(cache.lookup(&key), None);
+    }
+
+    #[test]
+    fn dflash_prefix_replay_sampled_requires_two_long_consistent_histories() {
+        let mut cache = replay_cache();
+        let key = dflash_prefix_replay_key(
+            &[1],
+            SamplingConfig {
+                temperature: 0.7,
+                ..SamplingConfig::default()
+            },
+        );
+        cache.insert(key.clone(), 1, &[1; 64]);
+        assert_eq!(cache.lookup(&key), None);
+        cache.insert(key.clone(), 1, &[1; 64]);
+        assert_eq!(cache.lookup(&key), None);
+
+        let mut second = vec![1; 64];
+        second[31] = 2;
+        cache.insert(key.clone(), 2, &second);
+        assert_eq!(cache.lookup(&key), None);
+
+        let third = vec![1; 64];
+        cache.insert(key.clone(), 3, &third);
+        assert_eq!(cache.lookup(&key), None);
+
+        let mut consistent = replay_cache();
+        consistent.insert(key.clone(), 1, &[1; 64]);
+        consistent.insert(key.clone(), 2, &[1; 64]);
+        assert_eq!(consistent.lookup(&key), Some(vec![1; 64]));
+    }
 
     #[test]
     fn qwen38_thinking_prompt_is_headless() {

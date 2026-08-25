@@ -6,6 +6,240 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-25 - Same-Prompt Replay Opens A Bounded Suffix/DFlash Lane
+
+Status: retain the default-off serve prototype; greedy replay clears its live
+mechanism gate, while sampled replay remains confidence-gated and experimental.
+
+- Causal replay over new Qwen3.8-27B Q4 temperature-0.7 target streams exposed a
+  real repeated-request opportunity. Replaying only the preceding completion's
+  exact prefix accepted `117` drafts in 18 D7 packets across three later
+  64-token requests. At the measured N8/serial ratio near `2.2`, the target-only
+  projection is `2.02x`. Linear L2/D7 suffix lookup reached `136` accepted drafts
+  in 24 packets (`2.31x` projected), while unrelated frozen Qwen3.6 outputs had
+  effectively no cross-request signal.
+- The smallest live slice injects cached D7 tokens into production DFlash verify
+  as deterministic one-hot proposals and skips the drafter. It keeps target
+  sampling, packed verification, hidden capture, restore, greedy margin fallback,
+  and DFlash fallback unchanged. Skipped sampled blocks advance DFlash2's
+  independent proposal RNG by seven draws so fallback does not resume from a
+  trivially shifted proposal stream.
+- On three repeated 64-token greedy serve requests, DFlash-only measured
+  `42.51/42.88` token/s after warmup; replay measured `63.35/63.35` token/s
+  (`1.48x`). Each replay request used eight packets, accepted `56/56`, made zero
+  drafter calls, retained the exact response hash, and still exercised one
+  margin-guarded fallback.
+- Unqualified sampled replay is unsafe as a performance policy. It produced
+  18-35% wins on one 64-token panel, but a different 128-token panel contained a
+  double-digit per-seed regression because changing valid coupling decisions can
+  change the later target trajectory and DFlash acceptance. Proposal-RNG alignment
+  reduced but did not remove that variance.
+- Sampled serve replay now requires two distinct-seed completions with at least
+  32 unanimous prefix tokens. On a temperature-0.2 panel it abstained on the first
+  warm request, then replayed four fully accepted packets (`28/28`) on each of the
+  next two. Warm aggregate decode improved about `1.04x`; the engaged rows moved
+  about `1.02x` and `1.14x`. This supports continued work, not default promotion.
+- `QWEN_DFLASH_PREFIX_REPLAY=1` enables one exact prompt/sampling-shape cache with
+  at most four 4,096-token completions. The model is backend-scoped, seed is
+  deliberately excluded from the key but counted by the sampled confidence gate,
+  and different prompts replace the entry. Default-off performs no replay hash or
+  output clone. Replay obeys the existing 16K hard context guard and remains a
+  trusted single-process serve experiment, not a multi-tenant cache contract.
+
+Next leverage is high-confidence suffix resynchronization over multiple prior
+outputs, not weakening the sampled prefix gate. It should earn a charged long-
+output win before any broader cache, tree verifier, or default-on policy.
+
+## 2026-08-25 - Q8 Packed-Prefill Local Tile Search Closed
+
+- A production-geometry Qwen3.8-27B Q8 `pp1024` trace measured `4,415.5` ms
+  wall / `3,946.0` ms GPU (`231.9` token/s). Dense FFN gate, up, down, and
+  SwiGLU accounted for `865.95/865.77/884.90/26.27` ms, or `67.0%` of traced
+  GPU time. A separate whole-graph FFN no-op moved `4,163.97 -> 1,424.93` ms,
+  independently bounding FFN at `65.8%` of wall.
+- A half-staged Q8 N64 tile shared each dequantized panel across twice as many
+  prompt columns and matched the N32 output bitwise. On the real
+  `[K=5120,M=17408,N=1024]` gate tensor it was flat/slower:
+  `13.557` versus `13.456` ms GPU (`0.993x`).
+- The existing wide F32 R2C16K64 tile also lost, `16.431` versus `13.456` ms
+  (`0.819x`), despite cosine `0.999999971`, relative RMS `2.589e-4`, and maximum
+  delta `2.056e-5` against the half-staged result.
+- A bitwise Q8 gate+up+SwiGLU fusion removed two intermediates, one activation
+  tile stream, and two dispatches but measured `27.598` versus `27.335` ms GPU
+  (`0.990x`). The unchanged MMA work dominates the apparent FFN attribution;
+  dequant reuse, wider column sharing, and local dispatch/intermediate fusion
+  do not move this shape.
+- Exact F16 materialization took `57.2` ms for one gate tensor and added 170 MiB
+  resident storage, but its matmul regressed to `13.916` versus `13.456` ms GPU
+  (`0.967x`) because the larger weight stream outweighed removed dequantization.
+  Do not build multi-GiB F16 prefill sidecars for this model.
+- All prototypes and their tests were removed. Do not reopen local Q8
+  tile/fusion variants without a mechanism that changes effective MMA
+  throughput or avoids projection work; the measured FFN share is a large
+  algorithm/backend opportunity, not evidence for more scheduling tweaks.
+
+## 2026-08-25 - Long DFlash Prefill Geometry And V_T Dispatch Repaired
+
+- `qwen-bench dflash` was reusing physical-N8 verifier scratch for prompt
+  prefill, forcing 58,810 tokens through 7,352 tiny chunks, losing matrix
+  attention after token 8, capturing 5.61 GiB of hidden history, and seeding all
+  of it into an all-SWA drafter. This was benchmark-path waste, not production
+  DFlash decode cost.
+- An isolated Qwen3.8-27B Q8 8,270-token A/B measured chunk-8 prefill at
+  `107.696` s versus production-sized chunk-1,024 at `35.986` s (`2.99x`). The
+  DFlash benchmark now owns separate 1,024-row matrix-prefill scratch, captures
+  only the loaded head's observable window (2,048 tokens for DFlash2), and drops
+  prefill-only storage before decode. Its no-spec comparator uses the same split
+  and excludes scratch allocation symmetrically.
+- On the exact 58,810-token Q8/Q8 source continuation, corrected prefill fell
+  from `1,020.011` to `322.110` s (`3.17x`) and full 512-token request wall from
+  `1,057.413` to `357.934` s (`2.95x`). First-draft prompt projection fell from
+  `1,850.4` to `92.9` ms. Acceptance remained exactly `335/176`, including every
+  per-position count.
+- The corrected split exposed the retained V_T transpose encoder's legacy
+  256x threadgroup multiplication. For Qwen3.8 G6 it becomes illegal above a
+  16,384-row rebuild; the 56,762-row capture split failed before dispatch. The
+  existing compact grid performs the identical admitted IDs with
+  `ceil(total/256)` groups and had already passed bitwise nonzero-span and
+  prefix-rebuild oracles plus a 197-217x isolated campaign.
+- Compact V_T dispatch is now default-on, with
+  `QWEN_ATTN_MATRIX_VT_COMPACT_DISPATCH=0` as the exact legacy rollback below
+  its range limit. Five focused tests pass, and the default path completed a
+  19,729-row rebuild that legacy cannot represent. A 2,595-token Q4/Q4
+  windowed smoke remained greedily identical for 64 tokens and measured
+  `1.715x` decode-only versus no-spec.
+
+## 2026-08-25 - Progressive N4 Long-Context DFlash Rejected
+
+- The production verifier's physical N=4 shape is not a general substitute for
+  N=8. On Qwen3.8-27B Q8, N4/N8 minima were `241.82/189.91` ms at 64K and
+  `283.52/279.67` ms at 128K: N4 loses outright. On Q4_K_M they were
+  `168.12/177.33` ms and `214.44/269.49` ms, respectively.
+- A real Qwen3.8 Q8 target + DFlash2 Q8 static-N8 continuation over 58,810
+  source-code tokens accepted the first four drafts on `35/176 = 19.9%` of
+  steps. It emitted 512 tokens with mean accepted chain `1.903`; steady-state
+  draft and verify means were `15.0` and `186.1` ms.
+- At that observed first-four rate, two-stage Q4 verification projects to about
+  `201.6` ms versus N8's `177.3` ms at 64K and `257.1` versus `269.5` ms at
+  128K. The latter is only a `4.6%` verifier saving, while full acceptance costs
+  `428.9` ms (`+59.2%`). Reaching the `15%` 128K gate would require first-four
+  acceptance below `6.8%`, the regime where speculation itself is usually the
+  larger economic problem.
+- No progressive executor was built. The existing audit now accepts
+  `QWEN_DFLASH_VERIFY_AUDIT_MODEL` so future verifier-shape decisions can use the
+  actual target quantization instead of a hard-coded older fixture.
+
+## 2026-08-24 - DSpark Physical N2 Prerequisite Gate Closed
+
+- The current restored position-2,384 FRESH singleton measures `55.560` ms wall
+  / `54.114` ms GPU (seven-sample median, 1,506 dispatches). It already exceeds
+  the preregistered `52.0` ms target-only N2 gate before adding a causal row,
+  drafter, decision, or transaction work; the complete external packet budget
+  remains `58.34` ms.
+- Exact token-axis Q8 GEMV is the right N2 primitive but not enough by itself.
+  Batched/two-singleton GPU ratios were `0.535` for q_b `[1024,32768]`, `0.726`
+  for KV `[4096,512]`, `0.849` for output-A `[4096,8192]`, and `0.783` for
+  output-B `[8192,4096]`; every batched result was bitwise identical. Relative
+  to one singleton, however, every N2 projection still costs more work.
+- Exact consecutive target transcripts share 99 of 258 routed slots (`38.4%`,
+  mean `2.302/6` per layer). A token-axis all-slot prototype was bitwise exact
+  across the supported quant pairs but recovered only about 6% over two
+  singleton bodies: IQ2_XS/IQ3_XXS was `0.3341` versus `0.3551` ms/layer and
+  all-IQ3 was `0.3290` versus `0.3490`; they remained `1.885x/1.866x` one
+  singleton.
+- Even perfect overlap-keyed weight traversal would retain an optimistic
+  `(12-2.302)/6 = 1.616x` routed-assignment floor before doubled activation dot
+  work. Combined with the measured Q8 increment, a credible N2 reopen needs the
+  singleton near `42 ms` GPU, not an executor wrapped around today's `54 ms`.
+- The token-axis expert prototype was removed; the generalized Q8 amortization
+  benchmark remains. Do not build the full transactional executor until a
+  structural singleton optimization first moves the restored floor into that
+  range, then rerun this gate.
+
+## 2026-08-24 - Dense Group-6 Register-Score Attention Rejected
+
+- The existing lane-owned score/`simd_shuffle` body was instantiated only for
+  dense group-6, F16-KV, C32 q1 attention. It preserved the 32-thread grid,
+  K/V traffic, split-K layout, and reducer while deleting 768 B of score TGM
+  plus two barriers per tile.
+- The full F16 attention oracle passed across groups, contexts, tile sizes,
+  and partition counts. At 128K, however, the same-command eight-q1 chain
+  regressed from `19.573` to `23.856` ms/layer (`+21.9%`), missing the
+  preregistered `-8%` primitive gate before whole-model testing.
+- The exact kernel and flag were removed. For dense group-6, lane score
+  retention and shuffle cost more than the incumbent TGM/barrier exchange;
+  this closes the dispatch-neutral q1 score-storage substitution.
+
+## 2026-08-24 - One-Pass N=8 Shared-KV Verifier Rejected
+
+- An exact 24Q/4KV/head-dim-256 kernel assigned one simdgroup to each of
+  eight causal rows inside a 256-thread group and staged each four-position
+  K/V tile once. It used 28 KiB of threadgroup memory and no context-linear
+  sidecar.
+- The implementation was numerically clean against eight q1 calls at
+  512/8K/16K and NWG 128/512/1024: cosine was `1.000000000` and maximum
+  absolute delta was at most `5.588e-9`.
+- The primitive won strongly at 64K (`9.740` versus `14.165` ms/layer,
+  `-31.2%`) but missed the 128K gate (`16.981` versus `19.573` ms/layer,
+  `-13.2%`). Geometry-matched NWG 128/256 did not rescue 128K
+  (`17.759/16.832` ms).
+- Whole-verifier behavior reversed the primitive result: candidate versus
+  baseline was `223.20` versus `178.46` ms at 64K and `354.70` versus
+  `269.69` ms at 128K (`+25.1/+31.5%`). The wide, 28-KiB threadgroup loses
+  the scheduling/interleaving that makes eight q1 dispatches efficient in
+  the complete model.
+- The kernel, route, and flag were removed. A shared-KV primitive win is not
+  promotable without a whole-verifier win; this closes the fused QT=8 lane
+  rather than inviting more tile or partition tuning.
+
+## 2026-08-24 - DFlash Long-Context Matrix Verifier Rejected
+
+- Initializing synthetic F16 KV exposed a bad comparison: multiplying an
+  isolated q1 timing by eight overstates the production verifier. Eight q1
+  rows in one command measured `3.503` ms/layer at 8K and `19.702` ms/layer
+  at 128K; this same-command chain is now part of the attention audit.
+- Production N=8 verifier minima at 8K/32K/64K/128K were
+  `96.87/132.79/178.13/268.62` ms. Online matrix attention with persistent
+  transposed V reached `92.99/126.44/172.67/264.81` ms: only 4-6 ms saved,
+  with no growing long-context advantage and a multi-GiB (~3.5 GiB at 128K)
+  V sidecar.
+- A 128K timestamp trace explains the ceiling: per-row attention consumed
+  `194.818` of `271.300` GPU ms versus matrix attention's `190.085` of
+  `263.611` ms. Deleting 112 attention encoders did not delete meaningful
+  physical work once interleaved with the complete model.
+- On an 8,843-token product prompt, persistent-V matrix verification was
+  `107.0` ms versus baseline `105.5` ms (`21.00` versus `20.99` tok/s);
+  direct-V matrix regressed to `116.0` ms and `19.91` tok/s. Output,
+  `181/518` acceptance, and 17 fallbacks were identical.
+- The matrix production prototype and its sidecar are removed. Future
+  long-context speculative work must either read K/V genuinely once or cut
+  serial decode work; isolated attention wins are not a sufficient gate.
+
+## 2026-08-24 - DFlash Short-Context Verifier Leaf Search Closed
+
+- Two Q6_K down-projection unpack alternatives lost to the incumbent paired
+  `uint16_t` path: lane-shared unpack measured `0.356` ms and packed unaligned
+  loads `0.316` ms versus `0.254` ms per dispatch. The existing unpack remains.
+- Proposal-only scalar admission did not predict target acceptance well enough
+  to pay for itself. Across 360 sampled blocks and leave-one-prompt-out
+  code/game/prose splits, q-distribution features reached `1.60%` pooled utility;
+  unary-score deficit reached `1.55%` pooled (`1.82/1.46/1.29%` held out), below
+  the `3%` gate. Richer target-aware policy remains a different work unit.
+- Residual-plus-RMSNorm fusion moved product verification by only about `0.3%`.
+  Concurrent GDN front projections measured verify `84.5/85.3/84.4` ms in
+  candidate/rollback/candidate order, only about `1%` better. Replacing fused
+  Q4 gate/up/SwiGLU with concurrent split projections regressed to
+  `86.2/85.2/86.1` ms and moved decode throughput backward
+  (`55.00/55.57/54.95` token/s).
+- Both concurrency arms preserved output and `212/308` acceptance; debug hazard
+  tracking and the N=8 split/fused bitwise oracle passed. All sub-threshold code
+  was removed, leaving packed GDN plus fused Q4 FFN as the short-context local
+  optimum.
+- This closes bounded fixed-cost verifier leaves, not speculative decoding.
+  Long-context shared-KV verification and the singleton-derived DSpark N2 lane
+  remain structurally distinct because they can delete context-scaling target
+  work rather than merely overlap unchanged projections.
+
 ## 2026-08-24 - DFlash N=8 Q4 FFN Fusion Cuts Verify Another 5%
 
 - A dense-FFN no-op ablation reduced packed verification from `89.8` to

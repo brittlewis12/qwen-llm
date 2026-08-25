@@ -17675,7 +17675,7 @@ fn validate_attn_matrix_common(
 }
 
 crate::env_flag!(
-    default_off attn_matrix_vt_compact_dispatch_env_enabled,
+    default_on attn_matrix_vt_compact_dispatch_env_enabled,
     "QWEN_ATTN_MATRIX_VT_COMPACT_DISPATCH"
 );
 
@@ -22824,7 +22824,6 @@ pub fn encode_mat_mat_q8_0_f32(
             ),
         });
     }
-
     // NR1=16 fast-path gate: same specialization as Q4_K/Q5_K/Q6_K mat-mat.
     // Only fires when n_query == 16 exactly; otherwise generic NR1=32 kernel.
     let kernel_name = if n_query == 16 {
@@ -30028,16 +30027,11 @@ mod tests {
         }
     }
 
-    /// v0.73b.0 A-lite GO/NO-GO bench. Compares amortized weight-BW
-    /// of Q8_0 mat-mat (NR1=16 fast path) vs N=16 successive Q8_0
-    /// mat-vec on a production drafter weight shape
-    /// (`blk.0.ffn_down.weight` from the spiritbuun DFlash drafter,
-    /// shape [17408, 5120]). The drafter has 5 layers; use 5 chained
-    /// dispatches per command buffer to mirror the actual hot-path
-    /// usage pattern. Threshold for proceed: GPU ratio ≤ 0.5
-    /// (mat-mat at LEAST 2× faster). Q5_K hit 3.59× at the GDN
-    /// out_proj shape; Q8_0 should hit similar or higher (simpler
-    /// dequant, same tile geometry).
+    /// Q8_0 token-axis amortization bench. The defaults retain the original
+    /// N=16 DFlash gate; environment overrides make the same harness useful for
+    /// exact production shapes at other small-N operating points. It compares
+    /// the generic mat-mat tile, one batched exact GEMV dispatch, and N exact
+    /// singleton GEMVs in same-command chains.
     ///
     /// Run: `cargo test --release --lib -p qwen-llm
     /// q8_0_mat_mat_amortization_vs_n_mat_vec --ignored -- --nocapture`
@@ -30045,31 +30039,63 @@ mod tests {
     #[ignore]
     fn q8_0_mat_mat_amortization_vs_n_mat_vec() {
         use std::time::Instant;
+
+        fn env_usize(name: &str, default: usize) -> usize {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.parse::<usize>().expect("invalid positive integer"))
+                .unwrap_or(default)
+        }
+
+        fn median(values: &mut [f64]) -> f64 {
+            values.sort_by(f64::total_cmp);
+            let middle = values.len() / 2;
+            if values.len().is_multiple_of(2) {
+                (values[middle - 1] + values[middle]) * 0.5
+            } else {
+                values[middle]
+            }
+        }
+
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
-        if !std::path::Path::new(path).exists() {
-            eprintln!("[v0.73b.0-gate] skipped — drafter GGUF missing");
+        let path = std::env::var("QWEN_Q8_AMORT_MODEL").unwrap_or_else(|_| {
+            "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf".into()
+        });
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[q8-amort] skipped - GGUF missing: {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let tensor_name = std::env::var("QWEN_Q8_AMORT_TENSOR")
+            .unwrap_or_else(|_| "blk.0.ffn_down.weight".into());
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let q8 = g
             .tensors
             .iter()
-            .find(|t| t.name == "blk.0.ffn_down.weight" && t.dtype == GgmlType::Q8_0)
-            .expect("blk.0.ffn_down.weight Q8_0 not found");
+            .find(|tensor| tensor.name == tensor_name && tensor.dtype == GgmlType::Q8_0)
+            .unwrap_or_else(|| {
+                let available = g
+                    .tensors
+                    .iter()
+                    .filter(|tensor| tensor.dtype == GgmlType::Q8_0)
+                    .take(64)
+                    .map(|tensor| tensor.name.as_str())
+                    .collect::<Vec<_>>();
+                panic!("{tensor_name} Q8_0 not found; first Q8_0 tensors: {available:?}")
+            });
         let n_in = q8.shape[0] as usize;
         let n_out = q8.shape[1] as usize;
-        let n_query = 16usize;
-        let n_layers = 5usize; // drafter has 5 layers
-        let warmup = 5usize;
-        let iters = 30usize;
+        let n_query = env_usize("QWEN_Q8_AMORT_N", 16);
+        let n_layers = env_usize("QWEN_Q8_AMORT_LAYERS", 5);
+        let warmup = env_usize("QWEN_Q8_AMORT_WARMUPS", 5);
+        let iters = env_usize("QWEN_Q8_AMORT_ITERS", 30);
+        assert!(n_query > 0 && n_layers > 0 && warmup > 0 && iters > 0);
 
         eprintln!(
-            "[v0.73b.0-gate] tensor={} shape=[n_in={n_in}, n_out={n_out}] N={n_query} layers={n_layers}",
+            "[q8-amort] tensor={} shape=[n_in={n_in}, n_out={n_out}] N={n_query} layers={n_layers}",
             q8.name
         );
 
@@ -30080,17 +30106,44 @@ mod tests {
             GgmlType::Q8_0,
         )
         .expect("weight tensor");
-        let x_packed = MetalTensor::zeros_f32(&ctx, vec![(n_query * n_in) as u64]).unwrap();
-        let y_packed = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_query) as u64]).unwrap();
-        let x_single = MetalTensor::zeros_f32(&ctx, vec![n_in as u64]).unwrap();
-        let y_single = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+        let x = (0..n_query * n_in)
+            .map(|index| ((index % 31) as f32 - 15.0) * 0.002)
+            .collect::<Vec<_>>();
+        let x_packed = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_query * n_in) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let y_mat_mat = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_query) as u64]).unwrap();
+        let y_batch = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_query) as u64]).unwrap();
+        let y_sequential = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_query) as u64]).unwrap();
 
         let bench_mat_mat = || {
             let cmd = ctx.queue.commandBuffer().expect("cmd");
             let enc = KernelEncoder::begin(&cmd);
             for _ in 0..n_layers {
                 encode_mat_mat_q8_0_f32(
-                    &ctx, &enc, &w_t, &x_packed, &y_packed, n_in, n_out, n_query,
+                    &ctx, &enc, &w_t, &x_packed, &y_mat_mat, n_in, n_out, n_query,
+                )
+                .unwrap();
+            }
+            enc.end();
+            let t = Instant::now();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            let wall = t.elapsed().as_secs_f64() * 1e3;
+            let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            (wall, gpu)
+        };
+
+        let bench_batch = || {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..n_layers {
+                encode_mat_vec_q8_0_batch_f32(
+                    &ctx, &enc, &w_t, &x_packed, &y_batch, n_in, n_out, n_query,
                 )
                 .unwrap();
             }
@@ -30107,9 +30160,11 @@ mod tests {
             let cmd = ctx.queue.commandBuffer().expect("cmd");
             let enc = KernelEncoder::begin(&cmd);
             for _ in 0..n_layers {
-                for _ in 0..n_query {
-                    encode_mat_vec_q8_0_f32(&ctx, &enc, &w_t, &x_single, &y_single, n_in, n_out)
-                        .unwrap();
+                for row in 0..n_query {
+                    let x_row = x_packed.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+                    let y_row =
+                        y_sequential.view_subrange((row * n_out) as u64, vec![n_out as u64]);
+                    encode_mat_vec_q8_0_f32(&ctx, &enc, &w_t, &x_row, &y_row, n_in, n_out).unwrap();
                 }
             }
             enc.end();
@@ -30123,52 +30178,112 @@ mod tests {
 
         for _ in 0..warmup {
             bench_mat_mat();
+            bench_batch();
             bench_n_mat_vec();
         }
 
-        let mut sum_mm_wall = 0.0f64;
-        let mut sum_mm_gpu = 0.0f64;
-        let mut sum_mv_wall = 0.0f64;
-        let mut sum_mv_gpu = 0.0f64;
-        for _ in 0..iters {
-            let (w, g) = bench_mat_mat();
-            sum_mm_wall += w;
-            sum_mm_gpu += g;
+        let mut mm_wall = Vec::with_capacity(iters);
+        let mut mm_gpu = Vec::with_capacity(iters);
+        let mut batch_wall = Vec::with_capacity(iters);
+        let mut batch_gpu = Vec::with_capacity(iters);
+        let mut mv_wall = Vec::with_capacity(iters);
+        let mut mv_gpu = Vec::with_capacity(iters);
+        for iteration in 0..iters {
+            let mut record = |kind: usize, (wall, gpu): (f64, f64)| match kind {
+                0 => {
+                    mm_wall.push(wall);
+                    mm_gpu.push(gpu);
+                }
+                1 => {
+                    batch_wall.push(wall);
+                    batch_gpu.push(gpu);
+                }
+                2 => {
+                    mv_wall.push(wall);
+                    mv_gpu.push(gpu);
+                }
+                _ => unreachable!(),
+            };
+            match iteration % 3 {
+                0 => {
+                    record(0, bench_mat_mat());
+                    record(1, bench_batch());
+                    record(2, bench_n_mat_vec());
+                }
+                1 => {
+                    record(1, bench_batch());
+                    record(2, bench_n_mat_vec());
+                    record(0, bench_mat_mat());
+                }
+                _ => {
+                    record(2, bench_n_mat_vec());
+                    record(0, bench_mat_mat());
+                    record(1, bench_batch());
+                }
+            }
         }
-        for _ in 0..iters {
-            let (w, g) = bench_n_mat_vec();
-            sum_mv_wall += w;
-            sum_mv_gpu += g;
-        }
-        let mm_wall = sum_mm_wall / iters as f64;
-        let mm_gpu = sum_mm_gpu / iters as f64;
-        let mv_wall = sum_mv_wall / iters as f64;
-        let mv_gpu = sum_mv_gpu / iters as f64;
+        let mm_wall = median(&mut mm_wall);
+        let mm_gpu = median(&mut mm_gpu);
+        let batch_wall = median(&mut batch_wall);
+        let batch_gpu = median(&mut batch_gpu);
+        let mv_wall = median(&mut mv_wall);
+        let mv_gpu = median(&mut mv_gpu);
 
-        eprintln!("[v0.73b.0-gate] {n_layers} layers × N={n_query} avg over {iters} iters:");
+        eprintln!("[q8-amort] {n_layers} layers x N={n_query} median over {iters} iters:");
         eprintln!(
             "  mat-mat (1 disp/layer):    wall={mm_wall:7.2} ms  gpu={mm_gpu:7.2} ms  per-layer-gpu={:5.3} ms",
             mm_gpu / n_layers as f64
         );
         eprintln!(
-            "  N=16 mat-vec (16/layer):   wall={mv_wall:7.2} ms  gpu={mv_gpu:7.2} ms  per-layer-gpu={:5.3} ms",
+            "  batched GEMV (1/layer):    wall={batch_wall:7.2} ms  gpu={batch_gpu:7.2} ms  per-layer-gpu={:5.3} ms",
+            batch_gpu / n_layers as f64
+        );
+        eprintln!(
+            "  N={n_query} mat-vec ({n_query}/layer): wall={mv_wall:7.2} ms  gpu={mv_gpu:7.2} ms  per-layer-gpu={:5.3} ms",
             mv_gpu / n_layers as f64
         );
         let ratio_wall = mm_wall / mv_wall;
         let ratio_gpu = mm_gpu / mv_gpu;
-        let speedup_wall = 1.0 / ratio_wall;
-        let speedup_gpu = 1.0 / ratio_gpu;
+        let batch_ratio_wall = batch_wall / mv_wall;
+        let batch_ratio_gpu = batch_gpu / mv_gpu;
         eprintln!(
-            "  ratio mat-mat / 16×mat-vec: wall={ratio_wall:.3} (= {speedup_wall:.2}× speedup)  gpu={ratio_gpu:.3} (= {speedup_gpu:.2}× speedup)"
+            "  ratios vs sequential: mat-mat wall/gpu={ratio_wall:.3}/{ratio_gpu:.3}; batched-GEMV wall/gpu={batch_ratio_wall:.3}/{batch_ratio_gpu:.3}"
         );
 
-        // GO/NO-GO threshold same as v0.73a.0 (GPU ratio <= 0.5).
-        assert!(
-            ratio_gpu <= 0.5,
-            "v0.73b.0 GO/NO-GO failed: GPU ratio {ratio_gpu:.3} > 0.5 \
-             (mat-mat must beat 16 mat-vec by at least 2×; \
-             reassess before v0.73b.1)"
-        );
+        one_shot(&ctx, |enc| {
+            encode_mat_vec_q8_0_batch_f32(
+                &ctx, enc, &w_t, &x_packed, &y_batch, n_in, n_out, n_query,
+            )?;
+            for row in 0..n_query {
+                let x_row = x_packed.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+                let y_row = y_sequential.view_subrange((row * n_out) as u64, vec![n_out as u64]);
+                encode_mat_vec_q8_0_f32(&ctx, enc, &w_t, &x_row, &y_row, n_in, n_out)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let batch = read_back_f32(&y_batch.buffer, n_query * n_out);
+        let sequential = read_back_f32(&y_sequential.buffer, n_query * n_out);
+        let bit_mismatches = batch
+            .iter()
+            .zip(&sequential)
+            .filter(|(left, right)| left.to_bits() != right.to_bits())
+            .count();
+        eprintln!("  batched-GEMV bit mismatches vs sequential: {bit_mismatches}");
+        assert_eq!(bit_mismatches, 0);
+
+        if let Ok(value) = std::env::var("QWEN_Q8_AMORT_MAX_GPU_RATIO") {
+            let max_ratio = value.parse::<f64>().expect("invalid GPU ratio");
+            assert!(
+                ratio_gpu <= max_ratio,
+                "Q8 mat-mat GPU ratio {ratio_gpu:.3} exceeds {max_ratio:.3}"
+            );
+        } else if n_query == 16 && tensor_name == "blk.0.ffn_down.weight" {
+            assert!(
+                ratio_gpu <= 0.5,
+                "original N=16 Q8 gate failed: GPU ratio {ratio_gpu:.3} > 0.5"
+            );
+        }
     }
 
     /// v0.73c.2 A-lite GO/NO-GO bench. Compares the fused
@@ -36605,6 +36720,25 @@ mod tests {
         }
     }
 
+    fn fill_audit_f16(tensor: &MetalTensor, salt: usize) {
+        assert_eq!(tensor.dtype, GgmlType::F16);
+        let pattern: Vec<u16> = (0..4096)
+            .map(|i| {
+                let raw = ((i * 37 + salt * 101) % 257) as f32 - 128.0;
+                half::f16::from_f32(raw * 0.00390625).to_bits()
+            })
+            .collect();
+        let n = tensor.n_elements() as usize;
+        let offset = tensor.offset as usize / std::mem::size_of::<u16>();
+        let dst = unsafe { (tensor.buffer.contents().as_ptr() as *mut u16).add(offset) };
+        for start in (0..n).step_by(pattern.len()) {
+            let len = (n - start).min(pattern.len());
+            unsafe {
+                std::ptr::copy_nonoverlapping(pattern.as_ptr(), dst.add(start), len);
+            }
+        }
+    }
+
     /// Attn-v4 decode bandwidth audit (2026-08-22): synthetic session at a
     /// large kv_n_pos, one `encode_attn_decode_v4_f32` call, kernel timing
     /// only. Reports achieved GB/s against the 474 GB/s stream so the
@@ -36638,6 +36772,8 @@ mod tests {
         for kp in sess.kv_n_pos.iter_mut() {
             *kp = n_pos;
         }
+        fill_audit_f16(&sess.kv_k[0], 1);
+        fill_audit_f16(&sess.kv_v[0], 2);
         let arch = &m.arch;
         let head_dim = arch.attn_head_dim as usize;
         let n_q = arch.n_q_heads as usize;
@@ -36708,8 +36844,8 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(512);
-        let CTX: usize = ctx_len;
-        let BASE_POS: usize = CTX - N_ROWS;
+        let oracle_ctx_len: usize = ctx_len;
+        let base_pos: usize = oracle_ctx_len - N_ROWS;
         const NWG: usize = 128;
 
         let mut rng_state: u32 = 0x1234_5678;
@@ -36720,7 +36856,7 @@ mod tests {
             ((rng_state >> 8) as f32) / ((1u32 << 24) as f32) - 0.5
         };
         let q: Vec<f32> = (0..N_ROWS * N_Q * HEAD_DIM).map(|_| rand_f32()).collect();
-        let kv_elems = CTX * N_KV * HEAD_DIM;
+        let kv_elems = oracle_ctx_len * N_KV * HEAD_DIM;
         let k_f32: Vec<f32> = (0..kv_elems).map(|_| rand_f32()).collect();
         let v_f32: Vec<f32> = (0..kv_elems).map(|_| rand_f32()).collect();
         let k_half: Vec<half::f16> = k_f32.iter().map(|v| half::f16::from_f32(*v)).collect();
@@ -36769,7 +36905,7 @@ mod tests {
                 &ml_partial,
                 &o_packed,
                 N_ROWS,
-                BASE_POS,
+                base_pos,
                 NWG,
                 true,
             )
@@ -36806,7 +36942,7 @@ mod tests {
                     N_Q,
                     N_KV,
                     HEAD_DIM,
-                    BASE_POS + row + 1,
+                    base_pos + row + 1,
                     NWG,
                     32,
                 )
@@ -36876,6 +37012,8 @@ mod tests {
         for kp in sess.kv_n_pos.iter_mut() {
             *kp = n_pos;
         }
+        fill_audit_f16(&sess.kv_k[0], 1);
+        fill_audit_f16(&sess.kv_v[0], 2);
         let arch = &m.arch;
         let head_dim = arch.attn_head_dim as usize;
         let n_q = arch.n_q_heads as usize;
@@ -36891,6 +37029,42 @@ mod tests {
         let base_pos = n_pos - N_ROWS;
         let q = MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * n_q * head_dim) as u64]).expect("q");
         let o = MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * n_q * head_dim) as u64]).expect("o");
+        let per_row_o_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * NWG_MAX * group * head_dim) as u64])
+                .expect("per-row o partial");
+        let per_row_ml_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * NWG_MAX * group * 2) as u64])
+                .expect("per-row ml partial");
+        let cmd = ctx.queue.commandBuffer().expect("cmd");
+        let enc = KernelEncoder::begin(&cmd);
+        for row in 0..N_ROWS {
+            let q_row =
+                q.view_subrange((row * n_q * head_dim) as u64, vec![(n_q * head_dim) as u64]);
+            let o_row =
+                o.view_subrange((row * n_q * head_dim) as u64, vec![(n_q * head_dim) as u64]);
+            encode_attn_decode_v4_f32(
+                &ctx,
+                &enc,
+                &q_row,
+                &sess.kv_k[0],
+                &sess.kv_v[0],
+                &per_row_o_partial,
+                &per_row_ml_partial,
+                &o_row,
+                n_q,
+                n_kv,
+                head_dim,
+                base_pos + row + 1,
+                crate::metal::attn_v4_choose_nwg(base_pos + row + 1, group),
+                crate::metal::attn_v4_choose_tile_c(base_pos + row + 1, group),
+            )
+            .expect("per-row encode");
+        }
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        let per_row_chain_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+        eprintln!("[per-row-chain-audit] ctx={n_pos} rows={N_ROWS} gpu_ms={per_row_chain_ms:.3}");
         let o_partial = MetalTensor::zeros_f32(
             &ctx,
             vec![(N_ROWS * n_kv * NWG_MAX * group * head_dim) as u64],

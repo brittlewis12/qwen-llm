@@ -1823,7 +1823,10 @@ fn packed_verify_phase_profile_v073a2_27b() {
 /// **H5.6 M1b: pipelined packed-verify cost** — times the PRODUCTION
 /// `encode_packed_verify_layer_major_inner` (one command buffer, one
 /// commit+wait internally) as-is, versus a same-session `single_token`
-/// decode step, across ctx {570, 1024, 4096} at N=16.
+/// decode step. Defaults to ctx {570, 1024, 4096} at N=16; long-context
+/// verifier work can override `QWEN_DFLASH_VERIFY_AUDIT_MODEL`,
+/// `QWEN_DFLASH_VERIFY_AUDIT_CTXS`, `QWEN_DFLASH_VERIFY_AUDIT_N`, and
+/// `QWEN_DFLASH_VERIFY_AUDIT_REPS`.
 ///
 /// This is the truth-source the per-phase profile above cannot give:
 /// `packed_verify_phase_profile_v073a2_27b` commits a command buffer per
@@ -1841,8 +1844,14 @@ fn packed_verify_phase_profile_v073a2_27b() {
 #[test]
 #[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
 fn packed_verify_pipelined_cost_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
-        eprintln!("[h5.6-m1b] skipped — target GGUF missing");
+    let target_path = std::env::var_os("QWEN_DFLASH_VERIFY_AUDIT_MODEL")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(TARGET_GGUF));
+    if !target_path.exists() {
+        eprintln!(
+            "[h5.6-m1b] skipped — target GGUF missing: {}",
+            target_path.display()
+        );
         return;
     }
     let ctx_metal = match MetalContext::new() {
@@ -1851,28 +1860,45 @@ fn packed_verify_pipelined_cost_27b() {
         Err(e) => panic!("metal init: {e}"),
     };
 
-    eprintln!("[h5.6-m1b] loading 27B-Q4_K_M…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    eprintln!("[h5.6-m1b] loading {}", target_path.display());
+    let g = GgufFile::open(&target_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx_metal, &mm);
 
-    const N: u32 = 16;
+    let n: u32 = std::env::var("QWEN_DFLASH_VERIFY_AUDIT_N")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16);
+    assert!((1..=16).contains(&n));
     let target_layer_ids: Vec<u32> = vec![1, 16, 31, 46, 61];
     let k_target = target_layer_ids.len() as u32;
-    let ctx_points: &[u32] = &[570, 1024, 4096];
-    let kv_capacity = (*ctx_points.iter().max().unwrap() + N + 32) as usize;
+    let ctx_points: Vec<u32> = std::env::var("QWEN_DFLASH_VERIFY_AUDIT_CTXS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(|part| part.trim().parse().expect("invalid verify audit context"))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![570, 1024, 4096]);
+    assert!(!ctx_points.is_empty());
+    let kv_capacity = (*ctx_points.iter().max().unwrap() + n + 32) as usize;
 
     let mut sess = MetalSession::fresh(&ctx_metal, &mm, kv_capacity).expect("sess");
     let mut verify_scratch =
-        MetalDFlashVerifyScratch::fresh(&ctx_metal, &mm, N, k_target).expect("verify scratch");
+        MetalDFlashVerifyScratch::fresh(&ctx_metal, &mm, n, k_target).expect("verify scratch");
     let mut layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx_metal, &mm, N).expect("layer scratch");
+        MetalDFlashLayerMajorScratch::fresh(&ctx_metal, &mm, n).expect("layer scratch");
 
-    let verify_tokens: Vec<i32> = (0..N as i32).map(|i| (i + 1) * 13).collect();
-    const REPS: usize = 8;
+    let verify_tokens: Vec<i32> = (0..n as i32).map(|i| (i + 1) * 13).collect();
+    let reps: usize = std::env::var("QWEN_DFLASH_VERIFY_AUDIT_REPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8);
+    assert!(reps > 0);
 
-    for &ctx_pos in ctx_points {
+    for ctx_pos in ctx_points {
         let reprime = |sess: &mut MetalSession| {
             for kp in sess.kv_n_pos.iter_mut() {
                 *kp = ctx_pos as usize;
@@ -1893,8 +1919,8 @@ fn packed_verify_pipelined_cost_27b() {
             None,
         )
         .expect("verify warmup");
-        let mut verify_ms = Vec::with_capacity(REPS);
-        for _ in 0..REPS {
+        let mut verify_ms = Vec::with_capacity(reps);
+        for _ in 0..reps {
             reprime(&mut sess);
             let t = std::time::Instant::now();
             qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
@@ -1916,8 +1942,8 @@ fn packed_verify_pipelined_cost_27b() {
         reprime(&mut sess);
         mf.single_token(1234, ctx_pos, &mut sess)
             .expect("decode warmup");
-        let mut decode_ms = Vec::with_capacity(REPS);
-        for _ in 0..REPS {
+        let mut decode_ms = Vec::with_capacity(reps);
+        for _ in 0..reps {
             reprime(&mut sess);
             let t = std::time::Instant::now();
             mf.single_token(1234, ctx_pos, &mut sess).expect("decode");
@@ -1932,7 +1958,7 @@ fn packed_verify_pipelined_cost_27b() {
         let (v_min, v_mean) = stats(&verify_ms);
         let (d_min, d_mean) = stats(&decode_ms);
         eprintln!(
-            "[h5.6-m1b ctx={ctx_pos:>4}] verify16 min={v_min:7.2} mean={v_mean:7.2} ms | \
+            "[h5.6-m1b ctx={ctx_pos:>6}] verify{n} min={v_min:7.2} mean={v_mean:7.2} ms | \
              decode1 min={d_min:6.2} mean={d_mean:6.2} ms | \
              ratio(min)={:.2}x  step-budget@4.267={:.0} ms",
             v_min / d_min,

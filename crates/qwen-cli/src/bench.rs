@@ -13330,10 +13330,9 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         let _ = mf.single_token(prompt_ids[0], 0, &mut s)?;
     }
 
-    let cap = n_prompt + tokens + 32;
-    let mut target_session = MetalSession::fresh(&ctx, &mm, cap).context("target session")?;
-    let mut dsess = MetalDFlashSession::fresh(&ctx, &mhead, h_target as u64, v as u64, cap)
-        .context("dflash session")?;
+    let target_cap = n_prompt + tokens + 32;
+    let mut target_session =
+        MetalSession::fresh(&ctx, &mm, target_cap).context("target session")?;
 
     // Production DFlash scratch buffers.
     let mut verify_scratch =
@@ -13342,21 +13341,42 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let mut layer_scratch =
         MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, cfg.block_size).context("layer scratch")?;
 
-    // v0.75.1: contiguous [T, K*H] hidden capture buffer for the
-    // packed prefill path. One allocation, one prefill call, one
-    // batched append.
+    // Prompt prefill has production geometry independent of the physical
+    // verifier N. Reusing `layer_scratch` here would force N=8 prompt chunks
+    // and lose matrix-attention coverage after the first chunk.
+    let prefill_chunk = default_prefill_chunk(target_m.arch.kind, n_prompt);
+    let mut prefill_scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, n_prompt)?;
+    let capture_limit = qwen_llm::metal_dflash::dflash_capture_window_limit(&mhead);
+    let (capture_start, capture_tokens) =
+        qwen_llm::metal_dflash::dflash_capture_window_span(n_prompt, capture_limit);
+    let dflash_cap = capture_tokens + tokens + 32;
+    let mut dsess = MetalDFlashSession::fresh(&ctx, &mhead, h_target as u64, v as u64, dflash_cap)
+        .context("dflash session")?;
+
+    // Capture only the suffix visible to an all-SWA drafter. Full-attention
+    // heads retain full-prompt capture through `capture_limit=usize::MAX`.
     let prefill_hidden_dst =
-        MetalTensor::zeros_f32(&ctx, vec![(n_prompt * n_target_features) as u64])
+        MetalTensor::zeros_f32(&ctx, vec![(capture_tokens * n_target_features) as u64])
             .context("prefill_hidden_dst")?;
 
     // ---------- Prompt prefill ----------
     let t_prefill = Instant::now();
+    if capture_start > 0 {
+        prefill_tokens_prompt_only_profiled(
+            &mf,
+            &prompt_ids[..capture_start],
+            0,
+            &mut target_session,
+            &mut prefill_scratch,
+        )
+        .context("plain prompt prefix prefill")?;
+    }
     let last_logits = prefill_tokens_with_multi_hidden(
         &mf,
-        &prompt_ids,
-        0,
+        &prompt_ids[capture_start..],
+        capture_start as u32,
         &mut target_session,
-        &mut layer_scratch,
+        &mut prefill_scratch,
         &head.target_layer_ids,
         Some(&prefill_hidden_dst),
     )
@@ -13365,13 +13385,17 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         .append_target_ctx_columns_contiguous_now(
             &ctx,
             &prefill_hidden_dst,
-            0,
-            n_prompt,
+            capture_start as u32,
+            capture_tokens,
             n_target_features,
         )
         .context("append prefill ctx columns (batched)")?;
     let prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
-    eprintln!("[dflash] prefill {n_prompt} tokens in {prefill_ms:.1} ms");
+    drop(prefill_scratch);
+    drop(prefill_hidden_dst);
+    eprintln!(
+        "[dflash] prefill {n_prompt} tokens in {prefill_ms:.1} ms (chunk={prefill_chunk}, capture_start={capture_start}, capture_tokens={capture_tokens})"
+    );
 
     let mut emitted: Vec<i32> = Vec::with_capacity(tokens);
     let mut carry_tok = argmax_i32(&last_logits);
@@ -13693,22 +13717,33 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let mut ref_emitted: Vec<i32> = Vec::with_capacity(tokens);
     let (ref_prefill_ms, ref_decode_ms, ref_total_ms) = if !skip_equivalence_check {
         eprintln!("[dflash] running DFlash=off greedy baseline for comparison...");
-        let mut ref_session = MetalSession::fresh(&ctx, &mm, cap).context("ref session")?;
+        let mut ref_session = MetalSession::fresh(&ctx, &mm, target_cap).context("ref session")?;
+        let mut ref_layer_scratch =
+            fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, n_prompt)
+                .context("ref layer scratch")?;
         let t_ref_total = Instant::now();
         let t_ref_prefill = Instant::now();
-        // v0.75.1: packed multi-token prefill (no hidden capture).
-        let mut ref_layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16)
-            .context("ref layer scratch")?;
+        if capture_start > 0 {
+            prefill_tokens_prompt_only_profiled(
+                &mf,
+                &prompt_ids[..capture_start],
+                0,
+                &mut ref_session,
+                &mut ref_layer_scratch,
+            )
+            .context("ref plain prompt prefix prefill")?;
+        }
         let last_logits_ref = prefill_tokens_with_multi_hidden(
             &mf,
-            &prompt_ids,
-            0,
+            &prompt_ids[capture_start..],
+            capture_start as u32,
             &mut ref_session,
             &mut ref_layer_scratch,
             &[],
             None,
         )?;
         let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
+        drop(ref_layer_scratch);
         let mut next_tok = argmax_i32(&last_logits_ref);
         let mut pos = (n_prompt - 1) as u32;
         let t_ref_decode = Instant::now();

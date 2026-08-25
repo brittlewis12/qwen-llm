@@ -6609,12 +6609,14 @@ fn execute_single_turn_request(
             tracing::info!(
                 target: "qwen_diag",
                 concat!(
-                    "dflash: spec_steps={} off_steps={} accepted={}/{} ",
-                    "mean_emitted={:.2} prefix_replay={}/{}/{}/{} alpha_backoff={} fallback={} ",
+                    "dflash: off_ctx={} spec_steps={} off_steps={} accepted={}/{} ",
+                    "mean_emitted={:.2} prefix_replay={}/{}/{}/{} alpha_backoff={} reason={} ",
+                    "backoff_probes={} probe_ms={:.1} fallback={}/{:.1}ms ",
                     "draft_ms={:.1} draft_first_ms={:.1} verify_ms={:.1} ",
                     "read_ms={:.1} sample_ms={:.1} ",
                     "append_ms={:.1} restore_ms={:.1} serial_ms={:.1}",
                 ),
+                s.off_ctx,
                 s.spec_steps,
                 s.off_steps,
                 s.accepted_drafts,
@@ -6625,7 +6627,11 @@ fn execute_single_turn_request(
                 s.prefix_replay_drafts_scored,
                 s.prefix_replay_mismatches,
                 s.alpha_backoff,
+                s.backoff_reason.map_or("none", DflashBackoffReason::as_str),
+                s.backoff_probe_steps,
+                s.backoff_probe_ms,
                 s.fallback_calls,
+                s.fallback_ms,
                 s.draft_ms / steps,
                 s.draft_first_call_ms,
                 s.verify_ms / steps,
@@ -8657,14 +8663,16 @@ const DFLASH_SAMPLED_ALPHA_WINDOW: usize = 8;
 /// easier. The hard `*_OFF_CTX` guard and the content-aware α-backoff
 /// remain the safety nets.
 ///
-/// Owed: the within-session slope is only measured over 0.5K-2K. A
-/// long-band (8K+) single-process confirmation is still outstanding;
-/// until it lands, do not re-introduce a ctx term in either direction.
+/// The 2026-08-25 served-Q8 audit measured verify8/single ratios of
+/// 1.86x/2.27x/2.71x at 8K/32K/64K. The verifier remains viable across the
+/// band, but content acceptance and exact-fallback incidence still preclude a
+/// default long-context promotion.
 const DFLASH_BREAKEVEN_BASE: f64 = 3.1;
 /// Trigger margin below break-even, sized ≈ 1 SE of the window mean.
 const DFLASH_ALPHA_OFF_MARGIN: f64 = 0.6;
 /// Hard ctx guard past the calibrated range.
-const DFLASH_OFF_CTX: usize = 16384;
+const DFLASH_OFF_CTX_DEFAULT: usize = 16384;
+const DFLASH_OFF_CTX_ENV: &str = "QWEN_DFLASH_OFF_CTX";
 /// Off-steps between content-aware re-probe spec steps while in
 /// trailing-alpha backoff. One probe = one draft+verify step (~125 ms),
 /// so the steady backoff tax is bounded at ~16 ms/token above serial.
@@ -8672,6 +8680,19 @@ const DFLASH_REPROBE_INTERVAL: usize = 8;
 /// Sampled probes have lower acceptance and include CPU distribution work;
 /// space them out after a losing region while retaining eventual re-entry.
 const DFLASH_SAMPLED_REPROBE_INTERVAL: usize = 32;
+// Explicit long-context canaries use measured Q8 costs: fallback-heavy probes
+// cost about five serial transitions at 64K, while high-acceptance code remains
+// strongly positive. The early conjunction avoids penalizing isolated fallback
+// packets on otherwise profitable content.
+const DFLASH_LONG_ALPHA_OFF_MEAN: f64 = 2.9;
+const DFLASH_LONG_FALLBACK_EARLY_WINDOW: usize = 4;
+const DFLASH_LONG_FALLBACK_EARLY_LIMIT: usize = 2;
+const DFLASH_LONG_FALLBACK_WINDOW: usize = 8;
+const DFLASH_LONG_FALLBACK_LIMIT: usize = 4;
+const DFLASH_LONG_REPROBE_INTERVAL: usize = 64;
+const DFLASH_LONG_FALLBACK_REPROBE_INTERVAL: usize = 256;
+const DFLASH_LONG_REENTRY_PROBES: usize = 2;
+const DFLASH_LONG_REENTRY_MEAN: f64 = 3.1;
 /// Domain separation for DFlash proposal sampling. Target sampling keeps the
 /// request seed unchanged; stochastic proposals use this independent stream.
 const DFLASH_PROPOSAL_SEED_XOR: u64 = 0x4446_4c41_5348_3251;
@@ -8706,16 +8727,203 @@ fn dflash_breakeven(_kv_n_pos: usize) -> f64 {
     DFLASH_BREAKEVEN_BASE
 }
 
+fn parse_dflash_off_ctx(value: Option<&OsStr>) -> Result<usize> {
+    let Some(value) = value else {
+        return Ok(DFLASH_OFF_CTX_DEFAULT);
+    };
+    let value = value
+        .to_str()
+        .with_context(|| format!("{DFLASH_OFF_CTX_ENV} is not valid UTF-8"))?;
+    value
+        .parse()
+        .with_context(|| format!("{DFLASH_OFF_CTX_ENV}={value:?} is not a token count"))
+}
+
+fn configured_dflash_off_ctx() -> Result<usize> {
+    parse_dflash_off_ctx(std::env::var_os(DFLASH_OFF_CTX_ENV).as_deref())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DflashBackoffReason {
+    Acceptance,
+    Fallback,
+}
+
+impl DflashBackoffReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Acceptance => "acceptance",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DflashAdaptiveState {
+    alpha_window: Vec<usize>,
+    fallback_window: Vec<bool>,
+    reentry_accepts: Vec<usize>,
+    reason: Option<DflashBackoffReason>,
+    off_steps_since_probe: usize,
+    long_mode: bool,
+}
+
+impl DflashAdaptiveState {
+    fn prepare_mode(&mut self, long_mode: bool) {
+        if long_mode && !self.long_mode {
+            self.alpha_window.clear();
+            self.fallback_window.clear();
+            self.reentry_accepts.clear();
+            self.long_mode = true;
+        }
+    }
+
+    fn backoff_active(&self) -> bool {
+        self.reason.is_some()
+    }
+
+    fn probe_due(&self, sampled_mode: bool, long_mode: bool) -> bool {
+        let Some(reason) = self.reason else {
+            return false;
+        };
+        let interval = if long_mode {
+            match reason {
+                DflashBackoffReason::Acceptance => DFLASH_LONG_REPROBE_INTERVAL,
+                DflashBackoffReason::Fallback => DFLASH_LONG_FALLBACK_REPROBE_INTERVAL,
+            }
+        } else if sampled_mode {
+            DFLASH_SAMPLED_REPROBE_INTERVAL
+        } else {
+            DFLASH_REPROBE_INTERVAL
+        };
+        self.off_steps_since_probe > 0 && self.off_steps_since_probe.is_multiple_of(interval)
+    }
+
+    fn record_off_step(&mut self) {
+        self.off_steps_since_probe += 1;
+    }
+
+    fn begin_spec_step(&mut self) {
+        self.off_steps_since_probe = 0;
+    }
+
+    fn enter_long_backoff(&mut self, reason: DflashBackoffReason) {
+        self.reason = Some(reason);
+        self.alpha_window.clear();
+        self.fallback_window.clear();
+        self.reentry_accepts.clear();
+    }
+
+    fn record_spec_step(
+        &mut self,
+        n_accepted: usize,
+        fallback_ran: bool,
+        was_probe: bool,
+        reentry_eligible: bool,
+        sampled_mode: bool,
+        long_mode: bool,
+        position: usize,
+    ) {
+        if long_mode {
+            if was_probe {
+                if fallback_ran {
+                    self.reason = Some(DflashBackoffReason::Fallback);
+                    self.reentry_accepts.clear();
+                    return;
+                }
+                if !reentry_eligible {
+                    self.reentry_accepts.clear();
+                    return;
+                }
+                self.reentry_accepts.push(n_accepted);
+                if self.reentry_accepts.len() > DFLASH_LONG_REENTRY_PROBES {
+                    self.reentry_accepts.remove(0);
+                }
+                if self.reentry_accepts.len() == DFLASH_LONG_REENTRY_PROBES {
+                    let mean_emitted = 1.0
+                        + self.reentry_accepts.iter().sum::<usize>() as f64
+                            / DFLASH_LONG_REENTRY_PROBES as f64;
+                    if mean_emitted >= DFLASH_LONG_REENTRY_MEAN {
+                        self.reason = None;
+                        self.alpha_window.clear();
+                        self.fallback_window.clear();
+                        self.reentry_accepts.clear();
+                    }
+                }
+                return;
+            }
+
+            self.alpha_window.push(n_accepted);
+            if self.alpha_window.len() > DFLASH_ALPHA_WINDOW {
+                self.alpha_window.remove(0);
+            }
+            self.fallback_window.push(fallback_ran);
+            if self.fallback_window.len() > DFLASH_LONG_FALLBACK_WINDOW {
+                self.fallback_window.remove(0);
+            }
+            let fallback_losing = self.fallback_window.len() == DFLASH_LONG_FALLBACK_WINDOW
+                && self.fallback_window.iter().filter(|&&ran| ran).count()
+                    >= DFLASH_LONG_FALLBACK_LIMIT;
+            let early_fallback_losing = self.fallback_window.len()
+                >= DFLASH_LONG_FALLBACK_EARLY_WINDOW
+                && self.fallback_window
+                    [self.fallback_window.len() - DFLASH_LONG_FALLBACK_EARLY_WINDOW..]
+                    .iter()
+                    .filter(|&&ran| ran)
+                    .count()
+                    >= DFLASH_LONG_FALLBACK_EARLY_LIMIT
+                && 1.0
+                    + self.alpha_window
+                        [self.alpha_window.len() - DFLASH_LONG_FALLBACK_EARLY_WINDOW..]
+                        .iter()
+                        .sum::<usize>() as f64
+                        / (DFLASH_LONG_FALLBACK_EARLY_WINDOW as f64)
+                    < DFLASH_LONG_ALPHA_OFF_MEAN;
+            let alpha_losing = self.alpha_window.len() == DFLASH_ALPHA_WINDOW
+                && 1.0
+                    + self.alpha_window.iter().sum::<usize>() as f64 / (DFLASH_ALPHA_WINDOW as f64)
+                    < DFLASH_LONG_ALPHA_OFF_MEAN;
+            if early_fallback_losing || fallback_losing {
+                self.enter_long_backoff(DflashBackoffReason::Fallback);
+            } else if alpha_losing {
+                self.enter_long_backoff(DflashBackoffReason::Acceptance);
+            }
+            return;
+        }
+
+        let window_size = if sampled_mode {
+            DFLASH_SAMPLED_ALPHA_WINDOW
+        } else {
+            DFLASH_ALPHA_WINDOW
+        };
+        self.alpha_window.push(n_accepted);
+        if self.alpha_window.len() > window_size {
+            self.alpha_window.remove(0);
+        }
+        if self.alpha_window.len() == window_size {
+            let mean_emitted =
+                1.0 + self.alpha_window.iter().sum::<usize>() as f64 / window_size as f64;
+            if mean_emitted < dflash_breakeven(position) - DFLASH_ALPHA_OFF_MARGIN {
+                self.reason = Some(DflashBackoffReason::Acceptance);
+            } else if self.backoff_active() {
+                self.reason = None;
+            }
+        }
+    }
+}
+
 fn dflash_speculation_enabled(
     spec_disabled: bool,
     position: usize,
+    off_ctx: usize,
     remaining_context_tokens: usize,
     block_size: usize,
     backoff_active: bool,
     backoff_probe_due: bool,
 ) -> bool {
     !spec_disabled
-        && position < DFLASH_OFF_CTX
+        && position < off_ctx
         && remaining_context_tokens >= block_size
         && (!backoff_active || backoff_probe_due)
 }
@@ -8734,15 +8942,23 @@ fn dflash_prefix_replay_drafts<'a>(
 fn dflash_prefix_replay_allowed(
     spec_disabled: bool,
     position: usize,
+    off_ctx: usize,
     remaining_context_tokens: usize,
     block_size: usize,
+    long_mode: bool,
+    backoff_active: bool,
+    backoff_probe_due: bool,
 ) -> bool {
-    !spec_disabled && position < DFLASH_OFF_CTX && remaining_context_tokens >= block_size
+    !spec_disabled
+        && position < off_ctx
+        && remaining_context_tokens >= block_size
+        && (!long_mode || !backoff_active || backoff_probe_due)
 }
 
 /// **v0.77** DFlash speculative-decode statistics for one request.
 #[derive(Clone, Debug, Default, Serialize)]
 struct DflashDecodeStats {
+    off_ctx: usize,
     draft_ms: f64,
     draft_first_call_ms: f64,
     verify_ms: f64,
@@ -8750,6 +8966,8 @@ struct DflashDecodeStats {
     sample_ms: f64,
     append_ms: f64,
     restore_ms: f64,
+    fallback_ms: f64,
+    backoff_probe_ms: f64,
     serial_ms: f64,
     scratch_allocation_ms: f64,
     drafter_calls: usize,
@@ -8765,6 +8983,8 @@ struct DflashDecodeStats {
     drafts_scored: usize,
     physical_target_positions: usize,
     fallback_calls: usize,
+    backoff_probe_steps: usize,
+    backoff_reason: Option<DflashBackoffReason>,
     alpha_backoff: bool,
 }
 
@@ -8855,6 +9075,7 @@ where
     let wall_t0 = Instant::now();
     let selection_t0 = Instant::now();
     let sampled_mode = sampler.config().temperature > 0.0;
+    let off_ctx = configured_dflash_off_ctx()?;
     let mut proposal_sampler = if sampled_mode && head.selector.is_some() {
         let target_config = sampler.config();
         Some(
@@ -8882,6 +9103,7 @@ where
     let mut transitions = 0usize;
     let mut transition_wall_ms = 0.0;
     let mut stats = DflashDecodeStats::default();
+    stats.off_ctx = off_ctx;
 
     let cfg = head.config;
     let n_block = cfg.block_size as usize;
@@ -8914,25 +9136,10 @@ where
     let mut sampled_logits_cpu = Vec::<f32>::new();
 
     // Adaptive policy state: `spec_disabled` is the hard OFF_CTX stop
-    // (terminal); `backoff_active` is the content-aware trailing-alpha
-    // backoff, which periodically re-probes one spec step and re-enters when
-    // the window mean clears the break-even. Off steps feed the drafter cross-context
-    // and the caller's capture ring, so speculation can always resume
-    // below OFF_CTX.
+    // (terminal). Content backoff periodically re-probes while off steps keep
+    // the drafter cross-context and caller capture ring current.
     let mut spec_disabled = false;
-    let mut backoff_active = false;
-    let mut off_steps_since_backoff = 0usize;
-    let alpha_window_size = if sampled_mode {
-        DFLASH_SAMPLED_ALPHA_WINDOW
-    } else {
-        DFLASH_ALPHA_WINDOW
-    };
-    let reprobe_interval = if sampled_mode {
-        DFLASH_SAMPLED_REPROBE_INTERVAL
-    } else {
-        DFLASH_REPROBE_INTERVAL
-    };
-    let mut alpha_window: Vec<usize> = Vec::with_capacity(alpha_window_size + 1);
+    let mut adaptive = DflashAdaptiveState::default();
 
     let stop_reason = 'outer: loop {
         shutdown::checkpoint()?;
@@ -8948,18 +9155,29 @@ where
 
         let transition_t0 = Instant::now();
         let position = sequence.position();
-        let backoff_probe_due = backoff_active
-            && off_steps_since_backoff > 0
-            && off_steps_since_backoff.is_multiple_of(reprobe_interval);
+        let long_mode = off_ctx > DFLASH_OFF_CTX_DEFAULT && position >= DFLASH_OFF_CTX_DEFAULT;
+        adaptive.prepare_mode(long_mode);
+        let backoff_active = adaptive.backoff_active();
+        let backoff_probe_due = adaptive.probe_due(sampled_mode, long_mode);
         let remaining_context_tokens = sequence.remaining_context_tokens();
         let prefix_replay_drafts = prefix_replay.and_then(|history| {
-            dflash_prefix_replay_allowed(spec_disabled, position, remaining_context_tokens, n_block)
-                .then(|| dflash_prefix_replay_drafts(history, &tokens, n_block.saturating_sub(1)))?
+            dflash_prefix_replay_allowed(
+                spec_disabled,
+                position,
+                off_ctx,
+                remaining_context_tokens,
+                n_block,
+                long_mode,
+                backoff_active,
+                backoff_probe_due,
+            )
+            .then(|| dflash_prefix_replay_drafts(history, &tokens, n_block.saturating_sub(1)))?
         });
         let spec_enabled = prefix_replay_drafts.is_some()
             || dflash_speculation_enabled(
                 spec_disabled,
                 position,
+                off_ctx,
                 remaining_context_tokens,
                 n_block,
                 backoff_active,
@@ -8971,11 +9189,11 @@ where
             // capture so the caller's capture ring stays fed. The drafter
             // cross-context is appended only while re-entry is possible
             // (below the hard OFF_CTX guard, which is terminal).
-            if position >= DFLASH_OFF_CTX || remaining_context_tokens < n_block {
+            if position >= off_ctx || remaining_context_tokens < n_block {
                 spec_disabled = true;
             }
             stats.off_steps += 1;
-            off_steps_since_backoff += 1;
+            adaptive.record_off_step();
             sequence.ensure_can_append(1)?;
             let serial_t0 = Instant::now();
             let hidden_dst = verify_scratch.hidden_capture_n_slot(0);
@@ -9031,7 +9249,11 @@ where
                 .token;
             continue;
         }
-        off_steps_since_backoff = 0;
+        let backoff_probe_step = backoff_active && backoff_probe_due;
+        if backoff_probe_step {
+            stats.backoff_probe_steps += 1;
+        }
+        adaptive.begin_spec_step();
 
         // ---- Draft ----
         let drafter_pos = position as u32;
@@ -9225,6 +9447,7 @@ where
                 );
             }
             if flagged {
+                let fallback_t0 = Instant::now();
                 fallback_ran = true;
                 stats.fallback_calls += 1;
                 qwen_llm::metal_dflash::encode_restore_to_pre_block(
@@ -9312,6 +9535,7 @@ where
                 if fallback_targets.len() < n_keep {
                     fallback_targets.resize(n_keep, 0);
                 }
+                stats.fallback_ms += fallback_t0.elapsed().as_secs_f64() * 1e3;
             }
         }
         if prefix_replay_step {
@@ -9395,6 +9619,9 @@ where
         stats.accepted_drafts += n_accepted;
         let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
         transition_wall_ms += elapsed_ms;
+        if backoff_probe_step {
+            stats.backoff_probe_ms += elapsed_ms;
+        }
         first_transition_ms.get_or_insert(elapsed_ms);
 
         // ---- Shadow-reference divergence probe ----
@@ -9463,23 +9690,19 @@ where
             break 'outer reason;
         }
 
-        // ---- Trailing-α backoff / re-entry ----
-        // Re-probe spec steps push their acceptance into the same window,
-        // so a content recovery clears the backoff after enough probes.
-        alpha_window.push(n_accepted);
-        if alpha_window.len() > alpha_window_size {
-            alpha_window.remove(0);
-        }
-        if alpha_window.len() == alpha_window_size {
-            let mean_emitted =
-                1.0 + alpha_window.iter().sum::<usize>() as f64 / alpha_window_size as f64;
-            if mean_emitted < dflash_breakeven(sequence.position()) - DFLASH_ALPHA_OFF_MARGIN {
-                backoff_active = true;
-                off_steps_since_backoff = 0;
-                stats.alpha_backoff = true;
-            } else if backoff_active {
-                backoff_active = false;
-            }
+        // ---- Content and exact-fallback backoff / re-entry ----
+        adaptive.record_spec_step(
+            n_accepted,
+            fallback_ran,
+            backoff_probe_step,
+            !prefix_replay_step,
+            sampled_mode,
+            long_mode,
+            sequence.position(),
+        );
+        stats.backoff_reason = adaptive.reason;
+        if adaptive.reason.is_some() {
+            stats.alpha_backoff = true;
         }
 
         carry = if sampled_mode {
@@ -10687,20 +10910,30 @@ mod tests {
     #[test]
     fn dflash_uses_serial_tail_when_a_full_verify_block_will_not_fit() {
         const BLOCK: usize = 8;
+        const OFF_CTX: usize = 16_384;
         for remaining in 0..BLOCK {
             assert!(!dflash_speculation_enabled(
-                false, 100, remaining, BLOCK, false, false
+                false, 100, OFF_CTX, remaining, BLOCK, false, false
             ));
         }
         assert!(dflash_speculation_enabled(
-            false, 100, BLOCK, BLOCK, false, false
+            false, 100, OFF_CTX, BLOCK, BLOCK, false, false
         ));
         assert!(!dflash_speculation_enabled(
-            false, 100, BLOCK, BLOCK, true, false
+            false, 100, OFF_CTX, BLOCK, BLOCK, true, false
         ));
         assert!(dflash_speculation_enabled(
-            false, 100, BLOCK, BLOCK, true, true
+            false, 100, OFF_CTX, BLOCK, BLOCK, true, true
         ));
+        assert!(!dflash_speculation_enabled(
+            false, OFF_CTX, OFF_CTX, BLOCK, BLOCK, false, false
+        ));
+        assert_eq!(parse_dflash_off_ctx(None).unwrap(), DFLASH_OFF_CTX_DEFAULT);
+        assert_eq!(
+            parse_dflash_off_ctx(Some(OsStr::new("65536"))).unwrap(),
+            65_536
+        );
+        assert!(parse_dflash_off_ctx(Some(OsStr::new("invalid"))).is_err());
     }
 
     #[test]
@@ -10715,10 +10948,187 @@ mod tests {
             dflash_prefix_replay_drafts(&history, &[10, 11, 12], 7),
             None
         );
-        assert!(dflash_prefix_replay_allowed(false, 100, 8, 8));
-        assert!(!dflash_prefix_replay_allowed(true, 100, 8, 8));
-        assert!(!dflash_prefix_replay_allowed(false, DFLASH_OFF_CTX, 8, 8));
-        assert!(!dflash_prefix_replay_allowed(false, 100, 7, 8));
+        assert!(dflash_prefix_replay_allowed(
+            false,
+            100,
+            DFLASH_OFF_CTX_DEFAULT,
+            8,
+            8,
+            false,
+            false,
+            false
+        ));
+        assert!(!dflash_prefix_replay_allowed(
+            true,
+            100,
+            DFLASH_OFF_CTX_DEFAULT,
+            8,
+            8,
+            false,
+            false,
+            false
+        ));
+        assert!(!dflash_prefix_replay_allowed(
+            false,
+            DFLASH_OFF_CTX_DEFAULT,
+            DFLASH_OFF_CTX_DEFAULT,
+            8,
+            8,
+            false,
+            false,
+            false
+        ));
+        assert!(!dflash_prefix_replay_allowed(
+            false,
+            100,
+            DFLASH_OFF_CTX_DEFAULT,
+            7,
+            8,
+            false,
+            false,
+            false
+        ));
+        assert!(dflash_prefix_replay_allowed(
+            false,
+            100,
+            DFLASH_OFF_CTX_DEFAULT,
+            8,
+            8,
+            false,
+            true,
+            false
+        ));
+        assert!(dflash_prefix_replay_allowed(
+            false, 20_000, 65_536, 8, 8, true, true, true
+        ));
+        assert!(!dflash_prefix_replay_allowed(
+            false, 20_000, 65_536, 8, 8, true, true, false
+        ));
+    }
+
+    fn record_long_policy_step(
+        state: &mut DflashAdaptiveState,
+        n_accepted: usize,
+        fallback_ran: bool,
+        was_probe: bool,
+    ) {
+        state.prepare_mode(true);
+        state.record_spec_step(
+            n_accepted,
+            fallback_ran,
+            was_probe,
+            true,
+            false,
+            true,
+            64_000,
+        );
+    }
+
+    #[test]
+    fn dflash_long_policy_separates_measured_acceptance_bands() {
+        let mut losing = DflashAdaptiveState::default();
+        for accepted in [2; 9].into_iter().chain([1; 7]) {
+            record_long_policy_step(&mut losing, accepted, false, false);
+        }
+        assert_eq!(losing.reason, Some(DflashBackoffReason::Acceptance));
+
+        let mut winning = DflashAdaptiveState::default();
+        for accepted in [3; 7].into_iter().chain([2; 9]) {
+            record_long_policy_step(&mut winning, accepted, false, false);
+        }
+        assert_eq!(winning.reason, None);
+
+        let mut strong = DflashAdaptiveState::default();
+        for accepted in [5; 15].into_iter().chain([4]) {
+            record_long_policy_step(&mut strong, accepted, false, false);
+        }
+        assert_eq!(strong.reason, None);
+    }
+
+    #[test]
+    fn dflash_long_policy_backs_off_on_dense_exact_fallback() {
+        let mut early = DflashAdaptiveState::default();
+        for fallback in [true, false, true, false] {
+            record_long_policy_step(&mut early, 1, fallback, false);
+        }
+        assert_eq!(early.reason, Some(DflashBackoffReason::Fallback));
+
+        let mut early_high_acceptance = DflashAdaptiveState::default();
+        for fallback in [true, false, true, false] {
+            record_long_policy_step(&mut early_high_acceptance, 4, fallback, false);
+        }
+        assert_eq!(early_high_acceptance.reason, None);
+
+        let mut dense = DflashAdaptiveState::default();
+        for fallback in [true, false, true, false, true, false, true, false] {
+            record_long_policy_step(&mut dense, 4, fallback, false);
+        }
+        assert_eq!(dense.reason, Some(DflashBackoffReason::Fallback));
+
+        let mut sparse = DflashAdaptiveState::default();
+        for fallback in [true, false, true, false, true, false, false, false] {
+            record_long_policy_step(&mut sparse, 4, fallback, false);
+        }
+        assert_eq!(sparse.reason, None);
+    }
+
+    #[test]
+    fn dflash_long_policy_prices_probes_and_requires_sustained_reentry() {
+        let mut acceptance = DflashAdaptiveState {
+            reason: Some(DflashBackoffReason::Acceptance),
+            long_mode: true,
+            ..DflashAdaptiveState::default()
+        };
+        for _ in 0..DFLASH_LONG_REPROBE_INTERVAL - 1 {
+            acceptance.record_off_step();
+        }
+        assert!(!acceptance.probe_due(false, true));
+        acceptance.record_off_step();
+        assert!(acceptance.probe_due(false, true));
+
+        let mut fallback = DflashAdaptiveState {
+            reason: Some(DflashBackoffReason::Fallback),
+            long_mode: true,
+            ..DflashAdaptiveState::default()
+        };
+        for _ in 0..DFLASH_LONG_FALLBACK_REPROBE_INTERVAL {
+            fallback.record_off_step();
+        }
+        assert!(fallback.probe_due(false, true));
+        record_long_policy_step(&mut fallback, 2, false, true);
+        assert_eq!(fallback.reason, Some(DflashBackoffReason::Fallback));
+        record_long_policy_step(&mut fallback, 3, false, true);
+        assert_eq!(fallback.reason, None);
+
+        let mut interrupted = DflashAdaptiveState {
+            reason: Some(DflashBackoffReason::Acceptance),
+            long_mode: true,
+            ..DflashAdaptiveState::default()
+        };
+        record_long_policy_step(&mut interrupted, 4, false, true);
+        record_long_policy_step(&mut interrupted, 4, true, true);
+        record_long_policy_step(&mut interrupted, 4, false, true);
+        assert_eq!(interrupted.reason, Some(DflashBackoffReason::Fallback));
+
+        let mut replay_only = DflashAdaptiveState {
+            reason: Some(DflashBackoffReason::Acceptance),
+            long_mode: true,
+            ..DflashAdaptiveState::default()
+        };
+        for _ in 0..DFLASH_LONG_REENTRY_PROBES {
+            replay_only.record_spec_step(7, false, true, false, false, true, 64_000);
+        }
+        assert_eq!(replay_only.reason, Some(DflashBackoffReason::Acceptance));
+        assert!(replay_only.reentry_accepts.is_empty());
+    }
+
+    #[test]
+    fn dflash_fallback_density_does_not_change_short_context_policy() {
+        let mut state = DflashAdaptiveState::default();
+        for _ in 0..DFLASH_LONG_FALLBACK_WINDOW {
+            state.record_spec_step(4, true, false, true, false, false, 8_000);
+        }
+        assert_eq!(state.reason, None);
     }
 
     #[test]

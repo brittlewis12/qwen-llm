@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-25 - Long-Context DFlash Verifier Passes; Policy Remains Content-Bound
+
+Status: retain the 16,384-token default stop and expose a measured, explicit
+long-context canary with fallback-aware backoff.
+
+- On the served Qwen3.8-27B Q8 target, production N8 verifier/single-token
+  minima were `110.23/59.21` ms at 8K (`1.86x`), `147.24/64.98` ms at 32K
+  (`2.27x`), and `189.99/70.21` ms at 64K (`2.71x`). The physical verifier
+  clears the `3.4x` long-band ceiling; verifier construction is no longer the
+  first unknown.
+- Forced N8 over two 256-token continuations separated policy from mechanism.
+  Code measured mean-emitted `5.02/3.46/5.95` and decode speedups
+  `2.80x/1.23x/1.96x` at 8K/32K/64K. Prose measured `2.71/2.18/2.56` and
+  `1.10x/0.79x/0.88x`. All six outputs were exactly greedy-equivalent. A
+  blanket guard removal would therefore retain large wins and large losses.
+- The original adaptive 64K prose canary still lost badly: 53 speculative
+  steps triggered 37 exact fallbacks and produced `9.34` token/s versus about
+  `13.9` token/s implied by its same-request off rows. Acceptance-only policy
+  underpriced fallback because a flagged packet pays packed verification and
+  then serially replays the committed rows.
+- Long-only policy now enters backoff when a 16-step acceptance window falls
+  below `2.9` mean emitted, after four of eight exact fallbacks, or early when
+  two of four fallbacks coincide with mean emitted below `2.9`. Acceptance and
+  fallback backoffs probe after 64 and 256 off transitions respectively; two
+  clean drafter probes averaging at least `3.1` re-enter. Cached replay cannot
+  supply drafter re-entry evidence. Below 16K behavior is unchanged, and replay
+  obeys this breaker only in the explicit long lane.
+- Final 64K Q8 canaries retained exact transcript hashes. Code stayed fully
+  speculative at `24.50` token/s versus an exact DFlash-off `14.07` token/s
+  (`1.74x`; transition wall `1.72x`). Prose stopped after four fallback-heavy
+  discovery packets; its `19.414` s transition wall versus the `18.473` s
+  all-serial projection from 248 same-request off rows yields `0.952x` projected
+  serial throughput. This is a bounded downside, not a default-on result.
+- `QWEN_DFLASH_OFF_CTX=<tokens>` raises or lowers the effective hard stop;
+  default remains 16,384. Telemetry now reports the effective ceiling, current
+  backoff reason, probe count/time, and exact-fallback time.
+
+The next long-context gate is a broader natural acceptance/fallback census,
+especially sampled traffic, which remains unqualified, and phase-changing agent
+outputs. Do not remove the default guard until losing rows reach parity; do not
+build another verifier kernel merely to solve what is now measured as a
+proposal/exactness-policy problem.
+
 ## 2026-08-25 - Same-Prompt Replay Opens A Bounded Suffix/DFlash Lane
 
 Status: retain the default-off serve prototype; greedy replay clears its live
@@ -43,8 +86,9 @@ mechanism gate, while sampled replay remains confidence-gated and experimental.
   at most four 4,096-token completions. The model is backend-scoped, seed is
   deliberately excluded from the key but counted by the sampled confidence gate,
   and different prompts replace the entry. Default-off performs no replay hash or
-  output clone. Replay obeys the existing 16K hard context guard and remains a
-  trusted single-process serve experiment, not a multi-tenant cache contract.
+  output clone. Replay obeys the configured hard context guard (16K by default)
+  and remains a trusted single-process serve experiment, not a multi-tenant
+  cache contract.
 
 Next leverage is high-confidence suffix resynchronization over multiple prior
 outputs, not weakening the sampled prefix gate. It should earn a charged long-

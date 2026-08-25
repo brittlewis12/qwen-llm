@@ -188,13 +188,15 @@ is all-SWA-2048 and F1 (2026-08-20) proved bit-identical drafts from a
    ~4x gap to stream (111 vs 474 GB/s at 130K) is a limiter-capture
    follow-up. The packed-N8 verify reader (8x reuse) remains the
    larger lever; pre-pricing per the P2 census.
-3. **P1 = F3-amended (timed, one packet):** within-session verify(8)/
-   single_token slope at 8K-64K on the served Q8_0 asset with
-   attention/GDN phase split. Pass to lift OFF_CTX: break-even <= 3.4
-   across the band AND attention slope >= 60% of the verify slope.
-4. **P3 = F4-amended (counts):** alpha census at 60-133K plus fallback
-   rate plus the ctx-aware re-probe tax model. Pass: mean emitted >= 3.1
-   AND backoff-regime tax <= 5%.
+3. **P1 = F3-amended (physical economics DONE; attribution OPEN):** served
+   Q8_0 verify(8)/single minima are 1.86x/2.27x/2.71x at 8K/32K/64K, below
+   the 3.4 ceiling. The attention/GDN slope split remains attribution work,
+   not a blocker for the explicit canary.
+4. **P3 = F4-amended (OPEN):** two 64K canaries prove content bifurcation:
+   code is 1.72x exact off while fallback-heavy prose is bounded at 0.952x
+   projected serial throughput. Run the natural 60-133K alpha/fallback census,
+   including sampled and phase-changing outputs; keep the 16K default guard
+   until every losing cluster reaches parity and probe tax stays <=5%.
 5. **Guard tuning/robustness follow-up.** Attribute the 9.5e-2 outlier
    delta to its batched kernel; extend fallback coverage to MoE verify
    paths when MoE speculation reopens; port the guard to

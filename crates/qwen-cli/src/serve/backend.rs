@@ -1437,7 +1437,8 @@ impl EngineBackend {
         if let Some(stats) = dflash {
             tracing::info!(
                 target: "qwen_diag",
-                "serve dflash: spec_steps={} off_steps={} accepted={}/{} prefix_replay={}/{}/{}/{} drafter_calls={} alpha_backoff={} fallback={} draft_first_ms={:.1} draft_steady_ms={:.1} verify_ms={:.1}",
+                "serve dflash: off_ctx={} spec_steps={} off_steps={} accepted={}/{} prefix_replay={}/{}/{}/{} drafter_calls={} alpha_backoff={} reason={} backoff_probes={} probe_ms={:.1} fallback={}/{:.1}ms draft_first_ms={:.1} draft_steady_ms={:.1} verify_ms={:.1}",
+                stats.off_ctx,
                 stats.spec_steps,
                 stats.off_steps,
                 stats.accepted_drafts,
@@ -1448,7 +1449,11 @@ impl EngineBackend {
                 stats.prefix_replay_mismatches,
                 stats.drafter_calls,
                 stats.alpha_backoff,
+                stats.backoff_reason.map_or("none", crate::DflashBackoffReason::as_str),
+                stats.backoff_probe_steps,
+                stats.backoff_probe_ms,
                 stats.fallback_calls,
+                stats.fallback_ms,
                 stats.draft_first_call_ms,
                 stats.draft_ms,
                 stats.verify_ms,

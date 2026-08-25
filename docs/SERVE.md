@@ -149,6 +149,10 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   single-process experiment that verifies repeated exact-prompt completions
   before falling back to DFlash; sampled use requires two distinct-seed outputs
   with a 32-token consensus prefix. It is not a multi-tenant cache contract.
+  `QWEN_DFLASH_OFF_CTX=<tokens>` overrides the default 16,384-token hard stop
+  for explicit long-context canaries. Above the default boundary, admission
+  backs off on low acceptance or dense exact fallback and prices recovery probes
+  conservatively; the override is not a default-on long-context promotion.
   DFlash starts only after the required full-prompt or trailing SWA window has
   been captured and the target sequence is at prompt length. The old 25-token performance run is
   retracted: its short-prompt serial-tail path did not seed prompt hiddens, so it

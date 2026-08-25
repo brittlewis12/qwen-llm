@@ -7,6 +7,7 @@
 //!   qwen-tok -m <gguf> --file path/to/prompt.txt
 //!   qwen-tok -m <gguf> --file - < prompt.txt          # stdin
 //!   qwen-tok -m <gguf> --file foo.txt --ids           # also print token ids
+//!   qwen-tok -m <gguf> --decode-ids path/to/ids.txt
 //!
 //! Exit status: 0 on success.
 
@@ -19,18 +20,21 @@ use std::path::PathBuf;
 #[command(
     name = "qwen-tok",
     version,
-    about = "tokenize text with a supported GGUF's vocab"
+    about = "tokenize text or decode token IDs with a supported GGUF's vocab"
 )]
 struct Args {
     /// Path to a supported GGUF (any quant; only tokenizer metadata is used).
     #[arg(short = 'm', long)]
     model: PathBuf,
     /// Inline prompt text (mutually exclusive with --file).
-    #[arg(long, conflicts_with = "file")]
+    #[arg(long, conflicts_with_all = ["file", "decode_ids"])]
     text: Option<String>,
     /// Read prompt from a file, or `-` for stdin (mutually exclusive with --text).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "decode_ids")]
     file: Option<String>,
+    /// Decode whitespace-separated token IDs from a file, or `-` for stdin.
+    #[arg(long, conflicts_with_all = ["text", "file", "ids", "add_special"])]
+    decode_ids: Option<String>,
     /// Print token ids in addition to the count (one per line).
     #[arg(long)]
     ids: bool,
@@ -41,24 +45,47 @@ struct Args {
     add_special: bool,
 }
 
+fn read_path_or_stdin(path: &str) -> Result<String> {
+    if path == "-" {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .context("read stdin")?;
+        Ok(text)
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))
+    }
+}
+
+fn parse_token_ids(input: &str) -> Result<Vec<i32>> {
+    input
+        .split_whitespace()
+        .map(|value| {
+            value
+                .parse()
+                .with_context(|| format!("parse token ID {value:?}"))
+        })
+        .collect()
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    let tok = qwen_llm::tokenizer::Tokenizer::open(&args.model)
+        .with_context(|| format!("open tokenizer from {:?}", args.model))?;
+
+    if let Some(path) = args.decode_ids.as_deref() {
+        let ids = parse_token_ids(&read_path_or_stdin(path)?)?;
+        print!("{}", tok.decode(&ids));
+        return Ok(());
+    }
+
     let text = match (&args.text, &args.file) {
         (Some(t), None) => t.clone(),
-        (None, Some(p)) if p == "-" => {
-            let mut s = String::new();
-            std::io::stdin()
-                .read_to_string(&mut s)
-                .context("read stdin")?;
-            s
-        }
-        (None, Some(p)) => std::fs::read_to_string(p).with_context(|| format!("read {p:?}"))?,
-        (None, None) => bail!("specify --text <STRING> or --file <PATH|->"),
+        (None, Some(path)) => read_path_or_stdin(path)?,
+        (None, None) => bail!("specify --text, --file, or --decode-ids"),
         (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
     };
 
-    let tok = qwen_llm::tokenizer::Tokenizer::open(&args.model)
-        .with_context(|| format!("open tokenizer from {:?}", args.model))?;
     let ids = tok
         .encode(&text, args.add_special)
         .context("tokenize text")?;
@@ -70,4 +97,15 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_id_stream_accepts_whitespace_and_rejects_non_integers() {
+        assert_eq!(parse_token_ids("1\n-2  3\t").unwrap(), [1, -2, 3]);
+        assert!(parse_token_ids("1 nope").is_err());
+    }
 }

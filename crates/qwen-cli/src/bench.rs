@@ -41,6 +41,7 @@ mod moe_gdn_repair;
 mod prefix_cache_vt_ab;
 mod q4_mma_ceiling;
 mod response_shape_runtime;
+mod rope_micro;
 mod shutdown;
 #[path = "../source_identity.rs"]
 mod source_identity;
@@ -77,14 +78,16 @@ use qwen_llm::{
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
-        encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_residual_rms_norm_mul_f32,
-        encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_roofline_fma_f32,
-        encode_roofline_stream_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
-        encode_rope_neox_pair_f32, encode_scatter_offset_f32_to_f16,
-        encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv,
-        encode_sigmoid_f32, encode_sigmoid_mul_f32, encode_split_q_gate_f32,
-        encode_touch_bytes_f32, host_page_size_bytes, kernel_trace_begin, kernel_trace_snapshot,
-        plan_retained_storage, with_attn_v4_group_tile_override,
+        encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32,
+        encode_qk_rms_norm_rope_f32_packed_consecutive, encode_residual_rms_norm_mul_f32,
+        encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32,
+        encode_rms_norm_mul_f32, encode_roofline_fma_f32, encode_roofline_stream_f32,
+        encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive, encode_rope_neox_pair_f32,
+        encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv,
+        encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32,
+        encode_sigmoid_mul_gate_strided_f32, encode_split_q_gate_f32, encode_touch_bytes_f32,
+        host_page_size_bytes, kernel_trace_begin, kernel_trace_snapshot, plan_retained_storage,
+        with_attn_v4_group_tile_override,
     },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -567,6 +570,8 @@ enum Cmd {
     MoeBatchSweep(MoeBatchSweepArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
+    /// Compare native, shared-head, and minimax RoPE kernels without a model.
+    RopeMicro(rope_micro::RopeMicroArgs),
     /// Attribute the production-grid Q4_K N64 schedule with synthetic bounds.
     Q4MmaCeiling(q4_mma_ceiling::Q4MmaCeilingArgs),
     /// Measure the charged exact grammar-row Q6_K lm-head floor.
@@ -3106,6 +3111,7 @@ fn run() -> Result<()> {
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
         Cmd::Roofline(a) => run_roofline(a),
+        Cmd::RopeMicro(a) => rope_micro::run(a, serde_json::to_value(recorded_build_identity())?),
         Cmd::Q4MmaCeiling(a) => {
             q4_mma_ceiling::run(a, serde_json::to_value(recorded_build_identity())?)
         }
@@ -16514,6 +16520,10 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
         Ok(())
     };
 
+    let sigmoid_mul = env_flag_default_on("QWEN_DECODE_ATTN_SIGMOID_MUL");
+    let rope_pair = env_flag_default_on("QWEN_DECODE_ROPE_PAIR");
+    let fused_qk_norm_rope =
+        env_flag_default_on("QWEN_DECODE_QK_NORM_ROPE_FUSED") && rope_pair && sigmoid_mul;
     let mut agg: Vec<(String, f64)> = Vec::new();
     for run in 0..runs {
         shutdown::checkpoint()?;
@@ -16548,37 +16558,23 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
             },
             &mut phases,
         )?;
-        timed(
-            "split_q_gate",
-            &|enc| {
-                Ok(encode_split_q_gate_f32(
-                    &mctx,
-                    enc,
-                    &s.attn_q_full,
-                    &s.attn_q,
-                    &s.attn_gate,
-                    n_q,
-                    head_dim,
-                )?)
-            },
-            &mut phases,
-        )?;
-        timed(
-            "q_norm (batched rms)",
-            &|enc| {
-                Ok(encode_rms_norm_batched_f32(
-                    &mctx,
-                    enc,
-                    &s.attn_q,
-                    &ab.q_norm,
-                    &s.attn_q_normed,
-                    n_q,
-                    head_dim,
-                    RMS_EPS,
-                )?)
-            },
-            &mut phases,
-        )?;
+        if !sigmoid_mul {
+            timed(
+                "split_q_gate",
+                &|enc| {
+                    Ok(encode_split_q_gate_f32(
+                        &mctx,
+                        enc,
+                        &s.attn_q_full,
+                        &s.attn_q,
+                        &s.attn_gate,
+                        n_q,
+                        head_dim,
+                    )?)
+                },
+                &mut phases,
+            )?;
+        }
         timed(
             "k_proj (mat_vec)",
             &|enc| {
@@ -16609,36 +16605,26 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
             },
             &mut phases,
         )?;
-        timed(
-            "k_norm (batched rms)",
-            &|enc| {
-                Ok(encode_rms_norm_batched_f32(
-                    &mctx,
-                    enc,
-                    &s.attn_k_now,
-                    &ab.k_norm,
-                    &s.attn_k_normed,
-                    n_kv,
-                    head_dim,
-                    RMS_EPS,
-                )?)
-            },
-            &mut phases,
-        )?;
-        if env_flag_default_on("QWEN_DECODE_ROPE_PAIR") {
+        if fused_qk_norm_rope {
             timed(
-                "rope Q+K (paired)",
+                "qk_norm_rope (fused)",
                 &|enc| {
-                    Ok(encode_rope_neox_pair_f32(
+                    Ok(encode_qk_rms_norm_rope_f32_packed_consecutive(
                         &mctx,
                         enc,
+                        &s.attn_q_full,
+                        &ab.q_norm,
                         &s.attn_q_normed,
+                        &s.attn_k_now,
+                        &ab.k_norm,
                         &s.attn_k_normed,
+                        1,
                         n_q,
                         n_kv,
                         head_dim,
                         n_rot,
                         position,
+                        RMS_EPS,
                         arch.rope_theta,
                     )?)
                 },
@@ -16646,37 +16632,105 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
             )?;
         } else {
             timed(
-                "rope Q",
+                "q_norm (batched rms)",
                 &|enc| {
-                    Ok(encode_rope_neox_f32(
-                        &mctx,
-                        enc,
-                        &s.attn_q_normed,
-                        n_q,
-                        head_dim,
-                        n_rot,
-                        position,
-                        arch.rope_theta,
-                    )?)
+                    if sigmoid_mul {
+                        Ok(encode_rms_norm_batched_src_strided_f32(
+                            &mctx,
+                            enc,
+                            &s.attn_q_full,
+                            &ab.q_norm,
+                            &s.attn_q_normed,
+                            n_q,
+                            head_dim,
+                            2 * head_dim,
+                            0,
+                            RMS_EPS,
+                        )?)
+                    } else {
+                        Ok(encode_rms_norm_batched_f32(
+                            &mctx,
+                            enc,
+                            &s.attn_q,
+                            &ab.q_norm,
+                            &s.attn_q_normed,
+                            n_q,
+                            head_dim,
+                            RMS_EPS,
+                        )?)
+                    }
                 },
                 &mut phases,
             )?;
             timed(
-                "rope K",
+                "k_norm (batched rms)",
                 &|enc| {
-                    Ok(encode_rope_neox_f32(
+                    Ok(encode_rms_norm_batched_f32(
                         &mctx,
                         enc,
+                        &s.attn_k_now,
+                        &ab.k_norm,
                         &s.attn_k_normed,
                         n_kv,
                         head_dim,
-                        n_rot,
-                        position,
-                        arch.rope_theta,
+                        RMS_EPS,
                     )?)
                 },
                 &mut phases,
             )?;
+            if rope_pair {
+                timed(
+                    "rope Q+K (paired)",
+                    &|enc| {
+                        Ok(encode_rope_neox_pair_f32(
+                            &mctx,
+                            enc,
+                            &s.attn_q_normed,
+                            &s.attn_k_normed,
+                            n_q,
+                            n_kv,
+                            head_dim,
+                            n_rot,
+                            position,
+                            arch.rope_theta,
+                        )?)
+                    },
+                    &mut phases,
+                )?;
+            } else {
+                timed(
+                    "rope Q",
+                    &|enc| {
+                        Ok(encode_rope_neox_f32(
+                            &mctx,
+                            enc,
+                            &s.attn_q_normed,
+                            n_q,
+                            head_dim,
+                            n_rot,
+                            position,
+                            arch.rope_theta,
+                        )?)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "rope K",
+                    &|enc| {
+                        Ok(encode_rope_neox_f32(
+                            &mctx,
+                            enc,
+                            &s.attn_k_normed,
+                            n_kv,
+                            head_dim,
+                            n_rot,
+                            position,
+                            arch.rope_theta,
+                        )?)
+                    },
+                    &mut phases,
+                )?;
+            }
         }
         timed(
             "kv scatter (fused)",
@@ -16750,13 +16804,22 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
         timed(
             "gate sigmoid + mul",
             &|enc| {
-                Ok(encode_sigmoid_mul_f32(
-                    &mctx,
-                    enc,
-                    &s.attn_gate,
-                    &s.attn_o,
-                    &s.attn_o,
-                )?)
+                if sigmoid_mul {
+                    Ok(encode_sigmoid_mul_gate_strided_f32(
+                        &mctx,
+                        enc,
+                        &s.attn_q_full,
+                        &s.attn_o,
+                        &s.attn_o,
+                        n_q,
+                        head_dim,
+                        2 * head_dim,
+                        head_dim,
+                    )?)
+                } else {
+                    encode_sigmoid_f32(&mctx, enc, &s.attn_gate, &s.attn_q)?;
+                    Ok(encode_mul_f32(&mctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?)
+                }
             },
             &mut phases,
         )?;

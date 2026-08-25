@@ -42,12 +42,13 @@ use crate::metal::{
     encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
     encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
-    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
-    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
-    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_qkv_fused_f32,
-    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk16_f32, kernel_trace_begin,
-    kernel_trace_snapshot, kernel_trace_take_delta,
+    encode_qk_rms_norm_rope_f32_packed_consecutive, encode_rms_norm_batched_f32,
+    encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
+    encode_rope_neox_pair_adaptive_f32_packed_consecutive, encode_scatter_offset_f32_to_f16_kv,
+    encode_scatter_offset_f32_to_f16_kv_vt, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_qkv_fused_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
+    encode_topk16_f32, kernel_trace_begin, kernel_trace_snapshot, kernel_trace_take_delta,
 };
 #[cfg(feature = "dflash-k0s-diagnostics")]
 use crate::metal::{
@@ -431,6 +432,68 @@ fn dflash_swa_ctx_scan_start(
 }
 
 crate::env_flag!(default_on prefill_gdn_batched_enabled, "QWEN_PREFILL_GDN_BATCHED");
+crate::env_flag!(default_on prefill_rope_paired_enabled, "QWEN_PREFILL_ROPE_PAIRED");
+crate::env_flag!(
+    default_on prefill_qk_norm_rope_fused_flag,
+    "QWEN_PREFILL_QK_NORM_ROPE_FUSED"
+);
+
+fn prefill_qk_norm_rope_fused_enabled(n_tokens: usize) -> bool {
+    prefill_qk_norm_rope_fused_flag() && prefill_rope_paired_enabled() && n_tokens <= 48
+}
+
+fn encode_prefill_qk_rope(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k: &MetalTensor,
+    n_tokens: usize,
+    n_q_heads: usize,
+    n_k_heads: usize,
+    head_dim: usize,
+    n_rot: usize,
+    start_position: u32,
+    theta_base: f32,
+) -> Result<(), MetalError> {
+    if prefill_rope_paired_enabled() {
+        encode_rope_neox_pair_adaptive_f32_packed_consecutive(
+            ctx,
+            enc,
+            q,
+            k,
+            n_tokens,
+            n_q_heads,
+            n_k_heads,
+            head_dim,
+            n_rot,
+            start_position,
+            theta_base,
+        )
+    } else {
+        encode_rope_neox_f32_packed_consecutive(
+            ctx,
+            enc,
+            q,
+            n_tokens,
+            n_q_heads,
+            head_dim,
+            n_rot,
+            start_position,
+            theta_base,
+        )?;
+        encode_rope_neox_f32_packed_consecutive(
+            ctx,
+            enc,
+            k,
+            n_tokens,
+            n_k_heads,
+            head_dim,
+            n_rot,
+            start_position,
+            theta_base,
+        )
+    }
+}
 
 // Qwen3.8 Q8 verifier arm: batch alpha/beta scheduling across the N rows
 // while leaving recurrence and checkpoint semantics unchanged.
@@ -9317,9 +9380,9 @@ pub fn encode_packed_verify_layer_major_inner(
                 // v0.73c.1: attn projection batching, mirrors v0.73a.1 GDN
                 // restructure. Production 27B Q4_K_M attn projections are
                 // ALL Q4_K (q gated, k, v, output). Batch them as mat-mat
-                // across N=16 in step A/C; per-token loop only does
-                // RoPE + KV-scatter + attn-v4 + gate-sigmoid-mul (which
-                // we batch into step C as a flat elementwise pair).
+                // across N=16 in step A/C. RoPE runs either in the fused
+                // Step A post-processing kernel or immediately before
+                // KV-scatter and attention; gate-sigmoid-mul is batched in C.
                 let attn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
                 let attn_batched = attn_mat_mat_eligible(a.q.dtype)
                     && attn_mat_mat_eligible(a.k.dtype)
@@ -9334,6 +9397,7 @@ pub fn encode_packed_verify_layer_major_inner(
                     let q_dim = n_q * head_dim;
                     let kv_dim = n_kv * head_dim;
                     let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+                    let fused_qk_norm_rope = prefill_qk_norm_rope_fused_enabled(n);
 
                     // v0.76: sized views for adaptive-N back-off.
                     let attn_q_full_pack = layer_scratch
@@ -9358,8 +9422,8 @@ pub fn encode_packed_verify_layer_major_inner(
                         .attn_o_pack
                         .view_subrange(0, vec![(n * q_dim) as u64]);
 
-                    // Step A: batched front-end Q (gated) / K / V projections,
-                    // batched Q-norm and K-norm. One encoder per layer.
+                    // Step A: batched Q/K/V projections and Q/K post-processing.
+                    // The fused arm includes RoPE; the rollback arm stops after norms.
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         // Q gated (Q + gate interleaved per head).
@@ -9398,30 +9462,51 @@ pub fn encode_packed_verify_layer_major_inner(
                             kv_dim,
                             n,
                         )?;
-                        // Q-norm (per-head, strided source); n_heads = N * n_q.
-                        encode_rms_norm_batched_src_strided_f32(
-                            base.ctx,
-                            &enc,
-                            &attn_q_full_pack,
-                            &a.q_norm,
-                            &attn_q_normed_pack,
-                            n * n_q,
-                            head_dim,
-                            2 * head_dim,
-                            0,
-                            RMS_EPS,
-                        )?;
-                        // K-norm (per-head); n_heads = N * n_kv.
-                        encode_rms_norm_batched_f32(
-                            base.ctx,
-                            &enc,
-                            &attn_k_now_pack,
-                            &a.k_norm,
-                            &attn_k_normed_pack,
-                            n * n_kv,
-                            head_dim,
-                            RMS_EPS,
-                        )?;
+                        if fused_qk_norm_rope {
+                            encode_qk_rms_norm_rope_f32_packed_consecutive(
+                                base.ctx,
+                                &enc,
+                                &attn_q_full_pack,
+                                &a.q_norm,
+                                &attn_q_normed_pack,
+                                &attn_k_now_pack,
+                                &a.k_norm,
+                                &attn_k_normed_pack,
+                                n,
+                                n_q,
+                                n_kv,
+                                head_dim,
+                                n_rot,
+                                start_position,
+                                RMS_EPS,
+                                arch.rope_theta,
+                            )?;
+                        } else {
+                            // Q-norm (per-head, strided source); n_heads = N * n_q.
+                            encode_rms_norm_batched_src_strided_f32(
+                                base.ctx,
+                                &enc,
+                                &attn_q_full_pack,
+                                &a.q_norm,
+                                &attn_q_normed_pack,
+                                n * n_q,
+                                head_dim,
+                                2 * head_dim,
+                                0,
+                                RMS_EPS,
+                            )?;
+                            // K-norm (per-head); n_heads = N * n_kv.
+                            encode_rms_norm_batched_f32(
+                                base.ctx,
+                                &enc,
+                                &attn_k_now_pack,
+                                &a.k_norm,
+                                &attn_k_normed_pack,
+                                n * n_kv,
+                                head_dim,
+                                RMS_EPS,
+                            )?;
+                        }
                         enc.end();
                     }
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "front");
@@ -9472,28 +9557,21 @@ pub fn encode_packed_verify_layer_major_inner(
 
                     if let Some(nwg) = packed_q2_nwg {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_rope_neox_f32_packed_consecutive(
-                            base.ctx,
-                            &enc,
-                            &attn_q_normed_pack,
-                            n,
-                            n_q,
-                            head_dim,
-                            n_rot,
-                            start_position,
-                            arch.rope_theta,
-                        )?;
-                        encode_rope_neox_f32_packed_consecutive(
-                            base.ctx,
-                            &enc,
-                            &attn_k_normed_pack,
-                            n,
-                            n_kv,
-                            head_dim,
-                            n_rot,
-                            start_position,
-                            arch.rope_theta,
-                        )?;
+                        if !fused_qk_norm_rope {
+                            encode_prefill_qk_rope(
+                                base.ctx,
+                                &enc,
+                                &attn_q_normed_pack,
+                                &attn_k_normed_pack,
+                                n,
+                                n_q,
+                                n_kv,
+                                head_dim,
+                                n_rot,
+                                start_position,
+                                arch.rope_theta,
+                            )?;
+                        }
                         encode_scatter_offset_f32_to_f16_kv(
                             base.ctx,
                             &enc,
@@ -9598,27 +9676,29 @@ pub fn encode_packed_verify_layer_major_inner(
                                 .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                // RoPE on this row of Q and K.
-                                encode_rope_neox_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &q_normed_n,
-                                    n_q,
-                                    head_dim,
-                                    n_rot,
-                                    position_n,
-                                    arch.rope_theta,
-                                )?;
-                                encode_rope_neox_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &k_normed_n,
-                                    n_kv,
-                                    head_dim,
-                                    n_rot,
-                                    position_n,
-                                    arch.rope_theta,
-                                )?;
+                                if !fused_qk_norm_rope {
+                                    // RoPE on this row of Q and K.
+                                    encode_rope_neox_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_normed_n,
+                                        n_q,
+                                        head_dim,
+                                        n_rot,
+                                        position_n,
+                                        arch.rope_theta,
+                                    )?;
+                                    encode_rope_neox_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &k_normed_n,
+                                        n_kv,
+                                        head_dim,
+                                        n_rot,
+                                        position_n,
+                                        arch.rope_theta,
+                                    )?;
+                                }
                                 // KV scatter into F16 cache slot.
                                 encode_scatter_offset_f32_to_f16_kv(
                                     base.ctx,
@@ -11569,12 +11649,23 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     n_q / n_kv,
                                 )
                                 && a.qkv_fused.is_some();
+                        let fused_qk_norm_rope = prefill_qk_norm_rope_fused_enabled(chunk_p)
+                            && !prefill_noop_attn_body_enabled();
                         let qkv_fused_dim = attn_q_full_dim + 2 * kv_dim;
 
-                        // Step A: batched front-end Q gated / K / V projections + Q-norm + K-norm.
+                        // Step A: batched Q/K/V projections and Q/K post-processing.
                         if trace_attn_phases {
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
+                                label_prefill_encoder(
+                                    &enc,
+                                    il,
+                                    if use_fused_qkv {
+                                        "attn-qkv-proj"
+                                    } else {
+                                        "attn-proj"
+                                    },
+                                );
                                 if use_fused_qkv {
                                     let fused_qkv_pack = layer_scratch
                                         .attn_qkv_fused_pack
@@ -11649,28 +11740,58 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             )?;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                encode_rms_norm_batched_src_strided_f32(
-                                    base.ctx,
+                                label_prefill_encoder(
                                     &enc,
-                                    &q_full_pack_p,
-                                    &a.q_norm,
-                                    &q_normed_pack_p,
-                                    chunk_p * n_q,
-                                    head_dim,
-                                    2 * head_dim,
-                                    0,
-                                    RMS_EPS,
-                                )?;
-                                encode_rms_norm_batched_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &k_now_pack_p,
-                                    &a.k_norm,
-                                    &k_normed_pack_p,
-                                    chunk_p * n_kv,
-                                    head_dim,
-                                    RMS_EPS,
-                                )?;
+                                    il,
+                                    if fused_qk_norm_rope {
+                                        "attn-norm-rope"
+                                    } else {
+                                        "attn-norm"
+                                    },
+                                );
+                                if fused_qk_norm_rope {
+                                    encode_qk_rms_norm_rope_f32_packed_consecutive(
+                                        base.ctx,
+                                        &enc,
+                                        &q_full_pack_p,
+                                        &a.q_norm,
+                                        &q_normed_pack_p,
+                                        &k_now_pack_p,
+                                        &a.k_norm,
+                                        &k_normed_pack_p,
+                                        chunk_p,
+                                        n_q,
+                                        n_kv,
+                                        head_dim,
+                                        n_rot,
+                                        chunk_start,
+                                        RMS_EPS,
+                                        arch.rope_theta,
+                                    )?;
+                                } else {
+                                    encode_rms_norm_batched_src_strided_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_full_pack_p,
+                                        &a.q_norm,
+                                        &q_normed_pack_p,
+                                        chunk_p * n_q,
+                                        head_dim,
+                                        2 * head_dim,
+                                        0,
+                                        RMS_EPS,
+                                    )?;
+                                    encode_rms_norm_batched_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &k_now_pack_p,
+                                        &a.k_norm,
+                                        &k_normed_pack_p,
+                                        chunk_p * n_kv,
+                                        head_dim,
+                                        RMS_EPS,
+                                    )?;
+                                }
                                 enc.end();
                             }
                             flush_prefill_phase(
@@ -11681,11 +11802,24 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 chunk_idx,
                                 chunk_start,
                                 il,
-                                "norm",
+                                if fused_qk_norm_rope {
+                                    "norm_rope"
+                                } else {
+                                    "norm"
+                                },
                             )?;
                         } else {
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
+                                label_prefill_encoder(
+                                    &enc,
+                                    il,
+                                    if fused_qk_norm_rope {
+                                        "attn-front-norm-rope"
+                                    } else {
+                                        "attn-front"
+                                    },
+                                );
                                 if use_fused_qkv {
                                     let fused_qkv_pack = layer_scratch
                                         .attn_qkv_fused_pack
@@ -11746,28 +11880,49 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 // v0.432: strided q-norm replaces split_q_gate
                                 // + compact q-norm (gate halves are read by the
                                 // strided sigmoid_mul at the attn epilogue).
-                                encode_rms_norm_batched_src_strided_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &q_full_pack_p,
-                                    &a.q_norm,
-                                    &q_normed_pack_p,
-                                    chunk_p * n_q,
-                                    head_dim,
-                                    2 * head_dim,
-                                    0,
-                                    RMS_EPS,
-                                )?;
-                                encode_rms_norm_batched_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &k_now_pack_p,
-                                    &a.k_norm,
-                                    &k_normed_pack_p,
-                                    chunk_p * n_kv,
-                                    head_dim,
-                                    RMS_EPS,
-                                )?;
+                                if fused_qk_norm_rope {
+                                    encode_qk_rms_norm_rope_f32_packed_consecutive(
+                                        base.ctx,
+                                        &enc,
+                                        &q_full_pack_p,
+                                        &a.q_norm,
+                                        &q_normed_pack_p,
+                                        &k_now_pack_p,
+                                        &a.k_norm,
+                                        &k_normed_pack_p,
+                                        chunk_p,
+                                        n_q,
+                                        n_kv,
+                                        head_dim,
+                                        n_rot,
+                                        chunk_start,
+                                        RMS_EPS,
+                                        arch.rope_theta,
+                                    )?;
+                                } else {
+                                    encode_rms_norm_batched_src_strided_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_full_pack_p,
+                                        &a.q_norm,
+                                        &q_normed_pack_p,
+                                        chunk_p * n_q,
+                                        head_dim,
+                                        2 * head_dim,
+                                        0,
+                                        RMS_EPS,
+                                    )?;
+                                    encode_rms_norm_batched_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &k_now_pack_p,
+                                        &a.k_norm,
+                                        &k_normed_pack_p,
+                                        chunk_p * n_kv,
+                                        head_dim,
+                                        RMS_EPS,
+                                    )?;
+                                }
                                 enc.end();
                             }
                         }
@@ -11833,28 +11988,30 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             let rebuild_matrix_vt_prefix = matrix_vt_prefix_rebuild_rows.is_some();
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                encode_rope_neox_f32_packed_consecutive(
-                                    base.ctx,
+                                label_prefill_encoder(
                                     &enc,
-                                    &q_normed_pack_p,
-                                    chunk_p,
-                                    n_q,
-                                    head_dim,
-                                    n_rot,
-                                    chunk_start,
-                                    arch.rope_theta,
-                                )?;
-                                encode_rope_neox_f32_packed_consecutive(
-                                    base.ctx,
-                                    &enc,
-                                    &k_normed_pack_p,
-                                    chunk_p,
-                                    n_kv,
-                                    head_dim,
-                                    n_rot,
-                                    chunk_start,
-                                    arch.rope_theta,
-                                )?;
+                                    il,
+                                    if fused_qk_norm_rope {
+                                        "attn-scatter"
+                                    } else {
+                                        "attn-rope-scatter"
+                                    },
+                                );
+                                if !fused_qk_norm_rope {
+                                    encode_prefill_qk_rope(
+                                        base.ctx,
+                                        &enc,
+                                        &q_normed_pack_p,
+                                        &k_normed_pack_p,
+                                        chunk_p,
+                                        n_q,
+                                        n_kv,
+                                        head_dim,
+                                        n_rot,
+                                        chunk_start,
+                                        arch.rope_theta,
+                                    )?;
+                                }
                                 if use_matrix {
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;
@@ -11899,7 +12056,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 chunk_idx,
                                 chunk_start,
                                 il,
-                                "rope_scatter",
+                                if fused_qk_norm_rope {
+                                    "scatter"
+                                } else {
+                                    "rope_scatter"
+                                },
                             )?;
 
                             let mut traced_matrix_subphases = false;
@@ -15956,22 +16117,13 @@ impl<'a> DFlashDecoder<'a> {
                 )?;
             }
             if batched_proj {
-                encode_rope_neox_f32_packed_consecutive(
+                encode_prefill_qk_rope(
                     ctx_metal,
                     &enc,
                     &self.session.q_buf,
-                    n,
-                    n_q,
-                    head_dim,
-                    n_rot,
-                    noise_start_pos,
-                    theta,
-                )?;
-                encode_rope_neox_f32_packed_consecutive(
-                    ctx_metal,
-                    &enc,
                     &self.session.k_noise,
                     n,
+                    n_q,
                     n_kv,
                     head_dim,
                     n_rot,

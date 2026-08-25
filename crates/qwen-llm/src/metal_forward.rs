@@ -51,14 +51,15 @@ use crate::metal::{
     encode_moe_swiglu_iq3_s_f32_fast, encode_moe_swiglu_iq3_xxs_f32,
     encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_q4_K_f32, encode_moe_swiglu_q6_K_f32,
     encode_moe_swiglu_q8_0_f32, encode_moe_weighted_sum_f32, encode_mul_f32,
-    encode_residual_rms_norm_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_rope_neox_pair_f32, encode_scatter_offset_f32_to_f16_kv,
-    encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
-    encode_sigmoid_mul_gate_strided_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
-    encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
-    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_parallel_f32,
-    evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
+    encode_qk_rms_norm_rope_f32_packed_consecutive, encode_residual_rms_norm_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
+    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_pair_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv,
+    encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32, encode_sigmoid_mul_gate_strided_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
+    encode_topk_logits_softmax_parallel_f32, evaluate_metal_memory_admission, host_page_size_bytes,
+    plan_retained_storage,
 };
 use crate::model::{Arch, ArchKind};
 use crate::sampling::{BoundedTopKEvidence, GreedySelection, SampledToken, Sampler, SamplingError};
@@ -229,6 +230,10 @@ crate::env_flag!(default_off decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOO
 crate::env_flag!(default_off decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
 crate::env_flag!(default_on decode_gdn_fused_beta_proj_enabled, "QWEN_DECODE_GDN_FUSED_BETA_PROJ");
 crate::env_flag!(default_on decode_rope_pair_enabled, "QWEN_DECODE_ROPE_PAIR");
+crate::env_flag!(
+    default_on decode_qk_norm_rope_fused_enabled,
+    "QWEN_DECODE_QK_NORM_ROPE_FUSED"
+);
 
 fn gdn_beta_projection_fused(gb: &MetalGdnBlock) -> bool {
     decode_gdn_fused_beta_proj_enabled()
@@ -12346,91 +12351,110 @@ impl<'a> MetalForward<'a> {
         let kv_dim = n_kv * head_dim;
         let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
 
-        // v0.432: the default path reads the interleaved q_proj output
-        // ([head_dim Q, head_dim gate] per head) directly — Q halves via
-        // the strided q-norm here, gate halves via the strided sigmoid_mul
-        // at the attention epilogue — deleting the split_q_gate layout
-        // copy (one dispatch + a 2*q_dim round-trip per attn layer). The
-        // QWEN_DECODE_ATTN_SIGMOID_MUL=0 rollback branch still consumes a
-        // compact attn_gate, so it keeps the split.
-        if decode_attn_sigmoid_mul_enabled() {
-            encode_rms_norm_batched_src_strided_f32(
+        let fused_qk_norm_rope = decode_qk_norm_rope_fused_enabled()
+            && decode_rope_pair_enabled()
+            && decode_attn_sigmoid_mul_enabled();
+        if fused_qk_norm_rope {
+            encode_qk_rms_norm_rope_f32_packed_consecutive(
                 self.ctx,
                 enc,
                 &s.attn_q_full,
                 &ab.q_norm,
                 &s.attn_q_normed,
+                &s.attn_k_now,
+                &ab.k_norm,
+                &s.attn_k_normed,
+                1,
                 n_q,
+                n_kv,
                 head_dim,
-                2 * head_dim,
-                0,
+                n_rot,
+                position,
                 RMS_EPS,
+                arch.rope_theta,
             )?;
         } else {
-            encode_split_q_gate_f32(
-                self.ctx,
-                enc,
-                &s.attn_q_full,
-                &s.attn_q,
-                &s.attn_gate,
-                n_q,
-                head_dim,
-            )?;
+            // v0.432: the default path reads the interleaved q_proj output
+            // directly. The compact-gate rollback still keeps the split.
+            if decode_attn_sigmoid_mul_enabled() {
+                encode_rms_norm_batched_src_strided_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q_full,
+                    &ab.q_norm,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    2 * head_dim,
+                    0,
+                    RMS_EPS,
+                )?;
+            } else {
+                encode_split_q_gate_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q_full,
+                    &s.attn_q,
+                    &s.attn_gate,
+                    n_q,
+                    head_dim,
+                )?;
+                encode_rms_norm_batched_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q,
+                    &ab.q_norm,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    RMS_EPS,
+                )?;
+            }
             encode_rms_norm_batched_f32(
                 self.ctx,
                 enc,
-                &s.attn_q,
-                &ab.q_norm,
-                &s.attn_q_normed,
-                n_q,
+                &s.attn_k_now,
+                &ab.k_norm,
+                &s.attn_k_normed,
+                n_kv,
                 head_dim,
                 RMS_EPS,
             )?;
-        }
-        encode_rms_norm_batched_f32(
-            self.ctx,
-            enc,
-            &s.attn_k_now,
-            &ab.k_norm,
-            &s.attn_k_normed,
-            n_kv,
-            head_dim,
-            RMS_EPS,
-        )?;
-        if decode_rope_pair_enabled() {
-            encode_rope_neox_pair_f32(
-                self.ctx,
-                enc,
-                &s.attn_q_normed,
-                &s.attn_k_normed,
-                n_q,
-                n_kv,
-                head_dim,
-                n_rot,
-                position,
-                arch.rope_theta,
-            )?;
-        } else {
-            encode_rope_neox_f32(
-                self.ctx,
-                enc,
-                &s.attn_q_normed,
-                n_q,
-                head_dim,
-                n_rot,
-                position,
-                arch.rope_theta,
-            )?;
-            encode_rope_neox_f32(
-                self.ctx,
-                enc,
-                &s.attn_k_normed,
-                n_kv,
-                head_dim,
-                n_rot,
-                position,
-                arch.rope_theta,
-            )?;
+            if decode_rope_pair_enabled() {
+                encode_rope_neox_pair_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q_normed,
+                    &s.attn_k_normed,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )?;
+            } else {
+                encode_rope_neox_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )?;
+                encode_rope_neox_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_k_normed,
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )?;
+            }
         }
         let kv_dst_off = usize::try_from(checked_u64_mul(
             position as u64,
@@ -12842,100 +12866,120 @@ impl<'a> MetalForward<'a> {
         // (1) Q projection: outputs 2 * q_dim (Q + gate interleaved per head).
         encode_mat_vec_dispatch(self.ctx, enc, &ab.q, &s.h, &s.attn_q_full, h, 2 * q_dim)?;
 
-        // (2)+(3) Q-norm reading the interleaved q_proj output directly
-        // (v0.432: replaces split_q_gate + compact q-norm on the default
-        // path; the QWEN_DECODE_ATTN_SIGMOID_MUL=0 rollback keeps the
-        // split because its gate consumer needs a compact attn_gate).
-        if decode_attn_sigmoid_mul_enabled() {
-            encode_rms_norm_batched_src_strided_f32(
+        let fused_qk_norm_rope = decode_qk_norm_rope_fused_enabled()
+            && decode_rope_pair_enabled()
+            && decode_attn_sigmoid_mul_enabled();
+        if fused_qk_norm_rope {
+            // K/V must exist before the joint normalization/rotation dispatch.
+            encode_mat_vec_dispatch(self.ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim)?;
+            encode_mat_vec_dispatch(self.ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim)?;
+            encode_qk_rms_norm_rope_f32_packed_consecutive(
                 self.ctx,
                 enc,
                 &s.attn_q_full,
                 &ab.q_norm,
                 &s.attn_q_normed,
+                &s.attn_k_now,
+                &ab.k_norm,
+                &s.attn_k_normed,
+                1,
                 n_q,
+                n_kv,
                 head_dim,
-                2 * head_dim,
-                0,
+                n_rot,
+                position,
                 RMS_EPS,
+                arch.rope_theta,
             )?;
         } else {
-            encode_split_q_gate_f32(
-                self.ctx,
-                enc,
-                &s.attn_q_full,
-                &s.attn_q,
-                &s.attn_gate,
-                n_q,
-                head_dim,
-            )?;
+            // v0.432: the default path reads Q directly from the interleaved
+            // projection. The compact-gate rollback still keeps the split.
+            if decode_attn_sigmoid_mul_enabled() {
+                encode_rms_norm_batched_src_strided_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q_full,
+                    &ab.q_norm,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    2 * head_dim,
+                    0,
+                    RMS_EPS,
+                )?;
+            } else {
+                encode_split_q_gate_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q_full,
+                    &s.attn_q,
+                    &s.attn_gate,
+                    n_q,
+                    head_dim,
+                )?;
+                encode_rms_norm_batched_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q,
+                    &ab.q_norm,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    RMS_EPS,
+                )?;
+            }
+
+            // K/V projections retain their prior ordering on the rollback path.
+            encode_mat_vec_dispatch(self.ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim)?;
+            encode_mat_vec_dispatch(self.ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim)?;
             encode_rms_norm_batched_f32(
                 self.ctx,
                 enc,
-                &s.attn_q,
-                &ab.q_norm,
-                &s.attn_q_normed,
-                n_q,
+                &s.attn_k_now,
+                &ab.k_norm,
+                &s.attn_k_normed,
+                n_kv,
                 head_dim,
                 RMS_EPS,
             )?;
+            if decode_rope_pair_enabled() {
+                encode_rope_neox_pair_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q_normed,
+                    &s.attn_k_normed,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )?;
+            } else {
+                encode_rope_neox_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )?;
+                encode_rope_neox_f32(
+                    self.ctx,
+                    enc,
+                    &s.attn_k_normed,
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )?;
+            }
         }
 
-        // (4) K, V projections.
-        encode_mat_vec_dispatch(self.ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim)?;
-        encode_mat_vec_dispatch(self.ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim)?;
-
-        // (5) K-norm (per-head). Reuses Q-norm weight tensor type but
-        // points at K's weight.
-        encode_rms_norm_batched_f32(
-            self.ctx,
-            enc,
-            &s.attn_k_now,
-            &ab.k_norm,
-            &s.attn_k_normed,
-            n_kv,
-            head_dim,
-            RMS_EPS,
-        )?;
-
-        // (6) Partial RoPE on Q (in `attn_q_normed`) and K (in `attn_k_normed`).
-        if decode_rope_pair_enabled() {
-            encode_rope_neox_pair_f32(
-                self.ctx,
-                enc,
-                &s.attn_q_normed,
-                &s.attn_k_normed,
-                n_q,
-                n_kv,
-                head_dim,
-                n_rot,
-                position,
-                arch.rope_theta,
-            )?;
-        } else {
-            encode_rope_neox_f32(
-                self.ctx,
-                enc,
-                &s.attn_q_normed,
-                n_q,
-                head_dim,
-                n_rot,
-                position,
-                arch.rope_theta,
-            )?;
-            encode_rope_neox_f32(
-                self.ctx,
-                enc,
-                &s.attn_k_normed,
-                n_kv,
-                head_dim,
-                n_rot,
-                position,
-                arch.rope_theta,
-            )?;
-        }
-
-        // (7) KV cache append. v1 enforces strict-monotonic-from-zero;
+        // KV cache append. v1 enforces strict-monotonic-from-zero;
         // we copy K and V at slot `position` directly via copy_offset
         // running in reverse direction. Since we don't yet have a
         // "scatter" kernel, we synchronously fill the KV cache slot via
@@ -19077,6 +19121,9 @@ mod tests {
         let q_dim = n_q * head_dim;
         let kv_dim = n_kv * head_dim;
         let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+        let sigmoid_mul = decode_attn_sigmoid_mul_enabled();
+        let rope_pair = decode_rope_pair_enabled();
+        let fused_qk_norm_rope = decode_qk_norm_rope_fused_enabled() && rope_pair && sigmoid_mul;
 
         let mut phases: Vec<(String, f64)> = Vec::new();
         let timed = |label: &str,
@@ -19113,7 +19160,7 @@ mod tests {
         // v0.432: default path skips split_q_gate (strided q-norm +
         // strided gate sigmoid_mul read the interleave directly); the
         // phase name is kept only for the rollback branch.
-        if !decode_attn_sigmoid_mul_enabled() {
+        if !sigmoid_mul {
             timed(
                 "split_q_gate",
                 &|enc| {
@@ -19131,40 +19178,6 @@ mod tests {
                 &mut phases,
             )?;
         }
-        // Q-norm.
-        timed(
-            "q_norm (batched rms)",
-            &|enc| {
-                if decode_attn_sigmoid_mul_enabled() {
-                    encode_rms_norm_batched_src_strided_f32(
-                        mf.ctx,
-                        enc,
-                        &s.attn_q_full,
-                        &ab.q_norm,
-                        &s.attn_q_normed,
-                        n_q,
-                        head_dim,
-                        2 * head_dim,
-                        0,
-                        RMS_EPS,
-                    )
-                    .map_err(MfError::from)
-                } else {
-                    encode_rms_norm_batched_f32(
-                        mf.ctx,
-                        enc,
-                        &s.attn_q,
-                        &ab.q_norm,
-                        &s.attn_q_normed,
-                        n_q,
-                        head_dim,
-                        RMS_EPS,
-                    )
-                    .map_err(MfError::from)
-                }
-            },
-            &mut phases,
-        )?;
         // K, V projections.
         timed(
             "k_proj (mat_vec)",
@@ -19176,60 +19189,140 @@ mod tests {
             &|enc| encode_mat_vec_dispatch(mf.ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim),
             &mut phases,
         )?;
-        // K-norm.
-        timed(
-            "k_norm (batched rms)",
-            &|enc| {
-                encode_rms_norm_batched_f32(
-                    mf.ctx,
-                    enc,
-                    &s.attn_k_now,
-                    &ab.k_norm,
-                    &s.attn_k_normed,
-                    n_kv,
-                    head_dim,
-                    RMS_EPS,
-                )
-                .map_err(MfError::from)
-            },
-            &mut phases,
-        )?;
-        // RoPE Q.
-        timed(
-            "rope Q",
-            &|enc| {
-                encode_rope_neox_f32(
-                    mf.ctx,
-                    enc,
-                    &s.attn_q_normed,
-                    n_q,
-                    head_dim,
-                    n_rot,
-                    position,
-                    arch.rope_theta,
-                )
-                .map_err(MfError::from)
-            },
-            &mut phases,
-        )?;
-        // RoPE K.
-        timed(
-            "rope K",
-            &|enc| {
-                encode_rope_neox_f32(
-                    mf.ctx,
-                    enc,
-                    &s.attn_k_normed,
-                    n_kv,
-                    head_dim,
-                    n_rot,
-                    position,
-                    arch.rope_theta,
-                )
-                .map_err(MfError::from)
-            },
-            &mut phases,
-        )?;
+        if fused_qk_norm_rope {
+            timed(
+                "qk_norm_rope (fused)",
+                &|enc| {
+                    encode_qk_rms_norm_rope_f32_packed_consecutive(
+                        mf.ctx,
+                        enc,
+                        &s.attn_q_full,
+                        &ab.q_norm,
+                        &s.attn_q_normed,
+                        &s.attn_k_now,
+                        &ab.k_norm,
+                        &s.attn_k_normed,
+                        1,
+                        n_q,
+                        n_kv,
+                        head_dim,
+                        n_rot,
+                        position,
+                        RMS_EPS,
+                        arch.rope_theta,
+                    )
+                    .map_err(MfError::from)
+                },
+                &mut phases,
+            )?;
+        } else {
+            timed(
+                "q_norm (batched rms)",
+                &|enc| {
+                    if sigmoid_mul {
+                        encode_rms_norm_batched_src_strided_f32(
+                            mf.ctx,
+                            enc,
+                            &s.attn_q_full,
+                            &ab.q_norm,
+                            &s.attn_q_normed,
+                            n_q,
+                            head_dim,
+                            2 * head_dim,
+                            0,
+                            RMS_EPS,
+                        )
+                        .map_err(MfError::from)
+                    } else {
+                        encode_rms_norm_batched_f32(
+                            mf.ctx,
+                            enc,
+                            &s.attn_q,
+                            &ab.q_norm,
+                            &s.attn_q_normed,
+                            n_q,
+                            head_dim,
+                            RMS_EPS,
+                        )
+                        .map_err(MfError::from)
+                    }
+                },
+                &mut phases,
+            )?;
+            timed(
+                "k_norm (batched rms)",
+                &|enc| {
+                    encode_rms_norm_batched_f32(
+                        mf.ctx,
+                        enc,
+                        &s.attn_k_now,
+                        &ab.k_norm,
+                        &s.attn_k_normed,
+                        n_kv,
+                        head_dim,
+                        RMS_EPS,
+                    )
+                    .map_err(MfError::from)
+                },
+                &mut phases,
+            )?;
+            if rope_pair {
+                timed(
+                    "rope Q+K (paired)",
+                    &|enc| {
+                        encode_rope_neox_pair_f32(
+                            mf.ctx,
+                            enc,
+                            &s.attn_q_normed,
+                            &s.attn_k_normed,
+                            n_q,
+                            n_kv,
+                            head_dim,
+                            n_rot,
+                            position,
+                            arch.rope_theta,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            } else {
+                timed(
+                    "rope Q",
+                    &|enc| {
+                        encode_rope_neox_f32(
+                            mf.ctx,
+                            enc,
+                            &s.attn_q_normed,
+                            n_q,
+                            head_dim,
+                            n_rot,
+                            position,
+                            arch.rope_theta,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "rope K",
+                    &|enc| {
+                        encode_rope_neox_f32(
+                            mf.ctx,
+                            enc,
+                            &s.attn_k_normed,
+                            n_kv,
+                            head_dim,
+                            n_rot,
+                            position,
+                            arch.rope_theta,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
+        }
         // KV scatter (fused K+V, 1 dispatch).
         timed(
             "kv scatter (fused)",
@@ -19323,7 +19416,7 @@ mod tests {
         timed(
             "gate sigmoid + mul",
             &|enc| {
-                if decode_attn_sigmoid_mul_enabled() {
+                if sigmoid_mul {
                     encode_sigmoid_mul_gate_strided_f32(
                         mf.ctx,
                         enc,

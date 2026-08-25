@@ -121,6 +121,80 @@ kernel void kernel_rms_norm_batched_src_strided_f32(
     }
 }
 
+// ---- paired Q/K RMSNorm + consecutive-position RoPE ------------------------
+
+struct qk_rms_norm_rope_args {
+    uint n_tokens;
+    uint n_q_heads;
+    uint n_k_heads;
+    uint head_dim;
+    uint n_rot;
+    uint start_position;
+    float eps;
+    float theta_base;
+};
+
+kernel void kernel_qk_rms_norm_rope_f32_packed_consecutive(
+        constant qk_rms_norm_rope_args & args [[buffer(0)]],
+        device const float * q_src    [[buffer(1)]], // [token, q_head, Q|gate]
+        device const float * q_weight [[buffer(2)]], // [head_dim]
+        device       float * q_out    [[buffer(3)]], // [token, q_head, head_dim]
+        device const float * k_src    [[buffer(4)]], // [token, k_head, head_dim]
+        device const float * k_weight [[buffer(5)]], // [head_dim]
+        device       float * k_out    [[buffer(6)]], // [token, k_head, head_dim]
+        threadgroup  float * shmem    [[threadgroup(0)]],
+        uint  tgpig [[threadgroup_position_in_grid]],
+        uint  tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint  ntg   [[threads_per_threadgroup]]) {
+    const uint q_rows = args.n_tokens * args.n_q_heads;
+    const uint k_rows = args.n_tokens * args.n_k_heads;
+    if (tgpig >= q_rows + k_rows) return;
+
+    const bool is_q = tgpig < q_rows;
+    const uint row = is_q ? tgpig : tgpig - q_rows;
+    const uint heads = is_q ? args.n_q_heads : args.n_k_heads;
+    const uint token = row / heads;
+    device const float * x_h = is_q
+        ? q_src + (ulong)row * 2u * args.head_dim
+        : k_src + (ulong)row * args.head_dim;
+    device const float * weight = is_q ? q_weight : k_weight;
+    device float * y_h = is_q
+        ? q_out + (ulong)row * args.head_dim
+        : k_out + (ulong)row * args.head_dim;
+
+    float sumsq = 0.0f;
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        const float value = x_h[i];
+        sumsq += value * value;
+    }
+    sumsq = simd_sum(sumsq);
+    if (tiisg == 0) shmem[sgitg] = sumsq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = (tiisg < (ntg + 31) / 32) ? shmem[tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+
+    const float mean = sumsq / float(args.head_dim);
+    const float scale = 1.0f / sqrt(mean + args.eps);
+    const uint half_rot = args.n_rot / 2u;
+    const float position = float(args.start_position + token);
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        if (i < half_rot) {
+            const float a = (x_h[i] * scale) * weight[i];
+            const float b = (x_h[i + half_rot] * scale) * weight[i + half_rot];
+            const float exponent = float(2u * i) / float(args.n_rot);
+            const float angle = position / pow(args.theta_base, exponent);
+            float cosine;
+            const float sine = sincos(angle, cosine);
+            y_h[i] = a * cosine - b * sine;
+            y_h[i + half_rot] = a * sine + b * cosine;
+        } else if (i >= args.n_rot) {
+            y_h[i] = (x_h[i] * scale) * weight[i];
+        }
+    }
+}
+
 // ---- split Q + gate from interleaved layout --------------------------------
 //
 // q_full layout (per Q head): [head_dim Q values, head_dim gate values]

@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-25 - Native Q/K Norm+RoPE Fusion GO; Minimax KILL
+
+Status: default native Q/K RMSNorm+RoPE fusion for base-model decode and packed
+batches through 48 rows; adaptively pair/share native packed RoPE above that.
+Direct outputs are bitwise equal on the tested M4 Max/Metal 32023.864 toolchain.
+The article-derived minimax path remains benchmark-only and rejects positions
+above its validated range. Metal-MTP model/head code is unchanged; DFlash's
+packed target verifier and drafter noise-token RoPE are in scope.
+
+- A model-free ladder separated combined Metal `sincos`, packed Q/K pairing,
+  cross-head coefficient reuse, degree-9/10 absolute-minimax polynomials, and
+  norm+RoPE fusion. Native pairing/sharing is observed bitwise equal through
+  position 1,048,575 on this toolchain. Minimax reaches `1.45e-6` max output
+  drift and is not repeatably faster than native `sincos`, so it receives no
+  production path.
+- Cross-head sharing is `~3.2-3.6x` faster for N=512/2048 prefill but `~2.8x`
+  slower for decode. The M4-derived heuristic keeps head parallelism below 128
+  rows and shares coefficients at 128 or more; this is not a portable threshold.
+- Fusing Q norm, K norm, and RoPE moves `7.444 -> 2.785 us/layer` at N=1,
+  `13.507 -> 9.873` at N=16. The displayed 24/4 shape crosses between 64 and 80,
+  while cross-shape sweeps motivate a conservative `N<=48` policy. Complete
+  fused outputs are observed bitwise equal to composition on this toolchain.
+- Exploratory dirty-tree 0.8B Q4 tg128 brackets move `346.95 -> 344.50 ms` wall
+  and `304.65 -> 302.50 ms` GPU, both directionally `0.71%`. Two A3B brackets
+  directionally save `0.39%` wall and `0.44%` GPU. A cooled 27B pair is neutral;
+  no 27B speedup is claimed.
+- Ordinary pp suites remain within noise. Two N=16 27B verifier candidate runs
+  at `188.51/190.06 ms` versus one `194.16 ms` rollback provide directional
+  `2-3%` support, not a promotion-grade product estimate.
+
+Rollbacks: `QWEN_DECODE_QK_NORM_ROPE_FUSED=0`,
+`QWEN_PREFILL_QK_NORM_ROPE_FUSED=0`, and umbrella pairing flags
+`QWEN_DECODE_ROPE_PAIR=0` / `QWEN_PREFILL_ROPE_PAIRED=0`. Evidence and
+representative commands:
+`docs/bench/2026-08-25-rope-minimax-and-reuse/README.md`. Packed fallback rows
+inherit decode controls, so full cross-path rollback sets both decode and
+prefill families.
+
 ## 2026-08-25 - Long-Context DFlash Verifier Passes; Policy Remains Content-Bound
 
 Status: retain the 16,384-token default stop and expose a measured, explicit

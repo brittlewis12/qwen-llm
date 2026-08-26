@@ -2,7 +2,15 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::qwen4exp::Qwen4ExpConfig;
 use qwen_llm::qwen4exp_loader::{MixerWeights, Qwen4ExpModel};
 use qwen_llm::qwen4exp_ple::PleIq4NlTable;
+use qwen_llm::qwen4exp_residency::{
+    QWEN4EXP_METAL_TENSOR_COUNT, QWEN4EXP_PLE_SOURCE_BYTES, QWEN4EXP_RELEASE_TENSOR_COUNT,
+    QWEN4EXP_RETAINED_WINDOW_CEILING_BYTES, Qwen4ExpDtypeCensus, Qwen4ExpMetalWeightPlan,
+};
 use qwen_llm::tensor::GgmlType;
+use sha2::{Digest, Sha256};
+
+const PINNED_8BDC666_Q3_PLE_ROWS_SHA256: &str =
+    "ccc9aefbb25cc77a515e8cde2dab9bdff314283f760ec4300fddf95d475dcf5d";
 
 #[test]
 #[ignore = "set QWEN4EXP_METADATA_GGUF to a standalone metadata shard"]
@@ -66,4 +74,69 @@ fn parses_live_qwen4exp_metadata_when_available() {
         .expect("decode released PLE rows");
     assert_eq!(decoded.len(), 2_560);
     assert!(decoded.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+#[ignore = "set QWEN4EXP_Q3_K_XL_GGUF to the first released UD-Q3_K_XL shard"]
+fn plans_released_q3_k_xl_without_residing_the_ple_table() {
+    let path = std::env::var_os("QWEN4EXP_Q3_K_XL_GGUF")
+        .expect("QWEN4EXP_Q3_K_XL_GGUF must point to the first UD-Q3_K_XL shard");
+    let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+    let ctx = qwen_llm::metal::MetalContext::new().expect("initialize Metal");
+    let allocated_before = ctx.current_allocated_size();
+    let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf)
+        .expect("plan released UD-Q3_K_XL weights");
+    plan.revalidate(&ctx, &gguf)
+        .expect("revalidate released weight plan");
+    assert_eq!(ctx.current_allocated_size(), allocated_before);
+
+    let report = plan.report();
+    assert_eq!(report.source_tensor_count, QWEN4EXP_RELEASE_TENSOR_COUNT);
+    assert_eq!(report.metal_tensor_count, QWEN4EXP_METAL_TENSOR_COUNT);
+    assert_eq!(report.cpu_ple_tensor_count, 1);
+    assert_eq!(report.cpu_ple_source_bytes, QWEN4EXP_PLE_SOURCE_BYTES);
+    assert_eq!(
+        report.source_bytes - report.cpu_ple_source_bytes,
+        report.metal_source_bytes
+    );
+    assert_eq!(report.dtype_census, Qwen4ExpDtypeCensus::UD_Q3_K_XL);
+    assert_eq!(
+        report.view_count + report.fallback_count,
+        QWEN4EXP_METAL_TENSOR_COUNT
+    );
+    assert!(report.planned_window_count > 0);
+    assert!(report.ple_boundary_overlap_bytes < 2 * report.page_size as u64);
+    assert_eq!(
+        report.planning_max_buffer_length,
+        report
+            .device_max_buffer_length
+            .min(QWEN4EXP_RETAINED_WINDOW_CEILING_BYTES)
+    );
+
+    let table = plan
+        .ple_source()
+        .bind(&gguf)
+        .expect("bind row-addressed PLE source");
+    let row_ids = plan
+        .config()
+        .ple
+        .as_ref()
+        .unwrap()
+        .row_ids(42, &[])
+        .expect("hash released PLE rows");
+    let mut packed = vec![0; table.packed_staging_bytes(row_ids.len()).unwrap()];
+    table
+        .gather_packed_into(&row_ids, &mut packed)
+        .expect("gather real packed PLE rows");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&packed)),
+        PINNED_8BDC666_Q3_PLE_ROWS_SHA256
+    );
+    let mut decoded = vec![0.0; table.f32_staging_elements(row_ids.len()).unwrap()];
+    table
+        .gather_f32_into(&row_ids, &mut decoded)
+        .expect("gather real released PLE rows");
+    assert!(decoded.iter().all(|value| value.is_finite()));
+    assert!(decoded.iter().any(|&value| value != 0.0));
+    assert_eq!(ctx.current_allocated_size(), allocated_before);
 }

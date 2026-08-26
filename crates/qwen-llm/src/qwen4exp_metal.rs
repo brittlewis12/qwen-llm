@@ -1054,7 +1054,7 @@ mod tests {
         scratch.low = offset_tensor(
             &ctx,
             20,
-            &vec![0; RANK * 4],
+            &[0; RANK * 4],
             16,
             vec![RANK as u64],
             GgmlType::F32,
@@ -1070,7 +1070,7 @@ mod tests {
         scratch.mixed = offset_tensor(
             &ctx,
             12,
-            &vec![0; HIDDEN * 4],
+            &[0; HIDDEN * 4],
             24,
             vec![HIDDEN as u64],
             GgmlType::F32,
@@ -1078,7 +1078,7 @@ mod tests {
         scratch.injection = offset_tensor(
             &ctx,
             28,
-            &vec![0; BRANCHES * 4],
+            &[0; BRANCHES * 4],
             8,
             vec![BRANCHES as u64],
             GgmlType::F32,

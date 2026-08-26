@@ -153,6 +153,14 @@ Decision rules:
   for decision-changing results. A focused regression and ordinary endpoint
   check are preferable to replaying unrelated historical gates.
 
+## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
+
+The first MoE checkpoint deliberately uses the scalar, stable 512-way top-10
+selector. After end-to-end decode exists, attribute routing separately and test
+a cooperative selector only if the scalar scan is material. Any replacement
+must preserve lower-expert tie ordering and selected-logit softmax exactly; do
+not optimize routing from isolated kernel novelty alone.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

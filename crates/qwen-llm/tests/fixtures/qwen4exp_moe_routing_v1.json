@@ -1,0 +1,88 @@
+{
+  "binary": {
+    "byte_order": "little",
+    "dtype": "f32",
+    "file": "qwen4exp_moe_routing_v1.f32",
+    "sections": {
+      "input": {
+        "count_f32": 256,
+        "offset_f32": 0,
+        "shape": [
+          256
+        ]
+      },
+      "router": {
+        "count_f32": 4096,
+        "offset_f32": 256,
+        "shape": [
+          16,
+          256
+        ]
+      },
+      "router_logits": {
+        "count_f32": 16,
+        "offset_f32": 4608,
+        "shape": [
+          16
+        ]
+      },
+      "shared_gate": {
+        "count_f32": 1,
+        "offset_f32": 4634,
+        "shape": [
+          1
+        ]
+      },
+      "shared_router": {
+        "count_f32": 256,
+        "offset_f32": 4352,
+        "shape": [
+          256
+        ]
+      },
+      "topk_weights": {
+        "count_f32": 10,
+        "offset_f32": 4624,
+        "shape": [
+          10
+        ]
+      }
+    },
+    "sha256": "f0eb6a86932244d9db8817cb8a5f226730776068df2ec01adc4e34658712dba3"
+  },
+  "generator_version": 1,
+  "geometry": {
+    "expert_count": 16,
+    "experts_per_token": 10,
+    "hidden_size": 256,
+    "routed_intermediate_size": 32,
+    "shared_intermediate_size": 32
+  },
+  "schema_version": 1,
+  "semantics": {
+    "normalization": "softmax over selected logits",
+    "router": "F32 matrix-vector product",
+    "shared_gate": "sigmoid(dot(shared_router, input))",
+    "tie_break": "lower expert ID first"
+  },
+  "sentinels": {
+    "exact_tie_ids": [
+      3,
+      14
+    ],
+    "full_softmax_selected_sum_without_renormalization": 0.8830565810203552,
+    "selected_weight_sum": 1.0
+  },
+  "topk_ids": [
+    3,
+    14,
+    12,
+    9,
+    15,
+    1,
+    7,
+    10,
+    5,
+    0
+  ]
+}

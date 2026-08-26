@@ -55,6 +55,8 @@ pub mod prefetch;
 pub mod prefix_cache;
 pub mod prompt_lookup;
 pub mod qwen4exp;
+pub mod qwen4exp_forward;
+pub mod qwen4exp_loader;
 mod qwen_queue2;
 pub mod runtime;
 pub mod sampling;

@@ -1,0 +1,296 @@
+{
+  "binary": {
+    "byte_order": "little",
+    "dtype": "f32",
+    "file": "qwen4exp_gdn_grouped_tiled_v1.f32",
+    "sections": {
+      "conv_state_tiled": {
+        "count_f32": 3072,
+        "offset_f32": 67084,
+        "shape": [
+          3,
+          1024
+        ]
+      },
+      "delta_state_tiled": {
+        "count_f32": 65536,
+        "offset_f32": 1548,
+        "shape": [
+          4,
+          128,
+          128
+        ]
+      },
+      "l2_key": {
+        "count_f32": 256,
+        "offset_f32": 70412,
+        "shape": [
+          2,
+          128
+        ]
+      },
+      "l2_key_ggml": {
+        "count_f32": 256,
+        "offset_f32": 70924,
+        "shape": [
+          2,
+          128
+        ]
+      },
+      "l2_query": {
+        "count_f32": 256,
+        "offset_f32": 70156,
+        "shape": [
+          2,
+          128
+        ]
+      },
+      "l2_query_ggml": {
+        "count_f32": 256,
+        "offset_f32": 70668,
+        "shape": [
+          2,
+          128
+        ]
+      },
+      "output": {
+        "count_f32": 12,
+        "offset_f32": 0,
+        "shape": [
+          3,
+          4
+        ]
+      },
+      "recurrent_unscaled_tiled": {
+        "count_f32": 1536,
+        "offset_f32": 12,
+        "shape": [
+          3,
+          4,
+          128
+        ]
+      }
+    },
+    "sha256": "e993ed24822a4111b492a2c9afb4bf62e807ba4bf6e6f2b000c6cc9df3f12a2d"
+  },
+  "cross_reference": {
+    "max_abs_output_delta_from_ggml_l2": 1.7881393432617188e-06,
+    "sglang_additive_l2_output": [
+      -0.1585559993982315,
+      0.3512941598892212,
+      -0.0790521502494812,
+      0.09116387367248535,
+      -1.2624644041061401,
+      0.28739944100379944,
+      0.17510762810707092,
+      -0.9115671515464783,
+      -0.5460155010223389,
+      -1.0065746307373047,
+      1.2544974088668823,
+      0.8564949035644531
+    ]
+  },
+  "description": "Three-token grouped-checkpoint GDN decode with nonzero convolution and recurrent state, converted to GGUF tiled value-head order.",
+  "fault_sensitivity_max_abs_output": {
+    "grouped_modulo_mapping": 0.48047739267349243,
+    "silu_output_gate": 1.569411039352417,
+    "zero_initial_convolution_state": 0.3384944796562195,
+    "zero_initial_recurrent_state": 0.23766590654850006
+  },
+  "generator_version": 1,
+  "geometry": {
+    "conv_kernel": 4,
+    "eps": 1e-06,
+    "head_dim": 128,
+    "hidden_size": 4,
+    "key_heads": 2,
+    "tokens": 3,
+    "value_heads": 4
+  },
+  "l2_sentinel": {
+    "description": "Near-epsilon head vectors distinguish ggml's denominator clamp from additive-epsilon normalization.",
+    "max_abs_additive_delta": 0.7492499947547913
+  },
+  "layout": {
+    "checkpoint_key_head_rule": "value_head // values_per_key",
+    "checkpoint_value_heads": [
+      "k0v0",
+      "k0v1",
+      "k1v0",
+      "k1v1"
+    ],
+    "gguf_from_checkpoint": [
+      0,
+      2,
+      1,
+      3
+    ],
+    "gguf_key_head_rule": "value_head % key_heads",
+    "gguf_value_heads": [
+      "k0v0",
+      "k1v0",
+      "k0v1",
+      "k1v1"
+    ]
+  },
+  "recipe": {
+    "alpha": {
+      "add": 1,
+      "center": 9,
+      "modulus": 19,
+      "multipliers": [
+        7,
+        4
+      ],
+      "scale": 0.07
+    },
+    "beta": {
+      "add": 2,
+      "center": 11,
+      "modulus": 23,
+      "multipliers": [
+        5,
+        9
+      ],
+      "scale": 0.08
+    },
+    "conv": {
+      "add": 4,
+      "center": 14,
+      "modulus": 29,
+      "multipliers": [
+        13,
+        7
+      ],
+      "scale": 0.018
+    },
+    "conv_state": {
+      "add": 8,
+      "center": 21,
+      "modulus": 43,
+      "multipliers": [
+        29,
+        5
+      ],
+      "scale": 0.009
+    },
+    "delta_state": {
+      "add": 10,
+      "center": 23,
+      "modulus": 47,
+      "multipliers": [
+        31,
+        7,
+        13
+      ],
+      "scale": 0.0007
+    },
+    "dt_bias": [
+      -0.3,
+      0.1,
+      0.4,
+      -0.2
+    ],
+    "gate": {
+      "add": 5,
+      "center": 18,
+      "modulus": 37,
+      "multipliers": [
+        19,
+        7
+      ],
+      "scale": 0.03
+    },
+    "inputs": [
+      [
+        1.0,
+        -0.5,
+        0.25,
+        2.0
+      ],
+      [
+        -0.75,
+        1.5,
+        -1.0,
+        0.5
+      ],
+      [
+        0.2,
+        -0.4,
+        1.2,
+        -1.6
+      ]
+    ],
+    "norm": {
+      "base": 0.8,
+      "modulus": 9,
+      "step": 0.03
+    },
+    "output": {
+      "add": 6,
+      "center": 20,
+      "modulus": 41,
+      "multipliers": [
+        11,
+        23
+      ],
+      "scale": 0.012
+    },
+    "qkv": {
+      "add": 3,
+      "center": 15,
+      "modulus": 31,
+      "multipliers": [
+        17,
+        11
+      ],
+      "scale": 0.025
+    },
+    "transformed_a": [
+      -0.4,
+      -0.7,
+      -1.1,
+      -1.6
+    ]
+  },
+  "schema_version": 1,
+  "semantics": {
+    "convolution_state_order": "oldest_to_newest_raw_projection",
+    "l2_norm": "x / max(sqrt(sum(x*x)), eps)",
+    "output_gate": "sigmoid",
+    "query_scale": "1/sqrt(head_dim), folded into Metal gated-RMS epsilon",
+    "transformed_a": "-exp(A_log), supplied after checkpoint transform"
+  },
+  "sources": {
+    "llama_cpp": {
+      "contract": "grouped-to-tiled value-head conversion, ggml L2 norm, and Qwen3.8 sigmoid output gate",
+      "files": [
+        {
+          "path": "conversion/qwen.py",
+          "sha256": "56c65e7bc7817e624be3c5d9f6ca4a28e9e0ef89d4c6833d877bd86ecd798ecc"
+        },
+        {
+          "path": "src/models/qwen4exp.cpp",
+          "sha256": "1afe4a3c677452680bf8ccbbb98573ee6a645d0729df74a15b0faad38bdf0bc7"
+        }
+      ],
+      "repository": "https://github.com/ggml-org/llama.cpp",
+      "revision": "035e22731a7fd70b9854b3a2d64ec68e9b1a45d3",
+      "tree": "c946a1b3c9fbc8c0b1313eb77b48d34d8ce1884f"
+    },
+    "sglang": {
+      "contract": "grouped-head GDN recurrence and query scaling",
+      "path": "python/sglang/test/kits/attention_unittest/attention_methods/gdn_attention.py",
+      "repository": "https://github.com/sgl-project/sglang",
+      "revision": "73a255206f916366c8d26d4022f82ddfb0ab558d",
+      "sha256": "f7df7659b8e904d704ce04021e00a6fc20fdaf99f88e5828cbed09980bff786d",
+      "tree": "dc134c86f21a7396d89bdb01a8019e8db81d763a"
+    }
+  },
+  "toolchain": {
+    "device": "cpu",
+    "python": "3.11.11",
+    "threads": 1,
+    "torch": "2.4.1"
+  }
+}

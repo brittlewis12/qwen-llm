@@ -88,3 +88,41 @@ kernel void kernel_qwen4exp_hc_inject_f32(
     const float injection = 2.0f / (1.0f + exp(-value));
     residual[(ulong)branch * args.hidden_size + hidden] += block_output[hidden] * injection;
 }
+
+struct qwen4exp_gdn_norm_args {
+    uint n_heads;
+    float eps;
+};
+
+kernel void kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32(
+        constant qwen4exp_gdn_norm_args & args [[buffer(0)]],
+        device const float * input           [[buffer(1)]],
+        device const float * weight          [[buffer(2)]],
+        device const float * gate            [[buffer(3)]],
+        device       float * output          [[buffer(4)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        uint2 tpitg [[thread_position_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr uint HEAD_DIM = 128;
+    constexpr uint ROWS_PER_TG = 4;
+    const uint head = tgpig.x * ROWS_PER_TG + tpitg.y;
+    if (head >= args.n_heads) return;
+
+    device const float * input_head = input + (ulong)head * HEAD_DIM;
+    device const float * gate_head = gate + (ulong)head * HEAD_DIM;
+    device float * output_head = output + (ulong)head * HEAD_DIM;
+
+    float sumsq = 0.0f;
+    for (uint lane = tiisg; lane < HEAD_DIM; lane += 32) {
+        const float value = input_head[lane];
+        sumsq += value * value;
+    }
+    sumsq = simd_sum(sumsq);
+    const float scale = 1.0f / sqrt(sumsq / float(HEAD_DIM) + args.eps);
+
+    for (uint lane = tiisg; lane < HEAD_DIM; lane += 32) {
+        const float normalized = input_head[lane] * scale * weight[lane];
+        const float sigmoid_gate = 1.0f / (1.0f + exp(-gate_head[lane]));
+        output_head[lane] = normalized * sigmoid_gate;
+    }
+}

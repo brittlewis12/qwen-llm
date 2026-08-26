@@ -73,6 +73,10 @@ impl GatedResidualMetalScratch {
         self.low_rank
     }
 
+    pub(crate) fn mixed_tensor(&self) -> &MetalTensor {
+        &self.mixed
+    }
+
     /// Wait for the owning command buffer and permit reuse from another one.
     /// The command must already be ended and committed by the caller.
     pub fn release_after(&mut self) -> Result<(), Qwen4ExpMetalError> {
@@ -186,6 +190,37 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
     scratch: &'scratch mut GatedResidualMetalScratch,
 ) -> Result<GatedResidualMetalRead<'scratch, 'resources, 'pass>, Qwen4ExpMetalError> {
     require_serial(enc)?;
+    validate_and_preflight_gated_residual_mix(
+        ctx,
+        hyper_input,
+        block_output,
+        eps,
+        weights,
+        inject,
+        scratch,
+    )?;
+    reserve_command(scratch, enc)?;
+    let hyper_hidden = scratch.branch_count * scratch.hidden_size;
+    encode_read(ctx, enc, hyper_input, eps, weights, scratch, hyper_hidden)?;
+    Ok(GatedResidualMetalRead {
+        ctx,
+        encoder: enc,
+        hyper_input,
+        block_output,
+        inject,
+        scratch,
+    })
+}
+
+pub(crate) fn validate_and_preflight_gated_residual_mix(
+    ctx: &MetalContext,
+    hyper_input: &MetalTensor,
+    block_output: &MetalTensor,
+    eps: f32,
+    weights: GatedResidualMetalReadWeights<'_>,
+    inject: &MetalTensor,
+    scratch: &GatedResidualMetalScratch,
+) -> Result<(), Qwen4ExpMetalError> {
     let hyper_hidden = validate_read_contract(hyper_input, eps, weights, scratch, true)?;
     validate_combine_contract(hyper_input, block_output, inject, scratch, hyper_hidden)?;
     require_disjoint(&[
@@ -202,17 +237,7 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
         ("injection scratch", &scratch.injection),
     ])?;
     preflight_mix(ctx, weights.down.dtype, weights.up.dtype)?;
-    preflight_combine(ctx)?;
-    reserve_command(scratch, enc)?;
-    encode_read(ctx, enc, hyper_input, eps, weights, scratch, hyper_hidden)?;
-    Ok(GatedResidualMetalRead {
-        ctx,
-        encoder: enc,
-        hyper_input,
-        block_output,
-        inject,
-        scratch,
-    })
+    preflight_combine(ctx)
 }
 
 pub fn encode_final_gated_residual_mix<'scratch>(

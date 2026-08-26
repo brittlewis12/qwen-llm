@@ -579,7 +579,7 @@ fn encode_step(
     Ok(())
 }
 
-fn validate_contract(
+pub(crate) fn validate_contract(
     ctx: &MetalContext,
     input: &MetalTensor,
     weights: Qwen4ExpMoeMetalWeights<'_>,
@@ -756,7 +756,7 @@ fn workspace_tensors(workspace: &Qwen4ExpMoeMetalWorkspace) -> Vec<(&'static str
     ]
 }
 
-fn preflight(
+pub(crate) fn preflight(
     ctx: &MetalContext,
     weights: Qwen4ExpMoeMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpMoeError> {

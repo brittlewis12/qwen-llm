@@ -161,6 +161,10 @@ a cooperative selector only if the scalar scan is material. Any replacement
 must preserve lower-expert tie ordering and selected-logit softmax exactly; do
 not optimize routing from isolated kernel novelty alone.
 
+Layer-zero bring-up initializes the four HC streams with four validated copy
+dispatches. A direct repeat kernel is a profile-gated launch reduction after the
+complete token path exists, not a reason to delay the correctness checkpoint.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

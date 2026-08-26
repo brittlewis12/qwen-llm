@@ -594,7 +594,7 @@ pub fn encode_gated_delta_net<'a>(
     Ok(GatedDeltaNetMetalRead { workspace })
 }
 
-fn validate_contract(
+pub(crate) fn validate_contract(
     ctx: &MetalContext,
     input: &MetalTensor,
     weights: GatedDeltaNetMetalWeights<'_>,
@@ -840,7 +840,7 @@ fn require_same_device(
     Ok(())
 }
 
-fn preflight(
+pub(crate) fn preflight(
     ctx: &MetalContext,
     weights: GatedDeltaNetMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpGdnError> {

@@ -509,6 +509,32 @@ impl GgufFile {
         Ok(Some(out))
     }
 
+    /// Convenience: lookup an array of signed or unsigned integer metadata.
+    /// Unsigned values must fit in `i64`.
+    pub fn get_i64_array(&self, key: &str) -> Result<Option<Vec<i64>>, GgufError> {
+        let Some(value) = self.model.metadata().get(key) else {
+            return Ok(None);
+        };
+        let arr = value
+            .as_array()
+            .ok_or_else(|| GgufError::Decode(format!("metadata key {key:?} is not an array")))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for (idx, value) in arr.iter().enumerate() {
+            let parsed = value.as_i64().or_else(|| {
+                value
+                    .as_u64()
+                    .and_then(|unsigned| i64::try_from(unsigned).ok())
+            });
+            let parsed = parsed.ok_or_else(|| {
+                GgufError::Decode(format!(
+                    "metadata key {key:?}[{idx}] is not an i64-compatible integer"
+                ))
+            })?;
+            out.push(parsed);
+        }
+        Ok(Some(out))
+    }
+
     /// Convenience: lookup an array-of-floating-point metadata value by key.
     /// Returns `Ok(None)` if the key is missing, and `Err` if the key exists
     /// but contains a non-numeric value.

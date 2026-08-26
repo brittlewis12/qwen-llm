@@ -54,6 +54,7 @@ pub mod pid_metrics;
 pub mod prefetch;
 pub mod prefix_cache;
 pub mod prompt_lookup;
+pub mod qwen4exp;
 mod qwen_queue2;
 pub mod runtime;
 pub mod sampling;

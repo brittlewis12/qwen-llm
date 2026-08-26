@@ -1,3 +1,5 @@
+use objc2::rc::Retained;
+use objc2_metal::MTLBuffer;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::qwen4exp::Qwen4ExpConfig;
 use qwen_llm::qwen4exp_loader::{MixerWeights, Qwen4ExpModel};
@@ -5,9 +7,11 @@ use qwen_llm::qwen4exp_ple::PleIq4NlTable;
 use qwen_llm::qwen4exp_residency::{
     QWEN4EXP_METAL_TENSOR_COUNT, QWEN4EXP_PLE_SOURCE_BYTES, QWEN4EXP_RELEASE_TENSOR_COUNT,
     QWEN4EXP_RETAINED_WINDOW_CEILING_BYTES, Qwen4ExpDtypeCensus, Qwen4ExpMetalWeightPlan,
+    Qwen4ExpMetalWeights,
 };
 use qwen_llm::tensor::GgmlType;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 const PINNED_8BDC666_Q3_PLE_ROWS_SHA256: &str =
     "ccc9aefbb25cc77a515e8cde2dab9bdff314283f760ec4300fddf95d475dcf5d";
@@ -139,4 +143,123 @@ fn plans_released_q3_k_xl_without_residing_the_ple_table() {
     assert!(decoded.iter().all(|value| value.is_finite()));
     assert!(decoded.iter().any(|&value| value != 0.0));
     assert_eq!(ctx.current_allocated_size(), allocated_before);
+}
+
+#[test]
+#[ignore = "set QWEN4EXP_Q3_K_XL_REALIZE_GGUF to opt into full weight realization"]
+fn realizes_released_q3_k_xl_as_read_only_metal_views() {
+    let path = std::env::var_os("QWEN4EXP_Q3_K_XL_REALIZE_GGUF")
+        .expect("QWEN4EXP_Q3_K_XL_REALIZE_GGUF must point to the first UD-Q3_K_XL shard");
+    let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+    let ctx = qwen_llm::metal::MetalContext::new().expect("initialize Metal");
+    let baseline = ctx.current_allocated_size();
+    let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf)
+        .expect("plan released UD-Q3_K_XL weights");
+    let priced_upper = plan.memory_plan().priced_upper_bytes();
+    let admitted = plan
+        .admit(ctx.memory_signals())
+        .expect("admit released Metal weights");
+    assert!(admitted.admission().admitted);
+
+    let realized = Qwen4ExpMetalWeights::realize(&ctx, &gguf, admitted)
+        .expect("realize released Metal weights");
+    assert!(realized.admission().admitted);
+    assert_eq!(realized.allocated_before(), baseline);
+    assert!(realized.observed_allocation_delta() <= priced_upper);
+    assert!(realized.allocated_after() >= realized.allocated_before());
+
+    let weights = realized.weights();
+    weights.validate_context(&ctx).unwrap();
+    assert_eq!(weights.len(), QWEN4EXP_METAL_TENSOR_COUNT);
+    assert!(!weights.is_empty());
+    assert!(weights.tensor("per_layer_token_embd.weight").is_none());
+    assert_eq!(
+        weights.require_tensor("token_embd.weight").unwrap().dtype,
+        GgmlType::Q8_0
+    );
+    assert_eq!(
+        weights.require_tensor("output.weight").unwrap().dtype,
+        GgmlType::Q6_K
+    );
+    assert_eq!(
+        weights
+            .require_tensor("blk.2.ffn_gate_exps.weight")
+            .unwrap()
+            .dtype,
+        GgmlType::IQ4_XS
+    );
+    assert!(weights.tensors().all(|(_, tensor)| {
+        !tensor.is_writable()
+            && matches!(
+                tensor.provenance(),
+                qwen_llm::metal::MetalTensorProvenance::RetainedGgufReadOnly
+                    | qwen_llm::metal::MetalTensorProvenance::OwnedWeightReadOnly
+            )
+    }));
+
+    let mut seen_buffers = HashSet::new();
+    let mut retained_samples = Vec::new();
+    let mut retained_window_buffers = 0_usize;
+    let mut copied_fallback_buffers = 0_usize;
+    for (name, tensor) in weights.tensors() {
+        let identity = Retained::as_ptr(&tensor.buffer) as *const () as usize;
+        if !seen_buffers.insert(identity) {
+            continue;
+        }
+        match tensor.provenance() {
+            qwen_llm::metal::MetalTensorProvenance::RetainedGgufReadOnly => {
+                retained_window_buffers += 1;
+            }
+            qwen_llm::metal::MetalTensorProvenance::OwnedWeightReadOnly => {
+                copied_fallback_buffers += 1;
+            }
+            qwen_llm::metal::MetalTensorProvenance::OwnedWritable => unreachable!(),
+        }
+        let desc = gguf.find(name).unwrap();
+        let sample_len = usize::try_from(desc.n_bytes.min(32)).unwrap();
+        let expected = gguf.try_slice(desc).unwrap()[..sample_len].to_vec();
+        retained_samples.push((name.to_string(), tensor.clone(), expected));
+    }
+    assert_eq!(
+        retained_window_buffers,
+        weights.report().planned_window_count
+    );
+    assert_eq!(copied_fallback_buffers, weights.report().fallback_count);
+    assert!(copied_fallback_buffers > 0);
+    assert_eq!(retained_samples.len(), weights.memory_plan().buffer_count());
+
+    let table = weights
+        .ple_source()
+        .bind(&gguf)
+        .expect("bind CPU PLE source after Metal realization");
+    let row_ids = weights
+        .config()
+        .ple
+        .as_ref()
+        .unwrap()
+        .row_ids(42, &[])
+        .expect("hash released PLE rows");
+    let mut packed = vec![0; table.packed_staging_bytes(row_ids.len()).unwrap()];
+    table.gather_packed_into(&row_ids, &mut packed).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&packed)),
+        PINNED_8BDC666_Q3_PLE_ROWS_SHA256
+    );
+    drop(gguf);
+    for (name, tensor, expected) in retained_samples {
+        // SAFETY: realization validated this tensor's complete byte range
+        // against the retained Metal buffer.
+        let actual = unsafe {
+            std::slice::from_raw_parts(
+                tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize),
+                expected.len(),
+            )
+        };
+        assert_eq!(actual, expected, "post-drop sample mismatch for {name}");
+    }
 }

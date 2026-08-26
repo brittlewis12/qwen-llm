@@ -4,17 +4,22 @@
 //! retained, read-only GGUF views where page geometry permits; copied
 //! final-partial-page fallbacks are explicit in the report. No Metal buffers
 //! are created until a later admitted realization step.
+//! Backing GGUF files must remain immutable while a plan, PLE binding, or
+//! realized mmap view is in use.
 
 use crate::gguf::{GgufError, GgufFile, GgufShardStamp};
 use crate::metal::{
-    MetalContext, MetalError, RetainedStorageDisposition, RetainedStorageFallback,
-    RetainedStoragePlan, RetainedStorageWindow, host_page_size_bytes, plan_retained_storage,
+    MetalContext, MetalError, MetalGgufBacking, MetalMemoryAdmission, MetalMemorySignals,
+    MetalTensor, MetalTensorProvenance, RetainedStorageDisposition, RetainedStorageFallback,
+    RetainedStoragePlan, RetainedStorageWindow, evaluate_metal_memory_admission,
+    host_page_size_bytes, plan_retained_storage,
 };
 use crate::qwen4exp::Qwen4ExpConfig;
 use crate::qwen4exp_loader::{Qwen4ExpLoadError, Qwen4ExpModel};
 use crate::qwen4exp_ple::{PleGatherError, PleIq4NlTable};
 use crate::tensor::{GgmlType, TensorDesc};
-use objc2_metal::MTLDevice;
+use objc2_metal::{MTLBuffer, MTLDevice};
+use std::collections::BTreeMap;
 
 pub const QWEN4EXP_RELEASE_TENSOR_COUNT: usize = 1_224;
 pub const QWEN4EXP_METAL_TENSOR_COUNT: usize = QWEN4EXP_RELEASE_TENSOR_COUNT - 1;
@@ -103,6 +108,52 @@ pub struct Qwen4ExpMetalWeightPlanReport {
     pub device_max_buffer_length: usize,
     pub planning_max_buffer_length: usize,
     pub dtype_census: Qwen4ExpDtypeCensus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Qwen4ExpMetalWeightMemoryPlan {
+    buffer_count: usize,
+    logical_bytes: u64,
+    priced_upper_bytes: u64,
+}
+
+impl Qwen4ExpMetalWeightMemoryPlan {
+    pub fn buffer_count(&self) -> usize {
+        self.buffer_count
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
+    }
+
+    pub fn priced_upper_bytes(&self) -> u64 {
+        self.priced_upper_bytes
+    }
+
+    pub fn admission(&self, signals: MetalMemorySignals) -> MetalMemoryAdmission {
+        evaluate_metal_memory_admission(self.priced_upper_bytes, 0, signals, true)
+    }
+
+    pub fn reconcile(
+        &self,
+        allocated_before: u64,
+        allocated_after: u64,
+    ) -> Result<u64, Qwen4ExpResidencyError> {
+        let observed = allocated_after
+            .checked_sub(allocated_before)
+            .ok_or_else(|| {
+                Qwen4ExpResidencyError::Invalid(
+                    "Metal allocation counter regressed during weight realization".into(),
+                )
+            })?;
+        if observed > self.priced_upper_bytes {
+            return invalid(format!(
+                "observed Metal weight allocation {observed} exceeds priced upper bound {}",
+                self.priced_upper_bytes
+            ));
+        }
+        Ok(observed)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -206,8 +257,79 @@ pub struct Qwen4ExpMetalWeightPlan {
     descriptors: Vec<DescriptorFingerprint>,
     ple_source: Qwen4ExpPleSourcePlan,
     report: Qwen4ExpMetalWeightPlanReport,
+    memory: Qwen4ExpMetalWeightMemoryPlan,
     device_registry_id: u64,
     shard_stamps: Vec<GgufShardStamp>,
+}
+
+pub struct Qwen4ExpAdmittedMetalWeightPlan {
+    plan: Qwen4ExpMetalWeightPlan,
+    admission: MetalMemoryAdmission,
+}
+
+impl Qwen4ExpAdmittedMetalWeightPlan {
+    pub fn admission(&self) -> MetalMemoryAdmission {
+        self.admission
+    }
+
+    pub fn memory_plan(&self) -> &Qwen4ExpMetalWeightMemoryPlan {
+        &self.plan.memory
+    }
+
+    pub fn report(&self) -> &Qwen4ExpMetalWeightPlanReport {
+        &self.plan.report
+    }
+}
+
+/// Immutable lookup surface over weights realized with read-only provenance.
+/// `MetalTensor::buffer` remains a low-level public handle, so this is not a
+/// tamper-proof capability boundary.
+pub struct Qwen4ExpMetalWeights {
+    config: Qwen4ExpConfig,
+    tensors: BTreeMap<String, MetalTensor>,
+    ple_source: Qwen4ExpPleSourcePlan,
+    report: Qwen4ExpMetalWeightPlanReport,
+    memory: Qwen4ExpMetalWeightMemoryPlan,
+    device_registry_id: u64,
+}
+
+// Metal resources are device-wide and safe to encode from multiple host
+// threads. The map and its tensor views are immutable after construction.
+unsafe impl Send for Qwen4ExpMetalWeights {}
+unsafe impl Sync for Qwen4ExpMetalWeights {}
+
+pub struct Qwen4ExpRealizedMetalWeights {
+    weights: Qwen4ExpMetalWeights,
+    admission: MetalMemoryAdmission,
+    allocated_before: u64,
+    allocated_after: u64,
+    observed_allocation_delta: u64,
+}
+
+impl Qwen4ExpRealizedMetalWeights {
+    pub fn admission(&self) -> MetalMemoryAdmission {
+        self.admission
+    }
+
+    pub fn allocated_before(&self) -> u64 {
+        self.allocated_before
+    }
+
+    pub fn allocated_after(&self) -> u64 {
+        self.allocated_after
+    }
+
+    pub fn observed_allocation_delta(&self) -> u64 {
+        self.observed_allocation_delta
+    }
+
+    pub fn weights(&self) -> &Qwen4ExpMetalWeights {
+        &self.weights
+    }
+
+    pub fn into_weights(self) -> Qwen4ExpMetalWeights {
+        self.weights
+    }
 }
 
 impl Qwen4ExpMetalWeightPlan {
@@ -286,6 +408,7 @@ impl Qwen4ExpMetalWeightPlan {
             device_max_buffer_length,
             dtype_census,
         )?;
+        let memory = build_weight_memory_plan(ctx, &retained, &report)?;
         let descriptors = gguf
             .tensors
             .iter()
@@ -302,6 +425,7 @@ impl Qwen4ExpMetalWeightPlan {
                 shard_stamp: ple_shard_stamp,
             },
             report,
+            memory,
             device_registry_id: ctx.device.registryID(),
             shard_stamps,
         })
@@ -315,12 +439,36 @@ impl Qwen4ExpMetalWeightPlan {
         &self.report
     }
 
+    pub fn memory_plan(&self) -> &Qwen4ExpMetalWeightMemoryPlan {
+        &self.memory
+    }
+
     pub fn ple_source(&self) -> &Qwen4ExpPleSourcePlan {
         &self.ple_source
     }
 
     pub fn device_registry_id(&self) -> u64 {
         self.device_registry_id
+    }
+
+    pub fn admit(
+        self,
+        signals: MetalMemorySignals,
+    ) -> Result<Qwen4ExpAdmittedMetalWeightPlan, Qwen4ExpResidencyError> {
+        let admission = self.memory.admission(signals);
+        if !admission.admitted {
+            return invalid(format!(
+                "Metal weight admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+                admission.reason.as_str(),
+                admission.required_bytes,
+                admission.working_set_headroom_bytes,
+                admission.signals.process_limit_remaining_bytes
+            ));
+        }
+        Ok(Qwen4ExpAdmittedMetalWeightPlan {
+            plan: self,
+            admission,
+        })
     }
 
     pub fn revalidate(
@@ -335,11 +483,123 @@ impl Qwen4ExpMetalWeightPlan {
             || self.descriptors != rebuilt.descriptors
             || self.ple_source != rebuilt.ple_source
             || self.report != rebuilt.report
+            || self.memory != rebuilt.memory
             || self.shard_stamps != rebuilt.shard_stamps
         {
             return invalid("weight plan changed before realization");
         }
         Ok(())
+    }
+}
+
+impl Qwen4ExpMetalWeights {
+    pub fn realize(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        admitted: Qwen4ExpAdmittedMetalWeightPlan,
+    ) -> Result<Qwen4ExpRealizedMetalWeights, Qwen4ExpResidencyError> {
+        let plan = admitted.plan;
+        if plan.device_registry_id != ctx.device.registryID() {
+            return invalid(format!(
+                "weight plan belongs to Metal device registry {}, realization context is {}",
+                plan.device_registry_id,
+                ctx.device.registryID()
+            ));
+        }
+        plan.revalidate(ctx, gguf)?;
+        let refreshed_admission = plan.memory.admission(ctx.memory_signals());
+        if !refreshed_admission.admitted {
+            return invalid(format!(
+                "Metal weight admission changed before realization: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+                refreshed_admission.reason.as_str(),
+                refreshed_admission.required_bytes,
+                refreshed_admission.working_set_headroom_bytes,
+                refreshed_admission.signals.process_limit_remaining_bytes
+            ));
+        }
+
+        let allocated_before = refreshed_admission.signals.current_allocated_bytes;
+        let windows = realize_windows(ctx, gguf, &plan.retained)?;
+        let tensors = realize_tensors(ctx, gguf, &plan.retained, &windows)?;
+        let final_stamps = gguf.revalidate_retained_shard_stamps()?;
+        if final_stamps != plan.shard_stamps {
+            return invalid("GGUF shard identity changed during weight realization");
+        }
+        validate_realized_weights(gguf, &tensors)?;
+        let allocated_after = ctx.current_allocated_size();
+        let observed_allocation_delta = plan.memory.reconcile(allocated_before, allocated_after)?;
+
+        Ok(Qwen4ExpRealizedMetalWeights {
+            weights: Self {
+                config: plan.config,
+                tensors,
+                ple_source: plan.ple_source,
+                report: plan.report,
+                memory: plan.memory,
+                device_registry_id: plan.device_registry_id,
+            },
+            admission: refreshed_admission,
+            allocated_before,
+            allocated_after,
+            observed_allocation_delta,
+        })
+    }
+
+    pub fn validate_context(&self, ctx: &MetalContext) -> Result<(), Qwen4ExpResidencyError> {
+        if self.device_registry_id != ctx.device.registryID() {
+            return invalid(format!(
+                "Metal weights belong to device registry {}, context is {}",
+                self.device_registry_id,
+                ctx.device.registryID()
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn config(&self) -> &Qwen4ExpConfig {
+        &self.config
+    }
+
+    pub fn tensor(&self, name: &str) -> Option<&MetalTensor> {
+        self.tensors.get(name)
+    }
+
+    pub fn require_tensor(&self, name: &str) -> Result<&MetalTensor, Qwen4ExpResidencyError> {
+        self.tensor(name).ok_or_else(|| {
+            Qwen4ExpResidencyError::Invalid(format!(
+                "realized UD-Q3_K_XL weights are missing tensor {name:?}"
+            ))
+        })
+    }
+
+    pub fn tensors(&self) -> impl ExactSizeIterator<Item = (&str, &MetalTensor)> {
+        self.tensors
+            .iter()
+            .map(|(name, tensor)| (name.as_str(), tensor))
+    }
+
+    pub fn len(&self) -> usize {
+        self.tensors.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tensors.is_empty()
+    }
+
+    pub fn ple_source(&self) -> &Qwen4ExpPleSourcePlan {
+        &self.ple_source
+    }
+
+    pub fn report(&self) -> &Qwen4ExpMetalWeightPlanReport {
+        &self.report
+    }
+
+    pub fn memory_plan(&self) -> &Qwen4ExpMetalWeightMemoryPlan {
+        &self.memory
+    }
+
+    pub fn device_registry_id(&self) -> u64 {
+        self.device_registry_id
     }
 }
 
@@ -462,6 +722,298 @@ fn validate_retained_policy(plan: &RetainedStoragePlan) -> Result<(), Qwen4ExpRe
                     entry.name
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn price_shared_buffer(
+    ctx: &MetalContext,
+    logical_bytes: u64,
+    name: &str,
+) -> Result<u64, Qwen4ExpResidencyError> {
+    if logical_bytes == 0 {
+        return invalid(format!("planned Metal buffer {name:?} has zero bytes"));
+    }
+    let max_buffer_length = u64::try_from(ctx.max_buffer_length()).map_err(|_| {
+        Qwen4ExpResidencyError::Invalid("Metal maximum buffer length exceeds u64".into())
+    })?;
+    if logical_bytes > max_buffer_length {
+        return invalid(format!(
+            "planned Metal buffer {name:?} requires {logical_bytes} bytes, beyond device maximum {max_buffer_length}"
+        ));
+    }
+    let priced = ctx.shared_buffer_size_and_align(logical_bytes)?;
+    if priced.size < logical_bytes || priced.alignment == 0 || !priced.alignment.is_power_of_two() {
+        return invalid(format!(
+            "invalid Metal pricing for {name:?}: logical={logical_bytes} priced={} alignment={}",
+            priced.size, priced.alignment
+        ));
+    }
+    let alignment = priced.alignment.max(host_page_size_bytes()? as u64);
+    priced
+        .size
+        .checked_add(alignment - 1)
+        .map(|bytes| bytes / alignment * alignment)
+        .ok_or_else(|| {
+            Qwen4ExpResidencyError::Invalid(format!(
+                "aligned Metal pricing for {name:?} overflows u64"
+            ))
+        })
+}
+
+fn build_weight_memory_plan(
+    ctx: &MetalContext,
+    retained: &RetainedStoragePlan,
+    report: &Qwen4ExpMetalWeightPlanReport,
+) -> Result<Qwen4ExpMetalWeightMemoryPlan, Qwen4ExpResidencyError> {
+    let mut buffer_count = 0_usize;
+    let mut logical_bytes = 0_u64;
+    let mut priced_upper_bytes = 0_u64;
+    for (index, window) in retained.windows.iter().enumerate() {
+        let logical = u64::try_from(window.length).map_err(|_| {
+            Qwen4ExpResidencyError::Invalid("retained window length exceeds u64".into())
+        })?;
+        let priced = price_shared_buffer(ctx, logical, &format!("weight_window[{index}]"))?;
+        buffer_count = buffer_count.checked_add(1).ok_or_else(|| {
+            Qwen4ExpResidencyError::Invalid("weight buffer count overflow".into())
+        })?;
+        logical_bytes = logical_bytes.checked_add(logical).ok_or_else(|| {
+            Qwen4ExpResidencyError::Invalid("logical weight byte count overflow".into())
+        })?;
+        priced_upper_bytes = priced_upper_bytes.checked_add(priced).ok_or_else(|| {
+            Qwen4ExpResidencyError::Invalid("priced weight byte count overflow".into())
+        })?;
+    }
+    for entry in &retained.entries {
+        if matches!(
+            entry.disposition,
+            RetainedStorageDisposition::CopyFallback { .. }
+        ) {
+            let priced = price_shared_buffer(ctx, entry.n_bytes, &entry.name)?;
+            buffer_count = buffer_count.checked_add(1).ok_or_else(|| {
+                Qwen4ExpResidencyError::Invalid("weight buffer count overflow".into())
+            })?;
+            logical_bytes = logical_bytes.checked_add(entry.n_bytes).ok_or_else(|| {
+                Qwen4ExpResidencyError::Invalid("logical fallback byte count overflow".into())
+            })?;
+            priced_upper_bytes = priced_upper_bytes.checked_add(priced).ok_or_else(|| {
+                Qwen4ExpResidencyError::Invalid("priced fallback byte count overflow".into())
+            })?;
+        }
+    }
+
+    let expected_buffers = report
+        .planned_window_count
+        .checked_add(report.fallback_count)
+        .ok_or_else(|| Qwen4ExpResidencyError::Invalid("report buffer count overflow".into()))?;
+    let expected_logical = report
+        .planned_window_bytes
+        .checked_add(report.fallback_bytes)
+        .ok_or_else(|| Qwen4ExpResidencyError::Invalid("report weight bytes overflow".into()))?;
+    if buffer_count != expected_buffers || logical_bytes != expected_logical {
+        return invalid(format!(
+            "weight memory plan differs from report: buffers={buffer_count}/{expected_buffers} logical={logical_bytes}/{expected_logical}"
+        ));
+    }
+    if priced_upper_bytes < logical_bytes {
+        return invalid("priced Metal weight bytes are below logical bytes");
+    }
+    Ok(Qwen4ExpMetalWeightMemoryPlan {
+        buffer_count,
+        logical_bytes,
+        priced_upper_bytes,
+    })
+}
+
+fn realize_windows(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    plan: &RetainedStoragePlan,
+) -> Result<Vec<MetalGgufBacking>, Qwen4ExpResidencyError> {
+    let mut windows = Vec::with_capacity(plan.windows.len());
+    for (index, window) in plan.windows.iter().enumerate() {
+        let mmap = gguf.retained_shard_mmap(window.shard_idx).ok_or_else(|| {
+            Qwen4ExpResidencyError::Invalid(format!(
+                "planned window {index} references missing shard {}",
+                window.shard_idx
+            ))
+        })?;
+        let mmap_offset = usize::try_from(window.mmap_offset).map_err(|_| {
+            Qwen4ExpResidencyError::Invalid(format!("planned window {index} offset exceeds usize"))
+        })?;
+        let backing = ctx.gguf_no_copy_window(
+            mmap,
+            window.shard_idx,
+            mmap_offset,
+            window.length,
+            QWEN4EXP_GGUF_BINDING_ALIGNMENT,
+        )?;
+        if backing.mmap_offset() != mmap_offset
+            || backing.exposed_len() != window.length
+            || backing.required_alignment() != QWEN4EXP_GGUF_BINDING_ALIGNMENT
+        {
+            return invalid(format!("retained window {index} realization drift"));
+        }
+        windows.push(backing);
+    }
+    Ok(windows)
+}
+
+fn realize_tensors(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    plan: &RetainedStoragePlan,
+    windows: &[MetalGgufBacking],
+) -> Result<BTreeMap<String, MetalTensor>, Qwen4ExpResidencyError> {
+    let descriptors = gguf
+        .tensors
+        .iter()
+        .filter(|desc| desc.name != "per_layer_token_embd.weight")
+        .collect::<Vec<_>>();
+    if descriptors.len() != plan.entries.len() {
+        return invalid(format!(
+            "realization descriptor count {} differs from planned {}",
+            descriptors.len(),
+            plan.entries.len()
+        ));
+    }
+
+    let mut tensors = BTreeMap::new();
+    for (index, (entry, desc)) in plan.entries.iter().zip(descriptors).enumerate() {
+        if entry.request_index != index
+            || entry.name != desc.name
+            || entry.shard_idx != desc.shard_idx
+            || entry.data_offset != desc.data_offset
+            || entry.n_bytes != desc.n_bytes
+        {
+            return invalid(format!("planner descriptor drift at request {index}"));
+        }
+        let (tensor, expected_provenance) = match entry.disposition {
+            RetainedStorageDisposition::View {
+                window_index,
+                buffer_offset,
+            } => {
+                let backing = windows.get(window_index).ok_or_else(|| {
+                    Qwen4ExpResidencyError::Invalid(format!(
+                        "tensor {:?} references missing window {window_index}",
+                        desc.name
+                    ))
+                })?;
+                let (eligibility, tensor) = backing.tensor(desc)?;
+                let tensor = tensor.ok_or_else(|| {
+                    Qwen4ExpResidencyError::Invalid(format!(
+                        "tensor {:?} failed retained realization: {eligibility:?}",
+                        desc.name
+                    ))
+                })?;
+                if tensor.offset != buffer_offset {
+                    return invalid(format!("retained offset drift for tensor {:?}", desc.name));
+                }
+                (tensor, MetalTensorProvenance::RetainedGgufReadOnly)
+            }
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::FinalPartialPage,
+            } => (
+                MetalTensor::copied_gguf_weight(ctx, desc, gguf.try_slice(desc)?)?,
+                MetalTensorProvenance::OwnedWeightReadOnly,
+            ),
+            RetainedStorageDisposition::CopyFallback { reason } => {
+                return invalid(format!(
+                    "disallowed {reason:?} fallback reached realization for {:?}",
+                    desc.name
+                ));
+            }
+            RetainedStorageDisposition::Alias {
+                source_request_index,
+            } => {
+                return invalid(format!(
+                    "unexpected alias for {:?} to request {source_request_index}",
+                    desc.name
+                ));
+            }
+        };
+        validate_realized_tensor(desc, &tensor, expected_provenance)?;
+        if tensors.insert(desc.name.clone(), tensor).is_some() {
+            return invalid(format!("duplicate realized tensor {:?}", desc.name));
+        }
+    }
+    Ok(tensors)
+}
+
+fn validate_realized_tensor(
+    desc: &TensorDesc,
+    tensor: &MetalTensor,
+    expected_provenance: MetalTensorProvenance,
+) -> Result<(), Qwen4ExpResidencyError> {
+    if tensor.shape != desc.shape
+        || tensor.dtype != desc.dtype
+        || tensor.n_bytes() != desc.n_bytes
+        || tensor.provenance() != expected_provenance
+        || tensor.is_writable()
+    {
+        return invalid(format!(
+            "realized tensor metadata drift for {:?}",
+            desc.name
+        ));
+    }
+    let end = tensor.offset.checked_add(desc.n_bytes).ok_or_else(|| {
+        Qwen4ExpResidencyError::Invalid(format!(
+            "realized tensor {:?} buffer range overflow",
+            desc.name
+        ))
+    })?;
+    if end > tensor.buffer.length() as u64 {
+        return invalid(format!(
+            "realized tensor {:?} ends at {end}, beyond buffer length {}",
+            desc.name,
+            tensor.buffer.length()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_realized_weights(
+    gguf: &GgufFile,
+    tensors: &BTreeMap<String, MetalTensor>,
+) -> Result<(), Qwen4ExpResidencyError> {
+    if tensors.len() != QWEN4EXP_METAL_TENSOR_COUNT
+        || tensors.contains_key("per_layer_token_embd.weight")
+    {
+        return invalid(format!(
+            "realized map has {} tensors or includes the CPU-only PLE table",
+            tensors.len()
+        ));
+    }
+    for desc in gguf
+        .tensors
+        .iter()
+        .filter(|desc| desc.name != "per_layer_token_embd.weight")
+    {
+        let tensor = tensors.get(&desc.name).ok_or_else(|| {
+            Qwen4ExpResidencyError::Invalid(format!(
+                "realized map is missing tensor {:?}",
+                desc.name
+            ))
+        })?;
+        if !matches!(
+            tensor.provenance(),
+            MetalTensorProvenance::RetainedGgufReadOnly
+                | MetalTensorProvenance::OwnedWeightReadOnly
+        ) {
+            return invalid(format!(
+                "realized tensor {:?} is not read-only by provenance",
+                desc.name
+            ));
+        }
+        if tensor.shape != desc.shape
+            || tensor.dtype != desc.dtype
+            || tensor.n_bytes() != desc.n_bytes
+        {
+            return invalid(format!(
+                "realized tensor metadata drift for {:?}",
+                desc.name
+            ));
         }
     }
     Ok(())
@@ -731,6 +1283,36 @@ mod tests {
             .to_string();
         assert!(error.contains("320001536"));
         assert!(error.contains("28800138240"));
+    }
+
+    #[test]
+    fn weight_memory_admission_and_reconciliation_fail_closed() {
+        let memory = Qwen4ExpMetalWeightMemoryPlan {
+            buffer_count: 3,
+            logical_bytes: 900,
+            priced_upper_bytes: 1_000,
+        };
+        let exact = MetalMemorySignals {
+            recommended_max_bytes: 1_100,
+            current_allocated_bytes: 100,
+            process_limit_remaining_bytes: Some(1_000),
+        };
+        assert!(memory.admission(exact).admitted);
+
+        let working_set_short = MetalMemorySignals {
+            recommended_max_bytes: 1_099,
+            ..exact
+        };
+        assert!(!memory.admission(working_set_short).admitted);
+        let process_short = MetalMemorySignals {
+            process_limit_remaining_bytes: Some(999),
+            ..exact
+        };
+        assert!(!memory.admission(process_short).admitted);
+
+        assert_eq!(memory.reconcile(100, 1_100).unwrap(), 1_000);
+        assert!(memory.reconcile(101, 100).is_err());
+        assert!(memory.reconcile(100, 1_101).is_err());
     }
 
     #[test]

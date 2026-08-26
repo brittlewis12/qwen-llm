@@ -1,0 +1,648 @@
+{
+  "binary": {
+    "byte_order": "little",
+    "dtype": "f32",
+    "file": "qwen4exp_qsa_text_f16_v1.f32",
+    "sections": {
+      "attention": {
+        "count_f32": 13312,
+        "offset_f32": 208,
+        "shape": [
+          13,
+          4,
+          256
+        ]
+      },
+      "compressed_cache": {
+        "count_f32": 512,
+        "offset_f32": 60164,
+        "shape": [
+          4,
+          128
+        ]
+      },
+      "index_query": {
+        "count_f32": 6656,
+        "offset_f32": 13520,
+        "shape": [
+          13,
+          4,
+          128
+        ]
+      },
+      "key": {
+        "count_f32": 6656,
+        "offset_f32": 46800,
+        "shape": [
+          13,
+          2,
+          256
+        ]
+      },
+      "key_cache": {
+        "count_f32": 8192,
+        "offset_f32": 60676,
+        "shape": [
+          16,
+          2,
+          256
+        ]
+      },
+      "output": {
+        "count_f32": 208,
+        "offset_f32": 0,
+        "shape": [
+          13,
+          16
+        ]
+      },
+      "query": {
+        "count_f32": 13312,
+        "offset_f32": 20176,
+        "shape": [
+          13,
+          4,
+          256
+        ]
+      },
+      "raw_gate": {
+        "count_f32": 13312,
+        "offset_f32": 33488,
+        "shape": [
+          13,
+          4,
+          256
+        ]
+      },
+      "scores": {
+        "count_f32": 52,
+        "offset_f32": 60112,
+        "shape": [
+          13,
+          4
+        ]
+      },
+      "value": {
+        "count_f32": 6656,
+        "offset_f32": 53456,
+        "shape": [
+          13,
+          2,
+          256
+        ]
+      },
+      "value_cache": {
+        "count_f32": 8192,
+        "offset_f32": 68868,
+        "shape": [
+          16,
+          2,
+          256
+        ]
+      }
+    },
+    "sha256": "d37a18aeff769c32408d2af44a62f9b8642a3fbab30a663efb71cbf648786624"
+  },
+  "description": "Independent 13-step PyTorch QSA decode oracle for the Metal F16 cache checkpoint.",
+  "fault_sensitivity_max_abs_output": {
+    "modulo_gqa_mapping": 0.22167477011680603,
+    "partial_extra_block_tail_residue_1": 0.09360301494598389,
+    "silu_gate": 0.46402549743652344
+  },
+  "generator_version": 1,
+  "geometry": {
+    "capacity": 16,
+    "compress_ratio": 4,
+    "eps": 1e-06,
+    "head_dim": 256,
+    "hidden_size": 16,
+    "index_head_dim": 128,
+    "index_query_heads": 4,
+    "kv_heads": 2,
+    "query_heads": 4,
+    "rotary_dim": 64,
+    "theta": 10000000.0,
+    "token_budget": 8,
+    "tokens": 13
+  },
+  "minimum_sparse_score_margin": 0.24957209825515747,
+  "recipe": {
+    "formula": "((row*m0 + column*m1 + add) % modulus - center) * scale",
+    "norms": {
+      "index_key": {
+        "base": 0.81,
+        "modulus": 7,
+        "step": 0.027
+      },
+      "index_query": {
+        "base": 0.72,
+        "modulus": 9,
+        "step": 0.031
+      },
+      "key": {
+        "base": 0.83,
+        "modulus": 11,
+        "step": 0.019
+      },
+      "query": {
+        "base": 0.76,
+        "modulus": 13,
+        "step": 0.021
+      }
+    },
+    "weights_and_inputs": {
+      "index_key": {
+        "add": 3,
+        "center": 35,
+        "modulus": 71,
+        "multipliers": [
+          29,
+          17
+        ],
+        "scale": 0.007
+      },
+      "index_query": {
+        "add": 7,
+        "center": 33,
+        "modulus": 67,
+        "multipliers": [
+          37,
+          11
+        ],
+        "scale": 0.006
+      },
+      "inputs": {
+        "add": 43,
+        "center": 29,
+        "modulus": 59,
+        "multipliers": [
+          17,
+          31
+        ],
+        "scale": 0.035
+      },
+      "key": {
+        "add": 9,
+        "center": 36,
+        "modulus": 73,
+        "multipliers": [
+          31,
+          19
+        ],
+        "scale": 0.006
+      },
+      "output": {
+        "add": 13,
+        "center": 44,
+        "modulus": 89,
+        "multipliers": [
+          23,
+          41
+        ],
+        "scale": 0.004
+      },
+      "query_gate": {
+        "add": 5,
+        "center": 39,
+        "modulus": 79,
+        "multipliers": [
+          43,
+          13
+        ],
+        "scale": 0.005
+      },
+      "value": {
+        "add": 11,
+        "center": 41,
+        "modulus": 83,
+        "multipliers": [
+          47,
+          7
+        ],
+        "scale": 0.012
+      }
+    }
+  },
+  "schema": "qwen4exp-qsa-text-f16-oracle",
+  "schema_version": 1,
+  "semantics": {
+    "attention": "grouped GQA, softmax scale 1/sqrt(256), sigmoid gate after value reduction",
+    "index_cache": "F32 raw pending; FP32 mean -> F16 -> F32 RMSNorm/RoPE -> F16 cache",
+    "index_score": "sum_heads(relu(dot(q_head, compressed_key))) / sqrt(128)",
+    "main_cache": "F32 normalized/rotated K and raw V -> F16 caches; Q and raw gates remain F32",
+    "positions": "plain text NEOX, zero based; compressed block uses its first token position"
+  },
+  "sources": {
+    "sglang": {
+      "files": [
+        {
+          "path": "python/sglang/srt/layers/attention/qsa/qsa_indexer.py",
+          "sha256": "bb57ce1e9abc4fbfcba2c9aaaf125b9e625983966497df57165b6d4c6461afe2"
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/qsa/kernel.py",
+          "sha256": "5482e38d30bfaf1624ec0625b4896cbb395a1637f75c183c8ca723c9f6055ff8"
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/qsa/mqa.py",
+          "sha256": "af36d5c8f4fbda5b0e82b7f31046a95c9a709fcc57b3600c6473c49e87b7629f"
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py",
+          "sha256": "c959835d05d0f395ad7eae4330cf264af9f6f7c1bff3d45a39bb953d2536f5f2"
+        }
+      ],
+      "repository": "https://github.com/sgl-project/sglang",
+      "revision": "73a255206f916366c8d26d4022f82ddfb0ab558d",
+      "tree": "dc134c86f21a7396d89bdb01a8019e8db81d763a"
+    },
+    "vllm": {
+      "files": [
+        {
+          "path": "vllm/models/qwen4_exp/nvidia/indexer_qsa.py",
+          "sha256": "668706c3a59c51e2c1ed51d19bd9a0e1564a0aad68c5e2bc20d5fb9e65cc2f98"
+        },
+        {
+          "path": "vllm/models/qwen4_exp/nvidia/ops/qsa.py",
+          "sha256": "faa8d358c79745f304edd363e4da21992e4cf015a22316b14980500bd199a0ad"
+        },
+        {
+          "path": "tests/models/qwen4_exp/test_qsa_reference.py",
+          "sha256": "7396d4482c2e7a0529bd927b2922925a709916910b651b2ed5da790ec2d385f1"
+        }
+      ],
+      "repository": "https://github.com/vllm-project/vllm",
+      "revision": "02f2b4c15dd987d9436e125aab29604447c77405",
+      "tree": "72eaeeeb9bfff19494a9d19ee85a6a83745d0602"
+    }
+  },
+  "steps": [
+    {
+      "length": 1,
+      "newly_completed_third_block_selected": false,
+      "position": 0,
+      "scores": [],
+      "selected_blocks": [],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 0
+    },
+    {
+      "length": 2,
+      "newly_completed_third_block_selected": false,
+      "position": 1,
+      "scores": [],
+      "selected_blocks": [],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 0
+    },
+    {
+      "length": 3,
+      "newly_completed_third_block_selected": false,
+      "position": 2,
+      "scores": [],
+      "selected_blocks": [],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 0
+    },
+    {
+      "length": 4,
+      "newly_completed_third_block_selected": false,
+      "position": 3,
+      "scores": [
+        0.7100597620010376
+      ],
+      "selected_blocks": [
+        0
+      ],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 1
+    },
+    {
+      "length": 5,
+      "newly_completed_third_block_selected": false,
+      "position": 4,
+      "scores": [
+        1.36008620262146
+      ],
+      "selected_blocks": [
+        0
+      ],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 1
+    },
+    {
+      "length": 6,
+      "newly_completed_third_block_selected": false,
+      "position": 5,
+      "scores": [
+        0.8020945191383362
+      ],
+      "selected_blocks": [
+        0
+      ],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 1
+    },
+    {
+      "length": 7,
+      "newly_completed_third_block_selected": false,
+      "position": 6,
+      "scores": [
+        0.8114622235298157
+      ],
+      "selected_blocks": [
+        0
+      ],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        -1,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 1
+    },
+    {
+      "length": 8,
+      "newly_completed_third_block_selected": false,
+      "position": 7,
+      "scores": [
+        0.7274945974349976,
+        1.537471890449524
+      ],
+      "selected_blocks": [
+        0,
+        1
+      ],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 2
+    },
+    {
+      "length": 9,
+      "newly_completed_third_block_selected": false,
+      "position": 8,
+      "scores": [
+        0.3067345917224884,
+        1.046714186668396
+      ],
+      "selected_blocks": [
+        0,
+        1
+      ],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        -1,
+        -1
+      ],
+      "visible_blocks": 2
+    },
+    {
+      "length": 10,
+      "newly_completed_third_block_selected": false,
+      "position": 9,
+      "scores": [
+        1.64719820022583,
+        0.8790319561958313
+      ],
+      "selected_blocks": [
+        0,
+        1
+      ],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        -1
+      ],
+      "visible_blocks": 2
+    },
+    {
+      "length": 11,
+      "newly_completed_third_block_selected": false,
+      "position": 10,
+      "scores": [
+        0.6277667284011841,
+        0.07491990923881531
+      ],
+      "selected_blocks": [
+        0,
+        1
+      ],
+      "selection_margin": null,
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "visible_blocks": 2
+    },
+    {
+      "length": 12,
+      "newly_completed_third_block_selected": true,
+      "position": 11,
+      "scores": [
+        0.5190790295600891,
+        2.2673566341400146,
+        0.7686511278152466
+      ],
+      "selected_blocks": [
+        1,
+        2
+      ],
+      "selection_margin": 0.24957209825515747,
+      "token_ids": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        -1,
+        -1,
+        -1
+      ],
+      "visible_blocks": 3
+    },
+    {
+      "length": 13,
+      "newly_completed_third_block_selected": true,
+      "partial_extra_block": {
+        "excluded_block": 0,
+        "extra_token_ids": [
+          0,
+          1
+        ],
+        "token_ids": [
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          0,
+          1,
+          12
+        ]
+      },
+      "position": 12,
+      "scores": [
+        1.0529041290283203,
+        2.063328742980957,
+        1.438551902770996
+      ],
+      "selected_blocks": [
+        1,
+        2
+      ],
+      "selection_margin": 0.3856477737426758,
+      "token_ids": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        -1,
+        -1
+      ],
+      "visible_blocks": 3
+    }
+  ],
+  "toolchain": {
+    "device": "cpu",
+    "numpy": "1.26.4",
+    "python": "3.11.11",
+    "threads": 1,
+    "torch": "2.4.1"
+  }
+}

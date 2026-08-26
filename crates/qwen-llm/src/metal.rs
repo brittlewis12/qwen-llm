@@ -11332,6 +11332,208 @@ pub fn encode_moe_swiglu_iq3_s_f32_fast(
     Ok(())
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MoeDecodeArgs {
+    n_in: u32,
+    n_out: u32,
+    n_expert: u32,
+    topk: u32,
+}
+
+fn checked_moe_decode_args(
+    kernel: &'static str,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<MoeDecodeArgs, MetalError> {
+    if n_in == 0 || n_out == 0 || n_expert == 0 || topk == 0 || topk > n_expert {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "dimensions must satisfy n_in,n_out,n_expert > 0 and 0 < topk <= n_expert, got n_in={n_in} n_out={n_out} n_expert={n_expert} topk={topk}"
+            ),
+        });
+    }
+    let narrow = |name: &str, value: usize| {
+        u32::try_from(value).map_err(|_| MetalError::BadShape {
+            kernel,
+            detail: format!("{name}={value} exceeds u32"),
+        })
+    };
+    Ok(MoeDecodeArgs {
+        n_in: narrow("n_in", n_in)?,
+        n_out: narrow("n_out", n_out)?,
+        n_expert: narrow("n_expert", n_expert)?,
+        topk: narrow("topk", topk)?,
+    })
+}
+
+fn checked_moe_product(
+    kernel: &'static str,
+    label: &str,
+    factors: &[usize],
+) -> Result<usize, MetalError> {
+    factors.iter().try_fold(1usize, |product, &factor| {
+        product
+            .checked_mul(factor)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel,
+                detail: format!("{label} element count overflow"),
+            })
+    })
+}
+
+fn validate_moe_decode_tensor(
+    kernel: &'static str,
+    name: &str,
+    tensor: &MetalTensor,
+    expected_elements: usize,
+    allowed_dtypes: &[GgmlType],
+    writable: bool,
+    alignment: usize,
+) -> Result<(), MetalError> {
+    if !allowed_dtypes.contains(&tensor.dtype) {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "{name} has dtype {:?}, expected {allowed_dtypes:?}",
+                tensor.dtype
+            ),
+        });
+    }
+    let (elements, bytes) = checked_ggml_shape_bytes(&tensor.shape, tensor.dtype)?;
+    if elements != expected_elements {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!("{name} has {elements} elements, expected {expected_elements}"),
+        });
+    }
+    if writable && !tensor.is_writable() {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "{name} must be writable, provenance={:?}",
+                tensor.provenance()
+            ),
+        });
+    }
+    if alignment == 0 || !tensor.offset.is_multiple_of(alignment as u64) {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "{name} offset {} is not {alignment}-byte aligned",
+                tensor.offset
+            ),
+        });
+    }
+    let end = tensor
+        .offset
+        .checked_add(bytes as u64)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: format!("{name} buffer range overflow"),
+        })?;
+    if end > tensor.buffer.length() as u64 {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "{name} range offset={} bytes={bytes} exceeds buffer={}",
+                tensor.offset,
+                tensor.buffer.length()
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub fn encode_moe_swiglu_iq4_xs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x: &MetalTensor,
+    topk_idx: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_swiglu_iq4_xs";
+    let args = checked_moe_decode_args(KERNEL, n_in, n_out, n_expert, topk)?;
+    if !n_in.is_multiple_of(256) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    let bank_elements = checked_moe_product(KERNEL, "expert bank", &[n_in, n_out, n_expert])?;
+    let inner_elements = checked_moe_product(KERNEL, "inner output", &[topk, n_out])?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "gate expert bank",
+        w_gate,
+        bank_elements,
+        &[GgmlType::IQ4_XS],
+        false,
+        2,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "up expert bank",
+        w_up,
+        bank_elements,
+        &[GgmlType::IQ4_XS],
+        false,
+        2,
+    )?;
+    validate_moe_decode_tensor(KERNEL, "input", x, n_in, &[GgmlType::F32], false, 4)?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "top-k indices",
+        topk_idx,
+        topk,
+        &[GgmlType::I32, GgmlType::F32],
+        false,
+        4,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "inner output",
+        inner,
+        inner_elements,
+        &[GgmlType::F32],
+        true,
+        4,
+    )?;
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_iq4_xs_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, topk_idx);
+    enc.set_tensor(5, inner);
+
+    const NSG: usize = 4;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[allow(non_snake_case)]
 pub fn encode_moe_swiglu_q6_K_f32(
     ctx: &MetalContext,
@@ -11875,6 +12077,90 @@ pub fn encode_moe_down_q6_K_f32(
     enc.dispatch(
         MTLSize {
             width: n_out.div_ceil(NR0 * NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_moe_down_iq4_nl_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    expert_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_down_iq4_nl";
+    let args = checked_moe_decode_args(KERNEL, n_in, n_out, n_expert, topk)?;
+    if !n_in.is_multiple_of(32) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("n_in={n_in} not divisible by 32"),
+        });
+    }
+    let bank_elements = checked_moe_product(KERNEL, "expert bank", &[n_in, n_out, n_expert])?;
+    let inner_elements = checked_moe_product(KERNEL, "inner input", &[topk, n_in])?;
+    let output_elements = checked_moe_product(KERNEL, "expert output", &[topk, n_out])?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "down expert bank",
+        weight,
+        bank_elements,
+        &[GgmlType::IQ4_NL],
+        false,
+        2,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "inner input",
+        inner,
+        inner_elements,
+        &[GgmlType::F32],
+        false,
+        4,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "top-k indices",
+        topk_idx,
+        topk,
+        &[GgmlType::I32, GgmlType::F32],
+        false,
+        4,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "expert output",
+        expert_out,
+        output_elements,
+        &[GgmlType::F32],
+        true,
+        4,
+    )?;
+
+    let pso = ctx.pipeline("kernel_moe_down_iq4_nl_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, expert_out);
+
+    const NSG: usize = 4;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NSG),
             height: topk,
             depth: 1,
         },
@@ -20638,6 +20924,7 @@ pub fn encode_get_rows_f32(
         GgmlType::Q4_K => (256, 144),
         GgmlType::Q6_K => (256, 210),
         GgmlType::Q8_0 => (32, 34),
+        GgmlType::IQ4_NL => (32, 18),
         other => {
             return Err(MetalError::BadShape {
                 kernel: "get_rows",
@@ -20648,9 +20935,12 @@ pub fn encode_get_rows_f32(
     let (block_elements, block_bytes) = block_layout;
     let source_alignment = match embed.dtype {
         GgmlType::F32 => std::mem::align_of::<f32>(),
-        GgmlType::F16 | GgmlType::BF16 | GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::Q8_0 => {
-            std::mem::align_of::<u16>()
-        }
+        GgmlType::F16
+        | GgmlType::BF16
+        | GgmlType::Q4_K
+        | GgmlType::Q6_K
+        | GgmlType::Q8_0
+        | GgmlType::IQ4_NL => std::mem::align_of::<u16>(),
         _ => unreachable!(),
     } as u64;
     if !embed.offset.is_multiple_of(source_alignment) {
@@ -20720,6 +21010,7 @@ pub fn encode_get_rows_f32(
         GgmlType::Q4_K => "kernel_get_rows_q4_K_f32",
         GgmlType::Q6_K => "kernel_get_rows_q6_K_f32",
         GgmlType::Q8_0 => "kernel_get_rows_q8_0_f32",
+        GgmlType::IQ4_NL => "kernel_get_rows_iq4_nl_f32",
         _ => unreachable!(),
     };
     #[repr(C)]
@@ -24819,6 +25110,322 @@ mod tests {
         (block, decoded)
     }
 
+    fn encode_iq4_nl_block(d: f32, seed: usize) -> ([u8; 18], [f32; 32]) {
+        const VALUES: [f32; 16] = [
+            -127.0, -104.0, -83.0, -65.0, -49.0, -35.0, -22.0, -10.0, 1.0, 13.0, 25.0, 38.0, 53.0,
+            69.0, 89.0, 113.0,
+        ];
+        let mut block = [0u8; 18];
+        let mut decoded = [0.0f32; 32];
+        block[..2].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
+        let stored_d = half::f16::from_f32(d).to_f32();
+        for lane in 0..16 {
+            let low = (seed + lane * 3) % 16;
+            let high = (seed * 5 + lane * 7 + 1) % 16;
+            block[2 + lane] = low as u8 | ((high as u8) << 4);
+            decoded[lane] = stored_d * VALUES[low];
+            decoded[16 + lane] = stored_d * VALUES[high];
+        }
+        (block, decoded)
+    }
+
+    fn encode_iq4_xs_block(d: f32, seed: usize) -> [u8; 136] {
+        let mut block = [0u8; 136];
+        block[..2].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
+        let mut scales_h = 0u16;
+        for subblock in 0..8 {
+            let scale = (seed * 11 + subblock * 7 + 3) % 64;
+            block[4 + subblock / 2] |= ((scale & 0x0f) as u8) << (4 * (subblock % 2));
+            scales_h |= ((scale >> 4) as u16) << (2 * subblock);
+            for lane in 0..16 {
+                let low = (seed + subblock * 5 + lane * 3) % 16;
+                let high = (seed * 7 + subblock * 3 + lane * 5 + 1) % 16;
+                block[8 + subblock * 16 + lane] = low as u8 | ((high as u8) << 4);
+            }
+        }
+        block[2..4].copy_from_slice(&scales_h.to_le_bytes());
+        block
+    }
+
+    fn synthetic_iq4_xs_bank(n_in: usize, n_out: usize, n_expert: usize, seed: usize) -> Vec<u8> {
+        assert!(n_in.is_multiple_of(256));
+        let blocks_per_row = n_in / 256;
+        let mut bytes = Vec::with_capacity(n_expert * n_out * blocks_per_row * 136);
+        for expert in 0..n_expert {
+            for row in 0..n_out {
+                for block in 0..blocks_per_row {
+                    let ordinal = (expert * n_out + row) * blocks_per_row + block + seed;
+                    let sign = if ordinal.is_multiple_of(2) { 1.0 } else { -1.0 };
+                    let d = sign * (ordinal % 5 + 1) as f32 / 65_536.0;
+                    bytes.extend_from_slice(&encode_iq4_xs_block(d, ordinal));
+                }
+            }
+        }
+        bytes
+    }
+
+    fn synthetic_iq4_nl_bank(n_in: usize, n_out: usize, n_expert: usize, seed: usize) -> Vec<u8> {
+        assert!(n_in.is_multiple_of(32));
+        let blocks_per_row = n_in / 32;
+        let mut bytes = Vec::with_capacity(n_expert * n_out * blocks_per_row * 18);
+        for expert in 0..n_expert {
+            for row in 0..n_out {
+                for block in 0..blocks_per_row {
+                    let ordinal = (expert * n_out + row) * blocks_per_row + block + seed;
+                    let sign = if ordinal.is_multiple_of(2) { 1.0 } else { -1.0 };
+                    let d = sign * (ordinal % 7 + 1) as f32 / 16_384.0;
+                    bytes.extend_from_slice(&encode_iq4_nl_block(d, ordinal).0);
+                }
+            }
+        }
+        bytes
+    }
+
+    fn dequant_expert(
+        bank: &[u8],
+        dtype: GgmlType,
+        n_in: usize,
+        n_out: usize,
+        expert: usize,
+    ) -> Vec<f32> {
+        let (block_elements, block_bytes) = dtype.storage_layout().unwrap();
+        let row_bytes = n_in / block_elements as usize * block_bytes as usize;
+        let expert_bytes = n_out * row_bytes;
+        let start = expert * expert_bytes;
+        let desc = TensorDesc {
+            name: format!("synthetic_{dtype:?}_expert_{expert}"),
+            shape: vec![n_in as u64, n_out as u64],
+            dtype,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_bytes as u64,
+        };
+        crate::codec::dequant_to_f32(&desc, &bank[start..start + expert_bytes]).unwrap()
+    }
+
+    fn assert_moe_oracle_close(label: &str, actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual.iter().all(|value| value.is_finite()));
+        let max_abs = actual
+            .iter()
+            .zip(expected)
+            .map(|(candidate, reference)| (candidate - reference).abs())
+            .fold(0.0f32, f32::max);
+        let reference_scale = expected.iter().copied().map(f32::abs).fold(0.0, f32::max);
+        let dot: f64 = actual
+            .iter()
+            .zip(expected)
+            .map(|(candidate, reference)| *candidate as f64 * *reference as f64)
+            .sum();
+        let actual_norm = actual
+            .iter()
+            .map(|value| (*value as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let expected_norm = expected
+            .iter()
+            .map(|value| (*value as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let cosine = dot / (actual_norm * expected_norm).max(1e-30);
+        let relative_max = max_abs / reference_scale.max(1e-6);
+        eprintln!(
+            "[{label}] max_abs={max_abs:.3e} relative_max={relative_max:.3e} cosine={cosine:.9}"
+        );
+        assert!(cosine >= 0.999_999, "{label} cosine={cosine}");
+        assert!(relative_max <= 2e-4, "{label} relative_max={relative_max}");
+    }
+
+    fn run_iq4_moe_decode_case(
+        ctx: &MetalContext,
+        n_in: usize,
+        n_ffn: usize,
+        n_hidden: usize,
+        n_expert: usize,
+        top_idx: &[i32],
+    ) {
+        let topk = top_idx.len();
+        let gate_bytes = synthetic_iq4_xs_bank(n_in, n_ffn, n_expert, 17);
+        let up_bytes = synthetic_iq4_xs_bank(n_in, n_ffn, n_expert, 10_003);
+        let down_bytes = synthetic_iq4_nl_bank(n_ffn, n_hidden, n_expert, 20_011);
+        let input = (0..n_in)
+            .map(|index| ((index * 37 + index / 11 * 5 + 3) % 257) as f32 * 0.0005 - 0.064)
+            .collect::<Vec<_>>();
+
+        let mut expected_inner = vec![0.0f32; topk * n_ffn];
+        for (slot, &expert) in top_idx.iter().enumerate() {
+            let expert = expert as usize;
+            let gate_weight = dequant_expert(&gate_bytes, GgmlType::IQ4_XS, n_in, n_ffn, expert);
+            let gate = crate::forward::mat_vec_pub(&gate_weight, n_in, n_ffn, &input);
+            drop(gate_weight);
+            let up_weight = dequant_expert(&up_bytes, GgmlType::IQ4_XS, n_in, n_ffn, expert);
+            let up = crate::forward::mat_vec_pub(&up_weight, n_in, n_ffn, &input);
+            for row in 0..n_ffn {
+                let gate_value = gate[row];
+                expected_inner[slot * n_ffn + row] =
+                    gate_value / (1.0 + (-gate_value).exp()) * up[row];
+            }
+        }
+
+        let gate = MetalTensor::from_bytes(
+            ctx,
+            &gate_bytes,
+            vec![n_in as u64, n_ffn as u64, n_expert as u64],
+            GgmlType::IQ4_XS,
+        )
+        .unwrap();
+        let up = MetalTensor::from_bytes(
+            ctx,
+            &up_bytes,
+            vec![n_in as u64, n_ffn as u64, n_expert as u64],
+            GgmlType::IQ4_XS,
+        )
+        .unwrap();
+        let down = MetalTensor::from_bytes(
+            ctx,
+            &down_bytes,
+            vec![n_ffn as u64, n_hidden as u64, n_expert as u64],
+            GgmlType::IQ4_NL,
+        )
+        .unwrap();
+        let input_gpu = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&input),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let top_idx_gpu = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(top_idx),
+            vec![topk as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let inner_gpu = MetalTensor::zeros_f32(ctx, vec![(topk * n_ffn) as u64]).unwrap();
+        one_shot(ctx, |encoder| {
+            encode_moe_swiglu_iq4_xs_f32(
+                ctx,
+                encoder,
+                &gate,
+                &up,
+                &input_gpu,
+                &top_idx_gpu,
+                &inner_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                topk,
+            )
+        })
+        .unwrap();
+        let actual_inner = read_back_f32(&inner_gpu.buffer, topk * n_ffn);
+        assert_moe_oracle_close("moe-iq4-xs-swiglu", &actual_inner, &expected_inner);
+
+        let mut expected_down = vec![0.0f32; topk * n_hidden];
+        for (slot, &expert) in top_idx.iter().enumerate() {
+            let down_weight = dequant_expert(
+                &down_bytes,
+                GgmlType::IQ4_NL,
+                n_ffn,
+                n_hidden,
+                expert as usize,
+            );
+            let output = crate::forward::mat_vec_pub(
+                &down_weight,
+                n_ffn,
+                n_hidden,
+                &actual_inner[slot * n_ffn..(slot + 1) * n_ffn],
+            );
+            expected_down[slot * n_hidden..(slot + 1) * n_hidden].copy_from_slice(&output);
+        }
+        let expert_out = MetalTensor::zeros_f32(ctx, vec![(topk * n_hidden) as u64]).unwrap();
+        one_shot(ctx, |encoder| {
+            encode_moe_down_iq4_nl_f32(
+                ctx,
+                encoder,
+                &down,
+                &inner_gpu,
+                &top_idx_gpu,
+                &expert_out,
+                n_ffn,
+                n_hidden,
+                n_expert,
+                topk,
+            )
+        })
+        .unwrap();
+        let actual_down = read_back_f32(&expert_out.buffer, topk * n_hidden);
+        assert_moe_oracle_close("moe-iq4-nl-down", &actual_down, &expected_down);
+
+        let invalid_idx = [-1i32, n_expert as i32];
+        let invalid_idx_gpu = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&invalid_idx),
+            vec![invalid_idx.len() as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let invalid_inner_values = vec![7.0f32; invalid_idx.len() * n_ffn];
+        let invalid_inner = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&invalid_inner_values),
+            vec![invalid_inner_values.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(ctx, |encoder| {
+            encode_moe_swiglu_iq4_xs_f32(
+                ctx,
+                encoder,
+                &gate,
+                &up,
+                &input_gpu,
+                &invalid_idx_gpu,
+                &invalid_inner,
+                n_in,
+                n_ffn,
+                n_expert,
+                invalid_idx.len(),
+            )
+        })
+        .unwrap();
+        assert!(
+            read_back_f32(&invalid_inner.buffer, invalid_inner_values.len())
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+
+        let invalid_down_values = vec![7.0f32; invalid_idx.len() * n_hidden];
+        let invalid_down = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&invalid_down_values),
+            vec![invalid_down_values.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(ctx, |encoder| {
+            encode_moe_down_iq4_nl_f32(
+                ctx,
+                encoder,
+                &down,
+                &invalid_inner,
+                &invalid_idx_gpu,
+                &invalid_down,
+                n_ffn,
+                n_hidden,
+                n_expert,
+                invalid_idx.len(),
+            )
+        })
+        .unwrap();
+        assert!(
+            read_back_f32(&invalid_down.buffer, invalid_down_values.len())
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+    }
+
     fn encode_iq2_xs_block(d: f32, seed: usize) -> [u8; 74] {
         let mut block = [0u8; 74];
         block[..2].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
@@ -25089,6 +25696,139 @@ mod tests {
             .is_err()
         );
         enc.end();
+    }
+
+    #[test]
+    fn get_rows_iq4_nl_gpu_matches_cpu_with_ple_width_and_offsets() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        const N_VOCAB: usize = 3;
+        const N_COLS: usize = 160;
+        const BLOCKS_PER_ROW: usize = N_COLS / 32;
+        let mut weight_bytes = Vec::new();
+        let mut hand_decoded = vec![0.0f32; N_VOCAB * N_COLS];
+        for row in 0..N_VOCAB {
+            for block_index in 0..BLOCKS_PER_ROW {
+                let ordinal = row * BLOCKS_PER_ROW + block_index;
+                let sign = if ordinal.is_multiple_of(2) { 1.0 } else { -1.0 };
+                let d = sign * (ordinal % 7 + 1) as f32 / 1024.0;
+                let (block, values) = encode_iq4_nl_block(d, ordinal);
+                weight_bytes.extend_from_slice(&block);
+                let start = row * N_COLS + block_index * 32;
+                hand_decoded[start..start + 32].copy_from_slice(&values);
+            }
+        }
+        let desc = TensorDesc {
+            name: "iq4_nl_ple_rows".into(),
+            shape: vec![N_COLS as u64, N_VOCAB as u64],
+            dtype: GgmlType::IQ4_NL,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: weight_bytes.len() as u64,
+        };
+        let codec_decoded = crate::codec::dequant_to_f32(&desc, &weight_bytes)
+            .expect("llama.cpp IQ4_NL reference dequantization");
+        assert!(
+            hand_decoded
+                .iter()
+                .zip(&codec_decoded)
+                .all(|(hand, codec)| hand.to_bits() == codec.to_bits()),
+            "synthetic IQ4_NL encoder disagrees with llama.cpp"
+        );
+
+        let embed = offset_tensor(
+            &ctx,
+            30,
+            &weight_bytes,
+            19,
+            vec![N_COLS as u64, N_VOCAB as u64],
+            GgmlType::IQ4_NL,
+        );
+        let row_ids = [2i32, -1, 0, N_VOCAB as i32, 1, 1];
+        let ids = offset_tensor(
+            &ctx,
+            12,
+            bytemuck::cast_slice(&row_ids),
+            13,
+            vec![row_ids.len() as u64],
+            GgmlType::I32,
+        );
+        let y = offset_tensor(
+            &ctx,
+            20,
+            &vec![0u8; row_ids.len() * N_COLS * size_of::<f32>()],
+            29,
+            vec![(row_ids.len() * N_COLS) as u64],
+            GgmlType::F32,
+        );
+        one_shot(&ctx, |enc| {
+            encode_get_rows_f32(&ctx, enc, &embed, &ids, &y, row_ids.len(), N_COLS)
+        })
+        .expect("IQ4_NL get_rows");
+
+        let actual = tensor_f32_at_offset(&y);
+        for (lookup_row, &row_id) in row_ids.iter().enumerate() {
+            let output_row = &actual[lookup_row * N_COLS..(lookup_row + 1) * N_COLS];
+            if row_id >= 0 && (row_id as usize) < N_VOCAB {
+                let expected =
+                    &codec_decoded[row_id as usize * N_COLS..(row_id as usize + 1) * N_COLS];
+                let max_abs = output_row
+                    .iter()
+                    .zip(expected)
+                    .map(|(candidate, reference)| (candidate - reference).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(max_abs <= 1e-6, "row {lookup_row} max_abs={max_abs}");
+            } else {
+                assert!(output_row.iter().all(|&value| value == 0.0));
+            }
+        }
+        assert!(
+            actual[4 * N_COLS..5 * N_COLS]
+                .iter()
+                .zip(&actual[5 * N_COLS..6 * N_COLS])
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+        );
+        assert_offset_guards(&embed, 30, 19);
+        assert_offset_guards(&ids, 12, 13);
+        assert_offset_guards(&y, 20, 29);
+
+        let command = ctx.queue.commandBuffer().expect("validation command");
+        let encoder = KernelEncoder::begin(&command);
+        let malformed_embed = MetalTensor {
+            shape: vec![31, N_VOCAB as u64],
+            ..embed.clone()
+        };
+        let malformed_output = MetalTensor::zeros_f32(&ctx, vec![(row_ids.len() * 31) as u64])
+            .expect("malformed output");
+        assert!(
+            encode_get_rows_f32(
+                &ctx,
+                &encoder,
+                &malformed_embed,
+                &ids,
+                &malformed_output,
+                row_ids.len(),
+                31,
+            )
+            .is_err()
+        );
+        let mut misaligned_embed = embed.clone();
+        misaligned_embed.offset += 1;
+        assert!(
+            encode_get_rows_f32(
+                &ctx,
+                &encoder,
+                &misaligned_embed,
+                &ids,
+                &y,
+                row_ids.len(),
+                N_COLS,
+            )
+            .is_err()
+        );
+        encoder.end();
     }
 
     fn mxfp4_scale(e: u8) -> f32 {
@@ -27251,6 +27991,235 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
         assert!(max_abs < 1e-6, "grouped finalizer drift {max_abs}");
+    }
+
+    #[test]
+    fn moe_iq4_decode_matches_cpu_at_flash_next_geometry() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        run_iq4_moe_decode_case(&ctx, 2_560, 640, 2_560, 2, &[1, 0]);
+    }
+
+    #[test]
+    fn moe_iq4_decode_addresses_all_512_experts_and_odd_output_tail() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        run_iq4_moe_decode_case(&ctx, 256, 32, 65, 512, &[511, 257, 0]);
+    }
+
+    #[test]
+    fn moe_iq4_decode_rejects_unsafe_tensor_contracts() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_IN: usize = 256;
+        const N_FFN: usize = 32;
+        const N_HIDDEN: usize = 65;
+        const N_EXPERT: usize = 2;
+        let gate_bytes = synthetic_iq4_xs_bank(N_IN, N_FFN, N_EXPERT, 17);
+        let up_bytes = synthetic_iq4_xs_bank(N_IN, N_FFN, N_EXPERT, 31);
+        let down_bytes = synthetic_iq4_nl_bank(N_FFN, N_HIDDEN, N_EXPERT, 47);
+        let gate = MetalTensor::from_bytes(
+            &ctx,
+            &gate_bytes,
+            vec![N_IN as u64, N_FFN as u64, N_EXPERT as u64],
+            GgmlType::IQ4_XS,
+        )
+        .unwrap();
+        let up = MetalTensor::from_bytes(
+            &ctx,
+            &up_bytes,
+            vec![N_IN as u64, N_FFN as u64, N_EXPERT as u64],
+            GgmlType::IQ4_XS,
+        )
+        .unwrap();
+        let down = MetalTensor::from_bytes(
+            &ctx,
+            &down_bytes,
+            vec![N_FFN as u64, N_HIDDEN as u64, N_EXPERT as u64],
+            GgmlType::IQ4_NL,
+        )
+        .unwrap();
+        let input = MetalTensor::zeros_f32(&ctx, vec![N_IN as u64]).unwrap();
+        let indices =
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&[0i32]), vec![1], GgmlType::I32)
+                .unwrap();
+        let inner = MetalTensor::zeros_f32(&ctx, vec![N_FFN as u64]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![N_HIDDEN as u64]).unwrap();
+        let half_input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![half::f16::ZERO; N_IN]),
+            vec![N_IN as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let half_indices = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[half::f16::ZERO]),
+            vec![1],
+            GgmlType::F16,
+        )
+        .unwrap();
+
+        let command = ctx.queue.commandBuffer().expect("validation command");
+        let encoder = KernelEncoder::begin(&command);
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &half_input,
+                &indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &input,
+                &half_indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let mut read_only_inner = inner.clone();
+        read_only_inner.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &input,
+                &indices,
+                &read_only_inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let mut short_input = input.clone();
+        short_input.offset = 4;
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &short_input,
+                &indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let mut misaligned_gate = gate.clone();
+        misaligned_gate.offset = 1;
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &misaligned_gate,
+                &up,
+                &input,
+                &indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let overflow_dimension = u32::MAX as usize - 255;
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &input,
+                &indices,
+                &inner,
+                overflow_dimension,
+                overflow_dimension,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &input,
+                &indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                N_EXPERT + 1,
+            )
+            .is_err()
+        );
+
+        let mut read_only_output = output.clone();
+        read_only_output.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        assert!(
+            encode_moe_down_iq4_nl_f32(
+                &ctx,
+                &encoder,
+                &down,
+                &inner,
+                &indices,
+                &read_only_output,
+                N_FFN,
+                N_HIDDEN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let mut short_down = down.clone();
+        short_down.offset = 2;
+        assert!(
+            encode_moe_down_iq4_nl_f32(
+                &ctx,
+                &encoder,
+                &short_down,
+                &inner,
+                &indices,
+                &output,
+                N_FFN,
+                N_HIDDEN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        encoder.end();
     }
 
     #[test]

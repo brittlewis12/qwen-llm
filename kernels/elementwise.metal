@@ -822,6 +822,39 @@ kernel void kernel_get_rows_q8_0_f32(
     y[out_index] = d * float(quant);
 }
 
+constant float get_rows_iq4nl_values[16] = {
+    -127.0f, -104.0f, -83.0f, -65.0f, -49.0f, -35.0f, -22.0f, -10.0f,
+       1.0f,   13.0f,  25.0f,  38.0f,  53.0f,  69.0f,  89.0f, 113.0f,
+};
+
+kernel void kernel_get_rows_iq4_nl_f32(
+        constant get_rows_args & args [[buffer(0)]],
+        device const uchar * embed [[buffer(1)]],
+        device const int   * ids   [[buffer(2)]],
+        device       float * y     [[buffer(3)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint r = gid.y;
+    const uint i = gid.x;
+    if (r >= args.n_rows || i >= args.n_cols) return;
+
+    constexpr ulong IQ4_NL_BYTES = 18;
+    constexpr uint QK_IQ4_NL = 32;
+    const int row_i = ids[r];
+    const ulong out_index = (ulong)r * args.n_cols + i;
+    if ((uint)row_i >= args.n_vocab) {
+        y[out_index] = 0.0f;
+        return;
+    }
+    const ulong blocks_per_row = (ulong)args.n_cols / QK_IQ4_NL;
+    const ulong block_index = (ulong)(uint)row_i * blocks_per_row + i / QK_IQ4_NL;
+    device const uchar * block = embed + block_index * IQ4_NL_BYTES;
+    const uint in_block = i % QK_IQ4_NL;
+    const uchar packed = block[2 + (in_block & 15u)];
+    const uint quant = in_block < 16u ? uint(packed & 15u) : uint(packed >> 4u);
+    const float d = float(((device const half *)block)[0]);
+    y[out_index] = d * get_rows_iq4nl_values[quant];
+}
+
 // GDN α-chain fusion (replaces 3 dispatches: add_inplace + softplus + mul).
 //
 //   out[i] = softplus(a[i] + dt_bias[i]) * a_log[i]

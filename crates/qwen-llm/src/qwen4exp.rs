@@ -479,6 +479,33 @@ impl PleConfig {
             .ok_or_else(|| invalid("qwen4exp.ple.ngram_size", "head count overflow"))
     }
 
+    pub fn logical_row_count(&self) -> Result<u64, Qwen4ExpError> {
+        let head_count = self.head_count()? as usize;
+        if self.head_offsets.len() != head_count || self.head_vocab_sizes.len() != head_count {
+            return Err(invalid(
+                "qwen4exp.ple.head_offsets",
+                format!("expected {head_count} offset and vocabulary entries"),
+            ));
+        }
+        let mut expected_offset = 0_u64;
+        for (&offset, &size) in self.head_offsets.iter().zip(&self.head_vocab_sizes) {
+            if size == 0
+                || size > i64::MAX as u64
+                || offset > i64::MAX as u64
+                || offset != expected_offset
+            {
+                return Err(invalid(
+                    "qwen4exp.ple.head_offsets",
+                    "head tables must be non-empty and contiguous",
+                ));
+            }
+            expected_offset = expected_offset
+                .checked_add(size)
+                .ok_or_else(|| invalid("qwen4exp.ple.head_offsets", "table row count overflow"))?;
+        }
+        Ok(expected_offset)
+    }
+
     pub fn validate(&self, hidden_size: u32, layer_count: u32) -> Result<(), Qwen4ExpError> {
         require_nonzero("tokenizer.ggml.tokens", self.token_vocab_size)?;
         if self.ngram_size < 2 {
@@ -545,31 +572,7 @@ impl PleConfig {
                 "hash multipliers must be odd positive i64 values",
             ));
         }
-        if self.head_offsets.len() != head_count as usize
-            || self.head_vocab_sizes.len() != head_count as usize
-        {
-            return Err(invalid(
-                "qwen4exp.ple.head_offsets",
-                format!("expected {head_count} offset and vocabulary entries"),
-            ));
-        }
-
-        let mut expected_offset = 0_u64;
-        for (&offset, &size) in self.head_offsets.iter().zip(&self.head_vocab_sizes) {
-            if size == 0
-                || size > i64::MAX as u64
-                || offset > i64::MAX as u64
-                || offset != expected_offset
-            {
-                return Err(invalid(
-                    "qwen4exp.ple.head_offsets",
-                    "head tables must be non-empty and contiguous",
-                ));
-            }
-            expected_offset = expected_offset
-                .checked_add(size)
-                .ok_or_else(|| invalid("qwen4exp.ple.head_offsets", "table row count overflow"))?;
-        }
+        let expected_offset = self.logical_row_count()?;
         if expected_offset > i32::MAX as u64 + 1 {
             return Err(invalid(
                 "qwen4exp.ple.head_offsets",

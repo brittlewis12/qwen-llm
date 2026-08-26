@@ -174,12 +174,7 @@ impl<'a> Qwen4ExpModel<'a> {
         };
 
         let ple_embedding = if let Some(ple) = &config.ple {
-            let logical_rows = ple
-                .head_offsets
-                .last()
-                .zip(ple.head_vocab_sizes.last())
-                .and_then(|(&offset, &size)| offset.checked_add(size))
-                .ok_or(Qwen4ExpLoadError::DimensionOverflow("PLE table rows"))?;
+            let logical_rows = ple.logical_row_count()?;
             Some(bind_ple_embedding(
                 gguf,
                 &mut used,

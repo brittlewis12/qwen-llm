@@ -57,6 +57,7 @@ pub mod prompt_lookup;
 pub mod qwen4exp;
 pub mod qwen4exp_forward;
 pub mod qwen4exp_loader;
+pub mod qwen4exp_metal;
 pub mod qwen4exp_ple;
 mod qwen_queue2;
 pub mod runtime;

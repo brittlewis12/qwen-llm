@@ -3021,6 +3021,7 @@ impl MetalTensor {
 /// kernel just appends dispatches.
 pub struct KernelEncoder {
     raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    parent: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     ended: bool,
     /// True when created via [`KernelEncoder::begin_concurrent`]. Concurrent
     /// passes provide NO ordering between dispatches, so every dispatch pair
@@ -3028,7 +3029,7 @@ pub struct KernelEncoder {
     /// output). That invariant is a convention, not a type-system property —
     /// the debug-only `note_read`/`note_write` hazard tracker below turns a
     /// future violation into a loud panic instead of a silent GPU race.
-    pub concurrent: bool,
+    concurrent: bool,
     #[cfg(debug_assertions)]
     hazard_writes: std::cell::RefCell<Vec<(usize, u64, u64)>>,
     #[cfg(debug_assertions)]
@@ -3041,9 +3042,14 @@ fn ranges_overlap(a_off: u64, a_len: u64, b_off: u64, b_len: u64) -> bool {
 }
 
 impl KernelEncoder {
-    fn new(raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>, concurrent: bool) -> Self {
+    fn new(
+        raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+        parent: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        concurrent: bool,
+    ) -> Self {
         Self {
             raw,
+            parent: parent.clone(),
             ended: false,
             concurrent,
             #[cfg(debug_assertions)]
@@ -3056,7 +3062,7 @@ impl KernelEncoder {
     pub fn begin(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
         let raw = cmd.computeCommandEncoder().expect("compute encoder");
         kernel_trace_record_encoder(false);
-        Self::new(raw, false)
+        Self::new(raw, cmd, false)
     }
 
     pub fn begin_concurrent(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
@@ -3064,7 +3070,15 @@ impl KernelEncoder {
             .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
             .expect("concurrent compute encoder");
         kernel_trace_record_encoder(true);
-        Self::new(raw, true)
+        Self::new(raw, cmd, true)
+    }
+
+    pub(crate) fn is_concurrent(&self) -> bool {
+        self.concurrent
+    }
+
+    pub(crate) fn parent_command_buffer(&self) -> Retained<ProtocolObject<dyn MTLCommandBuffer>> {
+        self.parent.clone()
     }
 
     pub fn begin_sampled(
@@ -3104,7 +3118,7 @@ impl KernelEncoder {
                 MetalError::Counter("could not create sampled compute encoder".into())
             })?;
         kernel_trace_record_encoder(concurrent);
-        Ok(Self::new(raw, concurrent))
+        Ok(Self::new(raw, cmd, concurrent))
     }
 
     /// Debug-only hazard note: declare that a dispatch in this encoder

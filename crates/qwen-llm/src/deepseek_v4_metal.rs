@@ -14550,7 +14550,7 @@ fn validate_ds4_rope(
 }
 
 fn require_serial(enc: &KernelEncoder, kernel: &str) -> Result<(), DeepSeekV4MetalError> {
-    if enc.concurrent {
+    if enc.is_concurrent() {
         return invalid(format!("{kernel} requires ordered serial dispatches"));
     }
     Ok(())

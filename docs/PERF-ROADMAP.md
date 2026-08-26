@@ -165,6 +165,11 @@ Layer-zero bring-up initializes the four HC streams with four validated copy
 dispatches. A direct repeat kernel is a profile-gated launch reduction after the
 complete token path exists, not a reason to delay the correctness checkpoint.
 
+PLE bring-up keeps the 28.8 GB IQ4_NL embedding table CPU-addressed and uploads
+only the 16 selected rows (1,440 bytes) for each token. Profile the host gather
+and upload after end-to-end decode exists; batch or overlap staging only if it is
+material, and do not make the full random-access table GPU-resident by default.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

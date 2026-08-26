@@ -62,6 +62,7 @@ pub mod qwen4exp_loader;
 pub mod qwen4exp_metal;
 pub mod qwen4exp_moe;
 pub mod qwen4exp_ple;
+pub mod qwen4exp_ple_metal;
 pub mod qwen4exp_qsa;
 pub mod qwen4exp_residency;
 mod qwen_queue2;

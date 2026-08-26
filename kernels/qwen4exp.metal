@@ -1,4 +1,4 @@
-// Qwen3.8-Flash-Next gated-residual elementwise kernels.
+// Qwen3.8-Flash-Next architecture kernels.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -87,6 +87,94 @@ kernel void kernel_qwen4exp_hc_inject_f32(
     const float value = raw_injection[branch] / float(args.branch_count);
     const float injection = 2.0f / (1.0f + exp(-value));
     residual[(ulong)branch * args.hidden_size + hidden] += block_output[hidden] * injection;
+}
+
+struct qwen4exp_ple_gate_args {
+    uint branch_count;
+    uint hidden_size;
+};
+
+kernel void kernel_qwen4exp_ple_gate_f32(
+        constant qwen4exp_ple_gate_args & args [[buffer(0)]],
+        device const float * key [[buffer(1)]],
+        device const float * query [[buffer(2)]],
+        device const float * value [[buffer(3)]],
+        device float * gated [[buffer(4)]],
+        threadgroup float * partial [[threadgroup(0)]],
+        uint branch [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        uint thread_count [[threads_per_threadgroup]]) {
+    if (branch >= args.branch_count) return;
+    const ulong base = (ulong)branch * args.hidden_size;
+    float dot = 0.0f;
+    for (uint hidden = tid; hidden < args.hidden_size; hidden += thread_count) {
+        dot += key[base + hidden] * query[base + hidden];
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) partial[simdgroup] = dot;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simdgroup == 0) {
+        const uint simdgroups = (thread_count + 31u) / 32u;
+        const float candidate = uint(lane) < simdgroups ? partial[lane] : 0.0f;
+        const float total = simd_sum(candidate);
+        if (lane == 0) partial[0] = total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float score = partial[0] * rsqrt(float(args.hidden_size));
+    float transformed = 0.0f;
+    if (score > 0.0f) {
+        transformed = sqrt(max(score, 1.0e-6f));
+    } else if (score < 0.0f) {
+        transformed = -sqrt(max(-score, 1.0e-6f));
+    }
+    const float gate = 1.0f / (1.0f + exp(-transformed));
+    for (uint hidden = tid; hidden < args.hidden_size; hidden += thread_count) {
+        gated[base + hidden] = value[hidden] * gate;
+    }
+}
+
+struct qwen4exp_ple_conv_args {
+    uint channels;
+    uint history_len;
+    uint kernel_size;
+    uint dilation;
+};
+
+kernel void kernel_qwen4exp_ple_conv_epilogue_f32(
+        constant qwen4exp_ple_conv_args & args [[buffer(0)]],
+        device const float * input [[buffer(1)]],
+        device const float * weight [[buffer(2)]],
+        device float * state [[buffer(3)]],
+        device const float * residual [[buffer(4)]],
+        device const float * gated [[buffer(5)]],
+        device float * raw_output [[buffer(6)]],
+        device float * output [[buffer(7)]],
+        uint channel [[thread_position_in_grid]]) {
+    if (channel >= args.channels) return;
+    const ulong state_base = (ulong)channel * args.history_len;
+    const ulong weight_base = (ulong)channel * args.kernel_size;
+    float convolution = 0.0f;
+    for (uint tap = 0; tap < args.kernel_size; ++tap) {
+        const uint lag = (args.kernel_size - 1u - tap) * args.dilation;
+        const float value = lag == 0u
+            ? input[channel]
+            : state[state_base + args.history_len - lag];
+        convolution += weight[weight_base + tap] * value;
+    }
+    raw_output[channel] = convolution;
+    const float activated = convolution / (1.0f + exp(-convolution));
+    output[channel] = residual[channel] + gated[channel] + activated;
+
+    if (args.history_len > 0u) {
+        for (uint slot = 0; slot + 1u < args.history_len; ++slot) {
+            state[state_base + slot] = state[state_base + slot + 1u];
+        }
+        state[state_base + args.history_len - 1u] = input[channel];
+    }
 }
 
 struct qwen4exp_gdn_norm_args {

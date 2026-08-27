@@ -1,17 +1,28 @@
 //! Synchronous single-session runtime for Qwen3.8-Flash-Next text generation.
 
 use crate::gguf::GgufFile;
-use crate::metal::{KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission};
+use crate::metal::{
+    KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTimestampSampleBuffer,
+};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_ple::PleIq4NlTable;
+use crate::qwen4exp_profile::{
+    QWEN4EXP_PACKED_PROFILE_SAMPLE_CAPACITY, Qwen4ExpPackedProfileRecorder,
+    Qwen4ExpPackedProfileSpan,
+};
+pub use crate::qwen4exp_profile::{Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileScope};
 use crate::qwen4exp_residency::{
     Qwen4ExpMetalWeightPlan, Qwen4ExpMetalWeights, Qwen4ExpResidencyError,
 };
 use crate::qwen4exp_text_session::{
-    Qwen4ExpCompletedLogits, Qwen4ExpTextSessionError, Qwen4ExpTextSessionMetalWeights,
-    Qwen4ExpTextSessionMetalWorkspace, Qwen4ExpTextSessionPlan, encode_qwen4exp_text_packed,
+    Qwen4ExpCompletedLogits, Qwen4ExpPackedEncodeCpuTiming, Qwen4ExpTextSessionError,
+    Qwen4ExpTextSessionMetalWeights, Qwen4ExpTextSessionMetalWorkspace, Qwen4ExpTextSessionPending,
+    Qwen4ExpTextSessionPlan, Qwen4ExpTextSessionReleaseTiming, encode_qwen4exp_text_packed,
+    encode_qwen4exp_text_packed_layer_sampled, encode_qwen4exp_text_packed_profiled,
     encode_qwen4exp_text_token, encode_qwen4exp_text_token_layer_sampled,
 };
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::time::Instant;
 
@@ -135,6 +146,84 @@ pub struct Qwen4ExpPrefillTiming {
     pub gpu_ms: f64,
     pub gpu_samples: usize,
     pub total_wall_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct Qwen4ExpPackedProfileEncodeTiming {
+    pub preflight_ms: f64,
+    pub stage_inputs_ms: f64,
+    pub graph_encode_ms: f64,
+    pub unattributed_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct Qwen4ExpPackedProfileCommandTiming {
+    pub commit_return_ms: f64,
+    pub root_wait_ms: f64,
+    pub child_publication_ms: f64,
+    pub root_publish_ms: f64,
+    pub release_total_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct Qwen4ExpPackedProfileStageTiming {
+    pub label: Qwen4ExpPackedProfileLabel,
+    pub start_sample: usize,
+    pub end_sample: usize,
+    pub duration_ticks: u64,
+    pub gpu_ms: f64,
+    pub fraction_of_gpu: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Qwen4ExpPackedProfileSampling {
+    DispatchBoundary,
+    EncoderStage,
+}
+
+impl Qwen4ExpPackedProfileSampling {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DispatchBoundary => "dispatch_boundary",
+            Self::EncoderStage => "encoder_stage",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Qwen4ExpPackedPrefillProfile {
+    pub token: Qwen4ExpTokenTiming,
+    pub encode: Qwen4ExpPackedProfileEncodeTiming,
+    pub command: Qwen4ExpPackedProfileCommandTiming,
+    pub sampling: Qwen4ExpPackedProfileSampling,
+    pub sampling_fallback: Option<String>,
+    pub stages: Vec<Qwen4ExpPackedProfileStageTiming>,
+    pub sample_count: usize,
+    pub sampled_span_ticks: u64,
+    pub raw_span_ms_assuming_ns: f64,
+    pub raw_coverage_assuming_ns: f64,
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("Qwen3.8-Flash-Next packed-profile telemetry unavailable: {detail}")]
+pub struct Qwen4ExpPackedProfileError {
+    detail: String,
+}
+
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Qwen4ExpPackedProfileOutcome {
+    pub token: Qwen4ExpTokenTiming,
+    pub encode: Qwen4ExpPackedProfileEncodeTiming,
+    pub command: Qwen4ExpPackedProfileCommandTiming,
+    pub sampling: Qwen4ExpPackedProfileSampling,
+    pub sampling_fallback: Option<String>,
+    pub profile: Result<Qwen4ExpPackedPrefillProfile, Qwen4ExpPackedProfileError>,
 }
 
 impl Qwen4ExpPrefillTiming {
@@ -468,29 +557,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
     {
         self.last_prefill_timing = None;
-        if self.next_position() != 0 {
-            return invalid(format!(
-                "prefill requires a reset session at position zero, got position {}",
-                self.next_position()
-            ));
-        }
-        if token_ids.is_empty() {
-            return invalid("prompt token sequence must be nonempty");
-        }
-        if token_ids.len() > self.remaining_forwards() {
-            return invalid(format!(
-                "prompt requires {} forwards but only {} remain",
-                token_ids.len(),
-                self.remaining_forwards()
-            ));
-        }
-        for (index, &token_id) in token_ids.iter().enumerate() {
-            self.validate_token_id(token_id).map_err(|source| {
-                Qwen4ExpRuntimeError::Invalid(format!(
-                    "prompt token {index} is invalid before prefill: {source}"
-                ))
-            })?;
-        }
+        self.validate_prefill_request(token_ids)?;
         let start = self.next_position();
         let packed_tokens = self
             .workspace
@@ -547,6 +614,72 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         self.logits()
     }
 
+    pub fn prefill_packed_profiled(
+        &mut self,
+        token_ids: &[u32],
+    ) -> Result<Qwen4ExpPackedProfileOutcome, Qwen4ExpRuntimeError> {
+        self.last_prefill_timing = None;
+        self.validate_prefill_request(token_ids)?;
+        let packed_capacity = self.workspace.packed_prefill_capacity().ok_or_else(|| {
+            Qwen4ExpRuntimeError::Invalid("packed prefill was not admitted for this runner".into())
+        })?;
+        if token_ids.len() < 2 || token_ids.len() > packed_capacity {
+            return invalid(format!(
+                "profiled packed prompt length {} is outside 2..={packed_capacity}",
+                token_ids.len()
+            ));
+        }
+        let start = self.next_position();
+        let outcome = match execute_qwen4exp_text_packed_profiled_sync(
+            self.ctx,
+            token_ids,
+            self.ple_table,
+            &self.weights,
+            &mut self.workspace,
+        ) {
+            Ok(outcome) => outcome,
+            Err(source) => {
+                return Err(Qwen4ExpRuntimeError::Prefill {
+                    committed: self.next_position().saturating_sub(start),
+                    requested: token_ids.len(),
+                    source: Box::new(source),
+                });
+            }
+        };
+        self.last_token_timing = None;
+        let mut timing = Qwen4ExpPrefillTiming::new(token_ids.len(), token_ids.len());
+        timing.record(outcome.token);
+        self.last_prefill_timing = Some(timing);
+        Ok(outcome)
+    }
+
+    fn validate_prefill_request(&self, token_ids: &[u32]) -> Result<(), Qwen4ExpRuntimeError> {
+        if self.next_position() != 0 {
+            return invalid(format!(
+                "prefill requires a reset session at position zero, got position {}",
+                self.next_position()
+            ));
+        }
+        if token_ids.is_empty() {
+            return invalid("prompt token sequence must be nonempty");
+        }
+        if token_ids.len() > self.remaining_forwards() {
+            return invalid(format!(
+                "prompt requires {} forwards but only {} remain",
+                token_ids.len(),
+                self.remaining_forwards()
+            ));
+        }
+        for (index, &token_id) in token_ids.iter().enumerate() {
+            self.validate_token_id(token_id).map_err(|source| {
+                Qwen4ExpRuntimeError::Invalid(format!(
+                    "prompt token {index} is invalid before prefill: {source}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     fn run_prefill_checkpoint<F>(
         &self,
         start: usize,
@@ -597,6 +730,243 @@ pub fn forward_qwen4exp_text_token_sync<'a>(
 ) -> Result<Qwen4ExpCompletedLogits<'a>, Qwen4ExpRuntimeError> {
     execute_qwen4exp_text_token_sync(ctx, token_id, table, weights, workspace)?;
     Ok(workspace.logits()?)
+}
+
+fn execute_qwen4exp_text_packed_profiled_sync(
+    ctx: &MetalContext,
+    token_ids: &[u32],
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<Qwen4ExpPackedProfileOutcome, Qwen4ExpRuntimeError> {
+    let start_position = workspace.committed_length();
+    let position = start_position
+        .checked_add(token_ids.len())
+        .and_then(|end| end.checked_sub(1))
+        .ok_or_else(|| {
+            Qwen4ExpRuntimeError::Invalid(
+                "profiled packed prefill position range is empty or overflows".into(),
+            )
+        })?;
+    let stage_sample_count = weights
+        .post_ple
+        .len()
+        .checked_add(2)
+        .and_then(|stages| stages.checked_mul(2))
+        .ok_or_else(|| Qwen4ExpRuntimeError::Invalid("packed sample count overflow".into()))?;
+    let (samples, sampling, sampling_fallback) =
+        match ctx.timestamp_dispatch_sample_buffer(QWEN4EXP_PACKED_PROFILE_SAMPLE_CAPACITY) {
+            Ok(samples) => (
+                samples,
+                Qwen4ExpPackedProfileSampling::DispatchBoundary,
+                None,
+            ),
+            Err(error) => (
+                ctx.timestamp_sample_buffer(stage_sample_count)?,
+                Qwen4ExpPackedProfileSampling::EncoderStage,
+                Some(error.to_string()),
+            ),
+        };
+    let wall_started = Instant::now();
+    let command = ctx.queue.commandBuffer().ok_or_else(|| {
+        Qwen4ExpRuntimeError::Invalid("Metal command queue returned no command buffer".into())
+    })?;
+    let mut encode_detail = Qwen4ExpPackedEncodeCpuTiming::default();
+    let encoded = match sampling {
+        Qwen4ExpPackedProfileSampling::DispatchBoundary => {
+            encode_qwen4exp_text_packed_dispatch_profiled(
+                ctx,
+                &command,
+                &samples,
+                token_ids,
+                start_position,
+                table,
+                weights,
+                workspace,
+                &mut encode_detail,
+            )
+        }
+        Qwen4ExpPackedProfileSampling::EncoderStage => encode_qwen4exp_text_packed_stage_profiled(
+            ctx,
+            &command,
+            &samples,
+            token_ids,
+            start_position,
+            table,
+            weights,
+            workspace,
+            &mut encode_detail,
+        ),
+    };
+    let (pending, sample_count, spans) = match encoded {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            let abandon = unsafe { workspace.abandon_uncommitted() };
+            drop(command);
+            if let Err(abandon_error) = abandon {
+                return invalid(format!(
+                    "profiled packed prefill encode failed ({error}); abandoning its command also failed ({abandon_error})"
+                ));
+            }
+            return Err(error);
+        }
+    };
+    drop(pending);
+    let encode_cpu_ms = wall_started.elapsed().as_secs_f64() * 1e3;
+    let wait_started = Instant::now();
+    let commit_started = Instant::now();
+    command.commit();
+    let commit_return_ms = commit_started.elapsed().as_secs_f64() * 1e3;
+    let release = workspace.release_after_timed()?;
+    let completion_wait_ms = wait_started.elapsed().as_secs_f64() * 1e3;
+    let gpu_start = command.GPUStartTime();
+    let gpu_end = command.GPUEndTime();
+    let gpu_ms =
+        (gpu_start.is_finite() && gpu_end.is_finite() && gpu_start > 0.0 && gpu_end > gpu_start)
+            .then_some((gpu_end - gpu_start) * 1e3);
+    let token = Qwen4ExpTokenTiming {
+        position,
+        encode_cpu_ms,
+        completion_wait_ms,
+        gpu_ms,
+        total_wall_ms: wall_started.elapsed().as_secs_f64() * 1e3,
+    };
+    let encode = Qwen4ExpPackedProfileEncodeTiming {
+        preflight_ms: encode_detail.preflight_ms,
+        stage_inputs_ms: encode_detail.stage_inputs_ms,
+        graph_encode_ms: encode_detail.graph_encode_ms,
+        unattributed_ms: (encode_cpu_ms
+            - encode_detail.preflight_ms
+            - encode_detail.stage_inputs_ms
+            - encode_detail.graph_encode_ms)
+            .max(0.0),
+    };
+    let command_timing = packed_profile_command_timing(commit_return_ms, release);
+    let profile = ctx
+        .resolve_timestamp_samples(&samples, sample_count)
+        .map_err(|error| packed_profile_error(error.to_string()))
+        .and_then(|timestamps| {
+            resolve_qwen4exp_packed_profile(
+                token,
+                encode,
+                command_timing,
+                sampling,
+                sampling_fallback.clone(),
+                sample_count,
+                &spans,
+                &timestamps,
+            )
+        });
+    Ok(Qwen4ExpPackedProfileOutcome {
+        token,
+        encode,
+        command: command_timing,
+        sampling,
+        sampling_fallback,
+        profile,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_qwen4exp_text_packed_dispatch_profiled<'a>(
+    ctx: &MetalContext,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    token_ids: &[u32],
+    start_position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    encode_detail: &mut Qwen4ExpPackedEncodeCpuTiming,
+) -> Result<
+    (
+        Qwen4ExpTextSessionPending<'a>,
+        usize,
+        Vec<Qwen4ExpPackedProfileSpan>,
+    ),
+    Qwen4ExpRuntimeError,
+> {
+    let detailed_gdn_layer = weights
+        .geometry
+        .post_ple()
+        .iter()
+        .find(|block| block.mixer().kind() == MixerKind::GatedDeltaNet)
+        .map(|block| block.layer())
+        .ok_or_else(|| {
+            Qwen4ExpRuntimeError::Invalid("packed profile requires a post-PLE GDN layer".into())
+        })?;
+    let detailed_qsa_layer = weights
+        .geometry
+        .post_ple()
+        .iter()
+        .find(|block| block.mixer().kind() == MixerKind::QwenSparseAttention)
+        .map(|block| block.layer())
+        .ok_or_else(|| {
+            Qwen4ExpRuntimeError::Invalid("packed profile requires a post-PLE QSA layer".into())
+        })?;
+    let mut recorder =
+        Qwen4ExpPackedProfileRecorder::new(samples, detailed_gdn_layer, detailed_qsa_layer)?;
+    let encoder = KernelEncoder::begin(command);
+    let pending = encode_qwen4exp_text_packed_profiled(
+        ctx,
+        &encoder,
+        token_ids,
+        start_position,
+        table,
+        weights,
+        workspace,
+        &mut recorder,
+        encode_detail,
+    )?;
+    let (sample_count, spans) = recorder.finish()?;
+    encoder.end();
+    Ok((pending, sample_count, spans))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_qwen4exp_text_packed_stage_profiled<'a>(
+    ctx: &MetalContext,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    token_ids: &[u32],
+    start_position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    encode_detail: &mut Qwen4ExpPackedEncodeCpuTiming,
+) -> Result<
+    (
+        Qwen4ExpTextSessionPending<'a>,
+        usize,
+        Vec<Qwen4ExpPackedProfileSpan>,
+    ),
+    Qwen4ExpRuntimeError,
+> {
+    let (pending, spans) = encode_qwen4exp_text_packed_layer_sampled(
+        ctx,
+        command,
+        samples,
+        token_ids,
+        start_position,
+        table,
+        weights,
+        workspace,
+        encode_detail,
+    )?;
+    Ok((pending, samples.sample_count(), spans))
+}
+
+fn packed_profile_command_timing(
+    commit_return_ms: f64,
+    release: Qwen4ExpTextSessionReleaseTiming,
+) -> Qwen4ExpPackedProfileCommandTiming {
+    Qwen4ExpPackedProfileCommandTiming {
+        commit_return_ms,
+        root_wait_ms: release.root_wait_ms,
+        child_publication_ms: release.child_publication_ms,
+        root_publish_ms: release.root_publish_ms,
+        release_total_ms: release.release_total_ms,
+    }
 }
 
 fn execute_qwen4exp_text_packed_sync(
@@ -788,6 +1158,121 @@ fn qwen4exp_layer_stages(weights: &Qwen4ExpTextSessionMetalWeights<'_>) -> Vec<Q
     stages
 }
 
+fn resolve_qwen4exp_packed_profile(
+    token: Qwen4ExpTokenTiming,
+    encode: Qwen4ExpPackedProfileEncodeTiming,
+    command: Qwen4ExpPackedProfileCommandTiming,
+    sampling: Qwen4ExpPackedProfileSampling,
+    sampling_fallback: Option<String>,
+    sample_count: usize,
+    spans: &[Qwen4ExpPackedProfileSpan],
+    timestamps: &[u64],
+) -> Result<Qwen4ExpPackedPrefillProfile, Qwen4ExpPackedProfileError> {
+    if spans.is_empty() || sample_count == 0 || timestamps.len() != sample_count {
+        return Err(packed_profile_error(format!(
+            "packed profile has {} spans, {sample_count} samples, and {} timestamps",
+            spans.len(),
+            timestamps.len()
+        )));
+    }
+    if timestamps.contains(&u64::MAX) {
+        return Err(packed_profile_error(
+            "packed profile contains a Metal counter error sentinel",
+        ));
+    }
+    if timestamps.windows(2).any(|window| window[1] < window[0]) {
+        return Err(packed_profile_error(
+            "packed profile resolved timestamps are not globally monotonic",
+        ));
+    }
+    let first_sample = spans
+        .iter()
+        .map(|span| span.start_sample)
+        .min()
+        .expect("nonempty packed spans have a first sample");
+    let last_sample = spans
+        .iter()
+        .map(|span| span.end_sample)
+        .max()
+        .expect("nonempty packed spans have a final sample");
+    if last_sample >= timestamps.len() {
+        return Err(packed_profile_error(format!(
+            "packed profile sample {last_sample} exceeds {} resolved timestamps",
+            timestamps.len()
+        )));
+    }
+    let sampled_span_ticks = timestamps[last_sample]
+        .checked_sub(timestamps[first_sample])
+        .ok_or_else(|| packed_profile_error("packed profile timestamps are not monotonic"))?;
+    if sampled_span_ticks == 0 {
+        return Err(packed_profile_error(
+            "packed profile timestamp span is zero",
+        ));
+    }
+    let command_gpu_ms = token
+        .gpu_ms
+        .ok_or_else(|| packed_profile_error("profiled packed command has no GPU interval"))?;
+    let scale_ms_per_tick = command_gpu_ms / sampled_span_ticks as f64;
+    let mut stages = Vec::with_capacity(spans.len());
+    let mut coarse_ticks = 0_u64;
+    for span in spans {
+        if span.start_sample >= timestamps.len() || span.end_sample >= timestamps.len() {
+            return Err(packed_profile_error(format!(
+                "packed stage {:?} references samples {}..{} outside {} timestamps",
+                span.label,
+                span.start_sample,
+                span.end_sample,
+                timestamps.len()
+            )));
+        }
+        let duration_ticks = timestamps[span.end_sample]
+            .checked_sub(timestamps[span.start_sample])
+            .ok_or_else(|| {
+                packed_profile_error(format!(
+                    "packed stage {:?} timestamps are not monotonic",
+                    span.label
+                ))
+            })?;
+        let gpu_ms = duration_ticks as f64 * scale_ms_per_tick;
+        if span.label.scope == Qwen4ExpPackedProfileScope::Coarse {
+            coarse_ticks = coarse_ticks
+                .checked_add(duration_ticks)
+                .ok_or_else(|| packed_profile_error("packed profile coarse duration overflow"))?;
+        }
+        stages.push(Qwen4ExpPackedProfileStageTiming {
+            label: span.label,
+            start_sample: span.start_sample,
+            end_sample: span.end_sample,
+            duration_ticks,
+            gpu_ms,
+            fraction_of_gpu: gpu_ms / command_gpu_ms,
+        });
+    }
+    if coarse_ticks > sampled_span_ticks {
+        return Err(packed_profile_error(format!(
+            "packed profile coarse stages account for {coarse_ticks} ticks across a {sampled_span_ticks}-tick span"
+        )));
+    }
+    stages.sort_by(|left, right| {
+        left.start_sample
+            .cmp(&right.start_sample)
+            .then_with(|| right.end_sample.cmp(&left.end_sample))
+    });
+    let raw_span_ms_assuming_ns = sampled_span_ticks as f64 * 1e-6;
+    Ok(Qwen4ExpPackedPrefillProfile {
+        token,
+        encode,
+        command,
+        sampling,
+        sampling_fallback,
+        stages,
+        sample_count,
+        sampled_span_ticks,
+        raw_span_ms_assuming_ns,
+        raw_coverage_assuming_ns: raw_span_ms_assuming_ns / command_gpu_ms,
+    })
+}
+
 fn resolve_qwen4exp_layer_profile(
     token: Qwen4ExpTokenTiming,
     stages: &[Qwen4ExpLayerStage],
@@ -850,6 +1335,12 @@ fn resolve_qwen4exp_layer_profile(
 
 fn layer_profile_error(detail: impl Into<String>) -> Qwen4ExpLayerProfileError {
     Qwen4ExpLayerProfileError {
+        detail: detail.into(),
+    }
+}
+
+fn packed_profile_error(detail: impl Into<String>) -> Qwen4ExpPackedProfileError {
+    Qwen4ExpPackedProfileError {
         detail: detail.into(),
     }
 }
@@ -969,6 +1460,78 @@ mod tests {
         assert_eq!(timing.gpu_ms, 3.0);
         assert_eq!(timing.complete_gpu_ms(), None);
         assert_eq!(timing.outside_gpu_ms(), None);
+    }
+
+    #[test]
+    fn packed_profile_resolves_nested_spans_without_double_counting() {
+        let token = Qwen4ExpTokenTiming {
+            position: 17,
+            encode_cpu_ms: 2.0,
+            completion_wait_ms: 6.0,
+            gpu_ms: Some(5.0),
+            total_wall_ms: 8.0,
+        };
+        let spans = [
+            Qwen4ExpPackedProfileSpan {
+                label: Qwen4ExpPackedProfileLabel::detail(
+                    "moe.router",
+                    2,
+                    MixerKind::GatedDeltaNet,
+                ),
+                start_sample: 1,
+                end_sample: 2,
+            },
+            Qwen4ExpPackedProfileSpan {
+                label: Qwen4ExpPackedProfileLabel::coarse(
+                    "post_ple_layer",
+                    Some(2),
+                    Some(MixerKind::GatedDeltaNet),
+                ),
+                start_sample: 0,
+                end_sample: 3,
+            },
+        ];
+        let profile = resolve_qwen4exp_packed_profile(
+            token,
+            Qwen4ExpPackedProfileEncodeTiming {
+                preflight_ms: 0.5,
+                stage_inputs_ms: 0.25,
+                graph_encode_ms: 1.0,
+                unattributed_ms: 0.25,
+            },
+            Qwen4ExpPackedProfileCommandTiming {
+                commit_return_ms: 0.1,
+                root_wait_ms: 5.0,
+                child_publication_ms: 0.5,
+                root_publish_ms: 0.1,
+                release_total_ms: 5.6,
+            },
+            Qwen4ExpPackedProfileSampling::DispatchBoundary,
+            None,
+            4,
+            &spans,
+            &[10, 20, 25, 50],
+        )
+        .unwrap();
+        assert_eq!(profile.sample_count, 4);
+        assert_eq!(profile.sampled_span_ticks, 40);
+        assert_eq!(profile.stages[0].label.name, "post_ple_layer");
+        assert_eq!(profile.stages[1].label.name, "moe.router");
+        assert!((profile.stages[0].gpu_ms - 5.0).abs() < 1e-12);
+        assert!((profile.stages[1].gpu_ms - 0.625).abs() < 1e-12);
+        assert!(
+            resolve_qwen4exp_packed_profile(
+                token,
+                profile.encode,
+                profile.command,
+                profile.sampling,
+                profile.sampling_fallback.clone(),
+                4,
+                &spans,
+                &[10, 30, 20, 50],
+            )
+            .is_err()
+        );
     }
 
     #[test]

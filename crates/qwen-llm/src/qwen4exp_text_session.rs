@@ -29,6 +29,11 @@ use crate::qwen4exp_post_ple_block::{
     Qwen4ExpPostPleBlockError, Qwen4ExpPostPleBlockMetalGeometry, Qwen4ExpPostPleBlockMetalWeights,
     Qwen4ExpPostPleBlockMetalWorkspace, Qwen4ExpPostPleMixerMetalGeometry,
     encode_qwen4exp_post_ple_block, encode_qwen4exp_post_ple_block_packed,
+    encode_qwen4exp_post_ple_block_packed_profiled,
+};
+use crate::qwen4exp_profile::{
+    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, Qwen4ExpPackedProfileSpan,
+    begin_optional, end_optional,
 };
 use crate::qwen4exp_qsa::{
     Qwen4ExpQsaError, QwenSparseAttentionMetalGeometry, QwenSparseAttentionPackedScratch,
@@ -45,6 +50,7 @@ use objc2_metal::{
 };
 use std::fmt;
 use std::mem::size_of;
+use std::time::Instant;
 
 pub const QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -78,6 +84,21 @@ pub enum Qwen4ExpTextSessionError {
     Invalid(String),
     #[error("Qwen3.8-Flash-Next text-session command buffer failed: {0}")]
     CommandBuffer(String),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Qwen4ExpPackedEncodeCpuTiming {
+    pub preflight_ms: f64,
+    pub stage_inputs_ms: f64,
+    pub graph_encode_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Qwen4ExpTextSessionReleaseTiming {
+    pub root_wait_ms: f64,
+    pub child_publication_ms: f64,
+    pub root_publish_ms: f64,
+    pub release_total_ms: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1033,6 +1054,24 @@ impl Qwen4ExpTextSessionMetalWorkspace {
     }
 
     pub fn release_after(&mut self) -> Result<(), Qwen4ExpTextSessionError> {
+        self.release_after_inner(None)
+    }
+
+    pub(crate) fn release_after_timed(
+        &mut self,
+    ) -> Result<Qwen4ExpTextSessionReleaseTiming, Qwen4ExpTextSessionError> {
+        let started = Instant::now();
+        let mut timing = Qwen4ExpTextSessionReleaseTiming::default();
+        let result = self.release_after_inner(Some(&mut timing));
+        timing.release_total_ms = started.elapsed().as_secs_f64() * 1e3;
+        result?;
+        Ok(timing)
+    }
+
+    fn release_after_inner(
+        &mut self,
+        mut timing: Option<&mut Qwen4ExpTextSessionReleaseTiming>,
+    ) -> Result<(), Qwen4ExpTextSessionError> {
         let Some(command) = self.active_command.clone() else {
             if self.pending_length.is_some() {
                 return invalid("token length is pending without an owning command");
@@ -1048,10 +1087,15 @@ impl Qwen4ExpTextSessionMetalWorkspace {
                 "workspace owner is not committed (status {status:?}); commit it or abandon the uncommitted command"
             ));
         }
+        let wait_started = timing.is_some().then(Instant::now);
         command.waitUntilCompleted();
+        if let (Some(timing), Some(started)) = (timing.as_deref_mut(), wait_started) {
+            timing.root_wait_ms = started.elapsed().as_secs_f64() * 1e3;
+        }
         let status = command.status();
         let command_error = command.error().map(|error| error.to_string());
         let mut child_errors = Vec::new();
+        let children_started = timing.is_some().then(Instant::now);
         if let Err(error) = self.zero_one.release_after() {
             child_errors.push(format!("layers zero-one: {error}"));
         }
@@ -1063,9 +1107,14 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         if let Err(error) = self.final_read.release_after() {
             child_errors.push(format!("final HC read: {error}"));
         }
+        if let (Some(timing), Some(started)) = (timing.as_deref_mut(), children_started) {
+            timing.child_publication_ms = started.elapsed().as_secs_f64() * 1e3;
+        }
+        let publish_started = timing.is_some().then(Instant::now);
         self.active_command = None;
         let pending = self.pending_length.take();
         let pending_present = pending.is_some();
+        let mut result = None;
         if let Some(expected) = pending {
             if self.zero_one.next_position() != Some(expected as u64) {
                 child_errors.push(format!(
@@ -1092,15 +1141,21 @@ impl Qwen4ExpTextSessionMetalWorkspace {
                 self.committed_length = expected;
                 self.encode_failed = false;
                 self.logits_ready = true;
-                return Ok(());
+                result = Some(Ok(()));
             }
         }
-        self.state_poisoned = true;
-        self.logits_ready = false;
-        Err(Qwen4ExpTextSessionError::CommandBuffer(format!(
-            "status={status:?}, error={command_error:?}, encode_failed={}, pending_length={pending_present}, children={child_errors:?}",
-            self.encode_failed
-        )))
+        let result = result.unwrap_or_else(|| {
+            self.state_poisoned = true;
+            self.logits_ready = false;
+            Err(Qwen4ExpTextSessionError::CommandBuffer(format!(
+                "status={status:?}, error={command_error:?}, encode_failed={}, pending_length={pending_present}, children={child_errors:?}",
+                self.encode_failed
+            )))
+        });
+        if let (Some(timing), Some(started)) = (timing.as_deref_mut(), publish_started) {
+            timing.root_publish_ms = started.elapsed().as_secs_f64() * 1e3;
+        }
+        result
     }
 
     /// Release a full session from a command that will never be committed.
@@ -1273,6 +1328,143 @@ pub fn encode_qwen4exp_text_packed<'a>(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    encode_qwen4exp_text_packed_inner(
+        ctx,
+        enc,
+        token_ids,
+        start_position,
+        table,
+        weights,
+        workspace,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_qwen4exp_text_packed_profiled<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_ids: &[u32],
+    start_position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    recorder: &mut Qwen4ExpPackedProfileRecorder<'_>,
+    cpu_timing: &mut Qwen4ExpPackedEncodeCpuTiming,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    encode_qwen4exp_text_packed_inner(
+        ctx,
+        enc,
+        token_ids,
+        start_position,
+        table,
+        weights,
+        workspace,
+        Some(recorder),
+        Some(cpu_timing),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_qwen4exp_text_packed_layer_sampled<'a>(
+    ctx: &MetalContext,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    token_ids: &[u32],
+    start_position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    cpu_timing: &mut Qwen4ExpPackedEncodeCpuTiming,
+) -> Result<
+    (
+        Qwen4ExpTextSessionPending<'a>,
+        Vec<Qwen4ExpPackedProfileSpan>,
+    ),
+    Qwen4ExpTextSessionError,
+> {
+    if token_ids.len() <= 1 {
+        return invalid("sampled packed profile requires at least two tokens");
+    }
+    let stage_count = weights
+        .post_ple
+        .len()
+        .checked_add(2)
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("stage count overflow".into()))?;
+    let expected_samples = stage_count.checked_mul(2).ok_or_else(|| {
+        Qwen4ExpTextSessionError::Invalid("packed stage sample count overflow".into())
+    })?;
+    if samples.sample_count() != expected_samples {
+        return invalid(format!(
+            "packed layer profile has {} timestamp samples, expected {expected_samples}",
+            samples.sample_count()
+        ));
+    }
+    let first = sampled_stage_encoder(command, samples, 0)?;
+    let preflight_started = Instant::now();
+    let (next_history, row_ids) = validate_and_preflight_packed(
+        ctx,
+        &first,
+        token_ids,
+        start_position,
+        table,
+        weights,
+        workspace,
+    )?;
+    cpu_timing.preflight_ms = preflight_started.elapsed().as_secs_f64() * 1e3;
+    let stage_started = Instant::now();
+    stage_packed_inputs(token_ids, &row_ids, table, workspace)?;
+    cpu_timing.stage_inputs_ms = stage_started.elapsed().as_secs_f64() * 1e3;
+    let pending_length = start_position
+        .checked_add(token_ids.len())
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("packed length overflow".into()))?;
+    reserve_command(workspace, &first, pending_length)?;
+    workspace.logits_ready = false;
+    let graph_started = Instant::now();
+    let spans = unsafe {
+        encode_packed_step_layer_sampled(
+            ctx,
+            command,
+            samples,
+            first,
+            start_position,
+            next_history,
+            weights,
+            workspace,
+            token_ids.len(),
+        )
+    };
+    let spans = match spans {
+        Ok(spans) => spans,
+        Err(error) => {
+            workspace.encode_failed = true;
+            workspace.state_poisoned = true;
+            return Err(error);
+        }
+    };
+    cpu_timing.graph_encode_ms = graph_started.elapsed().as_secs_f64() * 1e3;
+    Ok((
+        Qwen4ExpTextSessionPending {
+            workspace,
+            position: pending_length - 1,
+        },
+        spans,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_qwen4exp_text_packed_inner<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_ids: &[u32],
+    start_position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    mut cpu_timing: Option<&mut Qwen4ExpPackedEncodeCpuTiming>,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
     if token_ids.len() == 1 {
         return encode_qwen4exp_text_token(
             ctx,
@@ -1284,6 +1476,7 @@ pub fn encode_qwen4exp_text_packed<'a>(
             workspace,
         );
     }
+    let preflight_started = cpu_timing.is_some().then(Instant::now);
     let (next_history, row_ids) = validate_and_preflight_packed(
         ctx,
         enc,
@@ -1293,12 +1486,20 @@ pub fn encode_qwen4exp_text_packed<'a>(
         weights,
         workspace,
     )?;
+    if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), preflight_started) {
+        timing.preflight_ms = started.elapsed().as_secs_f64() * 1e3;
+    }
+    let stage_started = cpu_timing.is_some().then(Instant::now);
     stage_packed_inputs(token_ids, &row_ids, table, workspace)?;
+    if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), stage_started) {
+        timing.stage_inputs_ms = started.elapsed().as_secs_f64() * 1e3;
+    }
     let pending_length = start_position
         .checked_add(token_ids.len())
         .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("packed length overflow".into()))?;
     reserve_command(workspace, enc, pending_length)?;
     workspace.logits_ready = false;
+    let graph_started = cpu_timing.is_some().then(Instant::now);
     if let Err(error) = unsafe {
         encode_packed_step(
             ctx,
@@ -1308,11 +1509,15 @@ pub fn encode_qwen4exp_text_packed<'a>(
             weights,
             workspace,
             token_ids.len(),
+            profile,
         )
     } {
         workspace.encode_failed = true;
         workspace.state_poisoned = true;
         return Err(error);
+    }
+    if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), graph_started) {
+        timing.graph_encode_ms = started.elapsed().as_secs_f64() * 1e3;
     }
     Ok(Qwen4ExpTextSessionPending {
         workspace,
@@ -1625,10 +1830,16 @@ unsafe fn encode_packed_step(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
     tokens: usize,
+    mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
 ) -> Result<(), Qwen4ExpTextSessionError> {
     let views = workspace
         .packed_scratch()?
         .views(&workspace.geometry, tokens)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::coarse("input_embedding", None, None),
+    )?;
     encode_get_rows_f32(
         ctx,
         enc,
@@ -1638,8 +1849,14 @@ unsafe fn encode_packed_step(
         tokens,
         workspace.geometry.hidden_size(),
     )?;
+    end_optional(&mut profile, enc, marker)?;
     let ple_geometry = workspace.geometry.zero_one().ple();
     let lookup_count = ple_geometry.head_count() * tokens;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::coarse("ple_dequant", None, None),
+    )?;
     encode_get_rows_f32(
         ctx,
         enc,
@@ -1648,6 +1865,12 @@ unsafe fn encode_packed_step(
         &views.ple_embedding,
         lookup_count,
         ple_geometry.head_dim(),
+    )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::coarse("hc_bootstrap", None, None),
     )?;
     encode_hc_repeat_packed(
         ctx,
@@ -1658,6 +1881,7 @@ unsafe fn encode_packed_step(
         workspace.geometry.hidden_size(),
         tokens,
     )?;
+    end_optional(&mut profile, enc, marker)?;
 
     let Qwen4ExpTextSessionMetalWorkspace {
         packed,
@@ -1668,6 +1892,11 @@ unsafe fn encode_packed_step(
     let packed = packed.as_mut().ok_or_else(|| {
         Qwen4ExpTextSessionError::Invalid("packed prefill was not admitted for this session".into())
     })?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::coarse("layers_zero_one", None, None),
+    )?;
     unsafe {
         encode_qwen4exp_layers_zero_one_packed_staged(
             ctx,
@@ -1685,6 +1914,7 @@ unsafe fn encode_packed_step(
             tokens,
         )
     }?;
+    end_optional(&mut profile, enc, marker)?;
     for index in 0..weights.post_ple.len() {
         let block_weights = weights.post_ple.get(index).copied().ok_or_else(|| {
             Qwen4ExpTextSessionError::Invalid(format!(
@@ -1696,10 +1926,158 @@ unsafe fn encode_packed_step(
                 "packed post-PLE workspace index {index} is absent"
             ))
         })?;
+        let layer = block_weights.geometry.layer();
+        let mixer = block_weights.geometry.mixer().kind();
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::coarse("post_ple_layer", Some(layer), Some(mixer)),
+        )?;
+        if let Some(recorder) = profile.as_deref_mut() {
+            unsafe {
+                encode_qwen4exp_post_ple_block_packed_profiled(
+                    ctx,
+                    enc,
+                    start_position,
+                    &views.hyper_residual,
+                    &views.bridge,
+                    block_weights,
+                    block,
+                    &mut packed.residual,
+                    &packed.gdn,
+                    &packed.qsa,
+                    &packed.moe,
+                    tokens,
+                    recorder,
+                )
+            }?;
+        } else {
+            unsafe {
+                encode_qwen4exp_post_ple_block_packed(
+                    ctx,
+                    enc,
+                    start_position,
+                    &views.hyper_residual,
+                    &views.bridge,
+                    block_weights,
+                    block,
+                    &mut packed.residual,
+                    &packed.gdn,
+                    &packed.qsa,
+                    &packed.moe,
+                    tokens,
+                )
+            }?;
+        }
+        end_optional(&mut profile, enc, marker)?;
+    }
+    let last_hyper = views.hyper_residual.view_subrange(
+        ((tokens - 1) * workspace.geometry.hyper_width()) as u64,
+        vec![workspace.geometry.hyper_width() as u64],
+    );
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::coarse("tail", None, None),
+    )?;
+    encode_tail_stage(ctx, enc, &last_hyper, weights, workspace)?;
+    end_optional(&mut profile, enc, marker)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_packed_step_layer_sampled(
+    ctx: &MetalContext,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    first: KernelEncoder,
+    start_position: usize,
+    next_history: PleHistory,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+    tokens: usize,
+) -> Result<Vec<Qwen4ExpPackedProfileSpan>, Qwen4ExpTextSessionError> {
+    let views = workspace
+        .packed_scratch()?
+        .views(&workspace.geometry, tokens)?;
+    encode_get_rows_f32(
+        ctx,
+        &first,
+        weights.zero_one.layer_zero.token_embedding,
+        &views.token_ids,
+        &views.embedding,
+        tokens,
+        workspace.geometry.hidden_size(),
+    )?;
+    let ple_geometry = workspace.geometry.zero_one().ple();
+    encode_get_rows_f32(
+        ctx,
+        &first,
+        &views.ple_packed_rows,
+        &views.ple_local_row_ids,
+        &views.ple_embedding,
+        ple_geometry.head_count() * tokens,
+        ple_geometry.head_dim(),
+    )?;
+    encode_hc_repeat_packed(
+        ctx,
+        &first,
+        &views.embedding,
+        &views.hyper_residual,
+        workspace.geometry.branch_count(),
+        workspace.geometry.hidden_size(),
+        tokens,
+    )?;
+    let Qwen4ExpTextSessionMetalWorkspace {
+        packed,
+        zero_one,
+        post_ple,
+        ..
+    } = workspace;
+    let packed = packed.as_mut().ok_or_else(|| {
+        Qwen4ExpTextSessionError::Invalid("packed prefill was not admitted for this session".into())
+    })?;
+    unsafe {
+        encode_qwen4exp_layers_zero_one_packed_staged(
+            ctx,
+            &first,
+            &views.ple_embedding,
+            &views.hyper_residual,
+            &views.bridge,
+            weights.zero_one,
+            next_history,
+            zero_one,
+            &mut packed.residual,
+            &packed.gdn,
+            &packed.ple,
+            &packed.moe,
+            tokens,
+        )
+    }?;
+    first.end();
+    let mut spans = Vec::with_capacity(weights.post_ple.len() + 2);
+    spans.push(Qwen4ExpPackedProfileSpan {
+        label: Qwen4ExpPackedProfileLabel::coarse("bootstrap_layers_zero_one", None, None),
+        start_sample: 0,
+        end_sample: 1,
+    });
+    for index in 0..weights.post_ple.len() {
+        let block_weights = weights.post_ple.get(index).copied().ok_or_else(|| {
+            Qwen4ExpTextSessionError::Invalid(format!(
+                "packed post-PLE weight index {index} is absent"
+            ))
+        })?;
+        let block = post_ple.get_mut(index).ok_or_else(|| {
+            Qwen4ExpTextSessionError::Invalid(format!(
+                "packed post-PLE workspace index {index} is absent"
+            ))
+        })?;
+        let stage = index + 1;
+        let encoder = sampled_stage_encoder(command, samples, stage)?;
         unsafe {
             encode_qwen4exp_post_ple_block_packed(
                 ctx,
-                enc,
+                &encoder,
                 start_position,
                 &views.hyper_residual,
                 &views.bridge,
@@ -1712,12 +2090,31 @@ unsafe fn encode_packed_step(
                 tokens,
             )
         }?;
+        encoder.end();
+        spans.push(Qwen4ExpPackedProfileSpan {
+            label: Qwen4ExpPackedProfileLabel::coarse(
+                "post_ple_layer",
+                Some(block_weights.geometry.layer()),
+                Some(block_weights.geometry.mixer().kind()),
+            ),
+            start_sample: stage * 2,
+            end_sample: stage * 2 + 1,
+        });
     }
+    let tail_stage = weights.post_ple.len() + 1;
+    let tail = sampled_stage_encoder(command, samples, tail_stage)?;
     let last_hyper = views.hyper_residual.view_subrange(
         ((tokens - 1) * workspace.geometry.hyper_width()) as u64,
         vec![workspace.geometry.hyper_width() as u64],
     );
-    encode_tail_stage(ctx, enc, &last_hyper, weights, workspace)
+    encode_tail_stage(ctx, &tail, &last_hyper, weights, workspace)?;
+    tail.end();
+    spans.push(Qwen4ExpPackedProfileSpan {
+        label: Qwen4ExpPackedProfileLabel::coarse("tail", None, None),
+        start_sample: tail_stage * 2,
+        end_sample: tail_stage * 2 + 1,
+    });
+    Ok(spans)
 }
 
 fn validate_and_preflight(

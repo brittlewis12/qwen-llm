@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Packed Attribution Closes the Warm Gap
+
+Status: treat warm packed prefill as GPU-bound, separate cold first-touch from
+kernel optimization, and split common post-block work before choosing a motor.
+
+- A default-off first/warm/profile replay packet keeps one command, requires
+  bitwise endpoint logits, and reports CPU encode, commit, root wait, child
+  publication, and Metal timestamps. M4 Max falls back from unsupported
+  dispatch-boundary counters to 48 stage-sampled serial encoders in one command.
+- N=18 passed with raw timestamp coverage `1.000000` and a `1.00685x` profiled/
+  warm GPU ratio. First prefill was `4,452.690 ms` wall, while same-process warm
+  and profiled passes were `245.390/247.563 ms`; warm outside-GPU time was only
+  `2.026 ms`.
+- N=2,048 passed with coverage `1.000000` and a `0.99670x` observer ratio. Warm
+  and profiled passes measured `3,768.916/3,753.927 ms` wall. Throughput was
+  `543.39/545.54 tok/s`; profiled GPU time was `3,750.094 ms`.
+- At N=2,048, bootstrap layers 0/1 consume `167.762 ms` (4.47%), post-PLE blocks
+  `3,581.211 ms` (95.50%), and tail `1.121 ms`. GDN blocks cluster around
+  `75.8-76.7 ms`; QSA blocks around `81.2-83.6 ms`, but both still include common
+  HC and MoE work.
+- Child publication is `0.008-0.016 ms`, root publication rounds to zero, and
+  warm CPU encode is `1.665-2.569 ms`. The next attribution packet splits one
+  standard GDN and QSA block into HC, mixer, MoE, and combine stages.
+
 ## 2026-08-27 - Flash-Next Packed Prefill Reaches the CLI
 
 Status: default unprofiled multi-token requests to the qualified dense packed

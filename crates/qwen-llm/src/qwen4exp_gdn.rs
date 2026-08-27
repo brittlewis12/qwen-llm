@@ -11,6 +11,9 @@ use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
+use crate::qwen4exp_profile::{
+    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
+};
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
@@ -753,12 +756,58 @@ pub(crate) unsafe fn encode_gated_delta_net_packed_into_workspace(
     scratch: &GatedDeltaNetPackedScratch,
     tokens: usize,
 ) -> Result<MetalTensor, Qwen4ExpGdnError> {
+    unsafe {
+        encode_gated_delta_net_packed_into_workspace_inner(
+            ctx, enc, input, weights, workspace, scratch, tokens, 0, None,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_gated_delta_net_packed_into_workspace_profiled(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &mut GatedDeltaNetMetalWorkspace,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+    layer: u32,
+    recorder: &mut Qwen4ExpPackedProfileRecorder<'_>,
+) -> Result<MetalTensor, Qwen4ExpGdnError> {
+    unsafe {
+        encode_gated_delta_net_packed_into_workspace_inner(
+            ctx,
+            enc,
+            input,
+            weights,
+            workspace,
+            scratch,
+            tokens,
+            layer,
+            Some(recorder),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_gated_delta_net_packed_into_workspace_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &mut GatedDeltaNetMetalWorkspace,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+    layer: u32,
+    profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+) -> Result<MetalTensor, Qwen4ExpGdnError> {
     validate_and_preflight_gated_delta_net_packed_workspace(
         ctx, enc, input, weights, workspace, scratch, tokens,
     )?;
     reserve_command(workspace, enc)?;
     let encoded = unsafe {
-        encode_gated_delta_net_packed(
+        encode_gated_delta_net_packed_inner(
             ctx,
             enc,
             input,
@@ -767,6 +816,8 @@ pub(crate) unsafe fn encode_gated_delta_net_packed_into_workspace(
             &workspace.delta_state,
             scratch,
             tokens,
+            layer,
+            profile,
         )
     };
     if encoded.is_err() {
@@ -794,6 +845,35 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
     delta_state: &MetalTensor,
     scratch: &GatedDeltaNetPackedScratch,
     tokens: usize,
+) -> Result<MetalTensor, Qwen4ExpGdnError> {
+    unsafe {
+        encode_gated_delta_net_packed_inner(
+            ctx,
+            enc,
+            input,
+            weights,
+            conv_state,
+            delta_state,
+            scratch,
+            tokens,
+            0,
+            None,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_gated_delta_net_packed_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    conv_state: &MetalTensor,
+    delta_state: &MetalTensor,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+    layer: u32,
+    mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
 ) -> Result<MetalTensor, Qwen4ExpGdnError> {
     validate_packed_encoder(ctx, enc)?;
     if weights.geometry != scratch.geometry {
@@ -846,6 +926,11 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
     let output =
         scratch.prefix_view("packed GDN output", &scratch.output, g.hidden_size, tokens)?;
 
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("gdn.projections", layer, MixerKind::GatedDeltaNet),
+    )?;
     encode_mat_mat_dispatch(
         ctx,
         enc,
@@ -899,6 +984,12 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
         g.value_heads,
         tokens,
     )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("gdn.decay", layer, MixerKind::GatedDeltaNet),
+    )?;
     encode_gdn_decay_chain_batched_f32(
         ctx,
         enc,
@@ -908,6 +999,12 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
         &decay,
         tokens,
         g.value_heads,
+    )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("gdn.prep", layer, MixerKind::GatedDeltaNet),
     )?;
     encode_gdn_prep_packed_serial_f32(
         ctx,
@@ -923,6 +1020,12 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
         g.value_heads,
         g.head_dim,
     )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("gdn.norm", layer, MixerKind::GatedDeltaNet),
+    )?;
     encode_l2_norm_pair_batched_f32(
         ctx,
         enc,
@@ -933,6 +1036,12 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
         tokens * g.key_heads,
         g.head_dim,
         g.eps,
+    )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("gdn.recurrence", layer, MixerKind::GatedDeltaNet),
     )?;
     encode_gdn_step_decay_packed_f32(
         ctx,
@@ -949,6 +1058,12 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
         g.key_heads,
         g.head_dim,
     )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("gdn.gate_norm", layer, MixerKind::GatedDeltaNet),
+    )?;
     encode_rmsnorm_sigmoid_gated_packed(
         ctx,
         enc,
@@ -958,6 +1073,12 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
         &normalized,
         g,
         tokens,
+    )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("gdn.output", layer, MixerKind::GatedDeltaNet),
     )?;
     encode_mat_mat_dispatch(
         ctx,
@@ -969,6 +1090,7 @@ pub(crate) unsafe fn encode_gated_delta_net_packed(
         g.hidden_size,
         tokens,
     )?;
+    end_optional(&mut profile, enc, marker)?;
     Ok(output)
 }
 

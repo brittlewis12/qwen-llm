@@ -15,7 +15,10 @@ use crate::metal::{
 use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
 };
-use crate::qwen4exp::Qwen4ExpConfig;
+use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
+use crate::qwen4exp_profile::{
+    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
+};
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
@@ -1036,6 +1039,60 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
     scratch: &Qwen4ExpMoePackedMotorScratch,
     tokens: usize,
 ) -> Result<MetalTensor, Qwen4ExpMoeError> {
+    unsafe {
+        encode_qwen4exp_moe_packed_motor_inner(
+            ctx,
+            enc,
+            input,
+            weights,
+            scratch,
+            tokens,
+            0,
+            MixerKind::GatedDeltaNet,
+            None,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_profiled(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    scratch: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+    layer: u32,
+    mixer: MixerKind,
+    recorder: &mut Qwen4ExpPackedProfileRecorder<'_>,
+) -> Result<MetalTensor, Qwen4ExpMoeError> {
+    unsafe {
+        encode_qwen4exp_moe_packed_motor_inner(
+            ctx,
+            enc,
+            input,
+            weights,
+            scratch,
+            tokens,
+            layer,
+            mixer,
+            Some(recorder),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_qwen4exp_moe_packed_motor_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    scratch: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+    layer: u32,
+    mixer: MixerKind,
+    mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+) -> Result<MetalTensor, Qwen4ExpMoeError> {
     validate_encoder(ctx, enc)?;
     if weights.geometry != scratch.geometry {
         return invalid("packed MoE weight and scratch geometry differ");
@@ -1067,6 +1124,11 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
 
     preflight_packed(ctx, weights)?;
     let g = scratch.geometry;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.router", layer, mixer),
+    )?;
     encode_mat_mat_dispatch(
         ctx,
         enc,
@@ -1076,6 +1138,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         g.hidden_size,
         g.expert_count,
         tokens,
+    )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.topk", layer, mixer),
     )?;
     encode_topk_logits_softmax_dot_sigmoid_packed_f32(
         ctx,
@@ -1091,6 +1159,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         g.hidden_size,
         tokens,
     )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.bucket", layer, mixer),
+    )?;
     encode_moe_route_bucket_slots_f32(
         ctx,
         enc,
@@ -1100,6 +1174,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         g.expert_count,
         tokens,
         g.experts_per_token,
+    )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.routed_gate_up", layer, mixer),
     )?;
     match weights.routed_gate.dtype {
         GgmlType::IQ3_XXS => encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
@@ -1134,6 +1214,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         )?,
         dtype => return invalid(format!("unsupported packed routed gate/up dtype {dtype:?}")),
     }
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.routed_down", layer, mixer),
+    )?;
     match weights.routed_down.dtype {
         GgmlType::IQ4_NL => encode_moe_down_iq4_nl_f32_grouped_slots(
             ctx,
@@ -1163,6 +1249,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         )?,
         dtype => return invalid(format!("unsupported packed routed down dtype {dtype:?}")),
     }
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.routed_reduce", layer, mixer),
+    )?;
     encode_moe_weighted_sum_packed_f32(
         ctx,
         enc,
@@ -1172,6 +1264,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         g.hidden_size,
         g.experts_per_token,
         tokens,
+    )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.shared_gate_up", layer, mixer),
     )?;
     encode_mat_mat_dispatch(
         ctx,
@@ -1200,6 +1298,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         &views.shared_up_projection,
         &views.shared_inner,
     )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.shared_down", layer, mixer),
+    )?;
     encode_mat_mat_dispatch(
         ctx,
         enc,
@@ -1210,6 +1314,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         g.hidden_size,
         tokens,
     )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("moe.shared_merge", layer, mixer),
+    )?;
     encode_axpy_rowwise_f32(
         ctx,
         enc,
@@ -1219,6 +1329,7 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         g.hidden_size,
         tokens,
     )?;
+    end_optional(&mut profile, enc, marker)?;
     Ok(views.output)
 }
 

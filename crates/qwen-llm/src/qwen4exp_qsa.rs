@@ -19,6 +19,9 @@ use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
+use crate::qwen4exp_profile::{
+    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
+};
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::{GgmlType, ggml_type_layout};
 use objc2::rc::Retained;
@@ -1098,6 +1101,64 @@ pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor(
     start_position: usize,
     tokens: usize,
 ) -> Result<MetalTensor, Qwen4ExpQsaError> {
+    unsafe {
+        encode_qwen_sparse_attention_text_dense_packed_motor_inner(
+            ctx,
+            enc,
+            input,
+            weights,
+            workspace,
+            scratch,
+            start_position,
+            tokens,
+            0,
+            None,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_profiled(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    workspace: &mut QwenSparseAttentionMetalWorkspace,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    tokens: usize,
+    layer: u32,
+    recorder: &mut Qwen4ExpPackedProfileRecorder<'_>,
+) -> Result<MetalTensor, Qwen4ExpQsaError> {
+    unsafe {
+        encode_qwen_sparse_attention_text_dense_packed_motor_inner(
+            ctx,
+            enc,
+            input,
+            weights,
+            workspace,
+            scratch,
+            start_position,
+            tokens,
+            layer,
+            Some(recorder),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    workspace: &mut QwenSparseAttentionMetalWorkspace,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    tokens: usize,
+    layer: u32,
+    profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+) -> Result<MetalTensor, Qwen4ExpQsaError> {
     if tokens == 0 {
         return invalid("dense packed QSA token count must be nonzero");
     }
@@ -1150,6 +1211,8 @@ pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor(
         start_position,
         tokens,
         sequence_length,
+        layer,
+        profile,
     );
     if let Err(error) = encoded {
         workspace.state_poisoned = true;
@@ -1592,9 +1655,20 @@ fn encode_dense_packed_step(
     start_position: usize,
     tokens: usize,
     sequence_length: usize,
+    layer: u32,
+    mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
 ) -> Result<(), Qwen4ExpQsaError> {
     let g = workspace.geometry;
     let views = scratch.views(tokens)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail(
+            "qsa.index_projection",
+            layer,
+            MixerKind::QwenSparseAttention,
+        ),
+    )?;
     if weights.index_key.dtype == GgmlType::BF16 {
         // These values become persistent selector state. Keep F32 activations
         // instead of taking the global BF16-activation mat-mat shortcut.
@@ -1620,6 +1694,16 @@ fn encode_dense_packed_step(
             tokens,
         )?;
     }
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail(
+            "qsa.index_state",
+            layer,
+            MixerKind::QwenSparseAttention,
+        ),
+    )?;
     encode_packed_index_state(
         ctx,
         enc,
@@ -1630,9 +1714,29 @@ fn encode_dense_packed_step(
         tokens,
         sequence_length,
     )?;
+    end_optional(&mut profile, enc, marker)?;
     let visible_blocks = sequence_length / g.ratio;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail(
+            "qsa.visible_blocks",
+            layer,
+            MixerKind::QwenSparseAttention,
+        ),
+    )?;
     encode_fill_blocks(ctx, enc, workspace, visible_blocks, sequence_length)?;
+    end_optional(&mut profile, enc, marker)?;
 
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail(
+            "qsa.qkv_projections",
+            layer,
+            MixerKind::QwenSparseAttention,
+        ),
+    )?;
     encode_mat_mat_dispatch(
         ctx,
         enc,
@@ -1663,6 +1767,12 @@ fn encode_dense_packed_step(
         g.kv_width(),
         tokens,
     )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("qsa.norm_rope", layer, MixerKind::QwenSparseAttention),
+    )?;
     encode_qk_rms_norm_rope_f32_packed_consecutive(
         ctx,
         enc,
@@ -1681,8 +1791,18 @@ fn encode_dense_packed_step(
         g.eps,
         g.theta,
     )?;
+    end_optional(&mut profile, enc, marker)?;
     let cache_offset = start_position * g.kv_width();
     let cache_elements = tokens * g.kv_width();
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail(
+            "qsa.cache_scatter",
+            layer,
+            MixerKind::QwenSparseAttention,
+        ),
+    )?;
     encode_scatter_offset_f32_to_f16_kv(
         ctx,
         enc,
@@ -1693,9 +1813,15 @@ fn encode_dense_packed_step(
         cache_offset,
         cache_elements,
     )?;
+    end_optional(&mut profile, enc, marker)?;
 
     let group = g.query_heads / g.kv_heads;
     let mut tile_start = 0;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("qsa.attention", layer, MixerKind::QwenSparseAttention),
+    )?;
     while tile_start < tokens {
         let rows = (tokens - tile_start).min(scratch.query_tile);
         let query = views.query.view_subrange(
@@ -1754,6 +1880,12 @@ fn encode_dense_packed_step(
         )?;
         tile_start += rows;
     }
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("qsa.gate", layer, MixerKind::QwenSparseAttention),
+    )?;
     encode_sigmoid_mul_gate_strided_f32(
         ctx,
         enc,
@@ -1765,6 +1897,12 @@ fn encode_dense_packed_step(
         2 * g.head_dim,
         g.head_dim,
     )?;
+    end_optional(&mut profile, enc, marker)?;
+    let marker = begin_optional(
+        &mut profile,
+        enc,
+        Qwen4ExpPackedProfileLabel::detail("qsa.output", layer, MixerKind::QwenSparseAttention),
+    )?;
     encode_mat_mat_dispatch(
         ctx,
         enc,
@@ -1775,6 +1913,7 @@ fn encode_dense_packed_step(
         g.hidden_size,
         tokens,
     )?;
+    end_optional(&mut profile, enc, marker)?;
     Ok(())
 }
 

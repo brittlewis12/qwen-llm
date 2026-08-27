@@ -69,7 +69,8 @@ use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::qwen4exp::Qwen4ExpConfig;
 use qwen_llm::qwen4exp_runtime::{
-    Qwen4ExpLayerProfile, Qwen4ExpLayerStage, Qwen4ExpLoadedModel, Qwen4ExpPrefillTiming,
+    Qwen4ExpLayerProfile, Qwen4ExpLayerStage, Qwen4ExpLoadedModel, Qwen4ExpPackedPrefillProfile,
+    Qwen4ExpPackedProfileOutcome, Qwen4ExpPackedProfileScope, Qwen4ExpPrefillTiming,
     Qwen4ExpRuntimeError, Qwen4ExpSessionCapacity, Qwen4ExpTokenTiming,
 };
 use qwen_llm::runtime::{
@@ -106,6 +107,7 @@ const QWEN4EXP_CHAT_TEMPLATE_SHA256: [u8; 32] = [
     0x27, 0x05, 0x6b, 0x9f, 0x79, 0x72, 0x52, 0xa3, 0x14, 0x92, 0x63, 0xd4, 0xf9, 0xaa, 0xad, 0xce,
 ];
 const QWEN4EXP_LAYER_PROFILE_ENV: &str = "QWEN4EXP_LAYER_PROFILE";
+const QWEN4EXP_PACKED_PREFILL_PROFILE_ENV: &str = "QWEN4EXP_PACKED_PREFILL_PROFILE";
 const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 #[cfg(feature = "dsv4-diagnostics")]
 const DEEPSEEK_V4_TEMPORAL_WINDOW_ENV: &str = "QWEN_DSV4_TEMPORAL_WINDOW";
@@ -3777,6 +3779,110 @@ fn emit_qwen4exp_layer_profile(profile: &Qwen4ExpLayerProfile) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_qwen4exp_packed_profile(
+    outcome: &Qwen4ExpPackedProfileOutcome,
+    first: Qwen4ExpPrefillTiming,
+    warm: Qwen4ExpPrefillTiming,
+    first_copy_ms: f64,
+    warm_copy_ms: f64,
+    profiled_copy_ms: f64,
+    first_reset_ms: f64,
+    warm_reset_ms: f64,
+    packet_ms: f64,
+) {
+    for (pass, timing, copy_ms, reset_ms) in [
+        ("first", first, first_copy_ms, Some(first_reset_ms)),
+        ("warm", warm, warm_copy_ms, Some(warm_reset_ms)),
+    ] {
+        eprintln!(
+            "qwen4exp packed_profile_pass: pass={pass} tokens={} commands={} encode_cpu_ms={:.3} completion_wait_ms={:.3} gpu_ms={:?} gpu_samples={}/{} outside_gpu_ms={:?} runtime_wall_ms={:.3} logits_copy_ms={copy_ms:.3} reset_ms={reset_ms:?}",
+            timing.token_count,
+            timing.command_count,
+            timing.encode_cpu_ms,
+            timing.completion_wait_ms,
+            timing.complete_gpu_ms(),
+            timing.gpu_samples,
+            timing.command_count,
+            timing.outside_gpu_ms(),
+            timing.total_wall_ms,
+        );
+    }
+    let observer_gpu_ratio = warm
+        .complete_gpu_ms()
+        .zip(outcome.token.gpu_ms)
+        .map(|(baseline, profiled)| profiled / baseline);
+    let observer_wall_ratio = outcome.token.total_wall_ms / warm.total_wall_ms;
+    eprintln!(
+        "qwen4exp packed_profile: sampling={} sampling_fallback={:?} position={} command_gpu_ms={:?} runtime_wall_ms={:.3} encode_cpu_ms={:.3} preflight_ms={:.3} stage_inputs_ms={:.3} graph_encode_ms={:.3} encode_unattributed_ms={:.3} commit_return_ms={:.3} root_wait_ms={:.3} child_publication_ms={:.3} root_publish_ms={:.3} release_total_ms={:.3} observer_gpu_ratio={observer_gpu_ratio:?} observer_wall_ratio={observer_wall_ratio:.6} logits_copy_ms={profiled_copy_ms:.3} packet_ms={packet_ms:.3}",
+        outcome.sampling.as_str(),
+        outcome.sampling_fallback.as_deref(),
+        outcome.token.position,
+        outcome.token.gpu_ms,
+        outcome.token.total_wall_ms,
+        outcome.token.encode_cpu_ms,
+        outcome.encode.preflight_ms,
+        outcome.encode.stage_inputs_ms,
+        outcome.encode.graph_encode_ms,
+        outcome.encode.unattributed_ms,
+        outcome.command.commit_return_ms,
+        outcome.command.root_wait_ms,
+        outcome.command.child_publication_ms,
+        outcome.command.root_publish_ms,
+        outcome.command.release_total_ms,
+    );
+    if observer_gpu_ratio.is_none_or(|ratio| !(0.98..=1.02).contains(&ratio)) {
+        eprintln!(
+            "qwen4exp packed_profile_warning: observer GPU acceptance failed; ratio={observer_gpu_ratio:?}"
+        );
+    }
+}
+
+fn emit_qwen4exp_packed_timestamp_profile(profile: &Qwen4ExpPackedPrefillProfile) {
+    let coarse_gpu_ms = profile
+        .stages
+        .iter()
+        .filter(|stage| stage.label.scope == Qwen4ExpPackedProfileScope::Coarse)
+        .map(|stage| stage.gpu_ms)
+        .sum::<f64>();
+    eprintln!(
+        "qwen4exp packed_profile_timestamps: sampling={} sample_count={} sampled_span_ticks={} raw_span_ms_assuming_ns={:.3} raw_coverage_assuming_ns={:.6} coarse_gpu_ms={coarse_gpu_ms:.3}",
+        profile.sampling.as_str(),
+        profile.sample_count,
+        profile.sampled_span_ticks,
+        profile.raw_span_ms_assuming_ns,
+        profile.raw_coverage_assuming_ns,
+    );
+    if !(0.98..=1.02).contains(&profile.raw_coverage_assuming_ns) {
+        eprintln!(
+            "qwen4exp packed_profile_warning: raw timestamp coverage failed; coverage={:.6}",
+            profile.raw_coverage_assuming_ns,
+        );
+    }
+    for stage in &profile.stages {
+        let scope = stage.label.scope.as_str();
+        eprintln!(
+            "qwen4exp packed_profile_stage: scope={scope} name={} layer={:?} mixer={:?} samples={}..{} ticks={} gpu_ms={:.3} fraction={:.6}",
+            stage.label.name,
+            stage.label.layer,
+            stage.label.mixer,
+            stage.start_sample,
+            stage.end_sample,
+            stage.duration_ticks,
+            stage.gpu_ms,
+            stage.fraction_of_gpu,
+        );
+    }
+}
+
+fn qwen4exp_logits_bitwise_equal(left: &[f32], right: &[f32]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
 fn run_qwen4exp_single_turn(
     model_path: &Path,
     gguf: &GgufFile,
@@ -3826,8 +3932,21 @@ fn run_qwen4exp_single_turn(
         .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
     validate_qwen4exp_stop_tokens(&stop_tokens, vocab_size)?;
     let layer_profile_enabled = qwen_llm::env_flag::read_default_off(QWEN4EXP_LAYER_PROFILE_ENV);
-    let packed_prefill_requested = !layer_profile_enabled && prompt_tokens.len() > 1;
-    let prefill_request = if packed_prefill_requested {
+    let packed_profile_enabled =
+        qwen_llm::env_flag::read_default_off(QWEN4EXP_PACKED_PREFILL_PROFILE_ENV);
+    ensure!(
+        !layer_profile_enabled || !packed_profile_enabled,
+        "{QWEN4EXP_LAYER_PROFILE_ENV} and {QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} are mutually exclusive"
+    );
+    ensure!(
+        !packed_profile_enabled || prompt_tokens.len() >= 2,
+        "{QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} requires at least two prompt tokens"
+    );
+    let packed_prefill_requested =
+        !layer_profile_enabled && (packed_profile_enabled || prompt_tokens.len() > 1);
+    let prefill_request = if packed_profile_enabled {
+        "packed_profile"
+    } else if packed_prefill_requested {
         "packed"
     } else if layer_profile_enabled {
         "scalar_profiled"
@@ -3854,6 +3973,11 @@ fn run_qwen4exp_single_turn(
         ) {
             Ok(loaded) => (loaded, false),
             Err(packed_error) => {
+                if packed_profile_enabled {
+                    return Err(anyhow!(
+                        "load Qwen3.8-Flash-Next packed profile session failed ({packed_error})"
+                    ));
+                }
                 eprintln!(
                     "qwen4exp: packed prefill unavailable ({packed_error}); retrying scalar admission"
                 );
@@ -3877,7 +4001,9 @@ fn run_qwen4exp_single_turn(
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();
     let packed_prefill_capacity = loaded.packed_prefill_capacity();
-    let prefill_mode = if layer_profile_enabled {
+    let prefill_mode = if packed_profile_enabled {
+        "packed_profile"
+    } else if layer_profile_enabled {
         "scalar_profiled"
     } else if let Some(packed_capacity) = packed_prefill_capacity {
         if prompt_tokens.len() > packed_capacity {
@@ -3904,6 +4030,7 @@ fn run_qwen4exp_single_turn(
         .context("bind Qwen3.8-Flash-Next execution graph")?;
 
     let prefill_t0 = Instant::now();
+    let mut measured_prefill_ms = None;
     let mut prefill_timing = Qwen4ExpTimingTotals::default();
     let mut prefill_packed_tokens = 0;
     let mut prefill_scalar_tail_commands = prompt_tokens.len();
@@ -3938,6 +4065,87 @@ fn run_qwen4exp_single_turn(
             logits = Some(next_logits);
         }
         logits.expect("nonempty prompt produced endpoint logits")
+    } else if packed_profile_enabled {
+        let packed_capacity =
+            packed_prefill_capacity.expect("packed profile mode has an admitted packed workspace");
+        ensure!(
+            prompt_tokens.len() <= packed_capacity,
+            "{QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} requires the complete prompt to fit packed capacity {packed_capacity}; got {} tokens",
+            prompt_tokens.len()
+        );
+        let packet_t0 = Instant::now();
+
+        shutdown::checkpoint()?;
+        let first_completed = runner
+            .prefill(&prompt_tokens)
+            .context("run first unprofiled Flash-Next packed prefill")?;
+        let first_copy_t0 = Instant::now();
+        let first_logits = first_completed.to_vec();
+        let first_copy_ms = first_copy_t0.elapsed().as_secs_f64() * 1e3;
+        let first_timing = runner
+            .last_prefill_timing()
+            .expect("successful first packed prefill records timing");
+        let reset_t0 = Instant::now();
+        runner
+            .reset()
+            .context("reset Flash-Next after first packed profile pass")?;
+        let first_reset_ms = reset_t0.elapsed().as_secs_f64() * 1e3;
+
+        shutdown::checkpoint()?;
+        let warm_completed = runner
+            .prefill(&prompt_tokens)
+            .context("run warm unprofiled Flash-Next packed prefill")?;
+        let warm_copy_t0 = Instant::now();
+        let warm_logits = warm_completed.to_vec();
+        let warm_copy_ms = warm_copy_t0.elapsed().as_secs_f64() * 1e3;
+        let warm_timing = runner
+            .last_prefill_timing()
+            .expect("successful warm packed prefill records timing");
+        let reset_t0 = Instant::now();
+        runner
+            .reset()
+            .context("reset Flash-Next before profiled packed pass")?;
+        let warm_reset_ms = reset_t0.elapsed().as_secs_f64() * 1e3;
+
+        shutdown::checkpoint()?;
+        let profiled_t0 = Instant::now();
+        let outcome = runner
+            .prefill_packed_profiled(&prompt_tokens)
+            .context("profile Flash-Next packed prefill")?;
+        let profiled_copy_t0 = Instant::now();
+        let logits = runner.logits()?.to_vec();
+        let profiled_copy_ms = profiled_copy_t0.elapsed().as_secs_f64() * 1e3;
+        let profiled_ms = profiled_t0.elapsed().as_secs_f64() * 1e3;
+        ensure!(
+            qwen4exp_logits_bitwise_equal(&first_logits, &warm_logits)
+                && qwen4exp_logits_bitwise_equal(&warm_logits, &logits),
+            "Flash-Next packed profile passes produced different endpoint logits"
+        );
+        let timing = runner
+            .last_prefill_timing()
+            .expect("successful profiled packed prefill records timing");
+        debug_assert_eq!(timing.token_count, prompt_tokens.len());
+        prefill_packed_tokens = timing.packed_token_count;
+        prefill_scalar_tail_commands = 0;
+        prefill_timing.record_prefill(timing);
+        let packet_ms = packet_t0.elapsed().as_secs_f64() * 1e3;
+        emit_qwen4exp_packed_profile(
+            &outcome,
+            first_timing,
+            warm_timing,
+            first_copy_ms,
+            warm_copy_ms,
+            profiled_copy_ms,
+            first_reset_ms,
+            warm_reset_ms,
+            packet_ms,
+        );
+        match &outcome.profile {
+            Ok(profile) => emit_qwen4exp_packed_timestamp_profile(profile),
+            Err(error) => eprintln!("qwen4exp packed_profile_warning: {error}"),
+        }
+        measured_prefill_ms = Some(profiled_ms);
+        logits
     } else {
         let logits = runner
             .prefill_with_command_checkpoint(&prompt_tokens, || {
@@ -3957,7 +4165,8 @@ fn run_qwen4exp_single_turn(
         prefill_timing.record_prefill(timing);
         logits
     };
-    let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+    let prefill_ms =
+        measured_prefill_ms.unwrap_or_else(|| prefill_t0.elapsed().as_secs_f64() * 1e3);
     let mut sampler = Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
     let stdout_handle = std::io::stdout();
     let mut stdout = stdout_handle.lock();
@@ -12110,6 +12319,17 @@ mod tests {
         assert_eq!((partial.gpu_samples, partial.forwards), (2, 3));
         assert_eq!(partial.complete_gpu_ms(), None);
         assert_eq!(partial.outside_gpu_ms(), None);
+    }
+
+    #[test]
+    fn qwen4exp_profile_logit_replay_compares_float_bits() {
+        let nan = f32::from_bits(0x7fc0_0001);
+        assert!(qwen4exp_logits_bitwise_equal(&[nan, -0.0], &[nan, -0.0]));
+        assert!(!qwen4exp_logits_bitwise_equal(&[0.0], &[-0.0]));
+        assert!(!qwen4exp_logits_bitwise_equal(
+            &[nan],
+            &[f32::from_bits(0x7fc0_0002)]
+        ));
     }
 
     #[test]

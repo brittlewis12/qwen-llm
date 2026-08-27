@@ -9,6 +9,7 @@ use crate::qwen4exp_gdn::{
     GatedDeltaNetMetalGeometry, GatedDeltaNetMetalWeights, GatedDeltaNetMetalWorkspace,
     GatedDeltaNetPackedScratch, Qwen4ExpGdnError, encode_gated_delta_net,
     encode_gated_delta_net_packed_into_workspace,
+    encode_gated_delta_net_packed_into_workspace_profiled,
     validate_and_preflight_gated_delta_net_packed_workspace,
 };
 use crate::qwen4exp_layer_zero::Qwen4ExpResidualMetalWeights;
@@ -20,13 +21,18 @@ use crate::qwen4exp_metal::{
 use crate::qwen4exp_moe::{
     Qwen4ExpMoeError, Qwen4ExpMoeMetalGeometry, Qwen4ExpMoeMetalWeights, Qwen4ExpMoeMetalWorkspace,
     Qwen4ExpMoePackedMotorScratch, encode_qwen4exp_moe, encode_qwen4exp_moe_packed_motor,
-    preflight_packed as preflight_moe_packed, validate_packed_contract as validate_moe_packed,
+    encode_qwen4exp_moe_packed_motor_profiled, preflight_packed as preflight_moe_packed,
+    validate_packed_contract as validate_moe_packed,
+};
+use crate::qwen4exp_profile::{
+    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
 };
 use crate::qwen4exp_qsa::{
     Qwen4ExpQsaError, QwenSparseAttentionMetalGeometry, QwenSparseAttentionMetalWeights,
     QwenSparseAttentionMetalWorkspace, QwenSparseAttentionPackedScratch,
     encode_qwen_sparse_attention_text, encode_qwen_sparse_attention_text_dense_packed_motor,
-    preflight_dense_packed, validate_dense_packed_contract,
+    encode_qwen_sparse_attention_text_dense_packed_motor_profiled, preflight_dense_packed,
+    validate_dense_packed_contract,
 };
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
@@ -761,6 +767,76 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed(
     moe: &Qwen4ExpMoePackedMotorScratch,
     tokens: usize,
 ) -> Result<(), Qwen4ExpPostPleBlockError> {
+    unsafe {
+        encode_qwen4exp_post_ple_block_packed_inner(
+            ctx,
+            enc,
+            start_position,
+            hyper_residual,
+            bridge,
+            weights,
+            workspace,
+            residual,
+            gdn,
+            qsa,
+            moe,
+            tokens,
+            None,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_profiled(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    start_position: usize,
+    hyper_residual: &MetalTensor,
+    bridge: &MetalTensor,
+    weights: Qwen4ExpPostPleBlockMetalWeights<'_>,
+    workspace: &mut Qwen4ExpPostPleBlockMetalWorkspace,
+    residual: &mut GatedResidualPackedScratch,
+    gdn: &GatedDeltaNetPackedScratch,
+    qsa: &QwenSparseAttentionPackedScratch,
+    moe: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+    recorder: &mut Qwen4ExpPackedProfileRecorder<'_>,
+) -> Result<(), Qwen4ExpPostPleBlockError> {
+    unsafe {
+        encode_qwen4exp_post_ple_block_packed_inner(
+            ctx,
+            enc,
+            start_position,
+            hyper_residual,
+            bridge,
+            weights,
+            workspace,
+            residual,
+            gdn,
+            qsa,
+            moe,
+            tokens,
+            Some(recorder),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    start_position: usize,
+    hyper_residual: &MetalTensor,
+    bridge: &MetalTensor,
+    weights: Qwen4ExpPostPleBlockMetalWeights<'_>,
+    workspace: &mut Qwen4ExpPostPleBlockMetalWorkspace,
+    residual: &mut GatedResidualPackedScratch,
+    gdn: &GatedDeltaNetPackedScratch,
+    qsa: &QwenSparseAttentionPackedScratch,
+    moe: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+    profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+) -> Result<(), Qwen4ExpPostPleBlockError> {
     validate_and_preflight_packed(
         ctx,
         enc,
@@ -776,8 +852,16 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed(
         tokens,
     )?;
     reserve_command(workspace, enc)?;
+    let layer = workspace.geometry.layer();
+    let mixer = workspace.geometry.mixer().kind();
+    let mut profile = profile.filter(|recorder| recorder.is_detailed_layer(layer));
     let encoded = (|| {
         let g = workspace.geometry;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("block.attention_hc", layer, mixer),
+        )?;
         let attention = unsafe {
             encode_gated_residual_packed_mix(
                 ctx,
@@ -791,41 +875,102 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed(
                 tokens,
             )
         }?;
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("block.mixer", layer, mixer),
+        )?;
         let mixer_output = match (weights.mixer, &mut workspace.mixer) {
             (
                 Qwen4ExpPostPleMixerMetalWeights::GatedDeltaNet(weights),
                 Qwen4ExpPostPleMixerMetalWorkspace::GatedDeltaNet(workspace),
-            ) => unsafe {
-                encode_gated_delta_net_packed_into_workspace(
-                    ctx,
-                    enc,
-                    attention.mixed(),
-                    weights,
-                    workspace,
-                    gdn,
-                    tokens,
-                )
-            }?,
+            ) => {
+                if let Some(recorder) = profile.as_deref_mut() {
+                    unsafe {
+                        encode_gated_delta_net_packed_into_workspace_profiled(
+                            ctx,
+                            enc,
+                            attention.mixed(),
+                            weights,
+                            workspace,
+                            gdn,
+                            tokens,
+                            layer,
+                            recorder,
+                        )
+                    }?
+                } else {
+                    unsafe {
+                        encode_gated_delta_net_packed_into_workspace(
+                            ctx,
+                            enc,
+                            attention.mixed(),
+                            weights,
+                            workspace,
+                            gdn,
+                            tokens,
+                        )
+                    }?
+                }
+            }
             (
                 Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights),
                 Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace),
-            ) => unsafe {
-                encode_qwen_sparse_attention_text_dense_packed_motor(
-                    ctx,
-                    enc,
-                    attention.mixed(),
-                    weights,
-                    workspace,
-                    qsa,
-                    start_position,
-                    tokens,
-                )
-            }?,
+            ) => {
+                if let Some(recorder) = profile.as_deref_mut() {
+                    unsafe {
+                        encode_qwen_sparse_attention_text_dense_packed_motor_profiled(
+                            ctx,
+                            enc,
+                            attention.mixed(),
+                            weights,
+                            workspace,
+                            qsa,
+                            start_position,
+                            tokens,
+                            layer,
+                            recorder,
+                        )
+                    }?
+                } else {
+                    unsafe {
+                        encode_qwen_sparse_attention_text_dense_packed_motor(
+                            ctx,
+                            enc,
+                            attention.mixed(),
+                            weights,
+                            workspace,
+                            qsa,
+                            start_position,
+                            tokens,
+                        )
+                    }?
+                }
+            }
             _ => return invalid("packed mixer weight and workspace variants differ"),
         };
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("block.mixer_bridge", layer, mixer),
+        )?;
         encode_copy_offset_f32(ctx, enc, &mixer_output, 0, bridge, g.hidden_size * tokens)?;
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("block.attention_combine", layer, mixer),
+        )?;
         attention.encode_combine()?;
+        end_optional(&mut profile, enc, marker)?;
 
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("block.ffn_hc", layer, mixer),
+        )?;
         let ffn = unsafe {
             encode_gated_residual_packed_mix(
                 ctx,
@@ -839,11 +984,46 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed(
                 tokens,
             )
         }?;
-        let moe_output = unsafe {
-            encode_qwen4exp_moe_packed_motor(ctx, enc, ffn.mixed(), weights.moe, moe, tokens)
-        }?;
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("block.moe", layer, mixer),
+        )?;
+        let moe_output = if let Some(recorder) = profile.as_deref_mut() {
+            unsafe {
+                encode_qwen4exp_moe_packed_motor_profiled(
+                    ctx,
+                    enc,
+                    ffn.mixed(),
+                    weights.moe,
+                    moe,
+                    tokens,
+                    layer,
+                    mixer,
+                    recorder,
+                )
+            }?
+        } else {
+            unsafe {
+                encode_qwen4exp_moe_packed_motor(ctx, enc, ffn.mixed(), weights.moe, moe, tokens)
+            }?
+        };
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("block.moe_bridge", layer, mixer),
+        )?;
         encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, g.hidden_size * tokens)?;
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("block.ffn_combine", layer, mixer),
+        )?;
         ffn.encode_combine()?;
+        end_optional(&mut profile, enc, marker)?;
         Ok(())
     })();
     if encoded.is_err() {

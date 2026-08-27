@@ -220,13 +220,18 @@ intact. The force-ranked lane is now:
 1. Pin the upstream full-logit row for the HELLO boundary and one selected-QSA
    row above 4,096 tokens so packed qualification no longer rests solely on the
    local scalar engine.
-2. Profile the promoted packed command across short and long prompt bands before
-   changing its topology. Attribute the wall/command-GPU gap and price bridge
-   copies before building destination-aware motor outputs.
-3. For the next small decode falsifier, fuse each Q8 HC down projection with its
+2. Split standard GDN layer 5 and QSA layer 7 into six stage-sampled spans: HC
+   read, mixer, bridge/combine, FFN HC, MoE, and final bridge/combine. Keep one
+   command and require bitwise state/logits plus <=1.5% GPU observer overhead.
+3. Run an internal-SSD cold first-touch control. Keep storage/residency work
+   separate from warm kernel claims; warm packed execution is already >99% GPU.
+4. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
+   sum analogue of the existing Q8 fused path. Require at least `0.5 ms/token`
+   median command-GPU saving with a positive paired direction.
+5. Then test each Q8 HC down projection with its
    low-SiLU epilogue (97 dispatches/token) because it also removes a scratch
    pass; preserve the exact Q8 reduction and branch-count scaling.
-4. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
+6. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
    only if the HC result supports epilogue fusion; its routed-output read/modify/
    write dependency makes it the riskier candidate.
 
@@ -258,7 +263,16 @@ extent rather than the full decode budget and visibly falls back to scalar if
 the packed-only plan cannot load. The runtime submits one dense prefix command,
 checks shutdown before every scalar overflow command, and reports the actual
 packed/scalar split. Released 18-token HELLO runs retain output and scalar decode
-handoff. The next packed work is attribution, not more composition.
+handoff.
+
+Accepted N=18 and N=2,048 first/warm/profile packets close the broad attribution
+step. Warm outside-GPU time is only `2.026/6.397 ms`; child publication is
+`0.008/0.016 ms`. The cold first command instead carries `4,207/1,622 ms` of
+additional wall time with almost unchanged GPU intervals, making mmap/Metal
+first-touch a separate cold-TTFT lane. At N=2,048, bootstrap is 4.47%, post-PLE
+blocks 95.50%, and tail 0.03%. QSA blocks are only about 6-10% slower than GDN
+blocks, so the next packet must subtract their common HC/MoE work before any
+motor rewrite.
 
 Runtime admission now separates exact-release qualification from behavioral
 contracts. The full tokenizer fingerprint and released stop vector remain

@@ -67,6 +67,7 @@ pub mod qwen4exp_packed_prefill;
 pub mod qwen4exp_ple;
 pub mod qwen4exp_ple_metal;
 pub mod qwen4exp_post_ple_block;
+mod qwen4exp_profile;
 pub mod qwen4exp_qsa;
 pub mod qwen4exp_residency;
 pub mod qwen4exp_runtime;

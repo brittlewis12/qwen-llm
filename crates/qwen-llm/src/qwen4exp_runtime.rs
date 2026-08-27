@@ -1368,6 +1368,7 @@ mod tests {
     use super::*;
     use crate::metal::DispatchCensusRow;
     use crate::qwen4exp_moe::{
+        Qwen4ExpIq3GateUpProbeArm, Qwen4ExpIq3GateUpProbeRecord, with_qwen4exp_iq3_gate_up_probe,
         with_qwen4exp_moe_iq3_fast_override, with_qwen4exp_moe_route_count_capture,
         with_qwen4exp_packed_router_e8p32_strict_override,
     };
@@ -1627,6 +1628,34 @@ mod tests {
         }
     }
 
+    fn fill_f32_tensor_bits(tensor: &crate::metal::MetalTensor, bits: u32) {
+        assert_eq!(tensor.dtype, GgmlType::F32);
+        unsafe {
+            let destination = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<u32>();
+            std::slice::from_raw_parts_mut(destination, tensor.n_elements() as usize).fill(bits);
+        }
+    }
+
+    fn read_f32_tensor_bits(tensor: &crate::metal::MetalTensor) -> Vec<u32> {
+        assert_eq!(tensor.dtype, GgmlType::F32);
+        unsafe {
+            let source = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<u32>();
+            std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
+        }
+    }
+
     fn read_i32_tensor(tensor: &crate::metal::MetalTensor) -> Vec<i32> {
         assert_eq!(tensor.dtype, GgmlType::I32);
         unsafe {
@@ -1696,6 +1725,122 @@ mod tests {
                     expected.tg_threads,
                 ),
                 (
+                    actual.grid_width,
+                    actual.grid_height,
+                    actual.grid_depth,
+                    actual.threads_width,
+                    actual.threads_height,
+                    actual.threads_depth,
+                    actual.grid_tgs,
+                    actual.tg_threads,
+                ),
+                "{label} geometry {index}"
+            );
+        }
+    }
+
+    fn assert_iq3_gate_up_probe_census(
+        label: &str,
+        arm: Qwen4ExpIq3GateUpProbeArm,
+        records: &[Qwen4ExpIq3GateUpProbeRecord],
+        baseline: &[DispatchCensusRow],
+        candidate: &[DispatchCensusRow],
+    ) {
+        const PREFIX: &str = "qwen4exp.iq3_gate_up_probe.";
+        const KERNEL: &str = "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16";
+        let expected_layers = (0_u32..48)
+            .filter(|layer| !matches!(layer, 2 | 4 | 30 | 46 | 47))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), expected_layers.len(), "{label} records");
+        assert_eq!(candidate.len(), baseline.len() + expected_layers.len());
+        let probe_rows = candidate
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.tag
+                    .as_deref()
+                    .is_some_and(|tag| tag.starts_with(PREFIX))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(probe_rows.len(), expected_layers.len(), "{label} rows");
+        for (ordinal, ((index, row), (&layer, record))) in probe_rows
+            .iter()
+            .zip(expected_layers.iter().zip(records))
+            .enumerate()
+        {
+            let expected_tag = format!("qwen4exp.iq3_gate_up_probe.{}.layer{layer}", arm.as_str());
+            assert_eq!(row.tag.as_deref(), Some(expected_tag.as_str()));
+            assert_eq!(row.kernel, KERNEL);
+            assert_eq!(row.encoder_ordinal, 0);
+            assert!(!row.encoder_concurrent);
+            assert!(*index > 0 && *index + 1 < candidate.len());
+            assert_eq!(
+                candidate[*index - 1].kernel,
+                "kernel_moe_route_bucket_slots_f32"
+            );
+            let production = &candidate[*index + 1];
+            assert_eq!(production.kernel, KERNEL);
+            assert!(
+                production
+                    .tag
+                    .as_deref()
+                    .is_none_or(|tag| !tag.starts_with(PREFIX))
+            );
+            assert_eq!(
+                (
+                    row.grid_width,
+                    row.grid_height,
+                    row.grid_depth,
+                    row.threads_width,
+                    row.threads_height,
+                    row.threads_depth,
+                    row.grid_tgs,
+                    row.tg_threads,
+                ),
+                (
+                    production.grid_width,
+                    production.grid_height,
+                    production.grid_depth,
+                    production.threads_width,
+                    production.threads_height,
+                    production.threads_depth,
+                    production.grid_tgs,
+                    production.tg_threads,
+                )
+            );
+            assert_eq!(record.layer, layer);
+            assert_eq!(record.start_sample, ordinal * 2);
+            assert_eq!(record.end_sample, ordinal * 2 + 1);
+        }
+        let filtered = candidate
+            .iter()
+            .filter(|row| {
+                row.tag
+                    .as_deref()
+                    .is_none_or(|tag| !tag.starts_with(PREFIX))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(baseline.len(), filtered.len(), "{label} filtered census");
+        for (index, (expected, actual)) in baseline.iter().zip(filtered).enumerate() {
+            assert_eq!(expected.family, actual.family, "{label} family {index}");
+            assert_eq!(expected.tag, actual.tag, "{label} tag {index}");
+            assert_eq!(expected.kernel, actual.kernel, "{label} kernel {index}");
+            assert_eq!(
+                (
+                    expected.encoder_ordinal,
+                    expected.encoder_concurrent,
+                    expected.grid_width,
+                    expected.grid_height,
+                    expected.grid_depth,
+                    expected.threads_width,
+                    expected.threads_height,
+                    expected.threads_depth,
+                    expected.grid_tgs,
+                    expected.tg_threads,
+                ),
+                (
+                    actual.encoder_ordinal,
+                    actual.encoder_concurrent,
                     actual.grid_width,
                     actual.grid_height,
                     actual.grid_depth,
@@ -2025,45 +2170,156 @@ mod tests {
         })
     }
 
+    fn assert_packed_replay_state_bits_eq(
+        label: &str,
+        baseline: &PackedRouterReplay,
+        candidate: &PackedRouterReplay,
+    ) {
+        assert_f32_bits_eq(
+            &format!("{label} endpoint logits"),
+            &baseline.endpoint,
+            &candidate.endpoint,
+        );
+        assert_f32_bits_eq(
+            &format!("{label} continuation logits"),
+            &baseline.continuation,
+            &candidate.continuation,
+        );
+        assert_state_bytes_eq(
+            &format!("{label} packed persistent state"),
+            &baseline.prefill_state,
+            &candidate.prefill_state,
+        );
+        assert_state_bytes_eq(
+            &format!("{label} continuation persistent state"),
+            &baseline.continuation_state,
+            &candidate.continuation_state,
+        );
+        assert_eq!(candidate.prefill_qsa_lengths, baseline.prefill_qsa_lengths);
+        assert_eq!(
+            candidate.continuation_qsa_lengths,
+            baseline.continuation_qsa_lengths
+        );
+        assert_eq!(
+            candidate.prefill_ple_prior_tokens,
+            baseline.prefill_ple_prior_tokens
+        );
+        assert_eq!(
+            candidate.continuation_ple_prior_tokens,
+            baseline.continuation_ple_prior_tokens
+        );
+    }
+
     fn assert_packed_replay_bits_eq(
         label: &str,
         baseline: &PackedRouterReplay,
         captured: &PackedRouterReplay,
     ) {
-        assert_f32_bits_eq(
-            &format!("{label} endpoint logits"),
-            &baseline.endpoint,
-            &captured.endpoint,
-        );
-        assert_f32_bits_eq(
-            &format!("{label} continuation logits"),
-            &baseline.continuation,
-            &captured.continuation,
-        );
-        assert_state_bytes_eq(
-            &format!("{label} packed persistent state"),
-            &baseline.prefill_state,
-            &captured.prefill_state,
-        );
-        assert_state_bytes_eq(
-            &format!("{label} continuation persistent state"),
-            &baseline.continuation_state,
-            &captured.continuation_state,
-        );
-        assert_eq!(captured.prefill_qsa_lengths, baseline.prefill_qsa_lengths);
-        assert_eq!(
-            captured.continuation_qsa_lengths,
-            baseline.continuation_qsa_lengths
-        );
-        assert_eq!(
-            captured.prefill_ple_prior_tokens,
-            baseline.prefill_ple_prior_tokens
-        );
-        assert_eq!(
-            captured.continuation_ple_prior_tokens,
-            baseline.continuation_ple_prior_tokens
-        );
+        assert_packed_replay_state_bits_eq(label, baseline, captured);
         assert_route_count_capture_census(label, &baseline.census, &captured.census);
+    }
+
+    struct Iq3GateUpProbeObservation {
+        arm: Qwen4ExpIq3GateUpProbeArm,
+        command_gpu_ms: f64,
+        command_wall_ms: f64,
+        total_ticks: u64,
+        layer_ticks: Vec<(u32, u64)>,
+    }
+
+    impl Iq3GateUpProbeObservation {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "arm": self.arm.as_str(),
+                "command_gpu_ms_with_probe": self.command_gpu_ms,
+                "command_wall_ms_with_probe": self.command_wall_ms,
+                "total_probe_ticks": self.total_ticks,
+                "raw_probe_ms_assuming_ns": self.total_ticks as f64 * 1e-6,
+                "layers": self.layer_ticks.iter().map(|&(layer, ticks)| serde_json::json!({
+                    "layer": layer,
+                    "ticks": ticks
+                })).collect::<Vec<_>>()
+            })
+        }
+    }
+
+    fn resolve_iq3_gate_up_probe(
+        ctx: &MetalContext,
+        samples: &crate::metal::MetalTimestampSampleBuffer,
+        records: &[Qwen4ExpIq3GateUpProbeRecord],
+    ) -> (u64, Vec<(u32, u64)>) {
+        assert_eq!(records.len(), 43);
+        let sample_count = records.len() * 2;
+        let timestamps = ctx
+            .resolve_timestamp_samples(samples, sample_count)
+            .unwrap();
+        assert_eq!(timestamps.len(), sample_count);
+        assert!(!timestamps.contains(&u64::MAX));
+        assert!(timestamps.windows(2).all(|window| window[1] >= window[0]));
+        let mut total_ticks = 0_u64;
+        let mut layer_ticks = Vec::with_capacity(records.len());
+        for (ordinal, record) in records.iter().enumerate() {
+            assert_eq!(record.start_sample, ordinal * 2);
+            assert_eq!(record.end_sample, ordinal * 2 + 1);
+            let ticks = timestamps[record.end_sample]
+                .checked_sub(timestamps[record.start_sample])
+                .unwrap();
+            assert!(ticks > 0, "probe layer {} has zero ticks", record.layer);
+            total_ticks = total_ticks.checked_add(ticks).unwrap();
+            layer_ticks.push((record.layer, ticks));
+        }
+        (total_ticks, layer_ticks)
+    }
+
+    fn run_iq3_gate_up_probe_observation(
+        ctx: &MetalContext,
+        runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+        tokens: &[u32],
+        expected_endpoint: &[f32],
+        probe_output: &crate::metal::MetalTensor,
+        arm: Qwen4ExpIq3GateUpProbeArm,
+    ) -> Iq3GateUpProbeObservation {
+        runner.reset().unwrap();
+        zero_persistent_state(runner);
+        let samples = std::rc::Rc::new(ctx.timestamp_sample_buffer(86).unwrap());
+        let (endpoint, records) =
+            with_qwen4exp_iq3_gate_up_probe(arm, probe_output, samples.clone(), || {
+                runner.prefill(tokens).unwrap().to_vec()
+            });
+        assert_f32_bits_eq(
+            &format!("{} measured endpoint", arm.as_str()),
+            expected_endpoint,
+            &endpoint,
+        );
+        assert_eq!(runner.next_position(), tokens.len());
+        let timing = runner.last_prefill_timing().unwrap();
+        assert_eq!(timing.command_count, 1);
+        assert_eq!(timing.packed_token_count, tokens.len());
+        assert_eq!(timing.gpu_samples, 1);
+        let (total_ticks, layer_ticks) = resolve_iq3_gate_up_probe(ctx, &samples, &records);
+        Iq3GateUpProbeObservation {
+            arm,
+            command_gpu_ms: timing.gpu_ms,
+            command_wall_ms: timing.total_wall_ms,
+            total_ticks,
+            layer_ticks,
+        }
+    }
+
+    fn run_iq3_gate_up_control(
+        runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+        tokens: &[u32],
+        expected_endpoint: &[f32],
+    ) -> Qwen4ExpPrefillTiming {
+        runner.reset().unwrap();
+        zero_persistent_state(runner);
+        let endpoint = runner.prefill(tokens).unwrap().to_vec();
+        assert_f32_bits_eq("IQ3 gate/up control endpoint", expected_endpoint, &endpoint);
+        let timing = runner.last_prefill_timing().unwrap();
+        assert_eq!(timing.command_count, 1);
+        assert_eq!(timing.packed_token_count, tokens.len());
+        assert_eq!(timing.gpu_samples, 1);
+        timing
     }
 
     #[test]
@@ -2896,5 +3152,429 @@ mod tests {
             "wrote Qwen4Exp route-count census to {}",
             output_path.display()
         );
+    }
+
+    #[test]
+    #[ignore = "set the released GGUF plus QWEN4EXP_IQ3_GATE_UP_PROBE_* evidence variables"]
+    fn released_iq3_gate_up_range_probe_is_noop_and_measures_headroom() {
+        const TOKENS: usize = 2_048;
+        const ROUTED: usize = 640;
+        const TOP_K: usize = 10;
+        const MIRRORED_PAIRS: usize = 2;
+        const LEAF_GATE: f64 = 0.10;
+        const COMMAND_GATE: f64 = 0.01;
+        const MAX_CONTROL_DRIFT: f64 = 0.02;
+        const MAX_ADDITIVITY_RESIDUAL: f64 = 0.20;
+        const PROBE_SENTINEL: u32 = 0x7fc0_38a1;
+
+        let route_census_bytes = include_bytes!(
+            "../../../docs/bench/2026-08-27-qwen4exp-iq3-gate-up-census/route-count-census.json"
+        );
+        let route_census_sha256 = sha256_bytes(route_census_bytes);
+        assert_eq!(
+            route_census_sha256,
+            "ac48f12f0a0f5877e0c9261d69bdb0191103b2494b9d727a49f6bdb24d19ab08"
+        );
+        let route_census: serde_json::Value = serde_json::from_slice(route_census_bytes).unwrap();
+        let natural_census = route_census["workloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|workload| workload["label"] == "natural_roadmap_prefix_n2048")
+            .unwrap();
+        let panels = &natural_census["aggregates"]["credited_43"]["panels"]["16"];
+        let full_threadgroups = panels["full_panels"].as_u64().unwrap() * 10;
+        let active_threadgroups = panels["active_panels"].as_u64().unwrap() * 10;
+        let early_return_threadgroup_fraction =
+            (full_threadgroups - active_threadgroups) as f64 / full_threadgroups as f64;
+
+        let attribution_bytes = include_bytes!(
+            "../../../docs/bench/2026-08-27-qwen4exp-packed-moe-attribution/results.json"
+        );
+        let attribution_sha256 = sha256_bytes(attribution_bytes);
+        let attribution: serde_json::Value = serde_json::from_slice(attribution_bytes).unwrap();
+        let credited_gate_up_command_fraction = attribution["workloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|workload| workload["tokens"] == TOKENS)
+            .unwrap()["credited_command_share"]["routed_gate_up"]
+            .as_f64()
+            .unwrap();
+
+        let model_path = std::path::PathBuf::from(
+            std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
+                .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard"),
+        );
+        let output_path = std::path::PathBuf::from(
+            std::env::var_os("QWEN4EXP_IQ3_GATE_UP_PROBE_OUT")
+                .expect("QWEN4EXP_IQ3_GATE_UP_PROBE_OUT must name a new JSON report"),
+        );
+        let declared_source_commit = std::env::var("QWEN4EXP_IQ3_GATE_UP_PROBE_SOURCE")
+            .expect("QWEN4EXP_IQ3_GATE_UP_PROBE_SOURCE must be a full commit ID");
+        assert!(is_lower_hex(&declared_source_commit, 40));
+        let declared_tracked_diff_sha256 = std::env::var("QWEN4EXP_IQ3_GATE_UP_PROBE_DIFF_SHA256")
+            .expect("QWEN4EXP_IQ3_GATE_UP_PROBE_DIFF_SHA256 must identify the tracked diff");
+        assert!(is_lower_hex(&declared_tracked_diff_sha256, 64));
+
+        let test_executable = std::env::current_exe().unwrap();
+        let test_executable_bytes = std::fs::metadata(&test_executable).unwrap().len();
+        let test_executable_sha256 = sha256_file(&test_executable);
+        let embedded_metallib_sha256 = sha256_bytes(crate::KERNELS_METALLIB);
+        let gguf = GgufFile::open(&model_path).expect("open released UD-Q3_K_XL GGUF");
+        let shard_stamps = gguf.revalidate_retained_shard_stamps().unwrap();
+        assert_eq!(shard_stamps.len(), 3);
+        let shard_rows = shard_stamps
+            .iter()
+            .map(|stamp| {
+                serde_json::json!({
+                    "index": stamp.shard_idx,
+                    "path": &stamp.path,
+                    "device": stamp.device,
+                    "inode": stamp.inode,
+                    "size": stamp.size,
+                    "mtime_sec": stamp.mtime_sec,
+                    "mtime_nsec": stamp.mtime_nsec,
+                    "ctime_sec": stamp.ctime_sec,
+                    "ctime_nsec": stamp.ctime_nsec
+                })
+            })
+            .collect::<Vec<_>>();
+        let tokenizer = Tokenizer::from_gguf(&gguf).unwrap();
+        let tokens = natural_census["prompt_token_ids"]
+            .as_array()
+            .unwrap()
+            .into_iter()
+            .map(|token| u32::try_from(token.as_u64().unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(tokens.len(), TOKENS);
+        let marker = tokenizer.encode("<|im_start|>", false).unwrap();
+        assert_eq!(marker.len(), 1);
+        let marker = u32::try_from(marker[0]).unwrap();
+        let prompt_domain = format!("qwen4exp-iq3-gate-up-probe-prompt-u32le-v1;n={TOKENS}\0");
+        let prompt_sha256 = sha256_u32_le(prompt_domain.as_bytes(), &tokens);
+
+        let ctx = MetalContext::new().unwrap();
+        assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(
+            &Qwen4ExpConfig::flash_next_reference(),
+            TOKENS + 1,
+        )
+        .unwrap();
+        let mut loaded =
+            Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, TOKENS).unwrap();
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+        let probe_output = crate::metal::MetalTensor::zeros_f32(
+            &ctx,
+            vec![ROUTED as u64, TOP_K as u64, TOKENS as u64],
+        )
+        .unwrap();
+
+        runner.reset().unwrap();
+        zero_persistent_state(&runner);
+        let _ = runner.prefill(&tokens).unwrap();
+        let warm_timing = runner.last_prefill_timing().unwrap();
+
+        runner.reset().unwrap();
+        zero_persistent_state(&runner);
+        let baseline = run_packed_replay(&mut runner, &tokens, marker);
+        let baseline_timing = runner.last_prefill_timing().unwrap();
+        let baseline_digests = PackedReplayDigests::from_replay(&baseline);
+
+        let mut qualification_rows = Vec::new();
+        for arm in Qwen4ExpIq3GateUpProbeArm::ALL {
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            fill_f32_tensor_bits(&probe_output, PROBE_SENTINEL);
+            let samples = std::rc::Rc::new(ctx.timestamp_sample_buffer(86).unwrap());
+            let (candidate, records) =
+                with_qwen4exp_iq3_gate_up_probe(arm, &probe_output, samples.clone(), || {
+                    run_packed_replay(&mut runner, &tokens, marker)
+                });
+            let timing = runner.last_prefill_timing().unwrap();
+            assert_packed_replay_state_bits_eq(arm.as_str(), &baseline, &candidate);
+            assert_iq3_gate_up_probe_census(
+                arm.as_str(),
+                arm,
+                &records,
+                &baseline.census,
+                &candidate.census,
+            );
+            let (total_ticks, layer_ticks) = resolve_iq3_gate_up_probe(&ctx, &samples, &records);
+            if arm == Qwen4ExpIq3GateUpProbeArm::NoWork {
+                assert!(
+                    read_f32_tensor_bits(&probe_output)
+                        .iter()
+                        .all(|&bits| bits == PROBE_SENTINEL)
+                );
+            }
+            qualification_rows.push(serde_json::json!({
+                "arm": arm.as_str(),
+                "diagnostic_non_contamination_replay_exact": true,
+                "diagnostic_output_qualified_by_explicit_synthetic_all_band_fixture": true,
+                "ordinary_topology_after_filtering": true,
+                "probe_dispatches": records.len(),
+                "total_probe_ticks": total_ticks,
+                "command_gpu_ms_with_probe": timing.gpu_ms,
+                "candidate_replay_digests": PackedReplayDigests::from_replay(&candidate).json(),
+                "layers": layer_ticks.iter().map(|&(layer, ticks)| serde_json::json!({
+                    "layer": layer,
+                    "ticks": ticks
+                })).collect::<Vec<_>>()
+            }));
+        }
+
+        let forward = Qwen4ExpIq3GateUpProbeArm::ALL;
+        let reverse = [
+            Qwen4ExpIq3GateUpProbeArm::Full,
+            Qwen4ExpIq3GateUpProbeArm::Count65Plus,
+            Qwen4ExpIq3GateUpProbeArm::Count33To64,
+            Qwen4ExpIq3GateUpProbeArm::Count17To32,
+            Qwen4ExpIq3GateUpProbeArm::Count9To16,
+            Qwen4ExpIq3GateUpProbeArm::Count1To8,
+            Qwen4ExpIq3GateUpProbeArm::NoWork,
+        ];
+        let mut sequence_rows = Vec::new();
+        let mut control_rows = Vec::new();
+        let mut sequence_headroom = Vec::new();
+        for pair in 0..MIRRORED_PAIRS {
+            for (direction, order) in [("forward", forward), ("reverse", reverse)] {
+                let sequence = sequence_rows.len();
+                let before = run_iq3_gate_up_control(&mut runner, &tokens, &baseline.endpoint);
+                control_rows.push(serde_json::json!({
+                    "sequence": sequence,
+                    "pair": pair,
+                    "direction": direction,
+                    "position": "before",
+                    "gpu_ms": before.gpu_ms,
+                    "wall_ms": before.total_wall_ms
+                }));
+                let observations = order
+                    .into_iter()
+                    .map(|arm| {
+                        run_iq3_gate_up_probe_observation(
+                            &ctx,
+                            &mut runner,
+                            &tokens,
+                            &baseline.endpoint,
+                            &probe_output,
+                            arm,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let after = run_iq3_gate_up_control(&mut runner, &tokens, &baseline.endpoint);
+                control_rows.push(serde_json::json!({
+                    "sequence": sequence,
+                    "pair": pair,
+                    "direction": direction,
+                    "position": "after",
+                    "gpu_ms": after.gpu_ms,
+                    "wall_ms": after.total_wall_ms
+                }));
+                let ticks = |arm| {
+                    observations
+                        .iter()
+                        .find(|observation| observation.arm == arm)
+                        .unwrap()
+                        .total_ticks as f64
+                };
+                let no_work = ticks(Qwen4ExpIq3GateUpProbeArm::NoWork);
+                let full = ticks(Qwen4ExpIq3GateUpProbeArm::Full);
+                let optimistic_leaf_headroom = (no_work / full) * early_return_threadgroup_fraction;
+                let optimistic_command_headroom =
+                    optimistic_leaf_headroom * credited_gate_up_command_fraction;
+                let band_increment_values = [
+                    Qwen4ExpIq3GateUpProbeArm::Count1To8,
+                    Qwen4ExpIq3GateUpProbeArm::Count9To16,
+                    Qwen4ExpIq3GateUpProbeArm::Count17To32,
+                    Qwen4ExpIq3GateUpProbeArm::Count33To64,
+                    Qwen4ExpIq3GateUpProbeArm::Count65Plus,
+                ]
+                .into_iter()
+                .map(|arm| (arm, ticks(arm) - no_work))
+                .collect::<Vec<_>>();
+                let band_increments = band_increment_values
+                    .iter()
+                    .map(|&(arm, increment)| {
+                        serde_json::json!({
+                            "arm": arm.as_str(),
+                            "ticks_minus_no_work": increment,
+                            "fraction_of_full": increment / full
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let additive_increment = band_increment_values
+                    .iter()
+                    .map(|&(_, increment)| increment)
+                    .sum::<f64>();
+                let full_increment = full - no_work;
+                let control_mean = (before.gpu_ms + after.gpu_ms) * 0.5;
+                let control_drift = (after.gpu_ms - before.gpu_ms).abs() / control_mean;
+                let additivity_residual = additive_increment - full_increment;
+                let additivity_residual_fraction = if full_increment > 0.0 {
+                    additivity_residual.abs() / full_increment
+                } else {
+                    f64::INFINITY
+                };
+                let band_increments_nonnegative = band_increment_values
+                    .iter()
+                    .all(|&(_, increment)| increment >= 0.0);
+                let sequence_valid = full_increment > 0.0
+                    && band_increments_nonnegative
+                    && additivity_residual_fraction <= MAX_ADDITIVITY_RESIDUAL
+                    && control_drift <= MAX_CONTROL_DRIFT;
+                sequence_headroom.push((
+                    optimistic_leaf_headroom,
+                    optimistic_command_headroom,
+                    sequence_valid,
+                ));
+                sequence_rows.push(serde_json::json!({
+                    "sequence": sequence,
+                    "pair": pair,
+                    "direction": direction,
+                    "control_bracket_gpu_ms": [before.gpu_ms, after.gpu_ms],
+                    "observations": observations.iter().map(Iq3GateUpProbeObservation::json).collect::<Vec<_>>(),
+                    "derived": {
+                        "no_work_ticks": no_work,
+                        "full_ticks": full,
+                        "full_minus_no_work_ticks": full_increment,
+                        "band_increments": band_increments,
+                        "band_increments_nonnegative": band_increments_nonnegative,
+                        "additivity_residual_ticks": additivity_residual,
+                        "absolute_additivity_residual_fraction_of_useful_increment": additivity_residual_fraction,
+                        "control_drift_fraction": control_drift,
+                        "sequence_valid": sequence_valid,
+                        "optimistic_leaf_headroom_heuristic": optimistic_leaf_headroom,
+                        "optimistic_command_headroom_heuristic": optimistic_command_headroom,
+                        "clears_leaf_heuristic": optimistic_leaf_headroom >= LEAF_GATE,
+                        "clears_command_heuristic": optimistic_command_headroom >= COMMAND_GATE
+                    }
+                }));
+            }
+        }
+        let minimum_leaf_headroom = sequence_headroom
+            .iter()
+            .map(|&(leaf, _, _)| leaf)
+            .fold(f64::INFINITY, f64::min);
+        let minimum_command_headroom = sequence_headroom
+            .iter()
+            .map(|&(_, command, _)| command)
+            .fold(f64::INFINITY, f64::min);
+        let all_sequences_valid = sequence_headroom.iter().all(|&(_, _, valid)| valid);
+        let heuristic_prototype_triage_pass = all_sequences_valid
+            && minimum_leaf_headroom >= LEAF_GATE
+            && minimum_command_headroom >= COMMAND_GATE;
+
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "implementation": {
+                "operator_declared_source_commit": declared_source_commit,
+                "operator_declared_tracked_diff_sha256": declared_tracked_diff_sha256,
+                "operator_declaration_verification": "lowercase hexadecimal syntax only; executable and metallib hashes identify the runnable artifacts",
+                "tracked_diff_definition": "sha256(git diff --binary --no-ext-diff HEAD --)",
+                "test_executable": {
+                    "path": test_executable,
+                    "size": test_executable_bytes,
+                    "sha256": test_executable_sha256
+                },
+                "embedded_metallib": {
+                    "size": crate::KERNELS_METALLIB.len(),
+                    "sha256": embedded_metallib_sha256
+                }
+            },
+            "imported_evidence": {
+                "route_census": {
+                    "path": "docs/bench/2026-08-27-qwen4exp-iq3-gate-up-census/route-count-census.json",
+                    "sha256": route_census_sha256,
+                    "evidence_binding_sha256": route_census["implementation"]["evidence_binding_sha256"],
+                    "full_threadgroups": full_threadgroups,
+                    "active_threadgroups": active_threadgroups,
+                    "early_return_threadgroup_fraction": early_return_threadgroup_fraction
+                },
+                "packed_moe_attribution": {
+                    "path": "docs/bench/2026-08-27-qwen4exp-packed-moe-attribution/results.json",
+                    "sha256": attribution_sha256,
+                    "source_commit": attribution["source_commit"],
+                    "credited_gate_up_command_fraction": credited_gate_up_command_fraction,
+                    "status": "bound imported attribution; not remeasured by this probe"
+                }
+            },
+            "model": {
+                "operator_expected_repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+                "operator_expected_revision": "8bdc666649440e9bdc97e16f3f75782c98478ff5",
+                "operator_expected_quant": "UD-Q3_K_XL",
+                "identity_scope": "local files are bound only by revalidated retained descriptor stamps; this probe does not hash local bytes against expected LFS digests",
+                "shards": shard_rows
+            },
+            "device": {
+                "name": ctx.device.name().to_string(),
+                "registry_id": ctx.device.registryID()
+            },
+            "workload": {
+                "label": "natural_roadmap_prefix_n2048",
+                "tokens": TOKENS,
+                "population_representative": false,
+                "lever_decision_scope": "single natural technical-text sample",
+                "prompt_domain_utf8": prompt_domain,
+                "prompt_token_ids": tokens,
+                "prompt_token_ids_sha256_u32le": prompt_sha256
+            },
+            "protocol": {
+                "purpose": "triage compact N16 active-panel descriptors before implementation",
+                "performance_eligible": false,
+                "one_diagnostic_arm_per_command": true,
+                "production_dispatch_follows_probe": true,
+                "same_command_arm_to_arm_warming_avoided": true,
+                "cross_command_weight_and_output_residency_shared": true,
+                "mirrored_pairs": MIRRORED_PAIRS,
+                "measured_sequences": MIRRORED_PAIRS * 2,
+                "credited_layers": 43,
+                "samples_per_command": 86,
+                "early_return_threadgroup_fraction": early_return_threadgroup_fraction,
+                "credited_gate_up_command_fraction": credited_gate_up_command_fraction,
+                "optimistic_leaf_heuristic": LEAF_GATE,
+                "optimistic_command_heuristic": COMMAND_GATE,
+                "maximum_control_drift_fraction": MAX_CONTROL_DRIFT,
+                "maximum_absolute_additivity_residual_fraction_of_useful_increment": MAX_ADDITIVITY_RESIDUAL,
+                "limitations": [
+                    "no-work is the full direct grid filtered to perform no matrix writes",
+                    "the headroom heuristic is optimistic, not a confidence bound or performance gate",
+                    "subtraction does not predict descriptor-build or indirect-dispatch cost",
+                    "fixed dispatch and timestamp costs remain in both direct and future compact paths",
+                    "raw timestamp ratios, not command-with-probe timing, drive triage"
+                ]
+            },
+            "warmup": {
+                "gpu_ms": warm_timing.gpu_ms,
+                "wall_ms": warm_timing.total_wall_ms
+            },
+            "ordinary_baseline": {
+                "gpu_ms": baseline_timing.gpu_ms,
+                "wall_ms": baseline_timing.total_wall_ms,
+                "replay_digests": baseline_digests.json()
+            },
+            "qualification": qualification_rows,
+            "controls": control_rows,
+            "sequences": sequence_rows,
+            "decision": {
+                "scope": "heuristic prototype triage only; cannot satisfy the candidate performance gate",
+                "rule": "all four sequences must pass drift, monotonic increment, and additivity checks; their minimum optimistic heuristics must clear both screens",
+                "all_sequences_valid": all_sequences_valid,
+                "minimum_optimistic_leaf_headroom_heuristic": minimum_leaf_headroom,
+                "minimum_optimistic_command_headroom_heuristic": minimum_command_headroom,
+                "heuristic_prototype_triage_pass": heuristic_prototype_triage_pass,
+                "prototype_if_screened_in": "compact N16 active-panel descriptors plus indirect dispatch; retain arithmetic and 16 KiB TGM; require a separate paired candidate A/B"
+            }
+        });
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .expect("probe output path must not already exist");
+        let mut report_bytes = serde_json::to_vec_pretty(&report).unwrap();
+        report_bytes.push(b'\n');
+        std::io::Write::write_all(&mut output, &report_bytes).unwrap();
+        output.sync_all().unwrap();
+        eprintln!("wrote IQ3 gate/up probe to {}", output_path.display());
     }
 }

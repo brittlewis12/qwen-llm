@@ -8111,6 +8111,14 @@ pub fn encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
+    if min_count > max_count || max_count > i32::MAX as u32 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs_grouped_slots_n16",
+            detail: format!(
+                "count range [{min_count}, {max_count}] must be ordered and fit signed kernel arguments"
+            ),
+        });
+    }
     if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_iq3_xxs_grouped_slots_n16",

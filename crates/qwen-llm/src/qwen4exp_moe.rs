@@ -1,7 +1,5 @@
 //! One-token Metal MoE execution for Qwen3.8-Flash-Next.
 
-#[cfg(test)]
-use crate::metal::encode_copy_offset_i32;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
@@ -14,6 +12,11 @@ use crate::metal::{
     encode_moe_weighted_sum_f32, encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32,
     encode_silu_mul_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
     encode_topk_logits_softmax_f32,
+};
+#[cfg(test)]
+use crate::metal::{
+    dispatch_census_tag_scope, encode_copy_offset_i32,
+    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range,
 };
 use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
@@ -48,6 +51,77 @@ struct Qwen4ExpMoeRouteCountCaptureBinding {
     seen_layers: std::rc::Rc<std::cell::RefCell<[bool; 48]>>,
 }
 
+#[cfg(test)]
+const QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS: usize = 43;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Qwen4ExpIq3GateUpProbeArm {
+    NoWork,
+    Count1To8,
+    Count9To16,
+    Count17To32,
+    Count33To64,
+    Count65Plus,
+    Full,
+}
+
+#[cfg(test)]
+impl Qwen4ExpIq3GateUpProbeArm {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::NoWork,
+        Self::Count1To8,
+        Self::Count9To16,
+        Self::Count17To32,
+        Self::Count33To64,
+        Self::Count65Plus,
+        Self::Full,
+    ];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoWork => "no_work",
+            Self::Count1To8 => "count_1_8",
+            Self::Count9To16 => "count_9_16",
+            Self::Count17To32 => "count_17_32",
+            Self::Count33To64 => "count_33_64",
+            Self::Count65Plus => "count_65_plus",
+            Self::Full => "full",
+        }
+    }
+
+    const fn bounds(self) -> (u32, u32) {
+        match self {
+            Self::NoWork => (0, 0),
+            Self::Count1To8 => (1, 8),
+            Self::Count9To16 => (9, 16),
+            Self::Count17To32 => (17, 32),
+            Self::Count33To64 => (33, 64),
+            Self::Count65Plus => (65, i32::MAX as u32),
+            Self::Full => (0, i32::MAX as u32),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Qwen4ExpIq3GateUpProbeRecord {
+    pub layer: u32,
+    pub start_sample: usize,
+    pub end_sample: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct Qwen4ExpIq3GateUpProbeBinding {
+    arm: Qwen4ExpIq3GateUpProbeArm,
+    output: MetalTensor,
+    samples: std::rc::Rc<MetalTimestampSampleBuffer>,
+    next_sample: std::rc::Rc<std::cell::Cell<usize>>,
+    records: std::rc::Rc<std::cell::RefCell<Vec<Qwen4ExpIq3GateUpProbeRecord>>>,
+    seen_layers: std::rc::Rc<std::cell::RefCell<[bool; 48]>>,
+}
+
 crate::env_flag!(
     default_on configured_qwen4exp_moe_iq3_fast_enabled,
     "QWEN4EXP_MOE_IQ3_FAST"
@@ -66,6 +140,9 @@ thread_local! {
         std::cell::Cell::new(None)
     };
     static QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE: std::cell::RefCell<Option<Qwen4ExpMoeRouteCountCaptureBinding>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static QWEN4EXP_IQ3_GATE_UP_PROBE: std::cell::RefCell<Option<Qwen4ExpIq3GateUpProbeBinding>> = const {
         std::cell::RefCell::new(None)
     };
 }
@@ -138,6 +215,7 @@ pub(crate) fn with_qwen4exp_moe_route_count_capture<R>(
     assert_eq!(output.dtype, GgmlType::I32);
     assert_eq!(output.shape, [EXPERTS as u64, LAYERS as u64]);
     assert!(output.is_writable());
+    assert!(!qwen4exp_iq3_gate_up_probe_active());
 
     struct RestoreCapture(Option<Qwen4ExpMoeRouteCountCaptureBinding>);
 
@@ -170,6 +248,66 @@ pub(crate) fn with_qwen4exp_moe_route_count_capture<R>(
 #[cfg(test)]
 pub(crate) fn qwen4exp_moe_route_count_capture_active() -> bool {
     QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE.with(|slot| slot.borrow().is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_iq3_gate_up_probe<R>(
+    arm: Qwen4ExpIq3GateUpProbeArm,
+    output: &MetalTensor,
+    samples: std::rc::Rc<MetalTimestampSampleBuffer>,
+    f: impl FnOnce() -> R,
+) -> (R, Vec<Qwen4ExpIq3GateUpProbeRecord>) {
+    assert_eq!(output.dtype, GgmlType::F32);
+    assert!(output.is_writable());
+    assert!(
+        samples.sample_count() >= QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS * 2,
+        "IQ3 gate/up probe needs at least {} samples",
+        QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS * 2
+    );
+    assert!(!qwen4exp_moe_route_count_capture_active());
+    QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| {
+        assert!(slot.borrow().is_none(), "IQ3 gate/up probe cannot nest");
+    });
+
+    struct RestoreProbe;
+
+    impl Drop for RestoreProbe {
+        fn drop(&mut self) {
+            QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    let next_sample = std::rc::Rc::new(std::cell::Cell::new(0));
+    let records = std::rc::Rc::new(std::cell::RefCell::new(Vec::with_capacity(
+        QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS,
+    )));
+    let seen_layers = std::rc::Rc::new(std::cell::RefCell::new([false; 48]));
+    QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| {
+        *slot.borrow_mut() = Some(Qwen4ExpIq3GateUpProbeBinding {
+            arm,
+            output: output.clone(),
+            samples,
+            next_sample,
+            records: records.clone(),
+            seen_layers,
+        });
+    });
+    let _restore = RestoreProbe;
+    let result = f();
+    let records = records.borrow().clone();
+    (result, records)
+}
+
+#[cfg(test)]
+pub(crate) fn qwen4exp_iq3_gate_up_probe_active() -> bool {
+    QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| slot.borrow().is_some())
+}
+
+#[cfg(test)]
+const fn qwen4exp_iq3_gate_up_probe_layer(layer: u32) -> bool {
+    layer < 48 && !matches!(layer, 2 | 4 | 30 | 46 | 47)
 }
 
 #[cfg(test)]
@@ -1316,6 +1454,8 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
         mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
     ) -> Result<(), Qwen4ExpMoeError> {
         let g = self.weights.geometry;
+        #[cfg(test)]
+        self.encode_iq3_gate_up_probe(ctx, enc, layer)?;
         let marker = begin_optional(
             &mut profile,
             enc,
@@ -1358,6 +1498,106 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
         }
         end_optional(&mut profile, enc, marker)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn encode_iq3_gate_up_probe(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        if self.weights.routed_gate.dtype != GgmlType::IQ3_XXS
+            || !qwen4exp_iq3_gate_up_probe_layer(layer)
+        {
+            return Ok(());
+        }
+        QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| {
+            let binding = slot.borrow();
+            let Some(binding) = binding.as_ref() else {
+                return Ok(());
+            };
+            let layer_index = usize::try_from(layer).map_err(|_| {
+                Qwen4ExpMoeError::Invalid("IQ3 gate/up probe layer exceeds usize".into())
+            })?;
+            if binding.seen_layers.borrow()[layer_index] {
+                return invalid(format!(
+                    "IQ3 gate/up probe received duplicate layer {layer}"
+                ));
+            }
+            if binding.output.shape != self.views.routed_inner.shape {
+                return invalid(format!(
+                    "IQ3 gate/up probe output shape {:?} differs from routed inner {:?}",
+                    binding.output.shape, self.views.routed_inner.shape
+                ));
+            }
+            require_same_device(
+                ctx,
+                &[
+                    ("IQ3 gate/up probe output", &binding.output),
+                    ("IQ3 gate/up input", self.input),
+                    ("IQ3 gate/up route counts", &self.views.route_counts),
+                    ("IQ3 gate/up route slots", &self.views.route_slots),
+                    ("IQ3 gate/up routed inner", &self.views.routed_inner),
+                ],
+            )?;
+            require_disjoint(&[
+                ("IQ3 gate/up probe output", &binding.output),
+                ("IQ3 gate/up input", self.input),
+                ("IQ3 gate/up route counts", &self.views.route_counts),
+                ("IQ3 gate/up route slots", &self.views.route_slots),
+                ("IQ3 gate/up routed inner", &self.views.routed_inner),
+            ])?;
+            let start_sample = binding.next_sample.get();
+            let end_sample = start_sample
+                .checked_add(1)
+                .ok_or_else(|| Qwen4ExpMoeError::Invalid("probe sample index overflow".into()))?;
+            if end_sample >= binding.samples.sample_count() {
+                return invalid(format!(
+                    "IQ3 gate/up probe sample {end_sample} exceeds {} samples",
+                    binding.samples.sample_count()
+                ));
+            }
+            enc.sample_counters(&binding.samples, start_sample, true);
+            let (min_count, max_count) = binding.arm.bounds();
+            let _tag = dispatch_census_tag_scope(|| {
+                format!(
+                    "qwen4exp.iq3_gate_up_probe.{}.layer{layer}",
+                    binding.arm.as_str()
+                )
+            });
+            let g = self.weights.geometry;
+            encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+                ctx,
+                enc,
+                self.weights.routed_gate,
+                self.weights.routed_up,
+                self.input,
+                &self.views.route_counts,
+                &self.views.route_slots,
+                &binding.output,
+                g.hidden_size,
+                g.routed_intermediate_size,
+                g.expert_count,
+                g.experts_per_token,
+                self.tokens,
+                min_count,
+                max_count,
+            )?;
+            drop(_tag);
+            enc.sample_counters(&binding.samples, end_sample, true);
+            binding.next_sample.set(end_sample + 1);
+            binding
+                .records
+                .borrow_mut()
+                .push(Qwen4ExpIq3GateUpProbeRecord {
+                    layer,
+                    start_sample,
+                    end_sample,
+                });
+            binding.seen_layers.borrow_mut()[layer_index] = true;
+            Ok(())
+        })
     }
 
     fn encode_routed_down(
@@ -1577,6 +1817,10 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
     if qwen4exp_moe_route_count_capture_active() {
         return invalid("route-count capture requires a layer-aware packed MoE call");
     }
+    #[cfg(test)]
+    if qwen4exp_iq3_gate_up_probe_active() {
+        return invalid("IQ3 gate/up probe requires a layer-aware packed MoE call");
+    }
     unsafe {
         encode_qwen4exp_moe_packed_motor_for_layer(
             ctx,
@@ -1669,6 +1913,10 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_stage_sampled(
     #[cfg(test)]
     if qwen4exp_moe_route_count_capture_active() {
         return invalid("route-count capture is unavailable in stage-sampled packed MoE");
+    }
+    #[cfg(test)]
+    if qwen4exp_iq3_gate_up_probe_active() {
+        return invalid("IQ3 gate/up probe is unavailable in stage-sampled packed MoE");
     }
     if tokens <= 1 {
         return invalid("sampled packed MoE profiling requires at least two tokens");
@@ -4164,6 +4412,97 @@ mod tests {
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
 
+            if tokens == 33 {
+                const GUARD_ELEMENTS: usize = 64;
+                let active_elements = tokens * TOP_K * ROUTED;
+                let guarded_output = || {
+                    let storage = MetalTensor::zeros_f32(
+                        &ctx,
+                        vec![(active_elements + GUARD_ELEMENTS) as u64],
+                    )
+                    .unwrap();
+                    fill_f32_bits(&storage, GUARD_F32_SENTINEL);
+                    let view =
+                        storage.view_subrange(0, vec![ROUTED as u64, TOP_K as u64, tokens as u64]);
+                    fill_f32_bits(&view, ACTIVE_F32_SENTINEL);
+                    (storage, view)
+                };
+                let (full_storage, full) = guarded_output();
+                let (bands_storage, bands) = guarded_output();
+                let (no_work_storage, no_work) = guarded_output();
+                let views = scratch.views(tokens).unwrap();
+                let range_command = ctx.queue.commandBuffer().unwrap();
+                let range_encoder = KernelEncoder::begin(&range_command);
+                crate::metal::dispatch_census_begin();
+                for (destination, arm) in [
+                    (&full, Qwen4ExpIq3GateUpProbeArm::Full),
+                    (&bands, Qwen4ExpIq3GateUpProbeArm::Count1To8),
+                    (&bands, Qwen4ExpIq3GateUpProbeArm::Count9To16),
+                    (&bands, Qwen4ExpIq3GateUpProbeArm::Count17To32),
+                    (&bands, Qwen4ExpIq3GateUpProbeArm::Count33To64),
+                    (&bands, Qwen4ExpIq3GateUpProbeArm::Count65Plus),
+                    (&no_work, Qwen4ExpIq3GateUpProbeArm::NoWork),
+                ] {
+                    let (min_count, max_count) = arm.bounds();
+                    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+                        &ctx,
+                        &range_encoder,
+                        weights.routed_gate,
+                        weights.routed_up,
+                        &input,
+                        &views.route_counts,
+                        &views.route_slots,
+                        destination,
+                        HIDDEN,
+                        ROUTED,
+                        EXPERTS,
+                        TOP_K,
+                        tokens,
+                        min_count,
+                        max_count,
+                    )
+                    .unwrap();
+                }
+                let range_census = crate::metal::dispatch_census_take();
+                assert_eq!(range_census.len(), 7);
+                assert!(range_census.iter().all(|row| {
+                    row.kernel == "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16"
+                        && row.grid_width == tokens.div_ceil(16) as u64
+                        && row.grid_height == ROUTED.div_ceil(64) as u64
+                        && row.grid_depth == EXPERTS as u64
+                        && row.threads_width == 128
+                }));
+                range_encoder.end();
+                range_command.commit();
+                range_command.waitUntilCompleted();
+                assert_eq!(range_command.status(), MTLCommandBufferStatus::Completed);
+                assert!(range_command.error().is_none());
+
+                let production = read_f32(&views.routed_inner);
+                assert_bits_eq(
+                    "IQ3 N16 full-range differential",
+                    &read_f32(&full),
+                    &production,
+                );
+                assert_bits_eq(
+                    "IQ3 N16 disjoint count-band differential",
+                    &read_f32(&bands),
+                    &production,
+                );
+                assert!(
+                    read_f32(&no_work)
+                        .iter()
+                        .all(|value| value.to_bits() == ACTIVE_F32_SENTINEL)
+                );
+                for storage in [&full_storage, &bands_storage, &no_work_storage] {
+                    assert!(
+                        read_f32(storage)[active_elements..]
+                            .iter()
+                            .all(|value| value.to_bits() == GUARD_F32_SENTINEL)
+                    );
+                }
+            }
+
             if tokens == 8 {
                 if let Ok(samples) =
                     ctx.timestamp_sample_buffer(QWEN4EXP_PACKED_PROFILE_MOE_STAGES * 2)
@@ -4326,6 +4665,12 @@ mod tests {
                         assert_eq!(actual_ids[slot], expert as i32);
                         seen[slot] = true;
                     }
+                    assert!(
+                        actual_slots[expert * tokens + count..expert * tokens + tokens]
+                            .iter()
+                            .all(|&slot| slot == ACTIVE_I32_SENTINEL),
+                        "packed route expert {expert} wrote beyond count {count}"
+                    );
                 }
                 assert!(seen.into_iter().all(|present| present));
             }
@@ -4333,6 +4678,132 @@ mod tests {
             if tokens == 33 {
                 packed_n33 = Some(read_f32(&output));
             }
+        }
+
+        {
+            const TOKENS: usize = 65;
+            const GUARD_ELEMENTS: usize = 64;
+            let seeded_counts = [1, 8, 9, 16, 17, 32, 33, 64, 65, 65, 65, 65, 65, 65, 65, 15];
+            assert_eq!(seeded_counts.iter().sum::<usize>(), TOKENS * TOP_K);
+            let mut counts = vec![0_i32; EXPERTS];
+            let mut slots = vec![ACTIVE_I32_SENTINEL; EXPERTS * TOKENS];
+            let mut topk_ids = vec![ACTIVE_I32_SENTINEL; TOKENS * TOP_K];
+            let mut next_slot = 0_usize;
+            for (expert, &count) in seeded_counts.iter().enumerate() {
+                counts[expert] = count as i32;
+                for local in 0..count {
+                    slots[expert * TOKENS + local] = next_slot as i32;
+                    topk_ids[next_slot] = expert as i32;
+                    next_slot += 1;
+                }
+            }
+            assert_eq!(next_slot, TOKENS * TOP_K);
+            for &(min_count, max_count) in &[(1, 8), (9, 16), (17, 32), (33, 64), (65, 65)] {
+                assert!(
+                    counts
+                        .iter()
+                        .copied()
+                        .filter(|&count| (min_count..=max_count).contains(&count))
+                        .sum::<i32>()
+                        > 0,
+                    "explicit fixture must exercise count band {min_count}..={max_count}"
+                );
+            }
+            let input_values = (0..TOKENS * HIDDEN)
+                .map(|index| ((index * 37 + 19) % 257) as f32 * 0.000_4 - 0.051)
+                .collect::<Vec<_>>();
+            let input = tensor_f32(&ctx, &input_values, vec![HIDDEN as u64, TOKENS as u64]);
+            let counts_tensor = tensor_i32(&ctx, &counts, vec![EXPERTS as u64]);
+            let slots_tensor = tensor_i32(&ctx, &slots, vec![TOKENS as u64, EXPERTS as u64]);
+            let active_elements = TOKENS * TOP_K * ROUTED;
+            let guarded_output = || {
+                let storage =
+                    MetalTensor::zeros_f32(&ctx, vec![(active_elements + GUARD_ELEMENTS) as u64])
+                        .unwrap();
+                fill_f32_bits(&storage, GUARD_F32_SENTINEL);
+                let view =
+                    storage.view_subrange(0, vec![ROUTED as u64, TOP_K as u64, TOKENS as u64]);
+                fill_f32_bits(&view, ACTIVE_F32_SENTINEL);
+                (storage, view)
+            };
+            let (full_storage, full) = guarded_output();
+            let (bands_storage, bands) = guarded_output();
+            let (no_work_storage, no_work) = guarded_output();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for (destination, arm) in [
+                (&full, Qwen4ExpIq3GateUpProbeArm::Full),
+                (&bands, Qwen4ExpIq3GateUpProbeArm::Count1To8),
+                (&bands, Qwen4ExpIq3GateUpProbeArm::Count9To16),
+                (&bands, Qwen4ExpIq3GateUpProbeArm::Count17To32),
+                (&bands, Qwen4ExpIq3GateUpProbeArm::Count33To64),
+                (&bands, Qwen4ExpIq3GateUpProbeArm::Count65Plus),
+                (&no_work, Qwen4ExpIq3GateUpProbeArm::NoWork),
+            ] {
+                let (min_count, max_count) = arm.bounds();
+                encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+                    &ctx,
+                    &encoder,
+                    weights.routed_gate,
+                    weights.routed_up,
+                    &input,
+                    &counts_tensor,
+                    &slots_tensor,
+                    destination,
+                    HIDDEN,
+                    ROUTED,
+                    EXPERTS,
+                    TOP_K,
+                    TOKENS,
+                    min_count,
+                    max_count,
+                )
+                .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+            assert_bits_eq(
+                "IQ3 N16 explicit all-band differential",
+                &read_f32(&bands),
+                &read_f32(&full),
+            );
+            assert!(
+                read_f32(&full)
+                    .iter()
+                    .all(|value| value.to_bits() != ACTIVE_F32_SENTINEL)
+            );
+            assert!(
+                read_f32(&no_work)
+                    .iter()
+                    .all(|value| value.to_bits() == ACTIVE_F32_SENTINEL)
+            );
+            for storage in [&full_storage, &bands_storage, &no_work_storage] {
+                assert!(
+                    read_f32(storage)[active_elements..]
+                        .iter()
+                        .all(|value| value.to_bits() == GUARD_F32_SENTINEL)
+                );
+            }
+            let mut seen = vec![false; TOKENS * TOP_K];
+            for expert in 0..EXPERTS {
+                let count = counts[expert] as usize;
+                for &slot in &slots[expert * TOKENS..expert * TOKENS + count] {
+                    let slot = slot as usize;
+                    assert!(slot < seen.len());
+                    assert!(!seen[slot]);
+                    assert_eq!(topk_ids[slot], expert as i32);
+                    seen[slot] = true;
+                }
+                assert!(
+                    slots[expert * TOKENS + count..expert * TOKENS + TOKENS]
+                        .iter()
+                        .all(|&slot| slot == ACTIVE_I32_SENTINEL)
+                );
+            }
+            assert!(seen.into_iter().all(|present| present));
         }
 
         let mut perturbed_inputs = inputs.clone();

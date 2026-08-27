@@ -322,6 +322,29 @@ reaching the command. Exact N=2,048 is default on Apple M4 Max with
 `0.005791 ms/layer` and regresses warm command GPU, so it remains generic.
 Do not reopen selector/bucket work; count-banded standard IQ3 gate/up is next.
 
+The clean route census at `69e51c9` now separates prompt shape from kernel
+geometry. N=18 puts 80.10% of credited route mass in count 1-8 and reaches only
+16.57% active-panel lane occupancy at width 16. Repeated-token N=2,048 instead
+puts 97.62% of route mass in count 65+ and is retained only as a concentration
+stress control. The natural technical-text N=2,048 sample activates 15,560 of
+22,016 expert instances; count 65+ owns 77.49% of routes, and its 63,924 active
+width-16 panels are 86.10% occupied. The current direct grid still launches
+2,818,048 panels before the ten-output-panel multiplier, so 97.73% return before
+matrix work.
+
+The next checkpoint is a performance-ineligible range probe, not a candidate.
+It measures one of no-work, 1-8, 9-16, 17-32, 33-64, 65+, or full in each
+otherwise ordinary command, with the untouched production dispatch following
+the sampled probe. Two forward/reverse mirrored pairs are bracketed by ordinary
+controls. Every sequence must keep control drift at or below 2%, full above
+no-work, all band increments nonnegative, and absolute additivity residual at
+or below 20% of the useful full-minus-no-work increment. Only if all four
+sequences pass and their minimum optimistic screens exceed 10% of the gate/up
+leaf and 1% of command GPU may implementation begin. That result authorizes
+only a compact N16 active-panel descriptor plus indirect-dispatch falsifier;
+descriptor build cost belongs inside its later paired A/B. Width 8, width 32,
+and TGM reduction remain separate and parked.
+
 Runtime admission now separates exact-release qualification from behavioral
 contracts. The full tokenizer fingerprint and released stop vector remain
 oracles; compatible Flash-Next finetunes use structurally valid `qwen35`

@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next IQ3 Gate/Up Census
+
+Status: measure the full-grid no-work floor and count bands before implementing
+an IQ3_XXS gate/up candidate.
+
+- Checkpoint `69e51c9` adds a test-only, layer-indexed route-count capture. The
+  released capture-off/on replay preserves endpoint and continuation logits,
+  persistent state, QSA lengths, PLE history, and all non-capture dispatches
+  bit-for-bit across canonical, stress, and natural controls.
+- N=18 assigns 80.10% of credited route mass to counts 1-8, but only 2,920 of
+  44,032 width-16 panels are active and active-panel lane occupancy is 16.57%.
+- Repeated-token N=2,048 is deliberately nonrepresentative: 97.62% of route
+  mass is count 65+ and width-16 active-panel occupancy is 96.66%.
+- Natural technical N=2,048 activates 15,560 of 22,016 expert instances. Count
+  65+ owns 77.49% of routes; 63,924 of 2,818,048 width-16 panels are active and
+  active-panel lane occupancy is 86.10%.
+- Next run one diagnostic range per command against the same 43 layers. Treat
+  the result only as optimistic prototype triage; invalid drift, negative band
+  increments, or nonadditivity kills the screen before any candidate exists.
+
+Evidence: `docs/bench/2026-08-27-qwen4exp-iq3-gate-up-census/`.
+
 ## 2026-08-27 - Flash-Next Full-Chunk Router E8P32 GO
 
 Status: promote strict E8xP32 only at exact N=2,048; keep N=18 and every

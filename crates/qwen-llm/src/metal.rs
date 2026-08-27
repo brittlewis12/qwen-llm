@@ -10380,6 +10380,170 @@ pub fn encode_moe_down_q8_0_f32_grouped_slots(
     Ok(())
 }
 
+pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_down_iq4_nl_grouped_slots";
+    if !n_in.is_multiple_of(32) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("n_in={n_in} not divisible by 32"),
+        });
+    }
+    if weight.dtype != GgmlType::IQ4_NL
+        || inner.dtype != GgmlType::F32
+        || out.dtype != GgmlType::F32
+        || !matches!(counts.dtype, GgmlType::I32 | GgmlType::F32)
+        || !matches!(ids.dtype, GgmlType::I32 | GgmlType::F32)
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected IQ4_NL/F32/I32-or-F32 metadata/F32, got {:?}/{:?}/{:?}/{:?}/{:?}",
+                weight.dtype, inner.dtype, counts.dtype, ids.dtype, out.dtype
+            ),
+        });
+    }
+    if n_in == 0 || n_out == 0 || n_expert == 0 || n_tokens == 0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "n_in={n_in}, n_out={n_out}, n_expert={n_expert}, and n_tokens={n_tokens} must be nonzero"
+            ),
+        });
+    }
+    for (name, value) in [
+        ("n_in", n_in),
+        ("n_out", n_out),
+        ("n_expert", n_expert),
+        ("n_tokens", n_tokens),
+    ] {
+        if u32::try_from(value).is_err() {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name}={value} exceeds u32"),
+            });
+        }
+    }
+    for (name, value) in [("n_out", n_out), ("n_expert", n_expert)] {
+        if i32::try_from(value).is_err() {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name}={value} exceeds signed shader indexing"),
+            });
+        }
+    }
+    let product = |name: &str, factors: &[usize]| {
+        factors.iter().try_fold(1_usize, |value, &factor| {
+            value
+                .checked_mul(factor)
+                .ok_or_else(|| MetalError::BadShape {
+                    kernel: KERNEL,
+                    detail: format!("{name} element count overflow"),
+                })
+        })
+    };
+    let bank_elements = product("expert bank", &[n_in, n_out, n_expert])?;
+    let bucket_elements = product("expert buckets", &[n_expert, n_tokens])?;
+    if !(out.n_elements() as usize).is_multiple_of(n_out) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "output elements {} are not divisible by n_out={n_out}",
+                out.n_elements()
+            ),
+        });
+    }
+    let slot_count = out.n_elements() as usize / n_out;
+    if !slot_count.is_multiple_of(n_tokens) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("slot count {slot_count} is not divisible by n_tokens={n_tokens}"),
+        });
+    }
+    let topk = slot_count / n_tokens;
+    if topk == 0 || topk > 16 || topk > n_expert || i32::try_from(slot_count).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected 1 <= slots/tokens={topk} <= min(16, n_expert={n_expert}) and slot count {slot_count} to fit i32"
+            ),
+        });
+    }
+    let inner_elements = product("inner input", &[slot_count, n_in])?;
+    let output_elements = product("expert output", &[slot_count, n_out])?;
+    if weight.n_elements() as usize != bank_elements
+        || inner.n_elements() as usize != inner_elements
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != bucket_elements
+        || out.n_elements() as usize != output_elements
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "shape mismatch weight={} inner={} counts={} ids={} out={} expected {bank_elements}/{inner_elements}/{n_expert}/{bucket_elements}/{output_elements}",
+                weight.n_elements(),
+                inner.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                out.n_elements()
+            ),
+        });
+    }
+
+    let blocks_per_row = n_in / 32;
+    let pso = ctx.pipeline("kernel_moe_down_iq4_nl_f32_grouped_slots")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: n_tokens as u32,
+            k: n_in as u32,
+            nb01: blocks_per_row as u32,
+            stride_b: n_in as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, counts);
+    enc.set_tensor(4, ids);
+    enc.set_tensor(5, out);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_moe_down_bf16_f32_grouped_slots(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -13195,37 +13359,72 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
     hidden: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
+    const KERNEL: &str = "topk_logits_softmax_dot_sigmoid_packed";
     if logits.dtype != GgmlType::F32
         || shared_weight.dtype != GgmlType::F32
         || x.dtype != GgmlType::F32
+        || !matches!(out_idx.dtype, GgmlType::I32 | GgmlType::F32)
         || out_w.dtype != GgmlType::F32
         || shared_out.dtype != GgmlType::F32
     {
         return Err(MetalError::BadShape {
-            kernel: "topk_logits_softmax_dot_sigmoid_packed",
+            kernel: KERNEL,
             detail: format!(
-                "expected F32 logits/shared_weight/x/out_w/shared_out, got {:?}/{:?}/{:?}/{:?}/{:?}",
-                logits.dtype, shared_weight.dtype, x.dtype, out_w.dtype, shared_out.dtype
+                "expected F32 logits/shared_weight/x/out_w/shared_out and I32-or-F32 indices, got {:?}/{:?}/{:?}/{:?}/{:?}/{:?}",
+                logits.dtype,
+                shared_weight.dtype,
+                x.dtype,
+                out_idx.dtype,
+                out_w.dtype,
+                shared_out.dtype
             ),
         });
     }
-    if n_expert == 0 || n_expert > 256 || topk == 0 || topk > 16 || topk > n_expert {
+    if n_expert == 0 || n_expert > 512 || topk == 0 || topk > 16 || topk > n_expert {
         return Err(MetalError::BadShape {
-            kernel: "topk_logits_softmax_dot_sigmoid_packed",
+            kernel: KERNEL,
             detail: format!(
-                "expected 1 <= topk <= n_expert <= 256 and topk <= 16, got n_expert={n_expert} topk={topk}"
+                "expected 1 <= topk <= n_expert <= 512 and topk <= 16, got n_expert={n_expert} topk={topk}"
             ),
         });
     }
-    if logits.n_elements() as usize != n_tokens * n_expert
-        || out_idx.n_elements() as usize != n_tokens * topk
-        || out_w.n_elements() as usize != n_tokens * topk
+    if hidden == 0 || n_tokens == 0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("hidden={hidden} and n_tokens={n_tokens} must be nonzero"),
+        });
+    }
+    for (name, value) in [
+        ("n_expert", n_expert),
+        ("topk", topk),
+        ("hidden", hidden),
+        ("n_tokens", n_tokens),
+    ] {
+        if u32::try_from(value).is_err() {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name}={value} exceeds u32"),
+            });
+        }
+    }
+    let checked_elements = |name: &str, left: usize, right: usize| {
+        left.checked_mul(right).ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("{name} element count overflow: {left}*{right}"),
+        })
+    };
+    let logits_elements = checked_elements("logits", n_tokens, n_expert)?;
+    let topk_elements = checked_elements("top-k", n_tokens, topk)?;
+    let input_elements = checked_elements("input", n_tokens, hidden)?;
+    if logits.n_elements() as usize != logits_elements
+        || out_idx.n_elements() as usize != topk_elements
+        || out_w.n_elements() as usize != topk_elements
         || shared_weight.n_elements() as usize != hidden
-        || x.n_elements() as usize != n_tokens * hidden
+        || x.n_elements() as usize != input_elements
         || shared_out.n_elements() as usize != n_tokens
     {
         return Err(MetalError::BadShape {
-            kernel: "topk_logits_softmax_dot_sigmoid_packed",
+            kernel: KERNEL,
             detail: format!(
                 "shape mismatch logits={} idx={} w={} shared_weight={} x={} shared_out={} expected {}/{}/{}/{hidden}/{}/{}",
                 logits.n_elements(),
@@ -13234,10 +13433,10 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
                 shared_weight.n_elements(),
                 x.n_elements(),
                 shared_out.n_elements(),
-                n_tokens * n_expert,
-                n_tokens * topk,
-                n_tokens * topk,
-                n_tokens * hidden,
+                logits_elements,
+                topk_elements,
+                topk_elements,
+                input_elements,
                 n_tokens
             ),
         });
@@ -13268,10 +13467,41 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
     enc.set_tensor(4, out_idx);
     enc.set_tensor(5, out_w);
     enc.set_tensor(6, shared_out);
-    const THREADS: usize = 256;
-    enc.set_threadgroup_memory(0, THREADS * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(1, THREADS * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(2, THREADS * std::mem::size_of::<i32>());
+    let threads = if n_expert <= 256 { 256 } else { 512 };
+    if pso.maxTotalThreadsPerThreadgroup() < threads {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "512-expert route requires {threads} threads, pipeline exposes {}",
+                pso.maxTotalThreadsPerThreadgroup()
+            ),
+        });
+    }
+    let dynamic_memory = threads
+        .checked_mul(3 * std::mem::size_of::<u32>())
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "threadgroup memory size overflow".into(),
+        })?;
+    let required_memory = pso
+        .staticThreadgroupMemoryLength()
+        .checked_add(dynamic_memory)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "threadgroup memory requirement overflow".into(),
+        })?;
+    if required_memory > ctx.device.maxThreadgroupMemoryLength() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "route requires {required_memory} threadgroup bytes, device exposes {}",
+                ctx.device.maxThreadgroupMemoryLength()
+            ),
+        });
+    }
+    enc.set_threadgroup_memory(0, threads * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, threads * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, threads * std::mem::size_of::<i32>());
     enc.dispatch(
         MTLSize {
             width: 1,
@@ -13279,7 +13509,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
             depth: 1,
         },
         MTLSize {
-            width: THREADS,
+            width: threads,
             height: 1,
             depth: 1,
         },

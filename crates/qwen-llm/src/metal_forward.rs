@@ -13631,6 +13631,12 @@ pub fn encode_mat_vec_dispatch(
 }
 
 crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TABLE");
+
+#[cfg(test)]
+pub(crate) fn matmat_smalln_table_enabled_for_test() -> bool {
+    matmat_smalln_table_enabled()
+}
+
 crate::env_flag!(default_on matmat_q4_vec4_enabled, "QWEN_MATMAT_Q4_VEC4");
 crate::env_flag!(default_on matmat_q5_k_n2_seq_enabled, "QWEN_MATMAT_Q5_K_N2_SEQ");
 crate::env_flag!(default_on matmat_n1_matvec_enabled, "QWEN_MATMAT_N1_MATVEC");

@@ -2,13 +2,18 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
-    encode_axpy_scalar_f32, encode_copy_offset_f32, encode_dot_sigmoid_f32,
-    encode_moe_down_iq4_nl_f32, encode_moe_down_weighted_sum_q8_0_f32,
-    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
-    encode_moe_swiglu_iq4_xs_f32, encode_moe_weighted_sum_f32, encode_shared_swiglu_q8_0_f32,
-    encode_topk_logits_softmax_f32,
+    encode_axpy_rowwise_f32, encode_axpy_scalar_f32, encode_copy_offset_f32,
+    encode_dot_sigmoid_f32, encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_nl_f32_grouped_slots,
+    encode_moe_down_q8_0_f32_grouped_slots, encode_moe_down_weighted_sum_q8_0_f32,
+    encode_moe_route_bucket_slots_f32, encode_moe_swiglu_iq3_xxs_f32,
+    encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16,
+    encode_moe_swiglu_iq4_xs_f32, encode_moe_weighted_sum_f32, encode_moe_weighted_sum_packed_f32,
+    encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk_logits_softmax_f32,
 };
-use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
+};
 use crate::qwen4exp::Qwen4ExpConfig;
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
@@ -20,6 +25,7 @@ use objc2_metal::{
 };
 
 const MAX_TOP_K: usize = 16;
+const MAX_PACKED_TOKENS: usize = 2_048;
 
 crate::env_flag!(
     default_on configured_qwen4exp_moe_iq3_fast_enabled,
@@ -281,6 +287,354 @@ pub struct Qwen4ExpMoeMetalWorkspace {
     state_poisoned: bool,
 }
 
+struct Qwen4ExpMoePackedMotorScratch {
+    geometry: Qwen4ExpMoeMetalGeometry,
+    capacity: usize,
+    router_logits: MetalTensor,
+    topk_ids: MetalTensor,
+    topk_weights: MetalTensor,
+    shared_scale: MetalTensor,
+    route_counts: MetalTensor,
+    route_slots: MetalTensor,
+    routed_inner: MetalTensor,
+    routed_expert_output: MetalTensor,
+    shared_gate_projection: MetalTensor,
+    shared_up_projection: MetalTensor,
+    shared_inner: MetalTensor,
+    shared_output: MetalTensor,
+    output: MetalTensor,
+}
+
+struct Qwen4ExpMoePackedViews {
+    router_logits: MetalTensor,
+    topk_ids: MetalTensor,
+    topk_weights: MetalTensor,
+    shared_scale: MetalTensor,
+    route_counts: MetalTensor,
+    route_slots: MetalTensor,
+    routed_inner: MetalTensor,
+    routed_expert_output: MetalTensor,
+    shared_gate_projection: MetalTensor,
+    shared_up_projection: MetalTensor,
+    shared_inner: MetalTensor,
+    shared_output: MetalTensor,
+    output: MetalTensor,
+}
+
+impl Qwen4ExpMoePackedMotorScratch {
+    fn new(
+        ctx: &MetalContext,
+        geometry: Qwen4ExpMoeMetalGeometry,
+        capacity: usize,
+    ) -> Result<Self, Qwen4ExpMoeError> {
+        geometry.validate()?;
+        if capacity == 0 || capacity > MAX_PACKED_TOKENS {
+            return invalid(format!(
+                "packed MoE capacity must be in 1..={MAX_PACKED_TOKENS}, got {capacity}"
+            ));
+        }
+        let _required_bytes = Self::required_bytes(geometry, capacity)?;
+        let max_buffer_length = ctx.device.maxBufferLength();
+        let checked_elements = |name: &str, factors: &[usize]| {
+            let elements = checked_product(factors, name)?;
+            if u32::try_from(elements).is_err() {
+                return invalid(format!(
+                    "MoE packed {name} has {elements} elements, exceeding u32"
+                ));
+            }
+            let bytes = elements.checked_mul(size_of::<u32>()).ok_or_else(|| {
+                Qwen4ExpMoeError::Invalid(format!("MoE packed {name} byte count overflow"))
+            })?;
+            if bytes > max_buffer_length {
+                return invalid(format!(
+                    "MoE packed {name} requires {bytes} bytes, exceeding Metal maxBufferLength {max_buffer_length}"
+                ));
+            }
+            Ok(elements)
+        };
+        for (name, factors) in [
+            ("router logits", vec![geometry.expert_count, capacity]),
+            ("top-k IDs", vec![geometry.experts_per_token, capacity]),
+            ("top-k weights", vec![geometry.experts_per_token, capacity]),
+            ("shared scale", vec![capacity]),
+            ("route counts", vec![geometry.expert_count]),
+            ("route slots", vec![geometry.expert_count, capacity]),
+            (
+                "routed inner",
+                vec![
+                    geometry.routed_intermediate_size,
+                    geometry.experts_per_token,
+                    capacity,
+                ],
+            ),
+            (
+                "routed expert output",
+                vec![geometry.hidden_size, geometry.experts_per_token, capacity],
+            ),
+            (
+                "shared gate projection",
+                vec![geometry.shared_intermediate_size, capacity],
+            ),
+            (
+                "shared up projection",
+                vec![geometry.shared_intermediate_size, capacity],
+            ),
+            (
+                "shared inner",
+                vec![geometry.shared_intermediate_size, capacity],
+            ),
+            ("shared output", vec![geometry.hidden_size, capacity]),
+            ("output", vec![geometry.hidden_size, capacity]),
+        ] {
+            checked_elements(name, &factors)?;
+        }
+
+        Ok(Self {
+            geometry,
+            capacity,
+            router_logits: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.expert_count as u64, capacity as u64],
+            )?,
+            topk_ids: MetalTensor::zeros_i32(
+                ctx,
+                vec![geometry.experts_per_token as u64, capacity as u64],
+            )?,
+            topk_weights: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.experts_per_token as u64, capacity as u64],
+            )?,
+            shared_scale: MetalTensor::zeros_f32(ctx, vec![capacity as u64])?,
+            route_counts: MetalTensor::zeros_i32(ctx, vec![geometry.expert_count as u64])?,
+            route_slots: MetalTensor::zeros_i32(
+                ctx,
+                vec![(geometry.expert_count * capacity) as u64],
+            )?,
+            routed_inner: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    geometry.routed_intermediate_size as u64,
+                    geometry.experts_per_token as u64,
+                    capacity as u64,
+                ],
+            )?,
+            routed_expert_output: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    geometry.hidden_size as u64,
+                    geometry.experts_per_token as u64,
+                    capacity as u64,
+                ],
+            )?,
+            shared_gate_projection: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.shared_intermediate_size as u64, capacity as u64],
+            )?,
+            shared_up_projection: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.shared_intermediate_size as u64, capacity as u64],
+            )?,
+            shared_inner: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.shared_intermediate_size as u64, capacity as u64],
+            )?,
+            shared_output: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.hidden_size as u64, capacity as u64],
+            )?,
+            output: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.hidden_size as u64, capacity as u64],
+            )?,
+        })
+    }
+
+    fn required_bytes(
+        geometry: Qwen4ExpMoeMetalGeometry,
+        capacity: usize,
+    ) -> Result<usize, Qwen4ExpMoeError> {
+        geometry.validate()?;
+        if capacity == 0 || capacity > MAX_PACKED_TOKENS {
+            return invalid(format!(
+                "packed MoE capacity must be in 1..={MAX_PACKED_TOKENS}, got {capacity}"
+            ));
+        }
+        let element_counts = [
+            checked_product(&[geometry.expert_count, capacity], "packed router logits")?,
+            checked_product(&[geometry.experts_per_token, capacity], "packed top-k IDs")?,
+            checked_product(
+                &[geometry.experts_per_token, capacity],
+                "packed top-k weights",
+            )?,
+            capacity,
+            geometry.expert_count,
+            checked_product(&[geometry.expert_count, capacity], "packed route slots")?,
+            checked_product(
+                &[
+                    geometry.routed_intermediate_size,
+                    geometry.experts_per_token,
+                    capacity,
+                ],
+                "packed routed inner",
+            )?,
+            checked_product(
+                &[geometry.hidden_size, geometry.experts_per_token, capacity],
+                "packed routed expert output",
+            )?,
+            checked_product(
+                &[geometry.shared_intermediate_size, capacity],
+                "packed shared gate projection",
+            )?,
+            checked_product(
+                &[geometry.shared_intermediate_size, capacity],
+                "packed shared up projection",
+            )?,
+            checked_product(
+                &[geometry.shared_intermediate_size, capacity],
+                "packed shared inner",
+            )?,
+            checked_product(&[geometry.hidden_size, capacity], "packed shared output")?,
+            checked_product(&[geometry.hidden_size, capacity], "packed output")?,
+        ];
+        let elements = element_counts.into_iter().try_fold(0_usize, |sum, count| {
+            sum.checked_add(count).ok_or_else(|| {
+                Qwen4ExpMoeError::Invalid("packed MoE total element count overflow".into())
+            })
+        })?;
+        elements
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| Qwen4ExpMoeError::Invalid("packed MoE total byte count overflow".into()))
+    }
+
+    fn prefix_view(
+        &self,
+        name: &str,
+        tensor: &MetalTensor,
+        elements_per_token: usize,
+        tokens: usize,
+        shape: Vec<u64>,
+    ) -> Result<MetalTensor, Qwen4ExpMoeError> {
+        if tokens == 0 || tokens > self.capacity {
+            return invalid(format!(
+                "{name} token count {tokens} is outside capacity {}",
+                self.capacity
+            ));
+        }
+        let elements = elements_per_token
+            .checked_mul(tokens)
+            .ok_or_else(|| Qwen4ExpMoeError::Invalid(format!("{name} element count overflow")))?;
+        if shape.iter().product::<u64>() != elements as u64 {
+            return invalid(format!("{name} prefix shape {shape:?} has the wrong size"));
+        }
+        let view = tensor.view_subrange(0, shape);
+        if view.n_elements() as usize != elements {
+            return invalid(format!("{name} prefix view has the wrong element count"));
+        }
+        Ok(view)
+    }
+
+    fn views(&self, tokens: usize) -> Result<Qwen4ExpMoePackedViews, Qwen4ExpMoeError> {
+        let g = self.geometry;
+        Ok(Qwen4ExpMoePackedViews {
+            router_logits: self.prefix_view(
+                "packed MoE router logits",
+                &self.router_logits,
+                g.expert_count,
+                tokens,
+                vec![g.expert_count as u64, tokens as u64],
+            )?,
+            topk_ids: self.prefix_view(
+                "packed MoE top-k IDs",
+                &self.topk_ids,
+                g.experts_per_token,
+                tokens,
+                vec![g.experts_per_token as u64, tokens as u64],
+            )?,
+            topk_weights: self.prefix_view(
+                "packed MoE top-k weights",
+                &self.topk_weights,
+                g.experts_per_token,
+                tokens,
+                vec![g.experts_per_token as u64, tokens as u64],
+            )?,
+            shared_scale: self.prefix_view(
+                "packed MoE shared scale",
+                &self.shared_scale,
+                1,
+                tokens,
+                vec![tokens as u64],
+            )?,
+            route_counts: self
+                .route_counts
+                .view_subrange(0, vec![g.expert_count as u64]),
+            route_slots: self.prefix_view(
+                "packed MoE route slots",
+                &self.route_slots,
+                g.expert_count,
+                tokens,
+                vec![tokens as u64, g.expert_count as u64],
+            )?,
+            routed_inner: self.prefix_view(
+                "packed MoE routed inner",
+                &self.routed_inner,
+                g.experts_per_token * g.routed_intermediate_size,
+                tokens,
+                vec![
+                    g.routed_intermediate_size as u64,
+                    g.experts_per_token as u64,
+                    tokens as u64,
+                ],
+            )?,
+            routed_expert_output: self.prefix_view(
+                "packed MoE routed expert output",
+                &self.routed_expert_output,
+                g.experts_per_token * g.hidden_size,
+                tokens,
+                vec![
+                    g.hidden_size as u64,
+                    g.experts_per_token as u64,
+                    tokens as u64,
+                ],
+            )?,
+            shared_gate_projection: self.prefix_view(
+                "packed MoE shared gate projection",
+                &self.shared_gate_projection,
+                g.shared_intermediate_size,
+                tokens,
+                vec![g.shared_intermediate_size as u64, tokens as u64],
+            )?,
+            shared_up_projection: self.prefix_view(
+                "packed MoE shared up projection",
+                &self.shared_up_projection,
+                g.shared_intermediate_size,
+                tokens,
+                vec![g.shared_intermediate_size as u64, tokens as u64],
+            )?,
+            shared_inner: self.prefix_view(
+                "packed MoE shared inner",
+                &self.shared_inner,
+                g.shared_intermediate_size,
+                tokens,
+                vec![g.shared_intermediate_size as u64, tokens as u64],
+            )?,
+            shared_output: self.prefix_view(
+                "packed MoE shared output",
+                &self.shared_output,
+                g.hidden_size,
+                tokens,
+                vec![g.hidden_size as u64, tokens as u64],
+            )?,
+            output: self.prefix_view(
+                "packed MoE output",
+                &self.output,
+                g.hidden_size,
+                tokens,
+                vec![g.hidden_size as u64, tokens as u64],
+            )?,
+        })
+    }
+}
+
 impl Qwen4ExpMoeMetalWorkspace {
     pub fn new(
         ctx: &MetalContext,
@@ -492,22 +846,61 @@ fn encode_step(
     weights: Qwen4ExpMoeMetalWeights<'_>,
     workspace: &Qwen4ExpMoeMetalWorkspace,
 ) -> Result<(), Qwen4ExpMoeError> {
-    let g = workspace.geometry;
+    encode_singleton_step(
+        ctx,
+        enc,
+        input,
+        weights,
+        Qwen4ExpMoeSingletonBuffers {
+            router_logits: &workspace.router_logits,
+            topk_ids: &workspace.topk_ids,
+            topk_weights: &workspace.topk_weights,
+            shared_scale: &workspace.shared_gate,
+            routed_inner: &workspace.routed_inner,
+            routed_expert_output: &workspace.routed_expert_output,
+            shared_inner: &workspace.shared_inner,
+            shared_output: &workspace.shared_output,
+            output: &workspace.output,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct Qwen4ExpMoeSingletonBuffers<'a> {
+    router_logits: &'a MetalTensor,
+    topk_ids: &'a MetalTensor,
+    topk_weights: &'a MetalTensor,
+    shared_scale: &'a MetalTensor,
+    routed_inner: &'a MetalTensor,
+    routed_expert_output: &'a MetalTensor,
+    shared_inner: &'a MetalTensor,
+    shared_output: &'a MetalTensor,
+    output: &'a MetalTensor,
+}
+
+fn encode_singleton_step(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    buffers: Qwen4ExpMoeSingletonBuffers<'_>,
+) -> Result<(), Qwen4ExpMoeError> {
+    let g = weights.geometry;
     encode_mat_vec_dispatch(
         ctx,
         enc,
         weights.router,
         input,
-        &workspace.router_logits,
+        buffers.router_logits,
         g.hidden_size,
         g.expert_count,
     )?;
     encode_topk_logits_softmax_f32(
         ctx,
         enc,
-        &workspace.router_logits,
-        &workspace.topk_ids,
-        &workspace.topk_weights,
+        buffers.router_logits,
+        buffers.topk_ids,
+        buffers.topk_weights,
         g.expert_count,
         g.experts_per_token,
     )?;
@@ -516,7 +909,7 @@ fn encode_step(
         enc,
         weights.shared_router,
         input,
-        &workspace.shared_gate,
+        buffers.shared_scale,
         g.hidden_size,
     )?;
 
@@ -533,8 +926,8 @@ fn encode_step(
                 weights.routed_gate,
                 weights.routed_up,
                 input,
-                &workspace.topk_ids,
-                &workspace.routed_inner,
+                buffers.topk_ids,
+                buffers.routed_inner,
                 g.hidden_size,
                 g.routed_intermediate_size,
                 g.expert_count,
@@ -547,8 +940,8 @@ fn encode_step(
             weights.routed_gate,
             weights.routed_up,
             input,
-            &workspace.topk_ids,
-            &workspace.routed_inner,
+            buffers.topk_ids,
+            buffers.routed_inner,
             g.hidden_size,
             g.routed_intermediate_size,
             g.expert_count,
@@ -563,9 +956,9 @@ fn encode_step(
                 ctx,
                 enc,
                 weights.routed_down,
-                &workspace.routed_inner,
-                &workspace.topk_ids,
-                &workspace.routed_expert_output,
+                buffers.routed_inner,
+                buffers.topk_ids,
+                buffers.routed_expert_output,
                 g.routed_intermediate_size,
                 g.hidden_size,
                 g.expert_count,
@@ -574,9 +967,9 @@ fn encode_step(
             encode_moe_weighted_sum_f32(
                 ctx,
                 enc,
-                &workspace.routed_expert_output,
-                &workspace.topk_weights,
-                &workspace.output,
+                buffers.routed_expert_output,
+                buffers.topk_weights,
+                buffers.output,
                 g.hidden_size,
                 g.experts_per_token,
             )?;
@@ -585,10 +978,10 @@ fn encode_step(
             ctx,
             enc,
             weights.routed_down,
-            &workspace.routed_inner,
-            &workspace.topk_ids,
-            &workspace.topk_weights,
-            &workspace.output,
+            buffers.routed_inner,
+            buffers.topk_ids,
+            buffers.topk_weights,
+            buffers.output,
             g.routed_intermediate_size,
             g.hidden_size,
             g.expert_count,
@@ -603,7 +996,7 @@ fn encode_step(
         weights.shared_gate,
         weights.shared_up,
         input,
-        &workspace.shared_inner,
+        buffers.shared_inner,
         g.hidden_size,
         g.shared_intermediate_size,
     )?;
@@ -611,19 +1004,206 @@ fn encode_step(
         ctx,
         enc,
         weights.shared_down,
-        &workspace.shared_inner,
-        &workspace.shared_output,
+        buffers.shared_inner,
+        buffers.shared_output,
         g.shared_intermediate_size,
         g.hidden_size,
     )?;
     encode_axpy_scalar_f32(
         ctx,
         enc,
-        &workspace.shared_output,
-        &workspace.shared_gate,
-        &workspace.output,
+        buffers.shared_output,
+        buffers.shared_scale,
+        buffers.output,
     )?;
     Ok(())
+}
+
+/// Encode packed MoE rows into transaction-owned scratch.
+///
+/// # Safety
+///
+/// The caller must retain every tensor and exclusive logical ownership of
+/// `scratch` until the command completes successfully or is permanently
+/// abandoned. Any encoding or command failure makes scratch contents
+/// indeterminate; the enclosing transaction must be poisoned.
+unsafe fn encode_qwen4exp_moe_packed_motor(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    scratch: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+) -> Result<MetalTensor, Qwen4ExpMoeError> {
+    validate_encoder(ctx, enc)?;
+    if weights.geometry != scratch.geometry {
+        return invalid("packed MoE weight and scratch geometry differ");
+    }
+    validate_packed_contract(ctx, input, weights, scratch, tokens)?;
+    let views = scratch.views(tokens)?;
+
+    if tokens == 1 {
+        preflight(ctx, weights)?;
+        encode_singleton_step(
+            ctx,
+            enc,
+            input,
+            weights,
+            Qwen4ExpMoeSingletonBuffers {
+                router_logits: &views.router_logits,
+                topk_ids: &views.topk_ids,
+                topk_weights: &views.topk_weights,
+                shared_scale: &views.shared_scale,
+                routed_inner: &views.routed_inner,
+                routed_expert_output: &views.routed_expert_output,
+                shared_inner: &views.shared_inner,
+                shared_output: &views.shared_output,
+                output: &views.output,
+            },
+        )?;
+        return Ok(views.output);
+    }
+
+    preflight_packed(ctx, weights)?;
+    let g = scratch.geometry;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.router,
+        input,
+        &views.router_logits,
+        g.hidden_size,
+        g.expert_count,
+        tokens,
+    )?;
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+        ctx,
+        enc,
+        &views.router_logits,
+        weights.shared_router,
+        input,
+        &views.topk_ids,
+        &views.topk_weights,
+        &views.shared_scale,
+        g.expert_count,
+        g.experts_per_token,
+        g.hidden_size,
+        tokens,
+    )?;
+    encode_moe_route_bucket_slots_f32(
+        ctx,
+        enc,
+        &views.topk_ids,
+        &views.route_counts,
+        &views.route_slots,
+        g.expert_count,
+        tokens,
+        g.experts_per_token,
+    )?;
+    match weights.routed_gate.dtype {
+        GgmlType::IQ3_XXS => encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
+            ctx,
+            enc,
+            weights.routed_gate,
+            weights.routed_up,
+            input,
+            &views.route_counts,
+            &views.route_slots,
+            &views.routed_inner,
+            g.hidden_size,
+            g.routed_intermediate_size,
+            g.expert_count,
+            g.experts_per_token,
+            tokens,
+        )?,
+        dtype => return invalid(format!("unsupported packed routed gate/up dtype {dtype:?}")),
+    }
+    match weights.routed_down.dtype {
+        GgmlType::IQ4_NL => encode_moe_down_iq4_nl_f32_grouped_slots(
+            ctx,
+            enc,
+            weights.routed_down,
+            &views.routed_inner,
+            &views.route_counts,
+            &views.route_slots,
+            &views.routed_expert_output,
+            g.routed_intermediate_size,
+            g.hidden_size,
+            g.expert_count,
+            tokens,
+        )?,
+        GgmlType::Q8_0 => encode_moe_down_q8_0_f32_grouped_slots(
+            ctx,
+            enc,
+            weights.routed_down,
+            &views.routed_inner,
+            &views.route_counts,
+            &views.route_slots,
+            &views.routed_expert_output,
+            g.routed_intermediate_size,
+            g.hidden_size,
+            g.expert_count,
+            tokens,
+        )?,
+        dtype => return invalid(format!("unsupported packed routed down dtype {dtype:?}")),
+    }
+    encode_moe_weighted_sum_packed_f32(
+        ctx,
+        enc,
+        &views.routed_expert_output,
+        &views.topk_weights,
+        &views.output,
+        g.hidden_size,
+        g.experts_per_token,
+        tokens,
+    )?;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.shared_gate,
+        input,
+        &views.shared_gate_projection,
+        g.hidden_size,
+        g.shared_intermediate_size,
+        tokens,
+    )?;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.shared_up,
+        input,
+        &views.shared_up_projection,
+        g.hidden_size,
+        g.shared_intermediate_size,
+        tokens,
+    )?;
+    encode_silu_mul_f32(
+        ctx,
+        enc,
+        &views.shared_gate_projection,
+        &views.shared_up_projection,
+        &views.shared_inner,
+    )?;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.shared_down,
+        &views.shared_inner,
+        &views.shared_output,
+        g.shared_intermediate_size,
+        g.hidden_size,
+        tokens,
+    )?;
+    encode_axpy_rowwise_f32(
+        ctx,
+        enc,
+        &views.shared_output,
+        &views.shared_scale,
+        &views.output,
+        g.hidden_size,
+        tokens,
+    )?;
+    Ok(views.output)
 }
 
 pub(crate) fn validate_contract(
@@ -641,6 +1221,84 @@ pub(crate) fn validate_contract(
         false,
     )?;
     require_offset_alignment("MoE input", input, 16)?;
+    validate_weights(weights, g)?;
+
+    for (name, tensor, dtype, shape) in [
+        (
+            "MoE router logits",
+            &workspace.router_logits,
+            GgmlType::F32,
+            vec![g.expert_count as u64],
+        ),
+        (
+            "MoE top-k IDs",
+            &workspace.topk_ids,
+            GgmlType::I32,
+            vec![g.experts_per_token as u64],
+        ),
+        (
+            "MoE top-k weights",
+            &workspace.topk_weights,
+            GgmlType::F32,
+            vec![g.experts_per_token as u64],
+        ),
+        (
+            "MoE shared gate scalar",
+            &workspace.shared_gate,
+            GgmlType::F32,
+            vec![1],
+        ),
+        (
+            "MoE routed inner",
+            &workspace.routed_inner,
+            GgmlType::F32,
+            vec![
+                g.routed_intermediate_size as u64,
+                g.experts_per_token as u64,
+            ],
+        ),
+        (
+            "MoE routed expert output",
+            &workspace.routed_expert_output,
+            GgmlType::F32,
+            vec![g.hidden_size as u64, g.experts_per_token as u64],
+        ),
+        (
+            "MoE shared inner",
+            &workspace.shared_inner,
+            GgmlType::F32,
+            vec![g.shared_intermediate_size as u64],
+        ),
+        (
+            "MoE shared output",
+            &workspace.shared_output,
+            GgmlType::F32,
+            vec![g.hidden_size as u64],
+        ),
+        (
+            "MoE output",
+            &workspace.output,
+            GgmlType::F32,
+            vec![g.hidden_size as u64],
+        ),
+    ] {
+        require_tensor(name, tensor, dtype, &shape, true)?;
+    }
+
+    let named_weights = named_weights(weights);
+    require_read_only_weights(&named_weights)?;
+
+    let mut tensors = vec![("MoE input", input)];
+    tensors.extend(named_weights);
+    tensors.extend(workspace_tensors(workspace));
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)
+}
+
+fn validate_weights(
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    g: Qwen4ExpMoeMetalGeometry,
+) -> Result<(), Qwen4ExpMoeError> {
     require_projection(
         "MoE router",
         weights.router,
@@ -707,70 +1365,11 @@ pub(crate) fn validate_contract(
         g.hidden_size,
         &[GgmlType::Q8_0],
     )?;
+    Ok(())
+}
 
-    for (name, tensor, dtype, shape) in [
-        (
-            "MoE router logits",
-            &workspace.router_logits,
-            GgmlType::F32,
-            vec![g.expert_count as u64],
-        ),
-        (
-            "MoE top-k IDs",
-            &workspace.topk_ids,
-            GgmlType::I32,
-            vec![g.experts_per_token as u64],
-        ),
-        (
-            "MoE top-k weights",
-            &workspace.topk_weights,
-            GgmlType::F32,
-            vec![g.experts_per_token as u64],
-        ),
-        (
-            "MoE shared gate scalar",
-            &workspace.shared_gate,
-            GgmlType::F32,
-            vec![1],
-        ),
-        (
-            "MoE routed inner",
-            &workspace.routed_inner,
-            GgmlType::F32,
-            vec![
-                g.routed_intermediate_size as u64,
-                g.experts_per_token as u64,
-            ],
-        ),
-        (
-            "MoE routed expert output",
-            &workspace.routed_expert_output,
-            GgmlType::F32,
-            vec![g.hidden_size as u64, g.experts_per_token as u64],
-        ),
-        (
-            "MoE shared inner",
-            &workspace.shared_inner,
-            GgmlType::F32,
-            vec![g.shared_intermediate_size as u64],
-        ),
-        (
-            "MoE shared output",
-            &workspace.shared_output,
-            GgmlType::F32,
-            vec![g.hidden_size as u64],
-        ),
-        (
-            "MoE output",
-            &workspace.output,
-            GgmlType::F32,
-            vec![g.hidden_size as u64],
-        ),
-    ] {
-        require_tensor(name, tensor, dtype, &shape, true)?;
-    }
-
-    let named_weights = [
+fn named_weights(weights: Qwen4ExpMoeMetalWeights<'_>) -> [(&'static str, &MetalTensor); 8] {
+    [
         ("MoE router", weights.router),
         ("MoE routed gate bank", weights.routed_gate),
         ("MoE routed up bank", weights.routed_up),
@@ -779,14 +1378,192 @@ pub(crate) fn validate_contract(
         ("MoE shared gate", weights.shared_gate),
         ("MoE shared up", weights.shared_up),
         ("MoE shared down", weights.shared_down),
-    ];
-    require_read_only_weights(&named_weights)?;
+    ]
+}
 
-    let mut tensors = vec![("MoE input", input)];
+fn validate_packed_contract(
+    ctx: &MetalContext,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    scratch: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpMoeError> {
+    if tokens == 0 || tokens > scratch.capacity {
+        return invalid(format!(
+            "packed MoE token count {tokens} is outside capacity {}",
+            scratch.capacity
+        ));
+    }
+    let g = scratch.geometry;
+    if g.expert_count > 512 {
+        return invalid(format!(
+            "packed MoE supports at most 512 experts, got {}",
+            g.expert_count
+        ));
+    }
+    let slot_count = checked_product(&[tokens, g.experts_per_token], "packed route slots")?;
+    if i32::try_from(slot_count).is_err() {
+        return invalid(format!(
+            "packed MoE route slot count {slot_count} exceeds i32"
+        ));
+    }
+    require_tensor(
+        "packed MoE input",
+        input,
+        GgmlType::F32,
+        &[g.hidden_size as u64, tokens as u64],
+        false,
+    )?;
+    require_offset_alignment("packed MoE input", input, 16)?;
+    validate_weights(weights, g)?;
+    for (dtype, n_in, n_out) in [
+        (weights.router.dtype, g.hidden_size, g.expert_count),
+        (
+            weights.shared_gate.dtype,
+            g.hidden_size,
+            g.shared_intermediate_size,
+        ),
+        (
+            weights.shared_up.dtype,
+            g.hidden_size,
+            g.shared_intermediate_size,
+        ),
+        (
+            weights.shared_down.dtype,
+            g.shared_intermediate_size,
+            g.hidden_size,
+        ),
+    ] {
+        validate_f32_q8_mat_mat_addressing(dtype, n_in, n_out, tokens)?;
+    }
+
+    for (name, tensor, dtype, shape) in [
+        (
+            "packed MoE router logits",
+            &scratch.router_logits,
+            GgmlType::F32,
+            vec![g.expert_count as u64, scratch.capacity as u64],
+        ),
+        (
+            "packed MoE top-k IDs",
+            &scratch.topk_ids,
+            GgmlType::I32,
+            vec![g.experts_per_token as u64, scratch.capacity as u64],
+        ),
+        (
+            "packed MoE top-k weights",
+            &scratch.topk_weights,
+            GgmlType::F32,
+            vec![g.experts_per_token as u64, scratch.capacity as u64],
+        ),
+        (
+            "packed MoE shared scale",
+            &scratch.shared_scale,
+            GgmlType::F32,
+            vec![scratch.capacity as u64],
+        ),
+        (
+            "packed MoE route counts",
+            &scratch.route_counts,
+            GgmlType::I32,
+            vec![g.expert_count as u64],
+        ),
+        (
+            "packed MoE route slots",
+            &scratch.route_slots,
+            GgmlType::I32,
+            vec![(g.expert_count * scratch.capacity) as u64],
+        ),
+        (
+            "packed MoE routed inner",
+            &scratch.routed_inner,
+            GgmlType::F32,
+            vec![
+                g.routed_intermediate_size as u64,
+                g.experts_per_token as u64,
+                scratch.capacity as u64,
+            ],
+        ),
+        (
+            "packed MoE routed expert output",
+            &scratch.routed_expert_output,
+            GgmlType::F32,
+            vec![
+                g.hidden_size as u64,
+                g.experts_per_token as u64,
+                scratch.capacity as u64,
+            ],
+        ),
+        (
+            "packed MoE shared gate projection",
+            &scratch.shared_gate_projection,
+            GgmlType::F32,
+            vec![g.shared_intermediate_size as u64, scratch.capacity as u64],
+        ),
+        (
+            "packed MoE shared up projection",
+            &scratch.shared_up_projection,
+            GgmlType::F32,
+            vec![g.shared_intermediate_size as u64, scratch.capacity as u64],
+        ),
+        (
+            "packed MoE shared inner",
+            &scratch.shared_inner,
+            GgmlType::F32,
+            vec![g.shared_intermediate_size as u64, scratch.capacity as u64],
+        ),
+        (
+            "packed MoE shared output",
+            &scratch.shared_output,
+            GgmlType::F32,
+            vec![g.hidden_size as u64, scratch.capacity as u64],
+        ),
+        (
+            "packed MoE output",
+            &scratch.output,
+            GgmlType::F32,
+            vec![g.hidden_size as u64, scratch.capacity as u64],
+        ),
+    ] {
+        require_tensor(name, tensor, dtype, &shape, true)?;
+    }
+
+    let named_weights = named_weights(weights);
+    require_read_only_weights(&named_weights)?;
+    let mut tensors = vec![("packed MoE input", input)];
     tensors.extend(named_weights);
-    tensors.extend(workspace_tensors(workspace));
+    tensors.extend(packed_scratch_tensors(scratch));
     require_same_device(ctx, &tensors)?;
     require_disjoint(&tensors)
+}
+
+fn packed_scratch_tensors(
+    scratch: &Qwen4ExpMoePackedMotorScratch,
+) -> Vec<(&'static str, &MetalTensor)> {
+    vec![
+        ("packed MoE router logits", &scratch.router_logits),
+        ("packed MoE top-k IDs", &scratch.topk_ids),
+        ("packed MoE top-k weights", &scratch.topk_weights),
+        ("packed MoE shared scale", &scratch.shared_scale),
+        ("packed MoE route counts", &scratch.route_counts),
+        ("packed MoE route slots", &scratch.route_slots),
+        ("packed MoE routed inner", &scratch.routed_inner),
+        (
+            "packed MoE routed expert output",
+            &scratch.routed_expert_output,
+        ),
+        (
+            "packed MoE shared gate projection",
+            &scratch.shared_gate_projection,
+        ),
+        (
+            "packed MoE shared up projection",
+            &scratch.shared_up_projection,
+        ),
+        ("packed MoE shared inner", &scratch.shared_inner),
+        ("packed MoE shared output", &scratch.shared_output),
+        ("packed MoE output", &scratch.output),
+    ]
 }
 
 fn workspace_tensors(workspace: &Qwen4ExpMoeMetalWorkspace) -> Vec<(&'static str, &MetalTensor)> {
@@ -840,6 +1617,71 @@ pub(crate) fn preflight(
         32 * 2 * 2 * size_of::<f32>(),
     )?;
     ctx.pipeline("kernel_axpy_scalar_f32")?;
+    Ok(())
+}
+
+fn preflight_packed(
+    ctx: &MetalContext,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+) -> Result<(), Qwen4ExpMoeError> {
+    preflight_packed_projection(ctx, weights.router.dtype)?;
+    for dtype in [
+        weights.shared_gate.dtype,
+        weights.shared_up.dtype,
+        weights.shared_down.dtype,
+    ] {
+        preflight_packed_projection(ctx, dtype)?;
+    }
+    if weights.routed_gate.dtype != GgmlType::IQ3_XXS {
+        return invalid(format!(
+            "unsupported packed routed gate/up dtype {:?}",
+            weights.routed_gate.dtype
+        ));
+    }
+    require_pipeline_capacity(
+        ctx,
+        "kernel_topk_logits_softmax_dot_sigmoid_packed_f32",
+        512,
+        512 * 3 * size_of::<u32>(),
+    )?;
+    require_pipeline_capacity(ctx, "kernel_moe_route_bucket_slots_f32", 256, 0)?;
+    require_pipeline_capacity(
+        ctx,
+        "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16",
+        128,
+        16_384,
+    )?;
+    match weights.routed_down.dtype {
+        GgmlType::IQ4_NL => {
+            require_pipeline_capacity(ctx, "kernel_moe_down_iq4_nl_f32_grouped_slots", 128, 8_192)?
+        }
+        GgmlType::Q8_0 => {
+            require_pipeline_capacity(ctx, "kernel_moe_down_q8_0_f32_grouped_slots", 128, 8_192)?
+        }
+        dtype => return invalid(format!("unsupported packed routed down dtype {dtype:?}")),
+    }
+    require_pipeline_capacity(ctx, "kernel_moe_weighted_sum_packed_f32", 32, 0)?;
+    ctx.pipeline("kernel_silu_mul_f32")?;
+    ctx.pipeline("kernel_axpy_rowwise_f32")?;
+    Ok(())
+}
+
+fn preflight_packed_projection(
+    ctx: &MetalContext,
+    dtype: GgmlType,
+) -> Result<(), Qwen4ExpMoeError> {
+    let kernels: &[&str] = match dtype {
+        GgmlType::F32 => &["kernel_mat_mat_f32_f32"],
+        GgmlType::Q8_0 => &[
+            "kernel_mat_mat_q8_0_f32",
+            "kernel_mat_mat_q8_0_f32_n16",
+            "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+        ],
+        _ => return invalid(format!("unsupported packed MoE projection dtype {dtype:?}")),
+    };
+    for kernel in kernels {
+        ctx.pipeline(kernel)?;
+    }
     Ok(())
 }
 
@@ -902,7 +1744,8 @@ fn require_pipeline_capacity(
 }
 
 fn validate_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), Qwen4ExpMoeError> {
-    let actual = enc.parent_command_buffer().device().registryID();
+    let command = enc.parent_command_buffer();
+    let actual = command.device().registryID();
     let expected = ctx.device.registryID();
     if actual != expected {
         return invalid(format!(
@@ -911,6 +1754,12 @@ fn validate_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), Qwen4
     }
     if enc.is_concurrent() {
         return invalid("dependent MoE dispatches require a serial encoder");
+    }
+    let status = command.status();
+    if status != MTLCommandBufferStatus::NotEnqueued {
+        return invalid(format!(
+            "MoE encoding requires a NotEnqueued command buffer, got {status:?}"
+        ));
     }
     Ok(())
 }
@@ -1126,6 +1975,21 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
 
+    fn packed_test_context() -> Option<MetalContext> {
+        match MetalContext::new() {
+            Ok(ctx) => Some(ctx),
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => {
+                let required = matches!(
+                    std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
+                    Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+                );
+                assert!(!required, "Metal is required but unavailable");
+                None
+            }
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        }
+    }
+
     const ROUTING_ORACLE_JSON: &str =
         include_str!("../tests/fixtures/qwen4exp_moe_routing_v1.json");
     const ROUTING_ORACLE_F32: &[u8] =
@@ -1280,6 +2144,10 @@ mod tests {
         MetalTensor::from_bytes(ctx, bytemuck::cast_slice(values), shape, GgmlType::F32).unwrap()
     }
 
+    fn tensor_i32(ctx: &MetalContext, values: &[i32], shape: Vec<u64>) -> MetalTensor {
+        MetalTensor::from_bytes(ctx, bytemuck::cast_slice(values), shape, GgmlType::I32).unwrap()
+    }
+
     fn weight_f32(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
         let mut tensor = tensor_f32(ctx, values, shape);
         tensor.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
@@ -1323,6 +2191,1083 @@ mod tests {
                 .cast::<i32>();
             std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
         }
+    }
+
+    const ACTIVE_F32_SENTINEL: u32 = 0x7fc0_1234;
+    const GUARD_F32_SENTINEL: u32 = 0x7fc0_5678;
+    const ACTIVE_I32_SENTINEL: i32 = 0x1234_5678;
+    const GUARD_I32_SENTINEL: i32 = 0x2345_6789;
+
+    fn fill_f32_bits(tensor: &MetalTensor, bits: u32) {
+        assert_eq!(tensor.dtype, GgmlType::F32);
+        unsafe {
+            let destination = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<u32>();
+            std::slice::from_raw_parts_mut(destination, tensor.n_elements() as usize).fill(bits);
+        }
+    }
+
+    fn fill_i32(tensor: &MetalTensor, value: i32) {
+        assert_eq!(tensor.dtype, GgmlType::I32);
+        unsafe {
+            let destination = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<i32>();
+            std::slice::from_raw_parts_mut(destination, tensor.n_elements() as usize).fill(value);
+        }
+    }
+
+    fn seed_packed_scratch(scratch: &Qwen4ExpMoePackedMotorScratch, tokens: usize) {
+        let g = scratch.geometry;
+        for (tensor, width) in [
+            (&scratch.router_logits, g.expert_count),
+            (&scratch.topk_weights, g.experts_per_token),
+            (&scratch.shared_scale, 1),
+            (
+                &scratch.routed_inner,
+                g.experts_per_token * g.routed_intermediate_size,
+            ),
+            (
+                &scratch.routed_expert_output,
+                g.experts_per_token * g.hidden_size,
+            ),
+            (&scratch.shared_gate_projection, g.shared_intermediate_size),
+            (&scratch.shared_up_projection, g.shared_intermediate_size),
+            (&scratch.shared_inner, g.shared_intermediate_size),
+            (&scratch.shared_output, g.hidden_size),
+            (&scratch.output, g.hidden_size),
+        ] {
+            fill_f32_bits(tensor, GUARD_F32_SENTINEL);
+            let mut values = read_f32(tensor);
+            values[..tokens * width]
+                .iter_mut()
+                .for_each(|value| *value = f32::from_bits(ACTIVE_F32_SENTINEL));
+            unsafe {
+                let destination = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize)
+                    .cast::<f32>();
+                std::ptr::copy_nonoverlapping(values.as_ptr(), destination, values.len());
+            }
+        }
+        fill_i32(&scratch.topk_ids, GUARD_I32_SENTINEL);
+        let topk_ids = unsafe {
+            let destination = scratch
+                .topk_ids
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(scratch.topk_ids.offset as usize)
+                .cast::<i32>();
+            std::slice::from_raw_parts_mut(destination, scratch.topk_ids.n_elements() as usize)
+        };
+        topk_ids[..tokens * g.experts_per_token].fill(ACTIVE_I32_SENTINEL);
+        fill_i32(&scratch.route_counts, ACTIVE_I32_SENTINEL);
+        fill_i32(&scratch.route_slots, GUARD_I32_SENTINEL);
+        let route_slots = unsafe {
+            let destination = scratch
+                .route_slots
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(scratch.route_slots.offset as usize)
+                .cast::<i32>();
+            std::slice::from_raw_parts_mut(destination, scratch.route_slots.n_elements() as usize)
+        };
+        route_slots[..tokens * g.expert_count].fill(ACTIVE_I32_SENTINEL);
+    }
+
+    fn assert_packed_scratch_guards(scratch: &Qwen4ExpMoePackedMotorScratch, tokens: usize) {
+        let g = scratch.geometry;
+        for (tensor, width) in [
+            (&scratch.router_logits, g.expert_count),
+            (&scratch.topk_weights, g.experts_per_token),
+            (&scratch.shared_scale, 1),
+            (
+                &scratch.routed_inner,
+                g.experts_per_token * g.routed_intermediate_size,
+            ),
+            (
+                &scratch.routed_expert_output,
+                g.experts_per_token * g.hidden_size,
+            ),
+            (&scratch.shared_gate_projection, g.shared_intermediate_size),
+            (&scratch.shared_up_projection, g.shared_intermediate_size),
+            (&scratch.shared_inner, g.shared_intermediate_size),
+            (&scratch.shared_output, g.hidden_size),
+            (&scratch.output, g.hidden_size),
+        ] {
+            assert!(
+                read_f32(tensor)[tokens * width..]
+                    .iter()
+                    .all(|value| value.to_bits() == GUARD_F32_SENTINEL)
+            );
+        }
+        assert!(
+            read_i32(&scratch.topk_ids)[tokens * g.experts_per_token..]
+                .iter()
+                .all(|&value| value == GUARD_I32_SENTINEL)
+        );
+        assert!(
+            read_i32(&scratch.route_slots)[tokens * g.expert_count..]
+                .iter()
+                .all(|&value| value == GUARD_I32_SENTINEL)
+        );
+    }
+
+    fn assert_bits_eq(label: &str, actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{label}[{index}]: expected {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
+    fn assert_tokenwise_similarity(
+        label: &str,
+        actual: &[f32],
+        expected: &[f32],
+        width: usize,
+        tokens: usize,
+        max_abs: f32,
+        cosine: f64,
+    ) {
+        assert_eq!(actual.len(), width * tokens, "{label} actual shape");
+        assert_eq!(expected.len(), width * tokens, "{label} expected shape");
+        for token in 0..tokens {
+            let start = token * width;
+            assert_similarity(
+                &format!("{label} token={token}"),
+                &actual[start..start + width],
+                &expected[start..start + width],
+                max_abs,
+                cosine,
+            );
+        }
+    }
+
+    struct SerialPackedMoeTrace {
+        router_logits: Vec<f32>,
+        topk_ids: Vec<i32>,
+        topk_weights: Vec<f32>,
+        shared_scale: Vec<f32>,
+        routed_inner: Vec<f32>,
+        routed_expert_output: Vec<f32>,
+        shared_inner: Vec<f32>,
+        shared_output: Vec<f32>,
+        output: Vec<f32>,
+    }
+
+    fn serial_packed_moe_trace(
+        ctx: &MetalContext,
+        geometry: Qwen4ExpMoeMetalGeometry,
+        weights: Qwen4ExpMoeMetalWeights<'_>,
+        inputs: &[f32],
+        tokens: usize,
+    ) -> SerialPackedMoeTrace {
+        let mut workspace = Qwen4ExpMoeMetalWorkspace::new(ctx, geometry).unwrap();
+        let mut trace = SerialPackedMoeTrace {
+            router_logits: Vec::with_capacity(tokens * geometry.expert_count),
+            topk_ids: Vec::with_capacity(tokens * geometry.experts_per_token),
+            topk_weights: Vec::with_capacity(tokens * geometry.experts_per_token),
+            shared_scale: Vec::with_capacity(tokens),
+            routed_inner: Vec::with_capacity(
+                tokens * geometry.experts_per_token * geometry.routed_intermediate_size,
+            ),
+            routed_expert_output: Vec::with_capacity(
+                tokens * geometry.experts_per_token * geometry.hidden_size,
+            ),
+            shared_inner: Vec::with_capacity(tokens * geometry.shared_intermediate_size),
+            shared_output: Vec::with_capacity(tokens * geometry.hidden_size),
+            output: Vec::with_capacity(tokens * geometry.hidden_size),
+        };
+        for token in 0..tokens {
+            let start = token * geometry.hidden_size;
+            let input = tensor_f32(
+                ctx,
+                &inputs[start..start + geometry.hidden_size],
+                vec![geometry.hidden_size as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let read = encode_qwen4exp_moe(ctx, &encoder, &input, weights, &mut workspace).unwrap();
+            drop(read);
+            encoder.end();
+            command.commit();
+            workspace.release_after().unwrap();
+            trace
+                .router_logits
+                .extend(read_f32(&workspace.router_logits));
+            trace.topk_ids.extend(read_i32(&workspace.topk_ids));
+            trace.topk_weights.extend(read_f32(&workspace.topk_weights));
+            trace.shared_scale.extend(read_f32(&workspace.shared_gate));
+            trace.routed_inner.extend(read_f32(&workspace.routed_inner));
+            trace
+                .routed_expert_output
+                .extend(read_f32(&workspace.routed_expert_output));
+            trace.shared_inner.extend(read_f32(&workspace.shared_inner));
+            trace
+                .shared_output
+                .extend(read_f32(&workspace.shared_output));
+            trace.output.extend(read_f32(&workspace.output));
+        }
+        trace
+    }
+
+    #[test]
+    fn packed_router_supports_512_experts_with_stable_ties() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        const EXPERTS: usize = 512;
+        const TOP_K: usize = 10;
+        const HIDDEN: usize = 256;
+        let shared_values = (0..HIDDEN)
+            .map(|index| ((index * 17 + 3) % 41) as f32 * 0.002 - 0.04)
+            .collect::<Vec<_>>();
+        let shared_weight = weight_f32(&ctx, &shared_values, vec![HIDDEN as u64]);
+
+        for tokens in [2_usize, 8, 33] {
+            let logits = (0..tokens * EXPERTS)
+                .map(|index| {
+                    let token = index / EXPERTS;
+                    let expert = index % EXPERTS;
+                    let target = 300 + (token * 17) % 180;
+                    -(expert.abs_diff(target) as f32)
+                })
+                .collect::<Vec<_>>();
+            let input = (0..tokens * HIDDEN)
+                .map(|index| {
+                    let token = index / HIDDEN;
+                    let lane = index % HIDDEN;
+                    ((lane * 13 + token * 19 + 5) % 97) as f32 * 0.001 - 0.048
+                })
+                .collect::<Vec<_>>();
+            let logits_gpu = tensor_f32(&ctx, &logits, vec![EXPERTS as u64, tokens as u64]);
+            let input_gpu = tensor_f32(&ctx, &input, vec![HIDDEN as u64, tokens as u64]);
+            let ids_gpu = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, tokens as u64]).unwrap();
+            let weights_gpu =
+                MetalTensor::zeros_f32(&ctx, vec![TOP_K as u64, tokens as u64]).unwrap();
+            let shared_gpu = MetalTensor::zeros_f32(&ctx, vec![tokens as u64]).unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            crate::metal::encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                &ctx,
+                &encoder,
+                &logits_gpu,
+                &shared_weight,
+                &input_gpu,
+                &ids_gpu,
+                &weights_gpu,
+                &shared_gpu,
+                EXPERTS,
+                TOP_K,
+                HIDDEN,
+                tokens,
+            )
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            assert_eq!(census.len(), 1);
+            assert_eq!(
+                census[0].kernel,
+                "kernel_topk_logits_softmax_dot_sigmoid_packed_f32"
+            );
+            assert_eq!(census[0].grid_height, tokens as u64);
+            assert_eq!(census[0].threads_width, EXPERTS as u64);
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            let actual_ids = read_i32(&ids_gpu);
+            let actual_weights = read_f32(&weights_gpu);
+            let actual_shared = read_f32(&shared_gpu);
+            for token in 0..tokens {
+                let logits_row = &logits[token * EXPERTS..(token + 1) * EXPERTS];
+                let (expected_ids, expected_weights) = stable_topk(logits_row, TOP_K);
+                assert_eq!(
+                    &actual_ids[token * TOP_K..(token + 1) * TOP_K],
+                    expected_ids
+                );
+                assert!(expected_ids.iter().all(|&expert| expert >= 256));
+                assert_close(
+                    &format!("packed 512-expert route weights N={tokens} token={token}"),
+                    &actual_weights[token * TOP_K..(token + 1) * TOP_K],
+                    &expected_weights,
+                    1e-7,
+                    1e-7,
+                );
+                let shared_dot = shared_values
+                    .iter()
+                    .zip(&input[token * HIDDEN..(token + 1) * HIDDEN])
+                    .map(|(weight, input)| weight * input)
+                    .sum::<f32>();
+                let expected_shared = 1.0 / (1.0 + (-shared_dot).exp());
+                assert_close(
+                    &format!("packed 512-expert shared gate N={tokens} token={token}"),
+                    &[actual_shared[token]],
+                    &[expected_shared],
+                    2e-6,
+                    2e-6,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_iq4_nl_down_matches_slotwise_512_expert_execution() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        const EXPERTS: usize = 512;
+        const TOP_K: usize = 10;
+        const N_IN: usize = 64;
+        const N_OUT: usize = 256;
+        let down_bytes = synthetic_iq4_nl_bank(N_IN, N_OUT, EXPERTS, 211);
+        let weight = weight_bytes(
+            &ctx,
+            &down_bytes,
+            vec![N_IN as u64, N_OUT as u64, EXPERTS as u64],
+            GgmlType::IQ4_NL,
+        );
+
+        for tokens in [1_usize, 2, 8, 16, 33] {
+            let concentrated = [511_i32, 300, 301, 302, 303, 304, 305, 306, 307, 308];
+            let mut topk_ids = if tokens == 33 {
+                (0..tokens).flat_map(|_| concentrated).collect::<Vec<_>>()
+            } else {
+                (0..tokens * TOP_K)
+                    .map(|slot| {
+                        let token = slot / TOP_K;
+                        let route = slot % TOP_K;
+                        ((257 + token * 37 + route * 53) % EXPERTS) as i32
+                    })
+                    .collect::<Vec<_>>()
+            };
+            topk_ids[0] = 511;
+            let inner = (0..tokens * TOP_K * N_IN)
+                .map(|index| {
+                    let slot = index / N_IN;
+                    let lane = index % N_IN;
+                    ((slot * 29 + lane * 17 + 7) % 113) as f32 * 0.001 - 0.056
+                })
+                .collect::<Vec<_>>();
+            let ids_gpu = tensor_i32(&ctx, &topk_ids, vec![TOP_K as u64, tokens as u64]);
+            let inner_gpu =
+                tensor_f32(&ctx, &inner, vec![N_IN as u64, TOP_K as u64, tokens as u64]);
+            let counts_gpu = MetalTensor::zeros_i32(&ctx, vec![EXPERTS as u64]).unwrap();
+            let buckets_gpu =
+                MetalTensor::zeros_i32(&ctx, vec![tokens as u64, EXPERTS as u64]).unwrap();
+            let serial_output =
+                MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, TOP_K as u64, tokens as u64])
+                    .unwrap();
+            let grouped_output =
+                MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, TOP_K as u64, tokens as u64])
+                    .unwrap();
+            fill_i32(&counts_gpu, ACTIVE_I32_SENTINEL);
+            fill_i32(&buckets_gpu, GUARD_I32_SENTINEL);
+            fill_f32_bits(&serial_output, 0x7fc0_1111);
+            fill_f32_bits(&grouped_output, 0x7fc0_2222);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            for token in 0..tokens {
+                let slot_start = token * TOP_K;
+                let inner_row = inner_gpu
+                    .view_subrange((slot_start * N_IN) as u64, vec![N_IN as u64, TOP_K as u64]);
+                let ids_row = ids_gpu.view_subrange(slot_start as u64, vec![TOP_K as u64]);
+                let output_row = serial_output.view_subrange(
+                    (slot_start * N_OUT) as u64,
+                    vec![N_OUT as u64, TOP_K as u64],
+                );
+                encode_moe_down_iq4_nl_f32(
+                    &ctx,
+                    &encoder,
+                    &weight,
+                    &inner_row,
+                    &ids_row,
+                    &output_row,
+                    N_IN,
+                    N_OUT,
+                    EXPERTS,
+                    TOP_K,
+                )
+                .unwrap();
+            }
+            crate::metal::encode_moe_route_bucket_slots_f32(
+                &ctx,
+                &encoder,
+                &ids_gpu,
+                &counts_gpu,
+                &buckets_gpu,
+                EXPERTS,
+                tokens,
+                TOP_K,
+            )
+            .unwrap();
+            crate::metal::encode_moe_down_iq4_nl_f32_grouped_slots(
+                &ctx,
+                &encoder,
+                &weight,
+                &inner_gpu,
+                &counts_gpu,
+                &buckets_gpu,
+                &grouped_output,
+                N_IN,
+                N_OUT,
+                EXPERTS,
+                tokens,
+            )
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            assert_eq!(
+                census[census.len() - 2].kernel,
+                "kernel_moe_route_bucket_slots_f32"
+            );
+            assert_eq!(
+                census[census.len() - 1].kernel,
+                "kernel_moe_down_iq4_nl_f32_grouped_slots"
+            );
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            let mut expected_counts = vec![0_i32; EXPERTS];
+            let mut expected_buckets = vec![0_i32; EXPERTS * tokens];
+            for (slot, &expert) in topk_ids.iter().enumerate() {
+                let expert = expert as usize;
+                let count = expected_counts[expert] as usize;
+                expected_buckets[expert * tokens + count] = slot as i32;
+                expected_counts[expert] += 1;
+            }
+            let actual_counts = read_i32(&counts_gpu);
+            let actual_buckets = read_i32(&buckets_gpu);
+            assert_eq!(actual_counts, expected_counts);
+            assert_eq!(actual_counts.iter().sum::<i32>(), (tokens * TOP_K) as i32);
+            for expert in 0..EXPERTS {
+                let count = actual_counts[expert] as usize;
+                assert_eq!(
+                    &actual_buckets[expert * tokens..expert * tokens + count],
+                    &expected_buckets[expert * tokens..expert * tokens + count]
+                );
+            }
+            if tokens == 33 {
+                for (route, &expert) in concentrated.iter().enumerate() {
+                    let expert = expert as usize;
+                    assert_eq!(actual_counts[expert], 33);
+                    assert_eq!(
+                        actual_buckets[expert * tokens + 32],
+                        (32 * TOP_K + route) as i32
+                    );
+                }
+            }
+            assert_similarity(
+                &format!("grouped IQ4_NL down N={tokens}"),
+                &read_f32(&grouped_output),
+                &read_f32(&serial_output),
+                1e-5,
+                0.999_999_9,
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_iq4_nl_down_rejects_signed_shader_overflow() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        let down_bytes = synthetic_iq4_nl_bank(32, 1, 1, 223);
+        let weight = weight_bytes(&ctx, &down_bytes, vec![32, 1, 1], GgmlType::IQ4_NL);
+        let inner = tensor_f32(&ctx, &[0.0; 32], vec![32, 1]);
+        let counts = tensor_i32(&ctx, &[1], vec![1]);
+        let ids = tensor_i32(&ctx, &[0], vec![1]);
+        let output = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let too_large = i32::MAX as usize + 1;
+        let output_error = crate::metal::encode_moe_down_iq4_nl_f32_grouped_slots(
+            &ctx, &encoder, &weight, &inner, &counts, &ids, &output, 32, too_large, 1, 1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(output_error.contains("n_out") && output_error.contains("signed"));
+        let expert_error = crate::metal::encode_moe_down_iq4_nl_f32_grouped_slots(
+            &ctx, &encoder, &weight, &inner, &counts, &ids, &output, 32, 1, too_large, 1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(expert_error.contains("n_expert") && expert_error.contains("signed"));
+        encoder.end();
+    }
+
+    #[test]
+    fn packed_common_moe_motor_matches_serial_rows_and_routes() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        const HIDDEN: usize = 256;
+        const EXPERTS: usize = 512;
+        const TOP_K: usize = 10;
+        const ROUTED: usize = 64;
+        const SHARED: usize = 64;
+        const MAX_TOKENS: usize = 33;
+        const CAPACITY: usize = 34;
+        let geometry =
+            Qwen4ExpMoeMetalGeometry::new(HIDDEN, EXPERTS, TOP_K, ROUTED, SHARED).unwrap();
+
+        let mut router_values = vec![0.0_f32; HIDDEN * EXPERTS];
+        for expert in 0..EXPERTS {
+            let normalized = expert as f32 / EXPERTS as f32;
+            let row = expert * HIDDEN;
+            router_values[row] = 200.0 * normalized;
+            router_values[row + 1] = 100.0 * normalized * normalized;
+            router_values[row + 2] = normalized;
+        }
+        let router = weight_f32(&ctx, &router_values, vec![HIDDEN as u64, EXPERTS as u64]);
+        let shared_router_values = (0..HIDDEN)
+            .map(|lane| ((lane * 31 + 7) % 101) as f32 * 0.000_7 - 0.035)
+            .collect::<Vec<_>>();
+        let shared_router = weight_f32(&ctx, &shared_router_values, vec![HIDDEN as u64]);
+
+        let routed_gate_source = synthetic_f32_bank(HIDDEN, ROUTED, EXPERTS, 307);
+        let routed_gate_bytes = quantize_rows(&routed_gate_source, GgmlType::IQ3_XXS, HIDDEN);
+        drop(routed_gate_source);
+        let routed_up_source = synthetic_f32_bank(HIDDEN, ROUTED, EXPERTS, 331);
+        let routed_up_bytes = quantize_rows(&routed_up_source, GgmlType::IQ3_XXS, HIDDEN);
+        drop(routed_up_source);
+        let routed_down_bytes = synthetic_iq4_nl_bank(ROUTED, HIDDEN, EXPERTS, 353);
+        let routed_down_q8_bytes = synthetic_q8_0_bank(ROUTED, HIDDEN, EXPERTS, 367);
+        let shared_gate_bytes = synthetic_q8_0_bank(HIDDEN, SHARED, 1, 379);
+        let shared_up_bytes = synthetic_q8_0_bank(HIDDEN, SHARED, 1, 401);
+        let shared_down_bytes = synthetic_q8_0_bank(SHARED, HIDDEN, 1, 433);
+        let routed_gate = weight_bytes(
+            &ctx,
+            &routed_gate_bytes,
+            vec![HIDDEN as u64, ROUTED as u64, EXPERTS as u64],
+            GgmlType::IQ3_XXS,
+        );
+        let routed_up = weight_bytes(
+            &ctx,
+            &routed_up_bytes,
+            vec![HIDDEN as u64, ROUTED as u64, EXPERTS as u64],
+            GgmlType::IQ3_XXS,
+        );
+        let routed_down = weight_bytes(
+            &ctx,
+            &routed_down_bytes,
+            vec![ROUTED as u64, HIDDEN as u64, EXPERTS as u64],
+            GgmlType::IQ4_NL,
+        );
+        let routed_down_q8 = weight_bytes(
+            &ctx,
+            &routed_down_q8_bytes,
+            vec![ROUTED as u64, HIDDEN as u64, EXPERTS as u64],
+            GgmlType::Q8_0,
+        );
+        let shared_gate = weight_bytes(
+            &ctx,
+            &shared_gate_bytes,
+            vec![HIDDEN as u64, SHARED as u64],
+            GgmlType::Q8_0,
+        );
+        let shared_up = weight_bytes(
+            &ctx,
+            &shared_up_bytes,
+            vec![HIDDEN as u64, SHARED as u64],
+            GgmlType::Q8_0,
+        );
+        let shared_down = weight_bytes(
+            &ctx,
+            &shared_down_bytes,
+            vec![SHARED as u64, HIDDEN as u64],
+            GgmlType::Q8_0,
+        );
+        let weights = Qwen4ExpMoeMetalWeights {
+            geometry,
+            router: &router,
+            routed_gate: &routed_gate,
+            routed_up: &routed_up,
+            routed_down: &routed_down,
+            shared_router: &shared_router,
+            shared_gate: &shared_gate,
+            shared_up: &shared_up,
+            shared_down: &shared_down,
+        };
+        let q8_weights = Qwen4ExpMoeMetalWeights {
+            routed_down: &routed_down_q8,
+            ..weights
+        };
+
+        let mut inputs = (0..MAX_TOKENS * HIDDEN)
+            .map(|index| {
+                let token = index / HIDDEN;
+                let lane = index % HIDDEN;
+                ((token * 43 + lane * 17 + 11) % 127) as f32 * 0.000_8 - 0.05
+            })
+            .collect::<Vec<_>>();
+        for token in 0..MAX_TOKENS {
+            let target = 300 + (token * 17) % 180;
+            let row = token * HIDDEN;
+            inputs[row] = target as f32 / EXPERTS as f32;
+            inputs[row + 1] = -1.0;
+            inputs[row + 2] = -0.1;
+        }
+        let serial = serial_packed_moe_trace(&ctx, geometry, weights, &inputs, MAX_TOKENS);
+        assert!(serial.topk_ids.iter().all(|&expert| expert >= 256));
+        let mut packed_n33 = None;
+
+        for tokens in [1_usize, 2, 8, 16, 33] {
+            let scratch = Qwen4ExpMoePackedMotorScratch::new(&ctx, geometry, CAPACITY).unwrap();
+            seed_packed_scratch(&scratch, tokens);
+            let input = tensor_f32(
+                &ctx,
+                &inputs[..tokens * HIDDEN],
+                vec![HIDDEN as u64, tokens as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            let output = unsafe {
+                encode_qwen4exp_moe_packed_motor(&ctx, &encoder, &input, weights, &scratch, tokens)
+            }
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            let f32_matvec = if crate::metal::mat_vec_f32_lcpp_r2_enabled_for_test() {
+                "kernel_mat_vec_f32_f32_lcpp_r2"
+            } else {
+                "kernel_mat_vec_f32_f32"
+            };
+            let q8_matvec = if crate::metal::mat_vec_q8_0_lcpp_enabled() {
+                "kernel_mat_vec_q8_0_f32_lcpp"
+            } else {
+                "kernel_mat_vec_q8_0_f32"
+            };
+            let iq3_singleton = if qwen4exp_moe_iq3_fast_enabled() {
+                "kernel_moe_swiglu_iq3_xxs_f32_fast"
+            } else {
+                "kernel_moe_swiglu_iq3_xxs_f32"
+            };
+            let q8_matmat = |n_in: usize, n_out: usize| {
+                if tokens == 8
+                    && crate::metal_forward::matmat_smalln_table_enabled_for_test()
+                    && n_in.is_multiple_of(256)
+                    && n_out.is_multiple_of(8)
+                {
+                    "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32"
+                } else if tokens == 16 {
+                    "kernel_mat_mat_q8_0_f32_n16"
+                } else {
+                    "kernel_mat_mat_q8_0_f32"
+                }
+            };
+            let expected_kernels = if tokens == 1 {
+                vec![
+                    f32_matvec,
+                    "kernel_topk_logits_softmax_f32",
+                    "kernel_dot_sigmoid_f32",
+                    iq3_singleton,
+                    "kernel_moe_down_iq4_nl_f32",
+                    "kernel_moe_weighted_sum_f32",
+                    "kernel_shared_swiglu_q8_0_f32_lcpp",
+                    q8_matvec,
+                    "kernel_axpy_scalar_f32",
+                ]
+            } else {
+                vec![
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_topk_logits_softmax_dot_sigmoid_packed_f32",
+                    "kernel_moe_route_bucket_slots_f32",
+                    "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16",
+                    "kernel_moe_down_iq4_nl_f32_grouped_slots",
+                    "kernel_moe_weighted_sum_packed_f32",
+                    q8_matmat(HIDDEN, SHARED),
+                    q8_matmat(HIDDEN, SHARED),
+                    "kernel_silu_mul_f32",
+                    q8_matmat(SHARED, HIDDEN),
+                    "kernel_axpy_rowwise_f32",
+                ]
+            };
+            let actual_kernels = census
+                .iter()
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual_kernels, expected_kernels,
+                "packed common MoE N={tokens} route: {census:#?}"
+            );
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            let views = scratch.views(tokens).unwrap();
+            let actual_ids = read_i32(&views.topk_ids);
+            assert_eq!(
+                actual_ids,
+                serial.topk_ids[..tokens * TOP_K],
+                "packed common MoE N={tokens} top-k IDs"
+            );
+            let packed_stages = [
+                (
+                    "router logits",
+                    read_f32(&views.router_logits),
+                    &serial.router_logits[..tokens * EXPERTS],
+                    EXPERTS,
+                ),
+                (
+                    "top-k weights",
+                    read_f32(&views.topk_weights),
+                    &serial.topk_weights[..tokens * TOP_K],
+                    TOP_K,
+                ),
+                (
+                    "shared scale",
+                    read_f32(&views.shared_scale),
+                    &serial.shared_scale[..tokens],
+                    1,
+                ),
+                (
+                    "routed inner",
+                    read_f32(&views.routed_inner),
+                    &serial.routed_inner[..tokens * TOP_K * ROUTED],
+                    TOP_K * ROUTED,
+                ),
+                (
+                    "routed expert output",
+                    read_f32(&views.routed_expert_output),
+                    &serial.routed_expert_output[..tokens * TOP_K * HIDDEN],
+                    TOP_K * HIDDEN,
+                ),
+                (
+                    "shared inner",
+                    read_f32(&views.shared_inner),
+                    &serial.shared_inner[..tokens * SHARED],
+                    SHARED,
+                ),
+                (
+                    "shared output",
+                    read_f32(&views.shared_output),
+                    &serial.shared_output[..tokens * HIDDEN],
+                    HIDDEN,
+                ),
+                (
+                    "output",
+                    read_f32(&output),
+                    &serial.output[..tokens * HIDDEN],
+                    HIDDEN,
+                ),
+            ];
+            if tokens == 1 {
+                for (stage, actual, expected, _) in &packed_stages {
+                    assert_bits_eq(&format!("packed common MoE N=1 {stage}"), actual, expected);
+                }
+            } else {
+                for (stage, actual, expected, width) in &packed_stages {
+                    let (max_abs, cosine) = match *stage {
+                        "router logits" => (1e-6, 0.999_999_99),
+                        "top-k weights" => (1e-6, 0.999_999_99),
+                        "shared scale" => (1e-7, 0.999_999_99),
+                        "routed inner" => (1.5e-5, 0.999_999_9),
+                        "routed expert output" => (1.5e-6, 0.999_999_85),
+                        "shared inner" => (1.5e-7, 0.999_999_9),
+                        "shared output" => (3e-8, 0.999_999_8),
+                        "output" => (3e-7, 0.999_999_5),
+                        _ => unreachable!(),
+                    };
+                    assert_tokenwise_similarity(
+                        &format!("packed common MoE N={tokens} {stage}"),
+                        actual,
+                        expected,
+                        *width,
+                        tokens,
+                        max_abs,
+                        cosine,
+                    );
+                }
+
+                let actual_counts = read_i32(&views.route_counts);
+                let actual_slots = read_i32(&views.route_slots);
+                assert_eq!(actual_counts.iter().sum::<i32>(), (tokens * TOP_K) as i32);
+                let mut seen = vec![false; tokens * TOP_K];
+                for expert in 0..EXPERTS {
+                    let count = actual_counts[expert] as usize;
+                    assert!(count <= tokens);
+                    for &slot in &actual_slots[expert * tokens..expert * tokens + count] {
+                        let slot = slot as usize;
+                        assert!(slot < tokens * TOP_K);
+                        assert!(!seen[slot], "packed route slot {slot} appeared twice");
+                        assert_eq!(actual_ids[slot], expert as i32);
+                        seen[slot] = true;
+                    }
+                }
+                assert!(seen.into_iter().all(|present| present));
+            }
+            assert_packed_scratch_guards(&scratch, tokens);
+            if tokens == 33 {
+                packed_n33 = Some(read_f32(&output));
+            }
+        }
+
+        let mut perturbed_inputs = inputs.clone();
+        const CHANGED_TOKEN: usize = 17;
+        perturbed_inputs[CHANGED_TOKEN * HIDDEN + 5] += 0.75;
+        let perturbed_input = tensor_f32(
+            &ctx,
+            &perturbed_inputs,
+            vec![HIDDEN as u64, MAX_TOKENS as u64],
+        );
+        let perturbed_scratch =
+            Qwen4ExpMoePackedMotorScratch::new(&ctx, geometry, CAPACITY).unwrap();
+        seed_packed_scratch(&perturbed_scratch, MAX_TOKENS);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let perturbed_output = unsafe {
+            encode_qwen4exp_moe_packed_motor(
+                &ctx,
+                &encoder,
+                &perturbed_input,
+                weights,
+                &perturbed_scratch,
+                MAX_TOKENS,
+            )
+        }
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+        assert_packed_scratch_guards(&perturbed_scratch, MAX_TOKENS);
+        let baseline = packed_n33.unwrap();
+        let perturbed = read_f32(&perturbed_output);
+        assert!(
+            perturbed
+                .iter()
+                .all(|value| { value.is_finite() && value.to_bits() != ACTIVE_F32_SENTINEL })
+        );
+        for token in 0..MAX_TOKENS {
+            let start = token * HIDDEN;
+            if token == CHANGED_TOKEN {
+                assert!(
+                    baseline[start..start + HIDDEN]
+                        .iter()
+                        .zip(&perturbed[start..start + HIDDEN])
+                        .any(|(baseline, perturbed)| baseline.to_bits() != perturbed.to_bits())
+                );
+            } else {
+                assert_bits_eq(
+                    &format!("packed common MoE perturbation token={token}"),
+                    &perturbed[start..start + HIDDEN],
+                    &baseline[start..start + HIDDEN],
+                );
+            }
+        }
+
+        let q8_serial = serial_packed_moe_trace(&ctx, geometry, q8_weights, &inputs, 8);
+        for tokens in [1_usize, 8] {
+            let q8_scratch = Qwen4ExpMoePackedMotorScratch::new(&ctx, geometry, 9).unwrap();
+            seed_packed_scratch(&q8_scratch, tokens);
+            let input = tensor_f32(
+                &ctx,
+                &inputs[..tokens * HIDDEN],
+                vec![HIDDEN as u64, tokens as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            let output = unsafe {
+                encode_qwen4exp_moe_packed_motor(
+                    &ctx,
+                    &encoder,
+                    &input,
+                    q8_weights,
+                    &q8_scratch,
+                    tokens,
+                )
+            }
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            let f32_matvec = if crate::metal::mat_vec_f32_lcpp_r2_enabled_for_test() {
+                "kernel_mat_vec_f32_f32_lcpp_r2"
+            } else {
+                "kernel_mat_vec_f32_f32"
+            };
+            let q8_matvec = if crate::metal::mat_vec_q8_0_lcpp_enabled() {
+                "kernel_mat_vec_q8_0_f32_lcpp"
+            } else {
+                "kernel_mat_vec_q8_0_f32"
+            };
+            let iq3_singleton = if qwen4exp_moe_iq3_fast_enabled() {
+                "kernel_moe_swiglu_iq3_xxs_f32_fast"
+            } else {
+                "kernel_moe_swiglu_iq3_xxs_f32"
+            };
+            let q8_matmat = |n_in: usize, n_out: usize| {
+                if crate::metal_forward::matmat_smalln_table_enabled_for_test()
+                    && n_in.is_multiple_of(256)
+                    && n_out.is_multiple_of(8)
+                {
+                    "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32"
+                } else {
+                    "kernel_mat_mat_q8_0_f32"
+                }
+            };
+            let expected_kernels = if tokens == 1 {
+                vec![
+                    f32_matvec,
+                    "kernel_topk_logits_softmax_f32",
+                    "kernel_dot_sigmoid_f32",
+                    iq3_singleton,
+                    "kernel_moe_down_weighted_sum_q8_0_f32",
+                    "kernel_shared_swiglu_q8_0_f32_lcpp",
+                    q8_matvec,
+                    "kernel_axpy_scalar_f32",
+                ]
+            } else {
+                vec![
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_topk_logits_softmax_dot_sigmoid_packed_f32",
+                    "kernel_moe_route_bucket_slots_f32",
+                    "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16",
+                    "kernel_moe_down_q8_0_f32_grouped_slots",
+                    "kernel_moe_weighted_sum_packed_f32",
+                    q8_matmat(HIDDEN, SHARED),
+                    q8_matmat(HIDDEN, SHARED),
+                    "kernel_silu_mul_f32",
+                    q8_matmat(SHARED, HIDDEN),
+                    "kernel_axpy_rowwise_f32",
+                ]
+            };
+            assert_eq!(
+                census
+                    .iter()
+                    .map(|row| row.kernel.as_str())
+                    .collect::<Vec<_>>(),
+                expected_kernels,
+                "packed Q8-down MoE N={tokens} route: {census:#?}"
+            );
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+            let views = q8_scratch.views(tokens).unwrap();
+            assert_eq!(
+                read_i32(&views.topk_ids),
+                q8_serial.topk_ids[..tokens * TOP_K]
+            );
+            let stages = [
+                (
+                    "router logits",
+                    read_f32(&views.router_logits),
+                    &q8_serial.router_logits[..tokens * EXPERTS],
+                    EXPERTS,
+                ),
+                (
+                    "top-k weights",
+                    read_f32(&views.topk_weights),
+                    &q8_serial.topk_weights[..tokens * TOP_K],
+                    TOP_K,
+                ),
+                (
+                    "shared scale",
+                    read_f32(&views.shared_scale),
+                    &q8_serial.shared_scale[..tokens],
+                    1,
+                ),
+                (
+                    "routed inner",
+                    read_f32(&views.routed_inner),
+                    &q8_serial.routed_inner[..tokens * TOP_K * ROUTED],
+                    TOP_K * ROUTED,
+                ),
+                (
+                    "shared inner",
+                    read_f32(&views.shared_inner),
+                    &q8_serial.shared_inner[..tokens * SHARED],
+                    SHARED,
+                ),
+                (
+                    "shared output",
+                    read_f32(&views.shared_output),
+                    &q8_serial.shared_output[..tokens * HIDDEN],
+                    HIDDEN,
+                ),
+                (
+                    "output",
+                    read_f32(&output),
+                    &q8_serial.output[..tokens * HIDDEN],
+                    HIDDEN,
+                ),
+            ];
+            if tokens == 1 {
+                for (stage, actual, expected, _) in &stages {
+                    assert_bits_eq(&format!("packed Q8-down MoE N=1 {stage}"), actual, expected);
+                }
+            } else {
+                for (stage, actual, expected, width) in &stages {
+                    let (max_abs, cosine) = match *stage {
+                        "router logits" => (1e-6, 0.999_999_99),
+                        "top-k weights" => (1e-6, 0.999_999_99),
+                        "shared scale" => (1e-7, 0.999_999_99),
+                        "routed inner" => (1.5e-5, 0.999_999_9),
+                        "shared inner" => (1.5e-7, 0.999_999_9),
+                        "shared output" => (3e-8, 0.999_999_8),
+                        "output" => (2.5e-7, 0.999_999_8),
+                        _ => unreachable!(),
+                    };
+                    assert_tokenwise_similarity(
+                        &format!("packed Q8-down MoE N={tokens} {stage}"),
+                        actual,
+                        expected,
+                        *width,
+                        tokens,
+                        max_abs,
+                        cosine,
+                    );
+                }
+            }
+            assert_packed_scratch_guards(&q8_scratch, tokens);
+        }
+
+        let capacity_scratch =
+            Qwen4ExpMoePackedMotorScratch::new(&ctx, geometry, MAX_PACKED_TOKENS).unwrap();
+        assert_eq!(
+            capacity_scratch
+                .views(MAX_PACKED_TOKENS)
+                .unwrap()
+                .output
+                .n_elements(),
+            (MAX_PACKED_TOKENS * HIDDEN) as u64
+        );
+        let released_geometry = Qwen4ExpMoeMetalGeometry::new(2_560, 512, 10, 640, 640).unwrap();
+        assert_eq!(
+            Qwen4ExpMoePackedMotorScratch::required_bytes(released_geometry, MAX_PACKED_TOKENS,)
+                .unwrap(),
+            328_378_368
+        );
     }
 
     fn assert_close(label: &str, actual: &[f32], expected: &[f32], atol: f32, rtol: f32) {
@@ -2536,6 +4481,160 @@ mod tests {
             observed_cosine >= cosine,
             "{label} cosine={observed_cosine}"
         );
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_MOE_GGUF to the pinned first release shard"]
+    fn released_layer_three_packed_motor_matches_serial_rows() {
+        const TOKENS: usize = 8;
+        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_MOE_GGUF")
+            .expect("QWEN4EXP_Q3_K_XL_MOE_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+        let ctx = MetalContext::new().expect("initialize Metal");
+        let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();
+        let admitted = plan.admit(ctx.memory_signals()).unwrap();
+        let realized = Qwen4ExpMetalWeights::realize(&ctx, &gguf, admitted).unwrap();
+        let metal_weights = realized.weights();
+        let geometry = Qwen4ExpMoeMetalGeometry::from_config(metal_weights.config()).unwrap();
+        let weights = Qwen4ExpMoeMetalWeights::bind(metal_weights, 3).unwrap();
+        assert_eq!(weights.routed_gate.dtype, GgmlType::IQ3_XXS);
+        assert_eq!(weights.routed_down.dtype, GgmlType::IQ4_NL);
+
+        let router = gguf_dequant(&gguf, "blk.3.ffn_gate_inp.weight");
+        let mut inputs = Vec::with_capacity(TOKENS * geometry.hidden_size);
+        for seed in 0..512 {
+            let input = (0..geometry.hidden_size)
+                .map(|index| {
+                    let raw = ((index * 37 + index / 11 * 5 + seed * 17 + 3) % 257) as f32;
+                    (raw - 128.0) * 0.000_75
+                })
+                .collect::<Vec<_>>();
+            let logits = mat_vec(&router, &input, geometry.hidden_size, geometry.expert_count);
+            let (ids, _) = stable_topk(&logits, geometry.experts_per_token);
+            let mut sorted = logits.clone();
+            sorted.sort_by(|left, right| right.total_cmp(left));
+            let margin =
+                sorted[geometry.experts_per_token - 1] - sorted[geometry.experts_per_token];
+            if ids.iter().any(|&expert| expert >= 256) && margin > 1e-4 {
+                inputs.extend(input);
+                if inputs.len() == TOKENS * geometry.hidden_size {
+                    break;
+                }
+            }
+        }
+        assert_eq!(inputs.len(), TOKENS * geometry.hidden_size);
+        let serial = serial_packed_moe_trace(&ctx, geometry, weights, &inputs, TOKENS);
+        assert!(serial.topk_ids.iter().any(|&expert| expert >= 256));
+        let input = tensor_f32(
+            &ctx,
+            &inputs,
+            vec![geometry.hidden_size as u64, TOKENS as u64],
+        );
+        let scratch = Qwen4ExpMoePackedMotorScratch::new(&ctx, geometry, TOKENS).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        let output = unsafe {
+            encode_qwen4exp_moe_packed_motor(&ctx, &encoder, &input, weights, &scratch, TOKENS)
+        }
+        .unwrap();
+        let census = crate::metal::dispatch_census_take();
+        assert_eq!(
+            census
+                .iter()
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "kernel_mat_mat_f32_f32",
+                "kernel_topk_logits_softmax_dot_sigmoid_packed_f32",
+                "kernel_moe_route_bucket_slots_f32",
+                "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16",
+                "kernel_moe_down_iq4_nl_f32_grouped_slots",
+                "kernel_moe_weighted_sum_packed_f32",
+                "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+                "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+                "kernel_silu_mul_f32",
+                "kernel_mat_mat_q8_0_f32",
+                "kernel_axpy_rowwise_f32",
+            ],
+            "released packed layer-3 route: {census:#?}"
+        );
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+
+        let views = scratch.views(TOKENS).unwrap();
+        assert_eq!(read_i32(&views.topk_ids), serial.topk_ids);
+        for (stage, actual, expected, width, max_abs, cosine) in [
+            (
+                "released packed layer-3 router logits",
+                read_f32(&views.router_logits),
+                serial.router_logits.as_slice(),
+                geometry.expert_count,
+                6e-7,
+                0.999_999_99,
+            ),
+            (
+                "released packed layer-3 top-k weights",
+                read_f32(&views.topk_weights),
+                serial.topk_weights.as_slice(),
+                geometry.experts_per_token,
+                7e-8,
+                0.999_999_99,
+            ),
+            (
+                "released packed layer-3 shared scale",
+                read_f32(&views.shared_scale),
+                serial.shared_scale.as_slice(),
+                1,
+                1e-7,
+                0.999_999_99,
+            ),
+            (
+                "released packed layer-3 routed inner",
+                read_f32(&views.routed_inner),
+                serial.routed_inner.as_slice(),
+                geometry.experts_per_token * geometry.routed_intermediate_size,
+                4e-6,
+                0.999_999_9,
+            ),
+            (
+                "released packed layer-3 routed expert output",
+                read_f32(&views.routed_expert_output),
+                serial.routed_expert_output.as_slice(),
+                geometry.experts_per_token * geometry.hidden_size,
+                8e-7,
+                0.999_999_85,
+            ),
+            (
+                "released packed layer-3 shared inner",
+                read_f32(&views.shared_inner),
+                serial.shared_inner.as_slice(),
+                geometry.shared_intermediate_size,
+                1.5e-6,
+                0.999_999_9,
+            ),
+            (
+                "released packed layer-3 shared output",
+                read_f32(&views.shared_output),
+                serial.shared_output.as_slice(),
+                geometry.hidden_size,
+                6e-7,
+                0.999_999_9,
+            ),
+            (
+                "released packed layer-3 output",
+                read_f32(&output),
+                serial.output.as_slice(),
+                geometry.hidden_size,
+                4e-7,
+                0.999_999_9,
+            ),
+        ] {
+            assert_tokenwise_similarity(stage, &actual, expected, width, TOKENS, max_abs, cosine);
+        }
     }
 
     #[test]

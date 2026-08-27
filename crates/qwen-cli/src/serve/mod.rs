@@ -97,12 +97,6 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
     let snapshot_cache_bytes = snapshot_cache_bytes(invocation.snapshot_cache_mib)?;
-    let mut trace = invocation
-        .trace_sse
-        .as_deref()
-        .map(http::TraceLog::open)
-        .transpose()
-        .context("open --trace-sse log")?;
     let gguf = GgufFile::open(&invocation.model)
         .with_context(|| format!("open model {}", invocation.model.display()))?;
     let family = ModelFamily::detect(&gguf);
@@ -110,6 +104,12 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         supports_serve_family(family),
         "qwen serve supports Qwen3.5/3.6-family and DeepSeek V4 models (docs/SERVE.md)"
     );
+    let mut trace = invocation
+        .trace_sse
+        .as_deref()
+        .map(http::TraceLog::open)
+        .transpose()
+        .context("open --trace-sse log")?;
     let model_id = invocation
         .model
         .file_stem()

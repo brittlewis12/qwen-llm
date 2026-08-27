@@ -22,9 +22,43 @@ use objc2_metal::{
 const MAX_TOP_K: usize = 16;
 
 crate::env_flag!(
-    default_on qwen4exp_moe_iq3_fast_enabled,
+    default_on configured_qwen4exp_moe_iq3_fast_enabled,
     "QWEN4EXP_MOE_IQ3_FAST"
 );
+
+#[cfg(test)]
+thread_local! {
+    static QWEN4EXP_MOE_IQ3_FAST_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_moe_iq3_fast_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct RestoreOverride(Option<bool>);
+
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            QWEN4EXP_MOE_IQ3_FAST_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let previous = QWEN4EXP_MOE_IQ3_FAST_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    let _restore = RestoreOverride(previous);
+    f()
+}
+
+fn qwen4exp_moe_iq3_fast_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = QWEN4EXP_MOE_IQ3_FAST_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
+    configured_qwen4exp_moe_iq3_fast_enabled()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpMoeError {

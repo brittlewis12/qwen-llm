@@ -25,6 +25,15 @@ pub enum Qwen4ExpRuntimeError {
     Session(#[from] Qwen4ExpTextSessionError),
     #[error(transparent)]
     Metal(#[from] MetalError),
+    #[error(
+        "Qwen3.8-Flash-Next prefill failed after committing {committed} of {requested} tokens; reset before retrying the full prompt: {source}"
+    )]
+    Prefill {
+        committed: usize,
+        requested: usize,
+        #[source]
+        source: Box<Qwen4ExpRuntimeError>,
+    },
     #[error("invalid Qwen3.8-Flash-Next runtime contract: {0}")]
     Invalid(String),
 }
@@ -135,6 +144,18 @@ pub struct Qwen4ExpLayerProfile {
     pub stages: Vec<Qwen4ExpLayerStageTiming>,
     pub encoder_boundary_ms: f64,
     pub sampled_span_ticks: u64,
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("Qwen3.8-Flash-Next layer-profile telemetry unavailable: {detail}")]
+pub struct Qwen4ExpLayerProfileError {
+    detail: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Qwen4ExpLayerProfileOutcome {
+    pub token: Qwen4ExpTokenTiming,
+    pub profile: Result<Qwen4ExpLayerProfile, Qwen4ExpLayerProfileError>,
 }
 
 pub struct Qwen4ExpLoadedModel<'gguf> {
@@ -293,6 +314,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         &mut self,
         token_id: u32,
     ) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError> {
+        self.validate_token_id(token_id)?;
         if self.next_position() >= self.capacity.forward_limit {
             return invalid(format!(
                 "logical forward limit {} is exhausted",
@@ -313,28 +335,35 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
     pub fn forward_token_layer_profiled(
         &mut self,
         token_id: u32,
-    ) -> Result<Qwen4ExpLayerProfile, Qwen4ExpRuntimeError> {
+    ) -> Result<Qwen4ExpLayerProfileOutcome, Qwen4ExpRuntimeError> {
+        self.validate_token_id(token_id)?;
         if self.next_position() >= self.capacity.forward_limit {
             return invalid(format!(
                 "logical forward limit {} is exhausted",
                 self.capacity.forward_limit
             ));
         }
-        let profile = execute_qwen4exp_text_token_layer_profiled_sync(
+        let outcome = execute_qwen4exp_text_token_layer_profiled_sync(
             self.ctx,
             token_id,
             self.ple_table,
             &self.weights,
             &mut self.workspace,
         )?;
-        self.last_token_timing = Some(profile.token);
-        Ok(profile)
+        self.last_token_timing = Some(outcome.token);
+        Ok(outcome)
     }
 
     pub fn prefill(
         &mut self,
         token_ids: &[u32],
     ) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError> {
+        if self.next_position() != 0 {
+            return invalid(format!(
+                "prefill requires a reset session at position zero, got position {}",
+                self.next_position()
+            ));
+        }
         if token_ids.is_empty() {
             return invalid("prompt token sequence must be nonempty");
         }
@@ -345,18 +374,39 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
                 self.remaining_forwards()
             ));
         }
-        let (last, prefix) = token_ids
-            .split_last()
-            .expect("nonempty prompt has a final token");
-        for &token_id in prefix {
-            let _ = self.forward_token(token_id)?;
+        for (index, &token_id) in token_ids.iter().enumerate() {
+            self.validate_token_id(token_id).map_err(|source| {
+                Qwen4ExpRuntimeError::Invalid(format!(
+                    "prompt token {index} is invalid before prefill: {source}"
+                ))
+            })?;
         }
-        self.forward_token(*last)
+        let start = self.next_position();
+        for &token_id in token_ids {
+            if let Err(source) = self.forward_token(token_id).map(|_| ()) {
+                return Err(Qwen4ExpRuntimeError::Prefill {
+                    committed: self.next_position().saturating_sub(start),
+                    requested: token_ids.len(),
+                    source: Box::new(source),
+                });
+            }
+        }
+        self.logits()
     }
 
     pub fn reset(&mut self) -> Result<(), Qwen4ExpRuntimeError> {
         self.workspace.reset()?;
         self.last_token_timing = None;
+        Ok(())
+    }
+
+    fn validate_token_id(&self, token_id: u32) -> Result<(), Qwen4ExpRuntimeError> {
+        let vocab_size = self.weights.geometry.vocab_size();
+        if token_id as usize >= vocab_size {
+            return invalid(format!(
+                "token ID {token_id} is outside vocabulary {vocab_size}"
+            ));
+        }
         Ok(())
     }
 }
@@ -428,7 +478,7 @@ fn execute_qwen4exp_text_token_layer_profiled_sync(
     table: PleIq4NlTable<'_>,
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
-) -> Result<Qwen4ExpLayerProfile, Qwen4ExpRuntimeError> {
+) -> Result<Qwen4ExpLayerProfileOutcome, Qwen4ExpRuntimeError> {
     let position = workspace.committed_length();
     let stages = qwen4exp_layer_stages(weights);
     let sample_count = stages
@@ -473,8 +523,11 @@ fn execute_qwen4exp_text_token_layer_profiled_sync(
         gpu_ms,
         total_wall_ms: wall_started.elapsed().as_secs_f64() * 1e3,
     };
-    let timestamps = ctx.resolve_timestamp_samples(&samples, sample_count)?;
-    resolve_qwen4exp_layer_profile(token, &stages, &timestamps)
+    let profile = ctx
+        .resolve_timestamp_samples(&samples, sample_count)
+        .map_err(|error| layer_profile_error(error.to_string()))
+        .and_then(|timestamps| resolve_qwen4exp_layer_profile(token, &stages, &timestamps));
+    Ok(Qwen4ExpLayerProfileOutcome { token, profile })
 }
 
 fn qwen4exp_layer_stages(weights: &Qwen4ExpTextSessionMetalWeights<'_>) -> Vec<Qwen4ExpLayerStage> {
@@ -498,30 +551,30 @@ fn resolve_qwen4exp_layer_profile(
     token: Qwen4ExpTokenTiming,
     stages: &[Qwen4ExpLayerStage],
     timestamps: &[u64],
-) -> Result<Qwen4ExpLayerProfile, Qwen4ExpRuntimeError> {
+) -> Result<Qwen4ExpLayerProfile, Qwen4ExpLayerProfileError> {
     let expected_samples = stages
         .len()
         .checked_mul(2)
-        .ok_or_else(|| Qwen4ExpRuntimeError::Invalid("layer sample count overflow".into()))?;
+        .ok_or_else(|| layer_profile_error("layer sample count overflow"))?;
     if stages.is_empty() || timestamps.len() != expected_samples {
-        return invalid(format!(
+        return Err(layer_profile_error(format!(
             "layer profile has {} stages and {} samples; expected a nonempty 2:1 sample mapping",
             stages.len(),
             timestamps.len()
-        ));
+        )));
     }
-    let command_gpu_ms = token.gpu_ms.ok_or_else(|| {
-        Qwen4ExpRuntimeError::Invalid("profiled command has no GPU interval".into())
-    })?;
+    let command_gpu_ms = token
+        .gpu_ms
+        .ok_or_else(|| layer_profile_error("profiled command has no GPU interval"))?;
     let first_start = timestamps[0];
     let last_end = *timestamps
         .last()
         .expect("nonempty layer timestamps have a final sample");
-    let sampled_span_ticks = last_end.checked_sub(first_start).ok_or_else(|| {
-        Qwen4ExpRuntimeError::Invalid("layer timestamps are not monotonic".into())
-    })?;
+    let sampled_span_ticks = last_end
+        .checked_sub(first_start)
+        .ok_or_else(|| layer_profile_error("layer timestamps are not monotonic"))?;
     if sampled_span_ticks == 0 {
-        return invalid("layer timestamp span is zero");
+        return Err(layer_profile_error("layer timestamp span is zero"));
     }
     let scale_ms_per_tick = command_gpu_ms / sampled_span_ticks as f64;
     let mut previous_end = None;
@@ -531,9 +584,9 @@ fn resolve_qwen4exp_layer_profile(
         let start = timestamps[index * 2];
         let end = timestamps[index * 2 + 1];
         if end < start || previous_end.is_some_and(|previous| start < previous) {
-            return invalid(format!(
+            return Err(layer_profile_error(format!(
                 "layer stage {index} timestamps are not monotonic: previous_end={previous_end:?} start={start} end={end}"
-            ));
+            )));
         }
         let duration_ticks = end - start;
         let gpu_ms = duration_ticks as f64 * scale_ms_per_tick;
@@ -552,6 +605,12 @@ fn resolve_qwen4exp_layer_profile(
         encoder_boundary_ms: (command_gpu_ms - stage_gpu_ms).max(0.0),
         sampled_span_ticks,
     })
+}
+
+fn layer_profile_error(detail: impl Into<String>) -> Qwen4ExpLayerProfileError {
+    Qwen4ExpLayerProfileError {
+        detail: detail.into(),
+    }
 }
 
 fn checked_lcm(left: usize, right: usize) -> Result<usize, Qwen4ExpRuntimeError> {
@@ -575,8 +634,57 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::qwen4exp_moe::with_qwen4exp_moe_iq3_fast_override;
     use crate::sampling::{Sampler, SamplingConfig};
     use crate::tokenizer::Tokenizer;
+
+    fn argmax(values: &[f32]) -> usize {
+        values
+            .iter()
+            .enumerate()
+            .max_by(|(left_index, left), (right_index, right)| {
+                left.total_cmp(right)
+                    .then_with(|| right_index.cmp(left_index))
+            })
+            .map(|(index, _)| index)
+            .unwrap()
+    }
+
+    fn assert_logit_arms_close(label: &str, baseline: &[f32], candidate: &[f32]) {
+        assert_eq!(baseline.len(), candidate.len());
+        assert!(
+            baseline
+                .iter()
+                .chain(candidate)
+                .all(|value| value.is_finite())
+        );
+        let mut dot = 0.0_f64;
+        let mut baseline_norm = 0.0_f64;
+        let mut candidate_norm = 0.0_f64;
+        let mut difference_norm = 0.0_f64;
+        let mut max_abs = 0.0_f32;
+        for (&left, &right) in baseline.iter().zip(candidate) {
+            let left = left as f64;
+            let right = right as f64;
+            let difference = left - right;
+            dot += left * right;
+            baseline_norm += left * left;
+            candidate_norm += right * right;
+            difference_norm += difference * difference;
+            max_abs = max_abs.max(difference.abs() as f32);
+        }
+        let cosine = dot / (baseline_norm.sqrt() * candidate_norm.sqrt()).max(f64::MIN_POSITIVE);
+        let relative_rms = (difference_norm / baseline_norm.max(f64::MIN_POSITIVE)).sqrt();
+        eprintln!(
+            "{label}: baseline_argmax={} candidate_argmax={} cosine={cosine:.12} relative_rms={relative_rms:.6e} max_abs={max_abs:.6e}",
+            argmax(baseline),
+            argmax(candidate),
+        );
+        assert_eq!(argmax(baseline), argmax(candidate), "{label} argmax");
+        assert!(cosine > 0.999_999_99, "{label} cosine {cosine}");
+        assert!(relative_rms < 1e-4, "{label} relative RMS {relative_rms}");
+        assert!(max_abs < 1e-3, "{label} maximum delta {max_abs}");
+    }
 
     #[test]
     fn request_forward_limit_rounds_only_physical_qsa_rows() {
@@ -648,24 +756,60 @@ mod tests {
         .unwrap();
         let mut loaded = Qwen4ExpLoadedModel::load(&ctx, &gguf, capacity).unwrap();
         let mut runner = loaded.create_runner(&ctx).unwrap();
-        let first = runner.prefill(&prompt_tokens).unwrap().to_vec();
+        let invalid_prefill = match runner.prefill(&[prompt_tokens[0], 248_320]) {
+            Ok(_) => panic!("invalid prefill token must fail before execution"),
+            Err(error) => error.to_string(),
+        };
+        assert!(invalid_prefill.contains("prompt token 1 is invalid before prefill"));
+        assert_eq!(runner.next_position(), 0);
+        let continuation = [49_006_u32, 1_537];
+        let baseline_rows = with_qwen4exp_moe_iq3_fast_override(false, || {
+            let mut rows = vec![runner.prefill(&prompt_tokens).unwrap().to_vec()];
+            for &token in &continuation {
+                rows.push(runner.forward_token(token).unwrap().to_vec());
+            }
+            rows
+        });
+        let nonzero_prefill = match runner.prefill(&prompt_tokens) {
+            Ok(_) => panic!("prefill must reject a session with committed state"),
+            Err(error) => error.to_string(),
+        };
+        assert!(nonzero_prefill.contains("requires a reset session at position zero"));
+        runner.reset().unwrap();
+        let candidate_rows = with_qwen4exp_moe_iq3_fast_override(true, || {
+            let mut rows = vec![runner.prefill(&prompt_tokens).unwrap().to_vec()];
+            for &token in &continuation {
+                rows.push(runner.forward_token(token).unwrap().to_vec());
+            }
+            rows
+        });
+        for (index, (baseline, candidate)) in baseline_rows.iter().zip(&candidate_rows).enumerate()
+        {
+            assert_logit_arms_close(&format!("released logits row {index}"), baseline, candidate);
+        }
+        runner.reset().unwrap();
+        let first = with_qwen4exp_moe_iq3_fast_override(true, || {
+            runner.prefill(&prompt_tokens).unwrap().to_vec()
+        });
         let stop_tokens = gguf.stop_token_ids().unwrap();
         let mut sampler = Sampler::new(SamplingConfig::default()).unwrap();
         let mut logits = first.clone();
         let mut generated = Vec::new();
         let mut output = Vec::new();
-        for _ in 0..8 {
-            let token = sampler.sample(&logits).unwrap().token;
-            generated.push(token);
-            if stop_tokens.contains(&token) {
-                break;
+        with_qwen4exp_moe_iq3_fast_override(true, || {
+            for _ in 0..8 {
+                let token = sampler.sample(&logits).unwrap().token;
+                generated.push(token);
+                if stop_tokens.contains(&token) {
+                    break;
+                }
+                output.extend_from_slice(tokenizer.try_decode_piece_bytes_exact(token).unwrap());
+                logits = runner
+                    .forward_token(u32::try_from(token).unwrap())
+                    .unwrap()
+                    .to_vec();
             }
-            output.extend_from_slice(tokenizer.try_decode_piece_bytes_exact(token).unwrap());
-            logits = runner
-                .forward_token(u32::try_from(token).unwrap())
-                .unwrap()
-                .to_vec();
-        }
+        });
         assert_eq!(generated, [49_006, 1_537, 248_046]);
         assert_eq!(output, b"HELLO");
         assert_eq!(runner.next_position(), prompt_tokens.len() + 2);
@@ -673,10 +817,13 @@ mod tests {
         assert_eq!(runner.next_position(), 0);
         assert!(runner.logits().is_err());
         let (last, prefix) = prompt_tokens.split_last().unwrap();
-        for &token in prefix {
-            let _ = runner.forward_token(token).unwrap();
-        }
-        let profile = runner.forward_token_layer_profiled(*last).unwrap();
+        let outcome = with_qwen4exp_moe_iq3_fast_override(true, || {
+            for &token in prefix {
+                let _ = runner.forward_token(token).unwrap();
+            }
+            runner.forward_token_layer_profiled(*last).unwrap()
+        });
+        let profile = outcome.profile.unwrap();
         assert_eq!(profile.token.position, prompt_tokens.len() - 1);
         assert_eq!(profile.stages.len(), 48);
         assert!(profile.sampled_span_ticks > 0);

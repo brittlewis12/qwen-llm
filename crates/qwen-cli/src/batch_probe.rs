@@ -1266,12 +1266,13 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open queue-overlap model {}", args.model.display()))?;
     let family = ModelFamily::detect(&gguf).context("unsupported queue-overlap model family")?;
+    if family == ModelFamily::Qwen4Exp {
+        bail!("queue-overlap probing is not supported for Qwen3.8-Flash-Next");
+    }
     let ctx = MetalContext::new().context("create queue-overlap Metal context")?;
     let rows = match family {
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => run_qwen(&ctx, &gguf, &args)?,
-        ModelFamily::Qwen4Exp => {
-            bail!("queue-overlap probing is not supported for Qwen3.8-Flash-Next")
-        }
+        ModelFamily::Qwen4Exp => unreachable!("Qwen3.8-Flash-Next requests fail before Metal init"),
         ModelFamily::DeepSeek4 => run_deepseek(&ctx, &gguf, &args)?.0,
     };
     let (graph_policy, host_submission_policy) = match family {
@@ -1280,7 +1281,7 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
             "single_host_thread_encode_all_then_commit_all",
         ),
         ModelFamily::Qwen4Exp => {
-            unreachable!("Qwen3.8-Flash-Next queue-overlap requests fail above")
+            unreachable!("Qwen3.8-Flash-Next requests fail before Metal init")
         }
         ModelFamily::DeepSeek4 => (
             "forward_token_whole_profiled",

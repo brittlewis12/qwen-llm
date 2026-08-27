@@ -36,6 +36,11 @@ use unicode_general_category::{GeneralCategory, get_general_category};
 
 const NATIVE_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
 
+pub const QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256: [u8; 32] = [
+    0x86, 0xa6, 0x19, 0x3d, 0x6a, 0x6c, 0x9b, 0x43, 0xa7, 0x1a, 0x20, 0x77, 0x65, 0xf8, 0x5f, 0xb3,
+    0x90, 0x4a, 0xdd, 0xb3, 0xbb, 0xa6, 0xdc, 0xd5, 0x0b, 0x50, 0xbe, 0xf0, 0x76, 0xe5, 0xe8, 0x9f,
+];
+
 /// SHA-256 over the raw concatenation of signed token IDs in little-endian
 /// order. This is the production prompt-token identity contract.
 pub fn token_ids_sha256_i32le(tokens: &[i32]) -> String {
@@ -44,6 +49,130 @@ pub fn token_ids_sha256_i32le(tokens: &[i32]) -> String {
         digest.update(token.to_le_bytes());
     }
     format!("{:x}", digest.finalize())
+}
+
+pub fn qwen4exp_tokenizer_identity_sha256(g: &GgufFile) -> Result<[u8; 32], TokError> {
+    let mut digest = Sha256::new();
+    digest.update(b"qwen4exp-tokenizer-identity-v2\0");
+    hash_identity_str(
+        &mut digest,
+        "general.architecture",
+        required_str(g, "general.architecture")?,
+    )?;
+    hash_identity_str(
+        &mut digest,
+        "tokenizer.ggml.model",
+        required_str(g, "tokenizer.ggml.model")?,
+    )?;
+    hash_identity_str(
+        &mut digest,
+        "tokenizer.ggml.pre",
+        required_str(g, "tokenizer.ggml.pre")?,
+    )?;
+    hash_identity_str_array(
+        &mut digest,
+        "tokenizer.ggml.tokens",
+        &required_string_array(g, "tokenizer.ggml.tokens")?,
+    )?;
+    hash_identity_i64_array(
+        &mut digest,
+        "tokenizer.ggml.token_type",
+        &required_i64_array(g, "tokenizer.ggml.token_type")?,
+    )?;
+    hash_identity_str_array(
+        &mut digest,
+        "tokenizer.ggml.merges",
+        &required_string_array(g, "tokenizer.ggml.merges")?,
+    )?;
+    hash_identity_optional_i32(
+        &mut digest,
+        "tokenizer.ggml.bos_token_id",
+        optional_token_id(g, "tokenizer.ggml.bos_token_id")?,
+    )?;
+    hash_identity_optional_i32(
+        &mut digest,
+        "tokenizer.ggml.eos_token_id",
+        optional_token_id(g, "tokenizer.ggml.eos_token_id")?,
+    )?;
+    hash_identity_bool(
+        &mut digest,
+        "tokenizer.ggml.add_bos_token",
+        optional_bool(g, "tokenizer.ggml.add_bos_token")?.unwrap_or(false),
+    )?;
+    hash_identity_bool(
+        &mut digest,
+        "tokenizer.ggml.add_eos_token",
+        optional_bool(g, "tokenizer.ggml.add_eos_token")?.unwrap_or(false),
+    )?;
+    Ok(digest.finalize().into())
+}
+
+fn hash_identity_field(digest: &mut Sha256, name: &str, bytes: &[u8]) -> Result<(), TokError> {
+    let name_len = u64::try_from(name.len())
+        .map_err(|_| TokError::BadMetadata("tokenizer identity field name is too large".into()))?;
+    let value_len = u64::try_from(bytes.len()).map_err(|_| {
+        TokError::BadMetadata(format!("tokenizer identity field {name:?} is too large"))
+    })?;
+    digest.update(name_len.to_le_bytes());
+    digest.update(name.as_bytes());
+    digest.update(value_len.to_le_bytes());
+    digest.update(bytes);
+    Ok(())
+}
+
+fn hash_identity_str(digest: &mut Sha256, name: &str, value: &str) -> Result<(), TokError> {
+    hash_identity_field(digest, name, value.as_bytes())
+}
+
+fn hash_identity_str_array(
+    digest: &mut Sha256,
+    name: &str,
+    values: &[&str],
+) -> Result<(), TokError> {
+    let count = u64::try_from(values.len()).map_err(|_| {
+        TokError::BadMetadata(format!("tokenizer identity field {name:?} is too large"))
+    })?;
+    hash_identity_field(digest, name, &count.to_le_bytes())?;
+    for value in values {
+        let len = u64::try_from(value.len()).map_err(|_| {
+            TokError::BadMetadata(format!("tokenizer identity value in {name:?} is too large"))
+        })?;
+        digest.update(len.to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    Ok(())
+}
+
+fn hash_identity_i64_array(
+    digest: &mut Sha256,
+    name: &str,
+    values: &[i64],
+) -> Result<(), TokError> {
+    let count = u64::try_from(values.len()).map_err(|_| {
+        TokError::BadMetadata(format!("tokenizer identity field {name:?} is too large"))
+    })?;
+    hash_identity_field(digest, name, &count.to_le_bytes())?;
+    for value in values {
+        digest.update(value.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn hash_identity_optional_i32(
+    digest: &mut Sha256,
+    name: &str,
+    value: Option<i32>,
+) -> Result<(), TokError> {
+    let mut bytes = [0_u8; 5];
+    if let Some(value) = value {
+        bytes[0] = 1;
+        bytes[1..].copy_from_slice(&value.to_le_bytes());
+    }
+    hash_identity_field(digest, name, &bytes)
+}
+
+fn hash_identity_bool(digest: &mut Sha256, name: &str, value: bool) -> Result<(), TokError> {
+    hash_identity_field(digest, name, &[u8::from(value)])
 }
 
 /// Backend-agnostic tokenizer interface. Implemented by the default native
@@ -1708,6 +1837,13 @@ mod tests {
             .expect("QWEN4EXP_TOKENIZER_GGUF must point to the first Q3 shard");
         let gguf = GgufFile::open(path).expect("open released Flash-Next GGUF");
         assert_eq!(gguf.architecture().as_deref(), Some("qwen4exp"));
+        let identity = qwen4exp_tokenizer_identity_sha256(&gguf).unwrap();
+        let identity_hex = identity
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        eprintln!("released qwen4exp tokenizer identity: {identity_hex}");
+        assert_eq!(identity, QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256);
         let tokenizer = NativeTokenizer::from_gguf(&gguf).expect("load Flash-Next tokenizer");
         assert_eq!(tokenizer.n_vocab(), 248_320);
         assert_eq!(tokenizer.bos(), Some(248_044));

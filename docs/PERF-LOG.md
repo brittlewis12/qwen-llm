@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Bring-Up Review Closes Local Proof Gaps
+
+Status: retain the text-backbone implementation and fast IQ3 default while
+separating internal determinism from external model correctness. The next
+architecture proof is an upstream full-logit oracle, not another self-derived
+component fixture.
+
+- Source reconciliation against the report, HF implementation, and released
+  weight map confirms that Kimi Attention Residual was evaluated but not shipped;
+  the released Gated Residual equations and all text-backbone tensors are bound.
+  The 31 `mtp.*` tensors are optional speculative weights absent from the pinned
+  1,224-tensor GGUF, not missing base-forward state.
+- The HELLO IDs were captured from this engine and are now treated only as an
+  internal generation/reset proof. The smallest external closure is one
+  full-vocabulary row plus greedy IDs for that prompt, followed by one row above
+  4,096 tokens so QSA block selection and truncation are exercised.
+- Adversarial review found post-commit profile errors, partial-prefill ambiguity,
+  weak tokenizer identity, permissive stop vectors, and incomplete-looking GPU
+  totals. The runtime now makes post-commit telemetry nonfatal, prevalidates all
+  prompt IDs, reports committed prefill progress, pins the complete tokenizer
+  identity, requires stop vector `[248046]`, and emits GPU coverage counts.
+- Direct UD-Q3_K_XL baseline/candidate comparisons now cover full logits at the
+  prompt boundary and two decode boundaries. All argmax IDs match; observed
+  cosine is at least `0.999999998789`, relative RMS at most `4.921e-5`, and
+  maximum absolute delta at most `7.573e-4`.
+
 ## 2026-08-26 - Flash-Next Fast IQ3 Routed SwiGLU GO
 
 Status: default the existing four-row IQ3_XXS routed gate/up kernel for the
@@ -25,7 +51,8 @@ one-row kernel.
   The 28-token singleton prefill moved from `15.08` to `16.67` token/s.
 - Both A/B runs emitted the same 24-token byte prefix. The pinned UD-Q3_K_XL
   runner retained generated IDs `[49006, 1537, 248046]`, output `HELLO`, and
-  exact reset/replay logits with the candidate enabled.
+  exact reset/replay logits with the candidate enabled. This is internal
+  determinism evidence, not an external reference-runtime oracle.
 
 ## 2026-08-25 - Native Q/K Norm+RoPE Fusion GO; Minimax KILL
 

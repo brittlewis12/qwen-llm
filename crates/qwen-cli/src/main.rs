@@ -81,7 +81,10 @@ use qwen_llm::sampling::{
     SamplingConfig, SamplingError, SamplingPhaseProfile, SpeculativeSamplingDecision,
 };
 use qwen_llm::tensor::GgmlType;
-use qwen_llm::tokenizer::{Tokenizer, token_ids_sha256_i32le};
+use qwen_llm::tokenizer::{
+    QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256, Tokenizer, qwen4exp_tokenizer_identity_sha256,
+    token_ids_sha256_i32le,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -2761,6 +2764,15 @@ fn prepare_modern_run_prompt(
         family != ModelFamily::DeepSeek4 || args.max_context_tokens.is_none(),
         "--max-context-tokens is not supported for DeepSeek V4 single-turn generation; remove --max-context-tokens"
     );
+    if family == ModelFamily::Qwen4Exp
+        && (run.no_thinking || run.reasoning_effort.is_some())
+        && let Some(failure) = qwen4exp_prompt_identity_failure(family, gguf)
+    {
+        bail!(
+            "Qwen3.8-Flash-Next option validation rejected the released {} identity; omit the option or use the released model",
+            failure.as_str(),
+        );
+    }
     if run.no_thinking
         && matches!(
             family,
@@ -2799,8 +2811,11 @@ fn prepare_modern_run_prompt(
                     },
                 ),
                 ModelFamily::Qwen4Exp => {
+                    let failure = qwen4exp_prompt_identity_failure(family, gguf)
+                        .expect("unvalidated Flash-Next prompt has an identity failure");
                     bail!(
-                        "Qwen3.8-Flash-Next chat rendering requires the released tokenizer.chat_template identity; use --raw-prompt for untemplated input"
+                        "Qwen3.8-Flash-Next chat rendering rejected the released {} identity; use --raw-prompt for untemplated input",
+                        failure.as_str(),
                     )
                 }
                 ModelFamily::DeepSeek4 => render_deepseek_v4_0731_single_turn_prompt(
@@ -2835,8 +2850,11 @@ fn prepare_modern_run_prompt(
                     )
                 }
                 ModelFamily::Qwen4Exp => {
+                    let failure = qwen4exp_prompt_identity_failure(family, gguf)
+                        .expect("unvalidated Flash-Next prompt has an identity failure");
                     bail!(
-                        "Qwen3.8-Flash-Next chat rendering requires the released tokenizer.chat_template identity; use --raw-prompt for untemplated input"
+                        "Qwen3.8-Flash-Next chat rendering rejected the released {} identity; use --raw-prompt for untemplated input",
+                        failure.as_str(),
                     )
                 }
                 ModelFamily::DeepSeek4 => render_deepseek_v4_0731_messages_prompt(
@@ -2893,15 +2911,7 @@ pub(crate) fn validated_qwen_no_thinking_model(family: ModelFamily, gguf: &GgufF
 
 pub(crate) fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile) -> bool {
     if family == ModelFamily::Qwen4Exp {
-        return validated_qwen4exp_prompt_identity(
-            family,
-            gguf.get_str("tokenizer.ggml.model"),
-            gguf.get_str("tokenizer.ggml.pre"),
-            gguf.get_str("tokenizer.chat_template")
-                .is_some_and(qwen4exp_chat_template_matches),
-            Qwen4ExpConfig::from_gguf(gguf)
-                .is_ok_and(|config| config == Qwen4ExpConfig::flash_next_reference()),
-        );
+        return qwen4exp_prompt_identity_failure(family, gguf).is_none();
     }
     validated_qwen38_prompt_identity(
         family,
@@ -2917,22 +2927,81 @@ pub(crate) fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile
     )
 }
 
-fn validated_qwen4exp_prompt_identity(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Qwen4ExpPromptIdentityFailure {
+    Architecture,
+    TokenizerModel,
+    Pretokenizer,
+    ChatTemplate,
+    TokenizerVocabulary,
+    ModelConfig,
+}
+
+impl Qwen4ExpPromptIdentityFailure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Architecture => "general.architecture",
+            Self::TokenizerModel => "tokenizer.ggml.model",
+            Self::Pretokenizer => "tokenizer.ggml.pre",
+            Self::ChatTemplate => "tokenizer.chat_template",
+            Self::TokenizerVocabulary => "token/type/merge/special-token",
+            Self::ModelConfig => "qwen4exp architecture",
+        }
+    }
+}
+
+fn qwen4exp_prompt_identity_failure(
+    family: ModelFamily,
+    gguf: &GgufFile,
+) -> Option<Qwen4ExpPromptIdentityFailure> {
+    classify_qwen4exp_prompt_identity(
+        family,
+        gguf.get_str("tokenizer.ggml.model"),
+        gguf.get_str("tokenizer.ggml.pre"),
+        gguf.get_str("tokenizer.chat_template")
+            .is_some_and(qwen4exp_chat_template_matches),
+        qwen4exp_tokenizer_identity_matches(gguf),
+        Qwen4ExpConfig::from_gguf(gguf)
+            .is_ok_and(|config| config == Qwen4ExpConfig::flash_next_reference()),
+    )
+}
+
+fn classify_qwen4exp_prompt_identity(
     family: ModelFamily,
     tokenizer_model: Option<&str>,
     tokenizer_pre: Option<&str>,
     released_chat_template: bool,
+    released_tokenizer: bool,
     released_config: bool,
-) -> bool {
-    family == ModelFamily::Qwen4Exp
-        && tokenizer_model == Some("gpt2")
-        && tokenizer_pre == Some("qwen35")
-        && released_chat_template
-        && released_config
+) -> Option<Qwen4ExpPromptIdentityFailure> {
+    if family != ModelFamily::Qwen4Exp {
+        return Some(Qwen4ExpPromptIdentityFailure::Architecture);
+    }
+    if tokenizer_model != Some("gpt2") {
+        return Some(Qwen4ExpPromptIdentityFailure::TokenizerModel);
+    }
+    if tokenizer_pre != Some("qwen35") {
+        return Some(Qwen4ExpPromptIdentityFailure::Pretokenizer);
+    }
+    if !released_chat_template {
+        return Some(Qwen4ExpPromptIdentityFailure::ChatTemplate);
+    }
+    if !released_tokenizer {
+        return Some(Qwen4ExpPromptIdentityFailure::TokenizerVocabulary);
+    }
+    if !released_config {
+        return Some(Qwen4ExpPromptIdentityFailure::ModelConfig);
+    }
+    None
 }
 
 fn qwen4exp_chat_template_matches(template: &str) -> bool {
     Sha256::digest(template.as_bytes()).as_slice() == QWEN4EXP_CHAT_TEMPLATE_SHA256
+}
+
+fn qwen4exp_tokenizer_identity_matches(gguf: &GgufFile) -> bool {
+    qwen4exp_tokenizer_identity_sha256(gguf)
+        .is_ok_and(|identity| identity == QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256)
 }
 
 fn validated_qwen38_prompt_identity(
@@ -3283,8 +3352,8 @@ fn validate_qwen4exp_stop_contract(
         tokenizer_eos
     );
     ensure!(
-        stop_tokens.contains(&248_046),
-        "Qwen3.8-Flash-Next producer stop tokens omit released tokenizer EOS 248046"
+        stop_tokens == [248_046],
+        "Qwen3.8-Flash-Next producer stop tokens {stop_tokens:?} differ from released vector [248046]"
     );
     Ok(())
 }
@@ -3677,7 +3746,12 @@ impl Qwen4ExpTimingTotals {
     }
 
     fn outside_gpu_ms(&self) -> Option<f64> {
-        (self.gpu_samples == self.forwards).then_some((self.total_wall_ms - self.gpu_ms).max(0.0))
+        self.complete_gpu_ms()
+            .map(|gpu_ms| (self.total_wall_ms - gpu_ms).max(0.0))
+    }
+
+    fn complete_gpu_ms(&self) -> Option<f64> {
+        (self.gpu_samples == self.forwards).then_some(self.gpu_ms)
     }
 }
 
@@ -3738,6 +3812,10 @@ fn run_qwen4exp_single_turn(
     let (prompt, prompt_source, _) = prompt_text(args)?;
     let tokenizer_t0 = Instant::now();
     let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;
+    ensure!(
+        qwen4exp_tokenizer_identity_matches(gguf),
+        "Qwen3.8-Flash-Next tokenizer metadata differs from the released token, type, merge, and special-token identity"
+    );
     let prompt_ids = tokenizer
         .encode(&prompt, prompt_add_special_tokens(args, prompt_source))
         .context("tokenize Qwen3.8-Flash-Next prompt")?;
@@ -3816,14 +3894,17 @@ fn run_qwen4exp_single_turn(
     for (index, &token) in prompt_tokens.iter().enumerate() {
         shutdown::checkpoint()?;
         let (next_logits, timing) = if layer_profile_enabled && index + 1 == prompt_tokens.len() {
-            let profile = runner
+            let outcome = runner
                 .forward_token_layer_profiled(token)
                 .with_context(|| {
                     format!("profile Qwen3.8-Flash-Next prompt token {index} by layer")
                 })?;
             let next_logits = runner.logits()?.to_vec();
-            let timing = profile.token;
-            emit_qwen4exp_layer_profile(&profile);
+            let timing = outcome.token;
+            match outcome.profile {
+                Ok(profile) => emit_qwen4exp_layer_profile(&profile),
+                Err(error) => eprintln!("qwen4exp layer_profile_warning: {error}"),
+            }
             (next_logits, timing)
         } else {
             let next_logits = runner
@@ -3890,7 +3971,7 @@ fn run_qwen4exp_single_turn(
         0.0
     };
     eprintln!(
-        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:.1} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:.1} decode_outside_gpu_ms={:?} total_ms={:.1}",
+        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:?} prefill_gpu_samples={}/{} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:?} decode_gpu_samples={}/{} decode_outside_gpu_ms={:?} total_ms={:.1}",
         prompt_tokens.len(),
         generation.tokens.len(),
         generation.transitions,
@@ -3901,13 +3982,17 @@ fn run_qwen4exp_single_turn(
         prefill_tps,
         prefill_timing.encode_cpu_ms,
         prefill_timing.completion_wait_ms,
-        prefill_timing.gpu_ms,
+        prefill_timing.complete_gpu_ms(),
+        prefill_timing.gpu_samples,
+        prefill_timing.forwards,
         prefill_timing.outside_gpu_ms(),
         generation.wall_ms,
         decode_tps,
         decode_timing.encode_cpu_ms,
         decode_timing.completion_wait_ms,
-        decode_timing.gpu_ms,
+        decode_timing.complete_gpu_ms(),
+        decode_timing.gpu_samples,
+        decode_timing.forwards,
         decode_timing.outside_gpu_ms(),
         request_t0.elapsed().as_secs_f64() * 1e3,
     );
@@ -11933,54 +12018,116 @@ mod tests {
     }
 
     #[test]
+    fn qwen4exp_timing_totals_expose_only_complete_gpu_coverage() {
+        let mut totals = Qwen4ExpTimingTotals::default();
+        totals.record(Qwen4ExpTokenTiming {
+            position: 0,
+            encode_cpu_ms: 1.0,
+            completion_wait_ms: 4.0,
+            gpu_ms: Some(3.0),
+            total_wall_ms: 5.0,
+        });
+        assert_eq!(totals.complete_gpu_ms(), Some(3.0));
+        assert_eq!(totals.outside_gpu_ms(), Some(2.0));
+        totals.record(Qwen4ExpTokenTiming {
+            position: 1,
+            encode_cpu_ms: 1.0,
+            completion_wait_ms: 4.0,
+            gpu_ms: None,
+            total_wall_ms: 5.0,
+        });
+        assert_eq!(totals.complete_gpu_ms(), None);
+        assert_eq!(totals.outside_gpu_ms(), None);
+        assert_eq!((totals.gpu_samples, totals.forwards), (1, 2));
+    }
+
+    #[test]
     fn qwen_no_thinking_capability_is_closed_to_the_validated_identity() {
-        assert!(validated_qwen4exp_prompt_identity(
-            ModelFamily::Qwen4Exp,
-            Some("gpt2"),
-            Some("qwen35"),
-            true,
-            true,
-        ));
-        for identity in [
-            (
-                ModelFamily::Qwen35,
-                Some("gpt2"),
-                Some("qwen35"),
-                true,
-                true,
-            ),
-            (
-                ModelFamily::Qwen4Exp,
-                Some("other"),
-                Some("qwen35"),
-                true,
-                true,
-            ),
-            (
-                ModelFamily::Qwen4Exp,
-                Some("gpt2"),
-                Some("other"),
-                true,
-                true,
-            ),
-            (
-                ModelFamily::Qwen4Exp,
-                Some("gpt2"),
-                Some("qwen35"),
-                false,
-                true,
-            ),
-            (
+        assert_eq!(
+            classify_qwen4exp_prompt_identity(
                 ModelFamily::Qwen4Exp,
                 Some("gpt2"),
                 Some("qwen35"),
                 true,
-                false,
+                true,
+                true,
+            ),
+            None
+        );
+        for (identity, expected) in [
+            (
+                (
+                    ModelFamily::Qwen35,
+                    Some("gpt2"),
+                    Some("qwen35"),
+                    true,
+                    true,
+                    true,
+                ),
+                Qwen4ExpPromptIdentityFailure::Architecture,
+            ),
+            (
+                (
+                    ModelFamily::Qwen4Exp,
+                    Some("other"),
+                    Some("qwen35"),
+                    true,
+                    true,
+                    true,
+                ),
+                Qwen4ExpPromptIdentityFailure::TokenizerModel,
+            ),
+            (
+                (
+                    ModelFamily::Qwen4Exp,
+                    Some("gpt2"),
+                    Some("other"),
+                    true,
+                    true,
+                    true,
+                ),
+                Qwen4ExpPromptIdentityFailure::Pretokenizer,
+            ),
+            (
+                (
+                    ModelFamily::Qwen4Exp,
+                    Some("gpt2"),
+                    Some("qwen35"),
+                    false,
+                    true,
+                    true,
+                ),
+                Qwen4ExpPromptIdentityFailure::ChatTemplate,
+            ),
+            (
+                (
+                    ModelFamily::Qwen4Exp,
+                    Some("gpt2"),
+                    Some("qwen35"),
+                    true,
+                    false,
+                    true,
+                ),
+                Qwen4ExpPromptIdentityFailure::TokenizerVocabulary,
+            ),
+            (
+                (
+                    ModelFamily::Qwen4Exp,
+                    Some("gpt2"),
+                    Some("qwen35"),
+                    true,
+                    true,
+                    false,
+                ),
+                Qwen4ExpPromptIdentityFailure::ModelConfig,
             ),
         ] {
-            assert!(!validated_qwen4exp_prompt_identity(
-                identity.0, identity.1, identity.2, identity.3, identity.4,
-            ));
+            assert_eq!(
+                classify_qwen4exp_prompt_identity(
+                    identity.0, identity.1, identity.2, identity.3, identity.4, identity.5,
+                ),
+                Some(expected)
+            );
         }
         assert!(validated_qwen36_no_thinking_identity(
             ModelFamily::Qwen35Moe,
@@ -12119,6 +12266,9 @@ mod tests {
         validate_qwen4exp_stop_contract(&config, Some(248_046), &[248_046]).unwrap();
         assert!(validate_qwen4exp_stop_contract(&config, Some(248_045), &[248_046]).is_err());
         assert!(validate_qwen4exp_stop_contract(&config, Some(248_046), &[248_044]).is_err());
+        assert!(
+            validate_qwen4exp_stop_contract(&config, Some(248_046), &[248_046, 248_044]).is_err()
+        );
         let mut malformed = config;
         malformed.ple.as_mut().unwrap().eos_token_id = 248_046;
         assert!(validate_qwen4exp_stop_contract(&malformed, Some(248_046), &[248_046]).is_err());

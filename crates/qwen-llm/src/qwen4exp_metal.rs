@@ -1,7 +1,9 @@
 //! Metal primitives for Qwen3.8-Flash-Next gated residuals.
 
 use crate::metal::{KernelEncoder, MetalContext, MetalError, MetalTensor};
-use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
+};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -9,6 +11,8 @@ use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLComputePipelineState, MTLDevice,
     MTLResource, MTLSize,
 };
+
+const SIMD_WIDTH: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpMetalError {
@@ -130,6 +134,115 @@ impl GatedResidualMetalScratch {
     }
 }
 
+struct GatedResidualPackedScratch {
+    branch_count: usize,
+    hidden_size: usize,
+    low_rank: usize,
+    capacity: usize,
+    normalized: MetalTensor,
+    low: MetalTensor,
+    raw_gate: MetalTensor,
+    mixed: MetalTensor,
+    injection: MetalTensor,
+}
+
+impl GatedResidualPackedScratch {
+    fn new(
+        ctx: &MetalContext,
+        branch_count: usize,
+        hidden_size: usize,
+        low_rank: usize,
+        capacity: usize,
+    ) -> Result<Self, Qwen4ExpMetalError> {
+        let hyper_hidden = validate_geometry(branch_count, hidden_size, low_rank)?;
+        if capacity == 0 || u32::try_from(capacity).is_err() {
+            return Err(invalid(format!(
+                "packed HC capacity must be in 1..=u32::MAX, got {capacity}"
+            )));
+        }
+        for (name, n_in, n_out) in [
+            ("down", hyper_hidden, low_rank),
+            ("up", low_rank, hyper_hidden),
+            ("injection", hyper_hidden, branch_count),
+        ] {
+            let elements = n_in
+                .checked_mul(n_out)
+                .ok_or_else(|| invalid(format!("packed HC {name} projection overflow")))?;
+            if u32::try_from(elements).is_err() {
+                return Err(invalid(format!(
+                    "packed HC {name} projection has {elements} elements, exceeding u32 shader addressing"
+                )));
+            }
+        }
+        for (name, width) in [("hyper", hyper_hidden), ("low-rank", low_rank)] {
+            let q8_row_bytes = width
+                .checked_div(32)
+                .and_then(|blocks| blocks.checked_mul(34))
+                .ok_or_else(|| invalid(format!("packed HC {name} Q8 row-byte overflow")))?;
+            if u32::try_from(q8_row_bytes).is_err() {
+                return Err(invalid(format!(
+                    "packed HC {name} Q8 row-byte stride {q8_row_bytes} exceeds u32 shader addressing"
+                )));
+            }
+        }
+        for (name, width) in [
+            ("normalized", hyper_hidden),
+            ("low-rank", low_rank),
+            ("raw gate", hyper_hidden),
+            ("mixed", hidden_size),
+            ("injection", branch_count),
+        ] {
+            let elements = width
+                .checked_mul(capacity)
+                .ok_or_else(|| invalid(format!("packed HC {name} element count overflow")))?;
+            if u32::try_from(elements).is_err() {
+                return Err(invalid(format!(
+                    "packed HC {name} element count {elements} exceeds u32"
+                )));
+            }
+            elements
+                .checked_mul(size_of::<f32>())
+                .ok_or_else(|| invalid(format!("packed HC {name} byte count overflow")))?;
+        }
+        Ok(Self {
+            branch_count,
+            hidden_size,
+            low_rank,
+            capacity,
+            normalized: MetalTensor::zeros_f32(ctx, vec![hyper_hidden as u64, capacity as u64])?,
+            low: MetalTensor::zeros_f32(ctx, vec![low_rank as u64, capacity as u64])?,
+            raw_gate: MetalTensor::zeros_f32(ctx, vec![hyper_hidden as u64, capacity as u64])?,
+            mixed: MetalTensor::zeros_f32(ctx, vec![hidden_size as u64, capacity as u64])?,
+            injection: MetalTensor::zeros_f32(ctx, vec![branch_count as u64, capacity as u64])?,
+        })
+    }
+
+    fn prefix_view(
+        &self,
+        name: &str,
+        tensor: &MetalTensor,
+        width: usize,
+        tokens: usize,
+    ) -> Result<MetalTensor, Qwen4ExpMetalError> {
+        if tokens == 0 || tokens > self.capacity {
+            return Err(invalid(format!(
+                "{name} token count {tokens} is outside capacity {}",
+                self.capacity
+            )));
+        }
+        let elements = width
+            .checked_mul(tokens)
+            .ok_or_else(|| invalid(format!("{name} element count overflow")))?;
+        let view = tensor.view_subrange(0, vec![width as u64, tokens as u64]);
+        if view.n_elements() as usize != elements {
+            return Err(invalid(format!(
+                "{name} prefix view has the wrong element count"
+            )));
+        }
+        Ok(view)
+    }
+}
+
 #[must_use = "encode the residual block, then call encode_combine"]
 pub struct GatedResidualMetalRead<'scratch, 'resources, 'pass> {
     ctx: &'pass MetalContext,
@@ -164,6 +277,56 @@ impl GatedResidualMetalRead<'_, '_, '_> {
             self.hyper_input,
             self.scratch.branch_count,
             self.scratch.hidden_size,
+        )?;
+        Ok(())
+    }
+}
+
+#[must_use = "encode the packed residual block, then call encode_combine"]
+struct GatedResidualPackedRead<'scratch, 'resources, 'pass> {
+    ctx: &'pass MetalContext,
+    encoder: &'pass KernelEncoder,
+    hyper_input: &'resources MetalTensor,
+    block_output: &'resources MetalTensor,
+    inject: &'resources MetalTensor,
+    scratch: &'scratch mut GatedResidualPackedScratch,
+    normalized: MetalTensor,
+    mixed: MetalTensor,
+    tokens: usize,
+}
+
+impl GatedResidualPackedRead<'_, '_, '_> {
+    fn mixed(&self) -> &MetalTensor {
+        &self.mixed
+    }
+
+    fn encode_combine(self) -> Result<(), Qwen4ExpMetalError> {
+        let hyper_hidden = self.scratch.branch_count * self.scratch.hidden_size;
+        let injection = self.scratch.prefix_view(
+            "packed HC injection",
+            &self.scratch.injection,
+            self.scratch.branch_count,
+            self.tokens,
+        )?;
+        encode_mat_mat_dispatch(
+            self.ctx,
+            self.encoder,
+            self.inject,
+            &self.normalized,
+            &injection,
+            hyper_hidden,
+            self.scratch.branch_count,
+            self.tokens,
+        )?;
+        encode_hc_injection_packed(
+            self.ctx,
+            self.encoder,
+            self.block_output,
+            &injection,
+            self.hyper_input,
+            self.scratch.branch_count,
+            self.scratch.hidden_size,
+            self.tokens,
         )?;
         Ok(())
     }
@@ -213,6 +376,122 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
     })
 }
 
+/// Encode a packed HC read into transaction-owned scratch.
+///
+/// # Safety
+///
+/// The caller must hold every tensor and exclusive logical ownership of
+/// `hyper_input` and `scratch` until the command completes successfully or is
+/// permanently abandoned. If `block_output` is GPU-produced, it must be
+/// encoded on this same serial encoder after `mixed()` is consumed and before
+/// `encode_combine()`. No other command may access these resources, and
+/// abandonment requires permanently discarding every command reference. Any
+/// encode or command failure makes mutable contents indeterminate; the caller
+/// must poison the enclosing transaction rather than expose or reuse them.
+unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'pass>(
+    ctx: &'pass MetalContext,
+    enc: &'pass KernelEncoder,
+    hyper_input: &'resources MetalTensor,
+    block_output: &'resources MetalTensor,
+    eps: f32,
+    weights: GatedResidualMetalReadWeights<'_>,
+    inject: &'resources MetalTensor,
+    scratch: &'scratch mut GatedResidualPackedScratch,
+    tokens: usize,
+) -> Result<GatedResidualPackedRead<'scratch, 'resources, 'pass>, Qwen4ExpMetalError> {
+    validate_encoder(ctx, enc)?;
+    validate_and_preflight_gated_residual_packed_mix(
+        ctx,
+        hyper_input,
+        block_output,
+        eps,
+        weights,
+        inject,
+        scratch,
+        tokens,
+    )?;
+
+    let hyper_hidden = scratch.branch_count * scratch.hidden_size;
+    let normalized = scratch.prefix_view(
+        "packed HC normalized scratch",
+        &scratch.normalized,
+        hyper_hidden,
+        tokens,
+    )?;
+    let low = scratch.prefix_view(
+        "packed HC low-rank scratch",
+        &scratch.low,
+        scratch.low_rank,
+        tokens,
+    )?;
+    let raw_gate = scratch.prefix_view(
+        "packed HC raw gate scratch",
+        &scratch.raw_gate,
+        hyper_hidden,
+        tokens,
+    )?;
+    let mixed = scratch.prefix_view(
+        "packed HC mixed output",
+        &scratch.mixed,
+        scratch.hidden_size,
+        tokens,
+    )?;
+
+    encode_hc_norm_packed(
+        ctx,
+        enc,
+        hyper_input,
+        weights.norm,
+        &normalized,
+        scratch.branch_count,
+        scratch.hidden_size,
+        tokens,
+        eps,
+    )?;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.down,
+        &normalized,
+        &low,
+        hyper_hidden,
+        scratch.low_rank,
+        tokens,
+    )?;
+    encode_hc_low_activation(ctx, enc, &low, scratch.branch_count)?;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.up,
+        &low,
+        &raw_gate,
+        scratch.low_rank,
+        hyper_hidden,
+        tokens,
+    )?;
+    encode_hc_gated_mean_packed(
+        ctx,
+        enc,
+        &normalized,
+        &raw_gate,
+        &mixed,
+        scratch.branch_count,
+        scratch.hidden_size,
+        tokens,
+    )?;
+    Ok(GatedResidualPackedRead {
+        ctx,
+        encoder: enc,
+        hyper_input,
+        block_output,
+        inject,
+        scratch,
+        normalized,
+        mixed,
+        tokens,
+    })
+}
+
 pub(crate) fn validate_and_preflight_gated_residual_mix(
     ctx: &MetalContext,
     hyper_input: &MetalTensor,
@@ -255,6 +534,112 @@ pub(crate) fn validate_and_preflight_gated_residual_mix(
     )?;
     preflight_mix(ctx, weights.down.dtype, weights.up.dtype)?;
     preflight_combine(ctx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_and_preflight_gated_residual_packed_mix(
+    ctx: &MetalContext,
+    hyper_input: &MetalTensor,
+    block_output: &MetalTensor,
+    eps: f32,
+    weights: GatedResidualMetalReadWeights<'_>,
+    inject: &MetalTensor,
+    scratch: &GatedResidualPackedScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpMetalError> {
+    if tokens == 0 || tokens > scratch.capacity {
+        return Err(invalid(format!(
+            "packed HC token count {tokens} is outside capacity {}",
+            scratch.capacity
+        )));
+    }
+    if !eps.is_finite() || eps <= 0.0 {
+        return Err(invalid("RMS epsilon must be finite and positive"));
+    }
+    let hyper_hidden =
+        validate_geometry(scratch.branch_count, scratch.hidden_size, scratch.low_rank)?;
+    require_f32_shape(
+        "packed HC hyper input",
+        hyper_input,
+        &[hyper_hidden as u64, tokens as u64],
+        true,
+    )?;
+    require_f32_shape(
+        "packed HC block output",
+        block_output,
+        &[scratch.hidden_size as u64, tokens as u64],
+        false,
+    )?;
+    require_f32_shape(
+        "packed HC norm",
+        weights.norm,
+        &[hyper_hidden as u64],
+        false,
+    )?;
+    require_projection(
+        "packed HC down",
+        weights.down,
+        hyper_hidden,
+        scratch.low_rank,
+    )?;
+    require_projection("packed HC up", weights.up, scratch.low_rank, hyper_hidden)?;
+    require_projection(
+        "packed HC injection",
+        inject,
+        hyper_hidden,
+        scratch.branch_count,
+    )?;
+    if inject.dtype != GgmlType::F32 {
+        return Err(invalid(format!(
+            "packed HC injection must use F32 storage, got {:?}",
+            inject.dtype
+        )));
+    }
+    validate_f32_q8_mat_mat_addressing(weights.down.dtype, hyper_hidden, scratch.low_rank, tokens)?;
+    validate_f32_q8_mat_mat_addressing(weights.up.dtype, scratch.low_rank, hyper_hidden, tokens)?;
+    validate_f32_q8_mat_mat_addressing(inject.dtype, hyper_hidden, scratch.branch_count, tokens)?;
+    for (name, tensor, width) in [
+        (
+            "packed HC normalized scratch",
+            &scratch.normalized,
+            hyper_hidden,
+        ),
+        ("packed HC low-rank scratch", &scratch.low, scratch.low_rank),
+        (
+            "packed HC raw gate scratch",
+            &scratch.raw_gate,
+            hyper_hidden,
+        ),
+        (
+            "packed HC mixed output",
+            &scratch.mixed,
+            scratch.hidden_size,
+        ),
+        (
+            "packed HC injection scratch",
+            &scratch.injection,
+            scratch.branch_count,
+        ),
+    ] {
+        require_f32_shape(name, tensor, &[width as u64, scratch.capacity as u64], true)?;
+    }
+    let tensors = [
+        ("packed HC hyper input", hyper_input),
+        ("packed HC block output", block_output),
+        ("packed HC norm", weights.norm),
+        ("packed HC down", weights.down),
+        ("packed HC up", weights.up),
+        ("packed HC injection", inject),
+        ("packed HC normalized scratch", &scratch.normalized),
+        ("packed HC low-rank scratch", &scratch.low),
+        ("packed HC raw gate scratch", &scratch.raw_gate),
+        ("packed HC mixed output", &scratch.mixed),
+        ("packed HC injection scratch", &scratch.injection),
+    ];
+    require_disjoint(&tensors)?;
+    require_same_device(ctx, &tensors)?;
+    preflight_packed_mix(ctx, weights.down.dtype, weights.up.dtype)?;
+    preflight_packed_combine(ctx)
 }
 
 pub fn encode_final_gated_residual_mix<'scratch>(
@@ -469,6 +854,57 @@ fn preflight_combine(ctx: &MetalContext) -> Result<(), Qwen4ExpMetalError> {
     Ok(())
 }
 
+fn preflight_packed_mix(
+    ctx: &MetalContext,
+    down_dtype: GgmlType,
+    up_dtype: GgmlType,
+) -> Result<(), Qwen4ExpMetalError> {
+    let norm = ctx.pipeline("kernel_qwen4exp_ple_grouped_rms_norm_packed_f32")?;
+    if norm.threadExecutionWidth() != SIMD_WIDTH
+        || norm.maxTotalThreadsPerThreadgroup() < SIMD_WIDTH
+    {
+        return Err(invalid(format!(
+            "packed HC norm needs execution width {SIMD_WIDTH}, got width={} capacity={}",
+            norm.threadExecutionWidth(),
+            norm.maxTotalThreadsPerThreadgroup()
+        )));
+    }
+    ctx.pipeline("kernel_qwen4exp_hc_low_silu_f32")?;
+    ctx.pipeline("kernel_qwen4exp_hc_gated_mean_packed_f32")?;
+    preflight_packed_projection(ctx, down_dtype)?;
+    preflight_packed_projection(ctx, up_dtype)
+}
+
+fn preflight_packed_combine(ctx: &MetalContext) -> Result<(), Qwen4ExpMetalError> {
+    preflight_packed_projection(ctx, GgmlType::F32)?;
+    ctx.pipeline("kernel_qwen4exp_hc_inject_packed_f32")?;
+    Ok(())
+}
+
+fn preflight_packed_projection(
+    ctx: &MetalContext,
+    dtype: GgmlType,
+) -> Result<(), Qwen4ExpMetalError> {
+    preflight_projection(ctx, dtype)?;
+    let kernels: &[&str] = match dtype {
+        GgmlType::F32 => &["kernel_mat_mat_f32_f32"],
+        GgmlType::Q8_0 => &[
+            "kernel_mat_mat_q8_0_f32",
+            "kernel_mat_mat_q8_0_f32_n16",
+            "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+        ],
+        _ => {
+            return Err(invalid(format!(
+                "unsupported packed gated-residual projection dtype {dtype:?}"
+            )));
+        }
+    };
+    for kernel in kernels {
+        ctx.pipeline(kernel)?;
+    }
+    Ok(())
+}
+
 fn preflight_projection(ctx: &MetalContext, dtype: GgmlType) -> Result<(), Qwen4ExpMetalError> {
     let kernels: &[&str] = match dtype {
         GgmlType::F32 => &["kernel_mat_vec_f32_f32", "kernel_mat_vec_f32_f32_lcpp_r2"],
@@ -533,6 +969,25 @@ fn require_f32(
         return Err(invalid(format!("{name} must be writable")));
     }
     require_physical_range(name, tensor, expected_elements, 4, 4)
+}
+
+fn require_f32_shape(
+    name: &str,
+    tensor: &MetalTensor,
+    expected_shape: &[u64],
+    writable: bool,
+) -> Result<(), Qwen4ExpMetalError> {
+    if tensor.dtype != GgmlType::F32 || tensor.shape != expected_shape {
+        return Err(invalid(format!(
+            "{name} must be F32 with shape {expected_shape:?}, got {:?} {:?}",
+            tensor.dtype, tensor.shape
+        )));
+    }
+    let elements = checked_elements(expected_shape)?;
+    if writable && !tensor.is_writable() {
+        return Err(invalid(format!("{name} must be writable")));
+    }
+    require_physical_range(name, tensor, elements, 4, 4)
 }
 
 fn require_projection(
@@ -724,6 +1179,59 @@ fn encode_hc_norm(
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedHcNormArgs {
+    tokens: u32,
+    branch_count: u32,
+    hidden_size: u32,
+    eps: f32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_hc_norm_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weight: &MetalTensor,
+    normalized: &MetalTensor,
+    branch_count: usize,
+    hidden_size: usize,
+    tokens: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let pipeline = ctx.pipeline("kernel_qwen4exp_ple_grouped_rms_norm_packed_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &PackedHcNormArgs {
+            tokens: tokens as u32,
+            branch_count: branch_count as u32,
+            hidden_size: hidden_size as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, input);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, normalized);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(1024);
+    let simdgroups = threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (simdgroups * size_of::<f32>()).max(32));
+    enc.dispatch(
+        MTLSize {
+            width: branch_count * tokens,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct HcLowArgs {
     count: u32,
     inverse_branches: f32,
@@ -782,6 +1290,42 @@ fn encode_hc_gated_mean(
     Ok(())
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedHcBranchArgs {
+    tokens: u32,
+    branch_count: u32,
+    hidden_size: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_hc_gated_mean_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    normalized: &MetalTensor,
+    raw_gate: &MetalTensor,
+    mixed: &MetalTensor,
+    branch_count: usize,
+    hidden_size: usize,
+    tokens: usize,
+) -> Result<(), MetalError> {
+    let pipeline = ctx.pipeline("kernel_qwen4exp_hc_gated_mean_packed_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &PackedHcBranchArgs {
+            tokens: tokens as u32,
+            branch_count: branch_count as u32,
+            hidden_size: hidden_size as u32,
+        },
+    );
+    enc.set_tensor(1, normalized);
+    enc.set_tensor(2, raw_gate);
+    enc.set_tensor(3, mixed);
+    dispatch_1d(enc, &pipeline, hidden_size * tokens);
+    Ok(())
+}
+
 fn encode_hc_injection(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -819,6 +1363,34 @@ fn encode_hc_injection(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn encode_hc_injection_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    block_output: &MetalTensor,
+    raw_injection: &MetalTensor,
+    residual: &MetalTensor,
+    branch_count: usize,
+    hidden_size: usize,
+    tokens: usize,
+) -> Result<(), MetalError> {
+    let pipeline = ctx.pipeline("kernel_qwen4exp_hc_inject_packed_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &PackedHcBranchArgs {
+            tokens: tokens as u32,
+            branch_count: branch_count as u32,
+            hidden_size: hidden_size as u32,
+        },
+    );
+    enc.set_tensor(1, block_output);
+    enc.set_tensor(2, raw_injection);
+    enc.set_tensor(3, residual);
+    dispatch_1d(enc, &pipeline, branch_count * hidden_size * tokens);
+    Ok(())
+}
+
 fn dispatch_1d(
     enc: &KernelEncoder,
     pipeline: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputePipelineState>,
@@ -851,6 +1423,21 @@ mod tests {
         GatedResidualReadWeights, gated_residual_combine, gated_residual_mix,
     };
     use objc2_metal::MTLCommandQueue;
+
+    fn packed_test_context() -> Option<MetalContext> {
+        match MetalContext::new() {
+            Ok(ctx) => Some(ctx),
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => {
+                let required = matches!(
+                    std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
+                    Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+                );
+                assert!(!required, "Metal is required but unavailable");
+                None
+            }
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        }
+    }
 
     fn tensor(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
         MetalTensor::from_bytes(ctx, bytemuck::cast_slice(values), shape, GgmlType::F32).unwrap()
@@ -943,6 +1530,195 @@ mod tests {
                 "index {index}: expected {expected}, got {actual}"
             );
         }
+    }
+
+    fn assert_bits_eq(label: &str, actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{label}[{index}]: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    fn assert_similarity(
+        label: &str,
+        actual: &[f32],
+        expected: &[f32],
+        maximum_relative_rms: f64,
+        minimum_cosine: f64,
+    ) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        assert!(actual.iter().all(|value| value.is_finite()), "{label}");
+        let dot = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| *actual as f64 * *expected as f64)
+            .sum::<f64>();
+        let actual_square = actual
+            .iter()
+            .map(|value| (*value as f64).powi(2))
+            .sum::<f64>();
+        let expected_square = expected
+            .iter()
+            .map(|value| (*value as f64).powi(2))
+            .sum::<f64>();
+        let difference_square = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| (*actual as f64 - *expected as f64).powi(2))
+            .sum::<f64>();
+        let relative_rms = (difference_square / expected_square.max(1e-30)).sqrt();
+        let cosine = dot / (actual_square * expected_square).sqrt().max(1e-30);
+        eprintln!("[{label}] relative_rms={relative_rms:.3e} cosine={cosine:.9}");
+        assert!(
+            relative_rms <= maximum_relative_rms,
+            "{label} relative_rms={relative_rms}"
+        );
+        assert!(cosine >= minimum_cosine, "{label} cosine={cosine}");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_tokenwise_similarity(
+        label: &str,
+        actual: &[f32],
+        expected: &[f32],
+        width: usize,
+        tokens: usize,
+        maximum_relative_rms: f64,
+        minimum_cosine: f64,
+        maximum_absolute: f32,
+    ) {
+        assert_eq!(actual.len(), width * tokens, "{label} actual shape");
+        assert_eq!(expected.len(), width * tokens, "{label} expected shape");
+        for token in 0..tokens {
+            let start = token * width;
+            let actual_row = &actual[start..start + width];
+            let expected_row = &expected[start..start + width];
+            assert_similarity(
+                &format!("{label} token={token}"),
+                actual_row,
+                expected_row,
+                maximum_relative_rms,
+                minimum_cosine,
+            );
+            let observed_max = actual_row
+                .iter()
+                .zip(expected_row)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                observed_max <= maximum_absolute,
+                "{label} token={token} max_abs={observed_max}"
+            );
+        }
+    }
+
+    fn assert_only_token_changed(
+        label: &str,
+        baseline: &[f32],
+        perturbed: &[f32],
+        width: usize,
+        tokens: usize,
+        changed_token: usize,
+    ) {
+        assert_eq!(baseline.len(), width * tokens, "{label} baseline shape");
+        assert_eq!(perturbed.len(), width * tokens, "{label} perturbed shape");
+        for token in 0..tokens {
+            let start = token * width;
+            let baseline_row = &baseline[start..start + width];
+            let perturbed_row = &perturbed[start..start + width];
+            if token == changed_token {
+                assert!(
+                    baseline_row
+                        .iter()
+                        .zip(perturbed_row)
+                        .any(|(left, right)| left.to_bits() != right.to_bits()),
+                    "{label} changed token was unaffected"
+                );
+            } else {
+                assert_bits_eq(
+                    &format!("{label} isolated token={token}"),
+                    perturbed_row,
+                    baseline_row,
+                );
+            }
+        }
+    }
+
+    struct SerialPackedHcTrace {
+        normalized: Vec<f32>,
+        low: Vec<f32>,
+        raw_gate: Vec<f32>,
+        mixed: Vec<f32>,
+        injection: Vec<f32>,
+        residual: Vec<f32>,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn serial_hc_trace(
+        ctx: &MetalContext,
+        hyper_rows: &[f32],
+        block_rows: &[f32],
+        tokens: usize,
+        branch_count: usize,
+        hidden_size: usize,
+        low_rank: usize,
+        weights: GatedResidualMetalReadWeights<'_>,
+        inject: &MetalTensor,
+    ) -> SerialPackedHcTrace {
+        let hyper_hidden = branch_count * hidden_size;
+        let mut trace = SerialPackedHcTrace {
+            normalized: Vec::with_capacity(tokens * hyper_hidden),
+            low: Vec::with_capacity(tokens * low_rank),
+            raw_gate: Vec::with_capacity(tokens * hyper_hidden),
+            mixed: Vec::with_capacity(tokens * hidden_size),
+            injection: Vec::with_capacity(tokens * branch_count),
+            residual: Vec::with_capacity(tokens * hyper_hidden),
+        };
+        let mut scratch =
+            GatedResidualMetalScratch::new(ctx, branch_count, hidden_size, low_rank).unwrap();
+        for token in 0..tokens {
+            let hyper_start = token * hyper_hidden;
+            let block_start = token * hidden_size;
+            let hyper = tensor(
+                ctx,
+                &hyper_rows[hyper_start..hyper_start + hyper_hidden],
+                vec![hyper_hidden as u64],
+            );
+            let block = tensor(
+                ctx,
+                &block_rows[block_start..block_start + hidden_size],
+                vec![hidden_size as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_gated_residual_mix(
+                ctx,
+                &encoder,
+                &hyper,
+                &block,
+                1e-6,
+                weights,
+                inject,
+                &mut scratch,
+            )
+            .unwrap()
+            .encode_combine()
+            .unwrap();
+            encoder.end();
+            command.commit();
+            scratch.release_after().unwrap();
+            trace.normalized.extend(read_f32(&scratch.normalized));
+            trace.low.extend(read_f32(&scratch.low));
+            trace.raw_gate.extend(read_f32(&scratch.raw_gate));
+            trace.mixed.extend(read_f32(&scratch.mixed));
+            trace.injection.extend(read_f32(&scratch.injection));
+            trace.residual.extend(read_f32(&hyper));
+        }
+        trace
     }
 
     #[test]
@@ -1318,6 +2094,460 @@ mod tests {
 
         assert_close(&read_f32(&scratch.mixed), &expected_mixed, 2e-5);
         assert_close(&read_f32(&input_gpu), &expected_output, 2e-6);
+    }
+
+    #[test]
+    fn packed_hc_matches_serial_stages_residual_and_projection_routes() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        const BRANCHES: usize = 4;
+        const HIDDEN: usize = 2_560;
+        const RANK: usize = 320;
+        const HYPER: usize = BRANCHES * HIDDEN;
+        const TOKENS: usize = 33;
+
+        let hyper_rows = (0..TOKENS * HYPER)
+            .map(|index| {
+                let token = index / HYPER;
+                let centered = ((index * 37 + token * 19 + 11) % 251) as f32 - 125.0;
+                centered * 0.001_37 + token as f32 * 0.000_3
+            })
+            .collect::<Vec<_>>();
+        let block_rows = (0..TOKENS * HIDDEN)
+            .map(|index| {
+                let token = index / HIDDEN;
+                let centered = ((index * 29 + token * 13 + 7) % 191) as f32 - 95.0;
+                centered * 0.001_11 - token as f32 * 0.000_2
+            })
+            .collect::<Vec<_>>();
+        let norm = (0..HYPER)
+            .map(|index| 0.72 + (index * 7 % 29) as f32 * 0.021)
+            .collect::<Vec<_>>();
+        let injection = (0..HYPER * BRANCHES)
+            .map(|index| ((index * 17 + 3) % 101) as f32 * 0.000_9 - 0.045)
+            .collect::<Vec<_>>();
+        let down_bytes = q8_bank(HYPER, RANK, 43);
+        let up_bytes = q8_bank(RANK, HYPER, 10_043);
+        let norm_gpu = tensor(&ctx, &norm, vec![HYPER as u64]);
+        let down_gpu = MetalTensor::from_bytes(
+            &ctx,
+            &down_bytes,
+            vec![HYPER as u64, RANK as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap();
+        let up_gpu = MetalTensor::from_bytes(
+            &ctx,
+            &up_bytes,
+            vec![RANK as u64, HYPER as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap();
+        let inject_gpu = tensor(&ctx, &injection, vec![HYPER as u64, BRANCHES as u64]);
+        let weights = GatedResidualMetalReadWeights {
+            norm: &norm_gpu,
+            down: &down_gpu,
+            up: &up_gpu,
+        };
+        let serial = serial_hc_trace(
+            &ctx,
+            &hyper_rows,
+            &block_rows,
+            TOKENS,
+            BRANCHES,
+            HIDDEN,
+            RANK,
+            weights,
+            &inject_gpu,
+        );
+
+        let mut scratch =
+            GatedResidualPackedScratch::new(&ctx, BRANCHES, HIDDEN, RANK, TOKENS).unwrap();
+        let mut packed_n33 = None;
+        for tokens in [1_usize, 2, 8, 16, 33] {
+            let hyper = tensor(
+                &ctx,
+                &hyper_rows[..tokens * HYPER],
+                vec![HYPER as u64, tokens as u64],
+            );
+            let block = tensor(
+                &ctx,
+                &block_rows[..tokens * HIDDEN],
+                vec![HIDDEN as u64, tokens as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            let read = unsafe {
+                encode_gated_residual_packed_mix(
+                    &ctx,
+                    &encoder,
+                    &hyper,
+                    &block,
+                    1e-6,
+                    weights,
+                    &inject_gpu,
+                    &mut scratch,
+                    tokens,
+                )
+            }
+            .unwrap();
+            let mixed = read.mixed().clone();
+            read.encode_combine().unwrap();
+            let census = crate::metal::dispatch_census_take();
+            let q8_matvec = if crate::metal::mat_vec_q8_0_lcpp_enabled() {
+                "kernel_mat_vec_q8_0_f32_lcpp"
+            } else {
+                "kernel_mat_vec_q8_0_f32"
+            };
+            let f32_matvec = if census
+                .iter()
+                .any(|row| row.kernel == "kernel_mat_vec_f32_f32_lcpp_r2")
+            {
+                "kernel_mat_vec_f32_f32_lcpp_r2"
+            } else {
+                "kernel_mat_vec_f32_f32"
+            };
+            let expected_projection_kernels = match tokens {
+                1 => vec![q8_matvec, q8_matvec, f32_matvec],
+                2 => vec![
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_f32_f32",
+                ],
+                8 => vec![
+                    "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_f32_f32",
+                ],
+                16 => vec![
+                    "kernel_mat_mat_q8_0_f32_n16",
+                    "kernel_mat_mat_q8_0_f32_n16",
+                    "kernel_mat_mat_f32_f32",
+                ],
+                33 => vec![
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_f32_f32",
+                ],
+                _ => unreachable!(),
+            };
+            let projection_kernels = census
+                .iter()
+                .filter_map(|row| {
+                    matches!(
+                        row.kernel.as_str(),
+                        "kernel_mat_vec_q8_0_f32_lcpp"
+                            | "kernel_mat_vec_q8_0_f32"
+                            | "kernel_mat_vec_f32_f32_lcpp_r2"
+                            | "kernel_mat_vec_f32_f32"
+                            | "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32"
+                            | "kernel_mat_mat_q8_0_f32_n16"
+                            | "kernel_mat_mat_q8_0_f32"
+                            | "kernel_mat_mat_f32_f32"
+                    )
+                    .then_some(row.kernel.as_str())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                projection_kernels, expected_projection_kernels,
+                "N={tokens} packed HC projection sequence: {census:#?}"
+            );
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            let normalized = read_f32(
+                &scratch
+                    .prefix_view("packed HC normalized", &scratch.normalized, HYPER, tokens)
+                    .unwrap(),
+            );
+            let low = read_f32(
+                &scratch
+                    .prefix_view("packed HC low", &scratch.low, RANK, tokens)
+                    .unwrap(),
+            );
+            let raw_gate = read_f32(
+                &scratch
+                    .prefix_view("packed HC raw gate", &scratch.raw_gate, HYPER, tokens)
+                    .unwrap(),
+            );
+            let injection = read_f32(
+                &scratch
+                    .prefix_view("packed HC injection", &scratch.injection, BRANCHES, tokens)
+                    .unwrap(),
+            );
+            let expected_normalized = &serial.normalized[..tokens * HYPER];
+            let expected_low = &serial.low[..tokens * RANK];
+            let expected_raw_gate = &serial.raw_gate[..tokens * HYPER];
+            let expected_mixed = &serial.mixed[..tokens * HIDDEN];
+            let expected_injection = &serial.injection[..tokens * BRANCHES];
+            let expected_residual = &serial.residual[..tokens * HYPER];
+            let packed_mixed = read_f32(&mixed);
+            let packed_residual = read_f32(&hyper);
+            if tokens == TOKENS {
+                packed_n33 = Some(SerialPackedHcTrace {
+                    normalized: normalized.clone(),
+                    low: low.clone(),
+                    raw_gate: raw_gate.clone(),
+                    mixed: packed_mixed.clone(),
+                    injection: injection.clone(),
+                    residual: packed_residual.clone(),
+                });
+            }
+            assert_bits_eq(
+                &format!("packed HC N={tokens} normalized"),
+                &normalized,
+                expected_normalized,
+            );
+            if tokens == 1 {
+                for (stage, actual, expected) in [
+                    ("low", low.as_slice(), expected_low),
+                    ("raw gate", raw_gate.as_slice(), expected_raw_gate),
+                    ("mixed", packed_mixed.as_slice(), expected_mixed),
+                    ("injection", injection.as_slice(), expected_injection),
+                    ("residual", packed_residual.as_slice(), expected_residual),
+                ] {
+                    assert_bits_eq(&format!("packed HC N=1 {stage}"), actual, expected);
+                }
+            } else {
+                assert!(
+                    low.iter()
+                        .zip(expected_low)
+                        .any(|(actual, expected)| actual.to_bits() != expected.to_bits()),
+                    "packed HC N={tokens} must exercise matrix reduction"
+                );
+                for (stage, actual, expected, width, maximum_absolute) in [
+                    ("low", low.as_slice(), expected_low, RANK, 2e-2),
+                    (
+                        "raw gate",
+                        raw_gate.as_slice(),
+                        expected_raw_gate,
+                        HYPER,
+                        1e-2,
+                    ),
+                    (
+                        "mixed",
+                        packed_mixed.as_slice(),
+                        expected_mixed,
+                        HIDDEN,
+                        1e-3,
+                    ),
+                    (
+                        "injection",
+                        injection.as_slice(),
+                        expected_injection,
+                        BRANCHES,
+                        1e-3,
+                    ),
+                    (
+                        "residual",
+                        packed_residual.as_slice(),
+                        expected_residual,
+                        HYPER,
+                        1e-4,
+                    ),
+                ] {
+                    assert_tokenwise_similarity(
+                        &format!("packed HC N={tokens} {stage}"),
+                        actual,
+                        expected,
+                        width,
+                        tokens,
+                        2e-3,
+                        if stage == "raw gate" {
+                            0.999_998
+                        } else {
+                            0.999_999_8
+                        },
+                        maximum_absolute,
+                    );
+                }
+            }
+        }
+
+        let changed_token = 17;
+        let mut perturbed_hyper = hyper_rows.clone();
+        let mut perturbed_block = block_rows.clone();
+        for (index, value) in perturbed_hyper[changed_token * HYPER..(changed_token + 1) * HYPER]
+            .iter_mut()
+            .enumerate()
+        {
+            *value += 1.5 + (index % 17) as f32 * 0.031;
+        }
+        for (index, value) in perturbed_block[changed_token * HIDDEN..(changed_token + 1) * HIDDEN]
+            .iter_mut()
+            .enumerate()
+        {
+            *value -= 1.25 + (index % 13) as f32 * 0.027;
+        }
+        let hyper = tensor(&ctx, &perturbed_hyper, vec![HYPER as u64, TOKENS as u64]);
+        let block = tensor(&ctx, &perturbed_block, vec![HIDDEN as u64, TOKENS as u64]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let read = unsafe {
+            encode_gated_residual_packed_mix(
+                &ctx,
+                &encoder,
+                &hyper,
+                &block,
+                1e-6,
+                weights,
+                &inject_gpu,
+                &mut scratch,
+                TOKENS,
+            )
+        }
+        .unwrap();
+        let mixed = read.mixed().clone();
+        read.encode_combine().unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+        let perturbed = SerialPackedHcTrace {
+            normalized: read_f32(
+                &scratch
+                    .prefix_view(
+                        "perturbed packed HC normalized",
+                        &scratch.normalized,
+                        HYPER,
+                        TOKENS,
+                    )
+                    .unwrap(),
+            ),
+            low: read_f32(
+                &scratch
+                    .prefix_view("perturbed packed HC low", &scratch.low, RANK, TOKENS)
+                    .unwrap(),
+            ),
+            raw_gate: read_f32(
+                &scratch
+                    .prefix_view(
+                        "perturbed packed HC raw gate",
+                        &scratch.raw_gate,
+                        HYPER,
+                        TOKENS,
+                    )
+                    .unwrap(),
+            ),
+            mixed: read_f32(&mixed),
+            injection: read_f32(
+                &scratch
+                    .prefix_view(
+                        "perturbed packed HC injection",
+                        &scratch.injection,
+                        BRANCHES,
+                        TOKENS,
+                    )
+                    .unwrap(),
+            ),
+            residual: read_f32(&hyper),
+        };
+        let baseline = packed_n33.expect("capture packed HC N=33 baseline");
+        for (stage, baseline, perturbed, width) in [
+            (
+                "normalized",
+                baseline.normalized.as_slice(),
+                perturbed.normalized.as_slice(),
+                HYPER,
+            ),
+            (
+                "low",
+                baseline.low.as_slice(),
+                perturbed.low.as_slice(),
+                RANK,
+            ),
+            (
+                "raw gate",
+                baseline.raw_gate.as_slice(),
+                perturbed.raw_gate.as_slice(),
+                HYPER,
+            ),
+            (
+                "mixed",
+                baseline.mixed.as_slice(),
+                perturbed.mixed.as_slice(),
+                HIDDEN,
+            ),
+            (
+                "injection",
+                baseline.injection.as_slice(),
+                perturbed.injection.as_slice(),
+                BRANCHES,
+            ),
+            (
+                "residual",
+                baseline.residual.as_slice(),
+                perturbed.residual.as_slice(),
+                HYPER,
+            ),
+        ] {
+            assert_only_token_changed(
+                &format!("packed HC {stage}"),
+                baseline,
+                perturbed,
+                width,
+                TOKENS,
+                changed_token,
+            );
+        }
+    }
+
+    #[test]
+    fn packed_hc_contract_rejects_aliases_before_encoding() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        const BRANCHES: usize = 2;
+        const HIDDEN: usize = 32;
+        const RANK: usize = 32;
+        const HYPER: usize = BRANCHES * HIDDEN;
+        let oversized = match GatedResidualPackedScratch::new(&ctx, 1, 65_536, 65_536, 1) {
+            Ok(_) => panic!("packed HC accepted projection addressing above u32"),
+            Err(error) => error,
+        };
+        assert!(
+            oversized.to_string().contains("shader addressing"),
+            "{oversized}"
+        );
+        let hyper = tensor(&ctx, &[0.25; HYPER], vec![HYPER as u64, 1]);
+        let block = tensor(&ctx, &[0.5; HIDDEN], vec![HIDDEN as u64, 1]);
+        let norm = tensor(&ctx, &[1.0; HYPER], vec![HYPER as u64]);
+        let down = tensor(&ctx, &[0.0; HYPER * RANK], vec![HYPER as u64, RANK as u64]);
+        let up = tensor(&ctx, &[0.0; RANK * HYPER], vec![RANK as u64, HYPER as u64]);
+        let inject = tensor(
+            &ctx,
+            &[0.0; HYPER * BRANCHES],
+            vec![HYPER as u64, BRANCHES as u64],
+        );
+        let mut scratch = GatedResidualPackedScratch::new(&ctx, BRANCHES, HIDDEN, RANK, 1).unwrap();
+        scratch.normalized = hyper.clone();
+        let error = validate_and_preflight_gated_residual_packed_mix(
+            &ctx,
+            &hyper,
+            &block,
+            1e-6,
+            GatedResidualMetalReadWeights {
+                norm: &norm,
+                down: &down,
+                up: &up,
+            },
+            &inject,
+            &scratch,
+            1,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("overlaps"), "{error}");
+        assert_bits_eq(
+            "rejected packed HC residual",
+            &read_f32(&hyper),
+            &[0.25; HYPER],
+        );
     }
 
     #[test]

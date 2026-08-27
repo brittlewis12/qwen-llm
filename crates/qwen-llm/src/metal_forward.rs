@@ -13637,6 +13637,62 @@ crate::env_flag!(default_on matmat_n1_matvec_enabled, "QWEN_MATMAT_N1_MATVEC");
 crate::env_flag!(default_on matmat_iq2_s_n2_nc2_enabled, "QWEN_MATMAT_IQ2_S_N2_NC2");
 crate::env_flag!(default_on matmat_iq3_s_n2_nc2_enabled, "QWEN_MATMAT_IQ3_S_N2_NC2");
 
+pub(crate) fn validate_f32_q8_mat_mat_addressing(
+    dtype: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MfError> {
+    if !matches!(dtype, GgmlType::F32 | GgmlType::Q8_0) {
+        return Ok(());
+    }
+    for (name, value) in [("n_in", n_in), ("n_out", n_out), ("n_query", n_query)] {
+        if value == 0 || u32::try_from(value).is_err() {
+            return Err(MetalError::BadShape {
+                kernel: "mat_mat_dispatch",
+                detail: format!("{name}={value} must fit nonzero u32 shader addressing"),
+            }
+            .into());
+        }
+    }
+    for (name, elements) in [
+        ("weight", n_in.checked_mul(n_out)),
+        ("input", n_in.checked_mul(n_query)),
+        ("output", n_out.checked_mul(n_query)),
+    ] {
+        let elements = elements.ok_or_else(|| MetalError::BadShape {
+            kernel: "mat_mat_dispatch",
+            detail: format!("{name} element count overflow"),
+        })?;
+        if u32::try_from(elements).is_err() {
+            return Err(MetalError::BadShape {
+                kernel: "mat_mat_dispatch",
+                detail: format!("{name} element count {elements} exceeds u32 shader addressing"),
+            }
+            .into());
+        }
+    }
+    if dtype == GgmlType::Q8_0 {
+        let row_bytes = n_in
+            .checked_div(32)
+            .and_then(|blocks| blocks.checked_mul(34))
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "mat_mat_dispatch",
+                detail: "Q8_0 row-byte stride overflow".into(),
+            })?;
+        if !n_in.is_multiple_of(32) || u32::try_from(row_bytes).is_err() {
+            return Err(MetalError::BadShape {
+                kernel: "mat_mat_dispatch",
+                detail: format!(
+                    "Q8_0 n_in={n_in} must be block-aligned with u32 row-byte stride, got {row_bytes}"
+                ),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Mat-mat dispatch routing for the H5.3b layer-major path. Picks the
 /// right `kernel_mul_mm_*` lift based on weight dtype. Output is
 /// row-major `[n_query, n_out]` (codex H5.3b mid-impl review verified
@@ -13663,6 +13719,7 @@ pub fn encode_mat_mat_dispatch(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
+    validate_f32_q8_mat_mat_addressing(weight.dtype, n_in, n_out, n_query)?;
     // v0.77: n_query == 1 is exactly the mat-vec contract (x = [n_in],
     // y = [n_out]) — route to the production single-token kernels (c=1).
     // Before this arm, n=1 fell through the small-N table to the GENERIC
@@ -14727,6 +14784,20 @@ mod tests {
             final_logits: Some(vec![0.0; 4]),
             capture_tail: None,
         }
+    }
+
+    #[test]
+    fn f32_q8_mat_mat_addressing_rejects_shader_index_overflow() {
+        validate_f32_q8_mat_mat_addressing(GgmlType::F32, 10_240, 320, 2_048)
+            .expect("released HC down geometry");
+        validate_f32_q8_mat_mat_addressing(GgmlType::Q8_0, 10_240, 320, 2_048)
+            .expect("released Q8 HC down geometry");
+        assert!(validate_f32_q8_mat_mat_addressing(GgmlType::F32, 65_536, 65_536, 1).is_err());
+        assert!(validate_f32_q8_mat_mat_addressing(GgmlType::F32, 65_536, 1, 65_536).is_err());
+        let q8_stride_overflow = (u32::MAX as usize / 32) * 32;
+        assert!(
+            validate_f32_q8_mat_mat_addressing(GgmlType::Q8_0, q8_stride_overflow, 1, 1,).is_err()
+        );
     }
 
     #[test]

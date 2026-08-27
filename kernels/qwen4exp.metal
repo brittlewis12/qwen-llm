@@ -75,6 +75,33 @@ kernel void kernel_qwen4exp_hc_gated_mean_f32(
     mixed[hidden] = sum / float(args.branch_count);
 }
 
+struct hc_packed_branch_args {
+    uint n_tokens;
+    uint branch_count;
+    uint hidden_size;
+};
+
+kernel void kernel_qwen4exp_hc_gated_mean_packed_f32(
+        constant hc_packed_branch_args & args [[buffer(0)]],
+        device const float * normalized [[buffer(1)]],
+        device const float * raw_gate [[buffer(2)]],
+        device float * mixed [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint count = args.n_tokens * args.hidden_size;
+    if (index >= count) return;
+    const uint token = index / args.hidden_size;
+    const uint hidden = index % args.hidden_size;
+    float sum = 0.0f;
+    for (uint branch = 0; branch < args.branch_count; ++branch) {
+        const ulong source = ((ulong)token * args.branch_count + branch)
+            * args.hidden_size + hidden;
+        const float gate = 1.0f / (1.0f + exp(-raw_gate[source]));
+        sum += gate * normalized[source];
+    }
+    mixed[(ulong)token * args.hidden_size + hidden] =
+        sum / float(args.branch_count);
+}
+
 kernel void kernel_qwen4exp_hc_inject_f32(
         constant hc_branch_args & args [[buffer(0)]],
         device const float * block_output [[buffer(1)]],
@@ -87,6 +114,25 @@ kernel void kernel_qwen4exp_hc_inject_f32(
     const float value = raw_injection[branch] / float(args.branch_count);
     const float injection = 2.0f / (1.0f + exp(-value));
     residual[(ulong)branch * args.hidden_size + hidden] += block_output[hidden] * injection;
+}
+
+kernel void kernel_qwen4exp_hc_inject_packed_f32(
+        constant hc_packed_branch_args & args [[buffer(0)]],
+        device const float * block_output [[buffer(1)]],
+        device const float * raw_injection [[buffer(2)]],
+        device float * residual [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint count = args.n_tokens * args.branch_count * args.hidden_size;
+    if (index >= count) return;
+    const uint hidden = index % args.hidden_size;
+    const uint row = index / args.hidden_size;
+    const uint branch = row % args.branch_count;
+    const uint token = row / args.branch_count;
+    const float value = raw_injection[(ulong)token * args.branch_count + branch]
+        / float(args.branch_count);
+    const float injection = 2.0f / (1.0f + exp(-value));
+    residual[((ulong)token * args.branch_count + branch) * args.hidden_size + hidden]
+        += block_output[(ulong)token * args.hidden_size + hidden] * injection;
 }
 
 struct qwen4exp_ple_gate_args {

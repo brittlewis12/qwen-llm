@@ -744,7 +744,7 @@ pub(crate) fn validate_and_preflight_packed(
     )?;
     for moe_weights in [weights.layer_zero.moe, weights.layer_one_moe] {
         validate_moe_packed(ctx, &mixed, moe_weights, moe, tokens)?;
-        preflight_moe_packed(ctx, moe_weights)?;
+        preflight_moe_packed(ctx, moe_weights, tokens)?;
     }
     ctx.pipeline("kernel_copy_offset_f32")?;
 

@@ -1366,9 +1366,13 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qwen4exp_moe::with_qwen4exp_moe_iq3_fast_override;
+    use crate::metal::DispatchCensusRow;
+    use crate::qwen4exp_moe::{
+        with_qwen4exp_moe_iq3_fast_override, with_qwen4exp_packed_router_e8p32_strict_override,
+    };
     use crate::sampling::{Sampler, SamplingConfig};
     use crate::tokenizer::Tokenizer;
+    use objc2_metal::MTLBuffer;
 
     fn argmax(values: &[f32]) -> usize {
         values
@@ -1416,6 +1420,161 @@ mod tests {
         assert!(cosine > 0.999_999_99, "{label} cosine {cosine}");
         assert!(relative_rms < 1e-4, "{label} relative RMS {relative_rms}");
         assert!(max_abs < 1e-3, "{label} maximum delta {max_abs}");
+    }
+
+    fn assert_f32_bits_eq(label: &str, baseline: &[f32], candidate: &[f32]) {
+        assert_eq!(baseline.len(), candidate.len(), "{label} length");
+        if let Some((index, (&expected, &actual))) = baseline
+            .iter()
+            .zip(candidate)
+            .enumerate()
+            .find(|(_, (expected, actual))| expected.to_bits() != actual.to_bits())
+        {
+            panic!(
+                "{label}[{index}] differs: baseline={expected:?} ({:#010x}) candidate={actual:?} ({:#010x})",
+                expected.to_bits(),
+                actual.to_bits(),
+            );
+        }
+    }
+
+    fn snapshot_persistent_state(runner: &Qwen4ExpTextRunner<'_, '_, '_>) -> Vec<Vec<u8>> {
+        runner
+            .workspace
+            .persistent_state_tensors()
+            .into_iter()
+            .map(|tensor| unsafe {
+                let source = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize);
+                std::slice::from_raw_parts(source, tensor.n_bytes() as usize).to_vec()
+            })
+            .collect()
+    }
+
+    fn zero_persistent_state(runner: &Qwen4ExpTextRunner<'_, '_, '_>) {
+        for tensor in runner.workspace.persistent_state_tensors() {
+            unsafe {
+                let destination = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize);
+                std::slice::from_raw_parts_mut(destination, tensor.n_bytes() as usize).fill(0);
+            }
+        }
+    }
+
+    fn assert_state_bytes_eq(label: &str, baseline: &[Vec<u8>], candidate: &[Vec<u8>]) {
+        assert_eq!(baseline.len(), candidate.len(), "{label} tensor count");
+        for (tensor, (expected, actual)) in baseline.iter().zip(candidate).enumerate() {
+            assert_eq!(
+                expected.len(),
+                actual.len(),
+                "{label} tensor {tensor} byte length"
+            );
+            if let Some((byte, (&expected, &actual))) = expected
+                .iter()
+                .zip(actual)
+                .enumerate()
+                .find(|(_, (expected, actual))| expected != actual)
+            {
+                panic!(
+                    "{label} tensor {tensor} byte {byte} differs: baseline={expected:#04x} candidate={actual:#04x}"
+                );
+            }
+        }
+    }
+
+    fn assert_router_candidate_census(
+        label: &str,
+        tokens: usize,
+        baseline: &[DispatchCensusRow],
+        candidate: &[DispatchCensusRow],
+    ) {
+        const GENERIC: &str = "kernel_mat_mat_f32_f32";
+        const STRICT: &str = "kernel_mat_mat_f32_f32_router_e8p32_strict";
+        assert_eq!(baseline.len(), candidate.len(), "{label} dispatch count");
+        assert!(!baseline.is_empty(), "{label} baseline census");
+        assert!(
+            baseline
+                .iter()
+                .chain(candidate)
+                .all(|row| row.encoder_ordinal == 0 && !row.encoder_concurrent),
+            "{label} must use one serial encoder"
+        );
+        let mut substitutions = 0_usize;
+        for (index, (baseline, candidate)) in baseline.iter().zip(candidate).enumerate() {
+            assert_eq!(baseline.family, candidate.family, "{label} family {index}");
+            assert_eq!(baseline.tag, candidate.tag, "{label} tag {index}");
+            assert_eq!(
+                baseline.encoder_ordinal, candidate.encoder_ordinal,
+                "{label} encoder {index}"
+            );
+            assert_eq!(
+                baseline.encoder_concurrent, candidate.encoder_concurrent,
+                "{label} encoder mode {index}"
+            );
+            if candidate.kernel == STRICT {
+                substitutions += 1;
+                assert_eq!(baseline.kernel, GENERIC, "{label} substitution {index}");
+                assert_eq!(baseline.grid_width, 512, "{label} baseline grid {index}");
+                assert_eq!(candidate.grid_width, 64, "{label} candidate grid {index}");
+                assert_eq!(baseline.grid_height, tokens.div_ceil(32) as u64);
+                assert_eq!(candidate.grid_height, tokens.div_ceil(32) as u64);
+                assert_eq!(baseline.grid_depth, 1);
+                assert_eq!(candidate.grid_depth, 1);
+                assert_eq!(baseline.threads_width, 32);
+                assert_eq!(candidate.threads_width, 32);
+                assert_eq!(baseline.threads_height, 1);
+                assert_eq!(candidate.threads_height, 1);
+                assert_eq!(baseline.threads_depth, 1);
+                assert_eq!(candidate.threads_depth, 1);
+                assert_eq!(baseline.tg_threads, candidate.tg_threads);
+            } else {
+                assert_eq!(baseline.kernel, candidate.kernel, "{label} kernel {index}");
+                assert_eq!(
+                    (
+                        baseline.grid_width,
+                        baseline.grid_height,
+                        baseline.grid_depth,
+                        baseline.threads_width,
+                        baseline.threads_height,
+                        baseline.threads_depth,
+                        baseline.grid_tgs,
+                        baseline.tg_threads,
+                    ),
+                    (
+                        candidate.grid_width,
+                        candidate.grid_height,
+                        candidate.grid_depth,
+                        candidate.threads_width,
+                        candidate.threads_height,
+                        candidate.threads_depth,
+                        candidate.grid_tgs,
+                        candidate.tg_threads,
+                    ),
+                    "{label} geometry {index}"
+                );
+            }
+        }
+        assert_eq!(substitutions, 48, "{label} strict router substitutions");
+    }
+
+    struct PackedRouterReplay {
+        endpoint: Vec<f32>,
+        continuation: Vec<f32>,
+        prefill_state: Vec<Vec<u8>>,
+        continuation_state: Vec<Vec<u8>>,
+        prefill_qsa_lengths: Vec<(u32, usize)>,
+        continuation_qsa_lengths: Vec<(u32, usize)>,
+        prefill_ple_prior_tokens: Vec<u32>,
+        continuation_ple_prior_tokens: Vec<u32>,
+        census: Vec<DispatchCensusRow>,
     }
 
     #[test]
@@ -1663,5 +1822,137 @@ mod tests {
         assert!(profile.encoder_boundary_ms >= 0.0);
         let replay = runner.logits().unwrap().to_vec();
         assert_eq!(first, replay);
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_RUNTIME_GGUF to the pinned full release"]
+    fn released_packed_router_e8p32_strict_replays_exactly() {
+        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
+            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+        let tokenizer = Tokenizer::from_gguf(&gguf).expect("load released tokenizer");
+        let prompt = "<|im_start|>user\nReply with exactly: HELLO<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+        let short_tokens = tokenizer
+            .encode(prompt, false)
+            .unwrap()
+            .into_iter()
+            .map(|token| u32::try_from(token).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(short_tokens.len(), 18);
+        let marker = tokenizer.encode("<|im_start|>", false).unwrap();
+        assert_eq!(marker.len(), 1);
+        let marker = u32::try_from(marker[0]).unwrap();
+        let long_tokens = vec![marker; 2_048];
+
+        let ctx = MetalContext::new().expect("initialize Metal");
+        assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(
+            &Qwen4ExpConfig::flash_next_reference(),
+            long_tokens.len() + 1,
+        )
+        .unwrap();
+        let mut loaded = Qwen4ExpLoadedModel::load(&ctx, &gguf, capacity).unwrap();
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+
+        for (label, tokens) in [
+            ("N=18", short_tokens.as_slice()),
+            ("N=2048", long_tokens.as_slice()),
+        ] {
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            let baseline = with_qwen4exp_packed_router_e8p32_strict_override(false, || {
+                crate::metal::dispatch_census_begin();
+                let endpoint = runner.prefill(tokens).unwrap().to_vec();
+                let census = crate::metal::dispatch_census_take();
+                let timing = runner.last_prefill_timing().unwrap();
+                assert_eq!(timing.packed_token_count, tokens.len(), "{label} baseline");
+                assert_eq!(timing.command_count, 1, "{label} baseline commands");
+                let prefill_state = snapshot_persistent_state(&runner);
+                let prefill_qsa_lengths = runner.workspace.qsa_committed_lengths();
+                let prefill_ple_prior_tokens = runner.workspace.ple_prior_tokens().to_vec();
+                let continuation = runner.forward_token(marker).unwrap().to_vec();
+                PackedRouterReplay {
+                    endpoint,
+                    continuation,
+                    prefill_state,
+                    continuation_state: snapshot_persistent_state(&runner),
+                    prefill_qsa_lengths,
+                    continuation_qsa_lengths: runner.workspace.qsa_committed_lengths(),
+                    prefill_ple_prior_tokens,
+                    continuation_ple_prior_tokens: runner.workspace.ple_prior_tokens().to_vec(),
+                    census,
+                }
+            });
+            assert_eq!(runner.next_position(), tokens.len() + 1);
+
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            let candidate = with_qwen4exp_packed_router_e8p32_strict_override(true, || {
+                crate::metal::dispatch_census_begin();
+                let endpoint = runner.prefill(tokens).unwrap().to_vec();
+                let census = crate::metal::dispatch_census_take();
+                let timing = runner.last_prefill_timing().unwrap();
+                assert_eq!(timing.packed_token_count, tokens.len(), "{label} candidate");
+                assert_eq!(timing.command_count, 1, "{label} candidate commands");
+                let prefill_state = snapshot_persistent_state(&runner);
+                let prefill_qsa_lengths = runner.workspace.qsa_committed_lengths();
+                let prefill_ple_prior_tokens = runner.workspace.ple_prior_tokens().to_vec();
+                let continuation = runner.forward_token(marker).unwrap().to_vec();
+                PackedRouterReplay {
+                    endpoint,
+                    continuation,
+                    prefill_state,
+                    continuation_state: snapshot_persistent_state(&runner),
+                    prefill_qsa_lengths,
+                    continuation_qsa_lengths: runner.workspace.qsa_committed_lengths(),
+                    prefill_ple_prior_tokens,
+                    continuation_ple_prior_tokens: runner.workspace.ple_prior_tokens().to_vec(),
+                    census,
+                }
+            });
+            assert_eq!(runner.next_position(), tokens.len() + 1);
+            assert_f32_bits_eq(
+                &format!("{label} endpoint logits"),
+                &baseline.endpoint,
+                &candidate.endpoint,
+            );
+            assert_f32_bits_eq(
+                &format!("{label} continuation logits"),
+                &baseline.continuation,
+                &candidate.continuation,
+            );
+            assert_state_bytes_eq(
+                &format!("{label} packed persistent state"),
+                &baseline.prefill_state,
+                &candidate.prefill_state,
+            );
+            assert_eq!(
+                candidate.prefill_qsa_lengths, baseline.prefill_qsa_lengths,
+                "{label} packed QSA lengths"
+            );
+            assert_eq!(
+                candidate.prefill_ple_prior_tokens, baseline.prefill_ple_prior_tokens,
+                "{label} packed PLE history"
+            );
+            assert_state_bytes_eq(
+                &format!("{label} continuation persistent state"),
+                &baseline.continuation_state,
+                &candidate.continuation_state,
+            );
+            assert_eq!(
+                candidate.continuation_qsa_lengths, baseline.continuation_qsa_lengths,
+                "{label} continuation QSA lengths"
+            );
+            assert_eq!(
+                candidate.continuation_ple_prior_tokens, baseline.continuation_ple_prior_tokens,
+                "{label} continuation PLE history"
+            );
+            assert_router_candidate_census(
+                label,
+                tokens.len(),
+                &baseline.census,
+                &candidate.census,
+            );
+        }
     }
 }

@@ -625,7 +625,7 @@ fn validate_contract(
         if tokens == 1 {
             preflight_moe_singleton(ctx, weights)?;
         } else {
-            preflight_moe_packed(ctx, weights)?;
+            preflight_moe_packed(ctx, weights, tokens)?;
         }
     }
 

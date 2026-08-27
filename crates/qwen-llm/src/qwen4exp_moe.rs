@@ -3,14 +3,15 @@
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
-    encode_copy_offset_f32, encode_dot_sigmoid_f32, encode_moe_down_iq4_nl_f32,
-    encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_q8_0_f32_grouped_slots,
-    encode_moe_down_weighted_sum_q8_0_f32, encode_moe_route_bucket_slots_f32,
-    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
-    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
-    encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
-    encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
-    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk_logits_softmax_f32,
+    encode_copy_offset_f32, encode_dot_sigmoid_f32, encode_mat_mat_f32_router_e8p32_strict,
+    encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_nl_f32_grouped_slots,
+    encode_moe_down_q8_0_f32_grouped_slots, encode_moe_down_weighted_sum_q8_0_f32,
+    encode_moe_route_bucket_slots_f32, encode_moe_swiglu_iq3_xxs_f32,
+    encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16,
+    encode_moe_swiglu_iq4_xs_f32, encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16,
+    encode_moe_weighted_sum_f32, encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32,
+    encode_silu_mul_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
+    encode_topk_logits_softmax_f32,
 };
 use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
@@ -33,15 +34,26 @@ use objc2_metal::{
 
 const MAX_TOP_K: usize = 16;
 const MAX_PACKED_TOKENS: usize = 2_048;
+const PACKED_ROUTER_E8P32_STRICT_DEVICE: &str = "Apple M4 Max";
+const PACKED_ROUTER_E8P32_STRICT_HIDDEN: usize = 2_560;
+const PACKED_ROUTER_E8P32_STRICT_EXPERTS: usize = 512;
+const PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS: usize = 2_048;
 
 crate::env_flag!(
     default_on configured_qwen4exp_moe_iq3_fast_enabled,
     "QWEN4EXP_MOE_IQ3_FAST"
 );
+crate::env_flag!(
+    default_off configured_qwen4exp_packed_router_e8p32_strict_enabled,
+    "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"
+);
 
 #[cfg(test)]
 thread_local! {
     static QWEN4EXP_MOE_IQ3_FAST_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+    static QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE: std::cell::Cell<Option<bool>> = const {
         std::cell::Cell::new(None)
     };
 }
@@ -71,6 +83,66 @@ fn qwen4exp_moe_iq3_fast_enabled() -> bool {
         return enabled;
     }
     configured_qwen4exp_moe_iq3_fast_enabled()
+}
+
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_packed_router_e8p32_strict_override<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct RestoreOverride(Option<bool>);
+
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let previous = QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    let _restore = RestoreOverride(previous);
+    f()
+}
+
+fn qwen4exp_packed_router_e8p32_strict_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
+    configured_qwen4exp_packed_router_e8p32_strict_enabled()
+}
+
+fn packed_router_e8p32_strict_scope_qualified(
+    device_name: &str,
+    hidden_size: usize,
+    expert_count: usize,
+    router_dtype: GgmlType,
+    tokens: usize,
+) -> bool {
+    device_name == PACKED_ROUTER_E8P32_STRICT_DEVICE
+        && hidden_size == PACKED_ROUTER_E8P32_STRICT_HIDDEN
+        && expert_count == PACKED_ROUTER_E8P32_STRICT_EXPERTS
+        && router_dtype == GgmlType::F32
+        && matches!(tokens, 18 | PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS)
+}
+
+fn packed_router_e8p32_strict_qualified(
+    ctx: &MetalContext,
+    geometry: Qwen4ExpMoeMetalGeometry,
+    router_dtype: GgmlType,
+    tokens: usize,
+) -> bool {
+    qwen4exp_packed_router_e8p32_strict_enabled()
+        && packed_router_e8p32_strict_scope_qualified(
+            &ctx.device.name().to_string(),
+            geometry.hidden_size,
+            geometry.expert_count,
+            router_dtype,
+            tokens,
+        )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1048,14 +1120,13 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.router", layer, mixer),
         )?;
-        encode_mat_mat_dispatch(
+        encode_packed_router_projection(
             ctx,
             enc,
             self.weights.router,
             self.input,
             &self.views.router_logits,
-            g.hidden_size,
-            g.expert_count,
+            g,
             self.tokens,
         )?;
         end_optional(&mut profile, enc, marker)?;
@@ -1345,6 +1416,47 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
     }
 }
 
+fn encode_packed_router_projection(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    geometry: Qwen4ExpMoeMetalGeometry,
+    tokens: usize,
+) -> Result<(), Qwen4ExpMoeError> {
+    if packed_router_e8p32_strict_qualified(ctx, geometry, weight.dtype, tokens) {
+        encode_mat_mat_f32_router_e8p32_strict(
+            ctx,
+            enc,
+            weight,
+            input,
+            output,
+            geometry.hidden_size,
+            geometry.expert_count,
+            tokens,
+        )?;
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| {
+            eprintln!(
+                "qwen4exp: strict-order E8P32 packed router active; rollback=QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0"
+            );
+        });
+    } else {
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            weight,
+            input,
+            output,
+            geometry.hidden_size,
+            geometry.expert_count,
+            tokens,
+        )?;
+    }
+    Ok(())
+}
+
 /// Encode packed MoE rows into transaction-owned scratch.
 ///
 /// # Safety
@@ -1439,7 +1551,7 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_stage_sampled(
     }
     validate_packed_contract(ctx, input, weights, scratch, tokens)?;
     let views = scratch.views(tokens)?;
-    preflight_packed(ctx, weights)?;
+    preflight_packed(ctx, weights, tokens)?;
     let execution = Qwen4ExpMoePackedExecution {
         input,
         weights,
@@ -1568,7 +1680,7 @@ unsafe fn encode_qwen4exp_moe_packed_motor_inner(
         return Ok(views.output);
     }
 
-    preflight_packed(ctx, weights)?;
+    preflight_packed(ctx, weights, tokens)?;
     let execution = Qwen4ExpMoePackedExecution {
         input,
         weights,
@@ -2000,8 +2112,13 @@ pub(crate) fn preflight(
 pub(crate) fn preflight_packed(
     ctx: &MetalContext,
     weights: Qwen4ExpMoeMetalWeights<'_>,
+    tokens: usize,
 ) -> Result<(), Qwen4ExpMoeError> {
-    preflight_packed_projection(ctx, weights.router.dtype)?;
+    if packed_router_e8p32_strict_qualified(ctx, weights.geometry, weights.router.dtype, tokens) {
+        require_pipeline_capacity(ctx, "kernel_mat_mat_f32_f32_router_e8p32_strict", 32, 0)?;
+    } else {
+        preflight_packed_projection(ctx, weights.router.dtype)?;
+    }
     for dtype in [
         weights.shared_gate.dtype,
         weights.shared_up.dtype,
@@ -2561,6 +2678,279 @@ mod tests {
                 .add(tensor.offset as usize)
                 .cast::<i32>();
             std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
+        }
+    }
+
+    #[test]
+    fn packed_router_e8p32_strict_scope_is_exact() {
+        let qualified = |device, hidden, experts, dtype, tokens| {
+            packed_router_e8p32_strict_scope_qualified(device, hidden, experts, dtype, tokens)
+        };
+        assert!(PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS <= MAX_PACKED_TOKENS);
+        for tokens in [18, PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS] {
+            assert!(qualified(
+                PACKED_ROUTER_E8P32_STRICT_DEVICE,
+                PACKED_ROUTER_E8P32_STRICT_HIDDEN,
+                PACKED_ROUTER_E8P32_STRICT_EXPERTS,
+                GgmlType::F32,
+                tokens,
+            ));
+        }
+        assert!(!qualified(
+            "Apple M3 Max",
+            PACKED_ROUTER_E8P32_STRICT_HIDDEN,
+            PACKED_ROUTER_E8P32_STRICT_EXPERTS,
+            GgmlType::F32,
+            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_ROUTER_E8P32_STRICT_DEVICE,
+            PACKED_ROUTER_E8P32_STRICT_HIDDEN / 2,
+            PACKED_ROUTER_E8P32_STRICT_EXPERTS,
+            GgmlType::F32,
+            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_ROUTER_E8P32_STRICT_DEVICE,
+            PACKED_ROUTER_E8P32_STRICT_HIDDEN,
+            160,
+            GgmlType::F32,
+            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_ROUTER_E8P32_STRICT_DEVICE,
+            PACKED_ROUTER_E8P32_STRICT_HIDDEN,
+            PACKED_ROUTER_E8P32_STRICT_EXPERTS,
+            GgmlType::F16,
+            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
+        ));
+        for tokens in [
+            1,
+            17,
+            19,
+            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS - 1,
+            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS + 1,
+        ] {
+            assert!(!qualified(
+                PACKED_ROUTER_E8P32_STRICT_DEVICE,
+                PACKED_ROUTER_E8P32_STRICT_HIDDEN,
+                PACKED_ROUTER_E8P32_STRICT_EXPERTS,
+                GgmlType::F32,
+                tokens,
+            ));
+        }
+    }
+
+    #[test]
+    fn packed_router_e8p32_strict_matches_generic_route_bits() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        if ctx.device.name().to_string() != PACKED_ROUTER_E8P32_STRICT_DEVICE {
+            eprintln!(
+                "strict E8P32 Qwen router differential skipped on {}",
+                ctx.device.name()
+            );
+            return;
+        }
+
+        const TOP_K: usize = 10;
+        let geometry = Qwen4ExpMoeMetalGeometry::new(
+            PACKED_ROUTER_E8P32_STRICT_HIDDEN,
+            PACKED_ROUTER_E8P32_STRICT_EXPERTS,
+            TOP_K,
+            640,
+            640,
+        )
+        .unwrap();
+        let router_values = (0..geometry.hidden_size * geometry.expert_count)
+            .map(|index| ((index * 37 + 11) % 509) as f32 * 0.000_4 - 0.101_6)
+            .collect::<Vec<_>>();
+        let router = weight_f32(
+            &ctx,
+            &router_values,
+            vec![geometry.hidden_size as u64, geometry.expert_count as u64],
+        );
+        let shared_router_values = (0..geometry.hidden_size)
+            .map(|index| ((index * 29 + 7) % 257) as f32 * 0.000_5 - 0.064)
+            .collect::<Vec<_>>();
+        let shared_router = weight_f32(
+            &ctx,
+            &shared_router_values,
+            vec![geometry.hidden_size as u64],
+        );
+
+        for tokens in [18_usize, PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS] {
+            let input_values = (0..tokens * geometry.hidden_size)
+                .map(|index| {
+                    let token = index / geometry.hidden_size;
+                    let lane = index % geometry.hidden_size;
+                    ((token * 43 + lane * 17 + 13) % 521) as f32 * 0.000_3 - 0.078
+                })
+                .collect::<Vec<_>>();
+            let input = tensor_f32(
+                &ctx,
+                &input_values,
+                vec![geometry.hidden_size as u64, tokens as u64],
+            );
+            let baseline_logits =
+                MetalTensor::zeros_f32(&ctx, vec![geometry.expert_count as u64, tokens as u64])
+                    .unwrap();
+            let candidate_logits =
+                MetalTensor::zeros_f32(&ctx, vec![geometry.expert_count as u64, tokens as u64])
+                    .unwrap();
+            let baseline_ids =
+                MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, tokens as u64]).unwrap();
+            let candidate_ids =
+                MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, tokens as u64]).unwrap();
+            let baseline_weights =
+                MetalTensor::zeros_f32(&ctx, vec![TOP_K as u64, tokens as u64]).unwrap();
+            let candidate_weights =
+                MetalTensor::zeros_f32(&ctx, vec![TOP_K as u64, tokens as u64]).unwrap();
+            let baseline_shared = MetalTensor::zeros_f32(&ctx, vec![tokens as u64]).unwrap();
+            let candidate_shared = MetalTensor::zeros_f32(&ctx, vec![tokens as u64]).unwrap();
+            let baseline_counts =
+                MetalTensor::zeros_i32(&ctx, vec![geometry.expert_count as u64]).unwrap();
+            let candidate_counts =
+                MetalTensor::zeros_i32(&ctx, vec![geometry.expert_count as u64]).unwrap();
+            let baseline_slots =
+                MetalTensor::zeros_i32(&ctx, vec![tokens as u64, geometry.expert_count as u64])
+                    .unwrap();
+            let candidate_slots =
+                MetalTensor::zeros_i32(&ctx, vec![tokens as u64, geometry.expert_count as u64])
+                    .unwrap();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            with_qwen4exp_packed_router_e8p32_strict_override(false, || {
+                encode_packed_router_projection(
+                    &ctx,
+                    &encoder,
+                    &router,
+                    &input,
+                    &baseline_logits,
+                    geometry,
+                    tokens,
+                )
+            })
+            .unwrap();
+            with_qwen4exp_packed_router_e8p32_strict_override(true, || {
+                encode_packed_router_projection(
+                    &ctx,
+                    &encoder,
+                    &router,
+                    &input,
+                    &candidate_logits,
+                    geometry,
+                    tokens,
+                )
+            })
+            .unwrap();
+            for (logits, ids, weights, shared) in [
+                (
+                    &baseline_logits,
+                    &baseline_ids,
+                    &baseline_weights,
+                    &baseline_shared,
+                ),
+                (
+                    &candidate_logits,
+                    &candidate_ids,
+                    &candidate_weights,
+                    &candidate_shared,
+                ),
+            ] {
+                encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                    &ctx,
+                    &encoder,
+                    logits,
+                    &shared_router,
+                    &input,
+                    ids,
+                    weights,
+                    shared,
+                    geometry.expert_count,
+                    TOP_K,
+                    geometry.hidden_size,
+                    tokens,
+                )
+                .unwrap();
+            }
+            for (ids, counts, slots) in [
+                (&baseline_ids, &baseline_counts, &baseline_slots),
+                (&candidate_ids, &candidate_counts, &candidate_slots),
+            ] {
+                encode_moe_route_bucket_slots_f32(
+                    &ctx,
+                    &encoder,
+                    ids,
+                    counts,
+                    slots,
+                    geometry.expert_count,
+                    tokens,
+                    TOP_K,
+                )
+                .unwrap();
+            }
+            let census = crate::metal::dispatch_census_take();
+            assert_eq!(
+                census
+                    .iter()
+                    .map(|row| row.kernel.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_mat_mat_f32_f32_router_e8p32_strict",
+                    "kernel_topk_logits_softmax_dot_sigmoid_packed_f32",
+                    "kernel_topk_logits_softmax_dot_sigmoid_packed_f32",
+                    "kernel_moe_route_bucket_slots_f32",
+                    "kernel_moe_route_bucket_slots_f32",
+                ],
+                "strict E8P32 Qwen route N={tokens}: {census:#?}"
+            );
+            assert_eq!(census[0].grid_width, geometry.expert_count as u64);
+            assert_eq!(census[1].grid_width, (geometry.expert_count / 8) as u64);
+            assert_eq!(census[0].grid_height, tokens.div_ceil(32) as u64);
+            assert_eq!(census[1].grid_height, tokens.div_ceil(32) as u64);
+            assert_eq!(census[0].threads_width, 32);
+            assert_eq!(census[1].threads_width, 32);
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            assert_bits_eq(
+                &format!("strict E8P32 Qwen router logits N={tokens}"),
+                &read_f32(&candidate_logits),
+                &read_f32(&baseline_logits),
+            );
+            assert_eq!(
+                read_i32(&candidate_ids),
+                read_i32(&baseline_ids),
+                "strict E8P32 Qwen top-k IDs N={tokens}"
+            );
+            assert_bits_eq(
+                &format!("strict E8P32 Qwen top-k weights N={tokens}"),
+                &read_f32(&candidate_weights),
+                &read_f32(&baseline_weights),
+            );
+            assert_bits_eq(
+                &format!("strict E8P32 Qwen shared scale N={tokens}"),
+                &read_f32(&candidate_shared),
+                &read_f32(&baseline_shared),
+            );
+            assert_eq!(
+                read_i32(&candidate_counts),
+                read_i32(&baseline_counts),
+                "strict E8P32 Qwen route counts N={tokens}"
+            );
+            assert_eq!(
+                read_i32(&candidate_slots),
+                read_i32(&baseline_slots),
+                "strict E8P32 Qwen route slots N={tokens}"
+            );
         }
     }
 

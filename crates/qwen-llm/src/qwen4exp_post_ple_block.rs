@@ -742,7 +742,7 @@ pub(crate) fn validate_and_preflight_packed(
         _ => return invalid("packed mixer weight and workspace variants differ"),
     }
     validate_moe_packed(ctx, &mixed, weights.moe, moe, tokens)?;
-    preflight_moe_packed(ctx, weights.moe)?;
+    preflight_moe_packed(ctx, weights.moe, tokens)?;
     ctx.pipeline("kernel_copy_offset_f32")?;
     Ok(())
 }

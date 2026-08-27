@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Full-Chunk Routing Is F32 Projection
+
+Status: prototype the strict E8xP32 F32 router geometry at N=2,048. Kill
+top-k/bucket fusion and park interactive projection pending shared-candidate
+evidence.
+
+- Checkpoint `e86f9b1` splits router projection, top-k/shared selection, and
+  bucket publication without changing the ordinary 11-dispatch motor. N=8
+  route metadata, scratch, output, and guards remain bitwise equal.
+- N=18 passed HELLO replay with GPU/wall ratios `1.008065/1.010928` and raw
+  coverage `1.000000`. Projection/top-k/bucket own only
+  `3.572%/0.355%/0.272%` of command GPU across 43 standard layers.
+- N=2,048 passed at `544.77 tok/s`; GPU/wall ratios were
+  `0.997891/0.998216`, and raw coverage was `1.000000`. Projection measured
+  `15.863542 ms/layer`, or 18.167% of command GPU.
+- Top-k measured `0.280416 ms/layer` and bucket `1.617875 ms/layer`. Their
+  combined `1.898291 ms/layer` is below the `4.367 ms/layer` component KILL
+  floor, so fusion is killed before implementation.
+- Next compare generic F32 projection with strict E8xP32 at N=18 and N=2,048
+  under bitwise router, route, scratch, state, and endpoint gates. Full-chunk
+  KEEP requires `<=14.277188 ms/layer` and ordinary GPU `<=3725.021 ms`;
+  interactive KEEP requires `<=0.146842 ms/layer` and `<=240.308 ms`.
+
+Evidence: `docs/bench/2026-08-27-qwen4exp-packed-routing-attribution/`.
+
 ## 2026-08-27 - Flash-Next Packed MoE Splits by Prompt Shape
 
 Status: subdivide full-chunk routing before a routing prototype. Keep standard

@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "decision": "go_strict_e8p32_router_projection",
+  "source_commit": "e86f9b1460aca2428a37b77a6588ec64fd5b2f0c",
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "8bdc666649440e9bdc97e16f3f75782c98478ff5",
+    "quant": "UD-Q3_K_XL"
+  },
+  "device": "Apple M4 Max",
+  "sampling": {
+    "mode": "encoder_stage",
+    "command_count": 1,
+    "encoder_count": 64,
+    "sample_count": 128,
+    "span_count": 68,
+    "routing_substaged_layer": 5
+  },
+  "credited_standard_layers": 43,
+  "workloads": [
+    {
+      "tokens": 18,
+      "output": "HELLO",
+      "first": {
+        "wall_ms": 4030.849,
+        "gpu_ms": 254.43149986676872,
+        "outside_gpu_ms": 3776.417959133231
+      },
+      "warm": {
+        "wall_ms": 244.617,
+        "gpu_ms": 242.7348750643432,
+        "outside_gpu_ms": 1.8819579356568
+      },
+      "profiled": {
+        "wall_ms": 247.290,
+        "gpu_ms": 244.6924583055079,
+        "outside_gpu_ms": 2.5974586944921043
+      },
+      "gpu_ratio": 1.0080646970924378,
+      "wall_ratio": 1.010928,
+      "raw_coverage": 1.0,
+      "sampled_span_ticks": 244692417,
+      "routing": {
+        "parent_ticks": 239875,
+        "router_ticks": 203292,
+        "topk_ticks": 20209,
+        "bucket_ticks": 15500,
+        "boundary_residual_ticks": 874
+      },
+      "credited_command_share": {
+        "router": 0.03572473,
+        "topk": 0.00355135,
+        "bucket": 0.00272383,
+        "parent": 0.04215350
+      }
+    },
+    {
+      "tokens": 2048,
+      "profiled_tps": 544.77,
+      "first": {
+        "wall_ms": 4242.452,
+        "gpu_ms": 3775.2353749237955,
+        "outside_gpu_ms": 467.21633307620414
+      },
+      "warm": {
+        "wall_ms": 3765.955,
+        "gpu_ms": 3762.6474583521485,
+        "outside_gpu_ms": 3.3077916478514453
+      },
+      "profiled": {
+        "wall_ms": 3759.238,
+        "gpu_ms": 3754.7131250612438,
+        "outside_gpu_ms": 4.52462493875646
+      },
+      "gpu_ratio": 0.9978912897424678,
+      "wall_ratio": 0.998216,
+      "raw_coverage": 1.0,
+      "sampled_span_ticks": 3754713166,
+      "routing": {
+        "parent_ticks": 17762833,
+        "router_ticks": 15863542,
+        "topk_ticks": 280416,
+        "bucket_ticks": 1617875,
+        "boundary_residual_ticks": 1000
+      },
+      "credited_command_share": {
+        "router": 0.18167362,
+        "topk": 0.00321140,
+        "bucket": 0.01852835,
+        "parent": 0.20342482
+      }
+    }
+  ],
+  "strict_e8p32_gate_ms_per_layer": {
+    "baseline": 15.863542,
+    "keep_max": 14.277188,
+    "kill_min": 15.426947,
+    "minimum_saving": 1.586354,
+    "kill_saving_ceiling": 0.436595
+  },
+  "ordinary_command_baseline_ms": 3762.6474583521485,
+  "ordinary_command_keep_max_ms": 3725.021,
+  "interactive_gate": {
+    "projection_baseline_ms_per_layer": 0.203292,
+    "projection_keep_max_ms_per_layer": 0.146842,
+    "ordinary_command_baseline_ms": 242.7348750643432,
+    "ordinary_command_keep_max_ms": 240.308
+  }
+}

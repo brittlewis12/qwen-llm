@@ -220,10 +220,11 @@ intact. The force-ranked lane is now:
 1. Pin the upstream full-logit row for the HELLO boundary and one selected-QSA
    row above 4,096 tokens so packed qualification no longer rests solely on the
    local scalar engine.
-2. Subdivide standard layer-5 N=2,048 routing into router projection,
-   top-k/shared-scale selection, and deterministic bucketing. Keep one command
-   and require `>=8.734 ms/layer` plus a concrete `>=0.873 ms/layer` mechanism
-   before prototyping the winning component.
+2. Compare generic F32 routing projection with the strict E8xP32 geometry at
+   released `H=2560`, `E=512`, and N in `{18, 2048}`. Require bitwise router
+   logits and route state. N=2,048 KEEP requires `<=14.277188 ms/layer` plus
+   ordinary GPU `<=3725.021 ms`; N=18 requires `<=0.146842 ms/layer` plus
+   ordinary GPU `<=240.308 ms`.
 3. Test count-banded standard IQ3 gate/up geometry after routing attribution.
    It owns 14.56% of N=18 and 15.55% of N=2,048 command GPU time; require at
    least a 10% stage saving and 1% whole-command gain.
@@ -303,6 +304,17 @@ expert weights across roughly 40 slots per expert while router/top-k/bucket work
 still covers every token; this packet does not directly measure those traffic
 or occupancy mechanisms. Split the three routing kernels before choosing
 projection, selector, or fused-publication work.
+
+The seven-stage routing packet at `e86f9b1` identifies the mechanism. At
+N=2,048, F32 router projection is `15.863542 ms/layer`, or 18.167% of command
+GPU across 43 standard layers. Top-k plus bucket total `1.898291 ms/layer`,
+below the `4.367 ms/layer` component KILL floor, so their fusion is closed. At
+N=18, the complete routing parent is only 4.215%; projection remains parked
+until the shared exact-order candidate supplies a measured ceiling. The
+surviving full-chunk candidate is strict E8xP32 F32 projection, which reuses
+activation loads across eight output rows while preserving independent scalar
+K order. Reassociated float4/matrix paths and router dtype changes remain
+disqualified by discrete route sensitivity.
 
 Runtime admission now separates exact-release qualification from behavioral
 contracts. The full tokenizer fingerprint and released stop vector remain

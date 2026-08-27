@@ -988,6 +988,9 @@ mod tests {
     };
     use crate::qwen4exp_gdn::GatedDeltaNetMetalGeometry;
     use crate::qwen4exp_moe::Qwen4ExpMoeMetalGeometry;
+    use crate::qwen4exp_packed_prefill::{
+        Qwen4ExpPackedPrefillWorkspace, encode_qwen4exp_packed_prefill,
+    };
     use crate::qwen4exp_residency::Qwen4ExpMetalWeightPlan;
     use crate::tensor::TensorDesc;
     use objc2_metal::MTLCommandQueue;
@@ -1004,7 +1007,7 @@ mod tests {
     const HEAD_DIM: usize = 128;
     const KERNEL: usize = 4;
     const DILATION: usize = 3;
-    const CONTEXT: usize = 16;
+    const CONTEXT: usize = 34;
     const TABLE_ROWS: usize = 36;
 
     struct ResidualFixture {
@@ -1574,6 +1577,43 @@ mod tests {
         }
     }
 
+    fn assert_similarity(
+        label: &str,
+        actual: &[f32],
+        expected: &[f32],
+        maximum_absolute: f32,
+        minimum_cosine: f64,
+    ) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        assert!(
+            actual.iter().all(|value| value.is_finite()),
+            "{label} finite"
+        );
+        let maximum = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| (actual - expected).abs())
+            .fold(0.0_f32, f32::max);
+        let dot = actual
+            .iter()
+            .zip(expected)
+            .map(|(&actual, &expected)| f64::from(actual) * f64::from(expected))
+            .sum::<f64>();
+        let actual_norm = actual
+            .iter()
+            .map(|&value| f64::from(value).powi(2))
+            .sum::<f64>();
+        let expected_norm = expected
+            .iter()
+            .map(|&value| f64::from(value).powi(2))
+            .sum::<f64>();
+        let cosine = dot / (actual_norm * expected_norm).sqrt();
+        assert!(
+            maximum <= maximum_absolute && cosine >= minimum_cosine,
+            "{label}: max abs {maximum}, cosine {cosine}"
+        );
+    }
+
     fn max_delta(left: &[f32], right: &[f32]) -> f32 {
         left.iter()
             .zip(right)
@@ -1651,6 +1691,305 @@ mod tests {
         command.commit();
         workspace.release_after().unwrap();
         read_f32(&output)
+    }
+
+    fn packed_steps(
+        ctx: &MetalContext,
+        fixture: &SyntheticFixture,
+        workspace: &mut Qwen4ExpPackedPrefillWorkspace,
+        tokens: &[u32],
+        start_position: u64,
+    ) -> (Vec<f32>, Vec<crate::metal::DispatchCensusRow>) {
+        let output = MetalTensor::zeros_f32(ctx, vec![HYPER as u64, tokens.len() as u64]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        let read = encode_qwen4exp_packed_prefill(
+            ctx,
+            &encoder,
+            tokens,
+            start_position,
+            fixture.table.table(),
+            fixture.weights(),
+            workspace,
+        )
+        .unwrap();
+        read.output()
+            .encode_copy_to(ctx, &encoder, &output)
+            .unwrap();
+        let census = crate::metal::dispatch_census_take();
+        drop(read);
+        encoder.end();
+        command.commit();
+        workspace.release_after().unwrap();
+        (read_f32(&output), census)
+    }
+
+    #[test]
+    fn packed_two_layer_prefix_matches_chronological_scalar_chunks() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let fixture = SyntheticFixture::new(&ctx);
+        let tokens = (0..CONTEXT)
+            .map(|index| ((index * 7 + index / 3 * 5 + 3) % 29) as u32)
+            .collect::<Vec<_>>();
+        let mut scalar_workspace =
+            Qwen4ExpLayersZeroOneMetalWorkspace::new(&ctx, fixture.geometry).unwrap();
+        let mut scalar = Vec::with_capacity(CONTEXT * HYPER);
+        for (position, &token) in tokens.iter().enumerate() {
+            scalar.extend(integrated_step(
+                &ctx,
+                &fixture,
+                &mut scalar_workspace,
+                token,
+                position as u64,
+            ));
+        }
+
+        for packed_tokens in [1_usize, 2, 8, 16, 33] {
+            let mut workspace =
+                Qwen4ExpPackedPrefillWorkspace::new(&ctx, fixture.geometry, packed_tokens).unwrap();
+            let (actual, census) =
+                packed_steps(&ctx, &fixture, &mut workspace, &tokens[..packed_tokens], 0);
+            assert_eq!(
+                census.len(),
+                if packed_tokens == 1 { 84 } else { 87 },
+                "N={packed_tokens} packed two-layer dispatch census: {census:#?}"
+            );
+            let count = |kernel: &str| census.iter().filter(|row| row.kernel == kernel).count();
+            assert_eq!(
+                count("kernel_qwen4exp_hc_repeat_packed_f32"),
+                usize::from(packed_tokens > 1),
+                "N={packed_tokens} repeat route: {census:#?}"
+            );
+            assert_eq!(
+                count("kernel_qwen4exp_ple_conv_epilogue_packed_f32"),
+                1,
+                "N={packed_tokens} PLE chronology route: {census:#?}"
+            );
+            assert_eq!(
+                count("kernel_gdn_step_decay_packed_f32")
+                    + count("kernel_gdn_step_decay_packed_nsg4_f32"),
+                2,
+                "N={packed_tokens} GDN chronology route: {census:#?}"
+            );
+            assert_eq!(
+                count("kernel_moe_route_bucket_slots_f32"),
+                if packed_tokens == 1 { 0 } else { 2 },
+                "N={packed_tokens} MoE route: {census:#?}"
+            );
+            for token in 0..packed_tokens {
+                if packed_tokens == 1 {
+                    assert!(
+                        actual[token * HYPER..(token + 1) * HYPER]
+                            .iter()
+                            .zip(&scalar[token * HYPER..(token + 1) * HYPER])
+                            .all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
+                        "packed N=1 must preserve the exact singleton route"
+                    );
+                }
+                assert_similarity(
+                    &format!("packed N={packed_tokens} token {token}"),
+                    &actual[token * HYPER..(token + 1) * HYPER],
+                    &scalar[token * HYPER..(token + 1) * HYPER],
+                    6e-2,
+                    0.999_999,
+                );
+            }
+            assert_eq!(workspace.next_position(), Some(packed_tokens as u64));
+            let retained_start = packed_tokens.saturating_sub(2);
+            assert_eq!(
+                workspace.prior_tokens(),
+                &tokens[retained_start..packed_tokens]
+            );
+
+            let (continuation, _) = packed_steps(
+                &ctx,
+                &fixture,
+                &mut workspace,
+                &tokens[packed_tokens..packed_tokens + 1],
+                packed_tokens as u64,
+            );
+            assert_similarity(
+                &format!("packed N={packed_tokens} retained-state continuation"),
+                &continuation,
+                &scalar[packed_tokens * HYPER..(packed_tokens + 1) * HYPER],
+                6e-2,
+                0.999_999,
+            );
+            assert_eq!(workspace.next_position(), Some(packed_tokens as u64 + 1));
+        }
+    }
+
+    #[test]
+    fn packed_history_and_command_lifecycle_are_atomic_and_resettable() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let fixture = SyntheticFixture::new(&ctx);
+        let mut workspace = Qwen4ExpPackedPrefillWorkspace::new(&ctx, fixture.geometry, 2).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![HYPER as u64, 2]).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let error = encode_qwen4exp_packed_prefill(
+            &ctx,
+            &encoder,
+            &[3, 7],
+            1,
+            fixture.table.table(),
+            fixture.weights(),
+            &mut workspace,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("fresh packed causal state"), "{error}");
+        encoder.end();
+        assert_eq!(workspace.next_position(), None);
+        assert!(!workspace.is_poisoned());
+
+        for block in 0..4 {
+            for field in 0..4 {
+                let source = match (block, field) {
+                    (0, 0) => &fixture.l0_attention.norm,
+                    (0, 1) => &fixture.l0_attention.down,
+                    (0, 2) => &fixture.l0_attention.up,
+                    (0, 3) => &fixture.l0_attention.inject,
+                    (1, 0) => &fixture.l0_ffn.norm,
+                    (1, 1) => &fixture.l0_ffn.down,
+                    (1, 2) => &fixture.l0_ffn.up,
+                    (1, 3) => &fixture.l0_ffn.inject,
+                    (2, 0) => &fixture.l1_attention.norm,
+                    (2, 1) => &fixture.l1_attention.down,
+                    (2, 2) => &fixture.l1_attention.up,
+                    (2, 3) => &fixture.l1_attention.inject,
+                    (3, 0) => &fixture.l1_ffn.norm,
+                    (3, 1) => &fixture.l1_ffn.down,
+                    (3, 2) => &fixture.l1_ffn.up,
+                    (3, 3) => &fixture.l1_ffn.inject,
+                    _ => unreachable!(),
+                };
+                let mut writable = source.clone();
+                writable.provenance = MetalTensorProvenance::OwnedWritable;
+                let mut malformed = fixture.weights();
+                let target = match block {
+                    0 => &mut malformed.layer_zero.attention_residual,
+                    1 => &mut malformed.layer_zero.ffn_residual,
+                    2 => &mut malformed.layer_one_attention_residual,
+                    3 => &mut malformed.layer_one_ffn_residual,
+                    _ => unreachable!(),
+                };
+                match field {
+                    0 => target.read.norm = &writable,
+                    1 => target.read.down = &writable,
+                    2 => target.read.up = &writable,
+                    3 => target.inject = &writable,
+                    _ => unreachable!(),
+                }
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                let error = encode_qwen4exp_packed_prefill(
+                    &ctx,
+                    &encoder,
+                    &[3, 7],
+                    0,
+                    fixture.table.table(),
+                    malformed,
+                    &mut workspace,
+                )
+                .err()
+                .unwrap()
+                .to_string();
+                assert!(
+                    error.contains("read-only"),
+                    "block={block} field={field}: {error}"
+                );
+                encoder.end();
+                workspace.release_after().unwrap();
+                assert_eq!(workspace.next_position(), None);
+                assert!(!workspace.is_poisoned());
+            }
+        }
+
+        let mut writable_token = fixture.token.clone();
+        writable_token.provenance = MetalTensorProvenance::OwnedWritable;
+        let mut malformed = fixture.weights();
+        malformed.layer_zero.token_embedding = &writable_token;
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        assert!(
+            encode_qwen4exp_packed_prefill(
+                &ctx,
+                &encoder,
+                &[3, 7],
+                0,
+                fixture.table.table(),
+                malformed,
+                &mut workspace,
+            )
+            .is_err()
+        );
+        encoder.end();
+        assert_eq!(workspace.next_position(), None);
+        assert!(!workspace.is_poisoned());
+
+        let abandoned = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&abandoned);
+        let read = encode_qwen4exp_packed_prefill(
+            &ctx,
+            &encoder,
+            &[3, 7],
+            0,
+            fixture.table.table(),
+            fixture.weights(),
+            &mut workspace,
+        )
+        .unwrap();
+        let foreign = ctx.queue.commandBuffer().unwrap();
+        let foreign_encoder = KernelEncoder::begin(&foreign);
+        assert!(
+            read.output()
+                .encode_copy_to(&ctx, &foreign_encoder, &output)
+                .is_err()
+        );
+        foreign_encoder.end();
+        drop(read);
+        assert!(workspace.release_after().is_err());
+        assert!(workspace.reset().is_err());
+        encoder.end();
+        unsafe { workspace.abandon_uncommitted() }.unwrap();
+        drop(abandoned);
+        assert_eq!(workspace.next_position(), None);
+        assert!(workspace.prior_tokens().is_empty());
+
+        let (first, _) = packed_steps(&ctx, &fixture, &mut workspace, &[3, 7], 0);
+        assert_eq!(workspace.next_position(), Some(2));
+        assert_eq!(workspace.prior_tokens(), &[3, 7]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let error = encode_qwen4exp_packed_prefill(
+            &ctx,
+            &encoder,
+            &[11],
+            3,
+            fixture.table.table(),
+            fixture.weights(),
+            &mut workspace,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("discontinuous from 2"), "{error}");
+        encoder.end();
+        assert_eq!(workspace.next_position(), Some(2));
+
+        workspace.reset().unwrap();
+        assert_eq!(workspace.next_position(), None);
+        assert!(workspace.prior_tokens().is_empty());
+        let (reset, _) = packed_steps(&ctx, &fixture, &mut workspace, &[3, 7], 0);
+        assert_close("reset packed causal state", &reset, &first, 1e-6, 1e-6);
     }
 
     #[test]
@@ -2337,5 +2676,94 @@ mod tests {
                 4e-5,
             );
         }
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF to the pinned full release"]
+    fn released_packed_two_layer_prefix_matches_scalar_transaction() {
+        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF")
+            .expect("QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+        let ctx = MetalContext::new().expect("initialize Metal");
+        let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();
+        let admitted = plan.admit(ctx.memory_signals()).unwrap();
+        let realized = Qwen4ExpMetalWeights::realize(&ctx, &gguf, admitted).unwrap();
+        let resident = realized.weights();
+        let weights = Qwen4ExpLayersZeroOneMetalWeights::bind(resident).unwrap();
+        let table = resident.ple_source().bind(&gguf).unwrap();
+        let geometry = weights.geometry;
+        let tokens = [35_u32, 201, 17, 91, 5, 403, 29, 811];
+
+        let scalar_output =
+            MetalTensor::zeros_f32(&ctx, vec![geometry.hyper_width() as u64]).unwrap();
+        let mut scalar_workspace =
+            Qwen4ExpLayersZeroOneMetalWorkspace::new(&ctx, geometry).unwrap();
+        let mut scalar = Vec::with_capacity(tokens.len() * geometry.hyper_width());
+        for (position, &token) in tokens.iter().enumerate() {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let read = encode_qwen4exp_layers_zero_one(
+                &ctx,
+                &encoder,
+                token,
+                position as u64,
+                table,
+                weights,
+                &mut scalar_workspace,
+            )
+            .unwrap();
+            read.output()
+                .encode_copy_to(&ctx, &encoder, &scalar_output)
+                .unwrap();
+            drop(read);
+            encoder.end();
+            command.commit();
+            scalar_workspace.release_after().unwrap();
+            scalar.extend(read_f32(&scalar_output));
+        }
+
+        let packed_output = MetalTensor::zeros_f32(
+            &ctx,
+            vec![geometry.hyper_width() as u64, tokens.len() as u64],
+        )
+        .unwrap();
+        let mut packed_workspace =
+            Qwen4ExpPackedPrefillWorkspace::new(&ctx, geometry, tokens.len()).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        let read = encode_qwen4exp_packed_prefill(
+            &ctx,
+            &encoder,
+            &tokens,
+            0,
+            table,
+            weights,
+            &mut packed_workspace,
+        )
+        .unwrap();
+        read.output()
+            .encode_copy_to(&ctx, &encoder, &packed_output)
+            .unwrap();
+        let census = crate::metal::dispatch_census_take();
+        drop(read);
+        encoder.end();
+        command.commit();
+        packed_workspace.release_after().unwrap();
+        assert_eq!(census.len(), 87, "released packed census: {census:#?}");
+
+        let packed = read_f32(&packed_output);
+        for token in 0..tokens.len() {
+            let start = token * geometry.hyper_width();
+            let end = start + geometry.hyper_width();
+            assert_similarity(
+                &format!("released packed token {token}"),
+                &packed[start..end],
+                &scalar[start..end],
+                1e-4,
+                0.999_999_9,
+            );
+        }
+        assert_eq!(packed_workspace.next_position(), Some(tokens.len() as u64));
     }
 }

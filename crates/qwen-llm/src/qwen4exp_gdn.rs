@@ -272,7 +272,7 @@ pub struct GatedDeltaNetMetalWorkspace {
     state_poisoned: bool,
 }
 
-struct GatedDeltaNetPackedScratch {
+pub(crate) struct GatedDeltaNetPackedScratch {
     geometry: GatedDeltaNetMetalGeometry,
     capacity: usize,
     qkv: MetalTensor,
@@ -291,7 +291,7 @@ struct GatedDeltaNetPackedScratch {
 }
 
 impl GatedDeltaNetPackedScratch {
-    fn new(
+    pub(crate) fn new(
         ctx: &MetalContext,
         geometry: GatedDeltaNetMetalGeometry,
         capacity: usize,
@@ -711,7 +711,7 @@ pub fn encode_gated_delta_net<'a>(
 /// causal order. Any encode or command failure makes mutable contents
 /// indeterminate; the enclosing transaction must be poisoned.
 #[allow(clippy::too_many_arguments)]
-unsafe fn encode_gated_delta_net_packed(
+pub(crate) unsafe fn encode_gated_delta_net_packed(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     input: &MetalTensor,
@@ -1033,7 +1033,7 @@ pub(crate) fn validate_contract(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_packed_contract(
+pub(crate) fn validate_packed_contract(
     ctx: &MetalContext,
     input: &MetalTensor,
     weights: GatedDeltaNetMetalWeights<'_>,
@@ -1351,7 +1351,7 @@ pub(crate) fn preflight(
     Ok(())
 }
 
-fn preflight_packed(
+pub(crate) fn preflight_packed(
     ctx: &MetalContext,
     weights: GatedDeltaNetMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpGdnError> {

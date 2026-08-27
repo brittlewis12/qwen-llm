@@ -288,7 +288,7 @@ pub struct Qwen4ExpMoeMetalWorkspace {
     state_poisoned: bool,
 }
 
-struct Qwen4ExpMoePackedMotorScratch {
+pub(crate) struct Qwen4ExpMoePackedMotorScratch {
     geometry: Qwen4ExpMoeMetalGeometry,
     capacity: usize,
     router_logits: MetalTensor,
@@ -323,7 +323,7 @@ struct Qwen4ExpMoePackedViews {
 }
 
 impl Qwen4ExpMoePackedMotorScratch {
-    fn new(
+    pub(crate) fn new(
         ctx: &MetalContext,
         geometry: Qwen4ExpMoeMetalGeometry,
         capacity: usize,
@@ -450,7 +450,7 @@ impl Qwen4ExpMoePackedMotorScratch {
         })
     }
 
-    fn required_bytes(
+    pub(crate) fn required_bytes(
         geometry: Qwen4ExpMoeMetalGeometry,
         capacity: usize,
     ) -> Result<usize, Qwen4ExpMoeError> {
@@ -1028,7 +1028,7 @@ fn encode_singleton_step(
 /// `scratch` until the command completes successfully or is permanently
 /// abandoned. Any encoding or command failure makes scratch contents
 /// indeterminate; the enclosing transaction must be poisoned.
-unsafe fn encode_qwen4exp_moe_packed_motor(
+pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     input: &MetalTensor,
@@ -1397,7 +1397,7 @@ fn named_weights(weights: Qwen4ExpMoeMetalWeights<'_>) -> [(&'static str, &Metal
     ]
 }
 
-fn validate_packed_contract(
+pub(crate) fn validate_packed_contract(
     ctx: &MetalContext,
     input: &MetalTensor,
     weights: Qwen4ExpMoeMetalWeights<'_>,
@@ -1636,7 +1636,7 @@ pub(crate) fn preflight(
     Ok(())
 }
 
-fn preflight_packed(
+pub(crate) fn preflight_packed(
     ctx: &MetalContext,
     weights: Qwen4ExpMoeMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpMoeError> {

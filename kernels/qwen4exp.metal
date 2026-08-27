@@ -81,6 +81,19 @@ struct hc_packed_branch_args {
     uint hidden_size;
 };
 
+kernel void kernel_qwen4exp_hc_repeat_packed_f32(
+        constant hc_packed_branch_args & args [[buffer(0)]],
+        device const float * embedding [[buffer(1)]],
+        device float * hyper_residual [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint count = args.n_tokens * args.branch_count * args.hidden_size;
+    if (index >= count) return;
+    const uint hidden = index % args.hidden_size;
+    const uint row = index / args.hidden_size;
+    const uint token = row / args.branch_count;
+    hyper_residual[index] = embedding[(ulong)token * args.hidden_size + hidden];
+}
+
 kernel void kernel_qwen4exp_hc_gated_mean_packed_f32(
         constant hc_packed_branch_args & args [[buffer(0)]],
         device const float * normalized [[buffer(1)]],

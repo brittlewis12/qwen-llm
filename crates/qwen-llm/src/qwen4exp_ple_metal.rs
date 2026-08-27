@@ -332,10 +332,12 @@ impl Qwen4ExpPlePackedMotorScratch {
         })
     }
 
+    #[cfg(test)]
     fn capacity(&self) -> usize {
         self.capacity
     }
 
+    #[cfg(test)]
     fn geometry(&self) -> Qwen4ExpPleMetalGeometry {
         self.geometry
     }
@@ -956,7 +958,7 @@ pub(crate) fn validate_contract(
     require_disjoint(&tensors)
 }
 
-fn validate_packed_motor_contract(
+pub(crate) fn validate_packed_motor_contract(
     ctx: &MetalContext,
     embedding: &MetalTensor,
     hyper_input: &MetalTensor,
@@ -1104,7 +1106,7 @@ pub(crate) fn preflight(
     Ok(())
 }
 
-fn preflight_packed_motor(
+pub(crate) fn preflight_packed_motor(
     ctx: &MetalContext,
     weights: Qwen4ExpPleMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpPleMetalError> {

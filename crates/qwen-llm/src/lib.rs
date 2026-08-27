@@ -63,6 +63,7 @@ pub mod qwen4exp_layers_zero_three;
 pub mod qwen4exp_loader;
 pub mod qwen4exp_metal;
 pub mod qwen4exp_moe;
+pub mod qwen4exp_packed_prefill;
 pub mod qwen4exp_ple;
 pub mod qwen4exp_ple_metal;
 pub mod qwen4exp_post_ple_block;

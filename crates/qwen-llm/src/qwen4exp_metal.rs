@@ -134,7 +134,7 @@ impl GatedResidualMetalScratch {
     }
 }
 
-struct GatedResidualPackedScratch {
+pub(crate) struct GatedResidualPackedScratch {
     branch_count: usize,
     hidden_size: usize,
     low_rank: usize,
@@ -147,7 +147,7 @@ struct GatedResidualPackedScratch {
 }
 
 impl GatedResidualPackedScratch {
-    fn new(
+    pub(crate) fn new(
         ctx: &MetalContext,
         branch_count: usize,
         hidden_size: usize,
@@ -241,6 +241,15 @@ impl GatedResidualPackedScratch {
         }
         Ok(view)
     }
+
+    pub(crate) fn mixed_view(&self, tokens: usize) -> Result<MetalTensor, Qwen4ExpMetalError> {
+        self.prefix_view(
+            "packed HC mixed output",
+            &self.mixed,
+            self.hidden_size,
+            tokens,
+        )
+    }
 }
 
 #[must_use = "encode the residual block, then call encode_combine"]
@@ -283,7 +292,7 @@ impl GatedResidualMetalRead<'_, '_, '_> {
 }
 
 #[must_use = "encode the packed residual block, then call encode_combine"]
-struct GatedResidualPackedRead<'scratch, 'resources, 'pass> {
+pub(crate) struct GatedResidualPackedRead<'scratch, 'resources, 'pass> {
     ctx: &'pass MetalContext,
     encoder: &'pass KernelEncoder,
     hyper_input: &'resources MetalTensor,
@@ -296,11 +305,11 @@ struct GatedResidualPackedRead<'scratch, 'resources, 'pass> {
 }
 
 impl GatedResidualPackedRead<'_, '_, '_> {
-    fn mixed(&self) -> &MetalTensor {
+    pub(crate) fn mixed(&self) -> &MetalTensor {
         &self.mixed
     }
 
-    fn encode_combine(self) -> Result<(), Qwen4ExpMetalError> {
+    pub(crate) fn encode_combine(self) -> Result<(), Qwen4ExpMetalError> {
         let hyper_hidden = self.scratch.branch_count * self.scratch.hidden_size;
         let injection = self.scratch.prefix_view(
             "packed HC injection",
@@ -388,7 +397,7 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
 /// abandonment requires permanently discarding every command reference. Any
 /// encode or command failure makes mutable contents indeterminate; the caller
 /// must poison the enclosing transaction rather than expose or reuse them.
-unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'pass>(
+pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'pass>(
     ctx: &'pass MetalContext,
     enc: &'pass KernelEncoder,
     hyper_input: &'resources MetalTensor,
@@ -537,7 +546,7 @@ pub(crate) fn validate_and_preflight_gated_residual_mix(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_and_preflight_gated_residual_packed_mix(
+pub(crate) fn validate_and_preflight_gated_residual_packed_mix(
     ctx: &MetalContext,
     hyper_input: &MetalTensor,
     block_output: &MetalTensor,
@@ -1296,6 +1305,102 @@ struct PackedHcBranchArgs {
     tokens: u32,
     branch_count: u32,
     hidden_size: u32,
+}
+
+pub(crate) fn encode_hc_repeat_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    embedding: &MetalTensor,
+    hyper_residual: &MetalTensor,
+    branch_count: usize,
+    hidden_size: usize,
+    tokens: usize,
+) -> Result<(), Qwen4ExpMetalError> {
+    validate_encoder(ctx, enc)?;
+    let count = validate_and_preflight_hc_repeat_packed(
+        ctx,
+        embedding,
+        hyper_residual,
+        branch_count,
+        hidden_size,
+        tokens,
+    )?;
+    let pipeline = ctx.pipeline("kernel_qwen4exp_hc_repeat_packed_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &PackedHcBranchArgs {
+            tokens: tokens as u32,
+            branch_count: branch_count as u32,
+            hidden_size: hidden_size as u32,
+        },
+    );
+    enc.set_tensor(1, embedding);
+    enc.set_tensor(2, hyper_residual);
+    dispatch_1d(enc, &pipeline, count);
+    Ok(())
+}
+
+pub(crate) fn validate_and_preflight_hc_repeat_packed(
+    ctx: &MetalContext,
+    embedding: &MetalTensor,
+    hyper_residual: &MetalTensor,
+    branch_count: usize,
+    hidden_size: usize,
+    tokens: usize,
+) -> Result<usize, Qwen4ExpMetalError> {
+    if branch_count == 0 || hidden_size == 0 || tokens == 0 {
+        return Err(invalid(
+            "packed HC repeat branch count, hidden size, and token count must be nonzero",
+        ));
+    }
+    for (name, value) in [
+        ("branch count", branch_count),
+        ("hidden size", hidden_size),
+        ("token count", tokens),
+    ] {
+        if u32::try_from(value).is_err() {
+            return Err(invalid(format!(
+                "packed HC repeat {name} {value} exceeds u32"
+            )));
+        }
+    }
+    let hyper_hidden = branch_count
+        .checked_mul(hidden_size)
+        .ok_or_else(|| invalid("packed HC repeat hyper width overflow"))?;
+    let count = hyper_hidden
+        .checked_mul(tokens)
+        .ok_or_else(|| invalid("packed HC repeat element count overflow"))?;
+    if u32::try_from(count).is_err() {
+        return Err(invalid(format!(
+            "packed HC repeat element count {count} exceeds u32 shader addressing"
+        )));
+    }
+    require_f32_shape(
+        "packed HC repeat embedding",
+        embedding,
+        &[hidden_size as u64, tokens as u64],
+        false,
+    )?;
+    require_f32_shape(
+        "packed HC repeat residual",
+        hyper_residual,
+        &[hyper_hidden as u64, tokens as u64],
+        true,
+    )?;
+    let tensors = [
+        ("packed HC repeat embedding", embedding),
+        ("packed HC repeat residual", hyper_residual),
+    ];
+    require_disjoint(&tensors)?;
+    require_same_device(ctx, &tensors)?;
+    let pipeline = ctx.pipeline("kernel_qwen4exp_hc_repeat_packed_f32")?;
+    if pipeline.maxTotalThreadsPerThreadgroup() == 0 {
+        return Err(invalid(
+            "packed HC repeat pipeline reports zero threadgroup capacity",
+        ));
+    }
+    Ok(count)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2496,6 +2601,84 @@ mod tests {
                 changed_token,
             );
         }
+    }
+
+    #[test]
+    fn packed_hc_repeat_preserves_token_major_branch_layout_and_guards() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        const BRANCHES: usize = 4;
+        const HIDDEN: usize = 37;
+        const TOKENS: usize = 33;
+        const PREFIX: usize = 16;
+        const SUFFIX: usize = 20;
+
+        let values = (0..TOKENS * HIDDEN)
+            .map(|index| {
+                let token = index / HIDDEN;
+                let hidden = index % HIDDEN;
+                token as f32 * 10.0 + hidden as f32 * 0.03125 - 3.0
+            })
+            .collect::<Vec<_>>();
+        let embedding = tensor(&ctx, &values, vec![HIDDEN as u64, TOKENS as u64]);
+        let output_bytes = vec![0_u8; TOKENS * BRANCHES * HIDDEN * size_of::<f32>()];
+        let output = offset_tensor(
+            &ctx,
+            PREFIX,
+            &output_bytes,
+            SUFFIX,
+            vec![(BRANCHES * HIDDEN) as u64, TOKENS as u64],
+            GgmlType::F32,
+        );
+
+        let command = ctx.queue.commandBuffer().expect("repeat command");
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        encode_hc_repeat_packed(
+            &ctx, &encoder, &embedding, &output, BRANCHES, HIDDEN, TOKENS,
+        )
+        .unwrap();
+        let census = crate::metal::dispatch_census_take();
+        assert_eq!(census.len(), 1, "packed repeat census: {census:#?}");
+        assert_eq!(census[0].kernel, "kernel_qwen4exp_hc_repeat_packed_f32");
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(
+            command.error().is_none(),
+            "command failed: {:?}",
+            command.error()
+        );
+
+        let actual = read_f32(&output);
+        for token in 0..TOKENS {
+            for branch in 0..BRANCHES {
+                let start = (token * BRANCHES + branch) * HIDDEN;
+                assert_bits_eq(
+                    &format!("packed HC repeat token {token} branch {branch}"),
+                    &actual[start..start + HIDDEN],
+                    &values[token * HIDDEN..(token + 1) * HIDDEN],
+                );
+            }
+        }
+        assert_guards(&output, PREFIX, SUFFIX);
+
+        let shared =
+            MetalTensor::zeros_f32(&ctx, vec![(BRANCHES * HIDDEN) as u64, TOKENS as u64]).unwrap();
+        let mut overlapping_embedding = shared.clone();
+        overlapping_embedding.shape = vec![HIDDEN as u64, TOKENS as u64];
+        let error = validate_and_preflight_hc_repeat_packed(
+            &ctx,
+            &overlapping_embedding,
+            &shared,
+            BRANCHES,
+            HIDDEN,
+            TOKENS,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("overlaps"), "{error}");
     }
 
     #[test]

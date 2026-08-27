@@ -1493,6 +1493,7 @@ mod tests {
     fn assert_router_candidate_census(
         label: &str,
         tokens: usize,
+        expected_substitutions: usize,
         baseline: &[DispatchCensusRow],
         candidate: &[DispatchCensusRow],
     ) {
@@ -1562,7 +1563,10 @@ mod tests {
                 );
             }
         }
-        assert_eq!(substitutions, 48, "{label} strict router substitutions");
+        assert_eq!(
+            substitutions, expected_substitutions,
+            "{label} strict router substitutions"
+        );
     }
 
     struct PackedRouterReplay {
@@ -1952,6 +1956,7 @@ mod tests {
             assert_router_candidate_census(
                 label,
                 tokens.len(),
+                if tokens.len() == 2_048 { 48 } else { 0 },
                 &baseline.census,
                 &candidate.census,
             );

@@ -44,7 +44,7 @@ crate::env_flag!(
     "QWEN4EXP_MOE_IQ3_FAST"
 );
 crate::env_flag!(
-    default_off configured_qwen4exp_packed_router_e8p32_strict_enabled,
+    default_on configured_qwen4exp_packed_router_e8p32_strict_enabled,
     "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"
 );
 
@@ -126,7 +126,7 @@ fn packed_router_e8p32_strict_scope_qualified(
         && hidden_size == PACKED_ROUTER_E8P32_STRICT_HIDDEN
         && expert_count == PACKED_ROUTER_E8P32_STRICT_EXPERTS
         && router_dtype == GgmlType::F32
-        && matches!(tokens, 18 | PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS)
+        && tokens == PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS
 }
 
 fn packed_router_e8p32_strict_qualified(
@@ -2687,15 +2687,13 @@ mod tests {
             packed_router_e8p32_strict_scope_qualified(device, hidden, experts, dtype, tokens)
         };
         assert!(PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS <= MAX_PACKED_TOKENS);
-        for tokens in [18, PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS] {
-            assert!(qualified(
-                PACKED_ROUTER_E8P32_STRICT_DEVICE,
-                PACKED_ROUTER_E8P32_STRICT_HIDDEN,
-                PACKED_ROUTER_E8P32_STRICT_EXPERTS,
-                GgmlType::F32,
-                tokens,
-            ));
-        }
+        assert!(qualified(
+            PACKED_ROUTER_E8P32_STRICT_DEVICE,
+            PACKED_ROUTER_E8P32_STRICT_HIDDEN,
+            PACKED_ROUTER_E8P32_STRICT_EXPERTS,
+            GgmlType::F32,
+            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
+        ));
         assert!(!qualified(
             "Apple M3 Max",
             PACKED_ROUTER_E8P32_STRICT_HIDDEN,
@@ -2727,6 +2725,7 @@ mod tests {
         for tokens in [
             1,
             17,
+            18,
             19,
             PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS - 1,
             PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS + 1,
@@ -2780,7 +2779,7 @@ mod tests {
             vec![geometry.hidden_size as u64],
         );
 
-        for tokens in [18_usize, PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS] {
+        for tokens in [PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS] {
             let input_values = (0..tokens * geometry.hidden_size)
                 .map(|index| {
                     let token = index / geometry.hidden_size;

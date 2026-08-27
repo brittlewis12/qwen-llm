@@ -4,7 +4,7 @@ use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     encode_copy_offset_f32, encode_get_rows_f32,
 };
-use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
+use crate::metal_forward::{MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch};
 use crate::qwen4exp::{Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_ple::{PleGatherError, PleIq4NlTable};
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
@@ -278,6 +278,102 @@ pub struct Qwen4ExpPleMetalWorkspace {
     encode_failed: bool,
 }
 
+pub(crate) struct Qwen4ExpPlePackedMotorScratch {
+    geometry: Qwen4ExpPleMetalGeometry,
+    capacity: usize,
+    key: MetalTensor,
+    value: MetalTensor,
+    key_norm: MetalTensor,
+    query_norm: MetalTensor,
+    gated: MetalTensor,
+    conv_input: MetalTensor,
+    conv_raw: MetalTensor,
+    output: MetalTensor,
+}
+
+impl Qwen4ExpPlePackedMotorScratch {
+    pub(crate) fn new(
+        ctx: &MetalContext,
+        geometry: Qwen4ExpPleMetalGeometry,
+        capacity: usize,
+    ) -> Result<Self, Qwen4ExpPleMetalError> {
+        geometry.validate()?;
+        if capacity == 0 || u32::try_from(capacity).is_err() {
+            return invalid(format!(
+                "packed PLE capacity must be in 1..=u32::MAX, got {capacity}"
+            ));
+        }
+        let hyper = geometry.hyper_width();
+        hyper
+            .checked_mul(capacity)
+            .and_then(|elements| elements.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| {
+                Qwen4ExpPleMetalError::Invalid("packed PLE hyper scratch overflow".into())
+            })?;
+        geometry
+            .hidden_size
+            .checked_mul(capacity)
+            .and_then(|elements| elements.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| {
+                Qwen4ExpPleMetalError::Invalid("packed PLE value scratch overflow".into())
+            })?;
+        let hyper_shape = vec![hyper as u64, capacity as u64];
+        Ok(Self {
+            geometry,
+            capacity,
+            key: MetalTensor::zeros_f32(ctx, hyper_shape.clone())?,
+            value: MetalTensor::zeros_f32(ctx, vec![geometry.hidden_size as u64, capacity as u64])?,
+            key_norm: MetalTensor::zeros_f32(ctx, hyper_shape.clone())?,
+            query_norm: MetalTensor::zeros_f32(ctx, hyper_shape.clone())?,
+            gated: MetalTensor::zeros_f32(ctx, hyper_shape.clone())?,
+            conv_input: MetalTensor::zeros_f32(ctx, hyper_shape.clone())?,
+            conv_raw: MetalTensor::zeros_f32(ctx, hyper_shape.clone())?,
+            output: MetalTensor::zeros_f32(ctx, hyper_shape)?,
+        })
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    fn geometry(&self) -> Qwen4ExpPleMetalGeometry {
+        self.geometry
+    }
+
+    fn output(&self, tokens: usize) -> Result<MetalTensor, Qwen4ExpPleMetalError> {
+        self.prefix_view(
+            "packed PLE output",
+            &self.output,
+            self.geometry.hyper_width(),
+            tokens,
+        )
+    }
+
+    fn prefix_view(
+        &self,
+        name: &str,
+        tensor: &MetalTensor,
+        width: usize,
+        tokens: usize,
+    ) -> Result<MetalTensor, Qwen4ExpPleMetalError> {
+        if tokens == 0 || tokens > self.capacity {
+            return invalid(format!(
+                "{name} token count {tokens} is outside capacity {}",
+                self.capacity
+            ));
+        }
+        let elements = width.checked_mul(tokens).ok_or_else(|| {
+            Qwen4ExpPleMetalError::Invalid(format!("{name} element count overflow"))
+        })?;
+        let view = tensor.view_subrange(0, vec![width as u64, tokens as u64]);
+        if view.n_elements() as usize == elements {
+            Ok(view)
+        } else {
+            invalid(format!("{name} prefix view has the wrong element count"))
+        }
+    }
+}
+
 impl Qwen4ExpPleMetalWorkspace {
     pub fn new(
         ctx: &MetalContext,
@@ -547,6 +643,124 @@ pub fn encode_qwen4exp_ple<'a>(
     Ok(Qwen4ExpPleMetalRead { workspace })
 }
 
+/// Encode packed PLE rows into transaction-owned scratch and causal state.
+///
+/// # Safety
+///
+/// The caller must hold exclusive logical ownership of `conv_state` and
+/// `scratch` until the command completes successfully or is permanently
+/// abandoned. Commands that mutate the same state must execute in causal
+/// order. Any encode or command failure makes the state indeterminate; the
+/// caller must poison it rather than exposing the returned output or reusing
+/// the state.
+pub(crate) unsafe fn encode_qwen4exp_ple_packed_motor(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    embedding: &MetalTensor,
+    hyper_input: &MetalTensor,
+    weights: Qwen4ExpPleMetalWeights<'_>,
+    conv_state: &MetalTensor,
+    scratch: &Qwen4ExpPlePackedMotorScratch,
+    tokens: usize,
+) -> Result<MetalTensor, Qwen4ExpPleMetalError> {
+    validate_encoder(ctx, enc)?;
+    if weights.geometry != scratch.geometry {
+        return invalid("packed PLE weight and scratch geometry differ");
+    }
+    validate_packed_motor_contract(
+        ctx,
+        embedding,
+        hyper_input,
+        weights,
+        conv_state,
+        scratch,
+        tokens,
+    )?;
+    preflight_packed_motor(ctx, weights)?;
+
+    let g = scratch.geometry;
+    let key = scratch.prefix_view("packed PLE key", &scratch.key, g.hyper_width(), tokens)?;
+    let value = scratch.prefix_view("packed PLE value", &scratch.value, g.hidden_size, tokens)?;
+    let key_norm = scratch.prefix_view(
+        "packed PLE normalized key",
+        &scratch.key_norm,
+        g.hyper_width(),
+        tokens,
+    )?;
+    let query_norm = scratch.prefix_view(
+        "packed PLE normalized query",
+        &scratch.query_norm,
+        g.hyper_width(),
+        tokens,
+    )?;
+    let gated = scratch.prefix_view(
+        "packed PLE gated value",
+        &scratch.gated,
+        g.hyper_width(),
+        tokens,
+    )?;
+    let conv_input = scratch.prefix_view(
+        "packed PLE convolution input",
+        &scratch.conv_input,
+        g.hyper_width(),
+        tokens,
+    )?;
+    let conv_raw = scratch.prefix_view(
+        "packed PLE raw convolution output",
+        &scratch.conv_raw,
+        g.hyper_width(),
+        tokens,
+    )?;
+    let output = scratch.output(tokens)?;
+
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.key,
+        embedding,
+        &key,
+        g.hidden_size,
+        g.hyper_width(),
+        tokens,
+    )?;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.value,
+        embedding,
+        &value,
+        g.hidden_size,
+        g.hidden_size,
+        tokens,
+    )?;
+    encode_grouped_rms_norm_packed(ctx, enc, &key, weights.key_norm, &key_norm, g, tokens)?;
+    encode_grouped_rms_norm_packed(
+        ctx,
+        enc,
+        hyper_input,
+        weights.query_norm,
+        &query_norm,
+        g,
+        tokens,
+    )?;
+    encode_gate_packed(ctx, enc, &key_norm, &query_norm, &value, &gated, g, tokens)?;
+    encode_grouped_rms_norm_packed(ctx, enc, &gated, weights.conv_norm, &conv_input, g, tokens)?;
+    encode_conv_epilogue_packed(
+        ctx,
+        enc,
+        &conv_input,
+        weights.conv,
+        conv_state,
+        hyper_input,
+        &gated,
+        &conv_raw,
+        &output,
+        g,
+        tokens,
+    )?;
+    Ok(output)
+}
+
 fn encode_step(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -742,6 +956,123 @@ pub(crate) fn validate_contract(
     require_disjoint(&tensors)
 }
 
+fn validate_packed_motor_contract(
+    ctx: &MetalContext,
+    embedding: &MetalTensor,
+    hyper_input: &MetalTensor,
+    weights: Qwen4ExpPleMetalWeights<'_>,
+    conv_state: &MetalTensor,
+    scratch: &Qwen4ExpPlePackedMotorScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpPleMetalError> {
+    if tokens == 0 || tokens > scratch.capacity {
+        return invalid(format!(
+            "packed PLE token count {tokens} is outside capacity {}",
+            scratch.capacity
+        ));
+    }
+    let g = scratch.geometry;
+    require_tensor(
+        "packed PLE embedding",
+        embedding,
+        GgmlType::F32,
+        &[g.hidden_size as u64, tokens as u64],
+        false,
+    )?;
+    require_tensor(
+        "packed PLE hyper input",
+        hyper_input,
+        GgmlType::F32,
+        &[g.hyper_width() as u64, tokens as u64],
+        false,
+    )?;
+    require_projection(
+        "packed PLE key projection",
+        weights.key,
+        g.hidden_size,
+        g.hyper_width(),
+    )?;
+    require_projection(
+        "packed PLE value projection",
+        weights.value,
+        g.hidden_size,
+        g.hidden_size,
+    )?;
+    for (name, tensor) in [
+        ("packed PLE key norm", weights.key_norm),
+        ("packed PLE query norm", weights.query_norm),
+        ("packed PLE convolution norm", weights.conv_norm),
+    ] {
+        require_tensor(
+            name,
+            tensor,
+            GgmlType::F32,
+            &[g.hyper_width() as u64],
+            false,
+        )?;
+    }
+    require_tensor(
+        "packed PLE convolution",
+        weights.conv,
+        GgmlType::F32,
+        &[g.kernel_size as u64, g.hyper_width() as u64],
+        false,
+    )?;
+    require_tensor(
+        "packed PLE convolution state",
+        conv_state,
+        GgmlType::F32,
+        &[g.history_len() as u64, g.hyper_width() as u64],
+        true,
+    )?;
+    for (name, tensor, width) in [
+        ("packed PLE key scratch", &scratch.key, g.hyper_width()),
+        ("packed PLE value scratch", &scratch.value, g.hidden_size),
+        (
+            "packed PLE normalized key",
+            &scratch.key_norm,
+            g.hyper_width(),
+        ),
+        (
+            "packed PLE normalized query",
+            &scratch.query_norm,
+            g.hyper_width(),
+        ),
+        ("packed PLE gated value", &scratch.gated, g.hyper_width()),
+        (
+            "packed PLE convolution input",
+            &scratch.conv_input,
+            g.hyper_width(),
+        ),
+        (
+            "packed PLE raw convolution output",
+            &scratch.conv_raw,
+            g.hyper_width(),
+        ),
+        ("packed PLE output", &scratch.output, g.hyper_width()),
+    ] {
+        require_tensor(
+            name,
+            tensor,
+            GgmlType::F32,
+            &[width as u64, scratch.capacity as u64],
+            true,
+        )?;
+    }
+
+    let named_weights = named_weight_tensors(weights);
+    require_read_only_weights(&named_weights)?;
+    let mut tensors = named_weights;
+    tensors.extend([
+        ("packed PLE embedding", embedding),
+        ("packed PLE hyper input", hyper_input),
+        ("packed PLE convolution state", conv_state),
+    ]);
+    tensors.extend(packed_scratch_tensors(scratch));
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)
+}
+
 pub(crate) fn preflight(
     ctx: &MetalContext,
     weights: Qwen4ExpPleMetalWeights<'_>,
@@ -770,6 +1101,59 @@ pub(crate) fn preflight(
         ));
     }
     ctx.pipeline("kernel_copy_offset_f32")?;
+    Ok(())
+}
+
+fn preflight_packed_motor(
+    ctx: &MetalContext,
+    weights: Qwen4ExpPleMetalWeights<'_>,
+) -> Result<(), Qwen4ExpPleMetalError> {
+    for dtype in [weights.key.dtype, weights.value.dtype] {
+        preflight_packed_projection(ctx, dtype)?;
+    }
+    let grouped = ctx.pipeline("kernel_qwen4exp_ple_grouped_rms_norm_packed_f32")?;
+    require_pipeline_geometry(
+        "packed PLE grouped RMSNorm",
+        &grouped,
+        SIMD_WIDTH,
+        PLE_THREADS,
+    )?;
+    let gate = ctx.pipeline("kernel_qwen4exp_ple_gate_packed_f32")?;
+    require_pipeline_geometry("packed PLE gate", &gate, SIMD_WIDTH, PLE_THREADS)?;
+    let conv = ctx.pipeline("kernel_qwen4exp_ple_conv_epilogue_packed_f32")?;
+    if conv.maxTotalThreadsPerThreadgroup() < PLE_THREADS {
+        return invalid(format!(
+            "packed PLE convolution pipeline supports {} threads, needs {PLE_THREADS}",
+            conv.maxTotalThreadsPerThreadgroup()
+        ));
+    }
+    let scratch_bytes = (PLE_THREADS / SIMD_WIDTH) * size_of::<f32>();
+    if ctx.device.maxThreadgroupMemoryLength() < scratch_bytes {
+        return invalid(format!(
+            "packed PLE reductions need {scratch_bytes} threadgroup bytes, device has {}",
+            ctx.device.maxThreadgroupMemoryLength()
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_packed_projection(
+    ctx: &MetalContext,
+    dtype: GgmlType,
+) -> Result<(), Qwen4ExpPleMetalError> {
+    preflight_projection(ctx, dtype)?;
+    let kernels: &[&str] = match dtype {
+        GgmlType::F32 => &["kernel_mat_mat_f32_f32"],
+        GgmlType::Q8_0 => &[
+            "kernel_mat_mat_q8_0_f32",
+            "kernel_mat_mat_q8_0_f32_n16",
+            "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+        ],
+        _ => return invalid(format!("unsupported packed PLE projection dtype {dtype:?}")),
+    };
+    for kernel in kernels {
+        ctx.pipeline(kernel)?;
+    }
     Ok(())
 }
 
@@ -850,6 +1234,54 @@ fn encode_grouped_rms_norm(
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedGroupedNormArgs {
+    tokens: u32,
+    branch_count: u32,
+    hidden_size: u32,
+    eps: f32,
+}
+
+fn encode_grouped_rms_norm_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weight: &MetalTensor,
+    output: &MetalTensor,
+    geometry: Qwen4ExpPleMetalGeometry,
+    tokens: usize,
+) -> Result<(), Qwen4ExpPleMetalError> {
+    let pipeline = ctx.pipeline("kernel_qwen4exp_ple_grouped_rms_norm_packed_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &PackedGroupedNormArgs {
+            tokens: tokens as u32,
+            branch_count: geometry.branch_count as u32,
+            hidden_size: geometry.hidden_size as u32,
+            eps: geometry.eps,
+        },
+    );
+    enc.set_tensor(1, input);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, output);
+    enc.set_threadgroup_memory(0, (PLE_THREADS / SIMD_WIDTH) * size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: geometry.branch_count * tokens,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: PLE_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PleGateArgs {
     branch_count: u32,
     hidden_size: u32,
@@ -878,6 +1310,55 @@ fn encode_gate(
     enc.dispatch(
         MTLSize {
             width: geometry.branch_count,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: PLE_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedPleGateArgs {
+    tokens: u32,
+    branch_count: u32,
+    hidden_size: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_gate_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    key: &MetalTensor,
+    query: &MetalTensor,
+    value: &MetalTensor,
+    gated: &MetalTensor,
+    geometry: Qwen4ExpPleMetalGeometry,
+    tokens: usize,
+) -> Result<(), Qwen4ExpPleMetalError> {
+    let pipeline = ctx.pipeline("kernel_qwen4exp_ple_gate_packed_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &PackedPleGateArgs {
+            tokens: tokens as u32,
+            branch_count: geometry.branch_count as u32,
+            hidden_size: geometry.hidden_size as u32,
+        },
+    );
+    enc.set_tensor(1, key);
+    enc.set_tensor(2, query);
+    enc.set_tensor(3, value);
+    enc.set_tensor(4, gated);
+    enc.set_threadgroup_memory(0, (PLE_THREADS / SIMD_WIDTH) * size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: geometry.branch_count * tokens,
             height: 1,
             depth: 1,
         },
@@ -925,6 +1406,64 @@ fn encode_conv_epilogue(
     enc.set_tensor(5, &workspace.gated);
     enc.set_tensor(6, &workspace.conv_raw);
     enc.set_tensor(7, &workspace.output);
+    enc.dispatch(
+        MTLSize {
+            width: geometry.hyper_width().div_ceil(PLE_THREADS),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: PLE_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedPleConvArgs {
+    tokens: u32,
+    channels: u32,
+    history_len: u32,
+    kernel_size: u32,
+    dilation: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_conv_epilogue_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weight: &MetalTensor,
+    state: &MetalTensor,
+    residual: &MetalTensor,
+    gated: &MetalTensor,
+    raw_output: &MetalTensor,
+    output: &MetalTensor,
+    geometry: Qwen4ExpPleMetalGeometry,
+    tokens: usize,
+) -> Result<(), Qwen4ExpPleMetalError> {
+    let pipeline = ctx.pipeline("kernel_qwen4exp_ple_conv_epilogue_packed_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &PackedPleConvArgs {
+            tokens: tokens as u32,
+            channels: geometry.hyper_width() as u32,
+            history_len: geometry.history_len() as u32,
+            kernel_size: geometry.kernel_size as u32,
+            dilation: geometry.dilation as u32,
+        },
+    );
+    enc.set_tensor(1, input);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, state);
+    enc.set_tensor(4, residual);
+    enc.set_tensor(5, gated);
+    enc.set_tensor(6, raw_output);
+    enc.set_tensor(7, output);
     enc.dispatch(
         MTLSize {
             width: geometry.hyper_width().div_ceil(PLE_THREADS),
@@ -1136,6 +1675,21 @@ fn workspace_tensors(workspace: &Qwen4ExpPleMetalWorkspace) -> Vec<(&'static str
     ]
 }
 
+fn packed_scratch_tensors(
+    scratch: &Qwen4ExpPlePackedMotorScratch,
+) -> Vec<(&'static str, &MetalTensor)> {
+    vec![
+        ("packed PLE key scratch", &scratch.key),
+        ("packed PLE value scratch", &scratch.value),
+        ("packed PLE normalized key", &scratch.key_norm),
+        ("packed PLE normalized query", &scratch.query_norm),
+        ("packed PLE gated value", &scratch.gated),
+        ("packed PLE convolution input", &scratch.conv_input),
+        ("packed PLE raw convolution output", &scratch.conv_raw),
+        ("packed PLE output", &scratch.output),
+    ]
+}
+
 fn write_tensor_bytes(tensor: &MetalTensor, bytes: &[u8]) -> Result<(), Qwen4ExpPleMetalError> {
     if !tensor.is_writable() {
         return invalid("PLE staging destination must be writable");
@@ -1325,13 +1879,25 @@ mod tests {
 
     impl TableFixture {
         fn new(rows: usize, row_width: usize) -> Self {
+            Self::with_irregular_scales(rows, row_width, false)
+        }
+
+        fn irregular(rows: usize, row_width: usize) -> Self {
+            Self::with_irregular_scales(rows, row_width, true)
+        }
+
+        fn with_irregular_scales(rows: usize, row_width: usize, irregular: bool) -> Self {
             let blocks_per_row = row_width / 32;
             let mut bytes = Vec::with_capacity(rows * blocks_per_row * 18);
             for row in 0..rows {
                 for block in 0..blocks_per_row {
                     let ordinal = row * blocks_per_row + block;
                     let sign = if ordinal.is_multiple_of(4) { -1.0 } else { 1.0 };
-                    let scale = sign * (ordinal % 7 + 1) as f32 / 512.0;
+                    let scale = if irregular {
+                        sign * (ordinal * 37 % 997 + 13) as f32 / 1_237.0
+                    } else {
+                        sign * (ordinal % 7 + 1) as f32 / 512.0
+                    };
                     bytes.extend_from_slice(&half::f16::from_f32(scale).to_bits().to_le_bytes());
                     for lane in 0..16 {
                         let low = (ordinal * 3 + lane * 5 + 1) % 16;
@@ -1603,6 +2169,209 @@ mod tests {
         assert!(cosine >= minimum_cosine, "{label} cosine={cosine}");
     }
 
+    fn assert_bits_eq(label: &str, actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{label}[{index}]: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    struct SerialPleTrace {
+        key: Vec<f32>,
+        value: Vec<f32>,
+        key_norm: Vec<f32>,
+        query_norm: Vec<f32>,
+        gated: Vec<f32>,
+        conv_input: Vec<f32>,
+        conv_raw: Vec<f32>,
+        output: Vec<f32>,
+        states: Vec<Vec<f32>>,
+    }
+
+    fn serial_ple_trace(
+        ctx: &MetalContext,
+        geometry: Qwen4ExpPleMetalGeometry,
+        fixture: &SyntheticFixture,
+        table: PleIq4NlTable<'_>,
+        rows: &[[u32; HEADS]],
+        hyper: &[f32],
+        initial_state: &[f32],
+    ) -> SerialPleTrace {
+        assert_eq!(hyper.len(), rows.len() * HYPER);
+        let mut workspace = Qwen4ExpPleMetalWorkspace::new(ctx, geometry).unwrap();
+        write_tensor_bytes(&workspace.conv_state, bytemuck::cast_slice(initial_state)).unwrap();
+        let mut trace = SerialPleTrace {
+            key: Vec::with_capacity(rows.len() * HYPER),
+            value: Vec::with_capacity(rows.len() * HIDDEN),
+            key_norm: Vec::with_capacity(rows.len() * HYPER),
+            query_norm: Vec::with_capacity(rows.len() * HYPER),
+            gated: Vec::with_capacity(rows.len() * HYPER),
+            conv_input: Vec::with_capacity(rows.len() * HYPER),
+            conv_raw: Vec::with_capacity(rows.len() * HYPER),
+            output: Vec::with_capacity(rows.len() * HYPER),
+            states: Vec::with_capacity(rows.len()),
+        };
+        for (step, row_ids) in rows.iter().enumerate() {
+            workspace.stage_rows(table, row_ids).unwrap();
+            let start = step * HYPER;
+            let input = f32_tensor(ctx, &hyper[start..start + HYPER], vec![HYPER as u64]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let read = encode_qwen4exp_ple(
+                ctx,
+                &encoder,
+                &input,
+                fixture.metal_weights(geometry),
+                &mut workspace,
+            )
+            .unwrap();
+            drop(read);
+            encoder.end();
+            command.commit();
+            workspace.release_after().unwrap();
+
+            trace.key.extend(read_f32(&workspace.key));
+            trace.value.extend(read_f32(&workspace.value));
+            trace.key_norm.extend(read_f32(&workspace.key_norm));
+            trace.query_norm.extend(read_f32(&workspace.query_norm));
+            trace.gated.extend(read_f32(&workspace.gated));
+            trace.conv_input.extend(read_f32(&workspace.conv_input));
+            trace.conv_raw.extend(read_f32(&workspace.conv_raw));
+            trace.output.extend(read_f32(&workspace.output));
+            trace.states.push(read_f32(&workspace.conv_state));
+        }
+        trace
+    }
+
+    fn packed_scratch_prefix(
+        scratch: &Qwen4ExpPlePackedMotorScratch,
+        name: &str,
+        tensor: &MetalTensor,
+        width: usize,
+        tokens: usize,
+    ) -> Vec<f32> {
+        read_f32(&scratch.prefix_view(name, tensor, width, tokens).unwrap())
+    }
+
+    fn compare_packed_ple_trace(
+        label: &str,
+        tokens: usize,
+        scratch: &Qwen4ExpPlePackedMotorScratch,
+        output: &MetalTensor,
+        state: &MetalTensor,
+        serial: &SerialPleTrace,
+    ) {
+        let packed_key = packed_scratch_prefix(scratch, label, &scratch.key, HYPER, tokens);
+        let packed_value = packed_scratch_prefix(scratch, label, &scratch.value, HIDDEN, tokens);
+        let packed_key_norm =
+            packed_scratch_prefix(scratch, label, &scratch.key_norm, HYPER, tokens);
+        let packed_query_norm =
+            packed_scratch_prefix(scratch, label, &scratch.query_norm, HYPER, tokens);
+        let packed_gated = packed_scratch_prefix(scratch, label, &scratch.gated, HYPER, tokens);
+        let packed_conv_input =
+            packed_scratch_prefix(scratch, label, &scratch.conv_input, HYPER, tokens);
+        let packed_conv_raw =
+            packed_scratch_prefix(scratch, label, &scratch.conv_raw, HYPER, tokens);
+        let packed_output = read_f32(output);
+        let packed_state = read_f32(state);
+        let expected_key = &serial.key[..tokens * HYPER];
+        let expected_value = &serial.value[..tokens * HIDDEN];
+        let expected_key_norm = &serial.key_norm[..tokens * HYPER];
+        let expected_query_norm = &serial.query_norm[..tokens * HYPER];
+        let expected_gated = &serial.gated[..tokens * HYPER];
+        let expected_conv_input = &serial.conv_input[..tokens * HYPER];
+        let expected_conv_raw = &serial.conv_raw[..tokens * HYPER];
+        let expected_output = &serial.output[..tokens * HYPER];
+        let expected_state = &serial.states[tokens - 1];
+
+        assert_bits_eq(
+            &format!("{label} normalized query"),
+            &packed_query_norm,
+            expected_query_norm,
+        );
+        if tokens == 1 {
+            for (stage, actual, expected) in [
+                ("key", packed_key.as_slice(), expected_key),
+                ("value", packed_value.as_slice(), expected_value),
+                (
+                    "normalized key",
+                    packed_key_norm.as_slice(),
+                    expected_key_norm,
+                ),
+                ("gated value", packed_gated.as_slice(), expected_gated),
+                (
+                    "convolution input",
+                    packed_conv_input.as_slice(),
+                    expected_conv_input,
+                ),
+                (
+                    "raw convolution",
+                    packed_conv_raw.as_slice(),
+                    expected_conv_raw,
+                ),
+                ("output", packed_output.as_slice(), expected_output),
+                ("convolution state", packed_state.as_slice(), expected_state),
+            ] {
+                assert_bits_eq(&format!("{label} {stage}"), actual, expected);
+            }
+        } else {
+            assert!(
+                packed_key
+                    .iter()
+                    .zip(expected_key)
+                    .any(|(actual, expected)| actual.to_bits() != expected.to_bits()),
+                "{label} must exercise the packed projection reduction"
+            );
+            for (stage, actual, expected, max_abs) in [
+                ("key", packed_key.as_slice(), expected_key, 1.5e-2),
+                ("value", packed_value.as_slice(), expected_value, 1.5e-2),
+                (
+                    "normalized key",
+                    packed_key_norm.as_slice(),
+                    expected_key_norm,
+                    2e-3,
+                ),
+                (
+                    "gated value",
+                    packed_gated.as_slice(),
+                    expected_gated,
+                    1.2e-2,
+                ),
+                (
+                    "convolution input",
+                    packed_conv_input.as_slice(),
+                    expected_conv_input,
+                    2e-3,
+                ),
+                (
+                    "raw convolution",
+                    packed_conv_raw.as_slice(),
+                    expected_conv_raw,
+                    1e-4,
+                ),
+                ("output", packed_output.as_slice(), expected_output, 1.2e-2),
+                (
+                    "convolution state",
+                    packed_state.as_slice(),
+                    expected_state,
+                    2e-3,
+                ),
+            ] {
+                assert_similarity(
+                    &format!("{label} {stage}"),
+                    actual,
+                    expected,
+                    max_abs,
+                    0.999_999_8,
+                );
+            }
+        }
+    }
+
     #[test]
     fn release_geometry_derives_dilation_from_ngram_order() {
         let config = Qwen4ExpConfig::flash_next_reference();
@@ -1615,6 +2384,192 @@ mod tests {
         assert_eq!(geometry.dilation(), 3);
         assert_eq!(geometry.history_len(), 9);
         assert!(Qwen4ExpPleMetalGeometry::from_config(&config, 0).is_err());
+    }
+
+    #[test]
+    fn packed_ple_motor_matches_serial_outputs_state_and_continuation() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let geometry = geometry();
+        let fixture = SyntheticFixture::new(&ctx);
+        let table_fixture = TableFixture::irregular(TABLE_ROWS, HEAD_DIM);
+        let table = table_fixture.table();
+
+        for tokens in [1_usize, 2, 12] {
+            let steps = tokens + 1;
+            let rows = (0..steps)
+                .map(|step| {
+                    [
+                        (step * 5 + 2) as u32 % TABLE_ROWS as u32,
+                        (step * 11 + 7) as u32 % TABLE_ROWS as u32,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let mut embeddings = Vec::with_capacity(steps * HIDDEN);
+            for row_ids in &rows {
+                let mut embedding = vec![0.0_f32; HIDDEN];
+                table.gather_f32_into(row_ids, &mut embedding).unwrap();
+                embeddings.extend(embedding);
+            }
+            let hyper = (0..steps)
+                .flat_map(|step| values(HYPER, step * 29 + tokens * 7, 0.011, -0.03))
+                .collect::<Vec<_>>();
+            let initial_state = values(HYPER * HISTORY, tokens * 31 + 3, 0.001, -0.006);
+            let serial = serial_ple_trace(
+                &ctx,
+                geometry,
+                &fixture,
+                table,
+                &rows,
+                &hyper,
+                &initial_state,
+            );
+
+            let capacity = tokens + 3;
+            let scratch = Qwen4ExpPlePackedMotorScratch::new(&ctx, geometry, capacity).unwrap();
+            assert_eq!(scratch.capacity(), capacity);
+            assert_eq!(scratch.geometry(), geometry);
+            assert!(scratch.output(0).is_err());
+            assert!(scratch.output(capacity + 1).is_err());
+            let state = f32_tensor(&ctx, &initial_state, vec![HISTORY as u64, HYPER as u64]);
+            let embedding = f32_tensor(
+                &ctx,
+                &embeddings[..tokens * HIDDEN],
+                vec![HIDDEN as u64, tokens as u64],
+            );
+            let hyper_input = f32_tensor(
+                &ctx,
+                &hyper[..tokens * HYPER],
+                vec![HYPER as u64, tokens as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let output = unsafe {
+                encode_qwen4exp_ple_packed_motor(
+                    &ctx,
+                    &encoder,
+                    &embedding,
+                    &hyper_input,
+                    fixture.metal_weights(geometry),
+                    &state,
+                    &scratch,
+                    tokens,
+                )
+            }
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            let label = format!("packed PLE N={tokens}");
+            compare_packed_ple_trace(&label, tokens, &scratch, &output, &state, &serial);
+            assert_ne!(read_f32(&state), initial_state, "{label} state changed");
+
+            let continuation_embedding = f32_tensor(
+                &ctx,
+                &embeddings[tokens * HIDDEN..(tokens + 1) * HIDDEN],
+                vec![HIDDEN as u64, 1],
+            );
+            let continuation_hyper = f32_tensor(
+                &ctx,
+                &hyper[tokens * HYPER..(tokens + 1) * HYPER],
+                vec![HYPER as u64, 1],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let continuation_output = unsafe {
+                encode_qwen4exp_ple_packed_motor(
+                    &ctx,
+                    &encoder,
+                    &continuation_embedding,
+                    &continuation_hyper,
+                    fixture.metal_weights(geometry),
+                    &state,
+                    &scratch,
+                    1,
+                )
+            }
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            let expected_output = &serial.output[tokens * HYPER..(tokens + 1) * HYPER];
+            let expected_state = &serial.states[tokens];
+            if tokens == 1 {
+                assert_bits_eq(
+                    "packed PLE exact continuation output",
+                    &read_f32(&continuation_output),
+                    expected_output,
+                );
+                assert_bits_eq(
+                    "packed PLE exact continuation state",
+                    &read_f32(&state),
+                    expected_state,
+                );
+            } else {
+                assert_similarity(
+                    &format!("{label} continuation output"),
+                    &read_f32(&continuation_output),
+                    expected_output,
+                    1e-4,
+                    0.999_999_9,
+                );
+                assert_similarity(
+                    &format!("{label} continuation state"),
+                    &read_f32(&state),
+                    expected_state,
+                    2e-3,
+                    0.999_999_8,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_ple_contract_rejects_state_alias_without_mutation() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let geometry = geometry();
+        let fixture = SyntheticFixture::new(&ctx);
+        let scratch = Qwen4ExpPlePackedMotorScratch::new(&ctx, geometry, HISTORY).unwrap();
+        let embedding = f32_tensor(
+            &ctx,
+            &values(HIDDEN, 7, 0.01, -0.02),
+            vec![HIDDEN as u64, 1],
+        );
+        let hyper_input = f32_tensor(&ctx, &values(HYPER, 13, 0.01, 0.03), vec![HYPER as u64, 1]);
+        let state = scratch
+            .output
+            .view_subrange(0, vec![HISTORY as u64, HYPER as u64]);
+        let initial_state = values(HYPER * HISTORY, 19, 0.001, -0.004);
+        write_tensor_bytes(&state, bytemuck::cast_slice(&initial_state)).unwrap();
+
+        let error = validate_packed_motor_contract(
+            &ctx,
+            &embedding,
+            &hyper_input,
+            fixture.metal_weights(geometry),
+            &state,
+            &scratch,
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("overlaps"),
+            "unexpected error: {error}"
+        );
+        assert_bits_eq(
+            "rejected packed PLE state",
+            &read_f32(&state),
+            &initial_state,
+        );
     }
 
     #[test]
@@ -2095,6 +3050,343 @@ mod tests {
                 &cpu_state.values(),
                 5e-5,
                 0.999_999_9,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_PLE_GGUF to the pinned first release shard"]
+    fn released_packed_ple_matches_serial_through_history_and_continuation() {
+        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_PLE_GGUF")
+            .expect("QWEN4EXP_Q3_K_XL_PLE_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+        let config = Qwen4ExpConfig::from_gguf(&gguf).unwrap();
+        let ple = config.ple.as_ref().unwrap();
+        let geometry = Qwen4ExpPleMetalGeometry::from_config(&config, 1).unwrap();
+        let table_desc = gguf.find("per_layer_token_embd.weight").unwrap();
+        let table = PleIq4NlTable::new(
+            table_desc,
+            gguf.try_slice(table_desc).unwrap(),
+            ple.logical_row_count().unwrap(),
+        )
+        .unwrap();
+        let ctx = MetalContext::new().expect("initialize Metal");
+
+        let key = gguf_weight(&ctx, &gguf, "blk.1.ple_key.weight");
+        let value = gguf_weight(&ctx, &gguf, "blk.1.ple_value.weight");
+        let key_norm = gguf_weight(&ctx, &gguf, "blk.1.ple_norm_key.weight");
+        let query_norm = gguf_weight(&ctx, &gguf, "blk.1.ple_norm_query.weight");
+        let conv_norm = gguf_weight(&ctx, &gguf, "blk.1.ple_norm_conv.weight");
+        let conv = gguf_weight(&ctx, &gguf, "blk.1.ple_conv1d.weight");
+        let weights = Qwen4ExpPleMetalWeights {
+            geometry,
+            key: &key,
+            value: &value,
+            key_norm: &key_norm,
+            query_norm: &query_norm,
+            conv_norm: &conv_norm,
+            conv: &conv,
+        };
+        assert_eq!(weights.key.dtype, GgmlType::Q8_0);
+        assert_eq!(weights.value.dtype, GgmlType::Q8_0);
+
+        let token_ids = (0..34)
+            .map(|position| ((position * 977 + 35) % 150_000) as u32)
+            .collect::<Vec<_>>();
+        let mut history = PleHistory::default();
+        let mut rows = Vec::with_capacity(token_ids.len());
+        let mut embeddings = Vec::with_capacity(token_ids.len() * geometry.hidden_size());
+        let mut hyper = Vec::with_capacity(token_ids.len() * geometry.hyper_width());
+        for (position, token) in token_ids.into_iter().enumerate() {
+            let (next_history, row_ids) = history.advanced(ple, token, position as u64).unwrap();
+            let mut embedding = vec![0.0_f32; geometry.hidden_size()];
+            table.gather_f32_into(&row_ids, &mut embedding).unwrap();
+            rows.push(row_ids);
+            embeddings.extend(embedding);
+            hyper.extend(values(
+                geometry.hyper_width(),
+                position * 29 + 13,
+                0.009,
+                position as f32 * 0.001 - 0.03,
+            ));
+            history = next_history;
+        }
+        let initial_state = values(
+            geometry.hyper_width() * geometry.history_len(),
+            97,
+            0.000_7,
+            -0.004,
+        );
+
+        let mut serial_workspace = Qwen4ExpPleMetalWorkspace::new(&ctx, geometry).unwrap();
+        write_tensor_bytes(
+            &serial_workspace.conv_state,
+            bytemuck::cast_slice(&initial_state),
+        )
+        .unwrap();
+        let mut serial_key = Vec::new();
+        let mut serial_value = Vec::new();
+        let mut serial_key_norm = Vec::new();
+        let mut serial_query_norm = Vec::new();
+        let mut serial_gated = Vec::new();
+        let mut serial_conv_input = Vec::new();
+        let mut serial_conv_raw = Vec::new();
+        let mut serial_output = Vec::new();
+        let mut serial_states = Vec::new();
+        for (step, row_ids) in rows.iter().enumerate() {
+            serial_workspace.stage_rows(table, row_ids).unwrap();
+            let start = step * geometry.hyper_width();
+            let input = f32_tensor(
+                &ctx,
+                &hyper[start..start + geometry.hyper_width()],
+                vec![geometry.hyper_width() as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let read = encode_qwen4exp_ple(&ctx, &encoder, &input, weights, &mut serial_workspace)
+                .unwrap();
+            drop(read);
+            encoder.end();
+            command.commit();
+            serial_workspace.release_after().unwrap();
+            serial_key.extend(read_f32(&serial_workspace.key));
+            serial_value.extend(read_f32(&serial_workspace.value));
+            serial_key_norm.extend(read_f32(&serial_workspace.key_norm));
+            serial_query_norm.extend(read_f32(&serial_workspace.query_norm));
+            serial_gated.extend(read_f32(&serial_workspace.gated));
+            serial_conv_input.extend(read_f32(&serial_workspace.conv_input));
+            serial_conv_raw.extend(read_f32(&serial_workspace.conv_raw));
+            serial_output.extend(read_f32(&serial_workspace.output));
+            serial_states.push(read_f32(&serial_workspace.conv_state));
+        }
+
+        for packed_tokens in [8_usize, 16, 33] {
+            let scratch =
+                Qwen4ExpPlePackedMotorScratch::new(&ctx, geometry, packed_tokens).unwrap();
+            let packed_state = f32_tensor(
+                &ctx,
+                &initial_state,
+                vec![geometry.history_len() as u64, geometry.hyper_width() as u64],
+            );
+            let embedding = f32_tensor(
+                &ctx,
+                &embeddings[..packed_tokens * geometry.hidden_size()],
+                vec![geometry.hidden_size() as u64, packed_tokens as u64],
+            );
+            let hyper_input = f32_tensor(
+                &ctx,
+                &hyper[..packed_tokens * geometry.hyper_width()],
+                vec![geometry.hyper_width() as u64, packed_tokens as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            let output = unsafe {
+                encode_qwen4exp_ple_packed_motor(
+                    &ctx,
+                    &encoder,
+                    &embedding,
+                    &hyper_input,
+                    weights,
+                    &packed_state,
+                    &scratch,
+                    packed_tokens,
+                )
+            }
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            let projection_kernel = match packed_tokens {
+                8 => "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+                16 => "kernel_mat_mat_q8_0_f32_n16",
+                33 => "kernel_mat_mat_q8_0_f32",
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                census
+                    .iter()
+                    .filter(|dispatch| dispatch.kernel == projection_kernel)
+                    .count(),
+                2,
+                "released packed PLE N={packed_tokens} projection route: {census:#?}"
+            );
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            let expected_hyper = packed_tokens * geometry.hyper_width();
+            let expected_hidden = packed_tokens * geometry.hidden_size();
+            let packed_key = packed_scratch_prefix(
+                &scratch,
+                "released packed PLE key",
+                &scratch.key,
+                geometry.hyper_width(),
+                packed_tokens,
+            );
+            assert!(
+                packed_key
+                    .iter()
+                    .zip(&serial_key[..expected_hyper])
+                    .any(|(actual, expected)| actual.to_bits() != expected.to_bits()),
+                "released checkpoint must exercise the packed projection reduction"
+            );
+            let packed_query_norm = packed_scratch_prefix(
+                &scratch,
+                "released packed PLE normalized query",
+                &scratch.query_norm,
+                geometry.hyper_width(),
+                packed_tokens,
+            );
+            assert_bits_eq(
+                "released packed PLE normalized query",
+                &packed_query_norm,
+                &serial_query_norm[..expected_hyper],
+            );
+            for (stage, actual, expected, max_abs) in [
+                (
+                    "released packed PLE key",
+                    packed_key,
+                    &serial_key[..expected_hyper],
+                    1.5e-4,
+                ),
+                (
+                    "released packed PLE value",
+                    packed_scratch_prefix(
+                        &scratch,
+                        "released packed PLE value",
+                        &scratch.value,
+                        geometry.hidden_size(),
+                        packed_tokens,
+                    ),
+                    &serial_value[..expected_hidden],
+                    5e-5,
+                ),
+                (
+                    "released packed PLE normalized key",
+                    packed_scratch_prefix(
+                        &scratch,
+                        "released packed PLE normalized key",
+                        &scratch.key_norm,
+                        geometry.hyper_width(),
+                        packed_tokens,
+                    ),
+                    &serial_key_norm[..expected_hyper],
+                    4e-3,
+                ),
+                (
+                    "released packed PLE gated value",
+                    packed_scratch_prefix(
+                        &scratch,
+                        "released packed PLE gated value",
+                        &scratch.gated,
+                        geometry.hyper_width(),
+                        packed_tokens,
+                    ),
+                    &serial_gated[..expected_hyper],
+                    1e-4,
+                ),
+                (
+                    "released packed PLE convolution input",
+                    packed_scratch_prefix(
+                        &scratch,
+                        "released packed PLE convolution input",
+                        &scratch.conv_input,
+                        geometry.hyper_width(),
+                        packed_tokens,
+                    ),
+                    &serial_conv_input[..expected_hyper],
+                    3e-3,
+                ),
+                (
+                    "released packed PLE raw convolution",
+                    packed_scratch_prefix(
+                        &scratch,
+                        "released packed PLE raw convolution",
+                        &scratch.conv_raw,
+                        geometry.hyper_width(),
+                        packed_tokens,
+                    ),
+                    &serial_conv_raw[..expected_hyper],
+                    1e-3,
+                ),
+                (
+                    "released packed PLE output",
+                    read_f32(&output),
+                    &serial_output[..expected_hyper],
+                    2e-4,
+                ),
+            ] {
+                assert_similarity(stage, &actual, expected, max_abs, 0.999_999_8);
+            }
+            assert_similarity(
+                "released packed PLE convolution state",
+                &read_f32(&packed_state),
+                &serial_states[packed_tokens - 1],
+                3e-3,
+                0.999_999_8,
+            );
+
+            let continuation_embedding = f32_tensor(
+                &ctx,
+                &embeddings[packed_tokens * geometry.hidden_size()
+                    ..(packed_tokens + 1) * geometry.hidden_size()],
+                vec![geometry.hidden_size() as u64, 1],
+            );
+            let continuation_hyper = f32_tensor(
+                &ctx,
+                &hyper[packed_tokens * geometry.hyper_width()
+                    ..(packed_tokens + 1) * geometry.hyper_width()],
+                vec![geometry.hyper_width() as u64, 1],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            let continuation_output = unsafe {
+                encode_qwen4exp_ple_packed_motor(
+                    &ctx,
+                    &encoder,
+                    &continuation_embedding,
+                    &continuation_hyper,
+                    weights,
+                    &packed_state,
+                    &scratch,
+                    1,
+                )
+            }
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            let continuation_kernel = if crate::metal::mat_vec_q8_0_lcpp_enabled() {
+                "kernel_mat_vec_q8_0_f32_lcpp"
+            } else {
+                "kernel_mat_vec_q8_0_f32"
+            };
+            assert_eq!(
+                census
+                    .iter()
+                    .filter(|dispatch| dispatch.kernel == continuation_kernel)
+                    .count(),
+                2,
+                "released packed PLE N={packed_tokens} continuation route: {census:#?}"
+            );
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+            assert_similarity(
+                "released packed PLE continuation output",
+                &read_f32(&continuation_output),
+                &serial_output[expected_hyper..expected_hyper + geometry.hyper_width()],
+                1e-4,
+                0.999_999_9,
+            );
+            assert_similarity(
+                "released packed PLE continuation state",
+                &read_f32(&packed_state),
+                &serial_states[packed_tokens],
+                3e-3,
+                0.999_999_8,
             );
         }
     }

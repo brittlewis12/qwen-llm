@@ -241,6 +241,13 @@ F32 activations for the persistent BF16 index-key projection. Next compose the
 qualified motors through layers 2-47, then give that all-layer path one session
 owner and a zero-copy decode handoff before exposing it to the CLI.
 
+Runtime admission now separates exact-release qualification from behavioral
+contracts. The full tokenizer fingerprint and released stop vector remain
+oracles; compatible Flash-Next finetunes use structurally valid `qwen35`
+tokenizer data, the supported prompt protocol for reasoning controls, and their
+producer-declared in-range stop set. PLE's boundary token remains independent
+model state rather than generation policy.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

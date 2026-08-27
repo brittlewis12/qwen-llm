@@ -36,6 +36,10 @@ use unicode_general_category::{GeneralCategory, get_general_category};
 
 const NATIVE_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Exact released-conversion fingerprint for qualification fixtures.
+///
+/// Tokenizer compatibility is established structurally by [`NativeTokenizer`];
+/// this value must not be used to reject coherent finetunes or conversions.
 pub const QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256: [u8; 32] = [
     0x86, 0xa6, 0x19, 0x3d, 0x6a, 0x6c, 0x9b, 0x43, 0xa7, 0x1a, 0x20, 0x77, 0x65, 0xf8, 0x5f, 0xb3,
     0x90, 0x4a, 0xdd, 0xb3, 0xbb, 0xa6, 0xdc, 0xd5, 0x0b, 0x50, 0xbe, 0xf0, 0x76, 0xe5, 0xe8, 0x9f,
@@ -51,6 +55,10 @@ pub fn token_ids_sha256_i32le(tokens: &[i32]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+/// Fingerprint the tokenizer fields covered by the released artifact oracle.
+///
+/// This scans the complete vocabulary and merge table and is intentionally a
+/// qualification tool rather than a production request-admission check.
 pub fn qwen4exp_tokenizer_identity_sha256(g: &GgufFile) -> Result<[u8; 32], TokError> {
     let mut digest = Sha256::new();
     digest.update(b"qwen4exp-tokenizer-identity-v2\0");
@@ -779,7 +787,10 @@ impl NativeTokenizer {
             PretokenizerKind::JoyAi => None,
         };
         let bos = optional_token_id(g, "tokenizer.ggml.bos_token_id")?.or(default_special);
-        let eos = optional_token_id(g, "tokenizer.ggml.eos_token_id")?.or(default_special);
+        // The tokenizer interface has one canonical EOS while GGUF generation
+        // policy may declare an EOS array. Use its first entry for eos() and
+        // add_eos; GgufFile::stop_token_ids retains the complete stop set.
+        let eos = optional_primary_token_id(g, "tokenizer.ggml.eos_token_id")?.or(default_special);
         validate_optional_token_id("tokenizer.ggml.bos_token_id", bos, id_to_token.len())?;
         validate_optional_token_id("tokenizer.ggml.eos_token_id", eos, id_to_token.len())?;
         let add_bos = optional_bool(g, "tokenizer.ggml.add_bos_token")?.unwrap_or(false);
@@ -1710,6 +1721,23 @@ fn optional_token_id(g: &GgufFile, key: &str) -> Result<Option<i32>, TokError> {
     value_to_i32(value, key).map(Some)
 }
 
+fn optional_primary_token_id(g: &GgufFile, key: &str) -> Result<Option<i32>, TokError> {
+    let Some(value) = g.model.metadata().get(key) else {
+        return Ok(None);
+    };
+    primary_token_id_from_value(value, key)
+}
+
+fn primary_token_id_from_value(value: &Value, key: &str) -> Result<Option<i32>, TokError> {
+    if let Some(values) = value.as_array() {
+        return values
+            .first()
+            .map(|value| value_to_i32(value, key))
+            .transpose();
+    }
+    value_to_i32(value, key).map(Some)
+}
+
 fn value_to_i32(value: &Value, key: &str) -> Result<i32, TokError> {
     let n = value
         .as_i64()
@@ -1789,6 +1817,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn canonical_eos_accepts_scalar_and_array_metadata() {
+        assert_eq!(
+            primary_token_id_from_value(&serde_json::json!(42), "eos").unwrap(),
+            Some(42)
+        );
+        assert_eq!(
+            primary_token_id_from_value(&serde_json::json!([42, 43]), "eos").unwrap(),
+            Some(42)
+        );
+        assert_eq!(
+            primary_token_id_from_value(&serde_json::json!([]), "eos").unwrap(),
+            None
+        );
+        assert!(primary_token_id_from_value(&serde_json::json!(["bad"]), "eos").is_err());
+        assert!(
+            primary_token_id_from_value(&serde_json::json!([i32::MAX as u64 + 1]), "eos").is_err()
+        );
+    }
+
     struct OraclePair {
         path: &'static str,
         ffi: LlamaCppTokenizer,
@@ -1844,6 +1892,7 @@ mod tests {
             .collect::<String>();
         eprintln!("released qwen4exp tokenizer identity: {identity_hex}");
         assert_eq!(identity, QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256);
+        assert_eq!(gguf.stop_token_ids().unwrap(), vec![248_046]);
         let tokenizer = NativeTokenizer::from_gguf(&gguf).expect("load Flash-Next tokenizer");
         assert_eq!(tokenizer.n_vocab(), 248_320);
         assert_eq!(tokenizer.bos(), Some(248_044));

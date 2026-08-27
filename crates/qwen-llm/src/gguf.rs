@@ -607,21 +607,23 @@ impl GgufFile {
     /// partially-converted file; we surface that loudly rather than
     /// silently picking a default.
     ///
-    /// Implementation note: `Vec` (not `SmallVec`) is correct here — this
-    /// is read once at init and stored on the decoder; the hot-loop
-    /// membership check is over a 1-2 element slice regardless of
-    /// backing storage.
+    /// Implementation note: `Vec` preserves declaration order while a
+    /// temporary set keeps array deduplication linear. Generation backends
+    /// remain responsible for bounding any hot-loop membership set they admit.
     pub fn stop_token_ids(&self) -> Result<Vec<i32>, GgufError> {
         let mut out: Vec<i32> = Vec::with_capacity(2);
+        let mut seen = std::collections::HashSet::with_capacity(2);
 
         // EOS: scalar OR array. Try scalar first (the common case for
         // Qwen 3.5/3.6), then fall back to array form.
         if let Some(eos) = self.get_u64("tokenizer.ggml.eos_token_id") {
-            out.push(token_id_to_i32("tokenizer.ggml.eos_token_id", eos)?);
+            let eos = token_id_to_i32("tokenizer.ggml.eos_token_id", eos)?;
+            seen.insert(eos);
+            out.push(eos);
         } else if let Some(eos_arr) = self.get_u64_array("tokenizer.ggml.eos_token_id")? {
             for id in eos_arr {
                 let id = token_id_to_i32("tokenizer.ggml.eos_token_id", id)?;
-                if !out.contains(&id) {
+                if seen.insert(id) {
                     out.push(id);
                 }
             }
@@ -630,7 +632,7 @@ impl GgufFile {
         // EOT: optional, scalar. Append if not already present.
         if let Some(eot) = self.get_u64("tokenizer.ggml.eot_token_id") {
             let eot = token_id_to_i32("tokenizer.ggml.eot_token_id", eot)?;
-            if !out.contains(&eot) {
+            if seen.insert(eot) {
                 out.push(eot);
             }
         }
@@ -1563,6 +1565,7 @@ mod tests {
     enum TestKv<'a> {
         U16(&'a str, u16),
         U64(&'a str, u64),
+        U64Array(&'a str, &'a [u64]),
         I32(&'a str, i32),
     }
 
@@ -1604,6 +1607,15 @@ mod tests {
                     push_string(&mut b, key);
                     b.extend_from_slice(&10u32.to_le_bytes());
                     b.extend_from_slice(&value.to_le_bytes());
+                }
+                TestKv::U64Array(key, values) => {
+                    push_string(&mut b, key);
+                    b.extend_from_slice(&9u32.to_le_bytes());
+                    b.extend_from_slice(&10u32.to_le_bytes());
+                    b.extend_from_slice(&(values.len() as u64).to_le_bytes());
+                    for value in *values {
+                        b.extend_from_slice(&value.to_le_bytes());
+                    }
                 }
                 TestKv::I32(key, value) => {
                     push_string(&mut b, key);
@@ -1669,7 +1681,9 @@ mod tests {
                     bytes.extend_from_slice(&5u32.to_le_bytes());
                     bytes.extend_from_slice(&value.to_le_bytes());
                 }
-                TestKv::U64(_, _) => unreachable!("split metadata has no u64 values"),
+                TestKv::U64(_, _) | TestKv::U64Array(_, _) => {
+                    unreachable!("split metadata has no u64 values")
+                }
             }
         }
         bytes
@@ -2504,6 +2518,59 @@ mod tests {
         if path.to_string_lossy().contains("Qwen3.5-0.8B") {
             assert_eq!(stops, vec![248046], "0.8B instruct EOS");
         }
+    }
+
+    #[test]
+    fn stop_token_ids_support_scalar_eot_and_array_eos() {
+        let scalar_path = write_temp(&build_test_gguf(
+            &[
+                TestKv::U64("tokenizer.ggml.eos_token_id", 41),
+                TestKv::U64("tokenizer.ggml.eot_token_id", 42),
+            ],
+            &[],
+        ));
+        let scalar = GgufFile::open(&scalar_path).unwrap();
+        assert_eq!(scalar.stop_token_ids().unwrap(), vec![41, 42]);
+        let _ = std::fs::remove_file(&scalar_path);
+
+        let array_path = write_temp(&build_test_gguf(
+            &[
+                TestKv::U64Array("tokenizer.ggml.eos_token_id", &[41, 42, 41]),
+                TestKv::U64("tokenizer.ggml.eot_token_id", 43),
+            ],
+            &[],
+        ));
+        let array = GgufFile::open(&array_path).unwrap();
+        assert_eq!(array.stop_token_ids().unwrap(), vec![41, 42, 43]);
+        let _ = std::fs::remove_file(&array_path);
+    }
+
+    #[test]
+    fn stop_token_ids_reject_empty_and_out_of_range_arrays() {
+        let empty_path = write_temp(&build_test_gguf(
+            &[TestKv::U64Array("tokenizer.ggml.eos_token_id", &[])],
+            &[],
+        ));
+        let empty = GgufFile::open(&empty_path).unwrap();
+        assert!(matches!(
+            empty.stop_token_ids(),
+            Err(GgufError::MissingKey("tokenizer.ggml.eos_token_id"))
+        ));
+        let _ = std::fs::remove_file(&empty_path);
+
+        let out_of_range_path = write_temp(&build_test_gguf(
+            &[TestKv::U64Array(
+                "tokenizer.ggml.eos_token_id",
+                &[i32::MAX as u64 + 1],
+            )],
+            &[],
+        ));
+        let out_of_range = GgufFile::open(&out_of_range_path).unwrap();
+        assert!(matches!(
+            out_of_range.stop_token_ids(),
+            Err(GgufError::Decode(_))
+        ));
+        let _ = std::fs::remove_file(&out_of_range_path);
     }
 
     #[test]

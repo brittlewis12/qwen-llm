@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Qualification Leaves Runtime Admission
+
+Status: keep exact released metadata in qualification fixtures while admitting
+runtime behavior from structural model contracts, prompt capabilities, and
+producer generation policy.
+
+- Flash-Next reasoning and no-thinking rendering now depends on the supported
+  `qwen4exp`/`gpt2`/`qwen35` prompt protocol and known chat template, not the
+  complete released tokenizer fingerprint or unrelated model geometry.
+- Runtime tokenizer construction retains its token/type/merge, byte-vocabulary,
+  special-ID, and architecture/pretokenizer validation. The full vocabulary and
+  merge SHA remains available only to the ignored released-artifact oracle.
+- Producer-declared EOS/EOT vectors are accepted when nonempty and in range;
+  generation no longer requires `[248046]`. PLE's history-boundary token remains
+  independent model state validated through the Qwen4Exp configuration.
+
 ## 2026-08-27 - Flash-Next Dense Packed QSA Motor GO
 
 Status: retain the scalar QSA cache owner while adding dense causal packed

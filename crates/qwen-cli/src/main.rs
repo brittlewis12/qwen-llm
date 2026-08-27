@@ -81,10 +81,7 @@ use qwen_llm::sampling::{
     SamplingConfig, SamplingError, SamplingPhaseProfile, SpeculativeSamplingDecision,
 };
 use qwen_llm::tensor::GgmlType;
-use qwen_llm::tokenizer::{
-    QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256, Tokenizer, qwen4exp_tokenizer_identity_sha256,
-    token_ids_sha256_i32le,
-};
+use qwen_llm::tokenizer::{Tokenizer, token_ids_sha256_i32le};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -109,6 +106,7 @@ const QWEN4EXP_CHAT_TEMPLATE_SHA256: [u8; 32] = [
     0x27, 0x05, 0x6b, 0x9f, 0x79, 0x72, 0x52, 0xa3, 0x14, 0x92, 0x63, 0xd4, 0xf9, 0xaa, 0xad, 0xce,
 ];
 const QWEN4EXP_LAYER_PROFILE_ENV: &str = "QWEN4EXP_LAYER_PROFILE";
+const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 #[cfg(feature = "dsv4-diagnostics")]
 const DEEPSEEK_V4_TEMPORAL_WINDOW_ENV: &str = "QWEN_DSV4_TEMPORAL_WINDOW";
 #[cfg(feature = "dsv4-diagnostics")]
@@ -2766,10 +2764,10 @@ fn prepare_modern_run_prompt(
     );
     if family == ModelFamily::Qwen4Exp
         && (run.no_thinking || run.reasoning_effort.is_some())
-        && let Some(failure) = qwen4exp_prompt_identity_failure(family, gguf)
+        && let Some(failure) = qwen4exp_prompt_capability_failure(family, gguf)
     {
         bail!(
-            "Qwen3.8-Flash-Next option validation rejected the released {} identity; omit the option or use the released model",
+            "Qwen3.8-Flash-Next option requires the supported qwen35 prompt protocol; incompatible {}",
             failure.as_str(),
         );
     }
@@ -2780,11 +2778,11 @@ fn prepare_modern_run_prompt(
         )
     {
         ensure!(
-            validated_qwen_no_thinking_model(family, gguf),
-            "--no-thinking is currently validated only for Qwen3.6 35B A3B, Qwen3.8 27B, and Qwen3.8-Flash-Next identities with the qwen35 tokenizer; omit --no-thinking to use this model's default generation behavior"
+            supports_qwen_no_thinking_prompt(family, gguf),
+            "--no-thinking is currently supported only for Qwen3.6 35B A3B, Qwen3.8 27B, and Qwen3.8-Flash-Next models with a compatible qwen35 prompt protocol; omit --no-thinking to use this model's default generation behavior"
         );
     }
-    let qwen38 = validated_qwen38_prompt_model(family, gguf);
+    let qwen38 = supports_qwen38_prompt_protocol(family, gguf);
 
     let no_thinking = run.no_thinking;
     let qwen38_generation_mode =
@@ -2811,10 +2809,10 @@ fn prepare_modern_run_prompt(
                     },
                 ),
                 ModelFamily::Qwen4Exp => {
-                    let failure = qwen4exp_prompt_identity_failure(family, gguf)
-                        .expect("unvalidated Flash-Next prompt has an identity failure");
+                    let failure = qwen4exp_prompt_capability_failure(family, gguf)
+                        .expect("unsupported Flash-Next prompt has a capability failure");
                     bail!(
-                        "Qwen3.8-Flash-Next chat rendering rejected the released {} identity; use --raw-prompt for untemplated input",
+                        "Qwen3.8-Flash-Next chat rendering does not support the declared {}; use --raw-prompt for untemplated input",
                         failure.as_str(),
                     )
                 }
@@ -2850,10 +2848,10 @@ fn prepare_modern_run_prompt(
                     )
                 }
                 ModelFamily::Qwen4Exp => {
-                    let failure = qwen4exp_prompt_identity_failure(family, gguf)
-                        .expect("unvalidated Flash-Next prompt has an identity failure");
+                    let failure = qwen4exp_prompt_capability_failure(family, gguf)
+                        .expect("unsupported Flash-Next prompt has a capability failure");
                     bail!(
-                        "Qwen3.8-Flash-Next chat rendering rejected the released {} identity; use --raw-prompt for untemplated input",
+                        "Qwen3.8-Flash-Next chat rendering does not support the declared {}; use --raw-prompt for untemplated input",
                         failure.as_str(),
                     )
                 }
@@ -2884,7 +2882,7 @@ fn resolve_qwen38_generation_mode(
     );
     ensure!(
         reasoning_effort.is_none() || qwen38,
-        "--reasoning-effort is currently validated only for Qwen3.8 27B and Qwen3.8-Flash-Next identities with the qwen35 tokenizer"
+        "--reasoning-effort is currently supported only for Qwen3.8 27B and Qwen3.8-Flash-Next models with a compatible qwen35 prompt protocol"
     );
     if !qwen38 {
         return Ok(None);
@@ -2900,18 +2898,18 @@ fn resolve_qwen38_generation_mode(
     Ok(Some(Qwen38GenerationMode::Thinking(effort)))
 }
 
-pub(crate) fn validated_qwen_no_thinking_model(family: ModelFamily, gguf: &GgufFile) -> bool {
+pub(crate) fn supports_qwen_no_thinking_prompt(family: ModelFamily, gguf: &GgufFile) -> bool {
     validated_qwen36_no_thinking_identity(
         family,
         gguf.get_str("general.base_model.0.name"),
         gguf.get_str("tokenizer.ggml.model"),
         gguf.get_str("tokenizer.ggml.pre"),
-    ) || validated_qwen38_prompt_model(family, gguf)
+    ) || supports_qwen38_prompt_protocol(family, gguf)
 }
 
-pub(crate) fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile) -> bool {
+pub(crate) fn supports_qwen38_prompt_protocol(family: ModelFamily, gguf: &GgufFile) -> bool {
     if family == ModelFamily::Qwen4Exp {
-        return qwen4exp_prompt_identity_failure(family, gguf).is_none();
+        return qwen4exp_prompt_capability_failure(family, gguf).is_none();
     }
     validated_qwen38_prompt_identity(
         family,
@@ -2928,80 +2926,60 @@ pub(crate) fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Qwen4ExpPromptIdentityFailure {
+enum Qwen4ExpPromptCapabilityFailure {
     Architecture,
     TokenizerModel,
     Pretokenizer,
     ChatTemplate,
-    TokenizerVocabulary,
-    ModelConfig,
 }
 
-impl Qwen4ExpPromptIdentityFailure {
+impl Qwen4ExpPromptCapabilityFailure {
     fn as_str(self) -> &'static str {
         match self {
             Self::Architecture => "general.architecture",
             Self::TokenizerModel => "tokenizer.ggml.model",
             Self::Pretokenizer => "tokenizer.ggml.pre",
             Self::ChatTemplate => "tokenizer.chat_template",
-            Self::TokenizerVocabulary => "token/type/merge/special-token",
-            Self::ModelConfig => "qwen4exp architecture",
         }
     }
 }
 
-fn qwen4exp_prompt_identity_failure(
+fn qwen4exp_prompt_capability_failure(
     family: ModelFamily,
     gguf: &GgufFile,
-) -> Option<Qwen4ExpPromptIdentityFailure> {
-    classify_qwen4exp_prompt_identity(
+) -> Option<Qwen4ExpPromptCapabilityFailure> {
+    classify_qwen4exp_prompt_capability(
         family,
         gguf.get_str("tokenizer.ggml.model"),
         gguf.get_str("tokenizer.ggml.pre"),
         gguf.get_str("tokenizer.chat_template")
             .is_some_and(qwen4exp_chat_template_matches),
-        qwen4exp_tokenizer_identity_matches(gguf),
-        Qwen4ExpConfig::from_gguf(gguf)
-            .is_ok_and(|config| config == Qwen4ExpConfig::flash_next_reference()),
     )
 }
 
-fn classify_qwen4exp_prompt_identity(
+fn classify_qwen4exp_prompt_capability(
     family: ModelFamily,
     tokenizer_model: Option<&str>,
     tokenizer_pre: Option<&str>,
-    released_chat_template: bool,
-    released_tokenizer: bool,
-    released_config: bool,
-) -> Option<Qwen4ExpPromptIdentityFailure> {
+    supported_chat_template: bool,
+) -> Option<Qwen4ExpPromptCapabilityFailure> {
     if family != ModelFamily::Qwen4Exp {
-        return Some(Qwen4ExpPromptIdentityFailure::Architecture);
+        return Some(Qwen4ExpPromptCapabilityFailure::Architecture);
     }
     if tokenizer_model != Some("gpt2") {
-        return Some(Qwen4ExpPromptIdentityFailure::TokenizerModel);
+        return Some(Qwen4ExpPromptCapabilityFailure::TokenizerModel);
     }
     if tokenizer_pre != Some("qwen35") {
-        return Some(Qwen4ExpPromptIdentityFailure::Pretokenizer);
+        return Some(Qwen4ExpPromptCapabilityFailure::Pretokenizer);
     }
-    if !released_chat_template {
-        return Some(Qwen4ExpPromptIdentityFailure::ChatTemplate);
-    }
-    if !released_tokenizer {
-        return Some(Qwen4ExpPromptIdentityFailure::TokenizerVocabulary);
-    }
-    if !released_config {
-        return Some(Qwen4ExpPromptIdentityFailure::ModelConfig);
+    if !supported_chat_template {
+        return Some(Qwen4ExpPromptCapabilityFailure::ChatTemplate);
     }
     None
 }
 
 fn qwen4exp_chat_template_matches(template: &str) -> bool {
     Sha256::digest(template.as_bytes()).as_slice() == QWEN4EXP_CHAT_TEMPLATE_SHA256
-}
-
-fn qwen4exp_tokenizer_identity_matches(gguf: &GgufFile) -> bool {
-    qwen4exp_tokenizer_identity_sha256(gguf)
-        .is_ok_and(|identity| identity == QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256)
 }
 
 fn validated_qwen38_prompt_identity(
@@ -3332,29 +3310,19 @@ fn checked_qwen4exp_token_id(token: i32, vocab_size: u32, purpose: &str) -> Resu
     Ok(token)
 }
 
-fn validate_qwen4exp_stop_contract(
-    config: &Qwen4ExpConfig,
-    tokenizer_eos: Option<u64>,
-    stop_tokens: &[i32],
-) -> Result<()> {
-    let ple_eos = config
-        .ple
-        .as_ref()
-        .context("Qwen3.8-Flash-Next release requires PLE")?
-        .eos_token_id;
+fn validate_qwen4exp_stop_tokens(stop_tokens: &[i32], vocab_size: u32) -> Result<()> {
     ensure!(
-        ple_eos == 248_044,
-        "Qwen3.8-Flash-Next PLE boundary token {ple_eos} differs from released token 248044"
+        !stop_tokens.is_empty(),
+        "Qwen3.8-Flash-Next producer must declare at least one stop token"
     );
     ensure!(
-        tokenizer_eos == Some(248_046),
-        "Qwen3.8-Flash-Next tokenizer EOS {:?} differs from released token 248046",
-        tokenizer_eos
+        stop_tokens.len() <= QWEN4EXP_MAX_STOP_TOKENS,
+        "Qwen3.8-Flash-Next producer declares {} stop tokens, above the supported maximum {QWEN4EXP_MAX_STOP_TOKENS}",
+        stop_tokens.len()
     );
-    ensure!(
-        stop_tokens == [248_046],
-        "Qwen3.8-Flash-Next producer stop tokens {stop_tokens:?} differ from released vector [248046]"
-    );
+    for &token in stop_tokens {
+        checked_qwen4exp_token_id(token, vocab_size, "stop")?;
+    }
     Ok(())
 }
 
@@ -3812,10 +3780,6 @@ fn run_qwen4exp_single_turn(
     let (prompt, prompt_source, _) = prompt_text(args)?;
     let tokenizer_t0 = Instant::now();
     let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;
-    ensure!(
-        qwen4exp_tokenizer_identity_matches(gguf),
-        "Qwen3.8-Flash-Next tokenizer metadata differs from the released token, type, merge, and special-token identity"
-    );
     let prompt_ids = tokenizer
         .encode(&prompt, prompt_add_special_tokens(args, prompt_source))
         .context("tokenize Qwen3.8-Flash-Next prompt")?;
@@ -3851,14 +3815,7 @@ fn run_qwen4exp_single_turn(
     let stop_tokens = gguf
         .stop_token_ids()
         .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
-    validate_qwen4exp_stop_contract(
-        &config,
-        gguf.get_u64("tokenizer.ggml.eos_token_id"),
-        &stop_tokens,
-    )?;
-    for &token in &stop_tokens {
-        checked_qwen4exp_token_id(token, vocab_size, "stop")?;
-    }
+    validate_qwen4exp_stop_tokens(&stop_tokens, vocab_size)?;
 
     eprintln!(
         "qwen4exp: loading {} for serial generation; prompt_tokens={} max_generated_tokens={} forward_limit={} qsa_physical_capacity={}",
@@ -12042,90 +11999,36 @@ mod tests {
     }
 
     #[test]
-    fn qwen_no_thinking_capability_is_closed_to_the_validated_identity() {
+    fn qwen4exp_prompt_capability_is_scoped_to_the_declared_protocol() {
         assert_eq!(
-            classify_qwen4exp_prompt_identity(
+            classify_qwen4exp_prompt_capability(
                 ModelFamily::Qwen4Exp,
                 Some("gpt2"),
                 Some("qwen35"),
                 true,
-                true,
-                true,
             ),
             None
         );
-        for (identity, expected) in [
+        for (protocol, expected) in [
             (
-                (
-                    ModelFamily::Qwen35,
-                    Some("gpt2"),
-                    Some("qwen35"),
-                    true,
-                    true,
-                    true,
-                ),
-                Qwen4ExpPromptIdentityFailure::Architecture,
+                (ModelFamily::Qwen35, Some("gpt2"), Some("qwen35"), true),
+                Qwen4ExpPromptCapabilityFailure::Architecture,
             ),
             (
-                (
-                    ModelFamily::Qwen4Exp,
-                    Some("other"),
-                    Some("qwen35"),
-                    true,
-                    true,
-                    true,
-                ),
-                Qwen4ExpPromptIdentityFailure::TokenizerModel,
+                (ModelFamily::Qwen4Exp, Some("other"), Some("qwen35"), true),
+                Qwen4ExpPromptCapabilityFailure::TokenizerModel,
             ),
             (
-                (
-                    ModelFamily::Qwen4Exp,
-                    Some("gpt2"),
-                    Some("other"),
-                    true,
-                    true,
-                    true,
-                ),
-                Qwen4ExpPromptIdentityFailure::Pretokenizer,
+                (ModelFamily::Qwen4Exp, Some("gpt2"), Some("other"), true),
+                Qwen4ExpPromptCapabilityFailure::Pretokenizer,
             ),
             (
-                (
-                    ModelFamily::Qwen4Exp,
-                    Some("gpt2"),
-                    Some("qwen35"),
-                    false,
-                    true,
-                    true,
-                ),
-                Qwen4ExpPromptIdentityFailure::ChatTemplate,
-            ),
-            (
-                (
-                    ModelFamily::Qwen4Exp,
-                    Some("gpt2"),
-                    Some("qwen35"),
-                    true,
-                    false,
-                    true,
-                ),
-                Qwen4ExpPromptIdentityFailure::TokenizerVocabulary,
-            ),
-            (
-                (
-                    ModelFamily::Qwen4Exp,
-                    Some("gpt2"),
-                    Some("qwen35"),
-                    true,
-                    true,
-                    false,
-                ),
-                Qwen4ExpPromptIdentityFailure::ModelConfig,
+                (ModelFamily::Qwen4Exp, Some("gpt2"), Some("qwen35"), false),
+                Qwen4ExpPromptCapabilityFailure::ChatTemplate,
             ),
         ] {
             assert_eq!(
-                classify_qwen4exp_prompt_identity(
-                    identity.0, identity.1, identity.2, identity.3, identity.4, identity.5,
-                ),
+                classify_qwen4exp_prompt_capability(protocol.0, protocol.1, protocol.2, protocol.3,),
                 Some(expected)
             );
         }
@@ -12261,17 +12164,34 @@ mod tests {
     }
 
     #[test]
-    fn qwen4exp_stop_contract_keeps_ple_and_generation_boundaries_distinct() {
-        let config = Qwen4ExpConfig::flash_next_reference();
-        validate_qwen4exp_stop_contract(&config, Some(248_046), &[248_046]).unwrap();
-        assert!(validate_qwen4exp_stop_contract(&config, Some(248_045), &[248_046]).is_err());
-        assert!(validate_qwen4exp_stop_contract(&config, Some(248_046), &[248_044]).is_err());
+    #[ignore = "set QWEN4EXP_TOKENIZER_GGUF to the pinned Flash-Next release"]
+    fn released_qwen4exp_chat_template_matches_supported_protocol() {
+        let path = std::env::var_os("QWEN4EXP_TOKENIZER_GGUF")
+            .expect("QWEN4EXP_TOKENIZER_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released Flash-Next GGUF");
+        assert_eq!(gguf.architecture().as_deref(), Some("qwen4exp"));
+        let template = gguf
+            .get_str("tokenizer.chat_template")
+            .expect("released Flash-Next GGUF must declare a chat template");
+        assert!(qwen4exp_chat_template_matches(template));
+
+        let mut changed = template.to_owned();
+        changed.push(' ');
+        assert!(!qwen4exp_chat_template_matches(&changed));
+    }
+
+    #[test]
+    fn qwen4exp_stop_validation_honors_valid_producer_vectors() {
+        validate_qwen4exp_stop_tokens(&[248_046], 248_320).unwrap();
+        validate_qwen4exp_stop_tokens(&[42], 248_320).unwrap();
+        validate_qwen4exp_stop_tokens(&[42, 43], 248_320).unwrap();
+        assert!(validate_qwen4exp_stop_tokens(&[], 248_320).is_err());
+        assert!(validate_qwen4exp_stop_tokens(&[-1], 248_320).is_err());
+        assert!(validate_qwen4exp_stop_tokens(&[248_320], 248_320).is_err());
         assert!(
-            validate_qwen4exp_stop_contract(&config, Some(248_046), &[248_046, 248_044]).is_err()
+            validate_qwen4exp_stop_tokens(&vec![42; QWEN4EXP_MAX_STOP_TOKENS + 1], 248_320)
+                .is_err()
         );
-        let mut malformed = config;
-        malformed.ple.as_mut().unwrap().eos_token_id = 248_046;
-        assert!(validate_qwen4exp_stop_contract(&malformed, Some(248_046), &[248_046]).is_err());
     }
 
     #[test]
@@ -12341,7 +12261,7 @@ mod tests {
             resolve_qwen38_generation_mode(false, false, Some(cli::RunReasoningEffort::Low))
                 .unwrap_err()
                 .to_string()
-                .contains("validated only for Qwen3.8 27B and Qwen3.8-Flash-Next")
+                .contains("supported only for Qwen3.8 27B and Qwen3.8-Flash-Next")
         );
         assert_eq!(
             resolve_qwen38_generation_mode(false, false, None).unwrap(),

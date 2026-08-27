@@ -144,18 +144,18 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         crate::shutdown::checkpoint()?;
         return accept_loop(&invocation.addr, &model_id, 0.0, &mut backend, &mut trace);
     }
-    // Resolve the rendering family once, from the loaded identity — the
+    // Resolve the rendering protocol once from the loaded metadata -- the
     // same gate `qwen run` applies. Without this a Qwen3.8 model renders
     // with the generic ChatML contract (no effort instruction, no
     // preclosed history), silently diverging from upstream.
     let template =
-        if crate::validated_qwen38_prompt_model(family.expect("family checked above"), &gguf) {
+        if crate::supports_qwen38_prompt_protocol(family.expect("family checked above"), &gguf) {
             items::QwenTemplate::Qwen38
         } else {
             items::QwenTemplate::Generic
         };
     let no_thinking_supported =
-        crate::validated_qwen_no_thinking_model(family.expect("family checked above"), &gguf);
+        crate::supports_qwen_no_thinking_prompt(family.expect("family checked above"), &gguf);
     drop(gguf);
     crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;

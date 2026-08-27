@@ -3686,7 +3686,46 @@ pub fn encode_residual_rms_norm_mul_f32(
     Ok(())
 }
 
-crate::env_flag!(default_on mat_vec_f32_lcpp_r2_enabled, "QWEN_MATVEC_F32_LCPP_R2");
+crate::env_flag!(
+    default_on configured_mat_vec_f32_lcpp_r2_enabled,
+    "QWEN_MATVEC_F32_LCPP_R2"
+);
+
+#[cfg(test)]
+thread_local! {
+    static MAT_VEC_F32_LCPP_R2_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_mat_vec_f32_lcpp_r2_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct RestoreOverride(Option<bool>);
+
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            MAT_VEC_F32_LCPP_R2_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let previous = MAT_VEC_F32_LCPP_R2_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    let _restore = RestoreOverride(previous);
+    f()
+}
+
+fn mat_vec_f32_lcpp_r2_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = MAT_VEC_F32_LCPP_R2_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
+    configured_mat_vec_f32_lcpp_r2_enabled()
+}
+
+pub(crate) fn qwen4exp_gdn_beta_alpha_decay_f32_r2_supported() -> bool {
+    mat_vec_f32_lcpp_r2_enabled()
+}
 
 /// F32 mat-vec: `y[o] = Σ_i W[o, i] * x[i]`, GGUF stride convention.
 /// `W` has shape `[n_in, n_out]` (ne[0]=n_in fastest); `x` is `[n_in]`,
@@ -3851,6 +3890,156 @@ pub fn encode_mat_vec_f32_sigmoid(
     enc.dispatch(
         MTLSize {
             width: n_out.div_ceil(4),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 4 * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_qwen4exp_gdn_beta_alpha_decay_f32_r2(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    beta_weight: &MetalTensor,
+    alpha_weight: &MetalTensor,
+    x: &MetalTensor,
+    dt_bias: &MetalTensor,
+    a: &MetalTensor,
+    beta_out: &MetalTensor,
+    alpha_out: &MetalTensor,
+    decay_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "kernel_qwen4exp_gdn_beta_alpha_decay_f32_r2";
+    if !mat_vec_f32_lcpp_r2_enabled() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "QWEN_MATVEC_F32_LCPP_R2 disables the required reduction layout".into(),
+        });
+    }
+    let n_in_u32 = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_in={n_in} exceeds u32"),
+    })?;
+    let n_out_u32 = u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_out={n_out} exceeds u32"),
+    })?;
+    if n_in == 0 || n_out == 0 || !n_in.is_multiple_of(4) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("n_in={n_in} must be nonzero and divisible by 4; n_out={n_out}"),
+        });
+    }
+    let matrix_elements = n_in
+        .checked_mul(n_out)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("matrix element count overflows for {n_in}x{n_out}"),
+        })?;
+    let matrix_shape = [n_in as u64, n_out as u64];
+    let input_shape = [n_in as u64];
+    let output_shape = [n_out as u64];
+    let tensors = [
+        (
+            "beta weight",
+            beta_weight,
+            matrix_elements,
+            matrix_shape.as_slice(),
+        ),
+        (
+            "alpha weight",
+            alpha_weight,
+            matrix_elements,
+            matrix_shape.as_slice(),
+        ),
+        ("input", x, n_in, input_shape.as_slice()),
+        ("dt bias", dt_bias, n_out, output_shape.as_slice()),
+        ("transformed A", a, n_out, output_shape.as_slice()),
+        ("beta output", beta_out, n_out, output_shape.as_slice()),
+        ("alpha output", alpha_out, n_out, output_shape.as_slice()),
+        ("decay output", decay_out, n_out, output_shape.as_slice()),
+    ];
+    for (name, tensor, elements, shape) in tensors {
+        if tensor.dtype != GgmlType::F32
+            || tensor.n_elements() as usize != elements
+            || tensor.shape != shape
+        {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!(
+                    "{name} expected F32 shape {shape:?} with {elements} elements, got {:?} shape {:?} with {}",
+                    tensor.dtype,
+                    tensor.shape,
+                    tensor.n_elements()
+                ),
+            });
+        }
+        if tensor.buffer.device().registryID() != ctx.device.registryID() {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name} belongs to a different Metal device"),
+            });
+        }
+    }
+    for (name, tensor) in [
+        ("beta weight", beta_weight),
+        ("alpha weight", alpha_weight),
+        ("input", x),
+    ] {
+        if !tensor.offset.is_multiple_of(16) {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name} offset {} is not 16-byte aligned", tensor.offset),
+            });
+        }
+    }
+    for (name, tensor) in [
+        ("beta output", beta_out),
+        ("alpha output", alpha_out),
+        ("decay output", decay_out),
+    ] {
+        if !tensor.is_writable() {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name} must be writable"),
+            });
+        }
+    }
+    let pso = ctx.pipeline(KERNEL)?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in_u32,
+            n_out: n_out_u32,
+        },
+    );
+    enc.set_tensor(1, beta_weight);
+    enc.set_tensor(2, alpha_weight);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, dt_bias);
+    enc.set_tensor(5, a);
+    enc.set_tensor(6, beta_out);
+    enc.set_tensor(7, alpha_out);
+    enc.set_tensor(8, decay_out);
+    enc.set_threadgroup_memory(0, 32 * 2 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(2),
             height: 1,
             depth: 1,
         },

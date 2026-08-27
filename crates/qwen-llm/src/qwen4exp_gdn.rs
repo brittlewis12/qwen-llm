@@ -3,7 +3,9 @@
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     encode_copy_offset_f32, encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32,
-    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32_sigmoid, encode_ssm_conv_silu_f32,
+    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32_sigmoid,
+    encode_qwen4exp_gdn_beta_alpha_decay_f32_r2, encode_ssm_conv_silu_f32,
+    qwen4exp_gdn_beta_alpha_decay_f32_r2_supported,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
@@ -17,6 +19,73 @@ use objc2_metal::{
 
 const REQUIRED_HEAD_DIM: usize = 128;
 const REQUIRED_CONV_KERNEL: usize = 4;
+
+crate::env_flag!(
+    default_off configured_qwen4exp_gdn_beta_alpha_decay_fused_enabled,
+    "QWEN4EXP_GDN_BETA_ALPHA_DECAY_FUSED"
+);
+
+#[cfg(test)]
+thread_local! {
+    static QWEN4EXP_GDN_BETA_ALPHA_DECAY_FUSED_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_gdn_beta_alpha_decay_fused_override<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct RestoreOverride(Option<bool>);
+
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            QWEN4EXP_GDN_BETA_ALPHA_DECAY_FUSED_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let previous = QWEN4EXP_GDN_BETA_ALPHA_DECAY_FUSED_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    let _restore = RestoreOverride(previous);
+    f()
+}
+
+fn qwen4exp_gdn_beta_alpha_decay_fused_configured() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = QWEN4EXP_GDN_BETA_ALPHA_DECAY_FUSED_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
+    configured_qwen4exp_gdn_beta_alpha_decay_fused_enabled()
+}
+
+fn qwen4exp_gdn_beta_alpha_decay_fused_enabled_for(r2_supported: bool) -> bool {
+    qwen4exp_gdn_beta_alpha_decay_fused_configured() && r2_supported
+}
+
+fn qwen4exp_gdn_beta_alpha_decay_fused_enabled() -> bool {
+    qwen4exp_gdn_beta_alpha_decay_fused_enabled_for(qwen4exp_gdn_beta_alpha_decay_f32_r2_supported())
+}
+
+fn qwen4exp_gdn_beta_alpha_decay_fused_weights_eligible(
+    weights: GatedDeltaNetMetalWeights<'_>,
+) -> bool {
+    weights.geometry.hidden_size.is_multiple_of(4)
+        && weights.beta.offset.is_multiple_of(16)
+        && weights.alpha.offset.is_multiple_of(16)
+}
+
+fn qwen4exp_gdn_beta_alpha_decay_fused_call_enabled(
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+) -> bool {
+    qwen4exp_gdn_beta_alpha_decay_fused_enabled()
+        && qwen4exp_gdn_beta_alpha_decay_fused_weights_eligible(weights)
+        && input.offset.is_multiple_of(16)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpGdnError {
@@ -500,32 +569,49 @@ pub fn encode_gated_delta_net<'a>(
         geometry.hidden_size,
         geometry.value_width(),
     )?;
-    encode_mat_vec_f32_sigmoid(
-        ctx,
-        enc,
-        weights.beta,
-        input,
-        &workspace.beta,
-        geometry.hidden_size,
-        geometry.value_heads,
-    )?;
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.alpha,
-        input,
-        &workspace.alpha,
-        geometry.hidden_size,
-        geometry.value_heads,
-    )?;
-    encode_gdn_decay_chain_f32(
-        ctx,
-        enc,
-        &workspace.alpha,
-        weights.dt_bias,
-        weights.a,
-        &workspace.decay,
-    )?;
+    if qwen4exp_gdn_beta_alpha_decay_fused_call_enabled(input, weights) {
+        encode_qwen4exp_gdn_beta_alpha_decay_f32_r2(
+            ctx,
+            enc,
+            weights.beta,
+            weights.alpha,
+            input,
+            weights.dt_bias,
+            weights.a,
+            &workspace.beta,
+            &workspace.alpha,
+            &workspace.decay,
+            geometry.hidden_size,
+            geometry.value_heads,
+        )?;
+    } else {
+        encode_mat_vec_f32_sigmoid(
+            ctx,
+            enc,
+            weights.beta,
+            input,
+            &workspace.beta,
+            geometry.hidden_size,
+            geometry.value_heads,
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.alpha,
+            input,
+            &workspace.alpha,
+            geometry.hidden_size,
+            geometry.value_heads,
+        )?;
+        encode_gdn_decay_chain_f32(
+            ctx,
+            enc,
+            &workspace.alpha,
+            weights.dt_bias,
+            weights.a,
+            &workspace.decay,
+        )?;
+    }
     encode_ssm_conv_silu_f32(
         ctx,
         enc,
@@ -858,6 +944,11 @@ pub(crate) fn preflight(
         "kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32",
     ] {
         ctx.pipeline(kernel)?;
+    }
+    if qwen4exp_gdn_beta_alpha_decay_fused_enabled()
+        && qwen4exp_gdn_beta_alpha_decay_fused_weights_eligible(weights)
+    {
+        ctx.pipeline("kernel_qwen4exp_gdn_beta_alpha_decay_f32_r2")?;
     }
     Ok(())
 }
@@ -1204,6 +1295,61 @@ mod tests {
         }
     }
 
+    fn assert_bits_eq(name: &str, actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "{name} length");
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{name}[{index}]: expected {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
+    fn assert_same_dispatch(
+        actual: &crate::metal::DispatchCensusRow,
+        expected: &crate::metal::DispatchCensusRow,
+    ) {
+        assert_eq!(actual.family, expected.family);
+        assert_eq!(actual.tag, expected.tag);
+        assert_eq!(actual.encoder_ordinal, expected.encoder_ordinal);
+        assert_eq!(actual.encoder_concurrent, expected.encoder_concurrent);
+        assert_eq!(actual.kernel, expected.kernel);
+        assert_eq!(actual.grid_width, expected.grid_width);
+        assert_eq!(actual.grid_height, expected.grid_height);
+        assert_eq!(actual.grid_depth, expected.grid_depth);
+        assert_eq!(actual.threads_width, expected.threads_width);
+        assert_eq!(actual.threads_height, expected.threads_height);
+        assert_eq!(actual.threads_depth, expected.threads_depth);
+        assert_eq!(actual.grid_tgs, expected.grid_tgs);
+        assert_eq!(actual.tg_threads, expected.tg_threads);
+    }
+
+    fn run_gdn_test_command(
+        ctx: &MetalContext,
+        input: &MetalTensor,
+        weights: GatedDeltaNetMetalWeights<'_>,
+        workspace: &mut GatedDeltaNetMetalWorkspace,
+        fused: bool,
+        r2: bool,
+    ) -> Vec<crate::metal::DispatchCensusRow> {
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::with_mat_vec_f32_lcpp_r2_override(r2, || {
+            with_qwen4exp_gdn_beta_alpha_decay_fused_override(fused, || {
+                let read =
+                    encode_gated_delta_net(ctx, &encoder, input, weights, workspace).unwrap();
+                drop(read);
+            });
+        });
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        workspace.release_after().unwrap();
+        census
+    }
+
     #[derive(Deserialize)]
     struct GroupedTiledOracle {
         schema_version: u32,
@@ -1423,6 +1569,130 @@ mod tests {
     }
 
     #[test]
+    fn fused_beta_alpha_decay_requires_r2_and_restores_test_override() {
+        with_qwen4exp_gdn_beta_alpha_decay_fused_override(false, || {
+            assert!(!qwen4exp_gdn_beta_alpha_decay_fused_configured());
+            let panic = std::panic::catch_unwind(|| {
+                with_qwen4exp_gdn_beta_alpha_decay_fused_override(true, || {
+                    assert!(qwen4exp_gdn_beta_alpha_decay_fused_enabled_for(true));
+                    assert!(!qwen4exp_gdn_beta_alpha_decay_fused_enabled_for(false));
+                    panic!("exercise unwind restoration");
+                });
+            });
+            assert!(panic.is_err());
+            assert!(!qwen4exp_gdn_beta_alpha_decay_fused_configured());
+        });
+    }
+
+    #[test]
+    fn fused_beta_alpha_decay_matches_production_shape_reference_bit_exact() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        };
+        const N_IN: usize = 2560;
+        const N_OUT: usize = 48;
+
+        let mut input = values(N_IN, 41, 0.0078125);
+        input[0] = 1.0;
+        let beta = values(N_IN * N_OUT, 42, 0.00012207031);
+        let mut alpha = values(N_IN * N_OUT, 43, 0.000061035156);
+        let branch_values = [
+            -20.000_002_f32,
+            -20.0,
+            -19.999_998,
+            0.0,
+            19.999_998,
+            20.0,
+            20.000_002,
+        ];
+        for (row, &value) in branch_values.iter().enumerate() {
+            alpha[row * N_IN..(row + 1) * N_IN].fill(0.0);
+            alpha[row * N_IN] = value;
+        }
+        let dt_bias = vec![0.0; N_OUT];
+        let transformed_a = (0..N_OUT)
+            .map(|index| -0.5 - (index % 11) as f32 * 0.03125)
+            .collect::<Vec<_>>();
+
+        let input_gpu = tensor(&ctx, &input, vec![N_IN as u64]);
+        let beta_gpu = weight(&ctx, &beta, vec![N_IN as u64, N_OUT as u64]);
+        let alpha_gpu = weight(&ctx, &alpha, vec![N_IN as u64, N_OUT as u64]);
+        let dt_bias_gpu = weight(&ctx, &dt_bias, vec![N_OUT as u64]);
+        let transformed_a_gpu = weight(&ctx, &transformed_a, vec![N_OUT as u64]);
+        let baseline_beta = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64]).unwrap();
+        let baseline_alpha = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64]).unwrap();
+        let baseline_decay = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64]).unwrap();
+        let fused_beta = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64]).unwrap();
+        let fused_alpha = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64]).unwrap();
+        let fused_decay = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64]).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::with_mat_vec_f32_lcpp_r2_override(true, || {
+            encode_mat_vec_f32_sigmoid(
+                &ctx,
+                &encoder,
+                &beta_gpu,
+                &input_gpu,
+                &baseline_beta,
+                N_IN,
+                N_OUT,
+            )
+            .unwrap();
+            crate::metal::encode_mat_vec_f32(
+                &ctx,
+                &encoder,
+                &alpha_gpu,
+                &input_gpu,
+                &baseline_alpha,
+                N_IN,
+                N_OUT,
+            )
+            .unwrap();
+            encode_gdn_decay_chain_f32(
+                &ctx,
+                &encoder,
+                &baseline_alpha,
+                &dt_bias_gpu,
+                &transformed_a_gpu,
+                &baseline_decay,
+            )
+            .unwrap();
+            encode_qwen4exp_gdn_beta_alpha_decay_f32_r2(
+                &ctx,
+                &encoder,
+                &beta_gpu,
+                &alpha_gpu,
+                &input_gpu,
+                &dt_bias_gpu,
+                &transformed_a_gpu,
+                &fused_beta,
+                &fused_alpha,
+                &fused_decay,
+                N_IN,
+                N_OUT,
+            )
+            .unwrap();
+        });
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let baseline_alpha = read_f32(&baseline_alpha);
+        assert_bits_eq(
+            "branch alpha",
+            &baseline_alpha[..branch_values.len()],
+            &branch_values,
+        );
+        assert_bits_eq("beta", &read_f32(&fused_beta), &read_f32(&baseline_beta));
+        assert_bits_eq("alpha", &read_f32(&fused_alpha), &baseline_alpha);
+        assert_bits_eq("decay", &read_f32(&fused_decay), &read_f32(&baseline_decay));
+    }
+
+    #[test]
     fn sigmoid_gated_rmsnorm_matches_cpu_and_differs_from_silu() {
         let ctx = match MetalContext::new() {
             Ok(ctx) => ctx,
@@ -1487,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn two_token_gdn_composition_matches_cpu_state_and_output() {
+    fn two_token_gdn_composition_and_fusion_match_state_and_output() {
         let ctx = match MetalContext::new() {
             Ok(ctx) => ctx,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -1553,6 +1823,7 @@ mod tests {
             output: &output_gpu,
         };
         let mut workspace = GatedDeltaNetMetalWorkspace::new(&ctx, geometry).unwrap();
+        let mut fused_workspace = GatedDeltaNetMetalWorkspace::new(&ctx, geometry).unwrap();
         let mut cpu_state = CpuState {
             conv: vec![0.0; geometry.conv_state_elements()],
             delta: vec![0.0; geometry.delta_state_elements()],
@@ -1562,12 +1833,19 @@ mod tests {
             let input = values(geometry.hidden_size, 20 + token, 0.01);
             let expected = cpu_step(geometry, &cpu_weights, &input, &mut cpu_state);
             let input_gpu = tensor(&ctx, &input, vec![geometry.hidden_size as u64]);
+            crate::metal::dispatch_census_begin();
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
-            let read = encode_gated_delta_net(&ctx, &encoder, &input_gpu, weights, &mut workspace)
-                .unwrap();
-            assert_eq!(read.output().n_elements(), geometry.hidden_size as u64);
-            drop(read);
+            crate::metal::with_mat_vec_f32_lcpp_r2_override(true, || {
+                with_qwen4exp_gdn_beta_alpha_decay_fused_override(false, || {
+                    let read =
+                        encode_gated_delta_net(&ctx, &encoder, &input_gpu, weights, &mut workspace)
+                            .unwrap();
+                    assert_eq!(read.output().n_elements(), geometry.hidden_size as u64);
+                    drop(read);
+                });
+            });
+            let baseline_census = crate::metal::dispatch_census_take();
             encoder.end();
             if token == 0 {
                 let error = workspace.release_after().unwrap_err().to_string();
@@ -1588,6 +1866,59 @@ mod tests {
             }
             command.commit();
             workspace.release_after().unwrap();
+
+            let fused_census =
+                run_gdn_test_command(&ctx, &input_gpu, weights, &mut fused_workspace, true, true);
+
+            assert_eq!(baseline_census.len(), 10);
+            assert_eq!(fused_census.len(), 8);
+            assert_eq!(baseline_census[2].kernel, "kernel_mat_vec_f32_f32_sigmoid");
+            assert_eq!(baseline_census[3].kernel, "kernel_mat_vec_f32_f32_lcpp_r2");
+            assert_eq!(baseline_census[4].kernel, "kernel_gdn_decay_chain_f32");
+            assert_eq!(
+                fused_census[2].kernel,
+                "kernel_qwen4exp_gdn_beta_alpha_decay_f32_r2"
+            );
+            for row in baseline_census.iter().chain(&fused_census) {
+                assert_eq!(row.encoder_ordinal, 0);
+                assert!(!row.encoder_concurrent);
+            }
+            for (baseline, fused) in baseline_census[..2].iter().zip(&fused_census[..2]) {
+                assert_same_dispatch(fused, baseline);
+            }
+            for (baseline, fused) in baseline_census[5..].iter().zip(&fused_census[3..]) {
+                assert_same_dispatch(fused, baseline);
+            }
+            assert_bits_eq(
+                &format!("token {token} beta"),
+                &read_f32(&fused_workspace.beta),
+                &read_f32(&workspace.beta),
+            );
+            assert_bits_eq(
+                &format!("token {token} alpha"),
+                &read_f32(&fused_workspace.alpha),
+                &read_f32(&workspace.alpha),
+            );
+            assert_bits_eq(
+                &format!("token {token} decay"),
+                &read_f32(&fused_workspace.decay),
+                &read_f32(&workspace.decay),
+            );
+            assert_bits_eq(
+                &format!("token {token} convolution state"),
+                &read_f32(&fused_workspace.conv_state),
+                &read_f32(&workspace.conv_state),
+            );
+            assert_bits_eq(
+                &format!("token {token} delta state"),
+                &read_f32(&fused_workspace.delta_state),
+                &read_f32(&workspace.delta_state),
+            );
+            assert_bits_eq(
+                &format!("token {token} output"),
+                &read_f32(&fused_workspace.output),
+                &read_f32(&workspace.output),
+            );
 
             assert_close(&read_f32(&workspace.output), &expected, 3e-4, 5e-4);
             assert_close(
@@ -1616,9 +1947,56 @@ mod tests {
                 .all(|&value| value == 0.0)
         );
 
+        fused_workspace.reset().unwrap();
+        let input_gpu = tensor(&ctx, &values(32, 44, 0.01), vec![32]);
+        let r2_off_baseline =
+            run_gdn_test_command(&ctx, &input_gpu, weights, &mut workspace, false, false);
+        let r2_off_candidate =
+            run_gdn_test_command(&ctx, &input_gpu, weights, &mut fused_workspace, true, false);
+        assert_eq!(r2_off_candidate.len(), r2_off_baseline.len());
+        for (candidate, baseline) in r2_off_candidate.iter().zip(&r2_off_baseline) {
+            assert_same_dispatch(candidate, baseline);
+        }
+        assert!(
+            r2_off_candidate
+                .iter()
+                .all(|row| row.kernel != "kernel_qwen4exp_gdn_beta_alpha_decay_f32_r2")
+        );
+        assert_bits_eq(
+            "R2-off beta",
+            &read_f32(&fused_workspace.beta),
+            &read_f32(&workspace.beta),
+        );
+        assert_bits_eq(
+            "R2-off alpha",
+            &read_f32(&fused_workspace.alpha),
+            &read_f32(&workspace.alpha),
+        );
+        assert_bits_eq(
+            "R2-off decay",
+            &read_f32(&fused_workspace.decay),
+            &read_f32(&workspace.decay),
+        );
+        assert_bits_eq(
+            "R2-off convolution state",
+            &read_f32(&fused_workspace.conv_state),
+            &read_f32(&workspace.conv_state),
+        );
+        assert_bits_eq(
+            "R2-off delta state",
+            &read_f32(&fused_workspace.delta_state),
+            &read_f32(&workspace.delta_state),
+        );
+        assert_bits_eq(
+            "R2-off output",
+            &read_f32(&fused_workspace.output),
+            &read_f32(&workspace.output),
+        );
+        workspace.reset().unwrap();
+        fused_workspace.reset().unwrap();
+
         let concurrent_command = ctx.queue.commandBuffer().unwrap();
         let concurrent_encoder = KernelEncoder::begin_concurrent(&concurrent_command);
-        let input_gpu = tensor(&ctx, &values(32, 44, 0.01), vec![32]);
         assert!(
             encode_gated_delta_net(
                 &ctx,

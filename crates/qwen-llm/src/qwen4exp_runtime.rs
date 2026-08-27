@@ -172,6 +172,7 @@ pub struct Qwen4ExpPackedProfileCommandTiming {
 #[non_exhaustive]
 pub struct Qwen4ExpPackedProfileStageTiming {
     pub label: Qwen4ExpPackedProfileLabel,
+    pub depth: usize,
     pub start_sample: usize,
     pub end_sample: usize,
     pub duration_ticks: u64,
@@ -1239,6 +1240,7 @@ fn resolve_qwen4exp_packed_profile(
         }
         stages.push(Qwen4ExpPackedProfileStageTiming {
             label: span.label,
+            depth: span.depth,
             start_sample: span.start_sample,
             end_sample: span.end_sample,
             duration_ticks,
@@ -1476,6 +1478,7 @@ mod tests {
                     2,
                     MixerKind::GatedDeltaNet,
                 ),
+                depth: 1,
                 start_sample: 1,
                 end_sample: 2,
             },
@@ -1485,6 +1488,7 @@ mod tests {
                     Some(2),
                     Some(MixerKind::GatedDeltaNet),
                 ),
+                depth: 0,
                 start_sample: 0,
                 end_sample: 3,
             },
@@ -1515,6 +1519,8 @@ mod tests {
         assert_eq!(profile.sampled_span_ticks, 40);
         assert_eq!(profile.stages[0].label.name, "post_ple_layer");
         assert_eq!(profile.stages[1].label.name, "moe.router");
+        assert_eq!(profile.stages[0].depth, 0);
+        assert_eq!(profile.stages[1].depth, 1);
         assert!((profile.stages[0].gpu_ms - 5.0).abs() < 1e-12);
         assert!((profile.stages[1].gpu_ms - 0.625).abs() < 1e-12);
         assert!(

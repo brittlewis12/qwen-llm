@@ -71,7 +71,8 @@ use qwen_llm::qwen4exp::Qwen4ExpConfig;
 use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpLayerProfile, Qwen4ExpLayerStage, Qwen4ExpLoadedModel, Qwen4ExpPackedPrefillProfile,
     Qwen4ExpPackedProfileOutcome, Qwen4ExpPackedProfileSampling, Qwen4ExpPackedProfileScope,
-    Qwen4ExpPrefillTiming, Qwen4ExpRuntimeError, Qwen4ExpSessionCapacity, Qwen4ExpTokenTiming,
+    Qwen4ExpPackedProfileStageTiming, Qwen4ExpPrefillTiming, Qwen4ExpRuntimeError,
+    Qwen4ExpSessionCapacity, Qwen4ExpTokenTiming,
 };
 use qwen_llm::runtime::{
     LoadedModel, LoadedModelConfig, PrefetchPolicy, PrefetchResidencyProbe, PreparedCheckpoint,
@@ -3865,56 +3866,20 @@ fn emit_qwen4exp_packed_timestamp_profile(profile: &Qwen4ExpPackedPrefillProfile
         );
     }
     if profile.sampling == Qwen4ExpPackedProfileSampling::EncoderStage {
-        for coarse in profile.stages.iter().filter(|stage| {
-            stage.label.scope == Qwen4ExpPackedProfileScope::Coarse
-                && stage.label.name == "post_ple_layer"
+        for parent in profile.stages.iter().filter(|stage| {
+            (stage.label.scope == Qwen4ExpPackedProfileScope::Coarse
+                && stage.label.name == "post_ple_layer")
+                || (stage.label.scope == Qwen4ExpPackedProfileScope::Detail
+                    && stage.label.name == "block.moe")
         }) {
-            let details = profile
-                .stages
-                .iter()
-                .filter(|stage| {
-                    stage.label.scope == Qwen4ExpPackedProfileScope::Detail
-                        && stage.label.layer == coarse.label.layer
-                        && stage.label.mixer == coarse.label.mixer
-                        && stage.start_sample >= coarse.start_sample
-                        && stage.end_sample <= coarse.end_sample
-                })
-                .try_fold((0_u64, 0.0_f64), |(ticks, gpu_ms), stage| {
-                    ticks
-                        .checked_add(stage.duration_ticks)
-                        .map(|ticks| (ticks, gpu_ms + stage.gpu_ms))
-                });
-            match details {
-                Some((0, _)) => {}
-                Some((detail_ticks, detail_gpu_ms)) => {
-                    match coarse.duration_ticks.checked_sub(detail_ticks) {
-                        Some(residual_ticks) => {
-                            let residual_gpu_ms = coarse.gpu_ms - detail_gpu_ms;
-                            eprintln!(
-                                "qwen4exp packed_profile_detail_residual: layer={:?} mixer={:?} coarse_ticks={} detail_ticks={detail_ticks} residual_ticks={residual_ticks} coarse_gpu_ms={:.3} detail_gpu_ms={detail_gpu_ms:.3} residual_gpu_ms={residual_gpu_ms:.3}",
-                                coarse.label.layer,
-                                coarse.label.mixer,
-                                coarse.duration_ticks,
-                                coarse.gpu_ms,
-                            );
-                        }
-                        None => eprintln!(
-                            "qwen4exp packed_profile_warning: detail ticks exceed coarse ticks for layer={:?} mixer={:?}",
-                            coarse.label.layer, coarse.label.mixer,
-                        ),
-                    }
-                }
-                None => eprintln!(
-                    "qwen4exp packed_profile_warning: detail tick sum overflowed for layer={:?} mixer={:?}",
-                    coarse.label.layer, coarse.label.mixer,
-                ),
-            }
+            emit_qwen4exp_packed_detail_residual(profile, parent);
         }
     }
     for stage in &profile.stages {
         let scope = stage.label.scope.as_str();
         eprintln!(
-            "qwen4exp packed_profile_stage: scope={scope} name={} layer={:?} mixer={:?} samples={}..{} ticks={} gpu_ms={:.3} fraction={:.6}",
+            "qwen4exp packed_profile_stage: scope={scope} depth={} name={} layer={:?} mixer={:?} samples={}..{} ticks={} gpu_ms={:.3} fraction={:.6}",
+            stage.depth,
             stage.label.name,
             stage.label.layer,
             stage.label.mixer,
@@ -3924,6 +3889,63 @@ fn emit_qwen4exp_packed_timestamp_profile(profile: &Qwen4ExpPackedPrefillProfile
             stage.gpu_ms,
             stage.fraction_of_gpu,
         );
+    }
+}
+
+fn emit_qwen4exp_packed_detail_residual(
+    profile: &Qwen4ExpPackedPrefillProfile,
+    parent: &Qwen4ExpPackedProfileStageTiming,
+) {
+    let details = profile
+        .stages
+        .iter()
+        .filter(|stage| {
+            stage.label.scope == Qwen4ExpPackedProfileScope::Detail
+                && stage.depth == parent.depth + 1
+                && stage.label.layer == parent.label.layer
+                && stage.label.mixer == parent.label.mixer
+                && stage.start_sample >= parent.start_sample
+                && stage.end_sample <= parent.end_sample
+        })
+        .try_fold((0_u64, 0.0_f64), |(ticks, gpu_ms), stage| {
+            ticks
+                .checked_add(stage.duration_ticks)
+                .map(|ticks| (ticks, gpu_ms + stage.gpu_ms))
+        });
+    match details {
+        Some((0, _)) => {}
+        Some((detail_ticks, detail_gpu_ms)) => {
+            match parent.duration_ticks.checked_sub(detail_ticks) {
+                Some(residual_ticks) => {
+                    let residual_gpu_ms = parent.gpu_ms - detail_gpu_ms;
+                    if parent.label.scope == Qwen4ExpPackedProfileScope::Coarse {
+                        eprintln!(
+                            "qwen4exp packed_profile_detail_residual: layer={:?} mixer={:?} coarse_ticks={} detail_ticks={detail_ticks} residual_ticks={residual_ticks} coarse_gpu_ms={:.3} detail_gpu_ms={detail_gpu_ms:.3} residual_gpu_ms={residual_gpu_ms:.3}",
+                            parent.label.layer,
+                            parent.label.mixer,
+                            parent.duration_ticks,
+                            parent.gpu_ms,
+                        );
+                    } else {
+                        eprintln!(
+                            "qwen4exp packed_profile_moe_residual: layer={:?} mixer={:?} parent_ticks={} detail_ticks={detail_ticks} residual_ticks={residual_ticks} parent_gpu_ms={:.3} detail_gpu_ms={detail_gpu_ms:.3} residual_gpu_ms={residual_gpu_ms:.3}",
+                            parent.label.layer,
+                            parent.label.mixer,
+                            parent.duration_ticks,
+                            parent.gpu_ms,
+                        );
+                    }
+                }
+                None => eprintln!(
+                    "qwen4exp packed_profile_warning: detail ticks exceed parent ticks for parent={} layer={:?} mixer={:?}",
+                    parent.label.name, parent.label.layer, parent.label.mixer,
+                ),
+            }
+        }
+        None => eprintln!(
+            "qwen4exp packed_profile_warning: detail tick sum overflowed for parent={} layer={:?} mixer={:?}",
+            parent.label.name, parent.label.layer, parent.label.mixer,
+        ),
     }
 }
 

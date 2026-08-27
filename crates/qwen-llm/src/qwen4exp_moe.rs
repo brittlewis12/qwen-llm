@@ -2,22 +2,23 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
-    encode_axpy_rowwise_f32, encode_axpy_scalar_f32, encode_copy_offset_f32,
-    encode_dot_sigmoid_f32, encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_nl_f32_grouped_slots,
-    encode_moe_down_q8_0_f32_grouped_slots, encode_moe_down_weighted_sum_q8_0_f32,
-    encode_moe_route_bucket_slots_f32, encode_moe_swiglu_iq3_xxs_f32,
-    encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16,
-    encode_moe_swiglu_iq4_xs_f32, encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16,
-    encode_moe_weighted_sum_f32, encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32,
-    encode_silu_mul_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
-    encode_topk_logits_softmax_f32,
+    MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
+    encode_copy_offset_f32, encode_dot_sigmoid_f32, encode_moe_down_iq4_nl_f32,
+    encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_q8_0_f32_grouped_slots,
+    encode_moe_down_weighted_sum_q8_0_f32, encode_moe_route_bucket_slots_f32,
+    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
+    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
+    encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
+    encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk_logits_softmax_f32,
 };
 use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
-    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
+    QWEN4EXP_PACKED_PROFILE_MOE_STAGES, Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder,
+    Qwen4ExpPackedProfileSpan, begin_optional, end_optional, stage_encoder,
 };
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
@@ -1023,6 +1024,287 @@ fn encode_singleton_step(
     Ok(())
 }
 
+struct Qwen4ExpMoePackedExecution<'input, 'weights> {
+    input: &'input MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'weights>,
+    views: Qwen4ExpMoePackedViews,
+    tokens: usize,
+}
+
+impl Qwen4ExpMoePackedExecution<'_, '_> {
+    fn encode_route(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+        mixer: MixerKind,
+        mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        let g = self.weights.geometry;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.router", layer, mixer),
+        )?;
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            self.weights.router,
+            self.input,
+            &self.views.router_logits,
+            g.hidden_size,
+            g.expert_count,
+            self.tokens,
+        )?;
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.topk", layer, mixer),
+        )?;
+        encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+            ctx,
+            enc,
+            &self.views.router_logits,
+            self.weights.shared_router,
+            self.input,
+            &self.views.topk_ids,
+            &self.views.topk_weights,
+            &self.views.shared_scale,
+            g.expert_count,
+            g.experts_per_token,
+            g.hidden_size,
+            self.tokens,
+        )?;
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.bucket", layer, mixer),
+        )?;
+        encode_moe_route_bucket_slots_f32(
+            ctx,
+            enc,
+            &self.views.topk_ids,
+            &self.views.route_counts,
+            &self.views.route_slots,
+            g.expert_count,
+            self.tokens,
+            g.experts_per_token,
+        )?;
+        end_optional(&mut profile, enc, marker)?;
+        Ok(())
+    }
+
+    fn encode_routed_gate_up(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+        mixer: MixerKind,
+        mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        let g = self.weights.geometry;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.routed_gate_up", layer, mixer),
+        )?;
+        match self.weights.routed_gate.dtype {
+            GgmlType::IQ3_XXS => encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
+                ctx,
+                enc,
+                self.weights.routed_gate,
+                self.weights.routed_up,
+                self.input,
+                &self.views.route_counts,
+                &self.views.route_slots,
+                &self.views.routed_inner,
+                g.hidden_size,
+                g.routed_intermediate_size,
+                g.expert_count,
+                g.experts_per_token,
+                self.tokens,
+            )?,
+            GgmlType::IQ4_XS => encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16(
+                ctx,
+                enc,
+                self.weights.routed_gate,
+                self.weights.routed_up,
+                self.input,
+                &self.views.route_counts,
+                &self.views.route_slots,
+                &self.views.routed_inner,
+                g.hidden_size,
+                g.routed_intermediate_size,
+                g.expert_count,
+                g.experts_per_token,
+                self.tokens,
+            )?,
+            dtype => {
+                return invalid(format!("unsupported packed routed gate/up dtype {dtype:?}"));
+            }
+        }
+        end_optional(&mut profile, enc, marker)?;
+        Ok(())
+    }
+
+    fn encode_routed_down(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+        mixer: MixerKind,
+        mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        let g = self.weights.geometry;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.routed_down", layer, mixer),
+        )?;
+        match self.weights.routed_down.dtype {
+            GgmlType::IQ4_NL => encode_moe_down_iq4_nl_f32_grouped_slots(
+                ctx,
+                enc,
+                self.weights.routed_down,
+                &self.views.routed_inner,
+                &self.views.route_counts,
+                &self.views.route_slots,
+                &self.views.routed_expert_output,
+                g.routed_intermediate_size,
+                g.hidden_size,
+                g.expert_count,
+                self.tokens,
+            )?,
+            GgmlType::Q8_0 => encode_moe_down_q8_0_f32_grouped_slots(
+                ctx,
+                enc,
+                self.weights.routed_down,
+                &self.views.routed_inner,
+                &self.views.route_counts,
+                &self.views.route_slots,
+                &self.views.routed_expert_output,
+                g.routed_intermediate_size,
+                g.hidden_size,
+                g.expert_count,
+                self.tokens,
+            )?,
+            dtype => return invalid(format!("unsupported packed routed down dtype {dtype:?}")),
+        }
+        end_optional(&mut profile, enc, marker)?;
+        Ok(())
+    }
+
+    fn encode_routed_reduce(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+        mixer: MixerKind,
+        mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        let g = self.weights.geometry;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.routed_reduce", layer, mixer),
+        )?;
+        encode_moe_weighted_sum_packed_f32(
+            ctx,
+            enc,
+            &self.views.routed_expert_output,
+            &self.views.topk_weights,
+            &self.views.output,
+            g.hidden_size,
+            g.experts_per_token,
+            self.tokens,
+        )?;
+        end_optional(&mut profile, enc, marker)?;
+        Ok(())
+    }
+
+    fn encode_shared(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+        mixer: MixerKind,
+        mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        let g = self.weights.geometry;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.shared_gate_up", layer, mixer),
+        )?;
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            self.weights.shared_gate,
+            self.input,
+            &self.views.shared_gate_projection,
+            g.hidden_size,
+            g.shared_intermediate_size,
+            self.tokens,
+        )?;
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            self.weights.shared_up,
+            self.input,
+            &self.views.shared_up_projection,
+            g.hidden_size,
+            g.shared_intermediate_size,
+            self.tokens,
+        )?;
+        encode_silu_mul_f32(
+            ctx,
+            enc,
+            &self.views.shared_gate_projection,
+            &self.views.shared_up_projection,
+            &self.views.shared_inner,
+        )?;
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.shared_down", layer, mixer),
+        )?;
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            self.weights.shared_down,
+            &self.views.shared_inner,
+            &self.views.shared_output,
+            g.shared_intermediate_size,
+            g.hidden_size,
+            self.tokens,
+        )?;
+        end_optional(&mut profile, enc, marker)?;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("moe.shared_merge", layer, mixer),
+        )?;
+        encode_axpy_rowwise_f32(
+            ctx,
+            enc,
+            &self.views.shared_output,
+            &self.views.shared_scale,
+            &self.views.output,
+            g.hidden_size,
+            self.tokens,
+        )?;
+        end_optional(&mut profile, enc, marker)?;
+        Ok(())
+    }
+
+    fn into_output(self) -> MetalTensor {
+        self.views.output
+    }
+}
+
 /// Encode packed MoE rows into transaction-owned scratch.
 ///
 /// # Safety
@@ -1081,6 +1363,90 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_profiled(
     }
 }
 
+/// Encode packed MoE rows across five serial sampled encoders.
+///
+/// # Safety
+///
+/// The caller must retain the command, sample buffer, input, weights, and
+/// exclusive scratch ownership until completion or permanent abandonment. Any
+/// error requires the enclosing transaction to preserve its poisoned state
+/// until successful abandonment.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_stage_sampled(
+    ctx: &MetalContext,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    first_stage: usize,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    scratch: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+    layer: u32,
+    mixer: MixerKind,
+) -> Result<(MetalTensor, Vec<Qwen4ExpPackedProfileSpan>), Qwen4ExpMoeError> {
+    if tokens <= 1 {
+        return invalid("sampled packed MoE profiling requires at least two tokens");
+    }
+    let stage_index = |offset: usize| {
+        first_stage
+            .checked_add(offset)
+            .ok_or_else(|| Qwen4ExpMoeError::Invalid("packed MoE stage index overflow".into()))
+    };
+    let route_encoder = stage_encoder(command, samples, stage_index(0)?)?;
+    validate_encoder(ctx, &route_encoder)?;
+    if weights.geometry != scratch.geometry {
+        return invalid("packed MoE weight and scratch geometry differ");
+    }
+    validate_packed_contract(ctx, input, weights, scratch, tokens)?;
+    let views = scratch.views(tokens)?;
+    preflight_packed(ctx, weights)?;
+    let execution = Qwen4ExpMoePackedExecution {
+        input,
+        weights,
+        views,
+        tokens,
+    };
+
+    execution.encode_route(ctx, &route_encoder, layer, mixer, None)?;
+    route_encoder.end();
+    let gate_up_encoder = stage_encoder(command, samples, stage_index(1)?)?;
+    execution.encode_routed_gate_up(ctx, &gate_up_encoder, layer, mixer, None)?;
+    gate_up_encoder.end();
+    let down_encoder = stage_encoder(command, samples, stage_index(2)?)?;
+    execution.encode_routed_down(ctx, &down_encoder, layer, mixer, None)?;
+    down_encoder.end();
+    let reduce_encoder = stage_encoder(command, samples, stage_index(3)?)?;
+    execution.encode_routed_reduce(ctx, &reduce_encoder, layer, mixer, None)?;
+    reduce_encoder.end();
+    let shared_encoder = stage_encoder(command, samples, stage_index(4)?)?;
+    execution.encode_shared(ctx, &shared_encoder, layer, mixer, None)?;
+    shared_encoder.end();
+
+    let output = execution.into_output();
+    let names = [
+        "moe.routing",
+        "moe.routed_gate_up",
+        "moe.routed_down",
+        "moe.routed_reduce",
+        "moe.shared_tail",
+    ];
+    debug_assert_eq!(names.len(), QWEN4EXP_PACKED_PROFILE_MOE_STAGES);
+    let spans = names
+        .into_iter()
+        .enumerate()
+        .map(|(offset, name)| {
+            let stage = first_stage + offset;
+            Qwen4ExpPackedProfileSpan {
+                label: Qwen4ExpPackedProfileLabel::detail(name, layer, mixer),
+                depth: 2,
+                start_sample: stage * 2,
+                end_sample: stage * 2 + 1,
+            }
+        })
+        .collect();
+    Ok((output, spans))
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn encode_qwen4exp_moe_packed_motor_inner(
     ctx: &MetalContext,
@@ -1123,214 +1489,18 @@ unsafe fn encode_qwen4exp_moe_packed_motor_inner(
     }
 
     preflight_packed(ctx, weights)?;
-    let g = scratch.geometry;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.router", layer, mixer),
-    )?;
-    encode_mat_mat_dispatch(
-        ctx,
-        enc,
-        weights.router,
+    let execution = Qwen4ExpMoePackedExecution {
         input,
-        &views.router_logits,
-        g.hidden_size,
-        g.expert_count,
+        weights,
+        views,
         tokens,
-    )?;
-    end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.topk", layer, mixer),
-    )?;
-    encode_topk_logits_softmax_dot_sigmoid_packed_f32(
-        ctx,
-        enc,
-        &views.router_logits,
-        weights.shared_router,
-        input,
-        &views.topk_ids,
-        &views.topk_weights,
-        &views.shared_scale,
-        g.expert_count,
-        g.experts_per_token,
-        g.hidden_size,
-        tokens,
-    )?;
-    end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.bucket", layer, mixer),
-    )?;
-    encode_moe_route_bucket_slots_f32(
-        ctx,
-        enc,
-        &views.topk_ids,
-        &views.route_counts,
-        &views.route_slots,
-        g.expert_count,
-        tokens,
-        g.experts_per_token,
-    )?;
-    end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.routed_gate_up", layer, mixer),
-    )?;
-    match weights.routed_gate.dtype {
-        GgmlType::IQ3_XXS => encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
-            ctx,
-            enc,
-            weights.routed_gate,
-            weights.routed_up,
-            input,
-            &views.route_counts,
-            &views.route_slots,
-            &views.routed_inner,
-            g.hidden_size,
-            g.routed_intermediate_size,
-            g.expert_count,
-            g.experts_per_token,
-            tokens,
-        )?,
-        GgmlType::IQ4_XS => encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16(
-            ctx,
-            enc,
-            weights.routed_gate,
-            weights.routed_up,
-            input,
-            &views.route_counts,
-            &views.route_slots,
-            &views.routed_inner,
-            g.hidden_size,
-            g.routed_intermediate_size,
-            g.expert_count,
-            g.experts_per_token,
-            tokens,
-        )?,
-        dtype => return invalid(format!("unsupported packed routed gate/up dtype {dtype:?}")),
-    }
-    end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.routed_down", layer, mixer),
-    )?;
-    match weights.routed_down.dtype {
-        GgmlType::IQ4_NL => encode_moe_down_iq4_nl_f32_grouped_slots(
-            ctx,
-            enc,
-            weights.routed_down,
-            &views.routed_inner,
-            &views.route_counts,
-            &views.route_slots,
-            &views.routed_expert_output,
-            g.routed_intermediate_size,
-            g.hidden_size,
-            g.expert_count,
-            tokens,
-        )?,
-        GgmlType::Q8_0 => encode_moe_down_q8_0_f32_grouped_slots(
-            ctx,
-            enc,
-            weights.routed_down,
-            &views.routed_inner,
-            &views.route_counts,
-            &views.route_slots,
-            &views.routed_expert_output,
-            g.routed_intermediate_size,
-            g.hidden_size,
-            g.expert_count,
-            tokens,
-        )?,
-        dtype => return invalid(format!("unsupported packed routed down dtype {dtype:?}")),
-    }
-    end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.routed_reduce", layer, mixer),
-    )?;
-    encode_moe_weighted_sum_packed_f32(
-        ctx,
-        enc,
-        &views.routed_expert_output,
-        &views.topk_weights,
-        &views.output,
-        g.hidden_size,
-        g.experts_per_token,
-        tokens,
-    )?;
-    end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.shared_gate_up", layer, mixer),
-    )?;
-    encode_mat_mat_dispatch(
-        ctx,
-        enc,
-        weights.shared_gate,
-        input,
-        &views.shared_gate_projection,
-        g.hidden_size,
-        g.shared_intermediate_size,
-        tokens,
-    )?;
-    encode_mat_mat_dispatch(
-        ctx,
-        enc,
-        weights.shared_up,
-        input,
-        &views.shared_up_projection,
-        g.hidden_size,
-        g.shared_intermediate_size,
-        tokens,
-    )?;
-    encode_silu_mul_f32(
-        ctx,
-        enc,
-        &views.shared_gate_projection,
-        &views.shared_up_projection,
-        &views.shared_inner,
-    )?;
-    end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.shared_down", layer, mixer),
-    )?;
-    encode_mat_mat_dispatch(
-        ctx,
-        enc,
-        weights.shared_down,
-        &views.shared_inner,
-        &views.shared_output,
-        g.shared_intermediate_size,
-        g.hidden_size,
-        tokens,
-    )?;
-    end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("moe.shared_merge", layer, mixer),
-    )?;
-    encode_axpy_rowwise_f32(
-        ctx,
-        enc,
-        &views.shared_output,
-        &views.shared_scale,
-        &views.output,
-        g.hidden_size,
-        tokens,
-    )?;
-    end_optional(&mut profile, enc, marker)?;
-    Ok(views.output)
+    };
+    execution.encode_route(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+    execution.encode_routed_gate_up(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+    execution.encode_routed_down(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+    execution.encode_routed_reduce(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+    execution.encode_shared(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+    Ok(execution.into_output())
 }
 
 pub(crate) fn validate_contract(
@@ -2450,6 +2620,65 @@ mod tests {
         );
     }
 
+    fn assert_packed_scratch_bits_eq(
+        label: &str,
+        actual: &Qwen4ExpMoePackedMotorScratch,
+        expected: &Qwen4ExpMoePackedMotorScratch,
+        tokens: usize,
+    ) {
+        let actual = actual.views(tokens).unwrap();
+        let expected = expected.views(tokens).unwrap();
+        for (name, actual, expected) in [
+            (
+                "router logits",
+                &actual.router_logits,
+                &expected.router_logits,
+            ),
+            (
+                "top-k weights",
+                &actual.topk_weights,
+                &expected.topk_weights,
+            ),
+            ("shared scale", &actual.shared_scale, &expected.shared_scale),
+            ("routed inner", &actual.routed_inner, &expected.routed_inner),
+            (
+                "routed expert output",
+                &actual.routed_expert_output,
+                &expected.routed_expert_output,
+            ),
+            (
+                "shared gate projection",
+                &actual.shared_gate_projection,
+                &expected.shared_gate_projection,
+            ),
+            (
+                "shared up projection",
+                &actual.shared_up_projection,
+                &expected.shared_up_projection,
+            ),
+            ("shared inner", &actual.shared_inner, &expected.shared_inner),
+            (
+                "shared output",
+                &actual.shared_output,
+                &expected.shared_output,
+            ),
+            ("output", &actual.output, &expected.output),
+        ] {
+            assert_bits_eq(
+                &format!("{label} {name}"),
+                &read_f32(actual),
+                &read_f32(expected),
+            );
+        }
+        for (name, actual, expected) in [
+            ("top-k IDs", &actual.topk_ids, &expected.topk_ids),
+            ("route counts", &actual.route_counts, &expected.route_counts),
+            ("route slots", &actual.route_slots, &expected.route_slots),
+        ] {
+            assert_eq!(read_i32(actual), read_i32(expected), "{label} {name}");
+        }
+    }
+
     fn assert_bits_eq(label: &str, actual: &[f32], expected: &[f32]) {
         assert_eq!(actual.len(), expected.len(), "{label} length");
         for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
@@ -3319,6 +3548,58 @@ mod tests {
             command.waitUntilCompleted();
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
+
+            if tokens == 8 {
+                if let Ok(samples) =
+                    ctx.timestamp_sample_buffer(QWEN4EXP_PACKED_PROFILE_MOE_STAGES * 2)
+                {
+                    let split_scratch =
+                        Qwen4ExpMoePackedMotorScratch::new(&ctx, geometry, CAPACITY).unwrap();
+                    seed_packed_scratch(&split_scratch, tokens);
+                    let split_command = ctx.queue.commandBuffer().unwrap();
+                    let (split_output, spans) = unsafe {
+                        encode_qwen4exp_moe_packed_motor_stage_sampled(
+                            &ctx,
+                            &split_command,
+                            &samples,
+                            0,
+                            &input,
+                            weights,
+                            &split_scratch,
+                            tokens,
+                            5,
+                            MixerKind::GatedDeltaNet,
+                        )
+                    }
+                    .unwrap();
+                    split_command.commit();
+                    split_command.waitUntilCompleted();
+                    assert_eq!(split_command.status(), MTLCommandBufferStatus::Completed);
+                    assert!(split_command.error().is_none());
+                    assert_eq!(spans.len(), QWEN4EXP_PACKED_PROFILE_MOE_STAGES);
+                    for (index, span) in spans.iter().enumerate() {
+                        assert_eq!(span.depth, 2);
+                        assert_eq!(span.start_sample, index * 2);
+                        assert_eq!(span.end_sample, index * 2 + 1);
+                    }
+                    assert_packed_scratch_bits_eq(
+                        "packed common MoE monolithic/split",
+                        &split_scratch,
+                        &scratch,
+                        tokens,
+                    );
+                    assert_bits_eq(
+                        "packed common MoE returned split output",
+                        &read_f32(&split_output),
+                        &read_f32(&output),
+                    );
+                    assert_packed_scratch_guards(&split_scratch, tokens);
+                } else {
+                    eprintln!(
+                        "packed common MoE split equivalence skipped: stage counters unavailable"
+                    );
+                }
+            }
 
             let views = scratch.views(tokens).unwrap();
             let actual_ids = read_i32(&views.topk_ids);

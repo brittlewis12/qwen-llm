@@ -21,12 +21,13 @@ use crate::qwen4exp_metal::{
 use crate::qwen4exp_moe::{
     Qwen4ExpMoeError, Qwen4ExpMoeMetalGeometry, Qwen4ExpMoeMetalWeights, Qwen4ExpMoeMetalWorkspace,
     Qwen4ExpMoePackedMotorScratch, encode_qwen4exp_moe, encode_qwen4exp_moe_packed_motor,
-    encode_qwen4exp_moe_packed_motor_profiled, preflight_packed as preflight_moe_packed,
-    validate_packed_contract as validate_moe_packed,
+    encode_qwen4exp_moe_packed_motor_profiled, encode_qwen4exp_moe_packed_motor_stage_sampled,
+    preflight_packed as preflight_moe_packed, validate_packed_contract as validate_moe_packed,
 };
 use crate::qwen4exp_profile::{
-    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, Qwen4ExpPackedProfileSpan,
-    begin_optional, end_optional, is_stage_profiled_layer, stage_encoder,
+    QWEN4EXP_PACKED_PROFILE_GDN_LAYER, Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder,
+    Qwen4ExpPackedProfileSpan, begin_optional, end_optional, is_stage_profiled_layer,
+    stage_encoder, stage_profile_count,
 };
 use crate::qwen4exp_qsa::{
     Qwen4ExpQsaError, QwenSparseAttentionMetalGeometry, QwenSparseAttentionMetalWeights,
@@ -1066,6 +1067,11 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_stage_sampled(
             "layer {layer} with mixer {mixer:?} is not selected for stage profiling"
         ));
     }
+    let stage_count = stage_profile_count(layer, mixer).ok_or_else(|| {
+        Qwen4ExpPostPleBlockError::Invalid(format!(
+            "layer {layer} with mixer {mixer:?} has no stage profile plan"
+        ))
+    })?;
     let attention_encoder = stage_encoder(command, samples, first_stage)?;
     validate_and_preflight_packed(
         ctx,
@@ -1162,20 +1168,39 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_stage_sampled(
         }?;
         ffn_encoder.end();
 
-        let moe_encoder = stage_encoder(command, samples, first_stage + 4)?;
-        let moe_output = unsafe {
-            encode_qwen4exp_moe_packed_motor(
-                ctx,
-                &moe_encoder,
-                ffn.mixed(),
-                weights.moe,
-                moe,
-                tokens,
-            )
-        }?;
-        moe_encoder.end();
+        let (moe_output, moe_spans) = if layer == QWEN4EXP_PACKED_PROFILE_GDN_LAYER {
+            unsafe {
+                encode_qwen4exp_moe_packed_motor_stage_sampled(
+                    ctx,
+                    command,
+                    samples,
+                    first_stage + 4,
+                    ffn.mixed(),
+                    weights.moe,
+                    moe,
+                    tokens,
+                    layer,
+                    mixer,
+                )
+            }?
+        } else {
+            let moe_encoder = stage_encoder(command, samples, first_stage + 4)?;
+            let output = unsafe {
+                encode_qwen4exp_moe_packed_motor(
+                    ctx,
+                    &moe_encoder,
+                    ffn.mixed(),
+                    weights.moe,
+                    moe,
+                    tokens,
+                )
+            }?;
+            moe_encoder.end();
+            (output, Vec::new())
+        };
 
-        let final_encoder = stage_encoder(command, samples, first_stage + 5)?;
+        let final_stage = first_stage + stage_count - 1;
+        let final_encoder = stage_encoder(command, samples, final_stage)?;
         encode_copy_offset_f32(
             ctx,
             &final_encoder,
@@ -1186,36 +1211,54 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_stage_sampled(
         )?;
         ffn.encode_combine(&final_encoder)?;
         final_encoder.end();
-        Ok(())
+        Ok(moe_spans)
     })();
     if encoded.is_err() {
         workspace.encode_failed = true;
         workspace.state_poisoned = true;
     }
-    encoded?;
+    let moe_spans = encoded?;
 
-    let detail_names = [
+    let final_stage = first_stage + stage_count - 1;
+    let moe_first_stage = first_stage + 4;
+    let moe_last_stage = final_stage - 1;
+    let mut spans = Vec::with_capacity(7 + moe_spans.len());
+    spans.push(Qwen4ExpPackedProfileSpan {
+        label: Qwen4ExpPackedProfileLabel::coarse("post_ple_layer", Some(layer), Some(mixer)),
+        depth: 0,
+        start_sample: first_stage * 2,
+        end_sample: final_stage * 2 + 1,
+    });
+    for (offset, name) in [
         "block.attention_hc",
         "block.mixer",
         "block.mixer_bridge_attention_combine",
         "block.ffn_hc",
-        "block.moe",
-        "block.moe_bridge_ffn_combine",
-    ];
-    let mut spans = Vec::with_capacity(detail_names.len() + 1);
-    spans.push(Qwen4ExpPackedProfileSpan {
-        label: Qwen4ExpPackedProfileLabel::coarse("post_ple_layer", Some(layer), Some(mixer)),
-        start_sample: first_stage * 2,
-        end_sample: (first_stage + detail_names.len() - 1) * 2 + 1,
-    });
-    spans.extend(detail_names.into_iter().enumerate().map(|(index, name)| {
-        let stage = first_stage + index;
-        Qwen4ExpPackedProfileSpan {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let stage = first_stage + offset;
+        spans.push(Qwen4ExpPackedProfileSpan {
             label: Qwen4ExpPackedProfileLabel::detail(name, layer, mixer),
+            depth: 1,
             start_sample: stage * 2,
             end_sample: stage * 2 + 1,
-        }
-    }));
+        });
+    }
+    spans.push(Qwen4ExpPackedProfileSpan {
+        label: Qwen4ExpPackedProfileLabel::detail("block.moe", layer, mixer),
+        depth: 1,
+        start_sample: moe_first_stage * 2,
+        end_sample: moe_last_stage * 2 + 1,
+    });
+    spans.extend(moe_spans);
+    spans.push(Qwen4ExpPackedProfileSpan {
+        label: Qwen4ExpPackedProfileLabel::detail("block.moe_bridge_ffn_combine", layer, mixer),
+        depth: 1,
+        start_sample: final_stage * 2,
+        end_sample: final_stage * 2 + 1,
+    });
     Ok(spans)
 }
 

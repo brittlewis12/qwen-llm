@@ -33,9 +33,9 @@ use crate::qwen4exp_post_ple_block::{
     encode_qwen4exp_post_ple_block_packed_stage_sampled,
 };
 use crate::qwen4exp_profile::{
-    QWEN4EXP_PACKED_PROFILE_DETAIL_STAGES, Qwen4ExpPackedProfileLabel,
-    Qwen4ExpPackedProfileRecorder, Qwen4ExpPackedProfileSpan, begin_optional, end_optional,
-    is_stage_profiled_layer, packed_stage_sample_count,
+    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, Qwen4ExpPackedProfileSpan,
+    begin_optional, end_optional, is_stage_profiled_layer, packed_stage_sample_count,
+    packed_stage_span_count, stage_profile_count,
 };
 use crate::qwen4exp_qsa::{
     Qwen4ExpQsaError, QwenSparseAttentionMetalGeometry, QwenSparseAttentionPackedScratch,
@@ -2062,10 +2062,11 @@ unsafe fn encode_packed_step_layer_sampled(
         )
     }?;
     first.end();
-    let mut spans =
-        Vec::with_capacity(weights.post_ple.len() + 2 + 2 * QWEN4EXP_PACKED_PROFILE_DETAIL_STAGES);
+    let expected_spans = packed_stage_span_count(weights.post_ple.len())?;
+    let mut spans = Vec::with_capacity(expected_spans);
     spans.push(Qwen4ExpPackedProfileSpan {
         label: Qwen4ExpPackedProfileLabel::coarse("bootstrap_layers_zero_one", None, None),
+        depth: 0,
         start_sample: 0,
         end_sample: 1,
     });
@@ -2083,7 +2084,7 @@ unsafe fn encode_packed_step_layer_sampled(
         })?;
         let layer = block_weights.geometry.layer();
         let mixer = block_weights.geometry.mixer().kind();
-        if is_stage_profiled_layer(layer, mixer) {
+        if let Some(stage_count) = stage_profile_count(layer, mixer) {
             spans.extend(unsafe {
                 encode_qwen4exp_post_ple_block_packed_stage_sampled(
                     ctx,
@@ -2102,11 +2103,9 @@ unsafe fn encode_packed_step_layer_sampled(
                     tokens,
                 )
             }?);
-            next_stage = next_stage
-                .checked_add(QWEN4EXP_PACKED_PROFILE_DETAIL_STAGES)
-                .ok_or_else(|| {
-                    Qwen4ExpTextSessionError::Invalid("packed profile stage cursor overflow".into())
-                })?;
+            next_stage = next_stage.checked_add(stage_count).ok_or_else(|| {
+                Qwen4ExpTextSessionError::Invalid("packed profile stage cursor overflow".into())
+            })?;
         } else {
             let encoder = sampled_stage_encoder(command, samples, next_stage)?;
             unsafe {
@@ -2132,6 +2131,7 @@ unsafe fn encode_packed_step_layer_sampled(
                     Some(layer),
                     Some(mixer),
                 ),
+                depth: 0,
                 start_sample: next_stage * 2,
                 end_sample: next_stage * 2 + 1,
             });
@@ -2157,9 +2157,16 @@ unsafe fn encode_packed_step_layer_sampled(
     tail.end();
     spans.push(Qwen4ExpPackedProfileSpan {
         label: Qwen4ExpPackedProfileLabel::coarse("tail", None, None),
+        depth: 0,
         start_sample: tail_stage * 2,
         end_sample: tail_stage * 2 + 1,
     });
+    if spans.len() != expected_spans {
+        return invalid(format!(
+            "packed profile produced {} spans, expected {expected_spans}",
+            spans.len()
+        ));
+    }
     Ok(spans)
 }
 

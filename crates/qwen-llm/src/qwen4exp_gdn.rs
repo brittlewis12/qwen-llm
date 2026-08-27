@@ -1204,6 +1204,17 @@ mod tests {
         }
     }
 
+    fn assert_bits_eq(name: &str, actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "{name} length");
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{name}[{index}]: expected {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
     #[derive(Deserialize)]
     struct GroupedTiledOracle {
         schema_version: u32,
@@ -1420,6 +1431,368 @@ mod tests {
         assert_eq!(section.shape.iter().product::<usize>(), section.count_f32);
         let end = section.offset_f32 + section.count_f32;
         &values[section.offset_f32..end]
+    }
+
+    #[test]
+    fn packed_gdn_prep_matches_serial_released_geometry_bit_exact() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        };
+        const KEY_HEADS: usize = 16;
+        const VALUE_HEADS: usize = 48;
+        const HEAD_DIM: usize = 128;
+        const KEY_WIDTH: usize = KEY_HEADS * HEAD_DIM;
+        const VALUE_WIDTH: usize = VALUE_HEADS * HEAD_DIM;
+        const CONV_WIDTH: usize = 2 * KEY_WIDTH + VALUE_WIDTH;
+
+        for tokens in [1_usize, 2] {
+            let qkv = values(tokens * CONV_WIDTH, 50 + tokens, 0.002);
+            let initial_state = values(3 * CONV_WIDTH, 60 + tokens, 0.001);
+            let conv = values(4 * CONV_WIDTH, 70 + tokens, 0.003);
+            let qkv_gpu = tensor(&ctx, &qkv, vec![CONV_WIDTH as u64, tokens as u64]);
+            let serial_state = tensor(&ctx, &initial_state, vec![3, CONV_WIDTH as u64]);
+            let packed_state = tensor(&ctx, &initial_state, vec![3, CONV_WIDTH as u64]);
+            let conv_gpu = weight(&ctx, &conv, vec![4, CONV_WIDTH as u64]);
+            let serial_output =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * CONV_WIDTH) as u64]).unwrap();
+            let packed_query =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * KEY_WIDTH) as u64]).unwrap();
+            let packed_key =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * KEY_WIDTH) as u64]).unwrap();
+            let packed_value =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * VALUE_WIDTH) as u64]).unwrap();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for token in 0..tokens {
+                let qkv_row =
+                    qkv_gpu.view_subrange((token * CONV_WIDTH) as u64, vec![CONV_WIDTH as u64]);
+                let output_row = serial_output
+                    .view_subrange((token * CONV_WIDTH) as u64, vec![CONV_WIDTH as u64]);
+                encode_ssm_conv_silu_f32(
+                    &ctx,
+                    &encoder,
+                    &qkv_row,
+                    &serial_state,
+                    &conv_gpu,
+                    &output_row,
+                    CONV_WIDTH,
+                )
+                .unwrap();
+            }
+            crate::metal::encode_gdn_prep_packed_f32(
+                &ctx,
+                &encoder,
+                &qkv_gpu,
+                &packed_state,
+                &conv_gpu,
+                &packed_query,
+                &packed_key,
+                &packed_value,
+                tokens,
+                KEY_HEADS,
+                VALUE_HEADS,
+                HEAD_DIM,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+
+            let serial = read_f32(&serial_output);
+            let packed_query = read_f32(&packed_query);
+            let packed_key = read_f32(&packed_key);
+            let packed_value = read_f32(&packed_value);
+            for token in 0..tokens {
+                let serial_row = &serial[token * CONV_WIDTH..(token + 1) * CONV_WIDTH];
+                assert_bits_eq(
+                    &format!("tokens={tokens} token={token} query"),
+                    &packed_query[token * KEY_WIDTH..(token + 1) * KEY_WIDTH],
+                    &serial_row[..KEY_WIDTH],
+                );
+                assert_bits_eq(
+                    &format!("tokens={tokens} token={token} key"),
+                    &packed_key[token * KEY_WIDTH..(token + 1) * KEY_WIDTH],
+                    &serial_row[KEY_WIDTH..2 * KEY_WIDTH],
+                );
+                assert_bits_eq(
+                    &format!("tokens={tokens} token={token} value"),
+                    &packed_value[token * VALUE_WIDTH..(token + 1) * VALUE_WIDTH],
+                    &serial_row[2 * KEY_WIDTH..],
+                );
+            }
+            assert_bits_eq(
+                &format!("tokens={tokens} convolution state"),
+                &read_f32(&packed_state),
+                &read_f32(&serial_state),
+            );
+            assert!(
+                read_f32(&serial_state)
+                    .iter()
+                    .zip(&initial_state)
+                    .any(|(actual, initial)| actual.to_bits() != initial.to_bits())
+            );
+        }
+    }
+
+    #[test]
+    fn packed_gdn_recurrence_matches_serial_released_geometry_bit_exact() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        };
+        const KEY_HEADS: usize = 16;
+        const VALUE_HEADS: usize = 48;
+        const HEAD_DIM: usize = 128;
+        const KEY_WIDTH: usize = KEY_HEADS * HEAD_DIM;
+        const VALUE_WIDTH: usize = VALUE_HEADS * HEAD_DIM;
+        const STATE_ELEMENTS: usize = VALUE_HEADS * HEAD_DIM * HEAD_DIM;
+
+        for tokens in [1_usize, 2] {
+            let query = values(tokens * KEY_WIDTH, 80 + tokens, 0.001);
+            let key = values(tokens * KEY_WIDTH, 90 + tokens, 0.001);
+            let value = values(tokens * VALUE_WIDTH, 100 + tokens, 0.002);
+            let decay = (0..tokens * VALUE_HEADS)
+                .map(|index| 0.92 + (index % 13) as f32 * 0.0025)
+                .collect::<Vec<_>>();
+            let beta = (0..tokens * VALUE_HEADS)
+                .map(|index| 0.15 + (index % 17) as f32 * 0.01)
+                .collect::<Vec<_>>();
+            let initial_state = values(STATE_ELEMENTS, 110 + tokens, 0.0001);
+            let query_gpu = tensor(&ctx, &query, vec![KEY_WIDTH as u64, tokens as u64]);
+            let key_gpu = tensor(&ctx, &key, vec![KEY_WIDTH as u64, tokens as u64]);
+            let value_gpu = tensor(&ctx, &value, vec![VALUE_WIDTH as u64, tokens as u64]);
+            let decay_gpu = tensor(&ctx, &decay, vec![VALUE_HEADS as u64, tokens as u64]);
+            let beta_gpu = tensor(&ctx, &beta, vec![VALUE_HEADS as u64, tokens as u64]);
+            let serial_state = tensor(&ctx, &initial_state, vec![STATE_ELEMENTS as u64]);
+            let packed_state = tensor(&ctx, &initial_state, vec![STATE_ELEMENTS as u64]);
+            let serial_output =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * VALUE_WIDTH) as u64]).unwrap();
+            let packed_output =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * VALUE_WIDTH) as u64]).unwrap();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for token in 0..tokens {
+                let query_row =
+                    query_gpu.view_subrange((token * KEY_WIDTH) as u64, vec![KEY_WIDTH as u64]);
+                let key_row =
+                    key_gpu.view_subrange((token * KEY_WIDTH) as u64, vec![KEY_WIDTH as u64]);
+                let value_row =
+                    value_gpu.view_subrange((token * VALUE_WIDTH) as u64, vec![VALUE_WIDTH as u64]);
+                let decay_row =
+                    decay_gpu.view_subrange((token * VALUE_HEADS) as u64, vec![VALUE_HEADS as u64]);
+                let beta_row =
+                    beta_gpu.view_subrange((token * VALUE_HEADS) as u64, vec![VALUE_HEADS as u64]);
+                let output_row = serial_output
+                    .view_subrange((token * VALUE_WIDTH) as u64, vec![VALUE_WIDTH as u64]);
+                encode_gdn_step_decay_f32(
+                    &ctx,
+                    &encoder,
+                    &query_row,
+                    &key_row,
+                    &value_row,
+                    &decay_row,
+                    &beta_row,
+                    &serial_state,
+                    &output_row,
+                    VALUE_HEADS,
+                    KEY_HEADS,
+                    HEAD_DIM,
+                )
+                .unwrap();
+            }
+            crate::metal::encode_gdn_step_decay_packed_f32(
+                &ctx,
+                &encoder,
+                &query_gpu,
+                &key_gpu,
+                &value_gpu,
+                &decay_gpu,
+                &beta_gpu,
+                &packed_state,
+                &packed_output,
+                tokens,
+                VALUE_HEADS,
+                KEY_HEADS,
+                HEAD_DIM,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+
+            assert_bits_eq(
+                &format!("tokens={tokens} recurrence output"),
+                &read_f32(&packed_output),
+                &read_f32(&serial_output),
+            );
+            assert_bits_eq(
+                &format!("tokens={tokens} recurrence state"),
+                &read_f32(&packed_state),
+                &read_f32(&serial_state),
+            );
+            assert!(
+                read_f32(&serial_state)
+                    .iter()
+                    .zip(&initial_state)
+                    .any(|(actual, initial)| actual.to_bits() != initial.to_bits())
+            );
+        }
+    }
+
+    #[test]
+    fn packed_gdn_l2_pair_matches_serial_released_geometry_bit_exact() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        };
+        const KEY_HEADS: usize = 16;
+        const HEAD_DIM: usize = 128;
+        const KEY_WIDTH: usize = KEY_HEADS * HEAD_DIM;
+
+        for tokens in [1_usize, 2] {
+            let query = values(tokens * KEY_WIDTH, 120 + tokens, 0.003);
+            let key = values(tokens * KEY_WIDTH, 130 + tokens, 0.003);
+            let query_gpu = tensor(&ctx, &query, vec![KEY_WIDTH as u64, tokens as u64]);
+            let key_gpu = tensor(&ctx, &key, vec![KEY_WIDTH as u64, tokens as u64]);
+            let serial_query =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * KEY_WIDTH) as u64]).unwrap();
+            let serial_key =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * KEY_WIDTH) as u64]).unwrap();
+            let packed_query =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * KEY_WIDTH) as u64]).unwrap();
+            let packed_key =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * KEY_WIDTH) as u64]).unwrap();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for token in 0..tokens {
+                let query_row =
+                    query_gpu.view_subrange((token * KEY_WIDTH) as u64, vec![KEY_WIDTH as u64]);
+                let key_row =
+                    key_gpu.view_subrange((token * KEY_WIDTH) as u64, vec![KEY_WIDTH as u64]);
+                let query_out =
+                    serial_query.view_subrange((token * KEY_WIDTH) as u64, vec![KEY_WIDTH as u64]);
+                let key_out =
+                    serial_key.view_subrange((token * KEY_WIDTH) as u64, vec![KEY_WIDTH as u64]);
+                encode_l2_norm_pair_batched_f32(
+                    &ctx, &encoder, &query_row, &query_out, &key_row, &key_out, KEY_HEADS,
+                    HEAD_DIM, 1e-6,
+                )
+                .unwrap();
+            }
+            encode_l2_norm_pair_batched_f32(
+                &ctx,
+                &encoder,
+                &query_gpu,
+                &packed_query,
+                &key_gpu,
+                &packed_key,
+                tokens * KEY_HEADS,
+                HEAD_DIM,
+                1e-6,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+
+            assert_bits_eq(
+                &format!("tokens={tokens} L2 query"),
+                &read_f32(&packed_query),
+                &read_f32(&serial_query),
+            );
+            assert_bits_eq(
+                &format!("tokens={tokens} L2 key"),
+                &read_f32(&packed_key),
+                &read_f32(&serial_key),
+            );
+        }
+    }
+
+    #[test]
+    fn packed_gdn_decay_matches_serial_released_geometry_bit_exact() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        };
+        const VALUE_HEADS: usize = 48;
+        let boundary_values = [
+            -20.000_002_f32,
+            -20.0,
+            -19.999_998,
+            0.0,
+            19.999_998,
+            20.0,
+            20.000_002,
+        ];
+
+        for tokens in [1_usize, 2] {
+            let alpha = (0..tokens * VALUE_HEADS)
+                .map(|index| boundary_values[index % boundary_values.len()])
+                .collect::<Vec<_>>();
+            let dt_bias = (0..VALUE_HEADS)
+                .map(|index| ((index % 5) as f32 - 2.0) * 0.125)
+                .collect::<Vec<_>>();
+            let transformed_a = (0..VALUE_HEADS)
+                .map(|index| -0.4 - (index % 11) as f32 * 0.025)
+                .collect::<Vec<_>>();
+            let alpha_gpu = tensor(&ctx, &alpha, vec![VALUE_HEADS as u64, tokens as u64]);
+            let dt_bias_gpu = weight(&ctx, &dt_bias, vec![VALUE_HEADS as u64]);
+            let transformed_a_gpu = weight(&ctx, &transformed_a, vec![VALUE_HEADS as u64]);
+            let serial_decay =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * VALUE_HEADS) as u64]).unwrap();
+            let packed_decay =
+                MetalTensor::zeros_f32(&ctx, vec![(tokens * VALUE_HEADS) as u64]).unwrap();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for token in 0..tokens {
+                let alpha_row =
+                    alpha_gpu.view_subrange((token * VALUE_HEADS) as u64, vec![VALUE_HEADS as u64]);
+                let decay_row = serial_decay
+                    .view_subrange((token * VALUE_HEADS) as u64, vec![VALUE_HEADS as u64]);
+                encode_gdn_decay_chain_f32(
+                    &ctx,
+                    &encoder,
+                    &alpha_row,
+                    &dt_bias_gpu,
+                    &transformed_a_gpu,
+                    &decay_row,
+                )
+                .unwrap();
+            }
+            crate::metal::encode_gdn_decay_chain_batched_f32(
+                &ctx,
+                &encoder,
+                &alpha_gpu,
+                &dt_bias_gpu,
+                &transformed_a_gpu,
+                &packed_decay,
+                tokens,
+                VALUE_HEADS,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+
+            assert_bits_eq(
+                &format!("tokens={tokens} decay"),
+                &read_f32(&packed_decay),
+                &read_f32(&serial_decay),
+            );
+        }
     }
 
     #[test]

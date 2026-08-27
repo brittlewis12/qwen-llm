@@ -225,6 +225,14 @@ intact. The force-ranked lane is now:
    only if the HC result supports epilogue fusion; its routed-output read/modify/
    write dependency makes it the riskier candidate.
 
+Packed-prefill S1 is closed at released `16/48/128` GDN geometry. For one and
+two token rows, the existing packed convolution/SiLU prep, paired L2 norm,
+batched decay chain, and packed DeltaNet recurrence match serial execution
+bit-for-bit across every output and final convolution/recurrent state. The
+optional parallel prep kernel remains outside this proof and must stay disabled
+for the Flash-Next lane until separately qualified. Next isolate packed PLE,
+the first component with no existing family-level packed implementation.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

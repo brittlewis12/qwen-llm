@@ -220,29 +220,24 @@ intact. The force-ranked lane is now:
 1. Pin the upstream full-logit row for the HELLO boundary and one selected-QSA
    row above 4,096 tokens so packed qualification no longer rests solely on the
    local scalar engine.
-2. Compare generic F32 routing projection with the strict E8xP32 geometry at
-   released `H=2560`, `E=512`, and N in `{18, 2048}`. Require bitwise router
-   logits and route state. N=2,048 KEEP requires `<=14.277188 ms/layer` plus
-   ordinary GPU `<=3725.021 ms`; N=18 requires `<=0.146842 ms/layer` plus
-   ordinary GPU `<=240.308 ms`.
-3. Test count-banded standard IQ3 gate/up geometry after routing attribution.
+2. Test count-banded standard IQ3 gate/up geometry after routing attribution.
    It owns 14.56% of N=18 and 15.55% of N=2,048 command GPU time; require at
    least a 10% stage saving and 1% whole-command gain.
-4. Run an internal-SSD cold first-touch control. Keep storage/residency work
+3. Run an internal-SSD cold first-touch control. Keep storage/residency work
    separate from warm kernel claims; warm packed execution is already >99% GPU.
-5. For interactive TTFT only, consider a routed-down path that avoids material
+4. For interactive TTFT only, consider a routed-down path that avoids material
    output traffic while preserving slot order. N=18 down owns 11.08%; N=2,048
    down is parked at 6.78%, and reduction alone is decisively too small.
-6. Then price packed GDN and QSA mechanisms against their
+5. Then price packed GDN and QSA mechanisms against their
    measured 25.4% and 10.6% full-chunk command shares. Require at least 1%
    projected whole-command leverage before implementing either candidate.
-7. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
+6. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
    sum analogue of the existing Q8 fused path. Require at least `0.5 ms/token`
    median command-GPU saving with a positive paired direction.
-8. Then test each Q8 HC down projection with its
+7. Then test each Q8 HC down projection with its
    low-SiLU epilogue (97 dispatches/token) because it also removes a scratch
    pass; preserve the exact Q8 reduction and branch-count scaling.
-9. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
+8. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
    only if the HC result supports epilogue fusion; its routed-output read/modify/
    write dependency makes it the riskier candidate.
 
@@ -315,6 +310,17 @@ surviving full-chunk candidate is strict E8xP32 F32 projection, which reuses
 activation loads across eight output rows while preserving independent scalar
 K order. Reassociated float4/matrix paths and router dtype changes remain
 disqualified by discrete route sensitivity.
+
+The strict E8xP32 packet at `b799a95`/`9aca035` closes routing by shape, and
+`6df62fb` promotes the surviving full-chunk arm. A-B-A and pinned release
+replay keep all route state, endpoint logits, persistent handoff state, and
+non-router dispatch topology exact. At N=2,048, router time falls
+`15.891167 -> 2.608167 ms/layer`; warm command GPU falls
+`3764.453062 -> 3128.968083 ms`, with 99.67% of the 48-layer leaf prediction
+reaching the command. Exact N=2,048 is default on Apple M4 Max with
+`QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0` rollback. N=18 saves only
+`0.005791 ms/layer` and regresses warm command GPU, so it remains generic.
+Do not reopen selector/bucket work; count-banded standard IQ3 gate/up is next.
 
 Runtime admission now separates exact-release qualification from behavioral
 contracts. The full tokenizer fingerprint and released stop vector remain

@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Full-Chunk Router E8P32 GO
+
+Status: promote strict E8xP32 only at exact N=2,048; keep N=18 and every
+other packed shape on generic F32 routing.
+
+- Checkpoints `b799a95` and `9aca035` add the preregistered two-shape candidate
+  and pinned release A/B replay. `6df62fb` promotes only exact N=2,048 and
+  requires zero strict substitutions at N=18. Router state, endpoint and
+  continuation logits, persistent state, and non-router dispatches remain
+  bitwise/topologically equal.
+- N=18 A-B-A measured `0.205083 -> 0.199292 ms/layer`, only a 2.82% leaf
+  saving. Warm command GPU regressed `243.700542 -> 244.416292 ms`; both
+  preregistered gates fail, so interactive strict routing is killed.
+- N=2,048 A-B-A measured `15.891167 -> 2.608167 ms/layer`, an 83.59% leaf
+  saving. Warm command GPU fell `3,764.453062 -> 3,128.968083 ms`, a 16.88%
+  reduction; warm command-GPU-equivalent throughput rose
+  `544.04 -> 654.53 tok/s`.
+- The 48-layer leaf predicts `637.584 ms`; `635.485 ms` reaches the command
+  (`99.67%` conversion). All observer and raw-coverage gates passed.
+- Default exact N=2,048 on Apple M4 Max with rollback
+  `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0`. Next gate count-banded standard
+  IQ3_XXS routed gate/up; top-k/bucket fusion remains closed.
+
+Evidence: `docs/bench/2026-08-27-qwen4exp-packed-router-e8p32/`.
+
 ## 2026-08-27 - Flash-Next Full-Chunk Routing Is F32 Projection
 
 Status: prototype the strict E8xP32 F32 router geometry at N=2,048. Kill

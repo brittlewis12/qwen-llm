@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "decision": "go_full_chunk_kill_interactive",
+  "source_commits": {
+    "candidate": "b799a95a3f8e927c8040fda70d90b4013ff96f22",
+    "release_replay_fix": "9aca0359df658123b7fc43febbb548438ece027b",
+    "promotion": "6df62fb19418469c77a49491b6dcba69be2bbb7b"
+  },
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "8bdc666649440e9bdc97e16f3f75782c98478ff5",
+    "quant": "UD-Q3_K_XL"
+  },
+  "device": "Apple M4 Max",
+  "protocol": {
+    "sequence": "A-B-A",
+    "command_count": 1,
+    "profile_sample_count": 128,
+    "measured_candidate_router_substitutions": {
+      "18": 48,
+      "2048": 48
+    },
+    "promoted_router_substitutions": {
+      "18": 0,
+      "2048": 48
+    },
+    "raw_coverage": 1.0
+  },
+  "correctness": {
+    "synthetic_router_and_route_bits_equal": true,
+    "release_endpoint_logits_bits_equal": true,
+    "release_continuation_logits_bits_equal": true,
+    "prefill_persistent_state_bytes_equal": true,
+    "continuation_persistent_state_bytes_equal": true,
+    "qsa_lengths_equal": true,
+    "ple_history_equal": true,
+    "dispatch_topology_equal_except_router_kernel": true
+  },
+  "workloads": [
+    {
+      "tokens": 18,
+      "decision": "kill",
+      "output": "HELLO",
+      "arms": [
+        {
+          "name": "A1_generic",
+          "warm_command_gpu_ms": 242.8193751256913,
+          "profiled_command_gpu_ms": 244.74066658876836,
+          "router_ms_per_layer": 0.203500,
+          "observer_gpu_ratio": 1.0079124306373104,
+          "observer_wall_ratio": 1.008175
+        },
+        {
+          "name": "B_strict",
+          "warm_command_gpu_ms": 244.4162918254733,
+          "profiled_command_gpu_ms": 243.88012499548495,
+          "router_ms_per_layer": 0.199292,
+          "observer_gpu_ratio": 0.9978063375972858,
+          "observer_wall_ratio": 0.999128
+        },
+        {
+          "name": "A2_generic",
+          "warm_command_gpu_ms": 244.581708451733,
+          "profiled_command_gpu_ms": 244.41958335228264,
+          "router_ms_per_layer": 0.206666,
+          "observer_gpu_ratio": 0.9993371331794326,
+          "observer_wall_ratio": 1.000153
+        }
+      ],
+      "baseline_mean": {
+        "warm_command_gpu_ms": 243.70054178871214,
+        "router_ms_per_layer": 0.205083
+      },
+      "candidate_saving": {
+        "warm_command_gpu_ms": -0.7157500367611647,
+        "warm_command_percent": -0.2937006341913341,
+        "router_ms_per_layer": 0.005791,
+        "router_percent": 2.82373478055226
+      },
+      "gate": {
+        "router_keep_max_ms_per_layer": 0.146842,
+        "warm_command_keep_max_ms": 240.308
+      }
+    },
+    {
+      "tokens": 2048,
+      "decision": "go",
+      "arms": [
+        {
+          "name": "A1_generic",
+          "warm_command_gpu_ms": 3764.6075831726193,
+          "profiled_command_gpu_ms": 3755.826624808833,
+          "router_ms_per_layer": 15.903542,
+          "observer_gpu_ratio": 0.9976674970312879,
+          "observer_wall_ratio": 0.997862
+        },
+        {
+          "name": "B_strict",
+          "warm_command_gpu_ms": 3128.9680832996964,
+          "profiled_command_gpu_ms": 3118.744416628033,
+          "router_ms_per_layer": 2.608167,
+          "observer_gpu_ratio": 0.9967325755969738,
+          "observer_wall_ratio": 0.996726
+        },
+        {
+          "name": "A2_generic",
+          "warm_command_gpu_ms": 3764.298541471362,
+          "profiled_command_gpu_ms": 3811.366624897346,
+          "router_ms_per_layer": 15.878792,
+          "observer_gpu_ratio": 1.0125038125715677,
+          "observer_wall_ratio": 1.012852
+        }
+      ],
+      "baseline_mean": {
+        "warm_command_gpu_ms": 3764.4530623219907,
+        "router_ms_per_layer": 15.891167,
+        "warm_command_gpu_equivalent_tokens_per_second": 544.0365349479885
+      },
+      "candidate": {
+        "warm_command_gpu_equivalent_tokens_per_second": 654.5288879521754
+      },
+      "candidate_saving": {
+        "warm_command_gpu_ms": 635.4849790222943,
+        "warm_command_percent": 16.881203417909383,
+        "router_ms_per_layer": 13.283,
+        "router_percent": 83.58731614865039,
+        "leaf_to_command_conversion_percent": 99.67078518631182
+      },
+      "gate": {
+        "router_keep_max_ms_per_layer": 14.277188,
+        "warm_command_keep_max_ms": 3725.021
+      }
+    }
+  ],
+  "promotion": {
+    "default_on": true,
+    "eligible_tokens": 2048,
+    "rollback_env": "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0",
+    "interactive_shape_removed": true
+  },
+  "next": "count_banded_standard_iq3_xxs_routed_gate_up"
+}

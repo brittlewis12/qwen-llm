@@ -1851,7 +1851,9 @@ mod tests {
             long_tokens.len() + 1,
         )
         .unwrap();
-        let mut loaded = Qwen4ExpLoadedModel::load(&ctx, &gguf, capacity).unwrap();
+        let mut loaded =
+            Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, long_tokens.len())
+                .unwrap();
         let mut runner = loaded.create_runner(&ctx).unwrap();
 
         for (label, tokens) in [

@@ -8200,6 +8200,176 @@ pub fn encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_swiglu_iq4_xs_grouped_slots_n16";
+    let dimensions = checked_moe_decode_args(KERNEL, n_hidden, n_ffn, n_expert, topk)?;
+    if !n_hidden.is_multiple_of(256) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("n_hidden={n_hidden} not divisible by 256"),
+        });
+    }
+    if topk > 16 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("topk={topk} exceeds grouped kernel limit 16"),
+        });
+    }
+    let n_tokens_u32 = u32::try_from(n_tokens).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_tokens={n_tokens} exceeds u32"),
+    })?;
+    if n_tokens == 0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "n_tokens must be nonzero".into(),
+        });
+    }
+    for (name, value) in [
+        ("n_ffn", n_ffn),
+        ("n_expert", n_expert),
+        ("n_tokens", n_tokens),
+    ] {
+        if i32::try_from(value).is_err() {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name}={value} exceeds signed shader indexing"),
+            });
+        }
+    }
+
+    let slot_count = checked_moe_product(KERNEL, "route slots", &[n_tokens, topk])?;
+    if i32::try_from(slot_count).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("route slot count {slot_count} exceeds signed shader indexing"),
+        });
+    }
+    let bank_elements = checked_moe_product(KERNEL, "expert bank", &[n_hidden, n_ffn, n_expert])?;
+    let input_elements = checked_moe_product(KERNEL, "packed input", &[n_tokens, n_hidden])?;
+    let bucket_elements = checked_moe_product(KERNEL, "expert buckets", &[n_expert, n_tokens])?;
+    let inner_elements = checked_moe_product(KERNEL, "inner output", &[slot_count, n_ffn])?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "gate expert bank",
+        w_gate,
+        bank_elements,
+        &[GgmlType::IQ4_XS],
+        false,
+        2,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "up expert bank",
+        w_up,
+        bank_elements,
+        &[GgmlType::IQ4_XS],
+        false,
+        2,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "packed input",
+        x_pack,
+        input_elements,
+        &[GgmlType::F32],
+        false,
+        16,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "expert counts",
+        counts,
+        n_expert,
+        &[GgmlType::I32],
+        false,
+        4,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "expert slot buckets",
+        ids,
+        bucket_elements,
+        &[GgmlType::I32],
+        false,
+        4,
+    )?;
+    validate_moe_decode_tensor(
+        KERNEL,
+        "inner output",
+        inner,
+        inner_elements,
+        &[GgmlType::F32],
+        true,
+        4,
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        ffn: u32,
+        hidden: u32,
+        n_expert: u32,
+        topk: u32,
+        n_tokens: u32,
+        nb01: u32,
+        stride_b: u32,
+        min_count: u32,
+        max_count: u32,
+    }
+    let pso = ctx.pipeline("kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            ffn: dimensions.n_out,
+            hidden: dimensions.n_in,
+            n_expert: dimensions.n_expert,
+            topk: dimensions.topk,
+            n_tokens: n_tokens_u32,
+            nb01: dimensions.n_in / 256,
+            stride_b: dimensions.n_in,
+            min_count: 0,
+            max_count: n_tokens_u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x_pack);
+    enc.set_tensor(4, counts);
+    enc.set_tensor(5, ids);
+    enc.set_tensor(6, inner);
+    enc.set_threadgroup_memory(0, 16_384);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(16),
+            height: n_ffn.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_swiglu_iq3_s_f32_grouped_slots_n16(
     ctx: &MetalContext,
     enc: &KernelEncoder,

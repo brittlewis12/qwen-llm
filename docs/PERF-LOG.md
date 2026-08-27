@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Packed MoE Splits by Prompt Shape
+
+Status: subdivide full-chunk routing before a routing prototype. Keep standard
+IQ3 gate/up at both shapes and IQ4_NL down only for interactive TTFT.
+
+- Checkpoint `0c7ec44` factors the unchanged 11-dispatch packed motor into five
+  same-command sampled stages. N=8 route metadata, every active scratch view,
+  output, and guards are bitwise equal to the monolithic encoder.
+- N=18 passed replay and emitted `HELLO`. Warm/profiled GPU time was
+  `243.902/244.214 ms`; GPU/wall ratios were `1.001279/1.003343`, and raw
+  coverage was `1.000000`.
+- N=2,048 passed at `544.75 tok/s`. Warm/profiled GPU time was
+  `3,763.380/3,755.511 ms`; GPU/wall ratios were `0.997909/0.998065`, and raw
+  coverage was `1.000000`.
+- Crediting only 43 standard layers, N=18 attributes 14.56% to routed gate/up
+  and 11.08% to routed down; routing is only 4.40%. At N=2,048, routing grows to
+  20.28%, gate/up remains 15.55%, and down falls to 6.78%.
+- Ordered reduction is only 0.15%/0.52%, the shared tail 3.59%/1.97%, and MoE
+  boundary residual 0.026%/0.003%; all are killed by the gate. The five
+  uncredited dtype outliers remain unmeasured and parked.
+- Next split N=2,048 routing into router projection, top-k/shared selection, and
+  bucketing. KEEP requires `>=8.734 ms/layer` plus a mechanism worth
+  `>=0.873 ms/layer`; dispatch deletion alone remains insufficient.
+
+Evidence: `docs/bench/2026-08-27-qwen4exp-packed-moe-attribution/`.
+
 ## 2026-08-27 - Flash-Next Packed MoE Becomes the First Lever
 
 Status: attribute the packed MoE motor before changing kernels. Common MoE work

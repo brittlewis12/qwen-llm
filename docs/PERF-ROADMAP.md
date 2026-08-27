@@ -220,22 +220,28 @@ intact. The force-ranked lane is now:
 1. Pin the upstream full-logit row for the HELLO boundary and one selected-QSA
    row above 4,096 tokens so packed qualification no longer rests solely on the
    local scalar engine.
-2. Split the standard layer-5 packed MoE motor into routing/bucketing, routed
-   gate/up, routed down, ordered reduction, and shared-tail stages. Keep one
-   command, preserve dispatch order, and require bitwise replay plus accepted
-   raw, GPU, and wall observers at N=18 and N=2,048.
-3. Run an internal-SSD cold first-touch control. Keep storage/residency work
+2. Subdivide standard layer-5 N=2,048 routing into router projection,
+   top-k/shared-scale selection, and deterministic bucketing. Keep one command
+   and require `>=8.734 ms/layer` plus a concrete `>=0.873 ms/layer` mechanism
+   before prototyping the winning component.
+3. Test count-banded standard IQ3 gate/up geometry after routing attribution.
+   It owns 14.56% of N=18 and 15.55% of N=2,048 command GPU time; require at
+   least a 10% stage saving and 1% whole-command gain.
+4. Run an internal-SSD cold first-touch control. Keep storage/residency work
    separate from warm kernel claims; warm packed execution is already >99% GPU.
-4. After MoE attribution, price packed GDN and then QSA mechanisms against their
+5. For interactive TTFT only, consider a routed-down path that avoids material
+   output traffic while preserving slot order. N=18 down owns 11.08%; N=2,048
+   down is parked at 6.78%, and reduction alone is decisively too small.
+6. Then price packed GDN and QSA mechanisms against their
    measured 25.4% and 10.6% full-chunk command shares. Require at least 1%
    projected whole-command leverage before implementing either candidate.
-5. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
+7. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
    sum analogue of the existing Q8 fused path. Require at least `0.5 ms/token`
    median command-GPU saving with a positive paired direction.
-6. Then test each Q8 HC down projection with its
+8. Then test each Q8 HC down projection with its
    low-SiLU epilogue (97 dispatches/token) because it also removes a scratch
    pass; preserve the exact Q8 reduction and branch-count scaling.
-7. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
+9. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
    only if the HC result supports epilogue fusion; its routed-output read/modify/
    write dependency makes it the riskier candidate.
 
@@ -286,6 +292,17 @@ whole-command over-assignment from small-N layer variance. The latter bucket
 still conflates tiny copies with HC injection. The next packet therefore splits
 MoE internals; bridge output, HC, bootstrap, tail, and dispatch-only rewrites
 are parked.
+
+The five-stage MoE packet at `0c7ec44` also passes bitwise motor scratch and
+released first/warm/profile gates. Crediting only the 43 standard IQ3_XXS plus
+IQ4_NL layers, N=18 assigns 14.56% to gate/up, 11.08% to down, and only 4.40%
+to routing. At N=2,048, routing grows to 20.28%, gate/up remains 15.55%, and
+down falls to 6.78%. Ordered reduction, shared-tail, and boundary work are all
+below 5% at both shapes. The scaling is consistent with full chunks amortizing
+expert weights across roughly 40 slots per expert while router/top-k/bucket work
+still covers every token; this packet does not directly measure those traffic
+or occupancy mechanisms. Split the three routing kernels before choosing
+projection, selector, or fused-publication work.
 
 Runtime admission now separates exact-release qualification from behavioral
 contracts. The full tokenizer fingerprint and released stop vector remain

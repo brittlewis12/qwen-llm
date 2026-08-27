@@ -2,7 +2,7 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
-    encode_copy_offset_f32,
+    MetalTimestampSampleBuffer, encode_copy_offset_f32,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_gdn::{
@@ -25,7 +25,8 @@ use crate::qwen4exp_moe::{
     validate_packed_contract as validate_moe_packed,
 };
 use crate::qwen4exp_profile::{
-    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
+    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, Qwen4ExpPackedProfileSpan,
+    begin_optional, end_optional, is_stage_profiled_layer, stage_encoder,
 };
 use crate::qwen4exp_qsa::{
     Qwen4ExpQsaError, QwenSparseAttentionMetalGeometry, QwenSparseAttentionMetalWeights,
@@ -963,7 +964,7 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
             enc,
             Qwen4ExpPackedProfileLabel::detail("block.attention_combine", layer, mixer),
         )?;
-        attention.encode_combine()?;
+        attention.encode_combine(enc)?;
         end_optional(&mut profile, enc, marker)?;
 
         let marker = begin_optional(
@@ -1022,7 +1023,7 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
             enc,
             Qwen4ExpPackedProfileLabel::detail("block.ffn_combine", layer, mixer),
         )?;
-        ffn.encode_combine()?;
+        ffn.encode_combine(enc)?;
         end_optional(&mut profile, enc, marker)?;
         Ok(())
     })();
@@ -1031,6 +1032,191 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
         workspace.state_poisoned = true;
     }
     encoded
+}
+
+/// Encode one selected packed block across six serial sampled encoders.
+///
+/// # Safety
+///
+/// The caller must retain the command, sample buffer, tensors, and scratch
+/// allocations until completion or permanent abandonment. The command must be
+/// uncommitted and used only with serial encoders. On failure, the caller must
+/// preserve the poisoned block and session state until successful abandonment.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_stage_sampled(
+    ctx: &MetalContext,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    first_stage: usize,
+    start_position: usize,
+    hyper_residual: &MetalTensor,
+    bridge: &MetalTensor,
+    weights: Qwen4ExpPostPleBlockMetalWeights<'_>,
+    workspace: &mut Qwen4ExpPostPleBlockMetalWorkspace,
+    residual: &mut GatedResidualPackedScratch,
+    gdn: &GatedDeltaNetPackedScratch,
+    qsa: &QwenSparseAttentionPackedScratch,
+    moe: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+) -> Result<Vec<Qwen4ExpPackedProfileSpan>, Qwen4ExpPostPleBlockError> {
+    let layer = workspace.geometry.layer();
+    let mixer = workspace.geometry.mixer().kind();
+    if !is_stage_profiled_layer(layer, mixer) {
+        return invalid(format!(
+            "layer {layer} with mixer {mixer:?} is not selected for stage profiling"
+        ));
+    }
+    let attention_encoder = stage_encoder(command, samples, first_stage)?;
+    validate_and_preflight_packed(
+        ctx,
+        &attention_encoder,
+        start_position,
+        hyper_residual,
+        bridge,
+        weights,
+        workspace,
+        residual,
+        gdn,
+        qsa,
+        moe,
+        tokens,
+    )?;
+    reserve_command(workspace, &attention_encoder)?;
+    let encoded = (|| {
+        let g = workspace.geometry;
+        let attention = unsafe {
+            encode_gated_residual_packed_mix(
+                ctx,
+                &attention_encoder,
+                hyper_residual,
+                bridge,
+                g.eps,
+                weights.attention_residual.read,
+                weights.attention_residual.inject,
+                residual,
+                tokens,
+            )
+        }?;
+        attention_encoder.end();
+
+        let mixer_encoder = stage_encoder(command, samples, first_stage + 1)?;
+        let mixer_output = match (weights.mixer, &mut workspace.mixer) {
+            (
+                Qwen4ExpPostPleMixerMetalWeights::GatedDeltaNet(weights),
+                Qwen4ExpPostPleMixerMetalWorkspace::GatedDeltaNet(workspace),
+            ) => unsafe {
+                encode_gated_delta_net_packed_into_workspace(
+                    ctx,
+                    &mixer_encoder,
+                    attention.mixed(),
+                    weights,
+                    workspace,
+                    gdn,
+                    tokens,
+                )
+            }?,
+            (
+                Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights),
+                Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace),
+            ) => unsafe {
+                encode_qwen_sparse_attention_text_dense_packed_motor(
+                    ctx,
+                    &mixer_encoder,
+                    attention.mixed(),
+                    weights,
+                    workspace,
+                    qsa,
+                    start_position,
+                    tokens,
+                )
+            }?,
+            _ => return invalid("packed mixer weight and workspace variants differ"),
+        };
+        mixer_encoder.end();
+
+        let combine_encoder = stage_encoder(command, samples, first_stage + 2)?;
+        encode_copy_offset_f32(
+            ctx,
+            &combine_encoder,
+            &mixer_output,
+            0,
+            bridge,
+            g.hidden_size * tokens,
+        )?;
+        attention.encode_combine(&combine_encoder)?;
+        combine_encoder.end();
+
+        let ffn_encoder = stage_encoder(command, samples, first_stage + 3)?;
+        let ffn = unsafe {
+            encode_gated_residual_packed_mix(
+                ctx,
+                &ffn_encoder,
+                hyper_residual,
+                bridge,
+                g.eps,
+                weights.ffn_residual.read,
+                weights.ffn_residual.inject,
+                residual,
+                tokens,
+            )
+        }?;
+        ffn_encoder.end();
+
+        let moe_encoder = stage_encoder(command, samples, first_stage + 4)?;
+        let moe_output = unsafe {
+            encode_qwen4exp_moe_packed_motor(
+                ctx,
+                &moe_encoder,
+                ffn.mixed(),
+                weights.moe,
+                moe,
+                tokens,
+            )
+        }?;
+        moe_encoder.end();
+
+        let final_encoder = stage_encoder(command, samples, first_stage + 5)?;
+        encode_copy_offset_f32(
+            ctx,
+            &final_encoder,
+            &moe_output,
+            0,
+            bridge,
+            g.hidden_size * tokens,
+        )?;
+        ffn.encode_combine(&final_encoder)?;
+        final_encoder.end();
+        Ok(())
+    })();
+    if encoded.is_err() {
+        workspace.encode_failed = true;
+        workspace.state_poisoned = true;
+    }
+    encoded?;
+
+    let detail_names = [
+        "block.attention_hc",
+        "block.mixer",
+        "block.mixer_bridge_attention_combine",
+        "block.ffn_hc",
+        "block.moe",
+        "block.moe_bridge_ffn_combine",
+    ];
+    let mut spans = Vec::with_capacity(detail_names.len() + 1);
+    spans.push(Qwen4ExpPackedProfileSpan {
+        label: Qwen4ExpPackedProfileLabel::coarse("post_ple_layer", Some(layer), Some(mixer)),
+        start_sample: first_stage * 2,
+        end_sample: (first_stage + detail_names.len() - 1) * 2 + 1,
+    });
+    spans.extend(detail_names.into_iter().enumerate().map(|(index, name)| {
+        let stage = first_stage + index;
+        Qwen4ExpPackedProfileSpan {
+            label: Qwen4ExpPackedProfileLabel::detail(name, layer, mixer),
+            start_sample: stage * 2,
+            end_sample: stage * 2 + 1,
+        }
+    }));
+    Ok(spans)
 }
 
 pub(crate) fn validate_and_preflight(

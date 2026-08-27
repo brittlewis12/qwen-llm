@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Packed MoE Becomes the First Lever
+
+Status: attribute the packed MoE motor before changing kernels. Common MoE work
+dominates both interactive and full-chunk prefill; command boundaries do not.
+
+- The default-off packet expands standard GDN layer 5 and QSA layer 7 into six
+  same-command sampled encoders: attention HC, mixer, bridge/combine, FFN HC,
+  MoE, and final bridge/combine. The ordinary packed path remains unchanged.
+- N=18 passed bitwise replay and emitted `HELLO`. Warm/profiled GPU time was
+  `241.746/241.816 ms`; GPU and wall observer ratios were `1.000290/1.002163`,
+  raw coverage was `1.000000`, and each block's five boundaries cost `0.002 ms`.
+- N=2,048 passed at `544.42 tok/s`. Warm/profiled GPU time was
+  `3,760.795/3,757.903 ms`; observer ratios were `0.999231/0.999372`, raw
+  coverage was `1.000000`, and boundary residuals were `0.003 ms` per block.
+- At N=2,048, GDN/QSA blocks measured `76.327/81.331 ms`. Their common MoE
+  stage measured `39.426/39.472 ms`; mixers measured `28.088/33.054 ms`.
+  Extrapolation attributes 48.3% of the command to MoE, 25.4% to GDN, and
+  10.6% to QSA. HC is 7.2%; bridge/combine is only 3.6%.
+- At N=18, MoE is about 37.0% and bridge/combine 28.9%. Split that latter bucket
+  before any interactive copy rewrite; its tiny payload does not identify copy
+  traffic as the cause. The raw representative extrapolation over-assigns the
+  exact command by 1.44%, so retain that small-N cohort uncertainty.
+- Next split layer 5 MoE into routing, routed gate/up, routed down, ordered
+  reduction, and shared-tail stages. Keep only a mechanism with at least 1%
+  projected whole-command leverage; park bridge, HC, bootstrap, tail, and
+  dispatch-only work meanwhile.
+
+Evidence: `docs/bench/2026-08-27-qwen4exp-packed-stage-attribution/`.
+
 ## 2026-08-27 - Flash-Next Packed Attribution Closes the Warm Gap
 
 Status: treat warm packed prefill as GPU-bound, separate cold first-touch from

@@ -30,10 +30,12 @@ use crate::qwen4exp_post_ple_block::{
     Qwen4ExpPostPleBlockMetalWorkspace, Qwen4ExpPostPleMixerMetalGeometry,
     encode_qwen4exp_post_ple_block, encode_qwen4exp_post_ple_block_packed,
     encode_qwen4exp_post_ple_block_packed_profiled,
+    encode_qwen4exp_post_ple_block_packed_stage_sampled,
 };
 use crate::qwen4exp_profile::{
-    Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, Qwen4ExpPackedProfileSpan,
-    begin_optional, end_optional,
+    QWEN4EXP_PACKED_PROFILE_DETAIL_STAGES, Qwen4ExpPackedProfileLabel,
+    Qwen4ExpPackedProfileRecorder, Qwen4ExpPackedProfileSpan, begin_optional, end_optional,
+    is_stage_profiled_layer, packed_stage_sample_count,
 };
 use crate::qwen4exp_qsa::{
     Qwen4ExpQsaError, QwenSparseAttentionMetalGeometry, QwenSparseAttentionPackedScratch,
@@ -1387,18 +1389,23 @@ pub(crate) fn encode_qwen4exp_text_packed_layer_sampled<'a>(
     if token_ids.len() <= 1 {
         return invalid("sampled packed profile requires at least two tokens");
     }
-    let stage_count = weights
-        .post_ple
-        .len()
-        .checked_add(2)
-        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("stage count overflow".into()))?;
-    let expected_samples = stage_count.checked_mul(2).ok_or_else(|| {
-        Qwen4ExpTextSessionError::Invalid("packed stage sample count overflow".into())
-    })?;
+    let expected_samples = packed_stage_sample_count(weights.post_ple.len())?;
     if samples.sample_count() != expected_samples {
         return invalid(format!(
             "packed layer profile has {} timestamp samples, expected {expected_samples}",
             samples.sample_count()
+        ));
+    }
+    let detailed_blocks = weights
+        .post_ple
+        .iter()
+        .filter(|weights| {
+            is_stage_profiled_layer(weights.geometry.layer(), weights.geometry.mixer().kind())
+        })
+        .count();
+    if detailed_blocks != 2 {
+        return invalid(format!(
+            "packed layer profile found {detailed_blocks} detailed blocks, expected 2"
         ));
     }
     let first = sampled_stage_encoder(command, samples, 0)?;
@@ -2055,12 +2062,14 @@ unsafe fn encode_packed_step_layer_sampled(
         )
     }?;
     first.end();
-    let mut spans = Vec::with_capacity(weights.post_ple.len() + 2);
+    let mut spans =
+        Vec::with_capacity(weights.post_ple.len() + 2 + 2 * QWEN4EXP_PACKED_PROFILE_DETAIL_STAGES);
     spans.push(Qwen4ExpPackedProfileSpan {
         label: Qwen4ExpPackedProfileLabel::coarse("bootstrap_layers_zero_one", None, None),
         start_sample: 0,
         end_sample: 1,
     });
+    let mut next_stage = 1;
     for index in 0..weights.post_ple.len() {
         let block_weights = weights.post_ple.get(index).copied().ok_or_else(|| {
             Qwen4ExpTextSessionError::Invalid(format!(
@@ -2072,36 +2081,73 @@ unsafe fn encode_packed_step_layer_sampled(
                 "packed post-PLE workspace index {index} is absent"
             ))
         })?;
-        let stage = index + 1;
-        let encoder = sampled_stage_encoder(command, samples, stage)?;
-        unsafe {
-            encode_qwen4exp_post_ple_block_packed(
-                ctx,
-                &encoder,
-                start_position,
-                &views.hyper_residual,
-                &views.bridge,
-                block_weights,
-                block,
-                &mut packed.residual,
-                &packed.gdn,
-                &packed.qsa,
-                &packed.moe,
-                tokens,
-            )
-        }?;
-        encoder.end();
-        spans.push(Qwen4ExpPackedProfileSpan {
-            label: Qwen4ExpPackedProfileLabel::coarse(
-                "post_ple_layer",
-                Some(block_weights.geometry.layer()),
-                Some(block_weights.geometry.mixer().kind()),
-            ),
-            start_sample: stage * 2,
-            end_sample: stage * 2 + 1,
-        });
+        let layer = block_weights.geometry.layer();
+        let mixer = block_weights.geometry.mixer().kind();
+        if is_stage_profiled_layer(layer, mixer) {
+            spans.extend(unsafe {
+                encode_qwen4exp_post_ple_block_packed_stage_sampled(
+                    ctx,
+                    command,
+                    samples,
+                    next_stage,
+                    start_position,
+                    &views.hyper_residual,
+                    &views.bridge,
+                    block_weights,
+                    block,
+                    &mut packed.residual,
+                    &packed.gdn,
+                    &packed.qsa,
+                    &packed.moe,
+                    tokens,
+                )
+            }?);
+            next_stage = next_stage
+                .checked_add(QWEN4EXP_PACKED_PROFILE_DETAIL_STAGES)
+                .ok_or_else(|| {
+                    Qwen4ExpTextSessionError::Invalid("packed profile stage cursor overflow".into())
+                })?;
+        } else {
+            let encoder = sampled_stage_encoder(command, samples, next_stage)?;
+            unsafe {
+                encode_qwen4exp_post_ple_block_packed(
+                    ctx,
+                    &encoder,
+                    start_position,
+                    &views.hyper_residual,
+                    &views.bridge,
+                    block_weights,
+                    block,
+                    &mut packed.residual,
+                    &packed.gdn,
+                    &packed.qsa,
+                    &packed.moe,
+                    tokens,
+                )
+            }?;
+            encoder.end();
+            spans.push(Qwen4ExpPackedProfileSpan {
+                label: Qwen4ExpPackedProfileLabel::coarse(
+                    "post_ple_layer",
+                    Some(layer),
+                    Some(mixer),
+                ),
+                start_sample: next_stage * 2,
+                end_sample: next_stage * 2 + 1,
+            });
+            next_stage = next_stage.checked_add(1).ok_or_else(|| {
+                Qwen4ExpTextSessionError::Invalid("packed profile stage cursor overflow".into())
+            })?;
+        }
     }
-    let tail_stage = weights.post_ple.len() + 1;
+    let tail_stage = next_stage;
+    if (tail_stage + 1) * 2 != samples.sample_count() {
+        return invalid(format!(
+            "packed profile used {} stages before a {}-sample tail",
+            tail_stage + 1,
+            samples.sample_count()
+        ));
+    }
     let tail = sampled_stage_encoder(command, samples, tail_stage)?;
     let last_hyper = views.hyper_residual.view_subrange(
         ((tokens - 1) * workspace.geometry.hyper_width()) as u64,

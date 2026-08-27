@@ -70,8 +70,8 @@ use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft
 use qwen_llm::qwen4exp::Qwen4ExpConfig;
 use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpLayerProfile, Qwen4ExpLayerStage, Qwen4ExpLoadedModel, Qwen4ExpPackedPrefillProfile,
-    Qwen4ExpPackedProfileOutcome, Qwen4ExpPackedProfileScope, Qwen4ExpPrefillTiming,
-    Qwen4ExpRuntimeError, Qwen4ExpSessionCapacity, Qwen4ExpTokenTiming,
+    Qwen4ExpPackedProfileOutcome, Qwen4ExpPackedProfileSampling, Qwen4ExpPackedProfileScope,
+    Qwen4ExpPrefillTiming, Qwen4ExpRuntimeError, Qwen4ExpSessionCapacity, Qwen4ExpTokenTiming,
 };
 use qwen_llm::runtime::{
     LoadedModel, LoadedModelConfig, PrefetchPolicy, PrefetchResidencyProbe, PreparedCheckpoint,
@@ -3813,8 +3813,12 @@ fn emit_qwen4exp_packed_profile(
         .zip(outcome.token.gpu_ms)
         .map(|(baseline, profiled)| profiled / baseline);
     let observer_wall_ratio = outcome.token.total_wall_ms / warm.total_wall_ms;
+    let observer_gpu_accepted =
+        observer_gpu_ratio.is_some_and(|ratio| (0.985..=1.015).contains(&ratio));
+    let observer_wall_accepted = (0.98..=1.02).contains(&observer_wall_ratio);
+    let observer_accepted = observer_gpu_accepted && observer_wall_accepted;
     eprintln!(
-        "qwen4exp packed_profile: sampling={} sampling_fallback={:?} position={} command_gpu_ms={:?} runtime_wall_ms={:.3} encode_cpu_ms={:.3} preflight_ms={:.3} stage_inputs_ms={:.3} graph_encode_ms={:.3} encode_unattributed_ms={:.3} commit_return_ms={:.3} root_wait_ms={:.3} child_publication_ms={:.3} root_publish_ms={:.3} release_total_ms={:.3} observer_gpu_ratio={observer_gpu_ratio:?} observer_wall_ratio={observer_wall_ratio:.6} logits_copy_ms={profiled_copy_ms:.3} packet_ms={packet_ms:.3}",
+        "qwen4exp packed_profile: sampling={} sampling_fallback={:?} position={} command_gpu_ms={:?} runtime_wall_ms={:.3} encode_cpu_ms={:.3} preflight_ms={:.3} stage_inputs_ms={:.3} graph_encode_ms={:.3} encode_unattributed_ms={:.3} commit_return_ms={:.3} root_wait_ms={:.3} child_publication_ms={:.3} root_publish_ms={:.3} release_total_ms={:.3} observer_gpu_ratio={observer_gpu_ratio:?} observer_wall_ratio={observer_wall_ratio:.6} observer_accepted={observer_accepted} logits_copy_ms={profiled_copy_ms:.3} packet_ms={packet_ms:.3}",
         outcome.sampling.as_str(),
         outcome.sampling_fallback.as_deref(),
         outcome.token.position,
@@ -3831,9 +3835,9 @@ fn emit_qwen4exp_packed_profile(
         outcome.command.root_publish_ms,
         outcome.command.release_total_ms,
     );
-    if observer_gpu_ratio.is_none_or(|ratio| !(0.98..=1.02).contains(&ratio)) {
+    if !observer_accepted {
         eprintln!(
-            "qwen4exp packed_profile_warning: observer GPU acceptance failed; ratio={observer_gpu_ratio:?}"
+            "qwen4exp packed_profile_warning: observer acceptance failed; gpu_ratio={observer_gpu_ratio:?} wall_ratio={observer_wall_ratio:.6}"
         );
     }
 }
@@ -3845,19 +3849,67 @@ fn emit_qwen4exp_packed_timestamp_profile(profile: &Qwen4ExpPackedPrefillProfile
         .filter(|stage| stage.label.scope == Qwen4ExpPackedProfileScope::Coarse)
         .map(|stage| stage.gpu_ms)
         .sum::<f64>();
+    let raw_accepted = (0.995..=1.005).contains(&profile.raw_coverage_assuming_ns);
     eprintln!(
-        "qwen4exp packed_profile_timestamps: sampling={} sample_count={} sampled_span_ticks={} raw_span_ms_assuming_ns={:.3} raw_coverage_assuming_ns={:.6} coarse_gpu_ms={coarse_gpu_ms:.3}",
+        "qwen4exp packed_profile_timestamps: sampling={} sample_count={} sampled_span_ticks={} raw_span_ms_assuming_ns={:.3} raw_coverage_assuming_ns={:.6} raw_accepted={raw_accepted} coarse_gpu_ms={coarse_gpu_ms:.3}",
         profile.sampling.as_str(),
         profile.sample_count,
         profile.sampled_span_ticks,
         profile.raw_span_ms_assuming_ns,
         profile.raw_coverage_assuming_ns,
     );
-    if !(0.98..=1.02).contains(&profile.raw_coverage_assuming_ns) {
+    if !raw_accepted {
         eprintln!(
             "qwen4exp packed_profile_warning: raw timestamp coverage failed; coverage={:.6}",
             profile.raw_coverage_assuming_ns,
         );
+    }
+    if profile.sampling == Qwen4ExpPackedProfileSampling::EncoderStage {
+        for coarse in profile.stages.iter().filter(|stage| {
+            stage.label.scope == Qwen4ExpPackedProfileScope::Coarse
+                && stage.label.name == "post_ple_layer"
+        }) {
+            let details = profile
+                .stages
+                .iter()
+                .filter(|stage| {
+                    stage.label.scope == Qwen4ExpPackedProfileScope::Detail
+                        && stage.label.layer == coarse.label.layer
+                        && stage.label.mixer == coarse.label.mixer
+                        && stage.start_sample >= coarse.start_sample
+                        && stage.end_sample <= coarse.end_sample
+                })
+                .try_fold((0_u64, 0.0_f64), |(ticks, gpu_ms), stage| {
+                    ticks
+                        .checked_add(stage.duration_ticks)
+                        .map(|ticks| (ticks, gpu_ms + stage.gpu_ms))
+                });
+            match details {
+                Some((0, _)) => {}
+                Some((detail_ticks, detail_gpu_ms)) => {
+                    match coarse.duration_ticks.checked_sub(detail_ticks) {
+                        Some(residual_ticks) => {
+                            let residual_gpu_ms = coarse.gpu_ms - detail_gpu_ms;
+                            eprintln!(
+                                "qwen4exp packed_profile_detail_residual: layer={:?} mixer={:?} coarse_ticks={} detail_ticks={detail_ticks} residual_ticks={residual_ticks} coarse_gpu_ms={:.3} detail_gpu_ms={detail_gpu_ms:.3} residual_gpu_ms={residual_gpu_ms:.3}",
+                                coarse.label.layer,
+                                coarse.label.mixer,
+                                coarse.duration_ticks,
+                                coarse.gpu_ms,
+                            );
+                        }
+                        None => eprintln!(
+                            "qwen4exp packed_profile_warning: detail ticks exceed coarse ticks for layer={:?} mixer={:?}",
+                            coarse.label.layer, coarse.label.mixer,
+                        ),
+                    }
+                }
+                None => eprintln!(
+                    "qwen4exp packed_profile_warning: detail tick sum overflowed for layer={:?} mixer={:?}",
+                    coarse.label.layer, coarse.label.mixer,
+                ),
+            }
+        }
     }
     for stage in &profile.stages {
         let scope = stage.label.scope.as_str();

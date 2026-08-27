@@ -294,7 +294,7 @@ impl GatedResidualMetalRead<'_, '_, '_> {
 #[must_use = "encode the packed residual block, then call encode_combine"]
 pub(crate) struct GatedResidualPackedRead<'scratch, 'resources, 'pass> {
     ctx: &'pass MetalContext,
-    encoder: &'pass KernelEncoder,
+    command: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     hyper_input: &'resources MetalTensor,
     block_output: &'resources MetalTensor,
     inject: &'resources MetalTensor,
@@ -309,7 +309,14 @@ impl GatedResidualPackedRead<'_, '_, '_> {
         &self.mixed
     }
 
-    pub(crate) fn encode_combine(self) -> Result<(), Qwen4ExpMetalError> {
+    pub(crate) fn encode_combine(self, enc: &KernelEncoder) -> Result<(), Qwen4ExpMetalError> {
+        validate_encoder(self.ctx, enc)?;
+        let command = enc.parent_command_buffer();
+        if !std::ptr::addr_eq(Retained::as_ptr(&command), Retained::as_ptr(&self.command)) {
+            return Err(invalid(
+                "packed HC combine encoder belongs to a different command",
+            ));
+        }
         let hyper_hidden = self.scratch.branch_count * self.scratch.hidden_size;
         let injection = self.scratch.prefix_view(
             "packed HC injection",
@@ -319,7 +326,7 @@ impl GatedResidualPackedRead<'_, '_, '_> {
         )?;
         encode_mat_mat_dispatch(
             self.ctx,
-            self.encoder,
+            enc,
             self.inject,
             &self.normalized,
             &injection,
@@ -329,7 +336,7 @@ impl GatedResidualPackedRead<'_, '_, '_> {
         )?;
         encode_hc_injection_packed(
             self.ctx,
-            self.encoder,
+            enc,
             self.block_output,
             &injection,
             self.hyper_input,
@@ -392,14 +399,14 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
 /// The caller must hold every tensor and exclusive logical ownership of
 /// `hyper_input` and `scratch` until the command completes successfully or is
 /// permanently abandoned. If `block_output` is GPU-produced, it must be
-/// encoded on this same serial encoder after `mixed()` is consumed and before
+/// encoded on the same command after `mixed()` is consumed and before
 /// `encode_combine()`. No other command may access these resources, and
 /// abandonment requires permanently discarding every command reference. Any
 /// encode or command failure makes mutable contents indeterminate; the caller
 /// must poison the enclosing transaction rather than expose or reuse them.
-pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'pass>(
-    ctx: &'pass MetalContext,
-    enc: &'pass KernelEncoder,
+pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx>(
+    ctx: &'ctx MetalContext,
+    enc: &KernelEncoder,
     hyper_input: &'resources MetalTensor,
     block_output: &'resources MetalTensor,
     eps: f32,
@@ -407,7 +414,7 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'pas
     inject: &'resources MetalTensor,
     scratch: &'scratch mut GatedResidualPackedScratch,
     tokens: usize,
-) -> Result<GatedResidualPackedRead<'scratch, 'resources, 'pass>, Qwen4ExpMetalError> {
+) -> Result<GatedResidualPackedRead<'scratch, 'resources, 'ctx>, Qwen4ExpMetalError> {
     validate_encoder(ctx, enc)?;
     validate_and_preflight_gated_residual_packed_mix(
         ctx,
@@ -490,7 +497,7 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'pas
     )?;
     Ok(GatedResidualPackedRead {
         ctx,
-        encoder: enc,
+        command: enc.parent_command_buffer(),
         hyper_input,
         block_output,
         inject,
@@ -2299,7 +2306,15 @@ mod tests {
             }
             .unwrap();
             let mixed = read.mixed().clone();
-            read.encode_combine().unwrap();
+            if tokens == 8 {
+                encoder.end();
+                let combine_encoder = KernelEncoder::begin(&command);
+                read.encode_combine(&combine_encoder).unwrap();
+                combine_encoder.end();
+            } else {
+                read.encode_combine(&encoder).unwrap();
+                encoder.end();
+            }
             let census = crate::metal::dispatch_census_take();
             let q8_matvec = if crate::metal::mat_vec_q8_0_lcpp_enabled() {
                 "kernel_mat_vec_q8_0_f32_lcpp"
@@ -2359,7 +2374,6 @@ mod tests {
                 projection_kernels, expected_projection_kernels,
                 "N={tokens} packed HC projection sequence: {census:#?}"
             );
-            encoder.end();
             command.commit();
             command.waitUntilCompleted();
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
@@ -2508,7 +2522,7 @@ mod tests {
         }
         .unwrap();
         let mixed = read.mixed().clone();
-        read.encode_combine().unwrap();
+        read.encode_combine(&encoder).unwrap();
         encoder.end();
         command.commit();
         command.waitUntilCompleted();

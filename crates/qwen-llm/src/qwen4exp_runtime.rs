@@ -7,8 +7,9 @@ use crate::metal::{
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_ple::PleIq4NlTable;
 use crate::qwen4exp_profile::{
+    QWEN4EXP_PACKED_PROFILE_GDN_LAYER, QWEN4EXP_PACKED_PROFILE_QSA_LAYER,
     QWEN4EXP_PACKED_PROFILE_SAMPLE_CAPACITY, Qwen4ExpPackedProfileRecorder,
-    Qwen4ExpPackedProfileSpan,
+    Qwen4ExpPackedProfileSpan, packed_stage_sample_count,
 };
 pub use crate::qwen4exp_profile::{Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileScope};
 use crate::qwen4exp_residency::{
@@ -748,12 +749,7 @@ fn execute_qwen4exp_text_packed_profiled_sync(
                 "profiled packed prefill position range is empty or overflows".into(),
             )
         })?;
-    let stage_sample_count = weights
-        .post_ple
-        .len()
-        .checked_add(2)
-        .and_then(|stages| stages.checked_mul(2))
-        .ok_or_else(|| Qwen4ExpRuntimeError::Invalid("packed sample count overflow".into()))?;
+    let stage_sample_count = packed_stage_sample_count(weights.post_ple.len())?;
     let (samples, sampling, sampling_fallback) =
         match ctx.timestamp_dispatch_sample_buffer(QWEN4EXP_PACKED_PROFILE_SAMPLE_CAPACITY) {
             Ok(samples) => (
@@ -890,19 +886,21 @@ fn encode_qwen4exp_text_packed_dispatch_profiled<'a>(
         .geometry
         .post_ple()
         .iter()
-        .find(|block| block.mixer().kind() == MixerKind::GatedDeltaNet)
+        .find(|block| block.layer() == QWEN4EXP_PACKED_PROFILE_GDN_LAYER)
+        .filter(|block| block.mixer().kind() == MixerKind::GatedDeltaNet)
         .map(|block| block.layer())
         .ok_or_else(|| {
-            Qwen4ExpRuntimeError::Invalid("packed profile requires a post-PLE GDN layer".into())
+            Qwen4ExpRuntimeError::Invalid("packed profile requires GDN layer 5".into())
         })?;
     let detailed_qsa_layer = weights
         .geometry
         .post_ple()
         .iter()
-        .find(|block| block.mixer().kind() == MixerKind::QwenSparseAttention)
+        .find(|block| block.layer() == QWEN4EXP_PACKED_PROFILE_QSA_LAYER)
+        .filter(|block| block.mixer().kind() == MixerKind::QwenSparseAttention)
         .map(|block| block.layer())
         .ok_or_else(|| {
-            Qwen4ExpRuntimeError::Invalid("packed profile requires a post-PLE QSA layer".into())
+            Qwen4ExpRuntimeError::Invalid("packed profile requires QSA layer 7".into())
         })?;
     let mut recorder =
         Qwen4ExpPackedProfileRecorder::new(samples, detailed_gdn_layer, detailed_qsa_layer)?;

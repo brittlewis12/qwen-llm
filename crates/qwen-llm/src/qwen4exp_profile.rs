@@ -1,7 +1,50 @@
 use crate::metal::{KernelEncoder, MetalError, MetalTimestampSampleBuffer};
 use crate::qwen4exp::MixerKind;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::MTLCommandBuffer;
 
 pub(crate) const QWEN4EXP_PACKED_PROFILE_SAMPLE_CAPACITY: usize = 256;
+pub(crate) const QWEN4EXP_PACKED_PROFILE_GDN_LAYER: u32 = 5;
+pub(crate) const QWEN4EXP_PACKED_PROFILE_QSA_LAYER: u32 = 7;
+pub(crate) const QWEN4EXP_PACKED_PROFILE_DETAIL_STAGES: usize = 6;
+
+pub(crate) fn is_stage_profiled_layer(layer: u32, mixer: MixerKind) -> bool {
+    matches!(
+        (layer, mixer),
+        (QWEN4EXP_PACKED_PROFILE_GDN_LAYER, MixerKind::GatedDeltaNet)
+            | (
+                QWEN4EXP_PACKED_PROFILE_QSA_LAYER,
+                MixerKind::QwenSparseAttention
+            )
+    )
+}
+
+pub(crate) fn packed_stage_sample_count(post_ple_blocks: usize) -> Result<usize, MetalError> {
+    post_ple_blocks
+        .checked_add(2)
+        .and_then(|base| base.checked_add(2 * (QWEN4EXP_PACKED_PROFILE_DETAIL_STAGES - 1)))
+        .and_then(|stages| stages.checked_mul(2))
+        .ok_or_else(|| MetalError::Counter("packed profile sample count overflow".into()))
+}
+
+pub(crate) fn stage_encoder(
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    stage: usize,
+) -> Result<KernelEncoder, MetalError> {
+    let start_sample = stage
+        .checked_mul(2)
+        .ok_or_else(|| MetalError::Counter("packed stage sample index overflow".into()))?;
+    let end_sample = start_sample + 1;
+    if end_sample >= samples.sample_count() {
+        return Err(MetalError::Counter(format!(
+            "packed stage {stage} timestamp index {end_sample} exceeds {} samples",
+            samples.sample_count()
+        )));
+    }
+    KernelEncoder::try_begin_sampled(command, samples, start_sample, end_sample, false)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -198,4 +241,18 @@ pub(crate) fn end_optional(
         recorder.end(enc, marker)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_stage_plan_expands_only_standard_layers_five_and_seven() {
+        assert!(is_stage_profiled_layer(5, MixerKind::GatedDeltaNet));
+        assert!(is_stage_profiled_layer(7, MixerKind::QwenSparseAttention));
+        assert!(!is_stage_profiled_layer(5, MixerKind::QwenSparseAttention));
+        assert!(!is_stage_profiled_layer(3, MixerKind::QwenSparseAttention));
+        assert_eq!(packed_stage_sample_count(46).unwrap(), 116);
+    }
 }

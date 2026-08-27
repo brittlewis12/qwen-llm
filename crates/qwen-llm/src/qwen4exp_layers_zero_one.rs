@@ -823,7 +823,7 @@ pub(crate) unsafe fn encode_qwen4exp_layers_zero_one_packed_staged(
             )
         }?;
         encode_copy_offset_f32(ctx, enc, &mixer_output, 0, bridge, hidden * tokens)?;
-        attention.encode_combine()?;
+        attention.encode_combine(enc)?;
 
         let ffn = unsafe {
             encode_gated_residual_packed_mix(
@@ -849,7 +849,7 @@ pub(crate) unsafe fn encode_qwen4exp_layers_zero_one_packed_staged(
             )
         }?;
         encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, hidden * tokens)?;
-        ffn.encode_combine()?;
+        ffn.encode_combine(enc)?;
 
         let ple_output = unsafe {
             encode_qwen4exp_ple_packed_into_workspace(
@@ -897,7 +897,7 @@ pub(crate) unsafe fn encode_qwen4exp_layers_zero_one_packed_staged(
             )
         }?;
         encode_copy_offset_f32(ctx, enc, &mixer_output, 0, bridge, hidden * tokens)?;
-        attention.encode_combine()?;
+        attention.encode_combine(enc)?;
 
         let ffn = unsafe {
             encode_gated_residual_packed_mix(
@@ -923,7 +923,7 @@ pub(crate) unsafe fn encode_qwen4exp_layers_zero_one_packed_staged(
             )
         }?;
         encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, hidden * tokens)?;
-        ffn.encode_combine()?;
+        ffn.encode_combine(enc)?;
         Ok(())
     })();
     if encoded.is_err() {

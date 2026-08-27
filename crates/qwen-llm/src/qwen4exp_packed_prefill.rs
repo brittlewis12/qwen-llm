@@ -878,7 +878,7 @@ fn encode_layer(
         )
     }?;
     encode_copy_offset_f32(ctx, enc, &gdn_output, 0, bridge, hidden * tokens)?;
-    attention.encode_combine()?;
+    attention.encode_combine(enc)?;
 
     let ffn = unsafe {
         encode_gated_residual_packed_mix(
@@ -897,7 +897,7 @@ fn encode_layer(
         encode_qwen4exp_moe_packed_motor(ctx, enc, ffn.mixed(), moe_weights, moe, tokens)
     }?;
     encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, hidden * tokens)?;
-    ffn.encode_combine()?;
+    ffn.encode_combine(enc)?;
     Ok(())
 }
 

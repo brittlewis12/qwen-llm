@@ -551,7 +551,9 @@ impl NativeTokenizer {
         let pre = required_str(g, "tokenizer.ggml.pre")?;
         let architecture = g.architecture();
         let pretokenizer = match (architecture.as_deref(), model, pre) {
-            (Some("qwen35" | "qwen35moe"), "gpt2", "qwen35") => PretokenizerKind::Qwen35,
+            (Some("qwen35" | "qwen35moe" | "qwen4exp"), "gpt2", "qwen35") => {
+                PretokenizerKind::Qwen35
+            }
             (Some("deepseek4"), "gpt2", "joyai-llm") => PretokenizerKind::JoyAi,
             _ => {
                 return Err(TokError::UnsupportedNativeTokenizer {
@@ -1697,6 +1699,33 @@ mod tests {
 
     fn fixture() -> Option<&'static str> {
         fixtures().into_iter().next()
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_TOKENIZER_GGUF to the pinned Flash-Next release"]
+    fn released_qwen4exp_tokenizer_preserves_specials_and_exact_bytes() {
+        let path = std::env::var_os("QWEN4EXP_TOKENIZER_GGUF")
+            .expect("QWEN4EXP_TOKENIZER_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released Flash-Next GGUF");
+        assert_eq!(gguf.architecture().as_deref(), Some("qwen4exp"));
+        let tokenizer = NativeTokenizer::from_gguf(&gguf).expect("load Flash-Next tokenizer");
+        assert_eq!(tokenizer.n_vocab(), 248_320);
+        assert_eq!(tokenizer.bos(), Some(248_044));
+        assert_eq!(tokenizer.eos(), Some(248_046));
+        let text = "<|im_start|>user\nnaive cafe: 你好 👋\n<|im_end|>\n";
+        let tokens = tokenizer
+            .encode(text, false)
+            .expect("encode Flash-Next text");
+        let decoded = tokens
+            .iter()
+            .flat_map(|&token| {
+                tokenizer
+                    .try_decode_piece_bytes_exact(token)
+                    .expect("decode exact Flash-Next piece")
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(decoded, text.as_bytes());
     }
 
     fn joyai_reference_tokens(text: &str) -> Vec<String> {

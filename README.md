@@ -56,6 +56,7 @@ Use `run` for an ordinary model-templated request:
 qwen run -m MODEL --user "Explain this"
 qwen run -m MODEL --system "Be concise" --user "Explain this"
 qwen run -m Qwen3.8-27B.gguf --reasoning-effort low --user "Explain this"
+qwen run -m Qwen3.8-Flash-Next-Q3_K_XL.gguf --no-thinking --user "Explain this"
 qwen run -m MODEL --user -
 ```
 
@@ -75,16 +76,22 @@ Raw model input remains explicit. On supported detected model families,
 qwen run -m MODEL --raw-prompt '<exact model input>'
 ```
 
-On the validated Qwen3.8 27B surface, `--reasoning-effort low|medium|xhigh`
-selects the exact upstream ordinary-chat transition; omission remains xhigh.
-The option rejects `high`, raw prompts, `--no-thinking`, and non-Qwen3.8
-identities rather than inventing semantics. On validated Qwen3.6 35B A3B and
-Qwen3.8 27B surfaces, `--no-thinking` uses the model-family non-thinking
-transition. DeepSeek ordinary chat is already non-thinking, so that option is
-idempotent there. These controls do not suppress CLI diagnostics. Existing flat
-invocations and resident `--requests-jsonl FILE|-` remain supported; `qwen -h`
-shows the common path and `qwen --help` shows expanded documented
-legacy/research options. Legacy flags cannot be combined with `qwen run`.
+On validated Qwen3.8 27B and Flash-Next surfaces,
+`--reasoning-effort low|medium|xhigh` selects the exact upstream ordinary-chat
+transition; omission remains xhigh. The option rejects `high`, raw prompts,
+`--no-thinking`, and non-Qwen3.8 identities rather than inventing semantics. On
+validated Qwen3.6 35B A3B and Qwen3.8 surfaces, `--no-thinking` uses the
+model-family non-thinking transition. DeepSeek ordinary chat is already
+non-thinking, so that option is idempotent there. These controls do not suppress
+CLI diagnostics. Existing flat invocations and resident
+`--requests-jsonl FILE|-` remain supported; `qwen -h` shows the common path and
+`qwen --help` shows expanded documented legacy/research options. Legacy flags
+cannot be combined with `qwen run`.
+
+Flash-Next currently uses request-shaped QSA caches and a correctness-first
+token-at-a-time prompt path for the released `UD-Q3_K_XL` profile. Its CLI lane
+is serial single-turn text generation; batching, serve, prefix caches, and
+packed prefill remain explicit follow-ups rather than silent fallbacks.
 
 Qwen3.8 support is text-only. Modern messages do not accept image content,
 developer or tool roles, structured tool calls/results, response-format

@@ -3577,9 +3577,11 @@ mod tests {
         validate_cli(&args, ExplicitCliOptions::default()).unwrap();
         validate_model_family(args.batch_size, Some(ModelFamily::Qwen35)).unwrap();
         assert!(validate_model_family(args.batch_size, Some(ModelFamily::Qwen35Moe)).is_err());
+        assert!(validate_model_family(args.batch_size, Some(ModelFamily::Qwen4Exp)).is_err());
         assert!(validate_model_family(args.batch_size, Some(ModelFamily::DeepSeek4)).is_err());
         validate_model_family(Some(16), Some(ModelFamily::Qwen35Moe)).unwrap();
         assert!(validate_model_family(Some(16), Some(ModelFamily::Qwen35)).is_err());
+        assert!(validate_model_family(Some(16), Some(ModelFamily::Qwen4Exp)).is_err());
         assert!(validate_model_family(Some(16), Some(ModelFamily::DeepSeek4)).is_err());
         let mut moe_args = test_args();
         moe_args.batch_size = Some(MOE_BATCH16_WIDTH);

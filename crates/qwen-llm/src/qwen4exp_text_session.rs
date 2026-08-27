@@ -6,12 +6,12 @@ use crate::metal::{
     host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
-use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
+use crate::qwen4exp::{MixerKind, PleHistory, Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_gdn::GatedDeltaNetMetalGeometry;
 use crate::qwen4exp_layers_zero_one::{
     Qwen4ExpLayersZeroOneError, Qwen4ExpLayersZeroOneMetalGeometry,
     Qwen4ExpLayersZeroOneMetalWeights, Qwen4ExpLayersZeroOneMetalWorkspace,
-    encode_qwen4exp_layers_zero_one,
+    encode_qwen4exp_layers_zero_one_staged,
 };
 use crate::qwen4exp_metal::{
     GatedResidualMetalReadWeights, GatedResidualMetalScratch, Qwen4ExpMetalError,
@@ -653,14 +653,16 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         if self.pending_length.is_some() {
             return invalid("cannot reset while a token update is pending");
         }
+        self.committed_length = 0;
+        self.state_poisoned = true;
+        self.encode_failed = true;
+        self.logits_ready = false;
         self.zero_one.reset()?;
         for block in &mut self.post_ple {
             block.reset()?;
         }
-        self.committed_length = 0;
         self.state_poisoned = false;
         self.encode_failed = false;
-        self.logits_ready = false;
         Ok(())
     }
 
@@ -868,7 +870,7 @@ pub fn encode_qwen4exp_text_token<'a>(
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
     validate_encoder(ctx, enc)?;
     validate_and_preflight(ctx, enc, token_id, position, weights, workspace)?;
-    crate::qwen4exp_layers_zero_one::stage_ple_rows(
+    let next_history = crate::qwen4exp_layers_zero_one::stage_ple_rows(
         token_id,
         position as u64,
         table,
@@ -880,7 +882,15 @@ pub fn encode_qwen4exp_text_token<'a>(
     }
     reserve_command(workspace, enc, position + 1)?;
     workspace.logits_ready = false;
-    if let Err(error) = encode_step(ctx, enc, token_id, position, table, weights, workspace) {
+    if let Err(error) = encode_step(
+        ctx,
+        enc,
+        token_id,
+        position,
+        next_history,
+        weights,
+        workspace,
+    ) {
         workspace.encode_failed = true;
         workspace.state_poisoned = true;
         return Err(error);
@@ -1033,17 +1043,16 @@ fn encode_step(
     enc: &KernelEncoder,
     token_id: u32,
     position: usize,
-    table: PleIq4NlTable<'_>,
+    next_history: PleHistory,
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<(), Qwen4ExpTextSessionError> {
-    let zero_one = encode_qwen4exp_layers_zero_one(
+    let zero_one = encode_qwen4exp_layers_zero_one_staged(
         ctx,
         enc,
         token_id,
-        position as u64,
-        table,
         weights.zero_one,
+        next_history,
         &mut workspace.zero_one,
     )?;
     zero_one
@@ -1517,6 +1526,7 @@ mod tests {
     use crate::gguf::GgufFile;
     use crate::metal::MetalMemoryAdmissionReason;
     use crate::qwen4exp_layer_zero::Qwen4ExpResidualMetalWeights;
+    use crate::qwen4exp_layers_zero_one::encode_qwen4exp_layers_zero_one;
     use crate::qwen4exp_moe::Qwen4ExpMoeMetalWeights;
     use crate::qwen4exp_post_ple_block::Qwen4ExpPostPleMixerMetalWeights;
     use crate::qwen4exp_residency::Qwen4ExpMetalWeightPlan;

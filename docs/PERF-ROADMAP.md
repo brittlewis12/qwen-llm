@@ -187,9 +187,9 @@ command through final HC and Q6_K logits. Its exact logical session inventory is
 `143,207,764 + 25,356 * capacity` bytes, or 6.324 GiB at 262K, before the
 page-rounded per-buffer upper bound and 512 MiB dynamic reserve. Profile this
 baseline before changing command topology. In particular, the parent currently
-pre-stages PLE rows for transaction safety and the layers-zero-one child stages
-the same rows again; a prepared-child handoff should remove that duplicate only
-if host staging is visible in end-to-end decode attribution.
+pre-stages PLE rows for transaction safety and passes the prepared history into
+layers zero-one without a second gather. Profile the remaining single host
+gather and 1,440-byte upload before introducing batching or overlap.
 
 ## Serve Follow-ups — 2026-08-20
 

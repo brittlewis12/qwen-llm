@@ -86,6 +86,13 @@ fn snapshot_cache_bytes(mib: u64) -> Result<u64> {
         .context("--snapshot-cache-mib byte conversion overflow")
 }
 
+fn supports_serve_family(family: Option<ModelFamily>) -> bool {
+    matches!(
+        family,
+        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::DeepSeek4)
+    )
+}
+
 /// `qwen serve` entry: resident model, serial accept loop.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
@@ -100,10 +107,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .with_context(|| format!("open model {}", invocation.model.display()))?;
     let family = ModelFamily::detect(&gguf);
     ensure!(
-        matches!(
-            family,
-            Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::DeepSeek4)
-        ),
+        supports_serve_family(family),
         "qwen serve supports Qwen3.5/3.6-family and DeepSeek V4 models (docs/SERVE.md)"
     );
     let model_id = invocation
@@ -350,6 +354,15 @@ mod tests {
         assert!(error.to_string().contains("requires a loopback"));
         let listener = bind_loopback("127.0.0.1:0").unwrap();
         assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
+
+    #[test]
+    fn serve_family_gate_rejects_flash_next_until_it_has_a_backend() {
+        assert!(supports_serve_family(Some(ModelFamily::Qwen35)));
+        assert!(supports_serve_family(Some(ModelFamily::Qwen35Moe)));
+        assert!(supports_serve_family(Some(ModelFamily::DeepSeek4)));
+        assert!(!supports_serve_family(Some(ModelFamily::Qwen4Exp)));
+        assert!(!supports_serve_family(None));
     }
 
     #[test]

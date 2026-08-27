@@ -762,6 +762,7 @@ mod tests {
     };
     use crate::qwen4exp_qsa::{QwenSparseAttentionMetalGeometry, QwenSparseAttentionMetalWeights};
     use crate::qwen4exp_residency::Qwen4ExpMetalWeightPlan;
+    use crate::qwen4exp_runtime::forward_qwen4exp_text_token_sync;
     use crate::qwen4exp_text_session::{
         Qwen4ExpTextSessionMetalGeometry, Qwen4ExpTextSessionMetalWeights,
         Qwen4ExpTextSessionMetalWorkspace, encode_qwen4exp_text_token,
@@ -1699,26 +1700,14 @@ mod tests {
         position: usize,
     ) -> (Vec<f32>, Vec<f32>) {
         let weights = fixture.text_weights(tail, geometry);
-        let command = ctx.queue.commandBuffer().unwrap();
-        let encoder = KernelEncoder::begin(&command);
-        let pending = encode_qwen4exp_text_token(
+        let logits = forward_qwen4exp_text_token_sync(
             ctx,
-            &encoder,
             token,
-            position,
             fixture.table.table(),
             &weights,
             workspace,
         )
         .unwrap();
-        assert_eq!(pending.position(), position);
-        assert_eq!(pending.vocab_size(), VOCAB);
-        drop(pending);
-        assert!(workspace.logits().is_err());
-        encoder.end();
-        command.commit();
-        workspace.release_after().unwrap();
-        let logits = workspace.logits().unwrap();
         assert_eq!(logits.position(), position);
         assert_eq!(logits.n_elements(), VOCAB as u64);
         assert_eq!(logits.dtype(), GgmlType::F32);

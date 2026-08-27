@@ -67,6 +67,8 @@ use qwen_llm::moe_batch16::MOE_BATCH16_WIDTH;
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
+use qwen_llm::qwen4exp::Qwen4ExpConfig;
+use qwen_llm::qwen4exp_runtime::{Qwen4ExpLoadedModel, Qwen4ExpSessionCapacity};
 use qwen_llm::runtime::{
     LoadedModel, LoadedModelConfig, PrefetchPolicy, PrefetchResidencyProbe, PreparedCheckpoint,
     Runtime, RuntimeError, Sequence, SequenceConfig, prefetch_opened_gguf,
@@ -96,6 +98,10 @@ const DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR: &str = ".qwen-dsv4-model-identity
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const DEEPSEEK_V4_PREFETCH_ENV: &str = "QWEN_DSV4_PREFETCH";
 const DEEPSEEK_V4_PREFETCH_AUTO_THRESHOLD: f64 = 0.98;
+const QWEN4EXP_CHAT_TEMPLATE_SHA256: [u8; 32] = [
+    0x12, 0x82, 0x7f, 0x24, 0xb7, 0x42, 0xea, 0x4e, 0x80, 0xcd, 0xc1, 0x2d, 0xbc, 0xf9, 0x62, 0x22,
+    0x27, 0x05, 0x6b, 0x9f, 0x79, 0x72, 0x52, 0xa3, 0x14, 0x92, 0x63, 0xd4, 0xf9, 0xaa, 0xad, 0xce,
+];
 #[cfg(feature = "dsv4-diagnostics")]
 const DEEPSEEK_V4_TEMPORAL_WINDOW_ENV: &str = "QWEN_DSV4_TEMPORAL_WINDOW";
 #[cfg(feature = "dsv4-diagnostics")]
@@ -643,6 +649,7 @@ struct ExplicitCliOptions {
     durable_prefix_cache_max_mib: bool,
     durable_prefix_cache_max_entry_mib: bool,
     durable_prefix_cache_min_tokens: bool,
+    deepseek_v4_multigroup_selector: bool,
 }
 
 impl ExplicitCliOptions {
@@ -658,6 +665,7 @@ impl ExplicitCliOptions {
             durable_prefix_cache_max_mib: command_line("durable_prefix_cache_max_mib"),
             durable_prefix_cache_max_entry_mib: command_line("durable_prefix_cache_max_entry_mib"),
             durable_prefix_cache_min_tokens: command_line("durable_prefix_cache_min_tokens"),
+            deepseek_v4_multigroup_selector: command_line("deepseek_v4_multigroup_selector"),
         }
     }
 }
@@ -2481,6 +2489,9 @@ fn run() -> Result<()> {
         args.reasoning.is_none() && !args.preserve_reasoning,
         "--reasoning and --preserve-reasoning apply to DeepSeek V4 --messages requests only"
     );
+    if model_family == Some(ModelFamily::Qwen4Exp) {
+        return run_qwen4exp_single_turn(&model_path, &gguf, &args, explicit_options);
+    }
 
     if has_single_turn_input(&args) {
         return run_single_turn(&model_path, gguf, &args, staged_integrity);
@@ -2734,7 +2745,10 @@ fn prepare_modern_run_prompt(
     ensure!(
         matches!(
             family,
-            ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::DeepSeek4
+            ModelFamily::Qwen35
+                | ModelFamily::Qwen35Moe
+                | ModelFamily::Qwen4Exp
+                | ModelFamily::DeepSeek4
         ),
         "`qwen run` does not support model family {}",
         family.architecture_name()
@@ -2743,10 +2757,15 @@ fn prepare_modern_run_prompt(
         family != ModelFamily::DeepSeek4 || args.max_context_tokens.is_none(),
         "--max-context-tokens is not supported for DeepSeek V4 single-turn generation; remove --max-context-tokens"
     );
-    if run.no_thinking && matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
+    if run.no_thinking
+        && matches!(
+            family,
+            ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp
+        )
+    {
         ensure!(
             validated_qwen_no_thinking_model(family, gguf),
-            "--no-thinking is currently validated only for Qwen3.6 35B A3B and Qwen3.8 27B identities with the qwen35 tokenizer; omit --no-thinking to use this model's default generation behavior"
+            "--no-thinking is currently validated only for Qwen3.6 35B A3B, Qwen3.8 27B, and Qwen3.8-Flash-Next identities with the qwen35 tokenizer; omit --no-thinking to use this model's default generation behavior"
         );
     }
     let qwen38 = validated_qwen38_prompt_model(family, gguf);
@@ -2759,7 +2778,7 @@ fn prepare_modern_run_prompt(
         cli::AcquiredRunInput::RawPrompt(prompt) => (prompt, PromptSource::Inline),
         cli::AcquiredRunInput::User { system, user } => {
             let prompt = match family {
-                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe if qwen38 => {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp if qwen38 => {
                     render_qwen38_single_turn_prompt(
                         &user,
                         system.as_deref(),
@@ -2775,6 +2794,11 @@ fn prepare_modern_run_prompt(
                         QwenGenerationMode::Auto
                     },
                 ),
+                ModelFamily::Qwen4Exp => {
+                    bail!(
+                        "Qwen3.8-Flash-Next chat rendering requires the released tokenizer.chat_template identity; use --raw-prompt for untemplated input"
+                    )
+                }
                 ModelFamily::DeepSeek4 => render_deepseek_v4_0731_single_turn_prompt(
                     &user,
                     system.as_deref(),
@@ -2787,7 +2811,7 @@ fn prepare_modern_run_prompt(
         cli::AcquiredRunInput::Messages { document, source } => {
             let messages = parse_strict_messages_input(&document, &source)?;
             let prompt = match family {
-                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe if qwen38 => {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp if qwen38 => {
                     render_qwen38_messages_prompt_with_generation(
                         &messages,
                         true,
@@ -2804,6 +2828,11 @@ fn prepare_modern_run_prompt(
                         } else {
                             QwenGenerationMode::Auto
                         },
+                    )
+                }
+                ModelFamily::Qwen4Exp => {
+                    bail!(
+                        "Qwen3.8-Flash-Next chat rendering requires the released tokenizer.chat_template identity; use --raw-prompt for untemplated input"
                     )
                 }
                 ModelFamily::DeepSeek4 => render_deepseek_v4_0731_messages_prompt(
@@ -2833,7 +2862,7 @@ fn resolve_qwen38_generation_mode(
     );
     ensure!(
         reasoning_effort.is_none() || qwen38,
-        "--reasoning-effort is currently validated only for Qwen3.8 27B identities with the qwen35 tokenizer"
+        "--reasoning-effort is currently validated only for Qwen3.8 27B and Qwen3.8-Flash-Next identities with the qwen35 tokenizer"
     );
     if !qwen38 {
         return Ok(None);
@@ -2859,6 +2888,17 @@ pub(crate) fn validated_qwen_no_thinking_model(family: ModelFamily, gguf: &GgufF
 }
 
 pub(crate) fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile) -> bool {
+    if family == ModelFamily::Qwen4Exp {
+        return validated_qwen4exp_prompt_identity(
+            family,
+            gguf.get_str("tokenizer.ggml.model"),
+            gguf.get_str("tokenizer.ggml.pre"),
+            gguf.get_str("tokenizer.chat_template")
+                .is_some_and(qwen4exp_chat_template_matches),
+            Qwen4ExpConfig::from_gguf(gguf)
+                .is_ok_and(|config| config == Qwen4ExpConfig::flash_next_reference()),
+        );
+    }
     validated_qwen38_prompt_identity(
         family,
         gguf.get_str("general.name"),
@@ -2871,6 +2911,24 @@ pub(crate) fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile
         gguf.get_u64("qwen35.embedding_length"),
         gguf.get_u64("qwen35.feed_forward_length"),
     )
+}
+
+fn validated_qwen4exp_prompt_identity(
+    family: ModelFamily,
+    tokenizer_model: Option<&str>,
+    tokenizer_pre: Option<&str>,
+    released_chat_template: bool,
+    released_config: bool,
+) -> bool {
+    family == ModelFamily::Qwen4Exp
+        && tokenizer_model == Some("gpt2")
+        && tokenizer_pre == Some("qwen35")
+        && released_chat_template
+        && released_config
+}
+
+fn qwen4exp_chat_template_matches(template: &str) -> bool {
+    Sha256::digest(template.as_bytes()).as_slice() == QWEN4EXP_CHAT_TEMPLATE_SHA256
 }
 
 fn validated_qwen38_prompt_identity(
@@ -3113,6 +3171,118 @@ fn deepseek_v4_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Res
         DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
     );
     Ok(required)
+}
+
+fn qwen4exp_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Result<usize> {
+    ensure!(
+        prompt_tokens > 0,
+        "Qwen3.8-Flash-Next prompt tokenized to zero tokens"
+    );
+    ensure!(max_tokens > 0, "--tokens must be >= 1");
+    prompt_tokens
+        .checked_add(max_tokens - 1)
+        .context("Qwen3.8-Flash-Next forward budget overflow")
+}
+
+fn validate_qwen4exp_generation_mode(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
+    let mut unsupported = deepseek_v4_shared_unsupported_options(args, explicit);
+    if args.requests_jsonl.is_some() {
+        unsupported.push("--requests-jsonl");
+    }
+    if args.batch_size.is_some() {
+        unsupported.push("--batch-size");
+    }
+    if args.concurrency.is_some() {
+        unsupported.push("--concurrency");
+    }
+    if args.execution_mode.is_some() {
+        unsupported.push("--execution-mode");
+    }
+    if args.drafter.is_some() {
+        unsupported.push("--drafter");
+    }
+    if args.durable_prefix_cache.is_some() {
+        unsupported.push("--durable-prefix-cache");
+    }
+    if explicit.durable_prefix_cache_max_mib {
+        unsupported.push("--durable-prefix-cache-max-mib");
+    }
+    if explicit.durable_prefix_cache_max_entry_mib {
+        unsupported.push("--durable-prefix-cache-max-entry-mib");
+    }
+    if explicit.durable_prefix_cache_min_tokens {
+        unsupported.push("--durable-prefix-cache-min-tokens");
+    }
+    if args.request_stats_jsonl.is_some() {
+        unsupported.push("--request-stats-jsonl");
+    }
+    if args.sampling_attribution {
+        unsupported.push("--sampling-attribution");
+    }
+    if args.sampled_structural {
+        unsupported.push("--sampled-structural");
+    }
+    if args.trace_request.is_some() {
+        unsupported.push("--trace-request");
+    }
+    if args.messages_preserve_thinking || args.messages_strip_thinking {
+        unsupported.push("legacy message thinking controls");
+    }
+    ensure!(
+        !explicit.deepseek_v4_multigroup_selector
+            && args.deepseek_v4_multigroup_selector == DeepSeekV4MultigroupSelectorArg::Auto,
+        "--deepseek-v4-multigroup-selector applies only to DeepSeek V4"
+    );
+    ensure!(
+        unsupported.is_empty(),
+        "Qwen3.8-Flash-Next currently supports request-shaped serial single-turn generation only; unsupported options: {}",
+        unsupported.join(", ")
+    );
+    ensure!(
+        has_single_turn_input(args),
+        "Qwen3.8-Flash-Next generation requires --prompt, --prompt-file, --messages, or `qwen run --user`"
+    );
+    ensure!(
+        args.prepared_prompt.is_some() || args.messages.is_none(),
+        "Qwen3.8-Flash-Next legacy --messages rendering is not supported; use `qwen run --messages`"
+    );
+    Ok(())
+}
+
+fn checked_qwen4exp_token_id(token: i32, vocab_size: u32, purpose: &str) -> Result<u32> {
+    let token =
+        u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
+    ensure!(
+        token < vocab_size,
+        "{purpose} token ID {token} is outside vocabulary {vocab_size}"
+    );
+    Ok(token)
+}
+
+fn validate_qwen4exp_stop_contract(
+    config: &Qwen4ExpConfig,
+    tokenizer_eos: Option<u64>,
+    stop_tokens: &[i32],
+) -> Result<()> {
+    let ple_eos = config
+        .ple
+        .as_ref()
+        .context("Qwen3.8-Flash-Next release requires PLE")?
+        .eos_token_id;
+    ensure!(
+        ple_eos == 248_044,
+        "Qwen3.8-Flash-Next PLE boundary token {ple_eos} differs from released token 248044"
+    );
+    ensure!(
+        tokenizer_eos == Some(248_046),
+        "Qwen3.8-Flash-Next tokenizer EOS {:?} differs from released token 248046",
+        tokenizer_eos
+    );
+    ensure!(
+        stop_tokens.contains(&248_046),
+        "Qwen3.8-Flash-Next producer stop tokens omit released tokenizer EOS 248046"
+    );
+    Ok(())
 }
 
 fn deepseek_v4_forward_budget_for_context_limit(context_tokens: usize) -> Result<usize> {
@@ -3478,6 +3648,161 @@ fn emit_deepseek_v4_stage_profile(
             aggregate.boundary_ms,
         );
     }
+}
+
+fn run_qwen4exp_single_turn(
+    model_path: &Path,
+    gguf: &GgufFile,
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Result<()> {
+    validate_qwen4exp_generation_mode(args, explicit)?;
+    let request_t0 = Instant::now();
+    let sampling = cli_sampling_config(args)?;
+    let (prompt, prompt_source, _) = prompt_text(args)?;
+    let tokenizer_t0 = Instant::now();
+    let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;
+    let prompt_ids = tokenizer
+        .encode(&prompt, prompt_add_special_tokens(args, prompt_source))
+        .context("tokenize Qwen3.8-Flash-Next prompt")?;
+    let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
+    let required_forwards = qwen4exp_required_forwards(prompt_ids.len(), args.tokens)?;
+    let config =
+        Qwen4ExpConfig::from_gguf(gguf).context("bind Qwen3.8-Flash-Next request geometry")?;
+    ensure!(
+        config == Qwen4ExpConfig::flash_next_reference(),
+        "Qwen3.8-Flash-Next runtime requires the released architecture contract"
+    );
+    ensure!(
+        tokenizer.n_vocab() == config.vocab_size,
+        "Qwen3.8-Flash-Next tokenizer vocabulary {} differs from model vocabulary {}",
+        tokenizer.n_vocab(),
+        config.vocab_size
+    );
+    let logical_forward_limit = args.max_context_tokens.unwrap_or(required_forwards);
+    ensure!(
+        logical_forward_limit >= required_forwards,
+        "Qwen3.8-Flash-Next request requires {required_forwards} forwards, beyond --max-context-tokens {logical_forward_limit}"
+    );
+    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, logical_forward_limit)
+        .context("derive Qwen3.8-Flash-Next request-shaped session capacity")?;
+    let vocab_size = tokenizer.n_vocab();
+    let prompt_tokens = prompt_ids
+        .iter()
+        .enumerate()
+        .map(|(index, &token)| {
+            checked_qwen4exp_token_id(token, vocab_size, &format!("prompt[{index}]"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let stop_tokens = gguf
+        .stop_token_ids()
+        .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
+    validate_qwen4exp_stop_contract(
+        &config,
+        gguf.get_u64("tokenizer.ggml.eos_token_id"),
+        &stop_tokens,
+    )?;
+    for &token in &stop_tokens {
+        checked_qwen4exp_token_id(token, vocab_size, "stop")?;
+    }
+
+    eprintln!(
+        "qwen4exp: loading {} for serial generation; prompt_tokens={} max_generated_tokens={} forward_limit={} qsa_physical_capacity={}",
+        model_path.display(),
+        prompt_tokens.len(),
+        args.tokens,
+        capacity.forward_limit(),
+        capacity.qsa_physical_capacity(),
+    );
+    let load_t0 = Instant::now();
+    let ctx = MetalContext::new().context("initialize Metal for Qwen3.8-Flash-Next")?;
+    let mut loaded = Qwen4ExpLoadedModel::load(&ctx, gguf, capacity)
+        .context("load admitted Qwen3.8-Flash-Next weights and text session")?;
+    let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    let admission = loaded.admission();
+    eprintln!(
+        "qwen4exp: resident on {} in {:.1} ms; aggregate_required={:?} weight_observed={} session_observed={} session_required={:?}",
+        ctx.describe(),
+        load_ms,
+        admission.aggregate.required_bytes,
+        loaded.observed_weight_bytes(),
+        loaded.observed_session_bytes(),
+        admission.session.required_bytes,
+    );
+    let mut runner = loaded
+        .create_runner(&ctx)
+        .context("bind Qwen3.8-Flash-Next execution graph")?;
+
+    let prefill_t0 = Instant::now();
+    let mut logits = None;
+    for (index, &token) in prompt_tokens.iter().enumerate() {
+        shutdown::checkpoint()?;
+        logits = Some(
+            runner
+                .forward_token(token)
+                .with_context(|| format!("forward Qwen3.8-Flash-Next prompt token {index}"))?
+                .to_vec(),
+        );
+    }
+    let logits = logits.expect("nonempty prompt produced endpoint logits");
+    let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+    let mut sampler = Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
+    let stdout_handle = std::io::stdout();
+    let mut stdout = stdout_handle.lock();
+    let generation = generate_serial(
+        logits,
+        args.tokens,
+        &stop_tokens,
+        &mut sampler,
+        |token| {
+            let piece = tokenizer
+                .try_decode_piece_bytes_exact(token)
+                .with_context(|| format!("decode Qwen3.8-Flash-Next token {token}"))?;
+            stdout
+                .write_all(piece)
+                .with_context(|| format!("write Qwen3.8-Flash-Next token {token}"))?;
+            stdout.flush().context("flush Qwen3.8-Flash-Next token")?;
+            Ok(())
+        },
+        |token| {
+            let token = checked_qwen4exp_token_id(token, vocab_size, "generated")?;
+            Ok(runner
+                .forward_token(token)
+                .context("forward generated Qwen3.8-Flash-Next token")?
+                .to_vec())
+        },
+    )?;
+    if !generation.tokens.is_empty() {
+        writeln!(stdout)?;
+        stdout
+            .flush()
+            .context("flush Qwen3.8-Flash-Next final newline")?;
+    }
+    let prefill_tps = if prefill_ms > 0.0 {
+        prompt_tokens.len() as f64 / (prefill_ms / 1e3)
+    } else {
+        0.0
+    };
+    let decode_tps = if generation.wall_ms > 0.0 {
+        generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
+    } else {
+        0.0
+    };
+    eprintln!(
+        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} generation_ms={:.1} decode_tps={:.2} total_ms={:.1}",
+        prompt_tokens.len(),
+        generation.tokens.len(),
+        generation.transitions,
+        generation.stop_reason.as_str(),
+        tokenizer_ms,
+        load_ms,
+        prefill_ms,
+        prefill_tps,
+        generation.wall_ms,
+        decode_tps,
+        request_t0.elapsed().as_secs_f64() * 1e3,
+    );
+    Ok(())
 }
 
 fn run_deepseek_v4_single_turn(
@@ -7227,7 +7552,7 @@ fn run_requests_jsonl(
                 fixed_cohort_jsonl::CohortPlanSummary::default(),
                 fixed_cohort_jsonl::plan_summary::<MOE_BATCH16_WIDTH>(requests, args)?,
             ),
-            (Some(ModelFamily::DeepSeek4) | None, false) => (
+            (Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None, false) => (
                 fixed_cohort_jsonl::CohortPlanSummary::default(),
                 fixed_cohort_jsonl::CohortPlanSummary::default(),
             ),
@@ -7310,7 +7635,7 @@ fn run_requests_jsonl(
             fixed_cohort_economics_rejected: match model_family {
                 Some(ModelFamily::Qwen35) => dense_summary.economics_rejected_cohorts > 0,
                 Some(ModelFamily::Qwen35Moe) => moe_summary.economics_rejected_cohorts > 0,
-                Some(ModelFamily::DeepSeek4) | None => false,
+                Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None => false,
             },
             concurrency2_memory_admitted,
             dense_batch8_memory_admitted,
@@ -7326,24 +7651,33 @@ fn run_requests_jsonl(
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_policy,
                     Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_policy,
-                    Some(ModelFamily::DeepSeek4) | None => None,
+                    Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None => None,
                 },
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_plan_decision,
                     Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_plan_decision,
-                    Some(ModelFamily::DeepSeek4) | None => None,
+                    Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None => None,
                 },
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.refill_policy,
-                    Some(ModelFamily::Qwen35Moe) | Some(ModelFamily::DeepSeek4) | None => None,
+                    Some(
+                        ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4,
+                    )
+                    | None => None,
                 },
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.planned_refill_arenas,
-                    Some(ModelFamily::Qwen35Moe) | Some(ModelFamily::DeepSeek4) | None => None,
+                    Some(
+                        ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4,
+                    )
+                    | None => None,
                 },
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.planned_refill_requests,
-                    Some(ModelFamily::Qwen35Moe) | Some(ModelFamily::DeepSeek4) | None => None,
+                    Some(
+                        ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4,
+                    )
+                    | None => None,
                 },
             ))
             .context("serialize execution selection")?
@@ -11481,7 +11815,64 @@ mod tests {
     }
 
     #[test]
+    fn qwen4exp_forward_budget_accounts_for_unconsumed_final_token() {
+        assert_eq!(qwen4exp_required_forwards(18, 8).unwrap(), 25);
+        assert_eq!(qwen4exp_required_forwards(1, 1).unwrap(), 1);
+        assert!(qwen4exp_required_forwards(0, 1).is_err());
+        assert!(qwen4exp_required_forwards(1, 0).is_err());
+        assert!(qwen4exp_required_forwards(usize::MAX, 2).is_err());
+    }
+
+    #[test]
     fn qwen_no_thinking_capability_is_closed_to_the_validated_identity() {
+        assert!(validated_qwen4exp_prompt_identity(
+            ModelFamily::Qwen4Exp,
+            Some("gpt2"),
+            Some("qwen35"),
+            true,
+            true,
+        ));
+        for identity in [
+            (
+                ModelFamily::Qwen35,
+                Some("gpt2"),
+                Some("qwen35"),
+                true,
+                true,
+            ),
+            (
+                ModelFamily::Qwen4Exp,
+                Some("other"),
+                Some("qwen35"),
+                true,
+                true,
+            ),
+            (
+                ModelFamily::Qwen4Exp,
+                Some("gpt2"),
+                Some("other"),
+                true,
+                true,
+            ),
+            (
+                ModelFamily::Qwen4Exp,
+                Some("gpt2"),
+                Some("qwen35"),
+                false,
+                true,
+            ),
+            (
+                ModelFamily::Qwen4Exp,
+                Some("gpt2"),
+                Some("qwen35"),
+                true,
+                false,
+            ),
+        ] {
+            assert!(!validated_qwen4exp_prompt_identity(
+                identity.0, identity.1, identity.2, identity.3, identity.4,
+            ));
+        }
         assert!(validated_qwen36_no_thinking_identity(
             ModelFamily::Qwen35Moe,
             Some("Qwen3.6 35B A3B"),
@@ -11614,6 +12005,57 @@ mod tests {
     }
 
     #[test]
+    fn qwen4exp_stop_contract_keeps_ple_and_generation_boundaries_distinct() {
+        let config = Qwen4ExpConfig::flash_next_reference();
+        validate_qwen4exp_stop_contract(&config, Some(248_046), &[248_046]).unwrap();
+        assert!(validate_qwen4exp_stop_contract(&config, Some(248_045), &[248_046]).is_err());
+        assert!(validate_qwen4exp_stop_contract(&config, Some(248_046), &[248_044]).is_err());
+        let mut malformed = config;
+        malformed.ple.as_mut().unwrap().eos_token_id = 248_046;
+        assert!(validate_qwen4exp_stop_contract(&malformed, Some(248_046), &[248_046]).is_err());
+    }
+
+    #[test]
+    fn qwen4exp_serial_mode_rejects_inert_advanced_options() {
+        let make_args = || {
+            Args::try_parse_from(["qwen", "--model", "model.gguf", "--prompt", "hello"]).unwrap()
+        };
+        validate_qwen4exp_generation_mode(&make_args(), ExplicitCliOptions::default()).unwrap();
+
+        for explicit in [
+            ExplicitCliOptions {
+                durable_prefix_cache_max_mib: true,
+                ..ExplicitCliOptions::default()
+            },
+            ExplicitCliOptions {
+                durable_prefix_cache_max_entry_mib: true,
+                ..ExplicitCliOptions::default()
+            },
+            ExplicitCliOptions {
+                durable_prefix_cache_min_tokens: true,
+                ..ExplicitCliOptions::default()
+            },
+            ExplicitCliOptions {
+                deepseek_v4_multigroup_selector: true,
+                ..ExplicitCliOptions::default()
+            },
+        ] {
+            assert!(validate_qwen4exp_generation_mode(&make_args(), explicit).is_err());
+        }
+
+        let mut requests = make_args();
+        requests.requests_jsonl = Some(PathBuf::from("requests.jsonl"));
+        assert!(
+            validate_qwen4exp_generation_mode(&requests, ExplicitCliOptions::default()).is_err()
+        );
+        let mut concurrency = make_args();
+        concurrency.concurrency = Some(2);
+        assert!(
+            validate_qwen4exp_generation_mode(&concurrency, ExplicitCliOptions::default()).is_err()
+        );
+    }
+
+    #[test]
     fn qwen38_reasoning_effort_resolver_is_typed_and_fail_closed() {
         assert_eq!(
             resolve_qwen38_generation_mode(true, false, None).unwrap(),
@@ -11640,7 +12082,7 @@ mod tests {
             resolve_qwen38_generation_mode(false, false, Some(cli::RunReasoningEffort::Low))
                 .unwrap_err()
                 .to_string()
-                .contains("validated only for Qwen3.8 27B")
+                .contains("validated only for Qwen3.8 27B and Qwen3.8-Flash-Next")
         );
         assert_eq!(
             resolve_qwen38_generation_mode(false, false, None).unwrap(),

@@ -4,6 +4,7 @@ use crate::gguf::GgufFile;
 pub enum ModelFamily {
     Qwen35,
     Qwen35Moe,
+    Qwen4Exp,
     DeepSeek4,
 }
 
@@ -12,6 +13,7 @@ impl ModelFamily {
         match name {
             "qwen35" => Some(Self::Qwen35),
             "qwen35moe" => Some(Self::Qwen35Moe),
+            "qwen4exp" => Some(Self::Qwen4Exp),
             "deepseek4" => Some(Self::DeepSeek4),
             _ => None,
         }
@@ -27,6 +29,7 @@ impl ModelFamily {
         match self {
             Self::Qwen35 => "qwen35",
             Self::Qwen35Moe => "qwen35moe",
+            Self::Qwen4Exp => "qwen4exp",
             Self::DeepSeek4 => "deepseek4",
         }
     }
@@ -43,6 +46,11 @@ mod tests {
             Some(ModelFamily::DeepSeek4)
         );
         assert_eq!(ModelFamily::DeepSeek4.architecture_name(), "deepseek4");
+        assert_eq!(
+            ModelFamily::from_architecture_name("qwen4exp"),
+            Some(ModelFamily::Qwen4Exp)
+        );
+        assert_eq!(ModelFamily::Qwen4Exp.architecture_name(), "qwen4exp");
         assert_eq!(ModelFamily::from_architecture_name("deepseek2"), None);
     }
 }

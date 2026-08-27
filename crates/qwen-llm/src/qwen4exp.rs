@@ -1,9 +1,8 @@
 //! Qwen3.8-Flash-Next (`qwen4exp`) architecture contract and CPU references.
 //!
-//! This module deliberately does not register a runnable model family yet.
-//! It fixes the GGUF metadata contract and the stateful PLE/QSA semantics first,
-//! so later tensor binding and Metal execution have independently testable
-//! references.
+//! The architecture contract and CPU references remain independent from the
+//! runnable Metal family so metadata, PLE, and QSA semantics stay testable
+//! without model residency.
 
 use crate::gguf::{GgufError, GgufFile};
 use std::collections::HashSet;

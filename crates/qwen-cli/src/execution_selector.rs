@@ -172,6 +172,7 @@ impl ExecutionSelectionRecord {
             family: match family {
                 Some(ModelFamily::Qwen35) => "qwen35",
                 Some(ModelFamily::Qwen35Moe) => "qwen35moe",
+                Some(ModelFamily::Qwen4Exp) => "qwen4exp",
                 Some(ModelFamily::DeepSeek4) => "deepseek4",
                 None => "unknown",
             },
@@ -362,7 +363,7 @@ pub(super) fn select_qwen(input: QwenSelectionInput) -> ExecutionSelection {
                 )
             }
         }
-        Some(ModelFamily::DeepSeek4) | None => {
+        Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None => {
             serial("unsupported_family", "not_evaluated", input.moe_plan)
         }
     }

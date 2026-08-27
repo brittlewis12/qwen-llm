@@ -489,11 +489,21 @@ pub fn encode_qwen4exp_layers_zero_one<'a>(
     workspace: &'a mut Qwen4ExpLayersZeroOneMetalWorkspace,
 ) -> Result<Qwen4ExpLayersZeroOneMetalRead<'a>, Qwen4ExpLayersZeroOneError> {
     validate_and_preflight(ctx, enc, token_id, position, weights, workspace)?;
-    let (next_history, row_ids) =
-        workspace
-            .history
-            .advanced(weights.ple_config, token_id, position)?;
-    workspace.ple.stage_rows(table, &row_ids)?;
+    let next_history = stage_ple_rows(token_id, position, table, weights, workspace)?;
+    encode_qwen4exp_layers_zero_one_staged(ctx, enc, token_id, weights, next_history, workspace)
+}
+
+pub(crate) fn encode_qwen4exp_layers_zero_one_staged<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    weights: Qwen4ExpLayersZeroOneMetalWeights<'_>,
+    next_history: PleHistory,
+    workspace: &'a mut Qwen4ExpLayersZeroOneMetalWorkspace,
+) -> Result<Qwen4ExpLayersZeroOneMetalRead<'a>, Qwen4ExpLayersZeroOneError> {
+    if !workspace.ple.has_staged_rows() {
+        return invalid("layers-zero-one PLE rows were not staged by the parent");
+    }
     reserve_command(workspace, enc)?;
     workspace.pending_history = Some(next_history);
     if let Err(error) = encode_step(ctx, enc, token_id, weights, workspace) {
@@ -557,12 +567,13 @@ pub(crate) fn stage_ple_rows(
     table: PleIq4NlTable<'_>,
     weights: Qwen4ExpLayersZeroOneMetalWeights<'_>,
     workspace: &mut Qwen4ExpLayersZeroOneMetalWorkspace,
-) -> Result<(), Qwen4ExpLayersZeroOneError> {
-    let (_, row_ids) = workspace
-        .history
-        .advanced(weights.ple_config, token_id, position)?;
+) -> Result<PleHistory, Qwen4ExpLayersZeroOneError> {
+    let (next_history, row_ids) =
+        workspace
+            .history
+            .advanced(weights.ple_config, token_id, position)?;
     workspace.ple.stage_rows(table, &row_ids)?;
-    Ok(())
+    Ok(next_history)
 }
 
 fn encode_step(

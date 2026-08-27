@@ -68,6 +68,7 @@ pub mod qwen4exp_ple_metal;
 pub mod qwen4exp_post_ple_block;
 pub mod qwen4exp_qsa;
 pub mod qwen4exp_residency;
+pub mod qwen4exp_runtime;
 pub mod qwen4exp_text_session;
 mod qwen_queue2;
 pub mod runtime;

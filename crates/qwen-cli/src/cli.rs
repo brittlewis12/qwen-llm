@@ -170,10 +170,10 @@ pub(crate) struct RunArgs {
 
     /// Use validated non-thinking prompt rendering; does not suppress CLI diagnostics.
     ///
-    /// The validated Qwen3.6 35B A3B and Qwen3.8 27B identities use a template
-    /// transition; other Qwen identities fail closed. DeepSeek ordinary chat is
-    /// already non-thinking, so this is an idempotent guarantee there. This is
-    /// not an output filter.
+    /// The validated Qwen3.6 35B A3B, Qwen3.8 27B, and Qwen3.8 Flash-Next
+    /// identities use a template transition; other Qwen identities fail closed.
+    /// DeepSeek ordinary chat is already non-thinking, so this is an idempotent
+    /// guarantee there. This is not an output filter.
     #[arg(long, conflicts_with = "raw_prompt")]
     no_thinking: bool,
 

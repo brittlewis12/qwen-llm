@@ -511,6 +511,9 @@ fn validate_model_family_with_modes(
             );
             Ok(())
         }
+        Some(ModelFamily::Qwen4Exp) => {
+            bail!("--concurrency is not yet supported for Qwen3.8-Flash-Next")
+        }
         None => bail!("--concurrency requires a supported Qwen or DeepSeek V4 model"),
     }
 }
@@ -3798,6 +3801,16 @@ mod tests {
             false,
         )
         .unwrap();
+        assert!(
+            validate_model_family_with_modes(
+                args.concurrency,
+                0.0,
+                Some(ModelFamily::Qwen4Exp),
+                GreedyGpuArgmaxMode::DefaultOff,
+                false,
+            )
+            .is_err()
+        );
         assert!(
             validate_model_family_with_modes(
                 args.concurrency,

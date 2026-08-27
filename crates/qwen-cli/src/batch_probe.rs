@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::Parser;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use qwen_llm::deepseek_v4_metal::{
@@ -248,6 +248,10 @@ fn capabilities(family: ModelFamily) -> Vec<ModeCapability> {
         ModelFamily::Qwen35Moe => (
             "primitive_only",
             "projection and guarded block replay exist; full-model static backend required",
+        ),
+        ModelFamily::Qwen4Exp => (
+            "unsupported",
+            "Flash-Next queue-overlap probing requires a family-specific session backend",
         ),
         ModelFamily::DeepSeek4 => (
             "primitive_only",
@@ -1265,6 +1269,9 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
     let ctx = MetalContext::new().context("create queue-overlap Metal context")?;
     let rows = match family {
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => run_qwen(&ctx, &gguf, &args)?,
+        ModelFamily::Qwen4Exp => {
+            bail!("queue-overlap probing is not supported for Qwen3.8-Flash-Next")
+        }
         ModelFamily::DeepSeek4 => run_deepseek(&ctx, &gguf, &args)?.0,
     };
     let (graph_policy, host_submission_policy) = match family {
@@ -1272,6 +1279,9 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
             "monolithic_encode_single_token_argmax",
             "single_host_thread_encode_all_then_commit_all",
         ),
+        ModelFamily::Qwen4Exp => {
+            unreachable!("Qwen3.8-Flash-Next queue-overlap requests fail above")
+        }
         ModelFamily::DeepSeek4 => (
             "forward_token_whole_profiled",
             "one_host_thread_per_client_lockstep",
@@ -1336,6 +1346,7 @@ mod tests {
         for family in [
             ModelFamily::Qwen35,
             ModelFamily::Qwen35Moe,
+            ModelFamily::Qwen4Exp,
             ModelFamily::DeepSeek4,
         ] {
             let rows = capabilities(family);
@@ -1350,5 +1361,14 @@ mod tests {
                 .unwrap();
             assert_ne!(batching.state, "production");
         }
+        let flash_next = capabilities(ModelFamily::Qwen4Exp);
+        assert_eq!(
+            flash_next
+                .iter()
+                .find(|row| row.mode == "static_layer_batch")
+                .unwrap()
+                .state,
+            "unsupported"
+        );
     }
 }

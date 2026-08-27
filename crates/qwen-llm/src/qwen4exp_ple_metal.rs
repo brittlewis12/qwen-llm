@@ -422,6 +422,11 @@ impl Qwen4ExpPleMetalWorkspace {
         self.geometry
     }
 
+    #[cfg(test)]
+    pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
+        vec![self.conv_state.clone()]
+    }
+
     pub fn has_staged_rows(&self) -> bool {
         self.rows_staged
     }
@@ -643,6 +648,88 @@ pub fn encode_qwen4exp_ple<'a>(
         return Err(error);
     }
     Ok(Qwen4ExpPleMetalRead { workspace })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_and_preflight_qwen4exp_ple_packed_workspace(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    embedding: &MetalTensor,
+    hyper_input: &MetalTensor,
+    weights: Qwen4ExpPleMetalWeights<'_>,
+    workspace: &Qwen4ExpPleMetalWorkspace,
+    scratch: &Qwen4ExpPlePackedMotorScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpPleMetalError> {
+    validate_encoder(ctx, enc)?;
+    if workspace.state_poisoned {
+        return invalid("workspace causal state is indeterminate; reset it before reuse");
+    }
+    workspace.require_idle()?;
+    if workspace.rows_staged {
+        return invalid("packed PLE cannot replace staged scalar rows");
+    }
+    if weights.geometry != workspace.geometry || scratch.geometry != workspace.geometry {
+        return invalid("packed PLE weight, workspace, and scratch geometry differ");
+    }
+    validate_packed_motor_contract(
+        ctx,
+        embedding,
+        hyper_input,
+        weights,
+        &workspace.conv_state,
+        scratch,
+        tokens,
+    )?;
+    preflight_packed_motor(ctx, weights)
+}
+
+/// Encode packed PLE rows directly into the scalar convolution-state owner.
+///
+/// # Safety
+///
+/// The caller must retain the command and every input and scratch tensor until
+/// completion or permanent abandonment. Failure poisons this causal workspace.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen4exp_ple_packed_into_workspace(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    embedding: &MetalTensor,
+    hyper_input: &MetalTensor,
+    weights: Qwen4ExpPleMetalWeights<'_>,
+    workspace: &mut Qwen4ExpPleMetalWorkspace,
+    scratch: &Qwen4ExpPlePackedMotorScratch,
+    tokens: usize,
+) -> Result<MetalTensor, Qwen4ExpPleMetalError> {
+    validate_and_preflight_qwen4exp_ple_packed_workspace(
+        ctx,
+        enc,
+        embedding,
+        hyper_input,
+        weights,
+        workspace,
+        scratch,
+        tokens,
+    )?;
+    reserve_command(workspace, enc)?;
+    workspace.rows_staged = false;
+    let encoded = unsafe {
+        encode_qwen4exp_ple_packed_motor(
+            ctx,
+            enc,
+            embedding,
+            hyper_input,
+            weights,
+            &workspace.conv_state,
+            scratch,
+            tokens,
+        )
+    };
+    if encoded.is_err() {
+        workspace.encode_failed = true;
+        workspace.state_poisoned = true;
+    }
+    encoded
 }
 
 /// Encode packed PLE rows into transaction-owned scratch and causal state.

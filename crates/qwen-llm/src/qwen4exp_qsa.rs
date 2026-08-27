@@ -386,6 +386,47 @@ impl QwenSparseAttentionMetalGeometry {
         ])
     }
 
+    pub(crate) fn packed_scratch_logical_allocations(
+        self,
+        capacity: usize,
+    ) -> Result<Vec<usize>, Qwen4ExpQsaError> {
+        if capacity == 0 || capacity > self.token_budget {
+            return invalid(format!(
+                "dense packed QSA capacity must be in 1..={}, got {capacity}",
+                self.token_budget
+            ));
+        }
+        let f32_bytes = |name: &str, factors: &[usize]| {
+            factors
+                .iter()
+                .try_fold(1_usize, |product, &factor| product.checked_mul(factor))
+                .and_then(|elements| elements.checked_mul(size_of::<f32>()))
+                .ok_or_else(|| {
+                    Qwen4ExpQsaError::Invalid(format!(
+                        "dense packed QSA {name} allocation overflow"
+                    ))
+                })
+        };
+        let query_tile = capacity.min(DENSE_PACKED_QUERY_TILE);
+        Ok(vec![
+            f32_bytes("index key", &[self.index_head_dim, capacity])?,
+            f32_bytes(
+                "query/gate projection",
+                &[self.query_projection_width(), capacity],
+            )?,
+            f32_bytes("query", &[self.query_width(), capacity])?,
+            f32_bytes("raw key", &[self.kv_width(), capacity])?,
+            f32_bytes("key", &[self.kv_width(), capacity])?,
+            f32_bytes("value", &[self.kv_width(), capacity])?,
+            f32_bytes(
+                "attention scores",
+                &[self.token_budget, self.query_heads, query_tile],
+            )?,
+            f32_bytes("attention", &[self.query_width(), capacity])?,
+            f32_bytes("output", &[self.hidden_size, capacity])?,
+        ])
+    }
+
     pub fn hidden_size(self) -> usize {
         self.hidden_size
     }
@@ -501,7 +542,6 @@ pub struct QwenSparseAttentionMetalWorkspace {
     state_poisoned: bool,
 }
 
-#[allow(dead_code)]
 pub(crate) struct QwenSparseAttentionPackedScratch {
     geometry: QwenSparseAttentionMetalGeometry,
     capacity: usize,
@@ -517,7 +557,6 @@ pub(crate) struct QwenSparseAttentionPackedScratch {
     output: MetalTensor,
 }
 
-#[allow(dead_code)]
 struct QwenSparseAttentionPackedViews {
     index_key_raw: MetalTensor,
     query_gate_projection: MetalTensor,
@@ -529,7 +568,6 @@ struct QwenSparseAttentionPackedViews {
     output: MetalTensor,
 }
 
-#[allow(dead_code)]
 impl QwenSparseAttentionPackedScratch {
     pub(crate) fn new(
         ctx: &MetalContext,
@@ -811,6 +849,16 @@ impl QwenSparseAttentionMetalWorkspace {
         self.committed_length
     }
 
+    #[cfg(test)]
+    pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
+        vec![
+            self.pending_index_keys.clone(),
+            self.compressed_index_keys.clone(),
+            self.key_cache.clone(),
+            self.value_cache.clone(),
+        ]
+    }
+
     pub fn is_poisoned(&self) -> bool {
         self.state_poisoned
     }
@@ -1040,7 +1088,6 @@ pub fn encode_qwen_sparse_attention_text<'a>(
 /// causal order. Any encode or command failure makes mutable state
 /// indeterminate and requires poisoning the enclosing transaction.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1170,8 +1217,7 @@ fn prepare_dense_packed_control_scalars(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-fn validate_dense_packed_contract(
+pub(crate) fn validate_dense_packed_contract(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     input: &MetalTensor,
@@ -1362,7 +1408,6 @@ fn validate_dense_packed_contract(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn validate_dense_packed_scratch(
     scratch: &QwenSparseAttentionPackedScratch,
 ) -> Result<(), Qwen4ExpQsaError> {
@@ -1425,7 +1470,6 @@ fn validate_dense_packed_scratch(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn dense_packed_scratch_tensors(
     scratch: &QwenSparseAttentionPackedScratch,
 ) -> Vec<(&'static str, &MetalTensor)> {
@@ -1448,8 +1492,7 @@ fn dense_packed_scratch_tensors(
     ]
 }
 
-#[allow(dead_code)]
-fn preflight_dense_packed(
+pub(crate) fn preflight_dense_packed(
     ctx: &MetalContext,
     weights: QwenSparseAttentionMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpQsaError> {

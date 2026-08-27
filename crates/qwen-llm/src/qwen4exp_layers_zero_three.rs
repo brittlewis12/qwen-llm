@@ -765,7 +765,7 @@ mod tests {
     use crate::qwen4exp_runtime::forward_qwen4exp_text_token_sync;
     use crate::qwen4exp_text_session::{
         Qwen4ExpTextSessionMetalGeometry, Qwen4ExpTextSessionMetalWeights,
-        Qwen4ExpTextSessionMetalWorkspace, encode_qwen4exp_text_token,
+        Qwen4ExpTextSessionMetalWorkspace, encode_qwen4exp_text_packed, encode_qwen4exp_text_token,
     };
     use crate::tensor::TensorDesc;
     use half::bf16;
@@ -1839,6 +1839,317 @@ mod tests {
             assert_eq!(integrated.qsa_committed_lengths(), vec![(3, position + 1)]);
         }
         assert_eq!(layer_three.mixer_committed_length(), Some(5));
+    }
+
+    #[test]
+    fn packed_text_session_matches_scalar_and_hands_off_without_state_migration() {
+        let Some(ctx) = context() else { return };
+        let fixture = SyntheticFixture::new(&ctx);
+        let tail = TextSessionTailFixture::new(&ctx);
+        let geometry =
+            Qwen4ExpTextSessionMetalGeometry::from_config(&fixture.config, CAPACITY).unwrap();
+        let mut scalar =
+            Qwen4ExpTextSessionMetalWorkspace::new_for_tests(&ctx, geometry.clone()).unwrap();
+        let mut packed =
+            Qwen4ExpTextSessionMetalWorkspace::new_for_tests_with_packed(&ctx, geometry.clone())
+                .unwrap();
+        let tokens = [1_u32, 7, 3, 11, 5];
+        let persistent_before = packed.persistent_state_tensors();
+
+        let mut scalar_hidden = Vec::new();
+        let mut scalar_logits = Vec::new();
+        for (position, &token) in tokens.iter().enumerate() {
+            (scalar_hidden, scalar_logits) = run_text_session(
+                &ctx,
+                &fixture,
+                &tail,
+                &geometry,
+                &mut scalar,
+                token,
+                position,
+            );
+        }
+
+        let weights = fixture.text_weights(&tail, &geometry);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let pending = encode_qwen4exp_text_packed(
+            &ctx,
+            &encoder,
+            &tokens,
+            0,
+            fixture.table.table(),
+            &weights,
+            &mut packed,
+        )
+        .unwrap();
+        assert_eq!(pending.position(), tokens.len() - 1);
+        drop(pending);
+        encoder.end();
+        command.commit();
+        packed.release_after().unwrap();
+        let persistent_after = packed.persistent_state_tensors();
+        assert_eq!(persistent_before.len(), persistent_after.len());
+        for (before, after) in persistent_before.iter().zip(&persistent_after) {
+            assert_eq!(
+                Retained::as_ptr(&after.buffer),
+                Retained::as_ptr(&before.buffer)
+            );
+            assert_eq!(after.offset, before.offset);
+            assert_eq!(after.shape, before.shape);
+            assert_eq!(after.dtype, before.dtype);
+            assert_eq!(after.provenance(), before.provenance());
+        }
+
+        let packed_hidden = read_f32(packed.final_hidden_tensor());
+        let packed_logits = packed.logits().unwrap().to_vec();
+        assert_close(
+            "packed text-session final hidden",
+            &packed_hidden,
+            &scalar_hidden,
+            2e-3,
+        );
+        assert_close(
+            "packed text-session logits",
+            &packed_logits,
+            &scalar_logits,
+            5e-3,
+        );
+        assert_eq!(argmax(&packed_logits), argmax(&scalar_logits));
+        assert_eq!(packed.committed_length(), tokens.len());
+        assert_eq!(packed.qsa_committed_lengths(), vec![(3, tokens.len())]);
+        assert_eq!(packed.ple_prior_tokens(), scalar.ple_prior_tokens());
+
+        let continuation = 9;
+        let (scalar_hidden, scalar_logits) = run_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut scalar,
+            continuation,
+            tokens.len(),
+        );
+        let (packed_hidden, packed_logits) = run_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut packed,
+            continuation,
+            tokens.len(),
+        );
+        assert_close(
+            "packed-to-scalar handoff hidden",
+            &packed_hidden,
+            &scalar_hidden,
+            2e-3,
+        );
+        assert_close(
+            "packed-to-scalar handoff logits",
+            &packed_logits,
+            &scalar_logits,
+            5e-3,
+        );
+        assert_eq!(argmax(&packed_logits), argmax(&scalar_logits));
+        assert_eq!(packed.committed_length(), tokens.len() + 1);
+        assert_eq!(packed.qsa_committed_lengths(), vec![(3, tokens.len() + 1)]);
+    }
+
+    #[test]
+    fn packed_text_session_matches_scalar_at_qsa_residues_and_capacity() {
+        let Some(ctx) = context() else { return };
+        let fixture = SyntheticFixture::new(&ctx);
+        let tail = TextSessionTailFixture::new(&ctx);
+        let geometry =
+            Qwen4ExpTextSessionMetalGeometry::from_config(&fixture.config, CAPACITY).unwrap();
+        let stream = [1_u32, 7, 3, 11, 5, 9, 2, 13];
+
+        for (start, tokens) in [(0, 2), (0, 8), (1, 2), (2, 2), (3, 2)] {
+            let mut scalar =
+                Qwen4ExpTextSessionMetalWorkspace::new_for_tests(&ctx, geometry.clone()).unwrap();
+            let mut packed = Qwen4ExpTextSessionMetalWorkspace::new_for_tests_with_packed(
+                &ctx,
+                geometry.clone(),
+            )
+            .unwrap();
+            for (position, &token) in stream.iter().take(start).enumerate() {
+                run_text_session(
+                    &ctx,
+                    &fixture,
+                    &tail,
+                    &geometry,
+                    &mut scalar,
+                    token,
+                    position,
+                );
+                run_text_session(
+                    &ctx,
+                    &fixture,
+                    &tail,
+                    &geometry,
+                    &mut packed,
+                    token,
+                    position,
+                );
+            }
+            let mut scalar_hidden = Vec::new();
+            let mut scalar_logits = Vec::new();
+            for (position, &token) in stream.iter().enumerate().skip(start).take(tokens) {
+                (scalar_hidden, scalar_logits) = run_text_session(
+                    &ctx,
+                    &fixture,
+                    &tail,
+                    &geometry,
+                    &mut scalar,
+                    token,
+                    position,
+                );
+            }
+
+            let weights = fixture.text_weights(&tail, &geometry);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let pending = encode_qwen4exp_text_packed(
+                &ctx,
+                &encoder,
+                &stream[start..start + tokens],
+                start,
+                fixture.table.table(),
+                &weights,
+                &mut packed,
+            )
+            .unwrap();
+            drop(pending);
+            encoder.end();
+            command.commit();
+            packed.release_after().unwrap();
+
+            let packed_hidden = read_f32(packed.final_hidden_tensor());
+            let packed_logits = packed.logits().unwrap().to_vec();
+            assert_close(
+                &format!("packed start={start} tokens={tokens} hidden"),
+                &packed_hidden,
+                &scalar_hidden,
+                2e-3,
+            );
+            assert_close(
+                &format!("packed start={start} tokens={tokens} logits"),
+                &packed_logits,
+                &scalar_logits,
+                5e-3,
+            );
+            assert_eq!(argmax(&packed_logits), argmax(&scalar_logits));
+            assert_eq!(packed.committed_length(), start + tokens);
+            assert_eq!(packed.qsa_committed_lengths(), vec![(3, start + tokens)]);
+            assert_eq!(packed.ple_prior_tokens(), scalar.ple_prior_tokens());
+        }
+    }
+
+    #[test]
+    fn packed_text_session_preflight_and_abandon_are_transactional() {
+        let Some(ctx) = context() else { return };
+        let fixture = SyntheticFixture::new(&ctx);
+        let tail = TextSessionTailFixture::new(&ctx);
+        let geometry =
+            Qwen4ExpTextSessionMetalGeometry::from_config(&fixture.config, CAPACITY).unwrap();
+        let mut workspace =
+            Qwen4ExpTextSessionMetalWorkspace::new_for_tests_with_packed(&ctx, geometry.clone())
+                .unwrap();
+        let writable_injection =
+            MetalTensor::zeros_f32(&ctx, vec![HYPER as u64, BRANCHES as u64]).unwrap();
+        let mut malformed = fixture.text_weights(&tail, &geometry);
+        malformed.post_ple.last_mut().unwrap().ffn_residual.inject = &writable_injection;
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        assert!(
+            encode_qwen4exp_text_packed(
+                &ctx,
+                &encoder,
+                &[1, 7],
+                0,
+                fixture.table.table(),
+                &malformed,
+                &mut workspace,
+            )
+            .is_err()
+        );
+        assert!(crate::metal::dispatch_census_take().is_empty());
+        encoder.end();
+        drop(command);
+        assert!(!workspace.is_poisoned());
+        assert_eq!(workspace.committed_length(), 0);
+        workspace.release_after().unwrap();
+
+        let weights = fixture.text_weights(&tail, &geometry);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let pending = encode_qwen4exp_text_packed(
+            &ctx,
+            &encoder,
+            &[1, 7],
+            0,
+            fixture.table.table(),
+            &weights,
+            &mut workspace,
+        )
+        .unwrap();
+        drop(pending);
+        encoder.end();
+        unsafe { workspace.abandon_uncommitted().unwrap() };
+        drop(command);
+        assert!(!workspace.is_poisoned());
+        assert_eq!(workspace.committed_length(), 0);
+        assert_eq!(workspace.qsa_committed_lengths(), vec![(3, 0)]);
+        assert!(workspace.ple_prior_tokens().is_empty());
+        assert!(workspace.logits().is_err());
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let pending = encode_qwen4exp_text_packed(
+            &ctx,
+            &encoder,
+            &[1, 7],
+            0,
+            fixture.table.table(),
+            &weights,
+            &mut workspace,
+        )
+        .unwrap();
+        drop(pending);
+        encoder.end();
+        command.commit();
+        workspace.release_after().unwrap();
+        assert_eq!(workspace.committed_length(), 2);
+        workspace.reset().unwrap();
+        assert_eq!(workspace.committed_length(), 0);
+        assert_eq!(workspace.qsa_committed_lengths(), vec![(3, 0)]);
+        assert!(workspace.ple_prior_tokens().is_empty());
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let pending = encode_qwen4exp_text_packed(
+            &ctx,
+            &encoder,
+            &[1, 7],
+            0,
+            fixture.table.table(),
+            &weights,
+            &mut workspace,
+        )
+        .unwrap();
+        drop(pending);
+        workspace.mark_pending_encode_failed_for_tests();
+        encoder.end();
+        command.commit();
+        assert!(workspace.release_after().is_err());
+        assert!(workspace.is_poisoned());
+        assert!(workspace.logits().is_err());
+        workspace.reset().unwrap();
+        assert_eq!(workspace.committed_length(), 0);
+        assert_eq!(workspace.qsa_committed_lengths(), vec![(3, 0)]);
+        assert!(workspace.ple_prior_tokens().is_empty());
     }
 
     #[test]

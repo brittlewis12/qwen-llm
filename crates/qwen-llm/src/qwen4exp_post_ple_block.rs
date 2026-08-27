@@ -7,20 +7,26 @@ use crate::metal::{
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_gdn::{
     GatedDeltaNetMetalGeometry, GatedDeltaNetMetalWeights, GatedDeltaNetMetalWorkspace,
-    Qwen4ExpGdnError, encode_gated_delta_net,
+    GatedDeltaNetPackedScratch, Qwen4ExpGdnError, encode_gated_delta_net,
+    encode_gated_delta_net_packed_into_workspace,
+    validate_and_preflight_gated_delta_net_packed_workspace,
 };
 use crate::qwen4exp_layer_zero::Qwen4ExpResidualMetalWeights;
 use crate::qwen4exp_metal::{
-    GatedResidualMetalReadWeights, GatedResidualMetalScratch, Qwen4ExpMetalError,
-    encode_gated_residual_mix, validate_and_preflight_gated_residual_mix,
+    GatedResidualMetalReadWeights, GatedResidualMetalScratch, GatedResidualPackedScratch,
+    Qwen4ExpMetalError, encode_gated_residual_mix, encode_gated_residual_packed_mix,
+    validate_and_preflight_gated_residual_mix, validate_and_preflight_gated_residual_packed_mix,
 };
 use crate::qwen4exp_moe::{
     Qwen4ExpMoeError, Qwen4ExpMoeMetalGeometry, Qwen4ExpMoeMetalWeights, Qwen4ExpMoeMetalWorkspace,
-    encode_qwen4exp_moe,
+    Qwen4ExpMoePackedMotorScratch, encode_qwen4exp_moe, encode_qwen4exp_moe_packed_motor,
+    preflight_packed as preflight_moe_packed, validate_packed_contract as validate_moe_packed,
 };
 use crate::qwen4exp_qsa::{
     Qwen4ExpQsaError, QwenSparseAttentionMetalGeometry, QwenSparseAttentionMetalWeights,
-    QwenSparseAttentionMetalWorkspace, encode_qwen_sparse_attention_text,
+    QwenSparseAttentionMetalWorkspace, QwenSparseAttentionPackedScratch,
+    encode_qwen_sparse_attention_text, encode_qwen_sparse_attention_text_dense_packed_motor,
+    preflight_dense_packed, validate_dense_packed_contract,
 };
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
@@ -350,6 +356,14 @@ impl Qwen4ExpPostPleMixerMetalWorkspace {
         }
     }
 
+    #[cfg(test)]
+    fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
+        match self {
+            Self::GatedDeltaNet(workspace) => workspace.persistent_state_tensors(),
+            Self::QwenSparseAttention(workspace) => workspace.persistent_state_tensors(),
+        }
+    }
+
     fn reset(&mut self) -> Result<(), Qwen4ExpPostPleBlockError> {
         match self {
             Self::GatedDeltaNet(workspace) => workspace.reset()?,
@@ -417,6 +431,11 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
 
     pub fn mixer_committed_length(&self) -> Option<usize> {
         self.mixer.committed_length()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
+        self.mixer.persistent_state_tensors()
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -642,6 +661,196 @@ pub fn encode_qwen4exp_post_ple_block<'workspace, 'resources>(
         workspace,
         hyper_residual,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_and_preflight_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    start_position: usize,
+    hyper_residual: &MetalTensor,
+    bridge: &MetalTensor,
+    weights: Qwen4ExpPostPleBlockMetalWeights<'_>,
+    workspace: &Qwen4ExpPostPleBlockMetalWorkspace,
+    residual: &GatedResidualPackedScratch,
+    gdn: &GatedDeltaNetPackedScratch,
+    qsa: &QwenSparseAttentionPackedScratch,
+    moe: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpPostPleBlockError> {
+    validate_encoder(ctx, enc)?;
+    if workspace.state_poisoned {
+        return invalid("workspace causal state is indeterminate; reset it before reuse");
+    }
+    workspace.require_idle()?;
+    if tokens <= 1 {
+        return invalid("packed post-PLE blocks require at least two tokens");
+    }
+    if weights.geometry != workspace.geometry
+        || weights.mixer.geometry() != workspace.geometry.mixer
+        || workspace.mixer.geometry() != workspace.geometry.mixer
+        || weights.moe.geometry != workspace.geometry.moe
+    {
+        return invalid("packed post-PLE nested geometry differs from the block");
+    }
+    let g = workspace.geometry;
+    let mixed = residual.mixed_view(tokens)?;
+    for residual_weights in [weights.attention_residual, weights.ffn_residual] {
+        validate_and_preflight_gated_residual_packed_mix(
+            ctx,
+            hyper_residual,
+            bridge,
+            g.eps,
+            residual_weights.read,
+            residual_weights.inject,
+            residual,
+            tokens,
+        )?;
+    }
+    require_read_only_weights(&residual_weight_tensors(weights))?;
+    match (weights.mixer, &workspace.mixer) {
+        (
+            Qwen4ExpPostPleMixerMetalWeights::GatedDeltaNet(weights),
+            Qwen4ExpPostPleMixerMetalWorkspace::GatedDeltaNet(workspace),
+        ) => validate_and_preflight_gated_delta_net_packed_workspace(
+            ctx, enc, &mixed, weights, workspace, gdn, tokens,
+        )?,
+        (
+            Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights),
+            Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace),
+        ) => {
+            validate_dense_packed_contract(
+                ctx,
+                enc,
+                &mixed,
+                weights,
+                workspace,
+                qsa,
+                start_position,
+                tokens,
+            )?;
+            preflight_dense_packed(ctx, weights)?;
+        }
+        _ => return invalid("packed mixer weight and workspace variants differ"),
+    }
+    validate_moe_packed(ctx, &mixed, weights.moe, moe, tokens)?;
+    preflight_moe_packed(ctx, weights.moe)?;
+    ctx.pipeline("kernel_copy_offset_f32")?;
+    Ok(())
+}
+
+/// Encode a packed post-PLE block into its scalar mixer-state owner.
+///
+/// # Safety
+///
+/// The caller must retain the command and every packed tensor and scratch
+/// allocation until completion or permanent abandonment. Any failure poisons
+/// the complete block workspace.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    start_position: usize,
+    hyper_residual: &MetalTensor,
+    bridge: &MetalTensor,
+    weights: Qwen4ExpPostPleBlockMetalWeights<'_>,
+    workspace: &mut Qwen4ExpPostPleBlockMetalWorkspace,
+    residual: &mut GatedResidualPackedScratch,
+    gdn: &GatedDeltaNetPackedScratch,
+    qsa: &QwenSparseAttentionPackedScratch,
+    moe: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpPostPleBlockError> {
+    validate_and_preflight_packed(
+        ctx,
+        enc,
+        start_position,
+        hyper_residual,
+        bridge,
+        weights,
+        workspace,
+        residual,
+        gdn,
+        qsa,
+        moe,
+        tokens,
+    )?;
+    reserve_command(workspace, enc)?;
+    let encoded = (|| {
+        let g = workspace.geometry;
+        let attention = unsafe {
+            encode_gated_residual_packed_mix(
+                ctx,
+                enc,
+                hyper_residual,
+                bridge,
+                g.eps,
+                weights.attention_residual.read,
+                weights.attention_residual.inject,
+                residual,
+                tokens,
+            )
+        }?;
+        let mixer_output = match (weights.mixer, &mut workspace.mixer) {
+            (
+                Qwen4ExpPostPleMixerMetalWeights::GatedDeltaNet(weights),
+                Qwen4ExpPostPleMixerMetalWorkspace::GatedDeltaNet(workspace),
+            ) => unsafe {
+                encode_gated_delta_net_packed_into_workspace(
+                    ctx,
+                    enc,
+                    attention.mixed(),
+                    weights,
+                    workspace,
+                    gdn,
+                    tokens,
+                )
+            }?,
+            (
+                Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights),
+                Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace),
+            ) => unsafe {
+                encode_qwen_sparse_attention_text_dense_packed_motor(
+                    ctx,
+                    enc,
+                    attention.mixed(),
+                    weights,
+                    workspace,
+                    qsa,
+                    start_position,
+                    tokens,
+                )
+            }?,
+            _ => return invalid("packed mixer weight and workspace variants differ"),
+        };
+        encode_copy_offset_f32(ctx, enc, &mixer_output, 0, bridge, g.hidden_size * tokens)?;
+        attention.encode_combine()?;
+
+        let ffn = unsafe {
+            encode_gated_residual_packed_mix(
+                ctx,
+                enc,
+                hyper_residual,
+                bridge,
+                g.eps,
+                weights.ffn_residual.read,
+                weights.ffn_residual.inject,
+                residual,
+                tokens,
+            )
+        }?;
+        let moe_output = unsafe {
+            encode_qwen4exp_moe_packed_motor(ctx, enc, ffn.mixed(), weights.moe, moe, tokens)
+        }?;
+        encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, g.hidden_size * tokens)?;
+        ffn.encode_combine()?;
+        Ok(())
+    })();
+    if encoded.is_err() {
+        workspace.encode_failed = true;
+        workspace.state_poisoned = true;
+    }
+    encoded
 }
 
 pub(crate) fn validate_and_preflight(

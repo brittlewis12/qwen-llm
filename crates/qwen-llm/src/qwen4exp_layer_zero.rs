@@ -13,7 +13,9 @@ use crate::metal::{
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_gdn::{
     GatedDeltaNetMetalGeometry, GatedDeltaNetMetalWeights, GatedDeltaNetMetalWorkspace,
-    Qwen4ExpGdnError, encode_gated_delta_net,
+    GatedDeltaNetPackedScratch, Qwen4ExpGdnError, encode_gated_delta_net,
+    encode_gated_delta_net_packed_into_workspace,
+    validate_and_preflight_gated_delta_net_packed_workspace,
 };
 use crate::qwen4exp_metal::{
     GatedResidualMetalReadWeights, GatedResidualMetalScratch, Qwen4ExpMetalError,
@@ -283,6 +285,11 @@ impl Qwen4ExpLayerZeroMetalWorkspace {
         self.state_poisoned
     }
 
+    #[cfg(test)]
+    pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
+        self.gdn.persistent_state_tensors()
+    }
+
     pub fn reset(&mut self) -> Result<(), Qwen4ExpLayerZeroError> {
         self.require_idle()?;
         self.gdn.reset()?;
@@ -380,6 +387,71 @@ impl Qwen4ExpLayerZeroMetalWorkspace {
             Ok(())
         }
     }
+}
+
+pub(crate) fn validate_and_preflight_layer_zero_gdn_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &Qwen4ExpLayerZeroMetalWorkspace,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpLayerZeroError> {
+    if workspace.state_poisoned {
+        return invalid("workspace causal state is indeterminate; reset it before reuse");
+    }
+    workspace.require_idle()?;
+    if weights.geometry != workspace.geometry.gdn {
+        return invalid("packed layer-zero GDN weight and workspace geometry differ");
+    }
+    validate_and_preflight_gated_delta_net_packed_workspace(
+        ctx,
+        enc,
+        input,
+        weights,
+        &workspace.gdn,
+        scratch,
+        tokens,
+    )?;
+    Ok(())
+}
+
+/// Encode packed layer-zero GDN rows into the scalar layer-zero state owner.
+///
+/// # Safety
+///
+/// The caller must retain the command and packed scratch until completion or
+/// permanent abandonment. Failure poisons the complete layer-zero workspace.
+pub(crate) unsafe fn encode_layer_zero_gdn_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &mut Qwen4ExpLayerZeroMetalWorkspace,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+) -> Result<MetalTensor, Qwen4ExpLayerZeroError> {
+    validate_and_preflight_layer_zero_gdn_packed(
+        ctx, enc, input, weights, workspace, scratch, tokens,
+    )?;
+    reserve_command(workspace, enc)?;
+    let encoded = unsafe {
+        encode_gated_delta_net_packed_into_workspace(
+            ctx,
+            enc,
+            input,
+            weights,
+            &mut workspace.gdn,
+            scratch,
+            tokens,
+        )
+    };
+    if encoded.is_err() {
+        workspace.encode_failed = true;
+        workspace.state_poisoned = true;
+    }
+    encoded.map_err(Into::into)
 }
 
 #[must_use = "copy the layer-zero residual in its owning command, then release the workspace"]

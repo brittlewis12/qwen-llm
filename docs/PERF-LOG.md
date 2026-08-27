@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Full Packed Session GO
+
+Status: keep every scalar causal-state owner while composing all 48 layers,
+final HC, and logits in one dense packed command. Runtime/CLI promotion remains
+the next checkpoint.
+
+- Packed GDN and PLE adapters mutate the existing scalar convolution and
+  recurrent states. All 12 QSA layers append directly to their existing index
+  and F16 K/V caches; successful release publishes one common session length.
+- PLE stages selected IQ4_NL rows and dequantizes them on GPU instead of
+  materializing packed-token embeddings on the CPU. Final logits consume a
+  zero-copy view of the last packed hyper row.
+- Synthetic N=2/5/8 covers every modulo-four QSA start residue, full packed
+  capacity, scalar continuation, persistent-buffer identity, preflight with
+  zero dispatches, abandonment, and reset.
+- Released UD-Q3_K_XL N=8 preserves argmax. Final hidden/logit relative RMS is
+  `1.382e-2`/`9.605e-3`, cosine is `0.999906777`/`0.999972239`, and maximum
+  absolute delta is `8.955e-1`/`1.160e-1`; one scalar continuation remains
+  within `1.181e-2`/`8.966e-3` relative RMS and preserves argmax.
+- Released N=2,048 runs at `457.229 tok/s` wall (`4,479.161 ms`; GPU
+  `3,993.846 ms`). Four scalar continuations reach length 2,052, engage QSA
+  selection, preserve every persistent buffer binding, and publish all 12 QSA
+  lengths without migration.
+- The opt-in 2,048-row sidecar uses 55 admitted allocations and
+  `1,894,533,120` logical bytes. Scalar-only plans retain their prior inventory;
+  packed activation scratch can be discarded without migrating decode state.
+
 ## 2026-08-27 - Flash-Next Qualification Leaves Runtime Admission
 
 Status: keep exact released metadata in qualification fixtures while admitting

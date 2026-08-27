@@ -6,24 +6,31 @@ use crate::metal::{
 };
 use crate::qwen4exp::{MixerKind, PleConfig, PleHistory, Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_gdn::{
-    GatedDeltaNetMetalWeights, GatedDeltaNetMetalWorkspace, Qwen4ExpGdnError,
-    encode_gated_delta_net,
+    GatedDeltaNetMetalWeights, GatedDeltaNetMetalWorkspace, GatedDeltaNetPackedScratch,
+    Qwen4ExpGdnError, encode_gated_delta_net, encode_gated_delta_net_packed_into_workspace,
+    validate_and_preflight_gated_delta_net_packed_workspace,
 };
 use crate::qwen4exp_layer_zero::{
     Qwen4ExpLayerZeroError, Qwen4ExpLayerZeroMetalGeometry, Qwen4ExpLayerZeroMetalWeights,
-    Qwen4ExpLayerZeroMetalWorkspace, Qwen4ExpResidualMetalWeights, encode_qwen4exp_layer_zero,
+    Qwen4ExpLayerZeroMetalWorkspace, Qwen4ExpResidualMetalWeights, encode_layer_zero_gdn_packed,
+    encode_qwen4exp_layer_zero, validate_and_preflight_layer_zero_gdn_packed,
 };
 use crate::qwen4exp_metal::{
-    GatedResidualMetalReadWeights, GatedResidualMetalScratch, Qwen4ExpMetalError,
-    encode_gated_residual_mix, validate_and_preflight_gated_residual_mix,
+    GatedResidualMetalReadWeights, GatedResidualMetalScratch, GatedResidualPackedScratch,
+    Qwen4ExpMetalError, encode_gated_residual_mix, encode_gated_residual_packed_mix,
+    validate_and_preflight_gated_residual_mix, validate_and_preflight_gated_residual_packed_mix,
 };
 use crate::qwen4exp_moe::{
-    Qwen4ExpMoeError, Qwen4ExpMoeMetalWeights, Qwen4ExpMoeMetalWorkspace, encode_qwen4exp_moe,
+    Qwen4ExpMoeError, Qwen4ExpMoeMetalWeights, Qwen4ExpMoeMetalWorkspace,
+    Qwen4ExpMoePackedMotorScratch, encode_qwen4exp_moe, encode_qwen4exp_moe_packed_motor,
+    preflight_packed as preflight_moe_packed, validate_packed_contract as validate_moe_packed,
 };
 use crate::qwen4exp_ple::PleIq4NlTable;
 use crate::qwen4exp_ple_metal::{
     Qwen4ExpPleMetalError, Qwen4ExpPleMetalGeometry, Qwen4ExpPleMetalWeights,
-    Qwen4ExpPleMetalWorkspace, encode_qwen4exp_ple,
+    Qwen4ExpPleMetalWorkspace, Qwen4ExpPlePackedMotorScratch, encode_qwen4exp_ple,
+    encode_qwen4exp_ple_packed_into_workspace,
+    validate_and_preflight_qwen4exp_ple_packed_workspace,
 };
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
@@ -277,6 +284,14 @@ impl Qwen4ExpLayersZeroOneMetalWorkspace {
         self.history.prior_tokens()
     }
 
+    #[cfg(test)]
+    pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
+        let mut tensors = self.layer_zero.persistent_state_tensors();
+        tensors.extend(self.ple.persistent_state_tensors());
+        tensors.extend(self.layer_one_gdn.persistent_state_tensors());
+        tensors
+    }
+
     pub fn reset(&mut self) -> Result<(), Qwen4ExpLayersZeroOneError> {
         self.require_idle()?;
         if self.pending_history.is_some() {
@@ -512,6 +527,410 @@ pub(crate) fn encode_qwen4exp_layers_zero_one_staged<'a>(
         return Err(error);
     }
     Ok(Qwen4ExpLayersZeroOneMetalRead { workspace })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_and_preflight_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_ids: &[u32],
+    start_position: u64,
+    ple_embedding: &MetalTensor,
+    hyper_residual: &MetalTensor,
+    bridge: &MetalTensor,
+    weights: Qwen4ExpLayersZeroOneMetalWeights<'_>,
+    workspace: &Qwen4ExpLayersZeroOneMetalWorkspace,
+    residual: &GatedResidualPackedScratch,
+    gdn: &GatedDeltaNetPackedScratch,
+    ple: &Qwen4ExpPlePackedMotorScratch,
+    moe: &Qwen4ExpMoePackedMotorScratch,
+) -> Result<(PleHistory, Vec<u32>), Qwen4ExpLayersZeroOneError> {
+    validate_encoder(ctx, enc)?;
+    if workspace.state_poisoned {
+        return invalid("workspace causal state is indeterminate; reset it before reuse");
+    }
+    workspace.require_idle()?;
+    if workspace.pending_history.is_some() {
+        return invalid("workspace has a PLE history update without a command owner");
+    }
+    if weights.geometry != workspace.geometry {
+        return invalid("packed layers-zero-one weight and workspace geometry differ");
+    }
+    validate_nested_geometry(weights, workspace)?;
+    let tokens = token_ids.len();
+    if tokens <= 1 {
+        return invalid("packed layers-zero-one requires at least two tokens");
+    }
+    if let Some((index, token_id)) = token_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, token_id)| *token_id as usize >= workspace.geometry.vocab_size())
+    {
+        return invalid(format!(
+            "token ID {token_id} at packed row {index} is outside vocabulary {}",
+            workspace.geometry.vocab_size()
+        ));
+    }
+    match workspace.history.next_position() {
+        None if start_position != 0 => {
+            return invalid("fresh packed causal state must begin at position zero");
+        }
+        Some(expected) if start_position != expected => {
+            return invalid(format!(
+                "packed start position {start_position} is discontinuous from {expected}; reset causal state first"
+            ));
+        }
+        None | Some(_) => {}
+    }
+    let end_position = start_position.checked_add(tokens as u64).ok_or_else(|| {
+        Qwen4ExpLayersZeroOneError::Invalid("packed position range overflow".into())
+    })?;
+    if end_position > workspace.geometry.context_length() as u64 {
+        return invalid(format!(
+            "packed position range {start_position}..{end_position} exceeds context length {}",
+            workspace.geometry.context_length()
+        ));
+    }
+    validate_ple_config(weights.ple_config, workspace.geometry)?;
+
+    let g = workspace.geometry;
+    require_tensor(
+        "packed layers-zero-one PLE embedding",
+        ple_embedding,
+        GgmlType::F32,
+        &[g.hidden_size() as u64, tokens as u64],
+        true,
+    )?;
+    require_tensor(
+        "packed layers-zero-one hyper residual",
+        hyper_residual,
+        GgmlType::F32,
+        &[g.hyper_width() as u64, tokens as u64],
+        true,
+    )?;
+    require_tensor(
+        "packed layers-zero-one bridge",
+        bridge,
+        GgmlType::F32,
+        &[g.hidden_size() as u64, tokens as u64],
+        true,
+    )?;
+    require_same_device(
+        ctx,
+        &[
+            ("packed layers-zero-one PLE embedding", ple_embedding),
+            ("packed layers-zero-one hyper residual", hyper_residual),
+            ("packed layers-zero-one bridge", bridge),
+        ],
+    )?;
+    require_disjoint(&[
+        ("packed layers-zero-one PLE embedding", ple_embedding),
+        ("packed layers-zero-one hyper residual", hyper_residual),
+        ("packed layers-zero-one bridge", bridge),
+    ])?;
+
+    let mixed = residual.mixed_view(tokens)?;
+    for residual_weights in [
+        weights.layer_zero.attention_residual,
+        weights.layer_zero.ffn_residual,
+        weights.layer_one_attention_residual,
+        weights.layer_one_ffn_residual,
+    ] {
+        validate_and_preflight_gated_residual_packed_mix(
+            ctx,
+            hyper_residual,
+            bridge,
+            g.eps(),
+            residual_weights.read,
+            residual_weights.inject,
+            residual,
+            tokens,
+        )?;
+    }
+    require_read_only_weights(&[
+        (
+            "layer-zero attention HC norm",
+            weights.layer_zero.attention_residual.read.norm,
+        ),
+        (
+            "layer-zero attention HC down",
+            weights.layer_zero.attention_residual.read.down,
+        ),
+        (
+            "layer-zero attention HC up",
+            weights.layer_zero.attention_residual.read.up,
+        ),
+        (
+            "layer-zero attention HC injection",
+            weights.layer_zero.attention_residual.inject,
+        ),
+        (
+            "layer-zero FFN HC norm",
+            weights.layer_zero.ffn_residual.read.norm,
+        ),
+        (
+            "layer-zero FFN HC down",
+            weights.layer_zero.ffn_residual.read.down,
+        ),
+        (
+            "layer-zero FFN HC up",
+            weights.layer_zero.ffn_residual.read.up,
+        ),
+        (
+            "layer-zero FFN HC injection",
+            weights.layer_zero.ffn_residual.inject,
+        ),
+        (
+            "layer-one attention HC norm",
+            weights.layer_one_attention_residual.read.norm,
+        ),
+        (
+            "layer-one attention HC down",
+            weights.layer_one_attention_residual.read.down,
+        ),
+        (
+            "layer-one attention HC up",
+            weights.layer_one_attention_residual.read.up,
+        ),
+        (
+            "layer-one attention HC injection",
+            weights.layer_one_attention_residual.inject,
+        ),
+        (
+            "layer-one FFN HC norm",
+            weights.layer_one_ffn_residual.read.norm,
+        ),
+        (
+            "layer-one FFN HC down",
+            weights.layer_one_ffn_residual.read.down,
+        ),
+        (
+            "layer-one FFN HC up",
+            weights.layer_one_ffn_residual.read.up,
+        ),
+        (
+            "layer-one FFN HC injection",
+            weights.layer_one_ffn_residual.inject,
+        ),
+    ])?;
+    validate_and_preflight_layer_zero_gdn_packed(
+        ctx,
+        enc,
+        &mixed,
+        weights.layer_zero.gdn,
+        &workspace.layer_zero,
+        gdn,
+        tokens,
+    )?;
+    validate_and_preflight_gated_delta_net_packed_workspace(
+        ctx,
+        enc,
+        &mixed,
+        weights.layer_one_gdn,
+        &workspace.layer_one_gdn,
+        gdn,
+        tokens,
+    )?;
+    validate_and_preflight_qwen4exp_ple_packed_workspace(
+        ctx,
+        enc,
+        ple_embedding,
+        hyper_residual,
+        weights.ple,
+        &workspace.ple,
+        ple,
+        tokens,
+    )?;
+    for moe_weights in [weights.layer_zero.moe, weights.layer_one_moe] {
+        validate_moe_packed(ctx, &mixed, moe_weights, moe, tokens)?;
+        preflight_moe_packed(ctx, moe_weights)?;
+    }
+    ctx.pipeline("kernel_copy_offset_f32")?;
+
+    let head_count = g.ple().head_count();
+    let row_capacity = tokens.checked_mul(head_count).ok_or_else(|| {
+        Qwen4ExpLayersZeroOneError::Invalid("packed PLE row count overflow".into())
+    })?;
+    let mut next_history = workspace.history.clone();
+    let mut row_ids = Vec::with_capacity(row_capacity);
+    for (index, &token_id) in token_ids.iter().enumerate() {
+        let position = start_position + index as u64;
+        let (advanced, rows) = next_history.advanced(weights.ple_config, token_id, position)?;
+        if rows.len() != head_count {
+            return invalid(format!(
+                "PLE produced {} rows at packed token {index}, expected {head_count}",
+                rows.len()
+            ));
+        }
+        row_ids.extend_from_slice(&rows);
+        next_history = advanced;
+    }
+    Ok((next_history, row_ids))
+}
+
+/// Encode packed layers zero and one into their scalar causal-state owners.
+///
+/// # Safety
+///
+/// The caller must retain the owning command and all packed tensors and
+/// scratch until completion or permanent abandonment. Any failure poisons the
+/// layers-zero-one transaction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen4exp_layers_zero_one_packed_staged(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    ple_embedding: &MetalTensor,
+    hyper_residual: &MetalTensor,
+    bridge: &MetalTensor,
+    weights: Qwen4ExpLayersZeroOneMetalWeights<'_>,
+    next_history: PleHistory,
+    workspace: &mut Qwen4ExpLayersZeroOneMetalWorkspace,
+    residual: &mut GatedResidualPackedScratch,
+    gdn: &GatedDeltaNetPackedScratch,
+    ple: &Qwen4ExpPlePackedMotorScratch,
+    moe: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpLayersZeroOneError> {
+    reserve_command(workspace, enc)?;
+    workspace.pending_history = Some(next_history);
+    let encoded = (|| {
+        let g = workspace.geometry;
+        let hidden = g.hidden_size();
+
+        let attention = unsafe {
+            encode_gated_residual_packed_mix(
+                ctx,
+                enc,
+                hyper_residual,
+                bridge,
+                g.eps(),
+                weights.layer_zero.attention_residual.read,
+                weights.layer_zero.attention_residual.inject,
+                residual,
+                tokens,
+            )
+        }?;
+        let mixer_output = unsafe {
+            encode_layer_zero_gdn_packed(
+                ctx,
+                enc,
+                attention.mixed(),
+                weights.layer_zero.gdn,
+                &mut workspace.layer_zero,
+                gdn,
+                tokens,
+            )
+        }?;
+        encode_copy_offset_f32(ctx, enc, &mixer_output, 0, bridge, hidden * tokens)?;
+        attention.encode_combine()?;
+
+        let ffn = unsafe {
+            encode_gated_residual_packed_mix(
+                ctx,
+                enc,
+                hyper_residual,
+                bridge,
+                g.eps(),
+                weights.layer_zero.ffn_residual.read,
+                weights.layer_zero.ffn_residual.inject,
+                residual,
+                tokens,
+            )
+        }?;
+        let moe_output = unsafe {
+            encode_qwen4exp_moe_packed_motor(
+                ctx,
+                enc,
+                ffn.mixed(),
+                weights.layer_zero.moe,
+                moe,
+                tokens,
+            )
+        }?;
+        encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, hidden * tokens)?;
+        ffn.encode_combine()?;
+
+        let ple_output = unsafe {
+            encode_qwen4exp_ple_packed_into_workspace(
+                ctx,
+                enc,
+                ple_embedding,
+                hyper_residual,
+                weights.ple,
+                &mut workspace.ple,
+                ple,
+                tokens,
+            )
+        }?;
+        encode_copy_offset_f32(
+            ctx,
+            enc,
+            &ple_output,
+            0,
+            hyper_residual,
+            g.hyper_width() * tokens,
+        )?;
+
+        let attention = unsafe {
+            encode_gated_residual_packed_mix(
+                ctx,
+                enc,
+                hyper_residual,
+                bridge,
+                g.eps(),
+                weights.layer_one_attention_residual.read,
+                weights.layer_one_attention_residual.inject,
+                residual,
+                tokens,
+            )
+        }?;
+        let mixer_output = unsafe {
+            encode_gated_delta_net_packed_into_workspace(
+                ctx,
+                enc,
+                attention.mixed(),
+                weights.layer_one_gdn,
+                &mut workspace.layer_one_gdn,
+                gdn,
+                tokens,
+            )
+        }?;
+        encode_copy_offset_f32(ctx, enc, &mixer_output, 0, bridge, hidden * tokens)?;
+        attention.encode_combine()?;
+
+        let ffn = unsafe {
+            encode_gated_residual_packed_mix(
+                ctx,
+                enc,
+                hyper_residual,
+                bridge,
+                g.eps(),
+                weights.layer_one_ffn_residual.read,
+                weights.layer_one_ffn_residual.inject,
+                residual,
+                tokens,
+            )
+        }?;
+        let moe_output = unsafe {
+            encode_qwen4exp_moe_packed_motor(
+                ctx,
+                enc,
+                ffn.mixed(),
+                weights.layer_one_moe,
+                moe,
+                tokens,
+            )
+        }?;
+        encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, hidden * tokens)?;
+        ffn.encode_combine()?;
+        Ok(())
+    })();
+    if encoded.is_err() {
+        workspace.encode_failed = true;
+        workspace.state_poisoned = true;
+    }
+    encoded
 }
 
 pub(crate) fn validate_and_preflight(

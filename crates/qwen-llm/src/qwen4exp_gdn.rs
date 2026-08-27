@@ -405,6 +405,11 @@ impl GatedDeltaNetMetalWorkspace {
         self.geometry
     }
 
+    #[cfg(test)]
+    pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
+        vec![self.conv_state.clone(), self.delta_state.clone()]
+    }
+
     pub fn reset(&mut self) -> Result<(), Qwen4ExpGdnError> {
         self.require_idle()?;
         zero_writable_tensor(&self.conv_state)?;
@@ -458,6 +463,7 @@ impl GatedDeltaNetMetalWorkspace {
             ));
         }
         self.active_command = None;
+        self.state_poisoned = false;
         Ok(())
     }
 
@@ -699,6 +705,74 @@ pub fn encode_gated_delta_net<'a>(
     )?;
 
     Ok(GatedDeltaNetMetalRead { workspace })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_and_preflight_gated_delta_net_packed_workspace(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &GatedDeltaNetMetalWorkspace,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpGdnError> {
+    validate_packed_encoder(ctx, enc)?;
+    if workspace.state_poisoned {
+        return invalid("workspace causal state is indeterminate; reset it before reuse");
+    }
+    workspace.require_idle()?;
+    if weights.geometry != workspace.geometry || scratch.geometry != workspace.geometry {
+        return invalid("packed GDN weight, workspace, and scratch geometry differ");
+    }
+    validate_packed_contract(
+        ctx,
+        input,
+        weights,
+        &workspace.conv_state,
+        &workspace.delta_state,
+        scratch,
+        tokens,
+    )?;
+    preflight_packed(ctx, weights)
+}
+
+/// Encode packed rows directly into the scalar GDN state owner.
+///
+/// # Safety
+///
+/// The caller must retain the command and every input and scratch tensor until
+/// completion or permanent abandonment. Failure poisons this causal workspace.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_gated_delta_net_packed_into_workspace(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &mut GatedDeltaNetMetalWorkspace,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+) -> Result<MetalTensor, Qwen4ExpGdnError> {
+    validate_and_preflight_gated_delta_net_packed_workspace(
+        ctx, enc, input, weights, workspace, scratch, tokens,
+    )?;
+    reserve_command(workspace, enc)?;
+    let encoded = unsafe {
+        encode_gated_delta_net_packed(
+            ctx,
+            enc,
+            input,
+            weights,
+            &workspace.conv_state,
+            &workspace.delta_state,
+            scratch,
+            tokens,
+        )
+    };
+    if encoded.is_err() {
+        workspace.state_poisoned = true;
+    }
+    encoded
 }
 
 /// Encode packed GDN rows into transaction-owned scratch and causal state.
@@ -1609,6 +1683,33 @@ mod tests {
             }
             Err(error) => panic!("Metal initialization failed: {error}"),
         }
+    }
+
+    #[test]
+    fn not_enqueued_abandon_restores_gdn_retry_contract() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        let geometry = GatedDeltaNetMetalGeometry::new(256, 1, 1, 128, 4, 1e-6).unwrap();
+        let mut workspace = GatedDeltaNetMetalWorkspace::new(&ctx, geometry).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        reserve_command(&mut workspace, &encoder).unwrap();
+        workspace.state_poisoned = true;
+        encoder.end();
+        unsafe { workspace.abandon_uncommitted().unwrap() };
+        drop(command);
+        assert!(!workspace.state_poisoned);
+        workspace.require_idle().unwrap();
+
+        let retry_command = ctx.queue.commandBuffer().unwrap();
+        let retry_encoder = KernelEncoder::begin(&retry_command);
+        reserve_command(&mut workspace, &retry_encoder).unwrap();
+        retry_encoder.end();
+        unsafe { workspace.abandon_uncommitted().unwrap() };
+        drop(retry_command);
+        assert!(!workspace.state_poisoned);
+        workspace.require_idle().unwrap();
     }
 
     const GROUPED_TILED_ORACLE_JSON: &str =

@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Dense Packed QSA Motor GO
+
+Status: retain the scalar QSA cache owner while adding dense causal packed
+execution through a total sequence length of 2,048. Sparse per-query selection
+remains a later path for longer chunks.
+
+- N=1 delegates to the scalar body. Packed N=2/8/16/33/64 preserves F32 pending
+  index keys, the pooled F16 rounding point, compressed F16 index blocks, and
+  F16 K/V publication across every modulo-4 start residue.
+- Production GQA-12 tests cover the 32-row query-tile seam and the full-tile KQ
+  kernel at N=64. Packed execution omits index scoring and selection while the
+  dense budget exposes every causal token.
+- Released layer-3 Q8/BF16 comparisons cover the production N=2/8/16/33 kernel
+  routes. Observed row relative RMS is at most `7.448e-4`, cosine at least
+  `0.999999728`, and maximum absolute delta at most `8.684e-5`.
+- The BF16 index-key projection retains F32 activations at every N. The broader
+  BF16-activation shortcut moved persistent selector state by `1.42e-3`
+  relative RMS in qualification and was rejected for this stateful path.
+
 ## 2026-08-27 - Flash-Next GDN Tri-Fusion KILL
 
 Status: remove the default-off beta/alpha/decay experiment. Eliminating 72

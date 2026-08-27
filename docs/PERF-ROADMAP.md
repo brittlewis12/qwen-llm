@@ -233,6 +233,14 @@ optional parallel prep kernel remains outside this proof and must stay disabled
 for the Flash-Next lane until separately qualified. Next isolate packed PLE,
 the first component with no existing family-level packed implementation.
 
+Dense packed QSA is now closed through a total sequence length of 2,048. N=1
+delegates exactly; N=2/8/16/33/64 and all modulo-4 continuation residues retain
+the scalar cache state, including the N=64 full-tile attention route. Released
+Q8/BF16 layer-3 rows qualify every production small-N projection route. Keep
+F32 activations for the persistent BF16 index-key projection. Next compose the
+qualified motors through layers 2-47, then give that all-layer path one session
+owner and a zero-copy decode handoff before exposing it to the CLI.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

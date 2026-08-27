@@ -435,6 +435,19 @@ struct qwen4exp_qsa_pool_args {
     float eps;
 };
 
+struct qwen4exp_qsa_packed_index_args {
+    uint start_position;
+    uint n_tokens;
+    uint ratio;
+    uint head_dim;
+    uint rotary_dim;
+    uint first_block;
+    uint block_count;
+    uint block_capacity;
+    float theta;
+    float eps;
+};
+
 struct qwen4exp_qsa_index_score_args {
     uint visible_blocks;
 };
@@ -569,6 +582,100 @@ kernel void kernel_qwen4exp_qsa_pool_publish_f16(
         }
         destination[lane] = half(rotated * norm);
     }
+}
+
+// Publish from the pre-chunk pending slots before the following dispatch
+// advances those slots to their final per-residue values.
+kernel void kernel_qwen4exp_qsa_pool_publish_packed_f16(
+        constant qwen4exp_qsa_packed_index_args & args [[buffer(0)]],
+        device const float * pending [[buffer(1)]],
+        device const float * raw_keys [[buffer(2)]],
+        device const float * weight [[buffer(3)]],
+        device half * compressed [[buffer(4)]],
+        uint block_offset [[thread_position_in_grid]]) {
+    if (block_offset >= args.block_count
+            || args.ratio == 0u
+            || args.head_dim == 0u
+            || args.rotary_dim == 0u
+            || args.rotary_dim > args.head_dim
+            || (args.rotary_dim & 1u) != 0u) return;
+
+    const ulong start = args.start_position;
+    const ulong end = start + args.n_tokens;
+    const ulong block = (ulong)args.first_block + block_offset;
+    if (block >= args.block_capacity) return;
+    const ulong block_start = block * args.ratio;
+    const ulong block_end = block_start + args.ratio;
+    if (block_end <= start || block_end > end) return;
+
+    float sum_square = 0.0f;
+    for (uint lane = 0u; lane < args.head_dim; ++lane) {
+        float sum = 0.0f;
+        for (uint slot = 0u; slot < args.ratio; ++slot) {
+            const ulong source_position = block_start + slot;
+            sum += source_position < start
+                ? pending[(ulong)slot * args.head_dim + lane]
+                : raw_keys[(source_position - start) * args.head_dim + lane];
+        }
+        const float rounded = float(half(sum / float(args.ratio)));
+        sum_square += rounded * rounded;
+    }
+
+    const float norm = rsqrt(sum_square / float(args.head_dim) + args.eps);
+    const uint position = uint(block * args.ratio);
+    device half * destination = compressed + block * args.head_dim;
+    for (uint lane = 0u; lane < args.head_dim; ++lane) {
+        float sum = 0.0f;
+        for (uint slot = 0u; slot < args.ratio; ++slot) {
+            const ulong source_position = block_start + slot;
+            sum += source_position < start
+                ? pending[(ulong)slot * args.head_dim + lane]
+                : raw_keys[(source_position - start) * args.head_dim + lane];
+        }
+        const float rounded = float(half(sum / float(args.ratio)));
+        float rotated = rounded * weight[lane];
+        if (lane < args.rotary_dim) {
+            const uint half_dim = args.rotary_dim / 2u;
+            const uint pair = lane % half_dim;
+            const uint paired_lane = pair + (lane < half_dim ? half_dim : 0u);
+            float paired_sum = 0.0f;
+            for (uint slot = 0u; slot < args.ratio; ++slot) {
+                const ulong source_position = block_start + slot;
+                paired_sum += source_position < start
+                    ? pending[(ulong)slot * args.head_dim + paired_lane]
+                    : raw_keys[(source_position - start) * args.head_dim + paired_lane];
+            }
+            const float paired = float(half(paired_sum / float(args.ratio)));
+            const float frequency = pow(args.theta,
+                -2.0f * float(pair) / float(args.rotary_dim));
+            const float angle = float(position) * frequency;
+            rotated = lane < half_dim
+                ? rounded * weight[lane] * cos(angle)
+                    - paired * weight[pair + half_dim] * sin(angle)
+                : rounded * weight[lane] * cos(angle)
+                    + paired * weight[pair] * sin(angle);
+        }
+        destination[lane] = half(rotated * norm);
+    }
+}
+
+kernel void kernel_qwen4exp_qsa_commit_pending_packed_f32(
+        constant qwen4exp_qsa_packed_index_args & args [[buffer(0)]],
+        device const float * raw_keys [[buffer(1)]],
+        device float * pending [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    if (args.ratio == 0u || args.head_dim == 0u) return;
+    const ulong count = (ulong)args.ratio * args.head_dim;
+    if (index >= count) return;
+    const uint slot = index / args.head_dim;
+    const uint lane = index % args.head_dim;
+    const uint start_slot = args.start_position % args.ratio;
+    const uint first = (slot + args.ratio - start_slot) % args.ratio;
+    if (first >= args.n_tokens) return;
+    const uint last = first
+        + ((args.n_tokens - 1u - first) / args.ratio) * args.ratio;
+    pending[(ulong)slot * args.head_dim + lane]
+        = raw_keys[(ulong)last * args.head_dim + lane];
 }
 
 kernel void kernel_qwen4exp_qsa_index_scores_4x128_f16(

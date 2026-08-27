@@ -863,7 +863,7 @@ fn encode_step(
     Ok(())
 }
 
-fn validate_contract(
+pub(crate) fn validate_contract(
     ctx: &MetalContext,
     input: &MetalTensor,
     weights: QwenSparseAttentionMetalWeights<'_>,
@@ -1144,7 +1144,7 @@ fn workspace_tensors(
     ]
 }
 
-fn preflight(
+pub(crate) fn preflight(
     ctx: &MetalContext,
     weights: QwenSparseAttentionMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpQsaError> {

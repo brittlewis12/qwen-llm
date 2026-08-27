@@ -488,6 +488,30 @@ pub fn encode_qwen4exp_layers_zero_one<'a>(
     weights: Qwen4ExpLayersZeroOneMetalWeights<'_>,
     workspace: &'a mut Qwen4ExpLayersZeroOneMetalWorkspace,
 ) -> Result<Qwen4ExpLayersZeroOneMetalRead<'a>, Qwen4ExpLayersZeroOneError> {
+    validate_and_preflight(ctx, enc, token_id, position, weights, workspace)?;
+    let (next_history, row_ids) =
+        workspace
+            .history
+            .advanced(weights.ple_config, token_id, position)?;
+    workspace.ple.stage_rows(table, &row_ids)?;
+    reserve_command(workspace, enc)?;
+    workspace.pending_history = Some(next_history);
+    if let Err(error) = encode_step(ctx, enc, token_id, weights, workspace) {
+        workspace.encode_failed = true;
+        workspace.state_poisoned = true;
+        return Err(error);
+    }
+    Ok(Qwen4ExpLayersZeroOneMetalRead { workspace })
+}
+
+pub(crate) fn validate_and_preflight(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    position: u64,
+    weights: Qwen4ExpLayersZeroOneMetalWeights<'_>,
+    workspace: &Qwen4ExpLayersZeroOneMetalWorkspace,
+) -> Result<(), Qwen4ExpLayersZeroOneError> {
     validate_encoder(ctx, enc)?;
     if workspace.state_poisoned {
         return invalid("workspace causal state is indeterminate; reset it before reuse");
@@ -524,20 +548,21 @@ pub fn encode_qwen4exp_layers_zero_one<'a>(
         None | Some(_) => {}
     }
     validate_ple_config(weights.ple_config, workspace.geometry)?;
-    validate_contract(ctx, weights, workspace)?;
-    let (next_history, row_ids) =
-        workspace
-            .history
-            .advanced(weights.ple_config, token_id, position)?;
+    validate_contract(ctx, weights, workspace)
+}
+
+pub(crate) fn stage_ple_rows(
+    token_id: u32,
+    position: u64,
+    table: PleIq4NlTable<'_>,
+    weights: Qwen4ExpLayersZeroOneMetalWeights<'_>,
+    workspace: &mut Qwen4ExpLayersZeroOneMetalWorkspace,
+) -> Result<(), Qwen4ExpLayersZeroOneError> {
+    let (_, row_ids) = workspace
+        .history
+        .advanced(weights.ple_config, token_id, position)?;
     workspace.ple.stage_rows(table, &row_ids)?;
-    reserve_command(workspace, enc)?;
-    workspace.pending_history = Some(next_history);
-    if let Err(error) = encode_step(ctx, enc, token_id, weights, workspace) {
-        workspace.encode_failed = true;
-        workspace.state_poisoned = true;
-        return Err(error);
-    }
-    Ok(Qwen4ExpLayersZeroOneMetalRead { workspace })
+    Ok(())
 }
 
 fn encode_step(

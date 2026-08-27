@@ -175,6 +175,13 @@ bridge and writes PLE output back to that same buffer before layer 1. Preserve
 the owning-command boundaries until full decode is correct; direct child output
 handoff is a profile-gated launch/bandwidth cleanup, not a bring-up dependency.
 
+The first complete 3-GDN/1-QSA cycle makes QSA runtime memory explicit instead
+of treating weight admission as sufficient. One 262K-capacity released QSA
+workspace is about 528.6 MiB; all 12 QSA layers are about 6.19 GiB before
+allocator overhead. Sum these estimates into session admission before allocating
+the 48-layer runtime, and keep short-capacity correctness fixtures independent
+from the native-context product policy.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

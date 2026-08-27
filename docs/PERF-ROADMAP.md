@@ -210,6 +210,21 @@ tokens where QSA selection truncates visible blocks. Fast IQ3 now also has direc
 baseline/candidate full-logit rows at three local boundaries; all argmax IDs
 match with at most `4.921e-5` relative RMS and `7.573e-4` maximum delta.
 
+The exact beta/alpha/decay tri-fusion at checkpoint `56bc662` removed two
+dispatches from each of 36 GDN layers but saved only `0.0419 ms` at the median;
+its bootstrap upper bound was `0.3090 ms`, below the predeclared `0.4 ms` kill
+gate. The experiment is removed. Do not infer a large decode win from launch
+count alone when the fusion leaves all material weight and activation traffic
+intact. The force-ranked lane is now:
+
+1. Build packed prefill through the dense-QSA range as the product priority.
+2. For the next small decode falsifier, fuse each Q8 HC down projection with its
+   low-SiLU epilogue (97 dispatches/token) because it also removes a scratch
+   pass; preserve the exact Q8 reduction and branch-count scaling.
+3. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
+   only if the HC result supports epilogue fusion; its routed-output read/modify/
+   write dependency makes it the riskier candidate.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

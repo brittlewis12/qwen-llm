@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next GDN Tri-Fusion KILL
+
+Status: remove the default-off beta/alpha/decay experiment. Eliminating 72
+small decode dispatches per token did not clear its predefined minimum effect.
+
+- Checkpoint `56bc662` preserved beta's one-SIMD reduction, alpha's four-SIMD
+  R2 reduction, and the decay branch bit-exactly while replacing three kernels
+  with one in each of 36 GDN layers. Production-shape outputs, two-token state,
+  named dispatches, and the R2-off fallback passed focused tests.
+- A released UD-Q3_K_XL `B-C-C-B` x3 packet used 28 prompt forwards and 31
+  decode transitions per arm with five-second cooldowns. All 12 output digests
+  were `a43ab8b653ea3e75ed0933b22495869eccd123b3897b80b8a626cb7064d600d9`.
+- Baseline/candidate median decode GPU time was `48.3132/48.2713 ms` per
+  transition, a `0.0419 ms` saving; means saved `0.0286 ms`. The 100,000-draw
+  bootstrap 95% interval was `[-0.2882, +0.3090] ms`.
+- Balanced-block savings were `[-0.0210, +0.2463, -0.1394] ms/transition`.
+  Wall median saved `0.0484 ms`, with interval `[-0.2968, +0.3323] ms`.
+  The GPU upper bound is below the predeclared `0.4 ms` kill threshold.
+
+Evidence: `docs/bench/2026-08-27-qwen4exp-gdn-trifusion/`.
+
 ## 2026-08-27 - Flash-Next Bring-Up Review Closes Local Proof Gaps
 
 Status: retain the text-backbone implementation and fast IQ3 default while

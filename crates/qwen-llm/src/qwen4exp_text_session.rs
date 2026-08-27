@@ -1386,6 +1386,10 @@ pub(crate) fn encode_qwen4exp_text_packed_layer_sampled<'a>(
     ),
     Qwen4ExpTextSessionError,
 > {
+    #[cfg(test)]
+    if crate::qwen4exp_moe::qwen4exp_moe_route_count_capture_active() {
+        return invalid("route-count capture is unavailable in sampled packed profiles");
+    }
     if token_ids.len() <= 1 {
         return invalid("sampled packed profile requires at least two tokens");
     }
@@ -1543,6 +1547,10 @@ pub fn encode_qwen4exp_text_token_layer_sampled<'a>(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    #[cfg(test)]
+    if crate::qwen4exp_moe::qwen4exp_moe_route_count_capture_active() {
+        return invalid("route-count capture is unavailable in sampled token profiles");
+    }
     let stage_count = weights
         .post_ple
         .len()

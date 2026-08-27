@@ -1368,11 +1368,15 @@ mod tests {
     use super::*;
     use crate::metal::DispatchCensusRow;
     use crate::qwen4exp_moe::{
-        with_qwen4exp_moe_iq3_fast_override, with_qwen4exp_packed_router_e8p32_strict_override,
+        with_qwen4exp_moe_iq3_fast_override, with_qwen4exp_moe_route_count_capture,
+        with_qwen4exp_packed_router_e8p32_strict_override,
     };
     use crate::sampling::{Sampler, SamplingConfig};
+    use crate::tensor::GgmlType;
     use crate::tokenizer::Tokenizer;
     use objc2_metal::MTLBuffer;
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
 
     fn argmax(values: &[f32]) -> usize {
         values
@@ -1579,6 +1583,487 @@ mod tests {
         prefill_ple_prior_tokens: Vec<u32>,
         continuation_ple_prior_tokens: Vec<u32>,
         census: Vec<DispatchCensusRow>,
+    }
+
+    fn run_packed_replay(
+        runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+        tokens: &[u32],
+        continuation_token: u32,
+    ) -> PackedRouterReplay {
+        crate::metal::dispatch_census_begin();
+        let endpoint = runner.prefill(tokens).unwrap().to_vec();
+        let census = crate::metal::dispatch_census_take();
+        let timing = runner.last_prefill_timing().unwrap();
+        assert_eq!(timing.packed_token_count, tokens.len());
+        assert_eq!(timing.command_count, 1);
+        let prefill_state = snapshot_persistent_state(runner);
+        let prefill_qsa_lengths = runner.workspace.qsa_committed_lengths();
+        let prefill_ple_prior_tokens = runner.workspace.ple_prior_tokens().to_vec();
+        let continuation = runner.forward_token(continuation_token).unwrap().to_vec();
+        PackedRouterReplay {
+            endpoint,
+            continuation,
+            prefill_state,
+            continuation_state: snapshot_persistent_state(runner),
+            prefill_qsa_lengths,
+            continuation_qsa_lengths: runner.workspace.qsa_committed_lengths(),
+            prefill_ple_prior_tokens,
+            continuation_ple_prior_tokens: runner.workspace.ple_prior_tokens().to_vec(),
+            census,
+        }
+    }
+
+    fn fill_i32_tensor(tensor: &crate::metal::MetalTensor, value: i32) {
+        assert_eq!(tensor.dtype, GgmlType::I32);
+        unsafe {
+            let destination = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<i32>();
+            std::slice::from_raw_parts_mut(destination, tensor.n_elements() as usize).fill(value);
+        }
+    }
+
+    fn read_i32_tensor(tensor: &crate::metal::MetalTensor) -> Vec<i32> {
+        assert_eq!(tensor.dtype, GgmlType::I32);
+        unsafe {
+            let source = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<i32>();
+            std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
+        }
+    }
+
+    fn assert_route_count_capture_census(
+        label: &str,
+        baseline: &[DispatchCensusRow],
+        captured: &[DispatchCensusRow],
+    ) {
+        const COPY: &str = "kernel_copy_offset_i32";
+        let copies = captured.iter().filter(|row| row.kernel == COPY).count();
+        assert_eq!(copies, 48, "{label} capture dispatches");
+        for (index, row) in captured
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.kernel == COPY)
+        {
+            assert!(index > 0 && index + 1 < captured.len());
+            assert_eq!(
+                captured[index - 1].kernel,
+                "kernel_moe_route_bucket_slots_f32",
+                "{label} capture {index} must follow its bucket"
+            );
+            assert!(
+                captured[index + 1].kernel.starts_with("kernel_moe_swiglu_"),
+                "{label} capture {index} must precede routed gate/up"
+            );
+            assert_eq!(row.encoder_ordinal, 0);
+            assert!(!row.encoder_concurrent);
+        }
+        let filtered = captured
+            .iter()
+            .filter(|row| row.kernel != COPY)
+            .collect::<Vec<_>>();
+        assert_eq!(baseline.len(), filtered.len(), "{label} filtered census");
+        for (index, (expected, actual)) in baseline.iter().zip(filtered).enumerate() {
+            assert_eq!(expected.family, actual.family, "{label} family {index}");
+            assert_eq!(expected.tag, actual.tag, "{label} tag {index}");
+            assert_eq!(
+                expected.encoder_ordinal, actual.encoder_ordinal,
+                "{label} encoder {index}"
+            );
+            assert_eq!(
+                expected.encoder_concurrent, actual.encoder_concurrent,
+                "{label} encoder mode {index}"
+            );
+            assert_eq!(expected.kernel, actual.kernel, "{label} kernel {index}");
+            assert_eq!(
+                (
+                    expected.grid_width,
+                    expected.grid_height,
+                    expected.grid_depth,
+                    expected.threads_width,
+                    expected.threads_height,
+                    expected.threads_depth,
+                    expected.grid_tgs,
+                    expected.tg_threads,
+                ),
+                (
+                    actual.grid_width,
+                    actual.grid_height,
+                    actual.grid_depth,
+                    actual.threads_width,
+                    actual.threads_height,
+                    actual.threads_depth,
+                    actual.grid_tgs,
+                    actual.tg_threads,
+                ),
+                "{label} geometry {index}"
+            );
+        }
+    }
+
+    fn sha256_u32_le(domain: &[u8], values: &[u32]) -> String {
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        for value in values {
+            hash.update(value.to_le_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    fn sha256_i32_le(domain: &[u8], values: &[i32]) -> String {
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        for value in values {
+            hash.update(value.to_le_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn sha256_file(path: &std::path::Path) -> String {
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(path).unwrap();
+        let mut hash = Sha256::new();
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = file.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            hash.update(&buffer[..read]);
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    fn sha256_f32_bits(domain: &[u8], values: &[f32]) -> String {
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        for value in values {
+            hash.update(value.to_bits().to_le_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    fn sha256_state_bytes(domain: &[u8], tensors: &[Vec<u8>]) -> String {
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        for tensor in tensors {
+            hash.update((tensor.len() as u64).to_le_bytes());
+            hash.update(tensor);
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    fn sha256_census_rows(domain: &[u8], rows: &[DispatchCensusRow], omit_capture: bool) -> String {
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        for row in rows
+            .iter()
+            .filter(|row| !omit_capture || row.kernel != "kernel_copy_offset_i32")
+        {
+            for value in [row.family, row.tag.as_deref().unwrap_or(""), &row.kernel] {
+                hash.update((value.len() as u64).to_le_bytes());
+                hash.update(value.as_bytes());
+            }
+            hash.update(row.encoder_ordinal.to_le_bytes());
+            hash.update([u8::from(row.encoder_concurrent)]);
+            for value in [
+                row.grid_width,
+                row.grid_height,
+                row.grid_depth,
+                row.threads_width,
+                row.threads_height,
+                row.threads_depth,
+                row.grid_tgs,
+                row.tg_threads,
+            ] {
+                hash.update(value.to_le_bytes());
+            }
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    fn sha256_qsa_lengths(domain: &[u8], lengths: &[(u32, usize)]) -> String {
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        for &(layer, length) in lengths {
+            hash.update(layer.to_le_bytes());
+            hash.update((length as u64).to_le_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    struct PackedReplayDigests {
+        endpoint_logits: String,
+        continuation_logits: String,
+        prefill_state: String,
+        continuation_state: String,
+        prefill_qsa_lengths: String,
+        continuation_qsa_lengths: String,
+        prefill_ple_history: String,
+        continuation_ple_history: String,
+        census_raw: String,
+        census_without_capture: String,
+    }
+
+    impl PackedReplayDigests {
+        fn from_replay(replay: &PackedRouterReplay) -> Self {
+            Self {
+                endpoint_logits: sha256_f32_bits(
+                    b"qwen4exp-packed-replay-endpoint-logits-f32le-v1\0",
+                    &replay.endpoint,
+                ),
+                continuation_logits: sha256_f32_bits(
+                    b"qwen4exp-packed-replay-continuation-logits-f32le-v1\0",
+                    &replay.continuation,
+                ),
+                prefill_state: sha256_state_bytes(
+                    b"qwen4exp-packed-replay-prefill-state-v1\0",
+                    &replay.prefill_state,
+                ),
+                continuation_state: sha256_state_bytes(
+                    b"qwen4exp-packed-replay-continuation-state-v1\0",
+                    &replay.continuation_state,
+                ),
+                prefill_qsa_lengths: sha256_qsa_lengths(
+                    b"qwen4exp-packed-replay-prefill-qsa-lengths-v1\0",
+                    &replay.prefill_qsa_lengths,
+                ),
+                continuation_qsa_lengths: sha256_qsa_lengths(
+                    b"qwen4exp-packed-replay-continuation-qsa-lengths-v1\0",
+                    &replay.continuation_qsa_lengths,
+                ),
+                prefill_ple_history: sha256_u32_le(
+                    b"qwen4exp-packed-replay-prefill-ple-history-u32le-v1\0",
+                    &replay.prefill_ple_prior_tokens,
+                ),
+                continuation_ple_history: sha256_u32_le(
+                    b"qwen4exp-packed-replay-continuation-ple-history-u32le-v1\0",
+                    &replay.continuation_ple_prior_tokens,
+                ),
+                census_raw: sha256_census_rows(
+                    b"qwen4exp-packed-replay-dispatch-census-v1\0",
+                    &replay.census,
+                    false,
+                ),
+                census_without_capture: sha256_census_rows(
+                    b"qwen4exp-packed-replay-dispatch-census-v1\0",
+                    &replay.census,
+                    true,
+                ),
+            }
+        }
+
+        fn binding_sha256(&self, omit_capture: bool) -> String {
+            let census = if omit_capture {
+                &self.census_without_capture
+            } else {
+                &self.census_raw
+            };
+            let mut hash = Sha256::new();
+            hash.update(b"qwen4exp-packed-replay-evidence-binding-v1\0");
+            for (name, digest) in [
+                ("endpoint_logits", &self.endpoint_logits),
+                ("continuation_logits", &self.continuation_logits),
+                ("prefill_state", &self.prefill_state),
+                ("continuation_state", &self.continuation_state),
+                ("prefill_qsa_lengths", &self.prefill_qsa_lengths),
+                ("continuation_qsa_lengths", &self.continuation_qsa_lengths),
+                ("prefill_ple_history", &self.prefill_ple_history),
+                ("continuation_ple_history", &self.continuation_ple_history),
+                ("dispatch_census", census),
+            ] {
+                hash.update((name.len() as u64).to_le_bytes());
+                hash.update(name.as_bytes());
+                hash.update(digest.as_bytes());
+            }
+            format!("{:x}", hash.finalize())
+        }
+
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "endpoint_logits_sha256_f32le": &self.endpoint_logits,
+                "continuation_logits_sha256_f32le": &self.continuation_logits,
+                "prefill_persistent_state_sha256": &self.prefill_state,
+                "continuation_persistent_state_sha256": &self.continuation_state,
+                "prefill_qsa_lengths_sha256": &self.prefill_qsa_lengths,
+                "continuation_qsa_lengths_sha256": &self.continuation_qsa_lengths,
+                "prefill_ple_history_sha256_u32le": &self.prefill_ple_history,
+                "continuation_ple_history_sha256_u32le": &self.continuation_ple_history,
+                "dispatch_census_sha256": &self.census_raw,
+                "dispatch_census_without_capture_sha256": &self.census_without_capture,
+                "raw_binding_sha256": self.binding_sha256(false),
+                "without_capture_binding_sha256": self.binding_sha256(true)
+            })
+        }
+    }
+
+    fn is_lower_hex(value: &str, length: usize) -> bool {
+        value.len() == length
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    fn route_count_band_json(counts: &[i32], min: i32, max: Option<i32>) -> serde_json::Value {
+        let selected = counts
+            .iter()
+            .copied()
+            .filter(|&count| count >= min && max.is_none_or(|maximum| count <= maximum));
+        let (experts, routes) = selected.fold((0_usize, 0_usize), |(experts, routes), count| {
+            (experts + 1, routes + count as usize)
+        });
+        serde_json::json!({ "experts": experts, "routes": routes })
+    }
+
+    fn route_count_panels_json(counts: &[i32], tokens: usize, width: usize) -> serde_json::Value {
+        let routes = counts.iter().map(|&count| count as usize).sum::<usize>();
+        let active_panels = counts
+            .iter()
+            .map(|&count| (count as usize).div_ceil(width))
+            .sum::<usize>();
+        let full_panels = counts.len() * tokens.div_ceil(width);
+        let padded_columns = active_panels * width - routes;
+        let occupancy = if active_panels == 0 {
+            0.0
+        } else {
+            routes as f64 / (active_panels * width) as f64
+        };
+        serde_json::json!({
+            "width": width,
+            "active_panels": active_panels,
+            "full_panels": full_panels,
+            "early_return_panels": full_panels - active_panels,
+            "padded_columns": padded_columns,
+            "active_panel_lane_occupancy": occupancy
+        })
+    }
+
+    fn route_count_layer_json(
+        layer: usize,
+        counts: &[i32],
+        tokens: usize,
+        gate_dtype: GgmlType,
+        up_dtype: GgmlType,
+        down_dtype: GgmlType,
+    ) -> serde_json::Value {
+        let mut histogram = BTreeMap::<i32, usize>::new();
+        for &count in counts {
+            *histogram.entry(count).or_default() += 1;
+        }
+        let route_sum = counts.iter().map(|&count| count as usize).sum::<usize>();
+        serde_json::json!({
+            "layer": layer,
+            "gate_dtype": format!("{gate_dtype:?}"),
+            "up_dtype": format!("{up_dtype:?}"),
+            "down_dtype": format!("{down_dtype:?}"),
+            "route_sum": route_sum,
+            "active_experts": counts.iter().filter(|&&count| count != 0).count(),
+            "max_count": counts.iter().copied().max().unwrap_or(0),
+            "exact_histogram": histogram.into_iter().collect::<Vec<_>>(),
+            "bands": {
+                "zero": route_count_band_json(counts, 0, Some(0)),
+                "one_to_8": route_count_band_json(counts, 1, Some(8)),
+                "nine_to_16": route_count_band_json(counts, 9, Some(16)),
+                "seventeen_to_32": route_count_band_json(counts, 17, Some(32)),
+                "thirty_three_to_64": route_count_band_json(counts, 33, Some(64)),
+                "sixty_five_plus": route_count_band_json(counts, 65, None)
+            },
+            "panels": {
+                "8": route_count_panels_json(counts, tokens, 8),
+                "16": route_count_panels_json(counts, tokens, 16),
+                "32": route_count_panels_json(counts, tokens, 32)
+            },
+            "current_n16_grid": {
+                "full_threadgroups": 10 * 512 * tokens.div_ceil(16),
+                "active_threadgroups": 10 * counts.iter().map(|&count| (count as usize).div_ceil(16)).sum::<usize>()
+            }
+        })
+    }
+
+    fn route_count_aggregate_json(
+        name: &str,
+        layers: &[usize],
+        rows: &[Vec<i32>],
+        tokens: usize,
+    ) -> serde_json::Value {
+        let counts = layers
+            .iter()
+            .flat_map(|&layer| rows[layer].iter().copied())
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "name": name,
+            "layers": layers,
+            "route_sum": counts.iter().map(|&count| count as usize).sum::<usize>(),
+            "active_expert_instances": counts.iter().filter(|&&count| count != 0).count(),
+            "bands": {
+                "zero": route_count_band_json(&counts, 0, Some(0)),
+                "one_to_8": route_count_band_json(&counts, 1, Some(8)),
+                "nine_to_16": route_count_band_json(&counts, 9, Some(16)),
+                "seventeen_to_32": route_count_band_json(&counts, 17, Some(32)),
+                "thirty_three_to_64": route_count_band_json(&counts, 33, Some(64)),
+                "sixty_five_plus": route_count_band_json(&counts, 65, None)
+            },
+            "panels": {
+                "8": route_count_panels_json(&counts, tokens, 8),
+                "16": route_count_panels_json(&counts, tokens, 16),
+                "32": route_count_panels_json(&counts, tokens, 32)
+            }
+        })
+    }
+
+    fn assert_packed_replay_bits_eq(
+        label: &str,
+        baseline: &PackedRouterReplay,
+        captured: &PackedRouterReplay,
+    ) {
+        assert_f32_bits_eq(
+            &format!("{label} endpoint logits"),
+            &baseline.endpoint,
+            &captured.endpoint,
+        );
+        assert_f32_bits_eq(
+            &format!("{label} continuation logits"),
+            &baseline.continuation,
+            &captured.continuation,
+        );
+        assert_state_bytes_eq(
+            &format!("{label} packed persistent state"),
+            &baseline.prefill_state,
+            &captured.prefill_state,
+        );
+        assert_state_bytes_eq(
+            &format!("{label} continuation persistent state"),
+            &baseline.continuation_state,
+            &captured.continuation_state,
+        );
+        assert_eq!(captured.prefill_qsa_lengths, baseline.prefill_qsa_lengths);
+        assert_eq!(
+            captured.continuation_qsa_lengths,
+            baseline.continuation_qsa_lengths
+        );
+        assert_eq!(
+            captured.prefill_ple_prior_tokens,
+            baseline.prefill_ple_prior_tokens
+        );
+        assert_eq!(
+            captured.continuation_ple_prior_tokens,
+            baseline.continuation_ple_prior_tokens
+        );
+        assert_route_count_capture_census(label, &baseline.census, &captured.census);
     }
 
     #[test]
@@ -1847,7 +2332,6 @@ mod tests {
         assert_eq!(marker.len(), 1);
         let marker = u32::try_from(marker[0]).unwrap();
         let long_tokens = vec![marker; 2_048];
-
         let ctx = MetalContext::new().expect("initialize Metal");
         assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
         let capacity = Qwen4ExpSessionCapacity::for_forward_limit(
@@ -1961,5 +2445,456 @@ mod tests {
                 &candidate.census,
             );
         }
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_RUNTIME_GGUF and QWEN4EXP_ROUTE_COUNT_CENSUS_OUT"]
+    fn released_packed_route_count_capture_is_noop_and_complete() {
+        const LAYERS: usize = 48;
+        const EXPERTS: usize = 512;
+        const TOP_K: usize = 10;
+        const MODEL_REPOSITORY: &str = "unsloth/Qwen3.8-Flash-Next-GGUF";
+        const MODEL_REVISION: &str = "8bdc666649440e9bdc97e16f3f75782c98478ff5";
+        const MODEL_SHARDS: [(&str, u64, &str); 3] = [
+            (
+                "Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+                10_946_624,
+                "f2ef4328929d8b8c8930e2856eef52128dd4ce3425302f04bc3c657431cc4c49",
+            ),
+            (
+                "Qwen3.8-Flash-Next-UD-Q3_K_XL-00002-of-00003.gguf",
+                49_983_253_824,
+                "7d230e7c9421d868b89eebaf23033af0ea1a4e046956df00fb156814fb62346e",
+            ),
+            (
+                "Qwen3.8-Flash-Next-UD-Q3_K_XL-00003-of-00003.gguf",
+                39_992_153_376,
+                "21d4f90f9cd7b7c3a1582667c20cb22f7b03de895b88a23bb20aaeaa44f2c199",
+            ),
+        ];
+
+        let model_path = std::path::PathBuf::from(
+            std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
+                .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard"),
+        );
+        let output_path = std::path::PathBuf::from(
+            std::env::var_os("QWEN4EXP_ROUTE_COUNT_CENSUS_OUT")
+                .expect("QWEN4EXP_ROUTE_COUNT_CENSUS_OUT must name the census JSON output"),
+        );
+        let declared_source_commit = std::env::var("QWEN4EXP_ROUTE_COUNT_CENSUS_SOURCE")
+            .expect("QWEN4EXP_ROUTE_COUNT_CENSUS_SOURCE must be a lowercase full commit ID");
+        assert!(
+            is_lower_hex(&declared_source_commit, 40),
+            "QWEN4EXP_ROUTE_COUNT_CENSUS_SOURCE must be 40 lowercase hex characters"
+        );
+        let declared_tracked_diff_sha256 = std::env::var("QWEN4EXP_ROUTE_COUNT_CENSUS_DIFF_SHA256")
+            .expect("QWEN4EXP_ROUTE_COUNT_CENSUS_DIFF_SHA256 must identify the tracked diff");
+        assert!(
+            is_lower_hex(&declared_tracked_diff_sha256, 64),
+            "QWEN4EXP_ROUTE_COUNT_CENSUS_DIFF_SHA256 must be 64 lowercase hex characters"
+        );
+        let test_executable = std::env::current_exe().expect("resolve current test executable");
+        let test_executable_bytes = std::fs::metadata(&test_executable).unwrap().len();
+        let test_executable_sha256 = sha256_file(&test_executable);
+        let embedded_metallib_sha256 = sha256_bytes(crate::KERNELS_METALLIB);
+
+        let gguf = GgufFile::open(&model_path).expect("open released UD-Q3_K_XL GGUF");
+        assert_eq!(gguf.shards.len(), MODEL_SHARDS.len());
+        let retained_shard_stamps = gguf
+            .revalidate_retained_shard_stamps()
+            .expect("revalidate retained model shards");
+        assert_eq!(retained_shard_stamps.len(), MODEL_SHARDS.len());
+        let mut expected_shard_manifest_domain =
+            String::from("qwen4exp-route-count-expected-model-shard-manifest-v1\0");
+        let mut local_shard_stamp_domain =
+            String::from("qwen4exp-route-count-local-model-shard-stamps-v1\0");
+        let model_shard_rows = gguf
+            .shards
+            .iter()
+            .zip(MODEL_SHARDS)
+            .enumerate()
+            .map(
+                |(index, (shard, (expected_name, expected_size, expected_lfs_sha256)))| {
+                    let actual_name = shard
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap();
+                    let actual_size = shard.mmap_len() as u64;
+                    assert_eq!(actual_name, expected_name, "model shard {index} name");
+                    assert_eq!(actual_size, expected_size, "model shard {index} size");
+                    expected_shard_manifest_domain.push_str(&format!(
+                        "{index}\t{expected_name}\t{expected_size}\t{expected_lfs_sha256}\n"
+                    ));
+                    let stamp = &retained_shard_stamps[index];
+                    assert_eq!(stamp.shard_idx, index);
+                    assert_eq!(stamp.path, shard.path);
+                    local_shard_stamp_domain.push_str(&format!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                        stamp.shard_idx,
+                        stamp.device,
+                        stamp.inode,
+                        stamp.size,
+                        stamp.mtime_sec,
+                        stamp.mtime_nsec,
+                        stamp.ctime_sec,
+                        stamp.ctime_nsec,
+                    ));
+                    serde_json::json!({
+                        "index": index,
+                        "expected_release": {
+                            "file_name": expected_name,
+                            "size": expected_size,
+                            "lfs_sha256": expected_lfs_sha256
+                        },
+                        "actual_local_file": {
+                            "path": &stamp.path,
+                            "file_name": actual_name,
+                            "device": stamp.device,
+                            "inode": stamp.inode,
+                            "size": stamp.size,
+                            "mtime_sec": stamp.mtime_sec,
+                            "mtime_nsec": stamp.mtime_nsec,
+                            "ctime_sec": stamp.ctime_sec,
+                            "ctime_nsec": stamp.ctime_nsec
+                        }
+                    })
+                },
+            )
+            .collect::<Vec<_>>();
+        let expected_shard_manifest_sha256 =
+            sha256_bytes(expected_shard_manifest_domain.as_bytes());
+        let local_shard_stamp_sha256 = sha256_bytes(local_shard_stamp_domain.as_bytes());
+        let tokenizer = Tokenizer::from_gguf(&gguf).expect("load released tokenizer");
+        let prompt = "<|im_start|>user\nReply with exactly: HELLO<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+        let short_tokens = tokenizer
+            .encode(prompt, false)
+            .unwrap()
+            .into_iter()
+            .map(|token| u32::try_from(token).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(short_tokens.len(), 18);
+        let marker = tokenizer.encode("<|im_start|>", false).unwrap();
+        assert_eq!(marker.len(), 1);
+        let marker = u32::try_from(marker[0]).unwrap();
+        let long_tokens = vec![marker; 2_048];
+        let natural_tokens = tokenizer
+            .encode(include_str!("../../../docs/PERF-ROADMAP.md"), false)
+            .unwrap()
+            .into_iter()
+            .take(2_048)
+            .map(|token| u32::try_from(token).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(natural_tokens.len(), 2_048);
+
+        let ctx = MetalContext::new().expect("initialize Metal");
+        assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(
+            &Qwen4ExpConfig::flash_next_reference(),
+            long_tokens.len() + 1,
+        )
+        .unwrap();
+        let mut loaded =
+            Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, long_tokens.len())
+                .unwrap();
+        let released_config = loaded.config().clone();
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+
+        let mut moe_weights = vec![
+            runner.weights.zero_one.layer_zero.moe,
+            runner.weights.zero_one.layer_one_moe,
+        ];
+        moe_weights.extend(runner.weights.post_ple.iter().map(|weights| weights.moe));
+        assert_eq!(moe_weights.len(), LAYERS);
+        let mut dtype_cohort_domain = String::from("qwen4exp-route-count-layer-dtype-cohort-v1\0");
+        let layer_dtype_cohort = moe_weights
+            .iter()
+            .enumerate()
+            .map(|(layer, weights)| {
+                let mixer = released_config.mixer_kind(layer as u32).unwrap();
+                let mixer = format!("{mixer:?}");
+                let gate = format!("{:?}", weights.routed_gate.dtype);
+                let up = format!("{:?}", weights.routed_up.dtype);
+                let down = format!("{:?}", weights.routed_down.dtype);
+                dtype_cohort_domain.push_str(&format!("{layer}\t{mixer}\t{gate}\t{up}\t{down}\n"));
+                serde_json::json!({
+                    "layer": layer,
+                    "mixer": mixer,
+                    "routed_gate": gate,
+                    "routed_up": up,
+                    "routed_down": down
+                })
+            })
+            .collect::<Vec<_>>();
+        let layer_dtype_cohort_sha256 = sha256_bytes(dtype_cohort_domain.as_bytes());
+        let iq3_layers = moe_weights
+            .iter()
+            .enumerate()
+            .filter_map(|(layer, weights)| {
+                (weights.routed_gate.dtype == GgmlType::IQ3_XXS
+                    && weights.routed_up.dtype == GgmlType::IQ3_XXS)
+                    .then_some(layer)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(iq3_layers.len(), 47);
+        let credited_layers = (0..LAYERS)
+            .filter(|layer| !matches!(layer, 2 | 4 | 30 | 46 | 47))
+            .collect::<Vec<_>>();
+        assert_eq!(credited_layers.len(), 43);
+
+        let evidence_domain = format!(
+            concat!(
+                "qwen4exp-route-count-evidence-v2\0",
+                "operator_declared_source_commit={declared_source_commit}\n",
+                "operator_declared_tracked_diff_sha256={declared_tracked_diff_sha256}\n",
+                "test_executable_sha256={test_executable_sha256}\n",
+                "embedded_metallib_sha256={embedded_metallib_sha256}\n",
+                "expected_model_repository={MODEL_REPOSITORY}\n",
+                "expected_model_revision={MODEL_REVISION}\n",
+                "expected_model_shard_manifest_sha256={expected_shard_manifest_sha256}\n",
+                "actual_local_model_shard_stamps_sha256={local_shard_stamp_sha256}\n",
+                "layer_dtype_cohort_sha256={layer_dtype_cohort_sha256}\n",
+                "device_name={device_name}\n",
+                "device_registry_id={device_registry_id}\n",
+                "layers={LAYERS}\nexperts={EXPERTS}\ntop_k={TOP_K}\n"
+            ),
+            declared_source_commit = declared_source_commit,
+            declared_tracked_diff_sha256 = declared_tracked_diff_sha256,
+            test_executable_sha256 = test_executable_sha256,
+            embedded_metallib_sha256 = embedded_metallib_sha256,
+            MODEL_REPOSITORY = MODEL_REPOSITORY,
+            MODEL_REVISION = MODEL_REVISION,
+            expected_shard_manifest_sha256 = expected_shard_manifest_sha256,
+            local_shard_stamp_sha256 = local_shard_stamp_sha256,
+            layer_dtype_cohort_sha256 = layer_dtype_cohort_sha256,
+            LAYERS = LAYERS,
+            EXPERTS = EXPERTS,
+            TOP_K = TOP_K,
+            device_name = ctx.device.name(),
+            device_registry_id = ctx.device.registryID()
+        );
+        let evidence_binding_sha256 = sha256_bytes(evidence_domain.as_bytes());
+
+        let mut workload_rows = Vec::new();
+        for (label, tokens, input_kind, classification) in [
+            (
+                "hello_n18",
+                short_tokens.as_slice(),
+                "handcrafted_canonical_dialogue",
+                "canonical_interactive_correctness",
+            ),
+            (
+                "repeated_im_start_n2048",
+                long_tokens.as_slice(),
+                "synthetic_repetition",
+                "concentrated_route_stress",
+            ),
+            (
+                "natural_roadmap_prefix_n2048",
+                natural_tokens.as_slice(),
+                "repository_document_prefix",
+                "natural_technical_text",
+            ),
+        ] {
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            let baseline = run_packed_replay(&mut runner, tokens, marker);
+            assert_eq!(runner.next_position(), tokens.len() + 1);
+
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            let capture =
+                crate::metal::MetalTensor::zeros_i32(&ctx, vec![EXPERTS as u64, LAYERS as u64])
+                    .unwrap();
+            fill_i32_tensor(&capture, i32::MIN);
+            let (captured, captured_layers) =
+                with_qwen4exp_moe_route_count_capture(&capture, || {
+                    run_packed_replay(&mut runner, tokens, marker)
+                });
+            assert_eq!(captured_layers, LAYERS, "{label} captured layers");
+            assert_eq!(runner.next_position(), tokens.len() + 1);
+            assert_packed_replay_bits_eq(label, &baseline, &captured);
+            let baseline_digests = PackedReplayDigests::from_replay(&baseline);
+            let captured_digests = PackedReplayDigests::from_replay(&captured);
+            let baseline_binding = baseline_digests.binding_sha256(false);
+            let captured_without_capture_binding = captured_digests.binding_sha256(true);
+            assert_eq!(
+                baseline_binding, captured_without_capture_binding,
+                "{label} replay evidence after removing capture dispatches"
+            );
+
+            let counts = read_i32_tensor(&capture);
+            assert_eq!(counts.len(), LAYERS * EXPERTS);
+            assert!(!counts.contains(&i32::MIN));
+            let rows = counts
+                .chunks_exact(EXPERTS)
+                .map(<[i32]>::to_vec)
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), LAYERS);
+            for (layer, row) in rows.iter().enumerate() {
+                assert!(
+                    row.iter()
+                        .all(|&count| (0..=tokens.len() as i32).contains(&count)),
+                    "{label} layer {layer} count range"
+                );
+                assert_eq!(
+                    row.iter().sum::<i32>(),
+                    (tokens.len() * TOP_K) as i32,
+                    "{label} layer {layer} route sum"
+                );
+            }
+
+            let layer_rows = rows
+                .iter()
+                .enumerate()
+                .map(|(layer, row)| {
+                    route_count_layer_json(
+                        layer,
+                        row,
+                        tokens.len(),
+                        moe_weights[layer].routed_gate.dtype,
+                        moe_weights[layer].routed_up.dtype,
+                        moe_weights[layer].routed_down.dtype,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let all_layers = (0..LAYERS).collect::<Vec<_>>();
+            let prompt_domain =
+                format!("qwen4exp-route-count-prompt-u32le-v1;n={}\0", tokens.len());
+            let prompt_sha256 = sha256_u32_le(prompt_domain.as_bytes(), tokens);
+            let count_domain = format!(
+                concat!(
+                    "qwen4exp-route-count-matrix-i32le-v2\0",
+                    "evidence_binding_sha256={evidence_binding_sha256}\n",
+                    "label={label}\n",
+                    "prompt_token_ids_sha256_u32le={prompt_sha256}\n",
+                    "tokens={tokens}\n",
+                    "layers={LAYERS}\nexperts={EXPERTS}\ntop_k={TOP_K}\n",
+                    "layer_dtype_cohort_sha256={layer_dtype_cohort_sha256}\n",
+                    "capture_off_replay_binding_sha256={baseline_binding}\n",
+                    "capture_on_without_capture_binding_sha256={captured_without_capture_binding}\n",
+                    "capture_on_raw_census_sha256={capture_on_raw_census_sha256}\n"
+                ),
+                evidence_binding_sha256 = evidence_binding_sha256,
+                label = label,
+                prompt_sha256 = prompt_sha256,
+                LAYERS = LAYERS,
+                EXPERTS = EXPERTS,
+                TOP_K = TOP_K,
+                layer_dtype_cohort_sha256 = layer_dtype_cohort_sha256,
+                baseline_binding = baseline_binding,
+                captured_without_capture_binding = captured_without_capture_binding,
+                tokens = tokens.len(),
+                capture_on_raw_census_sha256 = captured_digests.census_raw
+            );
+            workload_rows.push(serde_json::json!({
+                "label": label,
+                "tokens": tokens.len(),
+                "input_kind": input_kind,
+                "classification": classification,
+                "population_representative": false,
+                "lever_decision_scope": "single_sample",
+                "prompt_domain_utf8": &prompt_domain,
+                "prompt_token_ids": tokens,
+                "prompt_token_ids_sha256_u32le": prompt_sha256,
+                "payload_domain_utf8": &count_domain,
+                "payload_sha256_i32le": sha256_i32_le(count_domain.as_bytes(), &counts),
+                "replay_evidence": {
+                    "capture_off": baseline_digests.json(),
+                    "capture_on": captured_digests.json(),
+                    "capture_off_equals_capture_on_without_capture_dispatches": true
+                },
+                "counts": rows,
+                "layers": layer_rows,
+                "aggregates": {
+                    "all_48": route_count_aggregate_json("all_48", &all_layers, &rows, tokens.len()),
+                    "iq3_gate_up_47": route_count_aggregate_json("iq3_gate_up_47", &iq3_layers, &rows, tokens.len()),
+                    "credited_43": route_count_aggregate_json("credited_43", &credited_layers, &rows, tokens.len())
+                }
+            }));
+        }
+
+        let report = serde_json::json!({
+            "schema_version": 2,
+            "implementation": {
+                "operator_declared_source_commit": declared_source_commit,
+                "operator_declared_tracked_diff_sha256": declared_tracked_diff_sha256,
+                "operator_declaration_verification": "lowercase hexadecimal syntax only; the test executable hash is the exact runnable identity",
+                "tracked_diff_definition": "sha256(git diff --binary --no-ext-diff HEAD --)",
+                "test_executable": {
+                    "path": test_executable,
+                    "size": test_executable_bytes,
+                    "sha256": test_executable_sha256
+                },
+                "embedded_metallib": {
+                    "size": crate::KERNELS_METALLIB.len(),
+                    "sha256": embedded_metallib_sha256
+                },
+                "evidence_domain_utf8": evidence_domain,
+                "evidence_binding_sha256": evidence_binding_sha256
+            },
+            "model": {
+                "expected_release": {
+                    "repository": MODEL_REPOSITORY,
+                    "revision": MODEL_REVISION,
+                    "quant": "UD-Q3_K_XL",
+                    "qualification": "ordered local file names and byte sizes match this expected manifest; local bytes were not hashed against the expected LFS digests",
+                    "shard_manifest_domain_utf8": expected_shard_manifest_domain,
+                    "shard_manifest_sha256": expected_shard_manifest_sha256
+                },
+                "actual_local_files": {
+                    "qualification": "retained file-descriptor stamps were revalidated after mmap and bind the exact local files, not their contents",
+                    "stamp_domain_utf8": local_shard_stamp_domain,
+                    "stamp_sha256": local_shard_stamp_sha256
+                },
+                "shards": model_shard_rows
+            },
+            "device": {
+                "name": ctx.device.name().to_string(),
+                "registry_id": ctx.device.registryID(),
+                "max_threadgroup_memory_bytes": ctx.device.maxThreadgroupMemoryLength()
+            },
+            "geometry": {
+                "layers": LAYERS,
+                "experts": EXPERTS,
+                "top_k": TOP_K,
+                "hidden": 2_560,
+                "routed_intermediate": 640,
+                "layout": "layer_major_i32",
+                "layer_dtype_cohort_domain_utf8": dtype_cohort_domain,
+                "layer_dtype_cohort_sha256": layer_dtype_cohort_sha256,
+                "layer_dtype_cohort": layer_dtype_cohort
+            },
+            "capture": {
+                "dispatches": LAYERS,
+                "kernel": "kernel_copy_offset_i32",
+                "performance_eligible": false,
+                "control_scope": "cfg(test) thread-local binding",
+                "ordinary_runtime_capture_branch": false,
+                "embedded_metallib_contains_dormant_copy_kernel": true,
+                "capture_off_on_bits_equal": true,
+                "non_capture_dispatch_topology_equal": true
+            },
+            "digest_encoding": {
+                "integers": "little-endian after the emitted UTF-8 domain",
+                "f32": "IEEE-754 bit patterns in little-endian order after the fixed field domain",
+                "persistent_state": "fixed field domain followed by u64 little-endian tensor byte length and tensor bytes in session order",
+                "dispatch_census": "fixed field domain followed by length-prefixed family/tag/kernel, encoder fields, and dispatch geometry in recorded order"
+            },
+            "workloads": workload_rows
+        });
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .expect("census output path must not already exist");
+        let mut report_bytes = serde_json::to_vec_pretty(&report).unwrap();
+        report_bytes.push(b'\n');
+        std::io::Write::write_all(&mut output, &report_bytes).unwrap();
+        output.sync_all().unwrap();
+        eprintln!(
+            "wrote Qwen4Exp route-count census to {}",
+            output_path.display()
+        );
     }
 }

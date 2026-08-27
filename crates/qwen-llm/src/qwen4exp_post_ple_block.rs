@@ -20,7 +20,7 @@ use crate::qwen4exp_metal::{
 };
 use crate::qwen4exp_moe::{
     Qwen4ExpMoeError, Qwen4ExpMoeMetalGeometry, Qwen4ExpMoeMetalWeights, Qwen4ExpMoeMetalWorkspace,
-    Qwen4ExpMoePackedMotorScratch, encode_qwen4exp_moe, encode_qwen4exp_moe_packed_motor,
+    Qwen4ExpMoePackedMotorScratch, encode_qwen4exp_moe, encode_qwen4exp_moe_packed_motor_for_layer,
     encode_qwen4exp_moe_packed_motor_profiled, encode_qwen4exp_moe_packed_motor_stage_sampled,
     preflight_packed as preflight_moe_packed, validate_packed_contract as validate_moe_packed,
 };
@@ -1008,7 +1008,16 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
             }?
         } else {
             unsafe {
-                encode_qwen4exp_moe_packed_motor(ctx, enc, ffn.mixed(), weights.moe, moe, tokens)
+                encode_qwen4exp_moe_packed_motor_for_layer(
+                    ctx,
+                    enc,
+                    ffn.mixed(),
+                    weights.moe,
+                    moe,
+                    tokens,
+                    layer,
+                    mixer,
+                )
             }?
         };
         end_optional(&mut profile, enc, marker)?;
@@ -1186,13 +1195,15 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_stage_sampled(
         } else {
             let moe_encoder = stage_encoder(command, samples, first_stage + 4)?;
             let output = unsafe {
-                encode_qwen4exp_moe_packed_motor(
+                encode_qwen4exp_moe_packed_motor_for_layer(
                     ctx,
                     &moe_encoder,
                     ffn.mixed(),
                     weights.moe,
                     moe,
                     tokens,
+                    layer,
+                    mixer,
                 )
             }?;
             moe_encoder.end();

@@ -1,5 +1,7 @@
 //! One-token Metal MoE execution for Qwen3.8-Flash-Next.
 
+#[cfg(test)]
+use crate::metal::encode_copy_offset_i32;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
@@ -39,6 +41,13 @@ const PACKED_ROUTER_E8P32_STRICT_HIDDEN: usize = 2_560;
 const PACKED_ROUTER_E8P32_STRICT_EXPERTS: usize = 512;
 const PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS: usize = 2_048;
 
+#[cfg(test)]
+#[derive(Clone)]
+struct Qwen4ExpMoeRouteCountCaptureBinding {
+    output: MetalTensor,
+    seen_layers: std::rc::Rc<std::cell::RefCell<[bool; 48]>>,
+}
+
 crate::env_flag!(
     default_on configured_qwen4exp_moe_iq3_fast_enabled,
     "QWEN4EXP_MOE_IQ3_FAST"
@@ -55,6 +64,9 @@ thread_local! {
     };
     static QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE: std::cell::Cell<Option<bool>> = const {
         std::cell::Cell::new(None)
+    };
+    static QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE: std::cell::RefCell<Option<Qwen4ExpMoeRouteCountCaptureBinding>> = const {
+        std::cell::RefCell::new(None)
     };
 }
 
@@ -113,6 +125,94 @@ fn qwen4exp_packed_router_e8p32_strict_enabled() -> bool {
         return enabled;
     }
     configured_qwen4exp_packed_router_e8p32_strict_enabled()
+}
+
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_moe_route_count_capture<R>(
+    output: &MetalTensor,
+    f: impl FnOnce() -> R,
+) -> (R, usize) {
+    const LAYERS: usize = 48;
+    const EXPERTS: usize = 512;
+
+    assert_eq!(output.dtype, GgmlType::I32);
+    assert_eq!(output.shape, [EXPERTS as u64, LAYERS as u64]);
+    assert!(output.is_writable());
+
+    struct RestoreCapture(Option<Qwen4ExpMoeRouteCountCaptureBinding>);
+
+    impl Drop for RestoreCapture {
+        fn drop(&mut self) {
+            QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE.with(|slot| {
+                *slot.borrow_mut() = self.0.take();
+            });
+        }
+    }
+
+    let seen_layers = std::rc::Rc::new(std::cell::RefCell::new([false; LAYERS]));
+    let previous = QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE.with(|slot| {
+        slot.borrow_mut()
+            .replace(Qwen4ExpMoeRouteCountCaptureBinding {
+                output: output.clone(),
+                seen_layers: seen_layers.clone(),
+            })
+    });
+    let _restore = RestoreCapture(previous);
+    let result = f();
+    let captured_layers = seen_layers
+        .borrow()
+        .iter()
+        .filter(|&&captured| captured)
+        .count();
+    (result, captured_layers)
+}
+
+#[cfg(test)]
+pub(crate) fn qwen4exp_moe_route_count_capture_active() -> bool {
+    QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE.with(|slot| slot.borrow().is_some())
+}
+
+#[cfg(test)]
+fn encode_qwen4exp_moe_route_count_capture(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    route_counts: &MetalTensor,
+    expert_count: usize,
+    layer: u32,
+) -> Result<(), Qwen4ExpMoeError> {
+    const LAYERS: usize = 48;
+    const EXPERTS: usize = 512;
+
+    QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE.with(|slot| {
+        let capture = slot.borrow();
+        let Some(capture) = capture.as_ref() else {
+            return Ok(());
+        };
+        if expert_count != EXPERTS {
+            return invalid(format!(
+                "route-count capture requires {EXPERTS} experts, got {expert_count}"
+            ));
+        }
+        let layer = usize::try_from(layer).map_err(|_| {
+            Qwen4ExpMoeError::Invalid("route-count capture layer exceeds usize".into())
+        })?;
+        if layer >= LAYERS {
+            return invalid(format!(
+                "route-count capture layer {layer} exceeds {LAYERS}"
+            ));
+        }
+        if capture.seen_layers.borrow()[layer] {
+            return invalid(format!(
+                "route-count capture received duplicate layer {layer}"
+            ));
+        }
+        let destination = capture
+            .output
+            .view_subrange((layer * EXPERTS) as u64, vec![EXPERTS as u64]);
+        encode_copy_offset_i32(ctx, enc, route_counts, 0, &destination, EXPERTS)?;
+        capture.seen_layers.borrow_mut()[layer] = true;
+        Ok(())
+    })
 }
 
 fn packed_router_e8p32_strict_scope_qualified(
@@ -1473,8 +1573,12 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
     scratch: &Qwen4ExpMoePackedMotorScratch,
     tokens: usize,
 ) -> Result<MetalTensor, Qwen4ExpMoeError> {
+    #[cfg(test)]
+    if qwen4exp_moe_route_count_capture_active() {
+        return invalid("route-count capture requires a layer-aware packed MoE call");
+    }
     unsafe {
-        encode_qwen4exp_moe_packed_motor_inner(
+        encode_qwen4exp_moe_packed_motor_for_layer(
             ctx,
             enc,
             input,
@@ -1483,7 +1587,33 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
             tokens,
             0,
             MixerKind::GatedDeltaNet,
-            None,
+        )
+    }
+}
+
+/// Encode packed MoE rows while preserving the model-layer identity used by
+/// profiling and test-only diagnostics.
+///
+/// # Safety
+///
+/// The caller must retain every tensor and exclusive logical ownership of
+/// `scratch` until the command completes successfully or is permanently
+/// abandoned. Any encoding or command failure makes scratch contents
+/// indeterminate; the enclosing transaction must be poisoned.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_for_layer(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    scratch: &Qwen4ExpMoePackedMotorScratch,
+    tokens: usize,
+    layer: u32,
+    mixer: MixerKind,
+) -> Result<MetalTensor, Qwen4ExpMoeError> {
+    unsafe {
+        encode_qwen4exp_moe_packed_motor_inner(
+            ctx, enc, input, weights, scratch, tokens, layer, mixer, None,
         )
     }
 }
@@ -1536,6 +1666,10 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_stage_sampled(
     layer: u32,
     mixer: MixerKind,
 ) -> Result<(MetalTensor, Vec<Qwen4ExpPackedProfileSpan>), Qwen4ExpMoeError> {
+    #[cfg(test)]
+    if qwen4exp_moe_route_count_capture_active() {
+        return invalid("route-count capture is unavailable in stage-sampled packed MoE");
+    }
     if tokens <= 1 {
         return invalid("sampled packed MoE profiling requires at least two tokens");
     }
@@ -1688,6 +1822,14 @@ unsafe fn encode_qwen4exp_moe_packed_motor_inner(
         tokens,
     };
     execution.encode_route(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+    #[cfg(test)]
+    encode_qwen4exp_moe_route_count_capture(
+        ctx,
+        enc,
+        &execution.views.route_counts,
+        execution.weights.geometry.expert_count,
+        layer,
+    )?;
     execution.encode_routed_gate_up(ctx, enc, layer, mixer, profile.as_deref_mut())?;
     execution.encode_routed_down(ctx, enc, layer, mixer, profile.as_deref_mut())?;
     execution.encode_routed_reduce(ctx, enc, layer, mixer, profile.as_deref_mut())?;
@@ -2114,6 +2256,10 @@ pub(crate) fn preflight_packed(
     weights: Qwen4ExpMoeMetalWeights<'_>,
     tokens: usize,
 ) -> Result<(), Qwen4ExpMoeError> {
+    #[cfg(test)]
+    if qwen4exp_moe_route_count_capture_active() {
+        ctx.pipeline("kernel_copy_offset_i32")?;
+    }
     if packed_router_e8p32_strict_qualified(ctx, weights.geometry, weights.router.dtype, tokens) {
         require_pipeline_capacity(ctx, "kernel_mat_mat_f32_f32_router_e8p32_strict", 32, 0)?;
     } else {

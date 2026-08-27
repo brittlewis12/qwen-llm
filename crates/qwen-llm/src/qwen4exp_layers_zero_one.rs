@@ -22,7 +22,7 @@ use crate::qwen4exp_metal::{
 };
 use crate::qwen4exp_moe::{
     Qwen4ExpMoeError, Qwen4ExpMoeMetalWeights, Qwen4ExpMoeMetalWorkspace,
-    Qwen4ExpMoePackedMotorScratch, encode_qwen4exp_moe, encode_qwen4exp_moe_packed_motor,
+    Qwen4ExpMoePackedMotorScratch, encode_qwen4exp_moe, encode_qwen4exp_moe_packed_motor_for_layer,
     preflight_packed as preflight_moe_packed, validate_packed_contract as validate_moe_packed,
 };
 use crate::qwen4exp_ple::PleIq4NlTable;
@@ -839,13 +839,15 @@ pub(crate) unsafe fn encode_qwen4exp_layers_zero_one_packed_staged(
             )
         }?;
         let moe_output = unsafe {
-            encode_qwen4exp_moe_packed_motor(
+            encode_qwen4exp_moe_packed_motor_for_layer(
                 ctx,
                 enc,
                 ffn.mixed(),
                 weights.layer_zero.moe,
                 moe,
                 tokens,
+                LAYER_ZERO,
+                MixerKind::GatedDeltaNet,
             )
         }?;
         encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, hidden * tokens)?;
@@ -913,13 +915,15 @@ pub(crate) unsafe fn encode_qwen4exp_layers_zero_one_packed_staged(
             )
         }?;
         let moe_output = unsafe {
-            encode_qwen4exp_moe_packed_motor(
+            encode_qwen4exp_moe_packed_motor_for_layer(
                 ctx,
                 enc,
                 ffn.mixed(),
                 weights.layer_one_moe,
                 moe,
                 tokens,
+                LAYER_ONE,
+                MixerKind::GatedDeltaNet,
             )
         }?;
         encode_copy_offset_f32(ctx, enc, &moe_output, 0, bridge, hidden * tokens)?;

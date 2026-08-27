@@ -2,10 +2,14 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
-    encode_copy_offset_f32, encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32,
-    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32_sigmoid, encode_ssm_conv_silu_f32,
+    encode_copy_offset_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
+    encode_gdn_prep_packed_serial_f32, encode_gdn_step_decay_f32, encode_gdn_step_decay_packed_f32,
+    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32_sigmoid, encode_sigmoid_f32,
+    encode_ssm_conv_silu_f32,
 };
-use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
+};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
@@ -266,6 +270,109 @@ pub struct GatedDeltaNetMetalWorkspace {
     output: MetalTensor,
     active_command: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
     state_poisoned: bool,
+}
+
+struct GatedDeltaNetPackedScratch {
+    geometry: GatedDeltaNetMetalGeometry,
+    capacity: usize,
+    qkv: MetalTensor,
+    gate: MetalTensor,
+    beta: MetalTensor,
+    alpha: MetalTensor,
+    decay: MetalTensor,
+    query: MetalTensor,
+    key: MetalTensor,
+    value: MetalTensor,
+    query_norm: MetalTensor,
+    key_norm: MetalTensor,
+    recurrent: MetalTensor,
+    normalized: MetalTensor,
+    output: MetalTensor,
+}
+
+impl GatedDeltaNetPackedScratch {
+    fn new(
+        ctx: &MetalContext,
+        geometry: GatedDeltaNetMetalGeometry,
+        capacity: usize,
+    ) -> Result<Self, Qwen4ExpGdnError> {
+        geometry.validate()?;
+        if capacity == 0 || u32::try_from(capacity).is_err() {
+            return invalid(format!(
+                "packed GDN capacity must be in 1..=u32::MAX, got {capacity}"
+            ));
+        }
+        for (name, width) in [
+            ("QKV", geometry.conv_width()),
+            ("gate", geometry.value_width()),
+            ("beta", geometry.value_heads),
+            ("alpha", geometry.value_heads),
+            ("decay", geometry.value_heads),
+            ("query", geometry.key_width()),
+            ("key", geometry.key_width()),
+            ("value", geometry.value_width()),
+            ("query norm", geometry.key_width()),
+            ("key norm", geometry.key_width()),
+            ("recurrent", geometry.value_width()),
+            ("normalized", geometry.value_width()),
+            ("output", geometry.hidden_size),
+        ] {
+            let elements = width.checked_mul(capacity).ok_or_else(|| {
+                Qwen4ExpGdnError::Invalid(format!(
+                    "packed GDN {name} scratch element count overflow"
+                ))
+            })?;
+            if u32::try_from(elements).is_err() {
+                return invalid(format!(
+                    "packed GDN {name} scratch has {elements} elements, exceeding u32"
+                ));
+            }
+            elements.checked_mul(size_of::<f32>()).ok_or_else(|| {
+                Qwen4ExpGdnError::Invalid(format!("packed GDN {name} scratch byte count overflow"))
+            })?;
+        }
+        let shape = |width: usize| vec![width as u64, capacity as u64];
+        Ok(Self {
+            geometry,
+            capacity,
+            qkv: MetalTensor::zeros_f32(ctx, shape(geometry.conv_width()))?,
+            gate: MetalTensor::zeros_f32(ctx, shape(geometry.value_width()))?,
+            beta: MetalTensor::zeros_f32(ctx, shape(geometry.value_heads))?,
+            alpha: MetalTensor::zeros_f32(ctx, shape(geometry.value_heads))?,
+            decay: MetalTensor::zeros_f32(ctx, shape(geometry.value_heads))?,
+            query: MetalTensor::zeros_f32(ctx, shape(geometry.key_width()))?,
+            key: MetalTensor::zeros_f32(ctx, shape(geometry.key_width()))?,
+            value: MetalTensor::zeros_f32(ctx, shape(geometry.value_width()))?,
+            query_norm: MetalTensor::zeros_f32(ctx, shape(geometry.key_width()))?,
+            key_norm: MetalTensor::zeros_f32(ctx, shape(geometry.key_width()))?,
+            recurrent: MetalTensor::zeros_f32(ctx, shape(geometry.value_width()))?,
+            normalized: MetalTensor::zeros_f32(ctx, shape(geometry.value_width()))?,
+            output: MetalTensor::zeros_f32(ctx, shape(geometry.hidden_size))?,
+        })
+    }
+
+    fn prefix_view(
+        &self,
+        name: &str,
+        tensor: &MetalTensor,
+        width: usize,
+        tokens: usize,
+    ) -> Result<MetalTensor, Qwen4ExpGdnError> {
+        if tokens == 0 || tokens > self.capacity {
+            return invalid(format!(
+                "{name} token count {tokens} is outside capacity {}",
+                self.capacity
+            ));
+        }
+        let elements = width
+            .checked_mul(tokens)
+            .ok_or_else(|| Qwen4ExpGdnError::Invalid(format!("{name} element count overflow")))?;
+        let view = tensor.view_subrange(0, vec![width as u64, tokens as u64]);
+        if view.n_elements() as usize != elements {
+            return invalid(format!("{name} prefix view has the wrong element count"));
+        }
+        Ok(view)
+    }
 }
 
 impl GatedDeltaNetMetalWorkspace {
@@ -594,6 +701,203 @@ pub fn encode_gated_delta_net<'a>(
     Ok(GatedDeltaNetMetalRead { workspace })
 }
 
+/// Encode packed GDN rows into transaction-owned scratch and causal state.
+///
+/// # Safety
+///
+/// The caller must hold every tensor and exclusive logical ownership of both
+/// state tensors and `scratch` until the command completes successfully or is
+/// permanently abandoned. Commands touching the same state must execute in
+/// causal order. Any encode or command failure makes mutable contents
+/// indeterminate; the enclosing transaction must be poisoned.
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_gated_delta_net_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    conv_state: &MetalTensor,
+    delta_state: &MetalTensor,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+) -> Result<MetalTensor, Qwen4ExpGdnError> {
+    validate_packed_encoder(ctx, enc)?;
+    if weights.geometry != scratch.geometry {
+        return invalid("packed GDN weight and scratch geometry differ");
+    }
+    validate_packed_contract(
+        ctx,
+        input,
+        weights,
+        conv_state,
+        delta_state,
+        scratch,
+        tokens,
+    )?;
+    preflight_packed(ctx, weights)?;
+
+    let g = scratch.geometry;
+    let qkv = scratch.prefix_view("packed GDN QKV", &scratch.qkv, g.conv_width(), tokens)?;
+    let gate = scratch.prefix_view("packed GDN gate", &scratch.gate, g.value_width(), tokens)?;
+    let beta = scratch.prefix_view("packed GDN beta", &scratch.beta, g.value_heads, tokens)?;
+    let alpha = scratch.prefix_view("packed GDN alpha", &scratch.alpha, g.value_heads, tokens)?;
+    let decay = scratch.prefix_view("packed GDN decay", &scratch.decay, g.value_heads, tokens)?;
+    let query = scratch.prefix_view("packed GDN query", &scratch.query, g.key_width(), tokens)?;
+    let key = scratch.prefix_view("packed GDN key", &scratch.key, g.key_width(), tokens)?;
+    let value = scratch.prefix_view("packed GDN value", &scratch.value, g.value_width(), tokens)?;
+    let query_norm = scratch.prefix_view(
+        "packed GDN query norm",
+        &scratch.query_norm,
+        g.key_width(),
+        tokens,
+    )?;
+    let key_norm = scratch.prefix_view(
+        "packed GDN key norm",
+        &scratch.key_norm,
+        g.key_width(),
+        tokens,
+    )?;
+    let recurrent = scratch.prefix_view(
+        "packed GDN recurrent output",
+        &scratch.recurrent,
+        g.value_width(),
+        tokens,
+    )?;
+    let normalized = scratch.prefix_view(
+        "packed GDN normalized output",
+        &scratch.normalized,
+        g.value_width(),
+        tokens,
+    )?;
+    let output =
+        scratch.prefix_view("packed GDN output", &scratch.output, g.hidden_size, tokens)?;
+
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.qkv,
+        input,
+        &qkv,
+        g.hidden_size,
+        g.conv_width(),
+        tokens,
+    )?;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.gate,
+        input,
+        &gate,
+        g.hidden_size,
+        g.value_width(),
+        tokens,
+    )?;
+    if tokens == 1 {
+        encode_mat_vec_f32_sigmoid(
+            ctx,
+            enc,
+            weights.beta,
+            input,
+            &beta,
+            g.hidden_size,
+            g.value_heads,
+        )?;
+    } else {
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            weights.beta,
+            input,
+            &beta,
+            g.hidden_size,
+            g.value_heads,
+            tokens,
+        )?;
+        encode_sigmoid_f32(ctx, enc, &beta, &beta)?;
+    }
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.alpha,
+        input,
+        &alpha,
+        g.hidden_size,
+        g.value_heads,
+        tokens,
+    )?;
+    encode_gdn_decay_chain_batched_f32(
+        ctx,
+        enc,
+        &alpha,
+        weights.dt_bias,
+        weights.a,
+        &decay,
+        tokens,
+        g.value_heads,
+    )?;
+    encode_gdn_prep_packed_serial_f32(
+        ctx,
+        enc,
+        &qkv,
+        conv_state,
+        weights.conv,
+        &query,
+        &key,
+        &value,
+        tokens,
+        g.key_heads,
+        g.value_heads,
+        g.head_dim,
+    )?;
+    encode_l2_norm_pair_batched_f32(
+        ctx,
+        enc,
+        &query,
+        &query_norm,
+        &key,
+        &key_norm,
+        tokens * g.key_heads,
+        g.head_dim,
+        g.eps,
+    )?;
+    encode_gdn_step_decay_packed_f32(
+        ctx,
+        enc,
+        &query_norm,
+        &key_norm,
+        &value,
+        &decay,
+        &beta,
+        delta_state,
+        &recurrent,
+        tokens,
+        g.value_heads,
+        g.key_heads,
+        g.head_dim,
+    )?;
+    encode_rmsnorm_sigmoid_gated_packed(
+        ctx,
+        enc,
+        &recurrent,
+        weights.norm,
+        &gate,
+        &normalized,
+        g,
+        tokens,
+    )?;
+    encode_mat_mat_dispatch(
+        ctx,
+        enc,
+        weights.output,
+        &normalized,
+        &output,
+        g.value_width(),
+        g.hidden_size,
+        tokens,
+    )?;
+    Ok(output)
+}
+
 pub(crate) fn validate_contract(
     ctx: &MetalContext,
     input: &MetalTensor,
@@ -728,6 +1032,153 @@ pub(crate) fn validate_contract(
     require_disjoint(&tensors)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_packed_contract(
+    ctx: &MetalContext,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    conv_state: &MetalTensor,
+    delta_state: &MetalTensor,
+    scratch: &GatedDeltaNetPackedScratch,
+    tokens: usize,
+) -> Result<(), Qwen4ExpGdnError> {
+    if tokens == 0 || tokens > scratch.capacity {
+        return invalid(format!(
+            "packed GDN token count {tokens} is outside capacity {}",
+            scratch.capacity
+        ));
+    }
+    let g = scratch.geometry;
+    require_f32_shape(
+        "packed GDN input",
+        input,
+        &[g.hidden_size as u64, tokens as u64],
+        false,
+    )?;
+    require_projection(
+        "packed GDN QKV projection",
+        weights.qkv,
+        g.hidden_size,
+        g.conv_width(),
+        true,
+    )?;
+    require_projection(
+        "packed GDN gate projection",
+        weights.gate,
+        g.hidden_size,
+        g.value_width(),
+        true,
+    )?;
+    require_projection(
+        "packed GDN beta projection",
+        weights.beta,
+        g.hidden_size,
+        g.value_heads,
+        false,
+    )?;
+    require_projection(
+        "packed GDN alpha projection",
+        weights.alpha,
+        g.hidden_size,
+        g.value_heads,
+        false,
+    )?;
+    require_f32_shape(
+        "packed GDN transformed A",
+        weights.a,
+        &[g.value_heads as u64],
+        false,
+    )?;
+    require_f32_shape(
+        "packed GDN dt bias",
+        weights.dt_bias,
+        &[g.value_heads as u64],
+        false,
+    )?;
+    require_projection(
+        "packed GDN convolution",
+        weights.conv,
+        g.conv_kernel,
+        g.conv_width(),
+        false,
+    )?;
+    require_f32_shape("packed GDN norm", weights.norm, &[g.head_dim as u64], false)?;
+    require_projection(
+        "packed GDN output projection",
+        weights.output,
+        g.value_width(),
+        g.hidden_size,
+        true,
+    )?;
+    for (dtype, n_in, n_out) in [
+        (weights.qkv.dtype, g.hidden_size, g.conv_width()),
+        (weights.gate.dtype, g.hidden_size, g.value_width()),
+        (weights.beta.dtype, g.hidden_size, g.value_heads),
+        (weights.alpha.dtype, g.hidden_size, g.value_heads),
+        (weights.output.dtype, g.value_width(), g.hidden_size),
+    ] {
+        validate_f32_q8_mat_mat_addressing(dtype, n_in, n_out, tokens)?;
+    }
+    require_f32_shape(
+        "packed GDN convolution state",
+        conv_state,
+        &[g.conv_state_elements() as u64],
+        true,
+    )?;
+    require_f32_shape(
+        "packed GDN delta state",
+        delta_state,
+        &[g.delta_state_elements() as u64],
+        true,
+    )?;
+    for (name, tensor, width) in [
+        ("packed GDN QKV scratch", &scratch.qkv, g.conv_width()),
+        ("packed GDN gate scratch", &scratch.gate, g.value_width()),
+        ("packed GDN beta scratch", &scratch.beta, g.value_heads),
+        ("packed GDN alpha scratch", &scratch.alpha, g.value_heads),
+        ("packed GDN decay scratch", &scratch.decay, g.value_heads),
+        ("packed GDN query", &scratch.query, g.key_width()),
+        ("packed GDN key", &scratch.key, g.key_width()),
+        ("packed GDN value", &scratch.value, g.value_width()),
+        ("packed GDN query norm", &scratch.query_norm, g.key_width()),
+        ("packed GDN key norm", &scratch.key_norm, g.key_width()),
+        (
+            "packed GDN recurrent output",
+            &scratch.recurrent,
+            g.value_width(),
+        ),
+        (
+            "packed GDN normalized output",
+            &scratch.normalized,
+            g.value_width(),
+        ),
+        ("packed GDN output", &scratch.output, g.hidden_size),
+    ] {
+        require_f32_shape(name, tensor, &[width as u64, scratch.capacity as u64], true)?;
+    }
+    let weights_named = [
+        ("packed GDN QKV projection", weights.qkv),
+        ("packed GDN gate projection", weights.gate),
+        ("packed GDN beta projection", weights.beta),
+        ("packed GDN alpha projection", weights.alpha),
+        ("packed GDN transformed A", weights.a),
+        ("packed GDN dt bias", weights.dt_bias),
+        ("packed GDN convolution", weights.conv),
+        ("packed GDN norm", weights.norm),
+        ("packed GDN output projection", weights.output),
+    ];
+    require_read_only_weights(&weights_named)?;
+    let mut tensors = weights_named.to_vec();
+    tensors.extend([
+        ("packed GDN input", input),
+        ("packed GDN convolution state", conv_state),
+        ("packed GDN delta state", delta_state),
+    ]);
+    tensors.extend(packed_scratch_tensors(scratch));
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)
+}
+
 fn require_f32(
     name: &str,
     tensor: &MetalTensor,
@@ -739,6 +1190,24 @@ fn require_f32(
             "{name} must be F32 with {expected_elements} elements, got {:?} with {}",
             tensor.dtype,
             tensor.n_elements()
+        ));
+    }
+    if writable && !tensor.is_writable() {
+        return invalid(format!("{name} must be writable"));
+    }
+    require_range(name, tensor, 4)
+}
+
+fn require_f32_shape(
+    name: &str,
+    tensor: &MetalTensor,
+    shape: &[u64],
+    writable: bool,
+) -> Result<(), Qwen4ExpGdnError> {
+    if tensor.dtype != GgmlType::F32 || tensor.shape != shape {
+        return invalid(format!(
+            "{name} must be F32 with shape {shape:?}, got {:?} {:?}",
+            tensor.dtype, tensor.shape
         ));
     }
     if writable && !tensor.is_writable() {
@@ -840,6 +1309,26 @@ fn require_same_device(
     Ok(())
 }
 
+fn packed_scratch_tensors(
+    scratch: &GatedDeltaNetPackedScratch,
+) -> Vec<(&'static str, &MetalTensor)> {
+    vec![
+        ("packed GDN QKV scratch", &scratch.qkv),
+        ("packed GDN gate scratch", &scratch.gate),
+        ("packed GDN beta scratch", &scratch.beta),
+        ("packed GDN alpha scratch", &scratch.alpha),
+        ("packed GDN decay scratch", &scratch.decay),
+        ("packed GDN query", &scratch.query),
+        ("packed GDN key", &scratch.key),
+        ("packed GDN value", &scratch.value),
+        ("packed GDN query norm", &scratch.query_norm),
+        ("packed GDN key norm", &scratch.key_norm),
+        ("packed GDN recurrent output", &scratch.recurrent),
+        ("packed GDN normalized output", &scratch.normalized),
+        ("packed GDN output", &scratch.output),
+    ]
+}
+
 pub(crate) fn preflight(
     ctx: &MetalContext,
     weights: GatedDeltaNetMetalWeights<'_>,
@@ -857,6 +1346,50 @@ pub(crate) fn preflight(
         "kernel_gdn_step_decay_f32",
         "kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32",
     ] {
+        ctx.pipeline(kernel)?;
+    }
+    Ok(())
+}
+
+fn preflight_packed(
+    ctx: &MetalContext,
+    weights: GatedDeltaNetMetalWeights<'_>,
+) -> Result<(), Qwen4ExpGdnError> {
+    for dtype in [weights.qkv.dtype, weights.gate.dtype, weights.output.dtype] {
+        preflight_packed_projection(ctx, dtype)?;
+    }
+    preflight_packed_projection(ctx, GgmlType::F32)?;
+    for kernel in [
+        "kernel_mat_vec_f32_f32_sigmoid",
+        "kernel_sigmoid_f32",
+        "kernel_gdn_decay_chain_batched_f32",
+        "kernel_gdn_prep_packed_f32",
+        "kernel_l2_norm_pair_batched_f32",
+        "kernel_l2_norm_pair_hd128_r4_f32",
+        "kernel_gdn_step_decay_packed_f32",
+        "kernel_gdn_step_decay_packed_nsg4_f32",
+        "kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32",
+    ] {
+        ctx.pipeline(kernel)?;
+    }
+    Ok(())
+}
+
+fn preflight_packed_projection(
+    ctx: &MetalContext,
+    dtype: GgmlType,
+) -> Result<(), Qwen4ExpGdnError> {
+    preflight_projection(ctx, dtype)?;
+    let kernels: &[&str] = match dtype {
+        GgmlType::F32 => &["kernel_mat_mat_f32_f32"],
+        GgmlType::Q8_0 => &[
+            "kernel_mat_mat_q8_0_f32",
+            "kernel_mat_mat_q8_0_f32_n16",
+            "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+        ],
+        _ => return invalid(format!("unsupported packed GDN projection dtype {dtype:?}")),
+    };
+    for kernel in kernels {
         ctx.pipeline(kernel)?;
     }
     Ok(())
@@ -914,6 +1447,78 @@ fn encode_rmsnorm_sigmoid_gated(
             depth: 1,
         },
     );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_rmsnorm_sigmoid_gated_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weight: &MetalTensor,
+    gate: &MetalTensor,
+    output: &MetalTensor,
+    geometry: GatedDeltaNetMetalGeometry,
+    tokens: usize,
+) -> Result<(), Qwen4ExpGdnError> {
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        eps: f32,
+    }
+    let heads = tokens
+        .checked_mul(geometry.value_heads)
+        .ok_or_else(|| Qwen4ExpGdnError::Invalid("packed GDN head count overflow".into()))?;
+    let pipeline = ctx.pipeline("kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: heads as u32,
+            eps: geometry.eps * geometry.head_dim as f32,
+        },
+    );
+    enc.set_tensor(1, input);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, gate);
+    enc.set_tensor(4, output);
+    enc.dispatch(
+        MTLSize {
+            width: heads.div_ceil(4),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 4,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+fn validate_packed_encoder(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+) -> Result<(), Qwen4ExpGdnError> {
+    let command = enc.parent_command_buffer();
+    let actual = command.device().registryID();
+    let expected = ctx.device.registryID();
+    if actual != expected {
+        return invalid(format!(
+            "packed GDN encoder belongs to Metal device registry {actual}, expected {expected}"
+        ));
+    }
+    if enc.is_concurrent() {
+        return invalid("packed GDN dependent dispatches require a serial encoder");
+    }
+    let status = command.status();
+    if status != MTLCommandBufferStatus::NotEnqueued {
+        return invalid(format!(
+            "packed GDN encoding requires a NotEnqueued command buffer, got {status:?}"
+        ));
+    }
     Ok(())
 }
 
@@ -991,6 +1596,21 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
 
+    fn packed_test_context() -> Option<MetalContext> {
+        match MetalContext::new() {
+            Ok(ctx) => Some(ctx),
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => {
+                let required = matches!(
+                    std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
+                    Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+                );
+                assert!(!required, "Metal is required but unavailable");
+                None
+            }
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        }
+    }
+
     const GROUPED_TILED_ORACLE_JSON: &str =
         include_str!("../tests/fixtures/qwen4exp_gdn_grouped_tiled_v1.json");
     const GROUPED_TILED_ORACLE_F32: &[u8] =
@@ -1032,6 +1652,32 @@ mod tests {
         tensor
     }
 
+    fn q8_bank(n_in: usize, n_out: usize, seed: usize) -> Vec<u8> {
+        assert!(n_in.is_multiple_of(32));
+        let mut bytes = Vec::with_capacity(n_in / 32 * n_out * 34);
+        for row in 0..n_out {
+            for block in 0..n_in / 32 {
+                let ordinal = row * (n_in / 32) + block + seed;
+                let sign = if ordinal.is_multiple_of(3) { -1.0 } else { 1.0 };
+                let scale = sign * (ordinal * 37 % 997 + 17) as f32 / 131_072.0;
+                bytes.extend_from_slice(&half::f16::from_f32(scale).to_bits().to_le_bytes());
+                for lane in 0..32 {
+                    let quant = ((ordinal * 11 + lane * 7 + 5) % 31) as i8 - 15;
+                    bytes.push(quant as u8);
+                }
+            }
+        }
+        bytes
+    }
+
+    fn q8_weight(ctx: &MetalContext, bytes: &[u8], n_in: usize, n_out: usize) -> MetalTensor {
+        let mut tensor =
+            MetalTensor::from_bytes(ctx, bytes, vec![n_in as u64, n_out as u64], GgmlType::Q8_0)
+                .unwrap();
+        tensor.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        tensor
+    }
+
     fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
         unsafe {
             let source = tensor
@@ -1043,6 +1689,165 @@ mod tests {
                 .cast::<f32>();
             std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
         }
+    }
+
+    fn assert_similarity(
+        label: &str,
+        actual: &[f32],
+        expected: &[f32],
+        maximum_relative_rms: f64,
+        minimum_cosine: f64,
+        maximum_absolute: f32,
+    ) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        assert!(actual.iter().all(|value| value.is_finite()), "{label}");
+        let dot = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| *actual as f64 * *expected as f64)
+            .sum::<f64>();
+        let actual_square = actual
+            .iter()
+            .map(|value| (*value as f64).powi(2))
+            .sum::<f64>();
+        let expected_square = expected
+            .iter()
+            .map(|value| (*value as f64).powi(2))
+            .sum::<f64>();
+        let difference_square = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| (*actual as f64 - *expected as f64).powi(2))
+            .sum::<f64>();
+        let relative_rms = (difference_square / expected_square.max(1e-30)).sqrt();
+        let cosine = dot / (actual_square * expected_square).sqrt().max(1e-30);
+        let observed_max = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| (actual - expected).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!(
+            "[{label}] relative_rms={relative_rms:.3e} cosine={cosine:.9} max_abs={observed_max:.3e}"
+        );
+        assert!(
+            relative_rms <= maximum_relative_rms,
+            "{label} relative_rms={relative_rms}"
+        );
+        assert!(cosine >= minimum_cosine, "{label} cosine={cosine}");
+        assert!(
+            observed_max <= maximum_absolute,
+            "{label} max_abs={observed_max}"
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_tokenwise_similarity(
+        label: &str,
+        actual: &[f32],
+        expected: &[f32],
+        width: usize,
+        tokens: usize,
+        maximum_relative_rms: f64,
+        minimum_cosine: f64,
+        maximum_absolute: f32,
+    ) {
+        assert_eq!(actual.len(), width * tokens, "{label} actual shape");
+        assert_eq!(expected.len(), width * tokens, "{label} expected shape");
+        for token in 0..tokens {
+            let start = token * width;
+            assert_similarity(
+                &format!("{label} token={token}"),
+                &actual[start..start + width],
+                &expected[start..start + width],
+                maximum_relative_rms,
+                minimum_cosine,
+                maximum_absolute,
+            );
+        }
+    }
+
+    struct SerialPackedGdnTrace {
+        qkv: Vec<f32>,
+        gate: Vec<f32>,
+        beta: Vec<f32>,
+        alpha: Vec<f32>,
+        decay: Vec<f32>,
+        query: Vec<f32>,
+        key: Vec<f32>,
+        value: Vec<f32>,
+        query_norm: Vec<f32>,
+        key_norm: Vec<f32>,
+        recurrent: Vec<f32>,
+        normalized: Vec<f32>,
+        output: Vec<f32>,
+        conv_states: Vec<Vec<f32>>,
+        delta_states: Vec<Vec<f32>>,
+    }
+
+    fn serial_gdn_trace(
+        ctx: &MetalContext,
+        geometry: GatedDeltaNetMetalGeometry,
+        weights: GatedDeltaNetMetalWeights<'_>,
+        inputs: &[f32],
+        tokens: usize,
+        initial_conv: &[f32],
+        initial_delta: &[f32],
+    ) -> SerialPackedGdnTrace {
+        let mut workspace = GatedDeltaNetMetalWorkspace::new(ctx, geometry).unwrap();
+        write_f32(&workspace.conv_state, initial_conv);
+        write_f32(&workspace.delta_state, initial_delta);
+        let mut trace = SerialPackedGdnTrace {
+            qkv: Vec::with_capacity(tokens * geometry.conv_width()),
+            gate: Vec::with_capacity(tokens * geometry.value_width()),
+            beta: Vec::with_capacity(tokens * geometry.value_heads),
+            alpha: Vec::with_capacity(tokens * geometry.value_heads),
+            decay: Vec::with_capacity(tokens * geometry.value_heads),
+            query: Vec::with_capacity(tokens * geometry.key_width()),
+            key: Vec::with_capacity(tokens * geometry.key_width()),
+            value: Vec::with_capacity(tokens * geometry.value_width()),
+            query_norm: Vec::with_capacity(tokens * geometry.key_width()),
+            key_norm: Vec::with_capacity(tokens * geometry.key_width()),
+            recurrent: Vec::with_capacity(tokens * geometry.value_width()),
+            normalized: Vec::with_capacity(tokens * geometry.value_width()),
+            output: Vec::with_capacity(tokens * geometry.hidden_size),
+            conv_states: Vec::with_capacity(tokens),
+            delta_states: Vec::with_capacity(tokens),
+        };
+        for token in 0..tokens {
+            let start = token * geometry.hidden_size;
+            let input = tensor(
+                ctx,
+                &inputs[start..start + geometry.hidden_size],
+                vec![geometry.hidden_size as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let read =
+                encode_gated_delta_net(ctx, &encoder, &input, weights, &mut workspace).unwrap();
+            drop(read);
+            encoder.end();
+            command.commit();
+            workspace.release_after().unwrap();
+            trace.qkv.extend(read_f32(&workspace.qkv));
+            trace.gate.extend(read_f32(&workspace.gate));
+            trace.beta.extend(read_f32(&workspace.beta));
+            trace.alpha.extend(read_f32(&workspace.alpha));
+            trace.decay.extend(read_f32(&workspace.decay));
+            let convolved = read_f32(&workspace.qkv_conv);
+            trace.query.extend(&convolved[..geometry.key_width()]);
+            trace
+                .key
+                .extend(&convolved[geometry.key_width()..2 * geometry.key_width()]);
+            trace.value.extend(&convolved[2 * geometry.key_width()..]);
+            trace.query_norm.extend(read_f32(&workspace.query_norm));
+            trace.key_norm.extend(read_f32(&workspace.key_norm));
+            trace.recurrent.extend(read_f32(&workspace.recurrent));
+            trace.normalized.extend(read_f32(&workspace.normalized));
+            trace.output.extend(read_f32(&workspace.output));
+            trace.conv_states.push(read_f32(&workspace.conv_state));
+            trace.delta_states.push(read_f32(&workspace.delta_state));
+        }
+        trace
     }
 
     fn mat_vec(weight: &[f32], input: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {
@@ -1792,6 +2597,468 @@ mod tests {
                 &read_f32(&packed_decay),
                 &read_f32(&serial_decay),
             );
+        }
+    }
+
+    #[test]
+    fn packed_gdn_motor_matches_serial_state_output_and_routes() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        let geometry = GatedDeltaNetMetalGeometry::new(2_560, 16, 48, 128, 4, 1e-6).unwrap();
+        const MAX_TOKENS: usize = 34;
+        let qkv_bytes = q8_bank(geometry.hidden_size, geometry.conv_width(), 31);
+        let gate_bytes = q8_bank(geometry.hidden_size, geometry.value_width(), 43);
+        let output_bytes = q8_bank(geometry.value_width(), geometry.hidden_size, 59);
+        let qkv = q8_weight(
+            &ctx,
+            &qkv_bytes,
+            geometry.hidden_size,
+            geometry.conv_width(),
+        );
+        let gate = q8_weight(
+            &ctx,
+            &gate_bytes,
+            geometry.hidden_size,
+            geometry.value_width(),
+        );
+        let beta = weight(
+            &ctx,
+            &values(geometry.hidden_size * geometry.value_heads, 71, 0.000_17),
+            vec![geometry.hidden_size as u64, geometry.value_heads as u64],
+        );
+        let alpha = weight(
+            &ctx,
+            &values(geometry.hidden_size * geometry.value_heads, 83, 0.000_19),
+            vec![geometry.hidden_size as u64, geometry.value_heads as u64],
+        );
+        let transformed_a = weight(
+            &ctx,
+            &(0..geometry.value_heads)
+                .map(|head| -0.35 - (head % 11) as f32 * 0.027)
+                .collect::<Vec<_>>(),
+            vec![geometry.value_heads as u64],
+        );
+        let dt_bias = weight(
+            &ctx,
+            &(0..geometry.value_heads)
+                .map(|head| (head as f32 % 9.0 - 4.0) * 0.031)
+                .collect::<Vec<_>>(),
+            vec![geometry.value_heads as u64],
+        );
+        let conv = weight(
+            &ctx,
+            &values(geometry.conv_kernel * geometry.conv_width(), 97, 0.001_3),
+            vec![geometry.conv_kernel as u64, geometry.conv_width() as u64],
+        );
+        let norm = weight(
+            &ctx,
+            &(0..geometry.head_dim)
+                .map(|lane| 0.78 + (lane % 17) as f32 * 0.019)
+                .collect::<Vec<_>>(),
+            vec![geometry.head_dim as u64],
+        );
+        let output = q8_weight(
+            &ctx,
+            &output_bytes,
+            geometry.value_width(),
+            geometry.hidden_size,
+        );
+        let weights = GatedDeltaNetMetalWeights {
+            geometry,
+            qkv: &qkv,
+            gate: &gate,
+            beta: &beta,
+            alpha: &alpha,
+            a: &transformed_a,
+            dt_bias: &dt_bias,
+            conv: &conv,
+            norm: &norm,
+            output: &output,
+        };
+        let inputs = (0..MAX_TOKENS * geometry.hidden_size)
+            .map(|index| {
+                let token = index / geometry.hidden_size;
+                let centered = ((index * 41 + token * 23 + 7) % 257) as f32 - 128.0;
+                centered * 0.001_1 + token as f32 * 0.000_2
+            })
+            .collect::<Vec<_>>();
+        let initial_conv = values(geometry.conv_state_elements(), 109, 0.000_7);
+        let initial_delta = values(geometry.delta_state_elements(), 127, 0.000_03);
+
+        for tokens in [1_usize, 2, 8, 16, 33] {
+            let serial = serial_gdn_trace(
+                &ctx,
+                geometry,
+                weights,
+                &inputs,
+                tokens + 1,
+                &initial_conv,
+                &initial_delta,
+            );
+            let input = tensor(
+                &ctx,
+                &inputs[..tokens * geometry.hidden_size],
+                vec![geometry.hidden_size as u64, tokens as u64],
+            );
+            let conv_state = tensor(
+                &ctx,
+                &initial_conv,
+                vec![geometry.conv_state_elements() as u64],
+            );
+            let delta_state = tensor(
+                &ctx,
+                &initial_delta,
+                vec![geometry.delta_state_elements() as u64],
+            );
+            let scratch = GatedDeltaNetPackedScratch::new(&ctx, geometry, tokens).unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            let packed_output = crate::metal::with_prefill_gdn_prep_parallel_override(true, || {
+                assert!(crate::metal::prefill_gdn_prep_parallel_enabled_for_test());
+                unsafe {
+                    encode_gated_delta_net_packed(
+                        &ctx,
+                        &encoder,
+                        &input,
+                        weights,
+                        &conv_state,
+                        &delta_state,
+                        &scratch,
+                        tokens,
+                    )
+                }
+            })
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            let q8_matvec = if crate::metal::mat_vec_q8_0_lcpp_enabled() {
+                "kernel_mat_vec_q8_0_f32_lcpp"
+            } else {
+                "kernel_mat_vec_q8_0_f32"
+            };
+            let f32_matvec = if crate::metal::mat_vec_f32_lcpp_r2_enabled_for_test() {
+                "kernel_mat_vec_f32_f32_lcpp_r2"
+            } else {
+                "kernel_mat_vec_f32_f32"
+            };
+            let l2_pair = if crate::metal::l2_pair_hd128_r4_enabled_for_test() {
+                "kernel_l2_norm_pair_hd128_r4_f32"
+            } else {
+                "kernel_l2_norm_pair_batched_f32"
+            };
+            let expected_kernels = match tokens {
+                1 => vec![
+                    q8_matvec,
+                    q8_matvec,
+                    "kernel_mat_vec_f32_f32_sigmoid",
+                    f32_matvec,
+                    "kernel_gdn_decay_chain_batched_f32",
+                    "kernel_gdn_prep_packed_f32",
+                    l2_pair,
+                    "kernel_gdn_step_decay_packed_nsg4_f32",
+                    "kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32",
+                    q8_matvec,
+                ],
+                2 => vec![
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_sigmoid_f32",
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_gdn_decay_chain_batched_f32",
+                    "kernel_gdn_prep_packed_f32",
+                    l2_pair,
+                    "kernel_gdn_step_decay_packed_nsg4_f32",
+                    "kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32",
+                    "kernel_mat_mat_q8_0_f32",
+                ],
+                8 => vec![
+                    "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+                    "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_sigmoid_f32",
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_gdn_decay_chain_batched_f32",
+                    "kernel_gdn_prep_packed_f32",
+                    l2_pair,
+                    "kernel_gdn_step_decay_packed_nsg4_f32",
+                    "kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32",
+                    "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+                ],
+                16 => vec![
+                    "kernel_mat_mat_q8_0_f32_n16",
+                    "kernel_mat_mat_q8_0_f32_n16",
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_sigmoid_f32",
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_gdn_decay_chain_batched_f32",
+                    "kernel_gdn_prep_packed_f32",
+                    l2_pair,
+                    "kernel_gdn_step_decay_packed_nsg4_f32",
+                    "kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32",
+                    "kernel_mat_mat_q8_0_f32_n16",
+                ],
+                33 => vec![
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_sigmoid_f32",
+                    "kernel_mat_mat_f32_f32",
+                    "kernel_gdn_decay_chain_batched_f32",
+                    "kernel_gdn_prep_packed_f32",
+                    l2_pair,
+                    "kernel_gdn_step_decay_packed_nsg4_f32",
+                    "kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32",
+                    "kernel_mat_mat_q8_0_f32",
+                ],
+                _ => unreachable!(),
+            };
+            let actual_kernels = census
+                .iter()
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual_kernels, expected_kernels,
+                "packed GDN N={tokens} full route with parallel prep forced on: {census:#?}"
+            );
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+
+            let prefix = |name: &str, tensor: &MetalTensor, width: usize| {
+                read_f32(&scratch.prefix_view(name, tensor, width, tokens).unwrap())
+            };
+            let packed_stages = [
+                (
+                    "QKV",
+                    prefix("packed GDN QKV", &scratch.qkv, geometry.conv_width()),
+                    &serial.qkv[..tokens * geometry.conv_width()],
+                    geometry.conv_width(),
+                ),
+                (
+                    "gate",
+                    prefix("packed GDN gate", &scratch.gate, geometry.value_width()),
+                    &serial.gate[..tokens * geometry.value_width()],
+                    geometry.value_width(),
+                ),
+                (
+                    "beta",
+                    prefix("packed GDN beta", &scratch.beta, geometry.value_heads),
+                    &serial.beta[..tokens * geometry.value_heads],
+                    geometry.value_heads,
+                ),
+                (
+                    "alpha",
+                    prefix("packed GDN alpha", &scratch.alpha, geometry.value_heads),
+                    &serial.alpha[..tokens * geometry.value_heads],
+                    geometry.value_heads,
+                ),
+                (
+                    "decay",
+                    prefix("packed GDN decay", &scratch.decay, geometry.value_heads),
+                    &serial.decay[..tokens * geometry.value_heads],
+                    geometry.value_heads,
+                ),
+                (
+                    "query",
+                    prefix("packed GDN query", &scratch.query, geometry.key_width()),
+                    &serial.query[..tokens * geometry.key_width()],
+                    geometry.key_width(),
+                ),
+                (
+                    "key",
+                    prefix("packed GDN key", &scratch.key, geometry.key_width()),
+                    &serial.key[..tokens * geometry.key_width()],
+                    geometry.key_width(),
+                ),
+                (
+                    "value",
+                    prefix("packed GDN value", &scratch.value, geometry.value_width()),
+                    &serial.value[..tokens * geometry.value_width()],
+                    geometry.value_width(),
+                ),
+                (
+                    "query norm",
+                    prefix(
+                        "packed GDN query norm",
+                        &scratch.query_norm,
+                        geometry.key_width(),
+                    ),
+                    &serial.query_norm[..tokens * geometry.key_width()],
+                    geometry.key_width(),
+                ),
+                (
+                    "key norm",
+                    prefix(
+                        "packed GDN key norm",
+                        &scratch.key_norm,
+                        geometry.key_width(),
+                    ),
+                    &serial.key_norm[..tokens * geometry.key_width()],
+                    geometry.key_width(),
+                ),
+                (
+                    "recurrent",
+                    prefix(
+                        "packed GDN recurrent",
+                        &scratch.recurrent,
+                        geometry.value_width(),
+                    ),
+                    &serial.recurrent[..tokens * geometry.value_width()],
+                    geometry.value_width(),
+                ),
+                (
+                    "normalized",
+                    prefix(
+                        "packed GDN normalized",
+                        &scratch.normalized,
+                        geometry.value_width(),
+                    ),
+                    &serial.normalized[..tokens * geometry.value_width()],
+                    geometry.value_width(),
+                ),
+                (
+                    "output",
+                    read_f32(&packed_output),
+                    &serial.output[..tokens * geometry.hidden_size],
+                    geometry.hidden_size,
+                ),
+            ];
+            if tokens == 1 {
+                for (stage, actual, expected, _) in &packed_stages {
+                    assert_bits_eq(&format!("packed GDN N=1 {stage}"), actual, expected);
+                }
+                assert_bits_eq(
+                    "packed GDN N=1 convolution state",
+                    &read_f32(&conv_state),
+                    &serial.conv_states[tokens - 1],
+                );
+                assert_bits_eq(
+                    "packed GDN N=1 delta state",
+                    &read_f32(&delta_state),
+                    &serial.delta_states[tokens - 1],
+                );
+            } else {
+                for (stage, actual, expected, width) in &packed_stages {
+                    let (maximum_relative_rms, minimum_cosine, maximum_absolute) = match *stage {
+                        "QKV" | "gate" => (1.5e-3, 0.999_999_4, 3e-4),
+                        "beta" | "decay" => (1e-6, 0.999_999_9, 1e-6),
+                        "alpha" => (1e-5, 0.999_999_9, 1e-7),
+                        "query" | "key" | "value" => (1.5e-3, 0.999_999_4, 1e-5),
+                        "query norm" | "key norm" => (1.5e-3, 0.999_999_4, 7e-4),
+                        "recurrent" => (2e-3, 0.999_999, 2e-6),
+                        "normalized" => (2e-3, 0.999_999, 7e-5),
+                        "output" => (2e-3, 0.999_999, 2e-4),
+                        _ => unreachable!(),
+                    };
+                    assert_tokenwise_similarity(
+                        &format!("packed GDN N={tokens} {stage}"),
+                        actual,
+                        expected,
+                        *width,
+                        tokens,
+                        maximum_relative_rms,
+                        minimum_cosine,
+                        maximum_absolute,
+                    );
+                }
+                assert_similarity(
+                    &format!("packed GDN N={tokens} convolution state"),
+                    &read_f32(&conv_state),
+                    &serial.conv_states[tokens - 1],
+                    1e-3,
+                    0.999_999_6,
+                    2.5e-4,
+                );
+                assert_similarity(
+                    &format!("packed GDN N={tokens} delta state"),
+                    &read_f32(&delta_state),
+                    &serial.delta_states[tokens - 1],
+                    1.5e-3,
+                    0.999_999_3,
+                    1.2e-6,
+                );
+            }
+            assert!(
+                read_f32(&delta_state)
+                    .iter()
+                    .zip(&initial_delta)
+                    .any(|(actual, initial)| actual.to_bits() != initial.to_bits()),
+                "packed GDN N={tokens} delta state did not change"
+            );
+
+            let packed_conv = read_f32(&conv_state);
+            let packed_delta = read_f32(&delta_state);
+            let mut continuation = GatedDeltaNetMetalWorkspace::new(&ctx, geometry).unwrap();
+            write_f32(&continuation.conv_state, &packed_conv);
+            write_f32(&continuation.delta_state, &packed_delta);
+            let start = tokens * geometry.hidden_size;
+            let continuation_input = tensor(
+                &ctx,
+                &inputs[start..start + geometry.hidden_size],
+                vec![geometry.hidden_size as u64],
+            );
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let read = encode_gated_delta_net(
+                &ctx,
+                &encoder,
+                &continuation_input,
+                weights,
+                &mut continuation,
+            )
+            .unwrap();
+            drop(read);
+            encoder.end();
+            command.commit();
+            continuation.release_after().unwrap();
+            let expected_output =
+                &serial.output[tokens * geometry.hidden_size..(tokens + 1) * geometry.hidden_size];
+            if tokens == 1 {
+                assert_bits_eq(
+                    "packed GDN exact scalar continuation output",
+                    &read_f32(&continuation.output),
+                    expected_output,
+                );
+                assert_bits_eq(
+                    "packed GDN exact scalar continuation conv state",
+                    &read_f32(&continuation.conv_state),
+                    &serial.conv_states[tokens],
+                );
+                assert_bits_eq(
+                    "packed GDN exact scalar continuation delta state",
+                    &read_f32(&continuation.delta_state),
+                    &serial.delta_states[tokens],
+                );
+            } else {
+                assert_similarity(
+                    &format!("packed GDN N={tokens} scalar continuation output"),
+                    &read_f32(&continuation.output),
+                    expected_output,
+                    8e-4,
+                    0.999_999_8,
+                    6e-5,
+                );
+                assert_similarity(
+                    &format!("packed GDN N={tokens} scalar continuation conv state"),
+                    &read_f32(&continuation.conv_state),
+                    &serial.conv_states[tokens],
+                    8e-4,
+                    0.999_999_8,
+                    2.5e-4,
+                );
+                assert_similarity(
+                    &format!("packed GDN N={tokens} scalar continuation delta state"),
+                    &read_f32(&continuation.delta_state),
+                    &serial.delta_states[tokens],
+                    1.3e-3,
+                    0.999_999_5,
+                    1e-6,
+                );
+            }
         }
     }
 

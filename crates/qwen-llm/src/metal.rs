@@ -3688,6 +3688,11 @@ pub fn encode_residual_rms_norm_mul_f32(
 
 crate::env_flag!(default_on mat_vec_f32_lcpp_r2_enabled, "QWEN_MATVEC_F32_LCPP_R2");
 
+#[cfg(test)]
+pub(crate) fn mat_vec_f32_lcpp_r2_enabled_for_test() -> bool {
+    mat_vec_f32_lcpp_r2_enabled()
+}
+
 /// F32 mat-vec: `y[o] = Σ_i W[o, i] * x[i]`, GGUF stride convention.
 /// `W` has shape `[n_in, n_out]` (ne[0]=n_in fastest); `x` is `[n_in]`,
 /// `y` is `[n_out]`.
@@ -20722,6 +20727,11 @@ pub fn encode_l2_norm_batched_f32(
 
 crate::env_flag!(default_on l2_pair_hd128_r4_enabled, "QWEN_L2_PAIR_HD128_R4");
 
+#[cfg(test)]
+pub(crate) fn l2_pair_hd128_r4_enabled_for_test() -> bool {
+    l2_pair_hd128_r4_enabled()
+}
+
 pub fn encode_l2_norm_pair_batched_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -22072,8 +22082,52 @@ pub fn encode_ssm_conv_silu_f32(
     Ok(())
 }
 
-crate::env_flag!(default_off prefill_gdn_prep_parallel_enabled, "QWEN_PREFILL_GDN_PREP_PARALLEL");
+crate::env_flag!(
+    default_off configured_prefill_gdn_prep_parallel_enabled,
+    "QWEN_PREFILL_GDN_PREP_PARALLEL"
+);
 
+#[cfg(test)]
+thread_local! {
+    static PREFILL_GDN_PREP_PARALLEL_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_prefill_gdn_prep_parallel_override<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct RestoreOverride(Option<bool>);
+
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            PREFILL_GDN_PREP_PARALLEL_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let previous = PREFILL_GDN_PREP_PARALLEL_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    let _restore = RestoreOverride(previous);
+    f()
+}
+
+fn prefill_gdn_prep_parallel_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = PREFILL_GDN_PREP_PARALLEL_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
+    configured_prefill_gdn_prep_parallel_enabled()
+}
+
+#[cfg(test)]
+pub(crate) fn prefill_gdn_prep_parallel_enabled_for_test() -> bool {
+    prefill_gdn_prep_parallel_enabled()
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn encode_gdn_prep_packed_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -22087,6 +22141,49 @@ pub fn encode_gdn_prep_packed_f32(
     n_k_heads: usize,
     n_v_heads: usize,
     head_dim: usize,
+) -> Result<(), MetalError> {
+    encode_gdn_prep_packed_f32_inner(
+        ctx, enc, qkv_pack, conv_buf, conv_w, q_pack, k_pack, v_pack, n_tokens, n_k_heads,
+        n_v_heads, head_dim, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_gdn_prep_packed_serial_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    qkv_pack: &MetalTensor,
+    conv_buf: &MetalTensor,
+    conv_w: &MetalTensor,
+    q_pack: &MetalTensor,
+    k_pack: &MetalTensor,
+    v_pack: &MetalTensor,
+    n_tokens: usize,
+    n_k_heads: usize,
+    n_v_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    encode_gdn_prep_packed_f32_inner(
+        ctx, enc, qkv_pack, conv_buf, conv_w, q_pack, k_pack, v_pack, n_tokens, n_k_heads,
+        n_v_heads, head_dim, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_gdn_prep_packed_f32_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    qkv_pack: &MetalTensor,
+    conv_buf: &MetalTensor,
+    conv_w: &MetalTensor,
+    q_pack: &MetalTensor,
+    k_pack: &MetalTensor,
+    v_pack: &MetalTensor,
+    n_tokens: usize,
+    n_k_heads: usize,
+    n_v_heads: usize,
+    head_dim: usize,
+    allow_parallel: bool,
 ) -> Result<(), MetalError> {
     let qk_dim = n_k_heads * head_dim;
     let v_dim = n_v_heads * head_dim;
@@ -22133,7 +22230,7 @@ pub fn encode_gdn_prep_packed_f32(
         head_dim: u32,
         conv_dim: u32,
     }
-    let use_parallel = prefill_gdn_prep_parallel_enabled();
+    let use_parallel = allow_parallel && prefill_gdn_prep_parallel_enabled();
     if use_parallel && n_tokens >= 3 {
         let args = Args {
             n_tokens: n_tokens as u32,

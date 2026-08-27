@@ -6,7 +6,8 @@ use crate::tensor::GgmlType;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLComputePipelineState, MTLSize,
+    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLComputePipelineState, MTLDevice,
+    MTLResource, MTLSize,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -189,7 +190,7 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
     inject: &'resources MetalTensor,
     scratch: &'scratch mut GatedResidualMetalScratch,
 ) -> Result<GatedResidualMetalRead<'scratch, 'resources, 'pass>, Qwen4ExpMetalError> {
-    require_serial(enc)?;
+    validate_encoder(ctx, enc)?;
     validate_and_preflight_gated_residual_mix(
         ctx,
         hyper_input,
@@ -236,6 +237,22 @@ pub(crate) fn validate_and_preflight_gated_residual_mix(
         ("mixed output", &scratch.mixed),
         ("injection scratch", &scratch.injection),
     ])?;
+    require_same_device(
+        ctx,
+        &[
+            ("hyper input", hyper_input),
+            ("block output", block_output),
+            ("HC norm", weights.norm),
+            ("HC down", weights.down),
+            ("HC up", weights.up),
+            ("HC injection", inject),
+            ("normalized scratch", &scratch.normalized),
+            ("low-rank scratch", &scratch.low),
+            ("raw gate scratch", &scratch.raw_gate),
+            ("mixed output", &scratch.mixed),
+            ("injection scratch", &scratch.injection),
+        ],
+    )?;
     preflight_mix(ctx, weights.down.dtype, weights.up.dtype)?;
     preflight_combine(ctx)
 }
@@ -248,8 +265,22 @@ pub fn encode_final_gated_residual_mix<'scratch>(
     weights: GatedResidualMetalReadWeights<'_>,
     scratch: &'scratch mut GatedResidualMetalScratch,
 ) -> Result<GatedResidualMetalFinalRead<'scratch>, Qwen4ExpMetalError> {
-    require_serial(enc)?;
-    let hyper_hidden = validate_read_contract(hyper_input, eps, weights, scratch, false)?;
+    validate_encoder(ctx, enc)?;
+    validate_and_preflight_final_gated_residual_mix(ctx, hyper_input, eps, weights, scratch)?;
+    let hyper_hidden = scratch.branch_count * scratch.hidden_size;
+    reserve_command(scratch, enc)?;
+    encode_read(ctx, enc, hyper_input, eps, weights, scratch, hyper_hidden)?;
+    Ok(GatedResidualMetalFinalRead { scratch })
+}
+
+pub(crate) fn validate_and_preflight_final_gated_residual_mix(
+    ctx: &MetalContext,
+    hyper_input: &MetalTensor,
+    eps: f32,
+    weights: GatedResidualMetalReadWeights<'_>,
+    scratch: &GatedResidualMetalScratch,
+) -> Result<(), Qwen4ExpMetalError> {
+    validate_read_contract(hyper_input, eps, weights, scratch, false)?;
     require_disjoint(&[
         ("hyper input", hyper_input),
         ("HC norm", weights.norm),
@@ -260,10 +291,20 @@ pub fn encode_final_gated_residual_mix<'scratch>(
         ("raw gate scratch", &scratch.raw_gate),
         ("mixed output", &scratch.mixed),
     ])?;
-    preflight_mix(ctx, weights.down.dtype, weights.up.dtype)?;
-    reserve_command(scratch, enc)?;
-    encode_read(ctx, enc, hyper_input, eps, weights, scratch, hyper_hidden)?;
-    Ok(GatedResidualMetalFinalRead { scratch })
+    require_same_device(
+        ctx,
+        &[
+            ("hyper input", hyper_input),
+            ("HC norm", weights.norm),
+            ("HC down", weights.down),
+            ("HC up", weights.up),
+            ("normalized scratch", &scratch.normalized),
+            ("low-rank scratch", &scratch.low),
+            ("raw gate scratch", &scratch.raw_gate),
+            ("mixed output", &scratch.mixed),
+        ],
+    )?;
+    preflight_mix(ctx, weights.down.dtype, weights.up.dtype)
 }
 
 fn validate_read_contract(
@@ -368,14 +409,27 @@ fn encode_read(
     Ok(())
 }
 
-fn require_serial(enc: &KernelEncoder) -> Result<(), Qwen4ExpMetalError> {
-    if enc.is_concurrent() {
-        Err(invalid(
-            "gated-residual dependent dispatches require a serial encoder",
-        ))
-    } else {
-        Ok(())
+fn validate_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), Qwen4ExpMetalError> {
+    let command = enc.parent_command_buffer();
+    let actual = command.device().registryID();
+    let expected = ctx.device.registryID();
+    if actual != expected {
+        return Err(invalid(format!(
+            "encoder belongs to Metal device registry {actual}, context is {expected}"
+        )));
     }
+    if enc.is_concurrent() {
+        return Err(invalid(
+            "gated-residual dependent dispatches require a serial encoder",
+        ));
+    }
+    let status = command.status();
+    if status != MTLCommandBufferStatus::NotEnqueued {
+        return Err(invalid(format!(
+            "gated-residual encoding requires a NotEnqueued command buffer, got {status:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn reserve_command(
@@ -584,6 +638,22 @@ fn require_disjoint(tensors: &[(&str, &MetalTensor)]) -> Result<(), Qwen4ExpMeta
                     tensors[left].0, tensors[right].0
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+fn require_same_device(
+    ctx: &MetalContext,
+    tensors: &[(&str, &MetalTensor)],
+) -> Result<(), Qwen4ExpMetalError> {
+    let expected = ctx.device.registryID();
+    for (name, tensor) in tensors {
+        let actual = tensor.buffer.device().registryID();
+        if actual != expected {
+            return Err(invalid(format!(
+                "{name} belongs to Metal device registry {actual}, expected {expected}"
+            )));
         }
     }
     Ok(())

@@ -1,0 +1,2025 @@
+//! Full one-token text decode session for Qwen3.8-Flash-Next.
+
+use crate::metal::{
+    KernelEncoder, MetalBufferSizeAndAlign, MetalContext, MetalError, MetalMemoryAdmission,
+    MetalMemorySignals, MetalTensor, MetalTensorProvenance, evaluate_metal_memory_admission,
+    host_page_size_bytes,
+};
+use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
+use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
+use crate::qwen4exp_gdn::GatedDeltaNetMetalGeometry;
+use crate::qwen4exp_layers_zero_one::{
+    Qwen4ExpLayersZeroOneError, Qwen4ExpLayersZeroOneMetalGeometry,
+    Qwen4ExpLayersZeroOneMetalWeights, Qwen4ExpLayersZeroOneMetalWorkspace,
+    encode_qwen4exp_layers_zero_one,
+};
+use crate::qwen4exp_metal::{
+    GatedResidualMetalReadWeights, GatedResidualMetalScratch, Qwen4ExpMetalError,
+    encode_final_gated_residual_mix, validate_and_preflight_final_gated_residual_mix,
+};
+use crate::qwen4exp_moe::Qwen4ExpMoeMetalGeometry;
+use crate::qwen4exp_ple::PleIq4NlTable;
+use crate::qwen4exp_post_ple_block::{
+    Qwen4ExpPostPleBlockError, Qwen4ExpPostPleBlockMetalGeometry, Qwen4ExpPostPleBlockMetalWeights,
+    Qwen4ExpPostPleBlockMetalWorkspace, Qwen4ExpPostPleMixerMetalGeometry,
+    encode_qwen4exp_post_ple_block,
+};
+use crate::qwen4exp_qsa::Qwen4ExpQsaError;
+use crate::qwen4exp_residency::{
+    Qwen4ExpMetalWeightMemoryPlan, Qwen4ExpMetalWeights, Qwen4ExpResidencyError,
+};
+use crate::tensor::GgmlType;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLDevice, MTLResource};
+use std::fmt;
+use std::mem::size_of;
+
+pub const QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Qwen4ExpTextSessionError {
+    #[error(transparent)]
+    Config(#[from] Qwen4ExpError),
+    #[error(transparent)]
+    Metal(#[from] MetalError),
+    #[error(transparent)]
+    Forward(#[from] MfError),
+    #[error(transparent)]
+    Residual(#[from] Qwen4ExpMetalError),
+    #[error(transparent)]
+    LayersZeroOne(#[from] Qwen4ExpLayersZeroOneError),
+    #[error(transparent)]
+    PostPleBlock(#[from] Qwen4ExpPostPleBlockError),
+    #[error(transparent)]
+    QwenSparseAttention(#[from] Qwen4ExpQsaError),
+    #[error(transparent)]
+    Residency(#[from] Qwen4ExpResidencyError),
+    #[error("invalid Qwen3.8-Flash-Next text-session contract: {0}")]
+    Invalid(String),
+    #[error("Qwen3.8-Flash-Next text-session command buffer failed: {0}")]
+    CommandBuffer(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Qwen4ExpTextSessionMetalGeometry {
+    zero_one: Qwen4ExpLayersZeroOneMetalGeometry,
+    post_ple: Vec<Qwen4ExpPostPleBlockMetalGeometry>,
+    qsa_layers: Vec<u32>,
+    capacity: usize,
+    vocab_size: usize,
+}
+
+impl Qwen4ExpTextSessionMetalGeometry {
+    pub fn from_config(
+        config: &Qwen4ExpConfig,
+        capacity: usize,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        config.validate()?;
+        if config.layer_count < 2 {
+            return invalid("text session requires at least two layers");
+        }
+        let zero_one = Qwen4ExpLayersZeroOneMetalGeometry::from_config(config)?;
+        let mut post_ple = Vec::with_capacity(config.layer_count.saturating_sub(2) as usize);
+        let mut qsa_layers = Vec::new();
+        for layer in 2..config.layer_count {
+            let qsa_capacity = match config.mixer_kind(layer) {
+                Some(MixerKind::GatedDeltaNet) => None,
+                Some(MixerKind::QwenSparseAttention) => {
+                    qsa_layers.push(layer);
+                    Some(capacity)
+                }
+                None => return invalid(format!("layer {layer} has no mixer schedule entry")),
+            };
+            post_ple.push(Qwen4ExpPostPleBlockMetalGeometry::from_config(
+                config,
+                layer,
+                qsa_capacity,
+            )?);
+        }
+        let geometry = Self {
+            zero_one,
+            post_ple,
+            qsa_layers,
+            capacity,
+            vocab_size: config.vocab_size as usize,
+        };
+        geometry.validate(config.layer_count as usize)?;
+        Ok(geometry)
+    }
+
+    fn validate(&self, layer_count: usize) -> Result<(), Qwen4ExpTextSessionError> {
+        if self.capacity == 0 || self.vocab_size == 0 {
+            return invalid("session capacity and vocabulary size must be nonzero");
+        }
+        if self.post_ple.len() != layer_count.saturating_sub(2) {
+            return invalid("post-PLE block count differs from the model layer count");
+        }
+        for (offset, block) in self.post_ple.iter().enumerate() {
+            let expected_layer = offset as u32 + 2;
+            if block.layer() != expected_layer
+                || block.branch_count() != self.zero_one.branch_count()
+                || block.hidden_size() != self.zero_one.hidden_size()
+                || block.low_rank() != self.zero_one.low_rank()
+                || block.eps().to_bits() != self.zero_one.eps().to_bits()
+            {
+                return invalid(format!(
+                    "post-PLE block {expected_layer} differs from session geometry"
+                ));
+            }
+            if let Some(qsa) = block.mixer().qsa()
+                && qsa.capacity() != self.capacity
+            {
+                return invalid(format!(
+                    "QSA layer {expected_layer} capacity {} differs from session {}",
+                    qsa.capacity(),
+                    self.capacity
+                ));
+            }
+        }
+        let observed_qsa = self
+            .post_ple
+            .iter()
+            .filter(|block| block.mixer().kind() == MixerKind::QwenSparseAttention)
+            .map(|block| block.layer())
+            .collect::<Vec<_>>();
+        if observed_qsa != self.qsa_layers {
+            return invalid("QSA layer index does not match the post-PLE schedule");
+        }
+        if self.qsa_layers.is_empty() {
+            return invalid("text session requires at least one QSA layer");
+        }
+        for (name, value) in [
+            ("capacity", self.capacity),
+            ("vocabulary size", self.vocab_size),
+            ("hidden size", self.hidden_size()),
+            ("hyper width", self.hyper_width()),
+        ] {
+            if u32::try_from(value).is_err() {
+                return invalid(format!("{name} {value} exceeds u32"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn zero_one(&self) -> Qwen4ExpLayersZeroOneMetalGeometry {
+        self.zero_one
+    }
+
+    pub fn post_ple(&self) -> &[Qwen4ExpPostPleBlockMetalGeometry] {
+        &self.post_ple
+    }
+
+    pub fn qsa_layers(&self) -> &[u32] {
+        &self.qsa_layers
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.post_ple.len() + 2
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn branch_count(&self) -> usize {
+        self.zero_one.branch_count()
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.zero_one.hidden_size()
+    }
+
+    pub fn low_rank(&self) -> usize {
+        self.zero_one.low_rank()
+    }
+
+    pub fn hyper_width(&self) -> usize {
+        self.zero_one.hyper_width()
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        self.vocab_size
+    }
+
+    pub fn eps(&self) -> f32 {
+        self.zero_one.eps()
+    }
+}
+
+pub struct Qwen4ExpTextSessionMetalWeights<'a> {
+    pub geometry: Qwen4ExpTextSessionMetalGeometry,
+    pub zero_one: Qwen4ExpLayersZeroOneMetalWeights<'a>,
+    pub post_ple: Vec<Qwen4ExpPostPleBlockMetalWeights<'a>>,
+    pub final_read: GatedResidualMetalReadWeights<'a>,
+    pub output: &'a MetalTensor,
+}
+
+impl<'a> Qwen4ExpTextSessionMetalWeights<'a> {
+    pub fn bind(
+        weights: &'a Qwen4ExpMetalWeights,
+        capacity: usize,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(weights.config(), capacity)?;
+        let mut post_ple = Vec::with_capacity(geometry.post_ple.len());
+        for block in &geometry.post_ple {
+            post_ple.push(Qwen4ExpPostPleBlockMetalWeights::bind(
+                weights,
+                block.layer(),
+                block.mixer().qsa().map(|qsa| qsa.capacity()),
+            )?);
+        }
+        Ok(Self {
+            geometry,
+            zero_one: Qwen4ExpLayersZeroOneMetalWeights::bind(weights)?,
+            post_ple,
+            final_read: GatedResidualMetalReadWeights {
+                norm: weights.require_tensor("output_hc_norm.weight")?,
+                down: weights.require_tensor("output_hc_down.weight")?,
+                up: weights.require_tensor("output_hc_up.weight")?,
+            },
+            output: weights.require_tensor("output.weight")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Qwen4ExpTextSessionAllocation {
+    pub name: String,
+    pub logical_bytes: u64,
+    pub priced_bytes: u64,
+    pub alignment: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Qwen4ExpTextSessionMemoryPlan {
+    residency_priced_upper_bytes: u64,
+    session_logical_bytes: u64,
+    session_priced_upper_bytes: u64,
+    allocations: Vec<Qwen4ExpTextSessionAllocation>,
+}
+
+impl Qwen4ExpTextSessionMemoryPlan {
+    pub fn for_geometry(
+        ctx: &MetalContext,
+        geometry: &Qwen4ExpTextSessionMetalGeometry,
+        residency: &Qwen4ExpMetalWeightMemoryPlan,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        Self::for_geometry_with_residency_bytes(ctx, geometry, residency.priced_upper_bytes())
+    }
+
+    fn for_geometry_with_residency_bytes(
+        ctx: &MetalContext,
+        geometry: &Qwen4ExpTextSessionMetalGeometry,
+        residency_priced_upper_bytes: u64,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let mut builder = AllocationBuilder::default();
+        add_zero_one_allocations(&mut builder, geometry.zero_one)?;
+        builder.f32("session.hyper_residual", geometry.hyper_width())?;
+        for block in &geometry.post_ple {
+            add_post_ple_allocations(&mut builder, *block)?;
+        }
+        add_residual_allocations(
+            &mut builder,
+            "session.final_read",
+            geometry.branch_count(),
+            geometry.hidden_size(),
+            geometry.low_rank(),
+        )?;
+        builder.f32("session.logits", geometry.vocab_size())?;
+        let mut allocations = Vec::with_capacity(builder.allocations.len());
+        let mut session_logical_bytes = 0_u64;
+        let mut session_priced_upper_bytes = 0_u64;
+        let host_page_size = host_page_size_bytes()? as u64;
+        let max_buffer_length = u64::try_from(ctx.max_buffer_length()).map_err(|_| {
+            Qwen4ExpTextSessionError::Invalid("Metal maximum buffer length exceeds u64".into())
+        })?;
+        for (name, logical_bytes) in builder.allocations {
+            let priced = ctx.shared_buffer_size_and_align(logical_bytes)?;
+            let (priced_upper_bytes, alignment) = price_session_allocation(
+                &name,
+                logical_bytes,
+                priced,
+                host_page_size,
+                max_buffer_length,
+            )?;
+            session_logical_bytes = session_logical_bytes
+                .checked_add(logical_bytes)
+                .ok_or_else(|| {
+                    Qwen4ExpTextSessionError::Invalid("session logical byte total overflow".into())
+                })?;
+            session_priced_upper_bytes = session_priced_upper_bytes
+                .checked_add(priced_upper_bytes)
+                .ok_or_else(|| {
+                    Qwen4ExpTextSessionError::Invalid("session priced byte total overflow".into())
+                })?;
+            allocations.push(Qwen4ExpTextSessionAllocation {
+                name,
+                logical_bytes,
+                priced_bytes: priced_upper_bytes,
+                alignment,
+            });
+        }
+        Ok(Self {
+            residency_priced_upper_bytes,
+            session_logical_bytes,
+            session_priced_upper_bytes,
+            allocations,
+        })
+    }
+
+    pub fn residency_priced_upper_bytes(&self) -> u64 {
+        self.residency_priced_upper_bytes
+    }
+
+    pub fn session_logical_bytes(&self) -> u64 {
+        self.session_logical_bytes
+    }
+
+    pub fn session_priced_upper_bytes(&self) -> u64 {
+        self.session_priced_upper_bytes
+    }
+
+    pub fn allocations(&self) -> &[Qwen4ExpTextSessionAllocation] {
+        &self.allocations
+    }
+
+    pub fn priced_upper_bytes_for_sessions(
+        &self,
+        session_count: usize,
+    ) -> Result<u64, Qwen4ExpTextSessionError> {
+        if session_count == 0 {
+            return invalid("memory admission requires at least one session");
+        }
+        let count = u64::try_from(session_count)
+            .map_err(|_| Qwen4ExpTextSessionError::Invalid("session count exceeds u64".into()))?;
+        self.session_priced_upper_bytes
+            .checked_mul(count)
+            .and_then(|sessions| self.residency_priced_upper_bytes.checked_add(sessions))
+            .ok_or_else(|| {
+                Qwen4ExpTextSessionError::Invalid(
+                    "residency plus session priced byte total overflow".into(),
+                )
+            })
+    }
+
+    pub fn admission_before_residency(
+        &self,
+        signals: MetalMemorySignals,
+        session_count: usize,
+    ) -> Result<MetalMemoryAdmission, Qwen4ExpTextSessionError> {
+        Ok(evaluate_metal_memory_admission(
+            self.priced_upper_bytes_for_sessions(session_count)?,
+            QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES,
+            signals,
+            true,
+        ))
+    }
+
+    pub fn admission_after_residency(&self, signals: MetalMemorySignals) -> MetalMemoryAdmission {
+        evaluate_metal_memory_admission(
+            self.session_priced_upper_bytes,
+            QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES,
+            signals,
+            true,
+        )
+    }
+
+    pub fn reconcile_session(
+        &self,
+        allocated_before: u64,
+        allocated_after: u64,
+    ) -> Result<u64, Qwen4ExpTextSessionError> {
+        let observed = allocated_after.saturating_sub(allocated_before);
+        if observed > self.session_priced_upper_bytes {
+            return invalid(format!(
+                "observed session allocation {observed} exceeds priced upper bound {}",
+                self.session_priced_upper_bytes
+            ));
+        }
+        Ok(observed)
+    }
+}
+
+impl fmt::Display for Qwen4ExpTextSessionMemoryPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "residency_priced={} session_allocations={} session_logical={} session_priced={} reserve={}",
+            self.residency_priced_upper_bytes,
+            self.allocations.len(),
+            self.session_logical_bytes,
+            self.session_priced_upper_bytes,
+            QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES
+        )
+    }
+}
+
+pub struct Qwen4ExpTextSessionPlan {
+    geometry: Qwen4ExpTextSessionMetalGeometry,
+    memory: Qwen4ExpTextSessionMemoryPlan,
+    device_registry_id: u64,
+}
+
+impl Qwen4ExpTextSessionPlan {
+    pub fn for_config(
+        ctx: &MetalContext,
+        config: &Qwen4ExpConfig,
+        capacity: usize,
+        residency: &Qwen4ExpMetalWeightMemoryPlan,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(config, capacity)?;
+        let memory = Qwen4ExpTextSessionMemoryPlan::for_geometry(ctx, &geometry, residency)?;
+        Ok(Self {
+            geometry,
+            memory,
+            device_registry_id: ctx.device.registryID(),
+        })
+    }
+
+    pub fn geometry(&self) -> &Qwen4ExpTextSessionMetalGeometry {
+        &self.geometry
+    }
+
+    pub fn memory_plan(&self) -> &Qwen4ExpTextSessionMemoryPlan {
+        &self.memory
+    }
+
+    pub fn admit_after_residency(
+        self,
+        weights: &Qwen4ExpMetalWeights,
+        signals: MetalMemorySignals,
+    ) -> Result<Qwen4ExpAdmittedTextSessionPlan, Qwen4ExpTextSessionError> {
+        if weights.device_registry_id() != self.device_registry_id {
+            return invalid(format!(
+                "resident weights belong to Metal device registry {}, session plan is for {}",
+                weights.device_registry_id(),
+                self.device_registry_id
+            ));
+        }
+        if Qwen4ExpTextSessionMetalGeometry::from_config(weights.config(), self.geometry.capacity)?
+            != self.geometry
+        {
+            return invalid("resident weights differ from the text-session geometry");
+        }
+        if weights.memory_plan().priced_upper_bytes() != self.memory.residency_priced_upper_bytes {
+            return invalid("resident weights differ from the session residency memory plan");
+        }
+        let admission = self.memory.admission_after_residency(signals);
+        if !admission.admitted {
+            return invalid(format!(
+                "text-session memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+                admission.reason.as_str(),
+                admission.required_bytes,
+                admission.working_set_headroom_bytes,
+                admission.signals.process_limit_remaining_bytes
+            ));
+        }
+        Ok(Qwen4ExpAdmittedTextSessionPlan {
+            plan: self,
+            admission,
+        })
+    }
+}
+
+pub struct Qwen4ExpAdmittedTextSessionPlan {
+    plan: Qwen4ExpTextSessionPlan,
+    admission: MetalMemoryAdmission,
+}
+
+impl Qwen4ExpAdmittedTextSessionPlan {
+    pub fn admission(&self) -> MetalMemoryAdmission {
+        self.admission
+    }
+
+    pub fn memory_plan(&self) -> &Qwen4ExpTextSessionMemoryPlan {
+        &self.plan.memory
+    }
+}
+
+pub struct Qwen4ExpTextSessionMetalWorkspace {
+    geometry: Qwen4ExpTextSessionMetalGeometry,
+    zero_one: Qwen4ExpLayersZeroOneMetalWorkspace,
+    hyper_residual: MetalTensor,
+    post_ple: Vec<Qwen4ExpPostPleBlockMetalWorkspace>,
+    final_read: GatedResidualMetalScratch,
+    logits: MetalTensor,
+    memory: Qwen4ExpTextSessionMemoryPlan,
+    admission: MetalMemoryAdmission,
+    observed_allocation_delta: u64,
+    committed_length: usize,
+    pending_length: Option<usize>,
+    active_command: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    state_poisoned: bool,
+    encode_failed: bool,
+    logits_ready: bool,
+}
+
+impl Qwen4ExpTextSessionMetalWorkspace {
+    pub fn from_admitted(
+        ctx: &MetalContext,
+        admitted: Qwen4ExpAdmittedTextSessionPlan,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        if admitted.plan.device_registry_id != ctx.device.registryID() {
+            return invalid(format!(
+                "session plan belongs to Metal device registry {}, context is {}",
+                admitted.plan.device_registry_id,
+                ctx.device.registryID()
+            ));
+        }
+        let _allocation_transaction = ctx.begin_allocation_transaction();
+        let refreshed = admitted
+            .plan
+            .memory
+            .admission_after_residency(ctx.memory_signals());
+        if !refreshed.admitted {
+            return invalid(format!(
+                "text-session memory admission changed before allocation: reason={} required={:?}",
+                refreshed.reason.as_str(),
+                refreshed.required_bytes
+            ));
+        }
+        Self::allocate(ctx, admitted.plan.geometry, admitted.plan.memory, refreshed)
+    }
+
+    fn allocate(
+        ctx: &MetalContext,
+        geometry: Qwen4ExpTextSessionMetalGeometry,
+        memory: Qwen4ExpTextSessionMemoryPlan,
+        admission: MetalMemoryAdmission,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let allocated_before = ctx.current_allocated_size();
+        let mut post_ple = Vec::with_capacity(geometry.post_ple.len());
+        for block in &geometry.post_ple {
+            post_ple.push(Qwen4ExpPostPleBlockMetalWorkspace::new(ctx, *block)?);
+        }
+        let workspace = Self {
+            zero_one: Qwen4ExpLayersZeroOneMetalWorkspace::new(ctx, geometry.zero_one)?,
+            hyper_residual: MetalTensor::zeros_f32(ctx, vec![geometry.hyper_width() as u64])?,
+            final_read: GatedResidualMetalScratch::new(
+                ctx,
+                geometry.branch_count(),
+                geometry.hidden_size(),
+                geometry.low_rank(),
+            )?,
+            logits: MetalTensor::zeros_f32(ctx, vec![geometry.vocab_size() as u64])?,
+            geometry,
+            post_ple,
+            memory,
+            admission,
+            observed_allocation_delta: 0,
+            committed_length: 0,
+            pending_length: None,
+            active_command: None,
+            state_poisoned: false,
+            encode_failed: false,
+            logits_ready: false,
+        };
+        let allocated_after = ctx.current_allocated_size();
+        let observed = workspace
+            .memory
+            .reconcile_session(allocated_before, allocated_after)?;
+        Ok(Self {
+            observed_allocation_delta: observed,
+            ..workspace
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(
+        ctx: &MetalContext,
+        geometry: Qwen4ExpTextSessionMetalGeometry,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let _allocation_transaction = ctx.begin_allocation_transaction();
+        let memory =
+            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_residency_bytes(ctx, &geometry, 0)?;
+        let admission = memory.admission_after_residency(MetalMemorySignals {
+            recommended_max_bytes: u64::MAX,
+            current_allocated_bytes: ctx.current_allocated_size(),
+            process_limit_remaining_bytes: Some(u64::MAX),
+        });
+        if !admission.admitted {
+            return invalid(format!(
+                "test session memory admission denied: {}",
+                admission.reason.as_str()
+            ));
+        }
+        Self::allocate(ctx, geometry, memory, admission)
+    }
+
+    pub fn geometry(&self) -> &Qwen4ExpTextSessionMetalGeometry {
+        &self.geometry
+    }
+
+    pub fn memory_plan(&self) -> &Qwen4ExpTextSessionMemoryPlan {
+        &self.memory
+    }
+
+    pub fn admission(&self) -> MetalMemoryAdmission {
+        self.admission
+    }
+
+    pub fn observed_allocation_delta(&self) -> u64 {
+        self.observed_allocation_delta
+    }
+
+    pub fn committed_length(&self) -> usize {
+        self.committed_length
+    }
+
+    pub fn qsa_committed_lengths(&self) -> Vec<(u32, usize)> {
+        self.geometry
+            .post_ple
+            .iter()
+            .zip(&self.post_ple)
+            .filter_map(|(geometry, workspace)| {
+                workspace
+                    .mixer_committed_length()
+                    .map(|length| (geometry.layer(), length))
+            })
+            .collect()
+    }
+
+    pub fn ple_prior_tokens(&self) -> &[u32] {
+        self.zero_one.prior_tokens()
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.state_poisoned
+    }
+
+    pub fn reset(&mut self) -> Result<(), Qwen4ExpTextSessionError> {
+        self.require_idle()?;
+        if self.pending_length.is_some() {
+            return invalid("cannot reset while a token update is pending");
+        }
+        self.zero_one.reset()?;
+        for block in &mut self.post_ple {
+            block.reset()?;
+        }
+        self.committed_length = 0;
+        self.state_poisoned = false;
+        self.encode_failed = false;
+        self.logits_ready = false;
+        Ok(())
+    }
+
+    pub fn release_after(&mut self) -> Result<(), Qwen4ExpTextSessionError> {
+        let Some(command) = self.active_command.clone() else {
+            if self.pending_length.is_some() {
+                return invalid("token length is pending without an owning command");
+            }
+            return Ok(());
+        };
+        let status = command.status();
+        if matches!(
+            status,
+            MTLCommandBufferStatus::NotEnqueued | MTLCommandBufferStatus::Enqueued
+        ) {
+            return invalid(format!(
+                "workspace owner is not committed (status {status:?}); commit it or abandon the uncommitted command"
+            ));
+        }
+        command.waitUntilCompleted();
+        let status = command.status();
+        let command_error = command.error().map(|error| error.to_string());
+        let mut child_errors = Vec::new();
+        if let Err(error) = self.zero_one.release_after() {
+            child_errors.push(format!("layers zero-one: {error}"));
+        }
+        for (geometry, block) in self.geometry.post_ple.iter().zip(&mut self.post_ple) {
+            if let Err(error) = block.release_after() {
+                child_errors.push(format!("layer {}: {error}", geometry.layer()));
+            }
+        }
+        if let Err(error) = self.final_read.release_after() {
+            child_errors.push(format!("final HC read: {error}"));
+        }
+        self.active_command = None;
+        let pending = self.pending_length.take();
+        let pending_present = pending.is_some();
+        if let Some(expected) = pending {
+            if self.zero_one.next_position() != Some(expected as u64) {
+                child_errors.push(format!(
+                    "PLE history position {:?}, expected {expected}",
+                    self.zero_one.next_position()
+                ));
+            }
+            for (geometry, block) in self.geometry.post_ple.iter().zip(&self.post_ple) {
+                if geometry.mixer().kind() == MixerKind::QwenSparseAttention
+                    && block.mixer_committed_length() != Some(expected)
+                {
+                    child_errors.push(format!(
+                        "QSA layer {} committed length {:?}, expected {expected}",
+                        geometry.layer(),
+                        block.mixer_committed_length()
+                    ));
+                }
+            }
+            if status == MTLCommandBufferStatus::Completed
+                && command_error.is_none()
+                && child_errors.is_empty()
+                && !self.encode_failed
+            {
+                self.committed_length = expected;
+                self.encode_failed = false;
+                self.logits_ready = true;
+                return Ok(());
+            }
+        }
+        self.state_poisoned = true;
+        self.logits_ready = false;
+        Err(Qwen4ExpTextSessionError::CommandBuffer(format!(
+            "status={status:?}, error={command_error:?}, encode_failed={}, pending_length={pending_present}, children={child_errors:?}",
+            self.encode_failed
+        )))
+    }
+
+    /// Release a full session from a command that will never be committed.
+    ///
+    /// # Safety
+    ///
+    /// The caller must end and permanently discard every reference to the
+    /// owning command. Committing it later may mutate all layer states and
+    /// logits after another token acquires this session.
+    pub unsafe fn abandon_uncommitted(&mut self) -> Result<(), Qwen4ExpTextSessionError> {
+        let Some(command) = self.active_command.as_ref() else {
+            return Ok(());
+        };
+        let status = command.status();
+        if status != MTLCommandBufferStatus::NotEnqueued {
+            return invalid(format!(
+                "only a NotEnqueued workspace owner can be abandoned, got {status:?}"
+            ));
+        }
+        let mut child_errors = Vec::new();
+        if let Err(error) = unsafe { self.zero_one.abandon_uncommitted() } {
+            child_errors.push(format!("layers zero-one: {error}"));
+        }
+        for (geometry, block) in self.geometry.post_ple.iter().zip(&mut self.post_ple) {
+            if let Err(error) = unsafe { block.abandon_uncommitted() } {
+                child_errors.push(format!("layer {}: {error}", geometry.layer()));
+            }
+        }
+        if let Err(error) = unsafe { self.final_read.abandon_uncommitted() } {
+            child_errors.push(format!("final HC read: {error}"));
+        }
+        if !child_errors.is_empty() {
+            return invalid(format!(
+                "could not abandon every text-session child: {child_errors:?}"
+            ));
+        }
+        self.active_command = None;
+        self.pending_length = None;
+        self.state_poisoned = false;
+        self.encode_failed = false;
+        self.logits_ready = self.committed_length > 0;
+        Ok(())
+    }
+
+    pub fn logits(&self) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpTextSessionError> {
+        if self.active_command.is_some() || !self.logits_ready || self.state_poisoned {
+            return invalid("completed logits are unavailable");
+        }
+        Ok(Qwen4ExpCompletedLogits { workspace: self })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn final_hidden_tensor(&self) -> &MetalTensor {
+        self.final_read.mixed_tensor()
+    }
+
+    fn require_idle(&self) -> Result<(), Qwen4ExpTextSessionError> {
+        if self.active_command.is_some() {
+            invalid("workspace is still owned by a command buffer")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[must_use = "end and commit the command, then release the text session"]
+pub struct Qwen4ExpTextSessionPending<'a> {
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    position: usize,
+}
+
+impl Qwen4ExpTextSessionPending<'_> {
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        self.workspace.geometry.vocab_size()
+    }
+}
+
+pub struct Qwen4ExpCompletedLogits<'a> {
+    workspace: &'a Qwen4ExpTextSessionMetalWorkspace,
+}
+
+impl Qwen4ExpCompletedLogits<'_> {
+    pub fn n_elements(&self) -> u64 {
+        self.workspace.geometry.vocab_size() as u64
+    }
+
+    pub fn dtype(&self) -> GgmlType {
+        GgmlType::F32
+    }
+
+    pub fn position(&self) -> usize {
+        self.workspace.committed_length - 1
+    }
+
+    pub fn as_slice(&self) -> &[f32] {
+        let offset = (self.workspace.logits.offset / size_of::<f32>() as u64) as usize;
+        // SAFETY: session logits are an owned, shared F32 buffer. The owning
+        // command completed before this handle became available, and the
+        // immutable workspace borrow prevents another token from overwriting
+        // the buffer while the returned slice is live.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.workspace
+                    .logits
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<f32>()
+                    .add(offset),
+                self.workspace.geometry.vocab_size(),
+            )
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<f32> {
+        self.as_slice().to_vec()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_qwen4exp_text_token<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    validate_encoder(ctx, enc)?;
+    validate_and_preflight(ctx, enc, token_id, position, weights, workspace)?;
+    crate::qwen4exp_layers_zero_one::stage_ple_rows(
+        token_id,
+        position as u64,
+        table,
+        weights.zero_one,
+        &mut workspace.zero_one,
+    )?;
+    for block in &mut workspace.post_ple {
+        block.prepare_for_parent(position)?;
+    }
+    reserve_command(workspace, enc, position + 1)?;
+    workspace.logits_ready = false;
+    if let Err(error) = encode_step(ctx, enc, token_id, position, table, weights, workspace) {
+        workspace.encode_failed = true;
+        workspace.state_poisoned = true;
+        return Err(error);
+    }
+    Ok(Qwen4ExpTextSessionPending {
+        workspace,
+        position,
+    })
+}
+
+fn validate_and_preflight(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    position: usize,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    if workspace.state_poisoned {
+        return invalid("workspace causal state is indeterminate; reset it before reuse");
+    }
+    workspace.require_idle()?;
+    if workspace.pending_length.is_some() {
+        return invalid("workspace has a token update without a command owner");
+    }
+    if weights.geometry != workspace.geometry {
+        return invalid("text-session weight and workspace geometry differ");
+    }
+    if weights.post_ple.len() != workspace.post_ple.len() {
+        return invalid("post-PLE weight and workspace counts differ");
+    }
+    if position != workspace.committed_length {
+        return invalid(format!(
+            "position {position} differs from committed length {}",
+            workspace.committed_length
+        ));
+    }
+    if position >= workspace.geometry.capacity {
+        return invalid(format!(
+            "text-session capacity {} is exhausted",
+            workspace.geometry.capacity
+        ));
+    }
+    crate::qwen4exp_layers_zero_one::validate_and_preflight(
+        ctx,
+        enc,
+        token_id,
+        position as u64,
+        weights.zero_one,
+        &workspace.zero_one,
+    )?;
+    for ((geometry, weights), block) in workspace
+        .geometry
+        .post_ple
+        .iter()
+        .zip(&weights.post_ple)
+        .zip(&workspace.post_ple)
+    {
+        if weights.geometry != *geometry {
+            return invalid(format!(
+                "layer {} weight geometry differs from the session",
+                geometry.layer()
+            ));
+        }
+        crate::qwen4exp_post_ple_block::validate_and_preflight(
+            ctx,
+            position,
+            &workspace.hyper_residual,
+            *weights,
+            block,
+        )?;
+    }
+    validate_final_contract(ctx, weights, workspace)?;
+    Ok(())
+}
+
+fn validate_final_contract(
+    ctx: &MetalContext,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let g = &workspace.geometry;
+    require_tensor(
+        "session hyper residual",
+        &workspace.hyper_residual,
+        GgmlType::F32,
+        &[g.hyper_width() as u64],
+        true,
+    )?;
+    if workspace.final_read.branch_count() != g.branch_count()
+        || workspace.final_read.hidden_size() != g.hidden_size()
+        || workspace.final_read.low_rank() != g.low_rank()
+    {
+        return invalid("final HC scratch geometry differs from the session");
+    }
+    validate_and_preflight_final_gated_residual_mix(
+        ctx,
+        &workspace.hyper_residual,
+        g.eps(),
+        weights.final_read,
+        &workspace.final_read,
+    )?;
+    require_projection(
+        "output projection",
+        weights.output,
+        g.hidden_size(),
+        g.vocab_size(),
+        &[GgmlType::F32, GgmlType::Q6_K],
+    )?;
+    require_tensor(
+        "session logits",
+        &workspace.logits,
+        GgmlType::F32,
+        &[g.vocab_size() as u64],
+        true,
+    )?;
+    let final_weights = [
+        ("final HC norm", weights.final_read.norm),
+        ("final HC down", weights.final_read.down),
+        ("final HC up", weights.final_read.up),
+        ("output projection", weights.output),
+    ];
+    require_read_only_weights(&final_weights)?;
+    let tensors = [
+        ("session hyper residual", &workspace.hyper_residual),
+        ("final HC norm", weights.final_read.norm),
+        ("final HC down", weights.final_read.down),
+        ("final HC up", weights.final_read.up),
+        ("final HC mixed output", workspace.final_read.mixed_tensor()),
+        ("output projection", weights.output),
+        ("session logits", &workspace.logits),
+    ];
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)?;
+    match weights.output.dtype {
+        GgmlType::F32 => {
+            ctx.pipeline("kernel_mat_vec_f32_f32")?;
+            ctx.pipeline("kernel_mat_vec_f32_f32_lcpp_r2")?;
+        }
+        GgmlType::Q6_K => {
+            ctx.pipeline("kernel_mat_vec_q6_K_f32")?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn encode_step(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let zero_one = encode_qwen4exp_layers_zero_one(
+        ctx,
+        enc,
+        token_id,
+        position as u64,
+        table,
+        weights.zero_one,
+        &mut workspace.zero_one,
+    )?;
+    zero_one
+        .output()
+        .encode_copy_to(ctx, enc, &workspace.hyper_residual)?;
+    drop(zero_one);
+    for (weights, block) in weights.post_ple.iter().zip(&mut workspace.post_ple) {
+        let read = encode_qwen4exp_post_ple_block(
+            ctx,
+            enc,
+            position,
+            &workspace.hyper_residual,
+            *weights,
+            block,
+        )?;
+        drop(read);
+    }
+    let final_read = encode_final_gated_residual_mix(
+        ctx,
+        enc,
+        &workspace.hyper_residual,
+        workspace.geometry.eps(),
+        weights.final_read,
+        &mut workspace.final_read,
+    )?;
+    encode_mat_vec_dispatch(
+        ctx,
+        enc,
+        weights.output,
+        final_read.mixed(),
+        &workspace.logits,
+        workspace.geometry.hidden_size(),
+        workspace.geometry.vocab_size(),
+    )?;
+    drop(final_read);
+    Ok(())
+}
+
+fn validate_encoder(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let command = enc.parent_command_buffer();
+    let actual = command.device().registryID();
+    let expected = ctx.device.registryID();
+    if actual != expected {
+        return invalid(format!(
+            "encoder belongs to Metal device registry {actual}, context is {expected}"
+        ));
+    }
+    if enc.is_concurrent() {
+        return invalid("text-session dependent dispatches require a serial encoder");
+    }
+    let status = command.status();
+    if status != MTLCommandBufferStatus::NotEnqueued {
+        return invalid(format!(
+            "text-session encoding requires a NotEnqueued command buffer, got {status:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn reserve_command(
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+    enc: &KernelEncoder,
+    pending_length: usize,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    workspace.require_idle()?;
+    workspace.active_command = Some(enc.parent_command_buffer());
+    workspace.pending_length = Some(pending_length);
+    workspace.encode_failed = false;
+    Ok(())
+}
+
+fn require_projection(
+    name: &str,
+    tensor: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    dtypes: &[GgmlType],
+) -> Result<(), Qwen4ExpTextSessionError> {
+    if tensor.shape != [n_in as u64, n_out as u64] || !dtypes.contains(&tensor.dtype) {
+        return invalid(format!(
+            "{name} must use {dtypes:?} with shape [{n_in}, {n_out}], got {:?} {:?}",
+            tensor.dtype, tensor.shape
+        ));
+    }
+    let (block, _) = tensor.dtype.storage_layout().ok_or_else(|| {
+        Qwen4ExpTextSessionError::Invalid(format!("unsupported dtype {:?}", tensor.dtype))
+    })?;
+    if !(n_in as u64).is_multiple_of(block) {
+        return invalid(format!(
+            "{name} input width {n_in} is not aligned to {block} elements"
+        ));
+    }
+    require_range(name, tensor)
+}
+
+fn require_tensor(
+    name: &str,
+    tensor: &MetalTensor,
+    dtype: GgmlType,
+    shape: &[u64],
+    writable: bool,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    if tensor.dtype != dtype || tensor.shape != shape {
+        return invalid(format!(
+            "{name} must be {dtype:?} with shape {shape:?}, got {:?} {:?}",
+            tensor.dtype, tensor.shape
+        ));
+    }
+    if writable && !tensor.is_writable() {
+        return invalid(format!("{name} must be writable"));
+    }
+    require_range(name, tensor)
+}
+
+fn storage_bytes(tensor: &MetalTensor) -> Result<u64, Qwen4ExpTextSessionError> {
+    let elements = tensor
+        .shape
+        .iter()
+        .try_fold(1_u64, |product, &dimension| product.checked_mul(dimension))
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("tensor element count overflow".into()))?;
+    let (block, bytes) = tensor.dtype.storage_layout().ok_or_else(|| {
+        Qwen4ExpTextSessionError::Invalid(format!("unsupported dtype {:?}", tensor.dtype))
+    })?;
+    if block == 0 || !elements.is_multiple_of(block) {
+        return invalid(format!(
+            "tensor shape {:?} is not block-aligned for {:?}",
+            tensor.shape, tensor.dtype
+        ));
+    }
+    elements
+        .checked_div(block)
+        .and_then(|units| units.checked_mul(bytes))
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("tensor byte count overflow".into()))
+}
+
+fn require_range(name: &str, tensor: &MetalTensor) -> Result<(), Qwen4ExpTextSessionError> {
+    let alignment = match tensor.dtype {
+        GgmlType::F32 | GgmlType::I32 => 4,
+        _ => 2,
+    };
+    if !tensor.offset.is_multiple_of(alignment) {
+        return invalid(format!(
+            "{name} offset {} is not {alignment}-byte aligned",
+            tensor.offset
+        ));
+    }
+    let bytes = storage_bytes(tensor)?;
+    let end = tensor
+        .offset
+        .checked_add(bytes)
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid(format!("{name} range overflow")))?;
+    if end > tensor.buffer.length() as u64 {
+        return invalid(format!(
+            "{name} range offset={} bytes={bytes} exceeds buffer={}",
+            tensor.offset,
+            tensor.buffer.length()
+        ));
+    }
+    Ok(())
+}
+
+fn require_read_only_weights(
+    tensors: &[(&str, &MetalTensor)],
+) -> Result<(), Qwen4ExpTextSessionError> {
+    for (name, tensor) in tensors {
+        if tensor.provenance() == MetalTensorProvenance::OwnedWritable {
+            return invalid(format!("{name} must have read-only weight provenance"));
+        }
+    }
+    Ok(())
+}
+
+fn require_same_device(
+    ctx: &MetalContext,
+    tensors: &[(&str, &MetalTensor)],
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let expected = ctx.device.registryID();
+    for (name, tensor) in tensors {
+        let actual = tensor.buffer.device().registryID();
+        if actual != expected {
+            return invalid(format!(
+                "{name} belongs to Metal device registry {actual}, expected {expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_disjoint(tensors: &[(&str, &MetalTensor)]) -> Result<(), Qwen4ExpTextSessionError> {
+    for left in 0..tensors.len() {
+        let left_bytes = storage_bytes(tensors[left].1)?;
+        for right in left + 1..tensors.len() {
+            if Retained::as_ptr(&tensors[left].1.buffer)
+                != Retained::as_ptr(&tensors[right].1.buffer)
+            {
+                continue;
+            }
+            let right_bytes = storage_bytes(tensors[right].1)?;
+            let left_end = tensors[left].1.offset.saturating_add(left_bytes);
+            let right_end = tensors[right].1.offset.saturating_add(right_bytes);
+            if tensors[left].1.offset < right_end && tensors[right].1.offset < left_end {
+                return invalid(format!("{} overlaps {}", tensors[left].0, tensors[right].0));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct AllocationBuilder {
+    allocations: Vec<(String, u64)>,
+}
+
+impl AllocationBuilder {
+    fn bytes(
+        &mut self,
+        name: impl Into<String>,
+        bytes: usize,
+    ) -> Result<(), Qwen4ExpTextSessionError> {
+        let bytes = u64::try_from(bytes).map_err(|_| {
+            Qwen4ExpTextSessionError::Invalid("allocation byte count exceeds u64".into())
+        })?;
+        if bytes == 0 {
+            return invalid("session allocation must be nonzero");
+        }
+        self.allocations.push((name.into(), bytes));
+        Ok(())
+    }
+
+    fn f32(
+        &mut self,
+        name: impl Into<String>,
+        elements: usize,
+    ) -> Result<(), Qwen4ExpTextSessionError> {
+        self.bytes(
+            name,
+            elements.checked_mul(4).ok_or_else(|| {
+                Qwen4ExpTextSessionError::Invalid("F32 allocation overflow".into())
+            })?,
+        )
+    }
+
+    fn i32(
+        &mut self,
+        name: impl Into<String>,
+        elements: usize,
+    ) -> Result<(), Qwen4ExpTextSessionError> {
+        self.f32(name, elements)
+    }
+}
+
+fn add_zero_one_allocations(
+    builder: &mut AllocationBuilder,
+    geometry: Qwen4ExpLayersZeroOneMetalGeometry,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let layer = geometry.layer_zero();
+    builder.i32("zero_one.layer_zero.token_id", 1)?;
+    builder.f32("zero_one.layer_zero.embedding", geometry.hidden_size())?;
+    builder.f32("zero_one.layer_zero.hyper_residual", geometry.hyper_width())?;
+    builder.f32("zero_one.layer_zero.mixer_output", geometry.hidden_size())?;
+    builder.f32("zero_one.layer_zero.moe_output", geometry.hidden_size())?;
+    add_residual_allocations(
+        builder,
+        "zero_one.layer_zero.residual",
+        geometry.branch_count(),
+        geometry.hidden_size(),
+        geometry.low_rank(),
+    )?;
+    add_gdn_allocations(builder, "zero_one.layer_zero.gdn", layer.gdn())?;
+    add_moe_allocations(builder, "zero_one.layer_zero.moe", layer.moe())?;
+
+    builder.f32("zero_one.hyper_residual", geometry.hyper_width())?;
+    add_ple_allocations(builder, "zero_one.ple", geometry.ple())?;
+    builder.f32("zero_one.mixer_output", geometry.hidden_size())?;
+    builder.f32("zero_one.moe_output", geometry.hidden_size())?;
+    add_residual_allocations(
+        builder,
+        "zero_one.residual",
+        geometry.branch_count(),
+        geometry.hidden_size(),
+        geometry.low_rank(),
+    )?;
+    add_gdn_allocations(builder, "zero_one.layer_one_gdn", layer.gdn())?;
+    add_moe_allocations(builder, "zero_one.layer_one_moe", layer.moe())
+}
+
+fn add_post_ple_allocations(
+    builder: &mut AllocationBuilder,
+    geometry: Qwen4ExpPostPleBlockMetalGeometry,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let prefix = format!("block.{}", geometry.layer());
+    builder.f32(format!("{prefix}.mixer_output"), geometry.hidden_size())?;
+    builder.f32(format!("{prefix}.moe_output"), geometry.hidden_size())?;
+    add_residual_allocations(
+        builder,
+        &format!("{prefix}.residual"),
+        geometry.branch_count(),
+        geometry.hidden_size(),
+        geometry.low_rank(),
+    )?;
+    match geometry.mixer() {
+        Qwen4ExpPostPleMixerMetalGeometry::GatedDeltaNet(gdn) => {
+            add_gdn_allocations(builder, &format!("{prefix}.gdn"), gdn)?;
+        }
+        Qwen4ExpPostPleMixerMetalGeometry::QwenSparseAttention(qsa) => {
+            for (index, bytes) in qsa.workspace_logical_allocations()?.into_iter().enumerate() {
+                builder.bytes(format!("{prefix}.qsa.{index}"), bytes)?;
+            }
+        }
+    }
+    add_moe_allocations(builder, &format!("{prefix}.moe"), geometry.moe())
+}
+
+fn add_residual_allocations(
+    builder: &mut AllocationBuilder,
+    prefix: &str,
+    branches: usize,
+    hidden: usize,
+    rank: usize,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let hyper = branches
+        .checked_mul(hidden)
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("residual width overflow".into()))?;
+    builder.f32(format!("{prefix}.normalized"), hyper)?;
+    builder.f32(format!("{prefix}.low"), rank)?;
+    builder.f32(format!("{prefix}.raw_gate"), hyper)?;
+    builder.f32(format!("{prefix}.mixed"), hidden)?;
+    builder.f32(format!("{prefix}.injection"), branches)
+}
+
+fn add_gdn_allocations(
+    builder: &mut AllocationBuilder,
+    prefix: &str,
+    geometry: GatedDeltaNetMetalGeometry,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    for (name, elements) in [
+        ("conv_state", geometry.conv_state_elements()),
+        ("delta_state", geometry.delta_state_elements()),
+        ("qkv", geometry.conv_width()),
+        ("qkv_conv", geometry.conv_width()),
+        ("gate", geometry.value_width()),
+        ("beta", geometry.value_heads()),
+        ("alpha", geometry.value_heads()),
+        ("decay", geometry.value_heads()),
+        ("query_norm", geometry.key_width()),
+        ("key_norm", geometry.key_width()),
+        ("recurrent", geometry.value_width()),
+        ("normalized", geometry.value_width()),
+        ("output", geometry.hidden_size()),
+    ] {
+        builder.f32(format!("{prefix}.{name}"), elements)?;
+    }
+    Ok(())
+}
+
+fn add_moe_allocations(
+    builder: &mut AllocationBuilder,
+    prefix: &str,
+    geometry: Qwen4ExpMoeMetalGeometry,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    builder.f32(format!("{prefix}.router_logits"), geometry.expert_count())?;
+    builder.i32(format!("{prefix}.topk_ids"), geometry.experts_per_token())?;
+    builder.f32(
+        format!("{prefix}.topk_weights"),
+        geometry.experts_per_token(),
+    )?;
+    builder.f32(format!("{prefix}.shared_gate"), 1)?;
+    builder.f32(
+        format!("{prefix}.routed_inner"),
+        geometry
+            .experts_per_token()
+            .checked_mul(geometry.routed_intermediate_size())
+            .ok_or_else(|| {
+                Qwen4ExpTextSessionError::Invalid("routed inner size overflow".into())
+            })?,
+    )?;
+    builder.f32(
+        format!("{prefix}.routed_expert_output"),
+        geometry
+            .experts_per_token()
+            .checked_mul(geometry.hidden_size())
+            .ok_or_else(|| {
+                Qwen4ExpTextSessionError::Invalid("routed output size overflow".into())
+            })?,
+    )?;
+    builder.f32(
+        format!("{prefix}.shared_inner"),
+        geometry.shared_intermediate_size(),
+    )?;
+    builder.f32(format!("{prefix}.shared_output"), geometry.hidden_size())?;
+    builder.f32(format!("{prefix}.output"), geometry.hidden_size())
+}
+
+fn add_ple_allocations(
+    builder: &mut AllocationBuilder,
+    prefix: &str,
+    geometry: crate::qwen4exp_ple_metal::Qwen4ExpPleMetalGeometry,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    builder.bytes(
+        format!("{prefix}.packed_rows"),
+        geometry.packed_staging_bytes(),
+    )?;
+    builder.i32(format!("{prefix}.local_row_ids"), geometry.head_count())?;
+    builder.f32(format!("{prefix}.embedding"), geometry.hidden_size())?;
+    builder.f32(format!("{prefix}.key"), geometry.hyper_width())?;
+    builder.f32(format!("{prefix}.value"), geometry.hidden_size())?;
+    builder.f32(format!("{prefix}.key_norm"), geometry.hyper_width())?;
+    builder.f32(format!("{prefix}.query_norm"), geometry.hyper_width())?;
+    builder.f32(format!("{prefix}.gated"), geometry.hyper_width())?;
+    builder.f32(format!("{prefix}.conv_input"), geometry.hyper_width())?;
+    builder.f32(
+        format!("{prefix}.conv_state"),
+        geometry
+            .hyper_width()
+            .checked_mul(geometry.history_len())
+            .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("PLE state size overflow".into()))?,
+    )?;
+    builder.f32(format!("{prefix}.conv_raw"), geometry.hyper_width())?;
+    builder.f32(format!("{prefix}.output"), geometry.hyper_width())
+}
+
+fn price_session_allocation(
+    name: &str,
+    logical_bytes: u64,
+    priced: MetalBufferSizeAndAlign,
+    host_page_size: u64,
+    max_buffer_length: u64,
+) -> Result<(u64, u64), Qwen4ExpTextSessionError> {
+    if logical_bytes == 0 {
+        return invalid(format!("session allocation {name:?} must be nonzero"));
+    }
+    if logical_bytes > max_buffer_length {
+        return invalid(format!(
+            "session allocation {name:?} requires {logical_bytes} bytes, beyond device maximum {max_buffer_length}"
+        ));
+    }
+    if priced.size < logical_bytes
+        || priced.alignment == 0
+        || !priced.alignment.is_power_of_two()
+        || host_page_size == 0
+        || !host_page_size.is_power_of_two()
+    {
+        return invalid(format!(
+            "invalid Metal pricing for session allocation {name:?}: logical={logical_bytes} priced={} alignment={} host_page={host_page_size}",
+            priced.size, priced.alignment
+        ));
+    }
+    let alignment = priced.alignment.max(host_page_size);
+    let priced_upper_bytes = priced
+        .size
+        .checked_add(alignment - 1)
+        .map(|bytes| bytes / alignment * alignment)
+        .ok_or_else(|| {
+            Qwen4ExpTextSessionError::Invalid(format!(
+                "aligned Metal pricing for session allocation {name:?} overflows u64"
+            ))
+        })?;
+    Ok((priced_upper_bytes, alignment))
+}
+
+fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpTextSessionError> {
+    Err(Qwen4ExpTextSessionError::Invalid(detail.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gguf::GgufFile;
+    use crate::metal::MetalMemoryAdmissionReason;
+    use crate::qwen4exp_layer_zero::Qwen4ExpResidualMetalWeights;
+    use crate::qwen4exp_moe::Qwen4ExpMoeMetalWeights;
+    use crate::qwen4exp_post_ple_block::Qwen4ExpPostPleMixerMetalWeights;
+    use crate::qwen4exp_residency::Qwen4ExpMetalWeightPlan;
+    use objc2_metal::MTLCommandQueue;
+
+    fn context() -> Option<MetalContext> {
+        match MetalContext::new() {
+            Ok(ctx) => Some(ctx),
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => None,
+            Err(error) => panic!("Metal initialization failed: {error}"),
+        }
+    }
+
+    fn signals(available: u64) -> MetalMemorySignals {
+        MetalMemorySignals {
+            recommended_max_bytes: available,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(available),
+        }
+    }
+
+    fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
+        assert_eq!(tensor.dtype, GgmlType::F32);
+        unsafe {
+            let source = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<f32>();
+            std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
+        }
+    }
+
+    fn assert_close(label: &str, actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        let mut max_error = 0.0_f32;
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            assert!(
+                actual.is_finite() && expected.is_finite(),
+                "{label} is non-finite"
+            );
+            max_error = max_error.max((actual - expected).abs());
+        }
+        assert!(
+            max_error <= tolerance,
+            "{label} max error {max_error} exceeds {tolerance}"
+        );
+    }
+
+    fn argmax(values: &[f32]) -> usize {
+        values
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .unwrap()
+    }
+
+    fn assert_binding(actual: &MetalTensor, expected: &MetalTensor) {
+        assert_eq!(
+            Retained::as_ptr(&actual.buffer),
+            Retained::as_ptr(&expected.buffer)
+        );
+        assert_eq!(actual.offset, expected.offset);
+        assert_eq!(actual.shape, expected.shape);
+        assert_eq!(actual.dtype, expected.dtype);
+        assert_eq!(actual.provenance(), expected.provenance());
+    }
+
+    fn assert_named_binding(actual: &MetalTensor, resident: &Qwen4ExpMetalWeights, name: &str) {
+        assert_binding(actual, resident.require_tensor(name).unwrap());
+    }
+
+    fn assert_residual_bindings(
+        weights: Qwen4ExpResidualMetalWeights<'_>,
+        resident: &Qwen4ExpMetalWeights,
+        layer: u32,
+        phase: &str,
+    ) {
+        for (actual, suffix) in [
+            (weights.read.norm, format!("hc_{phase}_norm.weight")),
+            (weights.read.down, format!("hc_{phase}_down.weight")),
+            (weights.read.up, format!("hc_{phase}_up.weight")),
+            (weights.inject, format!("hc_{phase}_inject.weight")),
+        ] {
+            assert_named_binding(actual, resident, &format!("blk.{layer}.{suffix}"));
+        }
+    }
+
+    fn assert_moe_bindings(
+        weights: Qwen4ExpMoeMetalWeights<'_>,
+        resident: &Qwen4ExpMetalWeights,
+        layer: u32,
+    ) {
+        for (actual, suffix) in [
+            (weights.router, "ffn_gate_inp.weight"),
+            (weights.routed_gate, "ffn_gate_exps.weight"),
+            (weights.routed_up, "ffn_up_exps.weight"),
+            (weights.routed_down, "ffn_down_exps.weight"),
+            (weights.shared_router, "ffn_gate_inp_shexp.weight"),
+            (weights.shared_gate, "ffn_gate_shexp.weight"),
+            (weights.shared_up, "ffn_up_shexp.weight"),
+            (weights.shared_down, "ffn_down_shexp.weight"),
+        ] {
+            assert_named_binding(actual, resident, &format!("blk.{layer}.{suffix}"));
+        }
+    }
+
+    fn assert_post_ple_bindings(
+        weights: Qwen4ExpPostPleBlockMetalWeights<'_>,
+        resident: &Qwen4ExpMetalWeights,
+        layer: u32,
+    ) {
+        assert_eq!(weights.geometry.layer(), layer);
+        assert_residual_bindings(weights.attention_residual, resident, layer, "attn");
+        match weights.mixer {
+            Qwen4ExpPostPleMixerMetalWeights::GatedDeltaNet(weights) => {
+                for (actual, suffix) in [
+                    (weights.qkv, "attn_qkv.weight"),
+                    (weights.gate, "attn_gate.weight"),
+                    (weights.beta, "ssm_beta.weight"),
+                    (weights.alpha, "ssm_alpha.weight"),
+                    (weights.a, "ssm_a"),
+                    (weights.dt_bias, "ssm_dt.bias"),
+                    (weights.conv, "ssm_conv1d.weight"),
+                    (weights.norm, "ssm_norm.weight"),
+                    (weights.output, "ssm_out.weight"),
+                ] {
+                    assert_named_binding(actual, resident, &format!("blk.{layer}.{suffix}"));
+                }
+            }
+            Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights) => {
+                for (actual, suffix) in [
+                    (weights.query, "attn_q.weight"),
+                    (weights.key, "attn_k.weight"),
+                    (weights.value, "attn_v.weight"),
+                    (weights.output, "attn_output.weight"),
+                    (weights.query_norm, "attn_q_norm.weight"),
+                    (weights.key_norm, "attn_k_norm.weight"),
+                    (weights.index_query, "indexer.q_proj.weight"),
+                    (weights.index_key, "indexer.k_proj.weight"),
+                    (weights.index_query_norm, "indexer.q_norm.weight"),
+                    (weights.index_key_norm, "indexer.k_norm.weight"),
+                ] {
+                    assert_named_binding(actual, resident, &format!("blk.{layer}.{suffix}"));
+                }
+            }
+        }
+        assert_residual_bindings(weights.ffn_residual, resident, layer, "ffn");
+        assert_moe_bindings(weights.moe, resident, layer);
+    }
+
+    #[test]
+    fn reference_memory_inventory_matches_all_workspace_allocations() {
+        let Some(ctx) = context() else { return };
+        let config = Qwen4ExpConfig::flash_next_reference();
+        for capacity in [4, config.context_length as usize] {
+            let geometry =
+                Qwen4ExpTextSessionMetalGeometry::from_config(&config, capacity).unwrap();
+            let plan = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_residency_bytes(
+                &ctx, &geometry, 0,
+            )
+            .unwrap();
+            let expected = 143_207_764_u64 + 25_356_u64 * capacity as u64;
+            assert_eq!(geometry.layer_count(), 48);
+            assert_eq!(geometry.qsa_layers().len(), 12);
+            assert_eq!(
+                geometry.qsa_layers(),
+                &[3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]
+            );
+            assert_eq!(plan.allocations().len(), 1_523);
+            assert_eq!(plan.session_logical_bytes(), expected);
+            assert!(plan.session_priced_upper_bytes() >= expected);
+            assert!(
+                plan.allocations()
+                    .iter()
+                    .all(|allocation| allocation.logical_bytes > 0
+                        && allocation.priced_bytes >= allocation.logical_bytes
+                        && allocation.alignment.is_power_of_two())
+            );
+        }
+    }
+
+    #[test]
+    fn multi_session_admission_accounts_for_residency_and_reserve() {
+        let Some(ctx) = context() else { return };
+        let config = Qwen4ExpConfig::flash_next_reference();
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 4).unwrap();
+        let residency = 91_u64;
+        let plan = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_residency_bytes(
+            &ctx, &geometry, residency,
+        )
+        .unwrap();
+        let sessions = 2;
+        let scratch = plan.priced_upper_bytes_for_sessions(sessions).unwrap();
+        assert_eq!(
+            scratch,
+            residency + plan.session_priced_upper_bytes() * sessions as u64
+        );
+        let required = scratch + QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES;
+        let admitted = plan
+            .admission_before_residency(signals(required), sessions)
+            .unwrap();
+        assert!(admitted.admitted);
+        assert_eq!(
+            admitted.reason,
+            MetalMemoryAdmissionReason::AdmittedWithProcessBudget
+        );
+        assert_eq!(admitted.required_bytes, Some(required));
+
+        let denied = plan
+            .admission_before_residency(signals(required - 1), sessions)
+            .unwrap();
+        assert!(!denied.admitted);
+        assert_eq!(denied.reason, MetalMemoryAdmissionReason::BothInsufficient);
+        assert!(plan.priced_upper_bytes_for_sessions(0).is_err());
+        assert!(plan.priced_upper_bytes_for_sessions(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn session_reconciliation_tolerates_concurrent_release_but_rejects_overrun() {
+        let Some(ctx) = context() else { return };
+        let config = Qwen4ExpConfig::flash_next_reference();
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 4).unwrap();
+        let plan =
+            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_residency_bytes(&ctx, &geometry, 0)
+                .unwrap();
+        assert_eq!(plan.reconcile_session(7, 7).unwrap(), 0);
+        assert_eq!(plan.reconcile_session(8, 7).unwrap(), 0);
+        assert!(
+            plan.reconcile_session(0, plan.session_priced_upper_bytes() + 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn session_allocation_pricing_fails_closed_at_arithmetic_boundaries() {
+        assert_eq!(
+            price_session_allocation(
+                "boundary",
+                4_097,
+                MetalBufferSizeAndAlign {
+                    size: 4_352,
+                    alignment: 256,
+                },
+                4_096,
+                4_097,
+            )
+            .unwrap(),
+            (8_192, 4_096)
+        );
+        for result in [
+            price_session_allocation(
+                "zero",
+                0,
+                MetalBufferSizeAndAlign {
+                    size: 1,
+                    alignment: 1,
+                },
+                4_096,
+                u64::MAX,
+            ),
+            price_session_allocation(
+                "too-large",
+                4_098,
+                MetalBufferSizeAndAlign {
+                    size: 4_098,
+                    alignment: 2,
+                },
+                4_096,
+                4_097,
+            ),
+            price_session_allocation(
+                "underpriced",
+                4_097,
+                MetalBufferSizeAndAlign {
+                    size: 4_096,
+                    alignment: 256,
+                },
+                4_096,
+                u64::MAX,
+            ),
+            price_session_allocation(
+                "bad-alignment",
+                1,
+                MetalBufferSizeAndAlign {
+                    size: 1,
+                    alignment: 3,
+                },
+                4_096,
+                u64::MAX,
+            ),
+            price_session_allocation(
+                "rounding-overflow",
+                u64::MAX,
+                MetalBufferSizeAndAlign {
+                    size: u64::MAX,
+                    alignment: 2,
+                },
+                4_096,
+                u64::MAX,
+            ),
+        ] {
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF to the pinned full release"]
+    fn released_full_text_session_matches_separate_layer_commands() {
+        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF")
+            .expect("QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+        let ctx = MetalContext::new().expect("initialize Metal");
+        let weight_plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();
+        let session_plan = Qwen4ExpTextSessionPlan::for_config(
+            &ctx,
+            weight_plan.config(),
+            4,
+            weight_plan.memory_plan(),
+        )
+        .unwrap();
+        let aggregate = session_plan
+            .memory_plan()
+            .admission_before_residency(ctx.memory_signals(), 2)
+            .unwrap();
+        assert!(
+            aggregate.admitted,
+            "two-session aggregate admission failed: {aggregate:?}"
+        );
+        let admitted_weights = weight_plan.admit(ctx.memory_signals()).unwrap();
+        let realized = Qwen4ExpMetalWeights::realize(&ctx, &gguf, admitted_weights).unwrap();
+        let resident = realized.weights();
+        let weights = Qwen4ExpTextSessionMetalWeights::bind(resident, 4).unwrap();
+        let table = resident.ple_source().bind(&gguf).unwrap();
+        assert_eq!(weights.post_ple.len(), 46);
+        assert_eq!(weights.geometry.qsa_layers().len(), 12);
+        assert_binding(
+            weights.final_read.norm,
+            resident.require_tensor("output_hc_norm.weight").unwrap(),
+        );
+        assert_binding(
+            weights.final_read.down,
+            resident.require_tensor("output_hc_down.weight").unwrap(),
+        );
+        assert_binding(
+            weights.final_read.up,
+            resident.require_tensor("output_hc_up.weight").unwrap(),
+        );
+        assert_binding(
+            weights.output,
+            resident.require_tensor("output.weight").unwrap(),
+        );
+        assert_eq!(weights.final_read.norm.dtype, GgmlType::F32);
+        assert_eq!(weights.final_read.down.dtype, GgmlType::Q8_0);
+        assert_eq!(weights.final_read.up.dtype, GgmlType::Q8_0);
+        assert_eq!(weights.output.dtype, GgmlType::Q6_K);
+        for (offset, block) in weights.post_ple.iter().enumerate() {
+            let layer = offset as u32 + 2;
+            assert_eq!(block.mixer.geometry(), block.geometry.mixer());
+            assert_post_ple_bindings(*block, resident, layer);
+        }
+
+        let geometry = weights.geometry.clone();
+        let mut control_zero_one =
+            Qwen4ExpLayersZeroOneMetalWorkspace::new(&ctx, geometry.zero_one()).unwrap();
+        let mut control_blocks = geometry
+            .post_ple()
+            .iter()
+            .map(|geometry| Qwen4ExpPostPleBlockMetalWorkspace::new(&ctx, *geometry).unwrap())
+            .collect::<Vec<_>>();
+        let control_hyper =
+            MetalTensor::zeros_f32(&ctx, vec![geometry.hyper_width() as u64]).unwrap();
+        let mut control_final = GatedResidualMetalScratch::new(
+            &ctx,
+            geometry.branch_count(),
+            geometry.hidden_size(),
+            geometry.low_rank(),
+        )
+        .unwrap();
+        let control_logits =
+            MetalTensor::zeros_f32(&ctx, vec![geometry.vocab_size() as u64]).unwrap();
+        let admitted_session = session_plan
+            .admit_after_residency(resident, ctx.memory_signals())
+            .unwrap();
+        let mut integrated =
+            Qwen4ExpTextSessionMetalWorkspace::from_admitted(&ctx, admitted_session).unwrap();
+
+        for (position, token) in [35_u32, 201, 17, 89].into_iter().enumerate() {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let read = encode_qwen4exp_layers_zero_one(
+                &ctx,
+                &encoder,
+                token,
+                position as u64,
+                table,
+                weights.zero_one,
+                &mut control_zero_one,
+            )
+            .unwrap();
+            read.output()
+                .encode_copy_to(&ctx, &encoder, &control_hyper)
+                .unwrap();
+            drop(read);
+            encoder.end();
+            command.commit();
+            control_zero_one.release_after().unwrap();
+
+            for (block_weights, block_workspace) in weights.post_ple.iter().zip(&mut control_blocks)
+            {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                let read = encode_qwen4exp_post_ple_block(
+                    &ctx,
+                    &encoder,
+                    position,
+                    &control_hyper,
+                    *block_weights,
+                    block_workspace,
+                )
+                .unwrap();
+                drop(read);
+                encoder.end();
+                command.commit();
+                block_workspace.release_after().unwrap();
+            }
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let final_read = encode_final_gated_residual_mix(
+                &ctx,
+                &encoder,
+                &control_hyper,
+                geometry.eps(),
+                weights.final_read,
+                &mut control_final,
+            )
+            .unwrap();
+            encode_mat_vec_dispatch(
+                &ctx,
+                &encoder,
+                weights.output,
+                final_read.mixed(),
+                &control_logits,
+                geometry.hidden_size(),
+                geometry.vocab_size(),
+            )
+            .unwrap();
+            drop(final_read);
+            encoder.end();
+            command.commit();
+            control_final.release_after().unwrap();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let pending = encode_qwen4exp_text_token(
+                &ctx,
+                &encoder,
+                token,
+                position,
+                table,
+                &weights,
+                &mut integrated,
+            )
+            .unwrap();
+            drop(pending);
+            encoder.end();
+            command.commit();
+            integrated.release_after().unwrap();
+
+            let expected_hidden = read_f32(control_final.mixed_tensor());
+            let actual_hidden = read_f32(integrated.final_hidden_tensor());
+            let expected_logits = read_f32(&control_logits);
+            let actual_logits = integrated.logits().unwrap().to_vec();
+            assert_close(
+                "released full-stack final hidden",
+                &actual_hidden,
+                &expected_hidden,
+                2e-4,
+            );
+            assert_close(
+                "released full-stack logits",
+                &actual_logits,
+                &expected_logits,
+                5e-3,
+            );
+            assert_eq!(argmax(&actual_logits), argmax(&expected_logits));
+        }
+        assert_eq!(integrated.committed_length(), 4);
+        assert!(
+            integrated
+                .qsa_committed_lengths()
+                .iter()
+                .all(|(_, length)| *length == 4)
+        );
+        assert!(
+            control_blocks
+                .iter()
+                .filter_map(|workspace| workspace.mixer_committed_length())
+                .all(|length| length == 4)
+        );
+    }
+}

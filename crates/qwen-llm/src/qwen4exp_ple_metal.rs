@@ -341,6 +341,7 @@ impl Qwen4ExpPleMetalWorkspace {
         if self.state_poisoned {
             return invalid("workspace causal state is indeterminate; reset it before staging");
         }
+        self.rows_staged = false;
         if table.row_width() != self.geometry.head_dim {
             return invalid(format!(
                 "PLE table row width {} differs from staged head width {}",
@@ -1878,7 +1879,8 @@ mod tests {
             ))
         ));
         assert_eq!(read_bytes(&workspace.packed_rows), staged);
-        assert!(workspace.has_staged_rows());
+        assert!(!workspace.has_staged_rows());
+        workspace.stage_rows(table, &rows).unwrap();
 
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);

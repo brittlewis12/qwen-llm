@@ -523,6 +523,25 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
         &self.moe_output
     }
 
+    pub(crate) fn prepare_for_parent(
+        &mut self,
+        position: usize,
+    ) -> Result<(), Qwen4ExpPostPleBlockError> {
+        match &mut self.mixer {
+            Qwen4ExpPostPleMixerMetalWorkspace::GatedDeltaNet(_) => Ok(()),
+            Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(qsa) => {
+                if qsa.committed_length() != position {
+                    return invalid(format!(
+                        "QSA committed length {} differs from token position {position}",
+                        qsa.committed_length()
+                    ));
+                }
+                crate::qwen4exp_qsa::prepare_control_scalars(qsa)?;
+                Ok(())
+            }
+        }
+    }
+
     fn require_idle(&self) -> Result<(), Qwen4ExpPostPleBlockError> {
         if self.active_command.is_some() {
             invalid("workspace is still owned by a command buffer")

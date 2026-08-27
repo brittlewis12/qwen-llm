@@ -182,6 +182,15 @@ allocator overhead. Sum these estimates into session admission before allocating
 the 48-layer runtime, and keep short-capacity correctness fixtures independent
 from the native-context product policy.
 
+The complete 48-layer text session now provides that admitted baseline in one
+command through final HC and Q6_K logits. Its exact logical session inventory is
+`143,207,764 + 25,356 * capacity` bytes, or 6.324 GiB at 262K, before the
+page-rounded per-buffer upper bound and 512 MiB dynamic reserve. Profile this
+baseline before changing command topology. In particular, the parent currently
+pre-stages PLE rows for transaction safety and the layers-zero-one child stages
+the same rows again; a prepared-child handoff should remove that duplicate only
+if host staging is visible in end-to-end decode attribution.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

@@ -326,6 +326,56 @@ impl QwenSparseAttentionMetalGeometry {
         })
     }
 
+    pub fn workspace_logical_allocations(self) -> Result<Vec<usize>, Qwen4ExpQsaError> {
+        fn bytes(elements: Option<usize>, width: usize) -> Result<usize, Qwen4ExpQsaError> {
+            elements
+                .and_then(|elements| elements.checked_mul(width))
+                .ok_or_else(|| {
+                    Qwen4ExpQsaError::Invalid("QSA workspace allocation overflow".into())
+                })
+        }
+        let f32_bytes = |elements| bytes(Some(elements), size_of::<f32>());
+        let i32_bytes = |elements| bytes(Some(elements), size_of::<i32>());
+        let f16_bytes = |elements| bytes(Some(elements), size_of::<u16>());
+        Ok(vec![
+            f32_bytes(self.index_query_width())?,
+            f32_bytes(self.index_query_width())?,
+            f32_bytes(self.index_head_dim)?,
+            bytes(
+                self.index_head_dim.checked_mul(self.ratio),
+                size_of::<f32>(),
+            )?,
+            bytes(
+                self.index_head_dim.checked_mul(self.block_capacity()),
+                size_of::<u16>(),
+            )?,
+            f32_bytes(self.block_capacity())?,
+            i32_bytes(1)?,
+            i32_bytes(self.block_budget())?,
+            i32_bytes(1)?,
+            i32_bytes(1)?,
+            i32_bytes(self.output_width())?,
+            bytes(
+                self.output_width().checked_mul(self.query_heads),
+                size_of::<f32>(),
+            )?,
+            f32_bytes(self.query_projection_width())?,
+            f32_bytes(self.query_width())?,
+            f32_bytes(self.query_width())?,
+            f32_bytes(self.kv_width())?,
+            f32_bytes(self.kv_width())?,
+            f32_bytes(self.kv_width())?,
+            f16_bytes(self.capacity.checked_mul(self.kv_width()).ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("QSA key cache allocation overflow".into())
+            })?)?,
+            f16_bytes(self.capacity.checked_mul(self.kv_width()).ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("QSA value cache allocation overflow".into())
+            })?)?,
+            f32_bytes(self.query_width())?,
+            f32_bytes(self.hidden_size)?,
+        ])
+    }
+
     pub fn hidden_size(self) -> usize {
         self.hidden_size
     }
@@ -557,10 +607,21 @@ impl QwenSparseAttentionMetalWorkspace {
         command.waitUntilCompleted();
         let status = command.status();
         let error = command.error().map(|error| error.to_string());
+        let scalar_result = (|| {
+            Ok((
+                read_i32_scalar(&self.selector_status)?,
+                read_i32_scalar(&self.selected_count)?,
+            ))
+        })();
         self.active_command = None;
         let pending = self.pending_length.take();
-        let selector_status = read_i32_scalar(&self.selector_status)?;
-        let selected_count = read_i32_scalar(&self.selected_count)?;
+        let (selector_status, selected_count) = match scalar_result {
+            Ok(scalars) => scalars,
+            Err(error) => {
+                self.state_poisoned = true;
+                return Err(error);
+            }
+        };
         let expected_count = pending
             .map(|length| (length / self.geometry.ratio).min(self.geometry.block_budget()))
             .unwrap_or(0);
@@ -715,12 +776,7 @@ pub fn encode_qwen_sparse_attention_text<'a>(
     validate_contract(ctx, input, weights, workspace)?;
     preflight(ctx, weights)?;
 
-    let position = workspace.committed_length;
-    let sequence_length = position + 1;
-    let visible_blocks = sequence_length / workspace.geometry.ratio;
-    write_i32_scalar(&workspace.visible_blocks, visible_blocks as i32)?;
-    write_i32_scalar(&workspace.selector_status, 0)?;
-    write_i32_scalar(&workspace.selected_count, 0)?;
+    let (position, sequence_length) = prepare_control_scalars(workspace)?;
     reserve_command(workspace, enc, sequence_length)?;
 
     let encoded = encode_step(
@@ -740,6 +796,28 @@ pub fn encode_qwen_sparse_attention_text<'a>(
         workspace,
         position,
     })
+}
+
+pub(crate) fn prepare_control_scalars(
+    workspace: &QwenSparseAttentionMetalWorkspace,
+) -> Result<(usize, usize), Qwen4ExpQsaError> {
+    if workspace.state_poisoned {
+        return invalid("workspace causal state is indeterminate; reset it before reuse");
+    }
+    workspace.require_idle()?;
+    if workspace.committed_length >= workspace.geometry.capacity {
+        return invalid(format!(
+            "QSA token capacity {} is exhausted",
+            workspace.geometry.capacity
+        ));
+    }
+    let position = workspace.committed_length;
+    let sequence_length = position + 1;
+    let visible_blocks = sequence_length / workspace.geometry.ratio;
+    write_i32_scalar(&workspace.visible_blocks, visible_blocks as i32)?;
+    write_i32_scalar(&workspace.selector_status, 0)?;
+    write_i32_scalar(&workspace.selected_count, 0)?;
+    Ok((position, sequence_length))
 }
 
 fn encode_step(
@@ -1684,7 +1762,8 @@ fn dispatch_1d(
 }
 
 fn validate_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), Qwen4ExpQsaError> {
-    let actual = enc.parent_command_buffer().device().registryID();
+    let command = enc.parent_command_buffer();
+    let actual = command.device().registryID();
     let expected = ctx.device.registryID();
     if actual != expected {
         return invalid(format!(
@@ -1693,6 +1772,12 @@ fn validate_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), Qwen4
     }
     if enc.is_concurrent() {
         return invalid("dependent QSA dispatches require a serial encoder");
+    }
+    let status = command.status();
+    if status != MTLCommandBufferStatus::NotEnqueued {
+        return invalid(format!(
+            "QSA encoding requires a NotEnqueued command buffer, got {status:?}"
+        ));
     }
     Ok(())
 }
@@ -2693,6 +2778,12 @@ mod tests {
         )
         .unwrap();
         let estimate = geometry.checked_workspace_byte_estimate().unwrap();
+        let allocations = geometry.workspace_logical_allocations().unwrap();
+        assert_eq!(allocations.len(), 22);
+        assert_eq!(
+            allocations.iter().sum::<usize>(),
+            estimate.total_workspace_bytes
+        );
         let expected_cache = config.context_length as usize
             * config.attention.kv_heads as usize
             * config.attention.key_head_dim as usize

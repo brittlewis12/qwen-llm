@@ -139,13 +139,7 @@ impl Qwen4ExpMetalWeightMemoryPlan {
         allocated_before: u64,
         allocated_after: u64,
     ) -> Result<u64, Qwen4ExpResidencyError> {
-        let observed = allocated_after
-            .checked_sub(allocated_before)
-            .ok_or_else(|| {
-                Qwen4ExpResidencyError::Invalid(
-                    "Metal allocation counter regressed during weight realization".into(),
-                )
-            })?;
+        let observed = allocated_after.saturating_sub(allocated_before);
         if observed > self.priced_upper_bytes {
             return invalid(format!(
                 "observed Metal weight allocation {observed} exceeds priced upper bound {}",
@@ -507,6 +501,7 @@ impl Qwen4ExpMetalWeights {
             ));
         }
         plan.revalidate(ctx, gguf)?;
+        let _allocation_transaction = ctx.begin_allocation_transaction();
         let refreshed_admission = plan.memory.admission(ctx.memory_signals());
         if !refreshed_admission.admitted {
             return invalid(format!(
@@ -1311,7 +1306,7 @@ mod tests {
         assert!(!memory.admission(process_short).admitted);
 
         assert_eq!(memory.reconcile(100, 1_100).unwrap(), 1_000);
-        assert!(memory.reconcile(101, 100).is_err());
+        assert_eq!(memory.reconcile(101, 100).unwrap(), 0);
         assert!(memory.reconcile(100, 1_101).is_err());
     }
 

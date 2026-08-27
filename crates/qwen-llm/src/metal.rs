@@ -41,7 +41,7 @@ use objc2_metal::{
     MTLDispatchType, MTLFence, MTLLibrary, MTLResource, MTLResourceOptions, MTLSize,
     MTLStorageMode,
 };
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutex, ReentrantMutexGuard, const_reentrant_mutex};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -588,6 +588,11 @@ pub struct MetalAllocationCensusRow {
 }
 
 static ALLOCATION_CENSUS_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
+static METAL_ALLOCATION_TRANSACTION: ReentrantMutex<()> = const_reentrant_mutex(());
+
+pub(crate) struct MetalAllocationTransactionGuard {
+    _guard: ReentrantMutexGuard<'static, ()>,
+}
 thread_local! {
     static ALLOCATION_CENSUS: std::cell::RefCell<Option<Vec<MetalAllocationCensusRow>>> =
         const { std::cell::RefCell::new(None) };
@@ -1288,6 +1293,12 @@ unsafe impl Send for MetalContext {}
 unsafe impl Sync for MetalContext {}
 
 impl MetalContext {
+    pub(crate) fn begin_allocation_transaction(&self) -> MetalAllocationTransactionGuard {
+        MetalAllocationTransactionGuard {
+            _guard: METAL_ALLOCATION_TRANSACTION.lock(),
+        }
+    }
+
     pub fn recommended_max_working_set_size(&self) -> u64 {
         self.device.recommendedMaxWorkingSetSize()
     }
@@ -1483,6 +1494,7 @@ impl MetalContext {
     /// Allocate a buffer populated from a `bytemuck::Pod` slice.
     /// Uses `StorageModeShared` (unified memory).
     pub fn buffer_from<T: bytemuck::Pod>(&self, data: &[T]) -> Result<Buffer, MetalError> {
+        let _allocation_transaction = self.begin_allocation_transaction();
         let bytes = bytemuck::cast_slice::<T, u8>(data);
         let n = bytes.len();
         if n == 0 {
@@ -1640,6 +1652,7 @@ impl MetalContext {
     where
         F: Fn(NonNull<c_void>, usize) + Send + Sync + 'static,
     {
+        let _allocation_transaction = self.begin_allocation_transaction();
         let ptr = NonNull::new(
             // SAFETY: geometry construction proves mmap_offset is within the
             // mapping and starts a non-empty window.
@@ -1689,6 +1702,7 @@ impl MetalContext {
 
     /// Allocate an uninitialized output buffer of `n_bytes`.
     pub fn buffer_uninit(&self, n_bytes: usize) -> Result<Buffer, MetalError> {
+        let _allocation_transaction = self.begin_allocation_transaction();
         let n = n_bytes.max(1);
         let buffer = self
             .device

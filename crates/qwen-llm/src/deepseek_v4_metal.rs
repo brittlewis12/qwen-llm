@@ -416,18 +416,8 @@ impl DeepSeekV4MemoryPlan {
             })
     }
 
-    fn observed_delta(
-        before_residency_bytes: u64,
-        observed_bytes: u64,
-        phase: &str,
-    ) -> Result<u64, DeepSeekV4MetalError> {
-        observed_bytes
-            .checked_sub(before_residency_bytes)
-            .ok_or_else(|| {
-                DeepSeekV4MetalError::Invalid(format!(
-                    "Metal allocation counter regressed during DeepSeek V4 {phase}"
-                ))
-            })
+    fn observed_delta(before_residency_bytes: u64, observed_bytes: u64) -> u64 {
+        observed_bytes.saturating_sub(before_residency_bytes)
     }
 
     pub fn reconcile_residency(
@@ -435,8 +425,7 @@ impl DeepSeekV4MemoryPlan {
         before_residency_bytes: u64,
         after_residency_bytes: u64,
     ) -> Result<u64, DeepSeekV4MetalError> {
-        let observed =
-            Self::observed_delta(before_residency_bytes, after_residency_bytes, "residency")?;
+        let observed = Self::observed_delta(before_residency_bytes, after_residency_bytes);
         let limit = self.residency_priced_upper_bytes;
         if observed > limit {
             return invalid(format!(
@@ -452,16 +441,8 @@ impl DeepSeekV4MemoryPlan {
         after_residency_bytes: u64,
         after_session_bytes: u64,
     ) -> Result<u64, DeepSeekV4MetalError> {
-        let observed_total =
-            Self::observed_delta(before_residency_bytes, after_session_bytes, "session")?;
-        let observed_session = after_session_bytes
-            .checked_sub(after_residency_bytes)
-            .ok_or_else(|| {
-                DeepSeekV4MetalError::Invalid(
-                    "Metal allocation counter regressed during DeepSeek V4 session construction"
-                        .into(),
-                )
-            })?;
+        let observed_total = Self::observed_delta(before_residency_bytes, after_session_bytes);
+        let observed_session = after_session_bytes.saturating_sub(after_residency_bytes);
         if observed_total > self.total_priced_upper_bytes {
             return invalid(format!(
                 "observed DeepSeek V4 session total {observed_total} exceeds priced model plus session {}",
@@ -495,7 +476,7 @@ impl DeepSeekV4MemoryPlan {
         observed_bytes: u64,
         phase: &str,
     ) -> Result<u64, DeepSeekV4MetalError> {
-        let observed = Self::observed_delta(before_residency_bytes, observed_bytes, phase)?;
+        let observed = Self::observed_delta(before_residency_bytes, observed_bytes);
         let limit = self.required_with_reserve_bytes()?;
         if observed > limit {
             return invalid(format!(
@@ -527,13 +508,8 @@ impl DeepSeekV4MemoryPlan {
             .after_residency_bytes
             .max(samples.after_session_bytes)
             .max(samples.after_first_forward_bytes);
-        let sampled_peak_delta_bytes = sampled_peak_bytes
-            .checked_sub(samples.before_residency_bytes)
-            .ok_or_else(|| {
-                DeepSeekV4MetalError::Invalid(
-                    "DeepSeek V4 sampled Metal peak precedes the allocation baseline".into(),
-                )
-            })?;
+        let sampled_peak_delta_bytes =
+            sampled_peak_bytes.saturating_sub(samples.before_residency_bytes);
         Ok(DeepSeekV4MemoryReconciliation {
             samples,
             observed_residency_delta_bytes,
@@ -964,6 +940,7 @@ impl DeepSeekV4MetalResidency {
         {
             return invalid("DeepSeek V4 memory plan changed before realization");
         }
+        let _allocation_transaction = ctx.begin_allocation_transaction();
         let refreshed_admission = plan
             .memory
             .admission_for_sessions(ctx.memory_signals(), admitted_session_count)?;
@@ -22248,6 +22225,18 @@ mod tests {
         assert_eq!(reconciliation.observed_residency_delta_bytes, 1_000);
         assert_eq!(reconciliation.observed_session_delta_bytes, 1_500);
         assert_eq!(reconciliation.sampled_peak_delta_bytes, required);
+        let released = plan
+            .reconcile(DeepSeekV4MemorySamples {
+                before_residency_bytes: baseline,
+                after_residency_bytes: baseline - 1,
+                after_session_bytes: baseline - 2,
+                after_first_forward_bytes: baseline - 3,
+            })
+            .unwrap();
+        assert_eq!(released.observed_residency_delta_bytes, 0);
+        assert_eq!(released.observed_session_delta_bytes, 0);
+        assert_eq!(released.observed_first_forward_delta_bytes, 0);
+        assert_eq!(released.sampled_peak_delta_bytes, 0);
         let error = plan
             .reconcile_session(baseline, baseline + 999, baseline + 1_500)
             .unwrap_err();

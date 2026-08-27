@@ -2,8 +2,8 @@
 
 use crate::metal::{
     KernelEncoder, MetalBufferSizeAndAlign, MetalContext, MetalError, MetalMemoryAdmission,
-    MetalMemorySignals, MetalTensor, MetalTensorProvenance, evaluate_metal_memory_admission,
-    host_page_size_bytes,
+    MetalMemorySignals, MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer,
+    evaluate_metal_memory_admission, host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::qwen4exp::{MixerKind, PleHistory, Qwen4ExpConfig, Qwen4ExpError};
@@ -868,20 +868,8 @@ pub fn encode_qwen4exp_text_token<'a>(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
-    validate_encoder(ctx, enc)?;
-    validate_and_preflight(ctx, enc, token_id, position, weights, workspace)?;
-    let next_history = crate::qwen4exp_layers_zero_one::stage_ple_rows(
-        token_id,
-        position as u64,
-        table,
-        weights.zero_one,
-        &mut workspace.zero_one,
-    )?;
-    for block in &mut workspace.post_ple {
-        block.prepare_for_parent(position)?;
-    }
-    reserve_command(workspace, enc, position + 1)?;
-    workspace.logits_ready = false;
+    let next_history =
+        prepare_qwen4exp_text_token(ctx, enc, token_id, position, table, weights, workspace)?;
     if let Err(error) = encode_step(
         ctx,
         enc,
@@ -899,6 +887,86 @@ pub fn encode_qwen4exp_text_token<'a>(
         workspace,
         position,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_qwen4exp_text_token_layer_sampled<'a>(
+    ctx: &MetalContext,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    token_id: u32,
+    position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    let stage_count = weights
+        .post_ple
+        .len()
+        .checked_add(2)
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("stage count overflow".into()))?;
+    let expected_samples = stage_count
+        .checked_mul(2)
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("stage sample count overflow".into()))?;
+    if samples.sample_count() != expected_samples {
+        return invalid(format!(
+            "layer profile has {} timestamp samples, expected {expected_samples}",
+            samples.sample_count()
+        ));
+    }
+
+    let first = sampled_stage_encoder(command, samples, 0)?;
+    let next_history =
+        prepare_qwen4exp_text_token(ctx, &first, token_id, position, table, weights, workspace)?;
+    let encoded = (|| {
+        encode_zero_one_stage(ctx, &first, token_id, next_history, weights, workspace)?;
+        first.end();
+        for index in 0..weights.post_ple.len() {
+            let encoder = sampled_stage_encoder(command, samples, index + 1)?;
+            encode_post_ple_stage(ctx, &encoder, position, index, weights, workspace)?;
+            encoder.end();
+        }
+        let tail = sampled_stage_encoder(command, samples, stage_count - 1)?;
+        encode_tail_stage(ctx, &tail, weights, workspace)?;
+        tail.end();
+        Ok(())
+    })();
+    if let Err(error) = encoded {
+        workspace.encode_failed = true;
+        workspace.state_poisoned = true;
+        return Err(error);
+    }
+    Ok(Qwen4ExpTextSessionPending {
+        workspace,
+        position,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_qwen4exp_text_token(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<PleHistory, Qwen4ExpTextSessionError> {
+    validate_encoder(ctx, enc)?;
+    validate_and_preflight(ctx, enc, token_id, position, weights, workspace)?;
+    let next_history = crate::qwen4exp_layers_zero_one::stage_ple_rows(
+        token_id,
+        position as u64,
+        table,
+        weights.zero_one,
+        &mut workspace.zero_one,
+    )?;
+    for block in &mut workspace.post_ple {
+        block.prepare_for_parent(position)?;
+    }
+    reserve_command(workspace, enc, position + 1)?;
+    workspace.logits_ready = false;
+    Ok(next_history)
 }
 
 fn validate_and_preflight(
@@ -1047,6 +1115,21 @@ fn encode_step(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<(), Qwen4ExpTextSessionError> {
+    encode_zero_one_stage(ctx, enc, token_id, next_history, weights, workspace)?;
+    for index in 0..weights.post_ple.len() {
+        encode_post_ple_stage(ctx, enc, position, index, weights, workspace)?;
+    }
+    encode_tail_stage(ctx, enc, weights, workspace)
+}
+
+fn encode_zero_one_stage(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    next_history: PleHistory,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<(), Qwen4ExpTextSessionError> {
     let zero_one = encode_qwen4exp_layers_zero_one_staged(
         ctx,
         enc,
@@ -1059,17 +1142,41 @@ fn encode_step(
         .output()
         .encode_copy_to(ctx, enc, &workspace.hyper_residual)?;
     drop(zero_one);
-    for (weights, block) in weights.post_ple.iter().zip(&mut workspace.post_ple) {
-        let read = encode_qwen4exp_post_ple_block(
-            ctx,
-            enc,
-            position,
-            &workspace.hyper_residual,
-            *weights,
-            block,
-        )?;
-        drop(read);
-    }
+    Ok(())
+}
+
+fn encode_post_ple_stage(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    position: usize,
+    index: usize,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let block_weights = weights.post_ple.get(index).copied().ok_or_else(|| {
+        Qwen4ExpTextSessionError::Invalid(format!("post-PLE weight index {index} is absent"))
+    })?;
+    let block = workspace.post_ple.get_mut(index).ok_or_else(|| {
+        Qwen4ExpTextSessionError::Invalid(format!("post-PLE workspace index {index} is absent"))
+    })?;
+    let read = encode_qwen4exp_post_ple_block(
+        ctx,
+        enc,
+        position,
+        &workspace.hyper_residual,
+        block_weights,
+        block,
+    )?;
+    drop(read);
+    Ok(())
+}
+
+fn encode_tail_stage(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<(), Qwen4ExpTextSessionError> {
     let final_read = encode_final_gated_residual_mix(
         ctx,
         enc,
@@ -1089,6 +1196,30 @@ fn encode_step(
     )?;
     drop(final_read);
     Ok(())
+}
+
+fn sampled_stage_encoder(
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    samples: &MetalTimestampSampleBuffer,
+    stage: usize,
+) -> Result<KernelEncoder, Qwen4ExpTextSessionError> {
+    let start_sample = stage
+        .checked_mul(2)
+        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("stage sample index overflow".into()))?;
+    let end_sample = start_sample + 1;
+    if end_sample >= samples.sample_count() {
+        return invalid(format!(
+            "stage {stage} timestamp index {end_sample} exceeds {} samples",
+            samples.sample_count()
+        ));
+    }
+    Ok(KernelEncoder::try_begin_sampled(
+        command,
+        samples,
+        start_sample,
+        end_sample,
+        false,
+    )?)
 }
 
 fn validate_encoder(

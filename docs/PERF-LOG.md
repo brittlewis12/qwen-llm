@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-26 - Flash-Next Fast IQ3 Routed SwiGLU GO
+
+Status: default the existing four-row IQ3_XXS routed gate/up kernel for the
+released Flash-Next decode path. Set `QWEN4EXP_MOE_IQ3_FAST=0` for the prior
+one-row kernel.
+
+- A warm 48-stage token profile attributed `35.677` ms to 34 post-PLE GDN
+  blocks, `15.452` ms to 12 QSA blocks, `2.180` ms to layers zero-one, and
+  `1.084` ms to final HC plus logits. Encoder boundaries were only `0.022` ms;
+  scheduling seams are not the first bottleneck.
+- The four-row kernel reduced the same profiled command from `54.415` to
+  `49.513` ms GPU (`1.099x`). GDN blocks fell to `32.004` ms and QSA blocks to
+  `14.112` ms, confirming the common routed-MoE stage rather than mixer-specific
+  work as the gain.
+- A 23-transition warm A/B reduced decode GPU time from `1234.9` to `1111.3`
+  ms and moved emitted throughput from `18.65` to `20.64` token/s (`1.107x`).
+  The 28-token singleton prefill moved from `15.08` to `16.67` token/s.
+- Both A/B runs emitted the same 24-token byte prefix. The pinned UD-Q3_K_XL
+  runner retained generated IDs `[49006, 1537, 248046]`, output `HELLO`, and
+  exact reset/replay logits with the candidate enabled.
+
 ## 2026-08-25 - Native Q/K Norm+RoPE Fusion GO; Minimax KILL
 
 Status: default native Q/K RMSNorm+RoPE fusion for base-model decode and packed

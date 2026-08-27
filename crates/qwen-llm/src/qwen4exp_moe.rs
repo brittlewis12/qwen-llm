@@ -4,8 +4,9 @@ use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     encode_axpy_scalar_f32, encode_copy_offset_f32, encode_dot_sigmoid_f32,
     encode_moe_down_iq4_nl_f32, encode_moe_down_weighted_sum_q8_0_f32,
-    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq4_xs_f32, encode_moe_weighted_sum_f32,
-    encode_shared_swiglu_q8_0_f32, encode_topk_logits_softmax_f32,
+    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
+    encode_moe_swiglu_iq4_xs_f32, encode_moe_weighted_sum_f32, encode_shared_swiglu_q8_0_f32,
+    encode_topk_logits_softmax_f32,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::qwen4exp::Qwen4ExpConfig;
@@ -19,6 +20,11 @@ use objc2_metal::{
 };
 
 const MAX_TOP_K: usize = 16;
+
+crate::env_flag!(
+    default_on qwen4exp_moe_iq3_fast_enabled,
+    "QWEN4EXP_MOE_IQ3_FAST"
+);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpMoeError {
@@ -481,19 +487,26 @@ fn encode_step(
     )?;
 
     match weights.routed_gate.dtype {
-        GgmlType::IQ3_XXS => encode_moe_swiglu_iq3_xxs_f32(
-            ctx,
-            enc,
-            weights.routed_gate,
-            weights.routed_up,
-            input,
-            &workspace.topk_ids,
-            &workspace.routed_inner,
-            g.hidden_size,
-            g.routed_intermediate_size,
-            g.expert_count,
-            g.experts_per_token,
-        )?,
+        GgmlType::IQ3_XXS => {
+            let encode = if qwen4exp_moe_iq3_fast_enabled() {
+                encode_moe_swiglu_iq3_xxs_f32_fast
+            } else {
+                encode_moe_swiglu_iq3_xxs_f32
+            };
+            encode(
+                ctx,
+                enc,
+                weights.routed_gate,
+                weights.routed_up,
+                input,
+                &workspace.topk_ids,
+                &workspace.routed_inner,
+                g.hidden_size,
+                g.routed_intermediate_size,
+                g.expert_count,
+                g.experts_per_token,
+            )?
+        }
         GgmlType::IQ4_XS => encode_moe_swiglu_iq4_xs_f32(
             ctx,
             enc,
@@ -763,6 +776,9 @@ pub(crate) fn preflight(
     preflight_projection(ctx, weights.router.dtype)?;
     preflight_projection(ctx, weights.shared_down.dtype)?;
     let (routed_gate_kernel, routed_gate_threads) = match weights.routed_gate.dtype {
+        GgmlType::IQ3_XXS if qwen4exp_moe_iq3_fast_enabled() => {
+            ("kernel_moe_swiglu_iq3_xxs_f32_fast", 64)
+        }
         GgmlType::IQ3_XXS => ("kernel_moe_swiglu_iq3_xxs_f32", 64),
         GgmlType::IQ4_XS => ("kernel_moe_swiglu_iq4_xs_f32", 128),
         dtype => return invalid(format!("unsupported routed gate/up dtype {dtype:?}")),

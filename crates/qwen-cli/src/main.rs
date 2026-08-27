@@ -68,7 +68,10 @@ use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::qwen4exp::Qwen4ExpConfig;
-use qwen_llm::qwen4exp_runtime::{Qwen4ExpLoadedModel, Qwen4ExpSessionCapacity};
+use qwen_llm::qwen4exp_runtime::{
+    Qwen4ExpLayerProfile, Qwen4ExpLayerStage, Qwen4ExpLoadedModel, Qwen4ExpSessionCapacity,
+    Qwen4ExpTokenTiming,
+};
 use qwen_llm::runtime::{
     LoadedModel, LoadedModelConfig, PrefetchPolicy, PrefetchResidencyProbe, PreparedCheckpoint,
     Runtime, RuntimeError, Sequence, SequenceConfig, prefetch_opened_gguf,
@@ -102,6 +105,7 @@ const QWEN4EXP_CHAT_TEMPLATE_SHA256: [u8; 32] = [
     0x12, 0x82, 0x7f, 0x24, 0xb7, 0x42, 0xea, 0x4e, 0x80, 0xcd, 0xc1, 0x2d, 0xbc, 0xf9, 0x62, 0x22,
     0x27, 0x05, 0x6b, 0x9f, 0x79, 0x72, 0x52, 0xa3, 0x14, 0x92, 0x63, 0xd4, 0xf9, 0xaa, 0xad, 0xce,
 ];
+const QWEN4EXP_LAYER_PROFILE_ENV: &str = "QWEN4EXP_LAYER_PROFILE";
 #[cfg(feature = "dsv4-diagnostics")]
 const DEEPSEEK_V4_TEMPORAL_WINDOW_ENV: &str = "QWEN_DSV4_TEMPORAL_WINDOW";
 #[cfg(feature = "dsv4-diagnostics")]
@@ -3650,6 +3654,78 @@ fn emit_deepseek_v4_stage_profile(
     }
 }
 
+#[derive(Default)]
+struct Qwen4ExpTimingTotals {
+    forwards: usize,
+    encode_cpu_ms: f64,
+    completion_wait_ms: f64,
+    gpu_ms: f64,
+    gpu_samples: usize,
+    total_wall_ms: f64,
+}
+
+impl Qwen4ExpTimingTotals {
+    fn record(&mut self, timing: Qwen4ExpTokenTiming) {
+        self.forwards += 1;
+        self.encode_cpu_ms += timing.encode_cpu_ms;
+        self.completion_wait_ms += timing.completion_wait_ms;
+        self.total_wall_ms += timing.total_wall_ms;
+        if let Some(gpu_ms) = timing.gpu_ms {
+            self.gpu_ms += gpu_ms;
+            self.gpu_samples += 1;
+        }
+    }
+
+    fn outside_gpu_ms(&self) -> Option<f64> {
+        (self.gpu_samples == self.forwards).then_some((self.total_wall_ms - self.gpu_ms).max(0.0))
+    }
+}
+
+fn emit_qwen4exp_layer_profile(profile: &Qwen4ExpLayerProfile) {
+    let mut gdn_ms = 0.0;
+    let mut gdn_layers = 0;
+    let mut qsa_ms = 0.0;
+    let mut qsa_layers = 0;
+    for stage in &profile.stages {
+        let (name, layer, mixer) = match stage.stage {
+            Qwen4ExpLayerStage::LayersZeroOne => ("layers_zero_one", None, "bootstrap"),
+            Qwen4ExpLayerStage::PostPle { layer, mixer } => match mixer {
+                qwen_llm::qwen4exp::MixerKind::GatedDeltaNet => {
+                    gdn_ms += stage.gpu_ms;
+                    gdn_layers += 1;
+                    ("post_ple", Some(layer), "gdn")
+                }
+                qwen_llm::qwen4exp::MixerKind::QwenSparseAttention => {
+                    qsa_ms += stage.gpu_ms;
+                    qsa_layers += 1;
+                    ("post_ple", Some(layer), "qsa")
+                }
+            },
+            Qwen4ExpLayerStage::Tail => ("tail", None, "final_hc_logits"),
+        };
+        eprintln!(
+            "qwen4exp layer_profile_stage: position={} stage={} layer={layer:?} mixer={} gpu_ms={:.3} fraction={:.6} ticks={}",
+            profile.token.position,
+            name,
+            mixer,
+            stage.gpu_ms,
+            stage.fraction_of_gpu,
+            stage.duration_ticks,
+        );
+    }
+    eprintln!(
+        "qwen4exp layer_profile: position={} command_gpu_ms={:.3} sampled_span_ticks={} encoder_boundary_ms={:.3} gdn_layers={} gdn_ms={:.3} qsa_layers={} qsa_ms={:.3}",
+        profile.token.position,
+        profile.token.gpu_ms.unwrap_or(0.0),
+        profile.sampled_span_ticks,
+        profile.encoder_boundary_ms,
+        gdn_layers,
+        gdn_ms,
+        qsa_layers,
+        qsa_ms,
+    );
+}
+
 fn run_qwen4exp_single_turn(
     model_path: &Path,
     gguf: &GgufFile,
@@ -3732,23 +3808,42 @@ fn run_qwen4exp_single_turn(
     let mut runner = loaded
         .create_runner(&ctx)
         .context("bind Qwen3.8-Flash-Next execution graph")?;
+    let layer_profile_enabled = qwen_llm::env_flag::read_default_off(QWEN4EXP_LAYER_PROFILE_ENV);
 
     let prefill_t0 = Instant::now();
     let mut logits = None;
+    let mut prefill_timing = Qwen4ExpTimingTotals::default();
     for (index, &token) in prompt_tokens.iter().enumerate() {
         shutdown::checkpoint()?;
-        logits = Some(
-            runner
+        let (next_logits, timing) = if layer_profile_enabled && index + 1 == prompt_tokens.len() {
+            let profile = runner
+                .forward_token_layer_profiled(token)
+                .with_context(|| {
+                    format!("profile Qwen3.8-Flash-Next prompt token {index} by layer")
+                })?;
+            let next_logits = runner.logits()?.to_vec();
+            let timing = profile.token;
+            emit_qwen4exp_layer_profile(&profile);
+            (next_logits, timing)
+        } else {
+            let next_logits = runner
                 .forward_token(token)
                 .with_context(|| format!("forward Qwen3.8-Flash-Next prompt token {index}"))?
-                .to_vec(),
-        );
+                .to_vec();
+            let timing = runner
+                .last_token_timing()
+                .expect("successful Flash-Next forward records timing");
+            (next_logits, timing)
+        };
+        prefill_timing.record(timing);
+        logits = Some(next_logits);
     }
     let logits = logits.expect("nonempty prompt produced endpoint logits");
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let mut sampler = Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
     let stdout_handle = std::io::stdout();
     let mut stdout = stdout_handle.lock();
+    let mut decode_timing = Qwen4ExpTimingTotals::default();
     let generation = generate_serial(
         logits,
         args.tokens,
@@ -3766,10 +3861,16 @@ fn run_qwen4exp_single_turn(
         },
         |token| {
             let token = checked_qwen4exp_token_id(token, vocab_size, "generated")?;
-            Ok(runner
+            let next_logits = runner
                 .forward_token(token)
                 .context("forward generated Qwen3.8-Flash-Next token")?
-                .to_vec())
+                .to_vec();
+            decode_timing.record(
+                runner
+                    .last_token_timing()
+                    .expect("successful Flash-Next forward records timing"),
+            );
+            Ok(next_logits)
         },
     )?;
     if !generation.tokens.is_empty() {
@@ -3789,7 +3890,7 @@ fn run_qwen4exp_single_turn(
         0.0
     };
     eprintln!(
-        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} generation_ms={:.1} decode_tps={:.2} total_ms={:.1}",
+        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:.1} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:.1} decode_outside_gpu_ms={:?} total_ms={:.1}",
         prompt_tokens.len(),
         generation.tokens.len(),
         generation.transitions,
@@ -3798,8 +3899,16 @@ fn run_qwen4exp_single_turn(
         load_ms,
         prefill_ms,
         prefill_tps,
+        prefill_timing.encode_cpu_ms,
+        prefill_timing.completion_wait_ms,
+        prefill_timing.gpu_ms,
+        prefill_timing.outside_gpu_ms(),
         generation.wall_ms,
         decode_tps,
+        decode_timing.encode_cpu_ms,
+        decode_timing.completion_wait_ms,
+        decode_timing.gpu_ms,
+        decode_timing.outside_gpu_ms(),
         request_t0.elapsed().as_secs_f64() * 1e3,
     );
     Ok(())

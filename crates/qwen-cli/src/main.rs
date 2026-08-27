@@ -69,8 +69,8 @@ use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::qwen4exp::Qwen4ExpConfig;
 use qwen_llm::qwen4exp_runtime::{
-    Qwen4ExpLayerProfile, Qwen4ExpLayerStage, Qwen4ExpLoadedModel, Qwen4ExpSessionCapacity,
-    Qwen4ExpTokenTiming,
+    Qwen4ExpLayerProfile, Qwen4ExpLayerStage, Qwen4ExpLoadedModel, Qwen4ExpPrefillTiming,
+    Qwen4ExpRuntimeError, Qwen4ExpSessionCapacity, Qwen4ExpTokenTiming,
 };
 use qwen_llm::runtime::{
     LoadedModel, LoadedModelConfig, PrefetchPolicy, PrefetchResidencyProbe, PreparedCheckpoint,
@@ -3713,6 +3713,15 @@ impl Qwen4ExpTimingTotals {
         }
     }
 
+    fn record_prefill(&mut self, timing: Qwen4ExpPrefillTiming) {
+        self.forwards += timing.command_count;
+        self.encode_cpu_ms += timing.encode_cpu_ms;
+        self.completion_wait_ms += timing.completion_wait_ms;
+        self.total_wall_ms += timing.total_wall_ms;
+        self.gpu_ms += timing.gpu_ms;
+        self.gpu_samples += timing.gpu_samples;
+    }
+
     fn outside_gpu_ms(&self) -> Option<f64> {
         self.complete_gpu_ms()
             .map(|gpu_ms| (self.total_wall_ms - gpu_ms).max(0.0))
@@ -3816,9 +3825,18 @@ fn run_qwen4exp_single_turn(
         .stop_token_ids()
         .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
     validate_qwen4exp_stop_tokens(&stop_tokens, vocab_size)?;
+    let layer_profile_enabled = qwen_llm::env_flag::read_default_off(QWEN4EXP_LAYER_PROFILE_ENV);
+    let packed_prefill_requested = !layer_profile_enabled && prompt_tokens.len() > 1;
+    let prefill_request = if packed_prefill_requested {
+        "packed"
+    } else if layer_profile_enabled {
+        "scalar_profiled"
+    } else {
+        "scalar"
+    };
 
     eprintln!(
-        "qwen4exp: loading {} for serial generation; prompt_tokens={} max_generated_tokens={} forward_limit={} qsa_physical_capacity={}",
+        "qwen4exp: loading {} for text generation; prompt_tokens={} max_generated_tokens={} forward_limit={} qsa_physical_capacity={} prefill_request={prefill_request}",
         model_path.display(),
         prompt_tokens.len(),
         args.tokens,
@@ -3827,12 +3845,53 @@ fn run_qwen4exp_single_turn(
     );
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for Qwen3.8-Flash-Next")?;
-    let mut loaded = Qwen4ExpLoadedModel::load(&ctx, gguf, capacity)
-        .context("load admitted Qwen3.8-Flash-Next weights and text session")?;
+    let (mut loaded, packed_fallback) = if packed_prefill_requested {
+        match Qwen4ExpLoadedModel::load_with_packed_prefill(
+            &ctx,
+            gguf,
+            capacity,
+            prompt_tokens.len(),
+        ) {
+            Ok(loaded) => (loaded, false),
+            Err(packed_error) => {
+                eprintln!(
+                    "qwen4exp: packed prefill unavailable ({packed_error}); retrying scalar admission"
+                );
+                match Qwen4ExpLoadedModel::load(&ctx, gguf, capacity) {
+                    Ok(loaded) => (loaded, true),
+                    Err(scalar_error) => {
+                        return Err(anyhow!(
+                            "load Qwen3.8-Flash-Next packed session failed ({packed_error}); scalar fallback also failed ({scalar_error})"
+                        ));
+                    }
+                }
+            }
+        }
+    } else {
+        (
+            Qwen4ExpLoadedModel::load(&ctx, gguf, capacity)
+                .context("load admitted Qwen3.8-Flash-Next weights and text session")?,
+            false,
+        )
+    };
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();
+    let packed_prefill_capacity = loaded.packed_prefill_capacity();
+    let prefill_mode = if layer_profile_enabled {
+        "scalar_profiled"
+    } else if let Some(packed_capacity) = packed_prefill_capacity {
+        if prompt_tokens.len() > packed_capacity {
+            "packed_dense_then_scalar"
+        } else {
+            "packed_dense"
+        }
+    } else if packed_fallback {
+        "scalar_fallback"
+    } else {
+        "scalar"
+    };
     eprintln!(
-        "qwen4exp: resident on {} in {:.1} ms; aggregate_required={:?} weight_observed={} session_observed={} session_required={:?}",
+        "qwen4exp: resident on {} in {:.1} ms; prefill_mode={prefill_mode} packed_prefill_capacity={packed_prefill_capacity:?} aggregate_required={:?} weight_observed={} session_observed={} session_required={:?}",
         ctx.describe(),
         load_ms,
         admission.aggregate.required_bytes,
@@ -3843,40 +3902,61 @@ fn run_qwen4exp_single_turn(
     let mut runner = loaded
         .create_runner(&ctx)
         .context("bind Qwen3.8-Flash-Next execution graph")?;
-    let layer_profile_enabled = qwen_llm::env_flag::read_default_off(QWEN4EXP_LAYER_PROFILE_ENV);
 
     let prefill_t0 = Instant::now();
-    let mut logits = None;
     let mut prefill_timing = Qwen4ExpTimingTotals::default();
-    for (index, &token) in prompt_tokens.iter().enumerate() {
-        shutdown::checkpoint()?;
-        let (next_logits, timing) = if layer_profile_enabled && index + 1 == prompt_tokens.len() {
-            let outcome = runner
-                .forward_token_layer_profiled(token)
-                .with_context(|| {
-                    format!("profile Qwen3.8-Flash-Next prompt token {index} by layer")
-                })?;
-            let next_logits = runner.logits()?.to_vec();
-            let timing = outcome.token;
-            match outcome.profile {
-                Ok(profile) => emit_qwen4exp_layer_profile(&profile),
-                Err(error) => eprintln!("qwen4exp layer_profile_warning: {error}"),
-            }
-            (next_logits, timing)
-        } else {
-            let next_logits = runner
-                .forward_token(token)
-                .with_context(|| format!("forward Qwen3.8-Flash-Next prompt token {index}"))?
-                .to_vec();
-            let timing = runner
-                .last_token_timing()
-                .expect("successful Flash-Next forward records timing");
-            (next_logits, timing)
-        };
-        prefill_timing.record(timing);
-        logits = Some(next_logits);
-    }
-    let logits = logits.expect("nonempty prompt produced endpoint logits");
+    let mut prefill_packed_tokens = 0;
+    let mut prefill_scalar_tail_commands = prompt_tokens.len();
+    let logits = if layer_profile_enabled {
+        let mut logits = None;
+        for (index, &token) in prompt_tokens.iter().enumerate() {
+            shutdown::checkpoint()?;
+            let (next_logits, timing) = if index + 1 == prompt_tokens.len() {
+                let outcome = runner
+                    .forward_token_layer_profiled(token)
+                    .with_context(|| {
+                        format!("profile Qwen3.8-Flash-Next prompt token {index} by layer")
+                    })?;
+                let next_logits = runner.logits()?.to_vec();
+                let timing = outcome.token;
+                match outcome.profile {
+                    Ok(profile) => emit_qwen4exp_layer_profile(&profile),
+                    Err(error) => eprintln!("qwen4exp layer_profile_warning: {error}"),
+                }
+                (next_logits, timing)
+            } else {
+                let next_logits = runner
+                    .forward_token(token)
+                    .with_context(|| format!("forward Qwen3.8-Flash-Next prompt token {index}"))?
+                    .to_vec();
+                let timing = runner
+                    .last_token_timing()
+                    .expect("successful Flash-Next forward records timing");
+                (next_logits, timing)
+            };
+            prefill_timing.record(timing);
+            logits = Some(next_logits);
+        }
+        logits.expect("nonempty prompt produced endpoint logits")
+    } else {
+        let logits = runner
+            .prefill_with_command_checkpoint(&prompt_tokens, || {
+                shutdown::checkpoint()
+                    .map_err(|error| Qwen4ExpRuntimeError::Checkpoint(error.to_string()))
+            })
+            .context("prefill Qwen3.8-Flash-Next prompt")?
+            .to_vec();
+        let timing = runner
+            .last_prefill_timing()
+            .expect("successful Flash-Next prefill records timing");
+        debug_assert_eq!(timing.token_count, prompt_tokens.len());
+        prefill_packed_tokens = timing.packed_token_count;
+        prefill_scalar_tail_commands = timing
+            .command_count
+            .saturating_sub(usize::from(timing.packed_token_count != 0));
+        prefill_timing.record_prefill(timing);
+        logits
+    };
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let mut sampler = Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
     let stdout_handle = std::io::stdout();
@@ -3928,15 +4008,19 @@ fn run_qwen4exp_single_turn(
         0.0
     };
     eprintln!(
-        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:?} prefill_gpu_samples={}/{} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:?} decode_gpu_samples={}/{} decode_outside_gpu_ms={:?} total_ms={:.1}",
+        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:?} prefill_gpu_samples={}/{} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:?} decode_gpu_samples={}/{} decode_outside_gpu_ms={:?} total_ms={:.1}",
         prompt_tokens.len(),
         generation.tokens.len(),
         generation.transitions,
         generation.stop_reason.as_str(),
         tokenizer_ms,
         load_ms,
+        prefill_mode,
         prefill_ms,
         prefill_tps,
+        prefill_timing.forwards,
+        prefill_packed_tokens,
+        prefill_scalar_tail_commands,
         prefill_timing.encode_cpu_ms,
         prefill_timing.completion_wait_ms,
         prefill_timing.complete_gpu_ms(),
@@ -11996,6 +12080,36 @@ mod tests {
         assert_eq!(totals.complete_gpu_ms(), None);
         assert_eq!(totals.outside_gpu_ms(), None);
         assert_eq!((totals.gpu_samples, totals.forwards), (1, 2));
+
+        let mut packed = Qwen4ExpTimingTotals::default();
+        packed.record_prefill(Qwen4ExpPrefillTiming {
+            token_count: 2_050,
+            packed_token_count: 2_048,
+            command_count: 3,
+            encode_cpu_ms: 7.0,
+            completion_wait_ms: 18.0,
+            gpu_ms: 16.0,
+            gpu_samples: 3,
+            total_wall_ms: 25.0,
+        });
+        assert_eq!((packed.gpu_samples, packed.forwards), (3, 3));
+        assert_eq!(packed.complete_gpu_ms(), Some(16.0));
+        assert_eq!(packed.outside_gpu_ms(), Some(9.0));
+
+        let mut partial = Qwen4ExpTimingTotals::default();
+        partial.record_prefill(Qwen4ExpPrefillTiming {
+            token_count: 2_050,
+            packed_token_count: 2_048,
+            command_count: 3,
+            encode_cpu_ms: 7.0,
+            completion_wait_ms: 18.0,
+            gpu_ms: 11.0,
+            gpu_samples: 2,
+            total_wall_ms: 25.0,
+        });
+        assert_eq!((partial.gpu_samples, partial.forwards), (2, 3));
+        assert_eq!(partial.complete_gpu_ms(), None);
+        assert_eq!(partial.outside_gpu_ms(), None);
     }
 
     #[test]

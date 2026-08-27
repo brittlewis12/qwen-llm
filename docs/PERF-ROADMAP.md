@@ -217,12 +217,16 @@ gate. The experiment is removed. Do not infer a large decode win from launch
 count alone when the fusion leaves all material weight and activation traffic
 intact. The force-ranked lane is now:
 
-1. Promote the qualified dense packed session through runtime prefill and CLI;
-   retain scalar execution after the 2,048-token dense-QSA boundary.
-2. For the next small decode falsifier, fuse each Q8 HC down projection with its
+1. Pin the upstream full-logit row for the HELLO boundary and one selected-QSA
+   row above 4,096 tokens so packed qualification no longer rests solely on the
+   local scalar engine.
+2. Profile the promoted packed command across short and long prompt bands before
+   changing its topology. Attribute the wall/command-GPU gap and price bridge
+   copies before building destination-aware motor outputs.
+3. For the next small decode falsifier, fuse each Q8 HC down projection with its
    low-SiLU epilogue (97 dispatches/token) because it also removes a scratch
    pass; preserve the exact Q8 reduction and branch-count scaling.
-3. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
+4. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
    only if the HC result supports epilogue fusion; its routed-output read/modify/
    write dependency makes it the riskier candidate.
 
@@ -248,9 +252,13 @@ activation sidecar is admission-priced at 55 allocations and 1,894,533,120
 logical bytes; scalar-only plans preserve their previous inventory. Released
 N=2,048 measures 457.229 tok/s wall, and four scalar continuations cross into
 QSA selection at length 2,052 with all state bindings and 12 cache lengths
-intact. Next route runtime prefill through this path, preserve exact N=1
-delegation and scalar overflow beyond 2,048, then expose the qualified route to
-the CLI.
+intact. Runtime and CLI promotion is now closed. Unprofiled prompts of two or
+more tokens request packed execution; scratch admission follows the actual prompt
+extent rather than the full decode budget and visibly falls back to scalar if
+the packed-only plan cannot load. The runtime submits one dense prefix command,
+checks shutdown before every scalar overflow command, and reports the actual
+packed/scalar split. Released 18-token HELLO runs retain output and scalar decode
+handoff. The next packed work is attribution, not more composition.
 
 Runtime admission now separates exact-release qualification from behavioral
 contracts. The full tokenizer fingerprint and released stop vector remain

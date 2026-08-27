@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Packed Prefill Reaches the CLI
+
+Status: default unprofiled multi-token requests to the qualified dense packed
+session, then continue scalar decode from the same causal-state owners.
+
+- Runtime admission sizes the 55 packed allocations to the actual prompt extent,
+  capped at 2,048 tokens, rather than the request's decode/context capacity. A
+  packed-only load failure is visible and retries the unchanged scalar plan.
+- One runtime prefill call submits the dense prefix as one command and any
+  overflow as scalar commands. Cooperative shutdown runs before every command;
+  timing retains partial GPU coverage and reports packed tokens separately from
+  scalar-tail commands.
+- Released UD-Q3_K_XL CLI runs on the 18-token HELLO prompt used one packed
+  command, emitted `HELLO`, stopped on EOS, and completed two scalar decode
+  transitions. Warm-page exploratory prefill measured `30.75-31.19 tok/s` wall
+  (`577.2-585.3 ms`) and `258.8-262.6 ms` reported command-GPU time.
+- With `--max-context-tokens 2052`, the same prompt still admitted only 18 packed
+  rows, observed `220,151,808` session bytes, and retained the same output. The
+  request budget no longer forces the 1.895 GB maximum packed sidecar.
+- Focused runtime, memory-inventory, and CLI tests pass. A source-only
+  adversarial re-review closed both admission-regression and shutdown-response
+  blockers with a `PASS` verdict.
+
 ## 2026-08-27 - Flash-Next Full Packed Session GO
 
 Status: keep every scalar causal-state owner while composing all 48 layers,

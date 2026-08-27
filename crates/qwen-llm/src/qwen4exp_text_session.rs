@@ -322,7 +322,12 @@ impl Qwen4ExpTextSessionMemoryPlan {
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         residency: &Qwen4ExpMetalWeightMemoryPlan,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_geometry_with_options(ctx, geometry, residency.priced_upper_bytes(), true)
+        Self::for_geometry_with_options(
+            ctx,
+            geometry,
+            residency.priced_upper_bytes(),
+            Some(geometry.packed_capacity()?),
+        )
     }
 
     fn for_geometry_with_residency_bytes(
@@ -330,7 +335,7 @@ impl Qwen4ExpTextSessionMemoryPlan {
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         residency_priced_upper_bytes: u64,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_geometry_with_options(ctx, geometry, residency_priced_upper_bytes, false)
+        Self::for_geometry_with_options(ctx, geometry, residency_priced_upper_bytes, None)
     }
 
     #[cfg(test)]
@@ -339,23 +344,31 @@ impl Qwen4ExpTextSessionMemoryPlan {
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         residency_priced_upper_bytes: u64,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_geometry_with_options(ctx, geometry, residency_priced_upper_bytes, true)
+        Self::for_geometry_with_options(
+            ctx,
+            geometry,
+            residency_priced_upper_bytes,
+            Some(geometry.packed_capacity()?),
+        )
     }
 
     fn for_geometry_with_options(
         ctx: &MetalContext,
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         residency_priced_upper_bytes: u64,
-        include_packed_prefill: bool,
+        packed_capacity: Option<usize>,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let mut builder = AllocationBuilder::default();
         add_zero_one_allocations(&mut builder, geometry.zero_one)?;
-        let packed_capacity = if include_packed_prefill {
-            add_packed_allocations(&mut builder, geometry)?;
-            Some(geometry.packed_capacity()?)
-        } else {
-            None
-        };
+        if let Some(capacity) = packed_capacity {
+            let maximum = geometry.packed_capacity()?;
+            if !(2..=maximum).contains(&capacity) {
+                return invalid(format!(
+                    "packed prefill capacity {capacity} is outside 2..={maximum}"
+                ));
+            }
+            add_packed_allocations(&mut builder, geometry, capacity)?;
+        }
         builder.f32("session.hyper_residual", geometry.hyper_width())?;
         for block in &geometry.post_ple {
             add_post_ple_allocations(&mut builder, *block)?;
@@ -515,7 +528,7 @@ impl Qwen4ExpTextSessionPlan {
         capacity: usize,
         residency: &Qwen4ExpMetalWeightMemoryPlan,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_config_with_options(ctx, config, capacity, residency, false)
+        Self::for_config_with_options(ctx, config, capacity, residency, None)
     }
 
     pub fn for_config_with_packed_prefill(
@@ -524,7 +537,31 @@ impl Qwen4ExpTextSessionPlan {
         capacity: usize,
         residency: &Qwen4ExpMetalWeightMemoryPlan,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_config_with_options(ctx, config, capacity, residency, true)
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(config, capacity)?;
+        let packed_capacity = geometry.packed_capacity()?;
+        Self::from_geometry(ctx, geometry, residency, Some(packed_capacity))
+    }
+
+    pub fn for_config_with_packed_prefill_capacity(
+        ctx: &MetalContext,
+        config: &Qwen4ExpConfig,
+        capacity: usize,
+        residency: &Qwen4ExpMetalWeightMemoryPlan,
+        packed_capacity: usize,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        Self::for_config_with_options(ctx, config, capacity, residency, Some(packed_capacity))
+    }
+
+    pub fn for_config_with_packed_prefill_tokens(
+        ctx: &MetalContext,
+        config: &Qwen4ExpConfig,
+        capacity: usize,
+        residency: &Qwen4ExpMetalWeightMemoryPlan,
+        prompt_tokens: usize,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(config, capacity)?;
+        let packed_capacity = prompt_tokens.min(geometry.packed_capacity()?);
+        Self::from_geometry(ctx, geometry, residency, Some(packed_capacity))
     }
 
     fn for_config_with_options(
@@ -532,16 +569,24 @@ impl Qwen4ExpTextSessionPlan {
         config: &Qwen4ExpConfig,
         capacity: usize,
         residency: &Qwen4ExpMetalWeightMemoryPlan,
-        include_packed_prefill: bool,
+        packed_capacity: Option<usize>,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(config, capacity)?;
-        let memory = if include_packed_prefill {
-            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_packed_prefill(
-                ctx, &geometry, residency,
-            )?
-        } else {
-            Qwen4ExpTextSessionMemoryPlan::for_geometry(ctx, &geometry, residency)?
-        };
+        Self::from_geometry(ctx, geometry, residency, packed_capacity)
+    }
+
+    fn from_geometry(
+        ctx: &MetalContext,
+        geometry: Qwen4ExpTextSessionMetalGeometry,
+        residency: &Qwen4ExpMetalWeightMemoryPlan,
+        packed_capacity: Option<usize>,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let memory = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+            ctx,
+            &geometry,
+            residency.priced_upper_bytes(),
+            packed_capacity,
+        )?;
         Ok(Self {
             geometry,
             memory,
@@ -639,8 +684,14 @@ impl Qwen4ExpTextPackedScratch {
     fn new(
         ctx: &MetalContext,
         geometry: &Qwen4ExpTextSessionMetalGeometry,
+        capacity: usize,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        let capacity = geometry.packed_capacity()?;
+        let maximum = geometry.packed_capacity()?;
+        if !(2..=maximum).contains(&capacity) {
+            return invalid(format!(
+                "packed scratch capacity {capacity} is outside 2..={maximum}"
+            ));
+        }
         let zero_one = geometry.zero_one();
         let hidden = geometry.hidden_size();
         let hyper = geometry.hyper_width();
@@ -813,7 +864,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             post_ple.push(Qwen4ExpPostPleBlockMetalWorkspace::new(ctx, *block)?);
         }
         let packed = if let Some(planned_capacity) = memory.packed_prefill_capacity() {
-            let scratch = Qwen4ExpTextPackedScratch::new(ctx, &geometry)?;
+            let scratch = Qwen4ExpTextPackedScratch::new(ctx, &geometry, planned_capacity)?;
             if scratch.capacity != planned_capacity {
                 return invalid(format!(
                     "packed scratch capacity {} differs from admitted {planned_capacity}",
@@ -911,6 +962,10 @@ impl Qwen4ExpTextSessionMetalWorkspace {
 
     pub fn admission(&self) -> MetalMemoryAdmission {
         self.admission
+    }
+
+    pub fn packed_prefill_capacity(&self) -> Option<usize> {
+        self.memory.packed_prefill_capacity()
     }
 
     pub fn observed_allocation_delta(&self) -> u64 {
@@ -2239,8 +2294,8 @@ impl AllocationBuilder {
 fn add_packed_allocations(
     builder: &mut AllocationBuilder,
     geometry: &Qwen4ExpTextSessionMetalGeometry,
+    capacity: usize,
 ) -> Result<(), Qwen4ExpTextSessionError> {
-    let capacity = geometry.packed_capacity()?;
     let zero_one = geometry.zero_one();
     let hidden = geometry.hidden_size();
     let hyper = geometry.hyper_width();
@@ -2871,6 +2926,42 @@ mod tests {
                 scalar_expected + packed_expected
             );
         }
+    }
+
+    #[test]
+    fn packed_memory_inventory_uses_the_prompt_extent() {
+        let Some(ctx) = context() else { return };
+        let config = Qwen4ExpConfig::flash_next_reference();
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 2_052).unwrap();
+        let prompt_plan =
+            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(&ctx, &geometry, 0, Some(18))
+                .unwrap();
+        let maximum_plan = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+            &ctx,
+            &geometry,
+            0,
+            Some(2_048),
+        )
+        .unwrap();
+        assert_eq!(prompt_plan.packed_prefill_capacity(), Some(18));
+        assert_eq!(
+            prompt_plan.allocations().len(),
+            maximum_plan.allocations().len()
+        );
+        assert!(prompt_plan.session_logical_bytes() < maximum_plan.session_logical_bytes());
+        assert!(
+            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(&ctx, &geometry, 0, Some(1),)
+                .is_err()
+        );
+        assert!(
+            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+                &ctx,
+                &geometry,
+                0,
+                Some(2_049),
+            )
+            .is_err()
+        );
     }
 
     #[test]

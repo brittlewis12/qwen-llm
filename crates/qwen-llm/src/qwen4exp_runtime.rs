@@ -9,8 +9,8 @@ use crate::qwen4exp_residency::{
 };
 use crate::qwen4exp_text_session::{
     Qwen4ExpCompletedLogits, Qwen4ExpTextSessionError, Qwen4ExpTextSessionMetalWeights,
-    Qwen4ExpTextSessionMetalWorkspace, Qwen4ExpTextSessionPlan, encode_qwen4exp_text_token,
-    encode_qwen4exp_text_token_layer_sampled,
+    Qwen4ExpTextSessionMetalWorkspace, Qwen4ExpTextSessionPlan, encode_qwen4exp_text_packed,
+    encode_qwen4exp_text_token, encode_qwen4exp_text_token_layer_sampled,
 };
 use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::time::Instant;
@@ -34,6 +34,8 @@ pub enum Qwen4ExpRuntimeError {
         #[source]
         source: Box<Qwen4ExpRuntimeError>,
     },
+    #[error("Qwen3.8-Flash-Next prefill checkpoint failed: {0}")]
+    Checkpoint(String),
     #[error("invalid Qwen3.8-Flash-Next runtime contract: {0}")]
     Invalid(String),
 }
@@ -123,6 +125,53 @@ impl Qwen4ExpTokenTiming {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Qwen4ExpPrefillTiming {
+    pub token_count: usize,
+    pub packed_token_count: usize,
+    pub command_count: usize,
+    pub encode_cpu_ms: f64,
+    pub completion_wait_ms: f64,
+    pub gpu_ms: f64,
+    pub gpu_samples: usize,
+    pub total_wall_ms: f64,
+}
+
+impl Qwen4ExpPrefillTiming {
+    fn new(token_count: usize, packed_token_count: usize) -> Self {
+        Self {
+            token_count,
+            packed_token_count,
+            command_count: 0,
+            encode_cpu_ms: 0.0,
+            completion_wait_ms: 0.0,
+            gpu_ms: 0.0,
+            gpu_samples: 0,
+            total_wall_ms: 0.0,
+        }
+    }
+
+    fn record(&mut self, timing: Qwen4ExpTokenTiming) {
+        self.command_count += 1;
+        self.encode_cpu_ms += timing.encode_cpu_ms;
+        self.completion_wait_ms += timing.completion_wait_ms;
+        self.total_wall_ms += timing.total_wall_ms;
+        if let Some(gpu_ms) = timing.gpu_ms {
+            self.gpu_ms += gpu_ms;
+            self.gpu_samples += 1;
+        }
+    }
+
+    pub fn complete_gpu_ms(self) -> Option<f64> {
+        (self.gpu_samples == self.command_count).then_some(self.gpu_ms)
+    }
+
+    pub fn outside_gpu_ms(self) -> Option<f64> {
+        self.complete_gpu_ms()
+            .map(|gpu_ms| (self.total_wall_ms - gpu_ms).max(0.0))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Qwen4ExpLayerStage {
     LayersZeroOne,
@@ -174,6 +223,33 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         gguf: &'gguf GgufFile,
         capacity: Qwen4ExpSessionCapacity,
     ) -> Result<Self, Qwen4ExpRuntimeError> {
+        Self::load_with_options(ctx, gguf, capacity, None)
+    }
+
+    pub fn load_with_packed_prefill(
+        ctx: &MetalContext,
+        gguf: &'gguf GgufFile,
+        capacity: Qwen4ExpSessionCapacity,
+        prompt_tokens: usize,
+    ) -> Result<Self, Qwen4ExpRuntimeError> {
+        if prompt_tokens < 2 {
+            return invalid("packed prefill requires at least two prompt tokens");
+        }
+        if prompt_tokens > capacity.forward_limit {
+            return invalid(format!(
+                "packed prompt length {prompt_tokens} exceeds forward limit {}",
+                capacity.forward_limit
+            ));
+        }
+        Self::load_with_options(ctx, gguf, capacity, Some(prompt_tokens))
+    }
+
+    fn load_with_options(
+        ctx: &MetalContext,
+        gguf: &'gguf GgufFile,
+        capacity: Qwen4ExpSessionCapacity,
+        packed_prefill_tokens: Option<usize>,
+    ) -> Result<Self, Qwen4ExpRuntimeError> {
         let weight_plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(ctx, gguf)?;
         let expected_capacity = Qwen4ExpSessionCapacity::for_forward_limit(
             weight_plan.config(),
@@ -182,12 +258,22 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         if expected_capacity != capacity {
             return invalid("session capacity differs from the released model geometry");
         }
-        let session_plan = Qwen4ExpTextSessionPlan::for_config(
-            ctx,
-            weight_plan.config(),
-            capacity.qsa_physical_capacity,
-            weight_plan.memory_plan(),
-        )?;
+        let session_plan = if let Some(prompt_tokens) = packed_prefill_tokens {
+            Qwen4ExpTextSessionPlan::for_config_with_packed_prefill_tokens(
+                ctx,
+                weight_plan.config(),
+                capacity.qsa_physical_capacity,
+                weight_plan.memory_plan(),
+                prompt_tokens,
+            )?
+        } else {
+            Qwen4ExpTextSessionPlan::for_config(
+                ctx,
+                weight_plan.config(),
+                capacity.qsa_physical_capacity,
+                weight_plan.memory_plan(),
+            )?
+        };
 
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let aggregate = session_plan
@@ -249,6 +335,12 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         )
     }
 
+    pub fn packed_prefill_capacity(&self) -> Option<usize> {
+        self.workspace
+            .as_ref()
+            .and_then(Qwen4ExpTextSessionMetalWorkspace::packed_prefill_capacity)
+    }
+
     pub fn create_runner<'ctx, 'model>(
         &'model mut self,
         ctx: &'ctx MetalContext,
@@ -274,6 +366,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             workspace,
             capacity: self.capacity,
             last_token_timing: None,
+            last_prefill_timing: None,
         })
     }
 }
@@ -285,6 +378,7 @@ pub struct Qwen4ExpTextRunner<'ctx, 'model, 'gguf> {
     workspace: Qwen4ExpTextSessionMetalWorkspace,
     capacity: Qwen4ExpSessionCapacity,
     last_token_timing: Option<Qwen4ExpTokenTiming>,
+    last_prefill_timing: Option<Qwen4ExpPrefillTiming>,
 }
 
 impl Qwen4ExpTextRunner<'_, '_, '_> {
@@ -308,6 +402,10 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
 
     pub fn last_token_timing(&self) -> Option<Qwen4ExpTokenTiming> {
         self.last_token_timing
+    }
+
+    pub fn last_prefill_timing(&self) -> Option<Qwen4ExpPrefillTiming> {
+        self.last_prefill_timing
     }
 
     pub fn forward_token(
@@ -358,6 +456,18 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         &mut self,
         token_ids: &[u32],
     ) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError> {
+        self.prefill_with_command_checkpoint(token_ids, || Ok(()))
+    }
+
+    pub fn prefill_with_command_checkpoint<F>(
+        &mut self,
+        token_ids: &[u32],
+        mut checkpoint: F,
+    ) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError>
+    where
+        F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
+    {
+        self.last_prefill_timing = None;
         if self.next_position() != 0 {
             return invalid(format!(
                 "prefill requires a reset session at position zero, got position {}",
@@ -382,21 +492,88 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
             })?;
         }
         let start = self.next_position();
-        for &token_id in token_ids {
-            if let Err(source) = self.forward_token(token_id).map(|_| ()) {
-                return Err(Qwen4ExpRuntimeError::Prefill {
-                    committed: self.next_position().saturating_sub(start),
-                    requested: token_ids.len(),
-                    source: Box::new(source),
-                });
+        let packed_tokens = self
+            .workspace
+            .packed_prefill_capacity()
+            .unwrap_or(0)
+            .min(token_ids.len());
+        let packed_tokens = if packed_tokens >= 2 { packed_tokens } else { 0 };
+        let mut prefill_timing = Qwen4ExpPrefillTiming::new(token_ids.len(), packed_tokens);
+        if packed_tokens != 0 {
+            self.run_prefill_checkpoint(start, token_ids.len(), &mut checkpoint)?;
+            match execute_qwen4exp_text_packed_sync(
+                self.ctx,
+                &token_ids[..packed_tokens],
+                self.ple_table,
+                &self.weights,
+                &mut self.workspace,
+            ) {
+                Ok(timing) => {
+                    self.last_token_timing = None;
+                    prefill_timing.record(timing);
+                }
+                Err(source) => {
+                    return Err(Qwen4ExpRuntimeError::Prefill {
+                        committed: self.next_position().saturating_sub(start),
+                        requested: token_ids.len(),
+                        source: Box::new(source),
+                    });
+                }
             }
         }
+        for &token_id in &token_ids[packed_tokens..] {
+            self.run_prefill_checkpoint(start, token_ids.len(), &mut checkpoint)?;
+            match execute_qwen4exp_text_token_sync(
+                self.ctx,
+                token_id,
+                self.ple_table,
+                &self.weights,
+                &mut self.workspace,
+            ) {
+                Ok(timing) => {
+                    self.last_token_timing = Some(timing);
+                    prefill_timing.record(timing);
+                }
+                Err(source) => {
+                    return Err(Qwen4ExpRuntimeError::Prefill {
+                        committed: self.next_position().saturating_sub(start),
+                        requested: token_ids.len(),
+                        source: Box::new(source),
+                    });
+                }
+            }
+        }
+        self.last_prefill_timing = Some(prefill_timing);
         self.logits()
+    }
+
+    fn run_prefill_checkpoint<F>(
+        &self,
+        start: usize,
+        requested: usize,
+        checkpoint: &mut F,
+    ) -> Result<(), Qwen4ExpRuntimeError>
+    where
+        F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
+    {
+        if let Err(source) = checkpoint() {
+            let committed = self.next_position().saturating_sub(start);
+            if committed == 0 {
+                return Err(source);
+            }
+            return Err(Qwen4ExpRuntimeError::Prefill {
+                committed,
+                requested,
+                source: Box::new(source),
+            });
+        }
+        Ok(())
     }
 
     pub fn reset(&mut self) -> Result<(), Qwen4ExpRuntimeError> {
         self.workspace.reset()?;
         self.last_token_timing = None;
+        self.last_prefill_timing = None;
         Ok(())
     }
 
@@ -420,6 +597,70 @@ pub fn forward_qwen4exp_text_token_sync<'a>(
 ) -> Result<Qwen4ExpCompletedLogits<'a>, Qwen4ExpRuntimeError> {
     execute_qwen4exp_text_token_sync(ctx, token_id, table, weights, workspace)?;
     Ok(workspace.logits()?)
+}
+
+fn execute_qwen4exp_text_packed_sync(
+    ctx: &MetalContext,
+    token_ids: &[u32],
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<Qwen4ExpTokenTiming, Qwen4ExpRuntimeError> {
+    let start_position = workspace.committed_length();
+    let position = start_position
+        .checked_add(token_ids.len())
+        .and_then(|end| end.checked_sub(1))
+        .ok_or_else(|| {
+            Qwen4ExpRuntimeError::Invalid(
+                "packed prefill position range is empty or overflows".into(),
+            )
+        })?;
+    let wall_started = Instant::now();
+    let command = ctx.queue.commandBuffer().ok_or_else(|| {
+        Qwen4ExpRuntimeError::Invalid("Metal command queue returned no command buffer".into())
+    })?;
+    let encoder = KernelEncoder::begin(&command);
+    let pending = match encode_qwen4exp_text_packed(
+        ctx,
+        &encoder,
+        token_ids,
+        start_position,
+        table,
+        weights,
+        workspace,
+    ) {
+        Ok(pending) => pending,
+        Err(error) => {
+            encoder.end();
+            let abandon = unsafe { workspace.abandon_uncommitted() };
+            drop(command);
+            if let Err(abandon_error) = abandon {
+                return invalid(format!(
+                    "packed prefill encode failed ({error}); abandoning its command also failed ({abandon_error})"
+                ));
+            }
+            return Err(error.into());
+        }
+    };
+    drop(pending);
+    encoder.end();
+    let encode_cpu_ms = wall_started.elapsed().as_secs_f64() * 1e3;
+    let wait_started = Instant::now();
+    command.commit();
+    workspace.release_after()?;
+    let completion_wait_ms = wait_started.elapsed().as_secs_f64() * 1e3;
+    let gpu_start = command.GPUStartTime();
+    let gpu_end = command.GPUEndTime();
+    let gpu_ms =
+        (gpu_start.is_finite() && gpu_end.is_finite() && gpu_start > 0.0 && gpu_end > gpu_start)
+            .then_some((gpu_end - gpu_start) * 1e3);
+    Ok(Qwen4ExpTokenTiming {
+        position,
+        encode_cpu_ms,
+        completion_wait_ms,
+        gpu_ms,
+        total_wall_ms: wall_started.elapsed().as_secs_f64() * 1e3,
+    })
 }
 
 fn execute_qwen4exp_text_token_sync(
@@ -703,6 +944,31 @@ mod tests {
         }
         assert!(Qwen4ExpSessionCapacity::for_forward_limit(&config, 0).is_err());
         assert!(Qwen4ExpSessionCapacity::for_forward_limit(&config, 262_145).is_err());
+    }
+
+    #[test]
+    fn prefill_timing_retains_partial_gpu_coverage() {
+        let mut timing = Qwen4ExpPrefillTiming::new(2_050, 2_048);
+        timing.record(Qwen4ExpTokenTiming {
+            position: 2_047,
+            encode_cpu_ms: 1.0,
+            completion_wait_ms: 4.0,
+            gpu_ms: Some(3.0),
+            total_wall_ms: 5.0,
+        });
+        timing.record(Qwen4ExpTokenTiming {
+            position: 2_048,
+            encode_cpu_ms: 1.0,
+            completion_wait_ms: 4.0,
+            gpu_ms: None,
+            total_wall_ms: 5.0,
+        });
+        assert_eq!(timing.token_count, 2_050);
+        assert_eq!(timing.packed_token_count, 2_048);
+        assert_eq!((timing.gpu_samples, timing.command_count), (1, 2));
+        assert_eq!(timing.gpu_ms, 3.0);
+        assert_eq!(timing.complete_gpu_ms(), None);
+        assert_eq!(timing.outside_gpu_ms(), None);
     }
 
     #[test]

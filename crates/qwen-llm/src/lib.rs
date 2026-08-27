@@ -58,6 +58,7 @@ pub mod qwen4exp;
 pub mod qwen4exp_forward;
 pub mod qwen4exp_gdn;
 pub mod qwen4exp_layer_zero;
+pub mod qwen4exp_layers_zero_one;
 pub mod qwen4exp_loader;
 pub mod qwen4exp_metal;
 pub mod qwen4exp_moe;

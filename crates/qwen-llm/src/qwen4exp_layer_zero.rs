@@ -484,8 +484,8 @@ pub fn encode_qwen4exp_layer_zero<'a>(
         ));
     }
     validate_contract(ctx, weights, workspace)?;
-    reserve_command(workspace, enc)?;
     write_token_id(&workspace.token_id, token_id as i32)?;
+    reserve_command(workspace, enc)?;
 
     if let Err(error) = encode_step(ctx, enc, weights, workspace) {
         workspace.encode_failed = true;
@@ -568,7 +568,7 @@ fn encode_step(
     Ok(())
 }
 
-fn validate_contract(
+pub(crate) fn validate_contract(
     ctx: &MetalContext,
     weights: Qwen4ExpLayerZeroMetalWeights<'_>,
     workspace: &Qwen4ExpLayerZeroMetalWorkspace,

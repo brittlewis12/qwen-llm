@@ -610,7 +610,7 @@ fn encode_step(
     Ok(())
 }
 
-fn validate_contract(
+pub(crate) fn validate_contract(
     ctx: &MetalContext,
     hyper_input: &MetalTensor,
     weights: Qwen4ExpPleMetalWeights<'_>,
@@ -741,7 +741,7 @@ fn validate_contract(
     require_disjoint(&tensors)
 }
 
-fn preflight(
+pub(crate) fn preflight(
     ctx: &MetalContext,
     weights: Qwen4ExpPleMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpPleMetalError> {

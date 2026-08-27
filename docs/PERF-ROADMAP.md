@@ -170,6 +170,11 @@ only the 16 selected rows (1,440 bytes) for each token. Profile the host gather
 and upload after end-to-end decode exists; batch or overlap staging only if it is
 material, and do not make the full random-access table GPU-resident by default.
 
+The first transactional two-layer prefix copies layer-zero output into one HC
+bridge and writes PLE output back to that same buffer before layer 1. Preserve
+the owning-command boundaries until full decode is correct; direct child output
+handoff is a profile-gated launch/bandwidth cleanup, not a bring-up dependency.
+
 ## Serve Follow-ups — 2026-08-20
 
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a

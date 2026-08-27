@@ -1035,7 +1035,7 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
     encoded
 }
 
-/// Encode one selected packed block across six serial sampled encoders.
+/// Encode one selected packed block across its serial sampled stage plan.
 ///
 /// # Safety
 ///

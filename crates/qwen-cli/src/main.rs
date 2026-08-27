@@ -3870,7 +3870,7 @@ fn emit_qwen4exp_packed_timestamp_profile(profile: &Qwen4ExpPackedPrefillProfile
             (stage.label.scope == Qwen4ExpPackedProfileScope::Coarse
                 && stage.label.name == "post_ple_layer")
                 || (stage.label.scope == Qwen4ExpPackedProfileScope::Detail
-                    && stage.label.name == "block.moe")
+                    && matches!(stage.label.name, "block.moe" | "moe.routing"))
         }) {
             emit_qwen4exp_packed_detail_residual(profile, parent);
         }
@@ -3926,13 +3926,26 @@ fn emit_qwen4exp_packed_detail_residual(
                             parent.duration_ticks,
                             parent.gpu_ms,
                         );
-                    } else {
+                    } else if parent.label.name == "block.moe" {
                         eprintln!(
                             "qwen4exp packed_profile_moe_residual: layer={:?} mixer={:?} parent_ticks={} detail_ticks={detail_ticks} residual_ticks={residual_ticks} parent_gpu_ms={:.3} detail_gpu_ms={detail_gpu_ms:.3} residual_gpu_ms={residual_gpu_ms:.3}",
                             parent.label.layer,
                             parent.label.mixer,
                             parent.duration_ticks,
                             parent.gpu_ms,
+                        );
+                    } else if parent.label.name == "moe.routing" {
+                        eprintln!(
+                            "qwen4exp packed_profile_routing_residual: layer={:?} mixer={:?} parent_ticks={} detail_ticks={detail_ticks} residual_ticks={residual_ticks} parent_gpu_ms={:.3} detail_gpu_ms={detail_gpu_ms:.3} residual_gpu_ms={residual_gpu_ms:.3}",
+                            parent.label.layer,
+                            parent.label.mixer,
+                            parent.duration_ticks,
+                            parent.gpu_ms,
+                        );
+                    } else {
+                        eprintln!(
+                            "qwen4exp packed_profile_warning: unsupported residual parent={} layer={:?} mixer={:?}",
+                            parent.label.name, parent.label.layer, parent.label.mixer,
                         );
                     }
                 }

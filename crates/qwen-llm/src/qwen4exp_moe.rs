@@ -17,8 +17,10 @@ use crate::metal_forward::{
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
-    QWEN4EXP_PACKED_PROFILE_MOE_STAGES, Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder,
-    Qwen4ExpPackedProfileSpan, begin_optional, end_optional, stage_encoder,
+    QWEN4EXP_PACKED_PROFILE_MOE_SPANS, QWEN4EXP_PACKED_PROFILE_MOE_STAGES,
+    QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES, Qwen4ExpPackedProfileLabel,
+    Qwen4ExpPackedProfileRecorder, Qwen4ExpPackedProfileSpan, begin_optional, end_optional,
+    stage_encoder,
 };
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
@@ -1032,7 +1034,7 @@ struct Qwen4ExpMoePackedExecution<'input, 'weights> {
 }
 
 impl Qwen4ExpMoePackedExecution<'_, '_> {
-    fn encode_route(
+    fn encode_router(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
@@ -1057,6 +1059,18 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             self.tokens,
         )?;
         end_optional(&mut profile, enc, marker)?;
+        Ok(())
+    }
+
+    fn encode_topk(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+        mixer: MixerKind,
+        mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        let g = self.weights.geometry;
         let marker = begin_optional(
             &mut profile,
             enc,
@@ -1077,6 +1091,18 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             self.tokens,
         )?;
         end_optional(&mut profile, enc, marker)?;
+        Ok(())
+    }
+
+    fn encode_bucket(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+        mixer: MixerKind,
+        mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        let g = self.weights.geometry;
         let marker = begin_optional(
             &mut profile,
             enc,
@@ -1093,6 +1119,20 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             g.experts_per_token,
         )?;
         end_optional(&mut profile, enc, marker)?;
+        Ok(())
+    }
+
+    fn encode_route(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        layer: u32,
+        mixer: MixerKind,
+        mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    ) -> Result<(), Qwen4ExpMoeError> {
+        self.encode_router(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+        self.encode_topk(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+        self.encode_bucket(ctx, enc, layer, mixer, profile.as_deref_mut())?;
         Ok(())
     }
 
@@ -1363,7 +1403,7 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_profiled(
     }
 }
 
-/// Encode packed MoE rows across five serial sampled encoders.
+/// Encode packed MoE rows across seven serial sampled encoders.
 ///
 /// # Safety
 ///
@@ -1392,8 +1432,8 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_stage_sampled(
             .checked_add(offset)
             .ok_or_else(|| Qwen4ExpMoeError::Invalid("packed MoE stage index overflow".into()))
     };
-    let route_encoder = stage_encoder(command, samples, stage_index(0)?)?;
-    validate_encoder(ctx, &route_encoder)?;
+    let router_encoder = stage_encoder(command, samples, stage_index(0)?)?;
+    validate_encoder(ctx, &router_encoder)?;
     if weights.geometry != scratch.geometry {
         return invalid("packed MoE weight and scratch geometry differ");
     }
@@ -1407,43 +1447,83 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_stage_sampled(
         tokens,
     };
 
-    execution.encode_route(ctx, &route_encoder, layer, mixer, None)?;
-    route_encoder.end();
-    let gate_up_encoder = stage_encoder(command, samples, stage_index(1)?)?;
+    execution.encode_router(ctx, &router_encoder, layer, mixer, None)?;
+    router_encoder.end();
+    let topk_encoder = stage_encoder(command, samples, stage_index(1)?)?;
+    execution.encode_topk(ctx, &topk_encoder, layer, mixer, None)?;
+    topk_encoder.end();
+    let bucket_encoder = stage_encoder(command, samples, stage_index(2)?)?;
+    execution.encode_bucket(ctx, &bucket_encoder, layer, mixer, None)?;
+    bucket_encoder.end();
+    let gate_up_encoder = stage_encoder(
+        command,
+        samples,
+        stage_index(QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES)?,
+    )?;
     execution.encode_routed_gate_up(ctx, &gate_up_encoder, layer, mixer, None)?;
     gate_up_encoder.end();
-    let down_encoder = stage_encoder(command, samples, stage_index(2)?)?;
+    let down_encoder = stage_encoder(
+        command,
+        samples,
+        stage_index(QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES + 1)?,
+    )?;
     execution.encode_routed_down(ctx, &down_encoder, layer, mixer, None)?;
     down_encoder.end();
-    let reduce_encoder = stage_encoder(command, samples, stage_index(3)?)?;
+    let reduce_encoder = stage_encoder(
+        command,
+        samples,
+        stage_index(QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES + 2)?,
+    )?;
     execution.encode_routed_reduce(ctx, &reduce_encoder, layer, mixer, None)?;
     reduce_encoder.end();
-    let shared_encoder = stage_encoder(command, samples, stage_index(4)?)?;
+    let shared_encoder = stage_encoder(
+        command,
+        samples,
+        stage_index(QWEN4EXP_PACKED_PROFILE_MOE_STAGES - 1)?,
+    )?;
     execution.encode_shared(ctx, &shared_encoder, layer, mixer, None)?;
     shared_encoder.end();
 
     let output = execution.into_output();
-    let names = [
-        "moe.routing",
+    let routing_first_stage = stage_index(0)?;
+    let routing_last_stage = stage_index(QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES - 1)?;
+    let mut spans = Vec::with_capacity(QWEN4EXP_PACKED_PROFILE_MOE_SPANS);
+    spans.push(Qwen4ExpPackedProfileSpan {
+        label: Qwen4ExpPackedProfileLabel::detail("moe.routing", layer, mixer),
+        depth: 2,
+        start_sample: routing_first_stage * 2,
+        end_sample: routing_last_stage * 2 + 1,
+    });
+    for (offset, name) in ["moe.router", "moe.topk", "moe.bucket"]
+        .into_iter()
+        .enumerate()
+    {
+        let stage = stage_index(offset)?;
+        spans.push(Qwen4ExpPackedProfileSpan {
+            label: Qwen4ExpPackedProfileLabel::detail(name, layer, mixer),
+            depth: 3,
+            start_sample: stage * 2,
+            end_sample: stage * 2 + 1,
+        });
+    }
+    for (offset, name) in [
         "moe.routed_gate_up",
         "moe.routed_down",
         "moe.routed_reduce",
         "moe.shared_tail",
-    ];
-    debug_assert_eq!(names.len(), QWEN4EXP_PACKED_PROFILE_MOE_STAGES);
-    let spans = names
-        .into_iter()
-        .enumerate()
-        .map(|(offset, name)| {
-            let stage = first_stage + offset;
-            Qwen4ExpPackedProfileSpan {
-                label: Qwen4ExpPackedProfileLabel::detail(name, layer, mixer),
-                depth: 2,
-                start_sample: stage * 2,
-                end_sample: stage * 2 + 1,
-            }
-        })
-        .collect();
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let stage = stage_index(QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES + offset)?;
+        spans.push(Qwen4ExpPackedProfileSpan {
+            label: Qwen4ExpPackedProfileLabel::detail(name, layer, mixer),
+            depth: 2,
+            start_sample: stage * 2,
+            end_sample: stage * 2 + 1,
+        });
+    }
+    debug_assert_eq!(spans.len(), QWEN4EXP_PACKED_PROFILE_MOE_SPANS);
     Ok((output, spans))
 }
 
@@ -3576,11 +3656,22 @@ mod tests {
                     split_command.waitUntilCompleted();
                     assert_eq!(split_command.status(), MTLCommandBufferStatus::Completed);
                     assert!(split_command.error().is_none());
-                    assert_eq!(spans.len(), QWEN4EXP_PACKED_PROFILE_MOE_STAGES);
-                    for (index, span) in spans.iter().enumerate() {
-                        assert_eq!(span.depth, 2);
-                        assert_eq!(span.start_sample, index * 2);
-                        assert_eq!(span.end_sample, index * 2 + 1);
+                    assert_eq!(spans.len(), QWEN4EXP_PACKED_PROFILE_MOE_SPANS);
+                    let expected_spans = [
+                        ("moe.routing", 2, 0, 5),
+                        ("moe.router", 3, 0, 1),
+                        ("moe.topk", 3, 2, 3),
+                        ("moe.bucket", 3, 4, 5),
+                        ("moe.routed_gate_up", 2, 6, 7),
+                        ("moe.routed_down", 2, 8, 9),
+                        ("moe.routed_reduce", 2, 10, 11),
+                        ("moe.shared_tail", 2, 12, 13),
+                    ];
+                    for (span, (name, depth, start, end)) in spans.iter().zip(expected_spans) {
+                        assert_eq!(span.label.name, name);
+                        assert_eq!(span.depth, depth);
+                        assert_eq!(span.start_sample, start);
+                        assert_eq!(span.end_sample, end);
                     }
                     assert_packed_scratch_bits_eq(
                         "packed common MoE monolithic/split",

@@ -8,7 +8,11 @@ pub(crate) const QWEN4EXP_PACKED_PROFILE_SAMPLE_CAPACITY: usize = 256;
 pub(crate) const QWEN4EXP_PACKED_PROFILE_GDN_LAYER: u32 = 5;
 pub(crate) const QWEN4EXP_PACKED_PROFILE_QSA_LAYER: u32 = 7;
 pub(crate) const QWEN4EXP_PACKED_PROFILE_BLOCK_STAGES: usize = 6;
-pub(crate) const QWEN4EXP_PACKED_PROFILE_MOE_STAGES: usize = 5;
+pub(crate) const QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES: usize = 3;
+pub(crate) const QWEN4EXP_PACKED_PROFILE_MOE_STAGES: usize =
+    QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES + 4;
+pub(crate) const QWEN4EXP_PACKED_PROFILE_MOE_SPANS: usize =
+    QWEN4EXP_PACKED_PROFILE_ROUTING_STAGES + 5;
 pub(crate) const QWEN4EXP_PACKED_PROFILE_GDN_STAGES: usize =
     QWEN4EXP_PACKED_PROFILE_BLOCK_STAGES + QWEN4EXP_PACKED_PROFILE_MOE_STAGES - 1;
 pub(crate) const QWEN4EXP_PACKED_PROFILE_QSA_STAGES: usize = QWEN4EXP_PACKED_PROFILE_BLOCK_STAGES;
@@ -42,7 +46,7 @@ pub(crate) fn packed_stage_span_count(post_ple_blocks: usize) -> Result<usize, M
     post_ple_blocks
         .checked_add(2)
         .and_then(|base| base.checked_add(2 * QWEN4EXP_PACKED_PROFILE_BLOCK_STAGES))
-        .and_then(|base| base.checked_add(QWEN4EXP_PACKED_PROFILE_MOE_STAGES))
+        .and_then(|base| base.checked_add(QWEN4EXP_PACKED_PROFILE_MOE_SPANS))
         .ok_or_else(|| MetalError::Counter("packed profile span count overflow".into()))
 }
 
@@ -273,13 +277,13 @@ mod tests {
         assert!(is_stage_profiled_layer(7, MixerKind::QwenSparseAttention));
         assert!(!is_stage_profiled_layer(5, MixerKind::QwenSparseAttention));
         assert!(!is_stage_profiled_layer(3, MixerKind::QwenSparseAttention));
-        assert_eq!(stage_profile_count(5, MixerKind::GatedDeltaNet), Some(10));
+        assert_eq!(stage_profile_count(5, MixerKind::GatedDeltaNet), Some(12));
         assert_eq!(
             stage_profile_count(7, MixerKind::QwenSparseAttention),
             Some(6)
         );
-        assert_eq!(packed_stage_sample_count(46).unwrap(), 124);
-        assert_eq!(packed_stage_span_count(46).unwrap(), 65);
+        assert_eq!(packed_stage_sample_count(46).unwrap(), 128);
+        assert_eq!(packed_stage_span_count(46).unwrap(), 68);
         assert!(packed_stage_sample_count(usize::MAX).is_err());
         assert!(packed_stage_span_count(usize::MAX).is_err());
     }

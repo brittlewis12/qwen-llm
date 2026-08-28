@@ -31,6 +31,13 @@ struct rms_norm_rows_args {
     float eps;
 };
 
+struct rms_norm_vjp_args {
+    uint  n_dim;
+    uint  row_count;
+    float eps;
+    uint  detach_scale;
+};
+
 struct ds4_prepare_norm_pair_args {
     uint q_dim;
     uint kv_dim;
@@ -105,6 +112,56 @@ kernel void kernel_rms_norm_mul_rows_f32(
     const float scale = rsqrt(mean + args.eps);
     for (uint i = tpitg; i < args.n_dim; i += ntg) {
         y[base + i] = (x[base + i] * scale) * weight[i];
+    }
+}
+
+// Activation VJP for weighted RMSNorm. `detach_scale=0` is the ordinary
+// Jacobian; `detach_scale=1` installs the RelP LN-rule by treating the
+// reciprocal RMS denominator as constant in the backward pass.
+kernel void kernel_rms_norm_mul_vjp_rows_f32(
+        constant rms_norm_vjp_args & args [[buffer(0)]],
+        device const float * x             [[buffer(1)]],
+        device const float * weight        [[buffer(2)]],
+        device const float * grad_output   [[buffer(3)]],
+        device       float * grad_input    [[buffer(4)]],
+        threadgroup float * shmem          [[threadgroup(0)]],
+        uint row [[threadgroup_position_in_grid]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    if (row >= args.row_count) return;
+    const ulong base = (ulong)row * args.n_dim;
+    const uint nsg = (ntg + 31) / 32;
+
+    float sumsq = 0.0f;
+    float dot = 0.0f;
+    for (uint i = tpitg; i < args.n_dim; i += ntg) {
+        const float xv = x[base + i];
+        const float weighted_grad = grad_output[base + i] * weight[i];
+        sumsq += xv * xv;
+        dot += xv * weighted_grad;
+    }
+    sumsq = simd_sum(sumsq);
+    dot = simd_sum(dot);
+    if (tiisg == 0) {
+        shmem[sgitg] = sumsq;
+        shmem[nsg + sgitg] = dot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    sumsq = tiisg < nsg ? shmem[tiisg] : 0.0f;
+    dot = tiisg < nsg ? shmem[nsg + tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+    dot = simd_sum(dot);
+
+    const float scale = rsqrt(sumsq / (float)args.n_dim + args.eps);
+    const float correction = dot * scale * scale * scale / (float)args.n_dim;
+    for (uint i = tpitg; i < args.n_dim; i += ntg) {
+        const float direct = grad_output[base + i] * weight[i] * scale;
+        grad_input[base + i] = args.detach_scale != 0u
+            ? direct
+            : direct - x[base + i] * correction;
     }
 }
 

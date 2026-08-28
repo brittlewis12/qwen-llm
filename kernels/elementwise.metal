@@ -16,6 +16,11 @@ struct n_args {
     uint n;
 };
 
+struct silu_mul_vjp_args {
+    uint n;
+    uint relp_identity_half;
+};
+
 // y[i] = x[i] / (1 + exp(-x[i]))
 kernel void kernel_silu_f32(
         constant n_args & args [[buffer(0)]],
@@ -233,6 +238,32 @@ kernel void kernel_silu_mul_f32(
     const float g = gate[tid];
     const float silu_g = g / (1.0f + exp(-g));
     out[tid] = silu_g * up[tid];
+}
+
+// Activation VJP for the SwiGLU inner product. The ordinary arm differentiates
+// SiLU exactly. The RelP arm applies both the identity rule (detach SiLU's
+// sigmoid factor) and half rule (split product relevance evenly by branch).
+kernel void kernel_silu_mul_vjp_f32(
+        constant silu_mul_vjp_args & args [[buffer(0)]],
+        device const float * gate         [[buffer(1)]],
+        device const float * up           [[buffer(2)]],
+        device const float * grad_output  [[buffer(3)]],
+        device       float * grad_gate    [[buffer(4)]],
+        device       float * grad_up      [[buffer(5)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const float g = gate[tid];
+    const float sigmoid_g = 1.0f / (1.0f + exp(-g));
+    const float silu_g = g * sigmoid_g;
+    const float incoming = grad_output[tid];
+    if (args.relp_identity_half != 0u) {
+        grad_gate[tid] = 0.5f * incoming * up[tid] * sigmoid_g;
+        grad_up[tid] = 0.5f * incoming * silu_g;
+    } else {
+        const float silu_derivative = sigmoid_g * (1.0f + g * (1.0f - sigmoid_g));
+        grad_gate[tid] = incoming * up[tid] * silu_derivative;
+        grad_up[tid] = incoming * silu_g;
+    }
 }
 
 // Gated attention: out[i] = x[i] * sigmoid(gate[i]).

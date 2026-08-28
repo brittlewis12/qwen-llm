@@ -163,6 +163,50 @@ kernel void kernel_mat_vec_q8_0_f32_lcpp(
     }
 }
 
+// Activation VJP for a frozen Q8_0 linear map. Weight rows are output
+// features, while each simdgroup owns one 32-wide input block and one
+// cotangent row:
+//
+//   grad_input[q, i] = sum_o weight[o, i] * grad_output[q, o]
+//
+// No gradient through the quantizer or weight storage is implied.
+kernel void kernel_frozen_linear_q8_0_vjp_f32(
+        constant mat_vec_q8_0_args & args       [[buffer(0)]],
+        device const uchar         * weight     [[buffer(1)]],
+        device const float         * grad_output[[buffer(2)]],
+        device       float         * grad_input [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr ushort NSG = 8;
+
+    const uint nb = args.n_in / QK8_0;
+    const uint ib = tgpig.x * NSG + sgitg;
+    if (ib >= nb) return;
+
+    const uint query = tgpig.z;
+    const ulong row_stride_bytes = (ulong)nb * Q8_0_BYTES;
+    float sumf = 0.0f;
+
+    for (uint row = 0; row < args.n_out; ++row) {
+        device const uchar * blk = weight
+            + (ulong)row * row_stride_bytes
+            + (ulong)ib * Q8_0_BYTES;
+        device const int8_t * qs = (device const int8_t *)(blk + 2);
+
+        float factor = 0.0f;
+        if (tiisg == 0) {
+            device const half * dh = (device const half *)blk;
+            factor = (float)dh[0]
+                * grad_output[(ulong)query * args.n_out + row];
+        }
+        factor = simd_broadcast_first(factor);
+        sumf += (float)qs[tiisg] * factor;
+    }
+
+    grad_input[(ulong)query * args.n_in + (ulong)ib * QK8_0 + tiisg] = sumf;
+}
+
 // Group-axis variant of the `_lcpp` kernel above. Grid depth indexes
 // `n_groups` consecutive weight blocks of `n_out` rows, consecutive
 // `n_in`-element input slices, and consecutive `n_out`-element output

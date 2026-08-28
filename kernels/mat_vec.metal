@@ -887,6 +887,74 @@ kernel void kernel_mat_vec_bf16_f32(
     }
 }
 
+#define FROZEN_LINEAR_VJP_NSG 8
+
+kernel void kernel_frozen_linear_f32_vjp_f32(
+        constant mat_vec_args & args        [[buffer(0)]],
+        device const float    * weight      [[buffer(1)]],
+        device const float    * grad_output [[buffer(2)]],
+        device       float    * grad_input  [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint input = (tgpig.x * FROZEN_LINEAR_VJP_NSG + sgitg) * 32u + tiisg;
+    if (input >= args.n_in) return;
+    const uint query = tgpig.z;
+    float sum = 0.0f;
+    for (uint row = 0; row < args.n_out; ++row) {
+        float incoming = tiisg == 0
+            ? grad_output[(ulong)query * args.n_out + row]
+            : 0.0f;
+        incoming = simd_broadcast_first(incoming);
+        sum += weight[(ulong)row * args.n_in + input] * incoming;
+    }
+    grad_input[(ulong)query * args.n_in + input] = sum;
+}
+
+kernel void kernel_frozen_linear_f16_vjp_f32(
+        constant mat_vec_args & args        [[buffer(0)]],
+        device const half     * weight      [[buffer(1)]],
+        device const float    * grad_output [[buffer(2)]],
+        device       float    * grad_input  [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint input = (tgpig.x * FROZEN_LINEAR_VJP_NSG + sgitg) * 32u + tiisg;
+    if (input >= args.n_in) return;
+    const uint query = tgpig.z;
+    float sum = 0.0f;
+    for (uint row = 0; row < args.n_out; ++row) {
+        float incoming = tiisg == 0
+            ? grad_output[(ulong)query * args.n_out + row]
+            : 0.0f;
+        incoming = simd_broadcast_first(incoming);
+        sum += (float)weight[(ulong)row * args.n_in + input] * incoming;
+    }
+    grad_input[(ulong)query * args.n_in + input] = sum;
+}
+
+kernel void kernel_frozen_linear_bf16_vjp_f32(
+        constant mat_vec_args & args        [[buffer(0)]],
+        device const ushort   * weight      [[buffer(1)]],
+        device const float    * grad_output [[buffer(2)]],
+        device       float    * grad_input  [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint input = (tgpig.x * FROZEN_LINEAR_VJP_NSG + sgitg) * 32u + tiisg;
+    if (input >= args.n_in) return;
+    const uint query = tgpig.z;
+    float sum = 0.0f;
+    for (uint row = 0; row < args.n_out; ++row) {
+        float incoming = tiisg == 0
+            ? grad_output[(ulong)query * args.n_out + row]
+            : 0.0f;
+        incoming = simd_broadcast_first(incoming);
+        sum += bf16_to_float(weight[(ulong)row * args.n_in + input]) * incoming;
+    }
+    grad_input[(ulong)query * args.n_in + input] = sum;
+}
+
 kernel void kernel_mat_vec_mxfp4_f32(
         constant mat_vec_args & args   [[buffer(0)]],
         device const uchar    * weight [[buffer(1)]],

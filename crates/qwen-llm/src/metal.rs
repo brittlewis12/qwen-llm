@@ -3610,6 +3610,130 @@ pub fn encode_rms_norm_mul_rows_f32(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RmsNormVjpRule {
+    Jacobian,
+    RelpDetachedScale,
+}
+
+/// Activation VJP for weighted RMSNorm over compact rows.
+///
+/// [`RmsNormVjpRule::Jacobian`] computes the ordinary derivative.
+/// [`RmsNormVjpRule::RelpDetachedScale`] implements the R-lens LN-rule by
+/// treating the reciprocal RMS denominator as constant during propagation.
+pub fn encode_rms_norm_mul_vjp_rows_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    weight: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+    row_count: usize,
+    n_dim: usize,
+    eps: f32,
+    rule: RmsNormVjpRule,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "rms_norm_mul_vjp_rows";
+    if row_count == 0 || n_dim == 0 || !eps.is_finite() || eps < 0.0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected nonzero rows/width and finite nonnegative eps, got rows={row_count} width={n_dim} eps={eps}"
+            ),
+        });
+    }
+    let row_count_u32 = u32::try_from(row_count).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "row count exceeds u32".into(),
+    })?;
+    let n_dim_u32 = u32::try_from(n_dim).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "row width exceeds u32".into(),
+    })?;
+    let row_shape = vec![u64::from(n_dim_u32), u64::from(row_count_u32)];
+    let weight_shape = vec![u64::from(n_dim_u32)];
+    if x.dtype != GgmlType::F32
+        || weight.dtype != GgmlType::F32
+        || grad_output.dtype != GgmlType::F32
+        || grad_input.dtype != GgmlType::F32
+        || !grad_input.is_writable()
+        || x.shape != row_shape
+        || grad_output.shape != row_shape
+        || grad_input.shape != row_shape
+        || weight.shape != weight_shape
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected F32 {:?}, weight {:?}, cotangent {:?} -> writable {:?}",
+                row_shape, weight_shape, row_shape, row_shape
+            ),
+        });
+    }
+    let (_, row_bytes) = checked_shape_bytes(&row_shape, std::mem::size_of::<f32>())?;
+    let (_, weight_bytes) = checked_shape_bytes(&weight_shape, std::mem::size_of::<f32>())?;
+    if !tensor_physical_range_valid(x, row_bytes, 4)
+        || !tensor_physical_range_valid(weight, weight_bytes, 4)
+        || !tensor_physical_range_valid(grad_output, row_bytes, 4)
+        || !tensor_physical_range_valid(grad_input, row_bytes, 4)
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "tensor has an unaligned or out-of-buffer byte range".into(),
+        });
+    }
+    if tensor_ranges_overlap(grad_input, x)
+        || tensor_ranges_overlap(grad_input, weight)
+        || tensor_ranges_overlap(grad_input, grad_output)
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "grad_input must not overlap primal, weight, or grad_output storage".into(),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_dim: u32,
+        row_count: u32,
+        eps: f32,
+        detach_scale: u32,
+    }
+    let pso = ctx.pipeline("kernel_rms_norm_mul_vjp_rows_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_dim: n_dim_u32,
+            row_count: row_count_u32,
+            eps,
+            detach_scale: u32::from(rule == RmsNormVjpRule::RelpDetachedScale),
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, grad_output);
+    enc.set_tensor(4, grad_input);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (2 * n_simdgroups * std::mem::size_of::<f32>()).max(32));
+    enc.dispatch(
+        MTLSize {
+            width: row_count,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// In-place residual add followed by RMSNorm-with-weight:
 /// `x[i] += residual[i]`; `y[i] = (x[i] / sqrt(mean(x²) + eps)) * weight[i]`.
 pub fn encode_residual_rms_norm_mul_f32(
@@ -14658,6 +14782,125 @@ pub fn encode_silu_mul_f32(
     encode_elementwise_2in_1out(ctx, enc, "kernel_silu_mul_f32", gate, up, out)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SwiGluVjpRule {
+    Jacobian,
+    RelpIdentityHalf,
+}
+
+/// Activation VJP for `silu(gate) * up` over compact rows.
+pub fn encode_silu_mul_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_gate: &MetalTensor,
+    grad_up: &MetalTensor,
+    row_count: usize,
+    n_dim: usize,
+    rule: SwiGluVjpRule,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "silu_mul_vjp";
+    if row_count == 0 || n_dim == 0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("expected nonzero rows and width, got {row_count}x{n_dim}"),
+        });
+    }
+    let row_count_u32 = u32::try_from(row_count).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "row count exceeds u32".into(),
+    })?;
+    let n_dim_u32 = u32::try_from(n_dim).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "row width exceeds u32".into(),
+    })?;
+    let element_count = row_count
+        .checked_mul(n_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "element count overflow".into(),
+        })?;
+    let element_count_u32 = u32::try_from(element_count).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "element count exceeds u32".into(),
+    })?;
+    let shape = vec![u64::from(n_dim_u32), u64::from(row_count_u32)];
+    let inputs = [gate, up, grad_output];
+    let outputs = [grad_gate, grad_up];
+    if inputs
+        .iter()
+        .chain(outputs.iter())
+        .any(|tensor| tensor.dtype != GgmlType::F32 || tensor.shape != shape)
+        || outputs.iter().any(|tensor| !tensor.is_writable())
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("expected five F32 tensors of shape {shape:?} with writable outputs"),
+        });
+    }
+    let (_, bytes) = checked_shape_bytes(&shape, std::mem::size_of::<f32>())?;
+    if inputs
+        .iter()
+        .chain(outputs.iter())
+        .any(|tensor| !tensor_physical_range_valid(tensor, bytes, 4))
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "tensor has an unaligned or out-of-buffer byte range".into(),
+        });
+    }
+    if tensor_ranges_overlap(grad_gate, grad_up)
+        || outputs.iter().any(|output| {
+            inputs
+                .iter()
+                .any(|input| tensor_ranges_overlap(output, input))
+        })
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "gradient outputs must not overlap primals, incoming gradient, or each other"
+                .into(),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        relp_identity_half: u32,
+    }
+    let pso = ctx.pipeline("kernel_silu_mul_vjp_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: element_count_u32,
+            relp_identity_half: u32::from(rule == SwiGluVjpRule::RelpIdentityHalf),
+        },
+    );
+    enc.set_tensor(1, gate);
+    enc.set_tensor(2, up);
+    enc.set_tensor(3, grad_output);
+    enc.set_tensor(4, grad_gate);
+    enc.set_tensor(5, grad_up);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: element_count.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Gated attention: out = x * sigmoid(gate). Used after attention before the
 /// output projection, and supports `out` aliasing `x`.
 pub fn encode_sigmoid_mul_f32(
@@ -23790,6 +24033,291 @@ pub fn encode_mat_vec_q8_0_f32(
     Ok(())
 }
 
+/// Activation VJP for a frozen Q8_0 linear map.
+///
+/// `weight` has GGUF shape `[n_in, n_out]`. Cotangents and results are
+/// contiguous row banks with tensor shapes `[n_out, n_query]` and
+/// `[n_in, n_query]`, respectively. The operation computes
+/// `grad_input = grad_output * weight` without differentiating the stored
+/// quantized weights.
+pub fn encode_frozen_linear_q8_0_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "frozen_linear_q8_0_vjp";
+    if n_in == 0 || n_out == 0 || n_query == 0 || !n_in.is_multiple_of(32) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected nonzero dimensions with n_in divisible by 32, got n_in={n_in} n_out={n_out} n_query={n_query}"
+            ),
+        });
+    }
+
+    let n_in_u32 = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_in={n_in} exceeds u32 indexing"),
+    })?;
+    let n_out_u32 = u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_out={n_out} exceeds u32 indexing"),
+    })?;
+    u32::try_from(n_query).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_query={n_query} exceeds Metal uint grid indexing"),
+    })?;
+
+    let weight_shape = vec![u64::from(n_in_u32), u64::from(n_out_u32)];
+    let grad_output_shape = vec![u64::from(n_out_u32), n_query as u64];
+    let grad_input_shape = vec![u64::from(n_in_u32), n_query as u64];
+    if weight.dtype != GgmlType::Q8_0
+        || grad_output.dtype != GgmlType::F32
+        || grad_input.dtype != GgmlType::F32
+        || !grad_input.is_writable()
+        || weight.shape != weight_shape
+        || grad_output.shape != grad_output_shape
+        || grad_input.shape != grad_input_shape
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected Q8_0 {:?}, F32 {:?} -> writable F32 {:?}; got {:?} {:?}, {:?} {:?}, {:?} {:?} writable={}",
+                weight_shape,
+                grad_output_shape,
+                grad_input_shape,
+                weight.dtype,
+                weight.shape,
+                grad_output.dtype,
+                grad_output.shape,
+                grad_input.dtype,
+                grad_input.shape,
+                grad_input.is_writable(),
+            ),
+        });
+    }
+
+    let (_, weight_bytes) = checked_ggml_shape_bytes(&weight_shape, GgmlType::Q8_0)?;
+    let (_, grad_output_bytes) =
+        checked_shape_bytes(&grad_output_shape, std::mem::size_of::<f32>())?;
+    let (_, grad_input_bytes) = checked_shape_bytes(&grad_input_shape, std::mem::size_of::<f32>())?;
+    if !tensor_physical_range_valid(weight, weight_bytes, 2)
+        || !tensor_physical_range_valid(
+            grad_output,
+            grad_output_bytes,
+            std::mem::align_of::<f32>() as u64,
+        )
+        || !tensor_physical_range_valid(
+            grad_input,
+            grad_input_bytes,
+            std::mem::align_of::<f32>() as u64,
+        )
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "weight or cotangent has an unaligned or out-of-buffer byte range".into(),
+        });
+    }
+    if tensor_ranges_overlap(grad_input, weight) || tensor_ranges_overlap(grad_input, grad_output) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "grad_input must not overlap weight or grad_output storage".into(),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_frozen_linear_q8_0_vjp_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in_u32,
+            n_out: n_out_u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, grad_output);
+    enc.set_tensor(3, grad_input);
+
+    const NSG: usize = 8;
+    enc.dispatch(
+        MTLSize {
+            width: (n_in / 32).div_ceil(NSG),
+            height: 1,
+            depth: n_query,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Activation VJP dispatcher for frozen resident linear weights.
+///
+/// This currently covers the exact dtypes needed by the Q8 target and BF16
+/// engineering controls: Q8_0, BF16, F16, and F32.
+pub fn encode_frozen_linear_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    match weight.dtype {
+        GgmlType::Q8_0 => encode_frozen_linear_q8_0_vjp_f32(
+            ctx,
+            enc,
+            weight,
+            grad_output,
+            grad_input,
+            n_in,
+            n_out,
+            n_query,
+        ),
+        GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => encode_frozen_linear_dense_vjp_f32(
+            ctx,
+            enc,
+            weight,
+            grad_output,
+            grad_input,
+            n_in,
+            n_out,
+            n_query,
+        ),
+        dtype => Err(MetalError::BadShape {
+            kernel: "frozen_linear_vjp",
+            detail: format!("unsupported frozen linear dtype {dtype:?}"),
+        }),
+    }
+}
+
+fn encode_frozen_linear_dense_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "frozen_linear_dense_vjp";
+    if n_in == 0 || n_out == 0 || n_query == 0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected nonzero dimensions, got n_in={n_in} n_out={n_out} n_query={n_query}"
+            ),
+        });
+    }
+    let n_in_u32 = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "n_in exceeds u32".into(),
+    })?;
+    let n_out_u32 = u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "n_out exceeds u32".into(),
+    })?;
+    let n_query_u32 = u32::try_from(n_query).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "n_query exceeds u32".into(),
+    })?;
+    let weight_shape = vec![u64::from(n_in_u32), u64::from(n_out_u32)];
+    let grad_output_shape = vec![u64::from(n_out_u32), u64::from(n_query_u32)];
+    let grad_input_shape = vec![u64::from(n_in_u32), u64::from(n_query_u32)];
+    if !matches!(weight.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16)
+        || grad_output.dtype != GgmlType::F32
+        || grad_input.dtype != GgmlType::F32
+        || !grad_input.is_writable()
+        || weight.shape != weight_shape
+        || grad_output.shape != grad_output_shape
+        || grad_input.shape != grad_input_shape
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected F32/F16/BF16 {:?}, F32 {:?} -> writable F32 {:?}",
+                weight_shape, grad_output_shape, grad_input_shape
+            ),
+        });
+    }
+    let (_, weight_bytes) = checked_ggml_shape_bytes(&weight_shape, weight.dtype)?;
+    let (_, grad_output_bytes) =
+        checked_shape_bytes(&grad_output_shape, std::mem::size_of::<f32>())?;
+    let (_, grad_input_bytes) = checked_shape_bytes(&grad_input_shape, std::mem::size_of::<f32>())?;
+    let weight_alignment = if weight.dtype == GgmlType::F32 { 4 } else { 2 };
+    if !tensor_physical_range_valid(weight, weight_bytes, weight_alignment)
+        || !tensor_physical_range_valid(grad_output, grad_output_bytes, 4)
+        || !tensor_physical_range_valid(grad_input, grad_input_bytes, 4)
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "tensor has an unaligned or out-of-buffer byte range".into(),
+        });
+    }
+    if tensor_ranges_overlap(grad_input, weight) || tensor_ranges_overlap(grad_input, grad_output) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "grad_input must not overlap weight or grad_output storage".into(),
+        });
+    }
+
+    let kernel_name = match weight.dtype {
+        GgmlType::F32 => "kernel_frozen_linear_f32_vjp_f32",
+        GgmlType::F16 => "kernel_frozen_linear_f16_vjp_f32",
+        GgmlType::BF16 => "kernel_frozen_linear_bf16_vjp_f32",
+        _ => unreachable!("dense VJP dtype validated above"),
+    };
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    let pso = ctx.pipeline(kernel_name)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in_u32,
+            n_out: n_out_u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, grad_output);
+    enc.set_tensor(3, grad_input);
+    const NSG: usize = 8;
+    enc.dispatch(
+        MTLSize {
+            width: n_in.div_ceil(32).div_ceil(NSG),
+            height: 1,
+            depth: n_query,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Group-axis Q8_0 GEMV with the exact singleton `_lcpp` accumulation body.
 /// Grid depth indexes `n_groups` consecutive weight blocks, input slices, and
 /// output slices, so one dispatch replaces `n_groups` sequential singleton
@@ -24261,6 +24789,77 @@ pub fn mat_vec_q8_0_f32_readback_for_test(
         encode_mat_vec_q8_0_f32(ctx, enc, &w_t, &x_t, &y_t, n_in, n_out)
     })?;
     Ok(read_back_f32(&y_t.buffer, n_out))
+}
+
+/// One-shot frozen Q8_0 linear activation VJP for tests.
+pub fn frozen_linear_q8_0_vjp_f32_readback_for_test(
+    ctx: &MetalContext,
+    weight_bytes: &[u8],
+    grad_output: &[f32],
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<Vec<f32>, MetalError> {
+    let weight = MetalTensor::from_bytes(
+        ctx,
+        weight_bytes,
+        vec![n_in as u64, n_out as u64],
+        GgmlType::Q8_0,
+    )?;
+    let grad_output = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(grad_output),
+        vec![n_out as u64, n_query as u64],
+        GgmlType::F32,
+    )?;
+    let grad_input = MetalTensor::zeros_f32(ctx, vec![n_in as u64, n_query as u64])?;
+    one_shot(ctx, |enc| {
+        encode_frozen_linear_q8_0_vjp_f32(
+            ctx,
+            enc,
+            &weight,
+            &grad_output,
+            &grad_input,
+            n_in,
+            n_out,
+            n_query,
+        )
+    })?;
+    Ok(read_back_f32(&grad_input.buffer, n_query * n_in))
+}
+
+/// One-shot frozen linear activation VJP for supported dense dtypes.
+pub fn frozen_linear_vjp_f32_readback_for_test(
+    ctx: &MetalContext,
+    weight_bytes: &[u8],
+    dtype: GgmlType,
+    grad_output: &[f32],
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<Vec<f32>, MetalError> {
+    let weight =
+        MetalTensor::from_bytes(ctx, weight_bytes, vec![n_in as u64, n_out as u64], dtype)?;
+    let grad_output = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(grad_output),
+        vec![n_out as u64, n_query as u64],
+        GgmlType::F32,
+    )?;
+    let grad_input = MetalTensor::zeros_f32(ctx, vec![n_in as u64, n_query as u64])?;
+    one_shot(ctx, |encoder| {
+        encode_frozen_linear_vjp_f32(
+            ctx,
+            encoder,
+            &weight,
+            &grad_output,
+            &grad_input,
+            n_in,
+            n_out,
+            n_query,
+        )
+    })?;
+    Ok(read_back_f32(&grad_input.buffer, n_query * n_in))
 }
 
 /// One-shot Q5_K mat-vec for tests.
@@ -25003,6 +25602,100 @@ pub fn rms_norm_mul_f32_readback_for_test(
         encode_rms_norm_mul_f32(ctx, enc, &x_t, &w_t, &y_t, eps)
     })?;
     Ok(read_back_f32(&y_t.buffer, n))
+}
+
+/// One-shot weighted RMSNorm activation VJP for tests.
+pub fn rms_norm_mul_vjp_rows_f32_readback_for_test(
+    ctx: &MetalContext,
+    x: &[f32],
+    weight: &[f32],
+    grad_output: &[f32],
+    row_count: usize,
+    n_dim: usize,
+    eps: f32,
+    rule: RmsNormVjpRule,
+) -> Result<Vec<f32>, MetalError> {
+    let x = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(x),
+        vec![n_dim as u64, row_count as u64],
+        GgmlType::F32,
+    )?;
+    let weight = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(weight),
+        vec![n_dim as u64],
+        GgmlType::F32,
+    )?;
+    let grad_output = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(grad_output),
+        vec![n_dim as u64, row_count as u64],
+        GgmlType::F32,
+    )?;
+    let grad_input = MetalTensor::zeros_f32(ctx, vec![n_dim as u64, row_count as u64])?;
+    one_shot(ctx, |encoder| {
+        encode_rms_norm_mul_vjp_rows_f32(
+            ctx,
+            encoder,
+            &x,
+            &weight,
+            &grad_output,
+            &grad_input,
+            row_count,
+            n_dim,
+            eps,
+            rule,
+        )
+    })?;
+    Ok(read_back_f32(&grad_input.buffer, row_count * n_dim))
+}
+
+/// One-shot SwiGLU activation VJP for tests.
+pub fn silu_mul_vjp_f32_readback_for_test(
+    ctx: &MetalContext,
+    gate: &[f32],
+    up: &[f32],
+    grad_output: &[f32],
+    row_count: usize,
+    n_dim: usize,
+    rule: SwiGluVjpRule,
+) -> Result<(Vec<f32>, Vec<f32>), MetalError> {
+    let shape = vec![n_dim as u64, row_count as u64];
+    let gate = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(gate),
+        shape.clone(),
+        GgmlType::F32,
+    )?;
+    let up = MetalTensor::from_bytes(ctx, bytemuck::cast_slice(up), shape.clone(), GgmlType::F32)?;
+    let grad_output = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(grad_output),
+        shape.clone(),
+        GgmlType::F32,
+    )?;
+    let grad_gate = MetalTensor::zeros_f32(ctx, shape.clone())?;
+    let grad_up = MetalTensor::zeros_f32(ctx, shape)?;
+    one_shot(ctx, |encoder| {
+        encode_silu_mul_vjp_f32(
+            ctx,
+            encoder,
+            &gate,
+            &up,
+            &grad_output,
+            &grad_gate,
+            &grad_up,
+            row_count,
+            n_dim,
+            rule,
+        )
+    })?;
+    let len = row_count * n_dim;
+    Ok((
+        read_back_f32(&grad_gate.buffer, len),
+        read_back_f32(&grad_up.buffer, len),
+    ))
 }
 
 /// One-shot fused residual-add + RMSNorm for tests. Returns `(x_after, y)`.
@@ -25917,6 +26610,61 @@ mod tests {
                 .iter()
                 .all(|&byte| byte == 0x5A)
         );
+    }
+
+    fn synthetic_q8_0_bank(n_in: usize, n_out: usize) -> (Vec<u8>, Vec<f32>) {
+        assert!(n_in.is_multiple_of(32));
+        let blocks_per_row = n_in / 32;
+        let mut bytes = Vec::with_capacity(n_out * blocks_per_row * 34);
+        let mut decoded = vec![0.0f32; n_in * n_out];
+        for row in 0..n_out {
+            for block_index in 0..blocks_per_row {
+                let ordinal = row * blocks_per_row + block_index;
+                let sign = if ordinal.is_multiple_of(3) { -1.0 } else { 1.0 };
+                let scale = sign * (ordinal % 7 + 1) as f32 / 512.0;
+                let stored_scale = half::f16::from_f32(scale);
+                bytes.extend_from_slice(&stored_scale.to_bits().to_le_bytes());
+                for lane in 0..32 {
+                    let quant = ((ordinal * 13 + lane * 7 + 5) % 63) as i8 - 31;
+                    bytes.push(quant as u8);
+                    decoded[row * n_in + block_index * 32 + lane] =
+                        stored_scale.to_f32() * f32::from(quant);
+                }
+            }
+        }
+        (bytes, decoded)
+    }
+
+    fn synthetic_dense_linear_bank(
+        dtype: GgmlType,
+        n_in: usize,
+        n_out: usize,
+    ) -> (Vec<u8>, Vec<f32>) {
+        let source: Vec<f32> = (0..n_in * n_out)
+            .map(|index| ((index * 23 + 7) % 97) as f32 * 0.003 - 0.14)
+            .collect();
+        let mut bytes = Vec::new();
+        let mut decoded = Vec::with_capacity(source.len());
+        for value in source {
+            match dtype {
+                GgmlType::F32 => {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                    decoded.push(value);
+                }
+                GgmlType::F16 => {
+                    let stored = half::f16::from_f32(value);
+                    bytes.extend_from_slice(&stored.to_bits().to_le_bytes());
+                    decoded.push(stored.to_f32());
+                }
+                GgmlType::BF16 => {
+                    let stored = half::bf16::from_f32(value);
+                    bytes.extend_from_slice(&stored.to_bits().to_le_bytes());
+                    decoded.push(stored.to_f32());
+                }
+                _ => panic!("unsupported synthetic dense dtype {dtype:?}"),
+            }
+        }
+        (bytes, decoded)
     }
 
     fn encode_q6_k_block(d: f32, seed: usize) -> ([u8; 210], [f32; 256]) {
@@ -28605,6 +29353,203 @@ mod tests {
                 .fold(0f32, f32::max);
             eprintln!("[rms_norm n={n}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-4, "rms_norm n={n}: max|Δ|={max_abs}");
+        }
+    }
+
+    #[test]
+    fn rms_norm_vjp_matches_jacobian_and_relp_rules() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const N_DIM: usize = 67;
+        const EPS: f32 = 1e-6;
+        for row_count in [1usize, 2, 8] {
+            let x: Vec<f32> = (0..row_count * N_DIM)
+                .map(|index| ((index * 17 + 3) % 43) as f32 * 0.021 - 0.39)
+                .collect();
+            let weight: Vec<f32> = (0..N_DIM)
+                .map(|index| 0.45 + (index % 11) as f32 * 0.07)
+                .collect();
+            let grad_output: Vec<f32> = (0..row_count * N_DIM)
+                .map(|index| ((index * 7 + 1) % 31) as f32 * 0.013 - 0.18)
+                .collect();
+            let mut expected_j = vec![0.0f32; x.len()];
+            let mut expected_r = vec![0.0f32; x.len()];
+            for row in 0..row_count {
+                let base = row * N_DIM;
+                let sumsq: f32 = x[base..base + N_DIM]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum();
+                let scale = (sumsq / N_DIM as f32 + EPS).sqrt().recip();
+                let dot: f32 = (0..N_DIM)
+                    .map(|index| x[base + index] * grad_output[base + index] * weight[index])
+                    .sum();
+                let correction = dot * scale * scale * scale / N_DIM as f32;
+                for index in 0..N_DIM {
+                    let direct = grad_output[base + index] * weight[index] * scale;
+                    expected_j[base + index] = direct - x[base + index] * correction;
+                    expected_r[base + index] = direct;
+                }
+            }
+
+            let actual_j = rms_norm_mul_vjp_rows_f32_readback_for_test(
+                &ctx,
+                &x,
+                &weight,
+                &grad_output,
+                row_count,
+                N_DIM,
+                EPS,
+                RmsNormVjpRule::Jacobian,
+            )
+            .unwrap();
+            let actual_r = rms_norm_mul_vjp_rows_f32_readback_for_test(
+                &ctx,
+                &x,
+                &weight,
+                &grad_output,
+                row_count,
+                N_DIM,
+                EPS,
+                RmsNormVjpRule::RelpDetachedScale,
+            )
+            .unwrap();
+            let max_j = actual_j
+                .iter()
+                .zip(&expected_j)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            let max_r = actual_r
+                .iter()
+                .zip(&expected_r)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_j < 2e-5, "rows={row_count}: Jacobian error {max_j}");
+            assert!(max_r < 2e-5, "rows={row_count}: RelP error {max_r}");
+            assert!(
+                actual_j
+                    .iter()
+                    .zip(&actual_r)
+                    .any(|(jacobian, relp)| (jacobian - relp).abs() > 1e-3),
+                "ordinary and RelP rules unexpectedly coincide"
+            );
+
+            let row = row_count - 1;
+            for index in [0usize, 31, N_DIM - 1] {
+                let epsilon = 1e-4f64;
+                let objective = |delta: f64| {
+                    let base = row * N_DIM;
+                    let sumsq: f64 = (0..N_DIM)
+                        .map(|column| {
+                            let value = f64::from(x[base + column])
+                                + if column == index { delta } else { 0.0 };
+                            value * value
+                        })
+                        .sum();
+                    let scale = (sumsq / N_DIM as f64 + f64::from(EPS)).sqrt().recip();
+                    (0..N_DIM)
+                        .map(|column| {
+                            let value = f64::from(x[base + column])
+                                + if column == index { delta } else { 0.0 };
+                            f64::from(grad_output[base + column])
+                                * value
+                                * scale
+                                * f64::from(weight[column])
+                        })
+                        .sum::<f64>()
+                };
+                let finite_difference =
+                    (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon);
+                let reverse = f64::from(actual_j[row * N_DIM + index]);
+                assert!(
+                    (finite_difference - reverse).abs() < 1e-4,
+                    "rows={row_count} index={index}: finite difference {finite_difference} != {reverse}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn swiglu_vjp_matches_jacobian_and_relp_rules() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const N_DIM: usize = 79;
+        for row_count in [1usize, 2, 8] {
+            let len = row_count * N_DIM;
+            let gate: Vec<f32> = (0..len)
+                .map(|index| ((index * 19 + 5) % 101) as f32 * 0.11 - 5.5)
+                .collect();
+            let up: Vec<f32> = (0..len)
+                .map(|index| ((index * 13 + 2) % 47) as f32 * 0.031 - 0.67)
+                .collect();
+            let grad_output: Vec<f32> = (0..len)
+                .map(|index| ((index * 7 + 3) % 37) as f32 * 0.017 - 0.29)
+                .collect();
+            let mut expected_j_gate = vec![0.0f32; len];
+            let mut expected_j_up = vec![0.0f32; len];
+            let mut expected_r_gate = vec![0.0f32; len];
+            let mut expected_r_up = vec![0.0f32; len];
+            for index in 0..len {
+                let sigmoid = 1.0 / (1.0 + (-gate[index]).exp());
+                let silu = gate[index] * sigmoid;
+                let silu_derivative = sigmoid * (1.0 + gate[index] * (1.0 - sigmoid));
+                expected_j_gate[index] = grad_output[index] * up[index] * silu_derivative;
+                expected_j_up[index] = grad_output[index] * silu;
+                expected_r_gate[index] = 0.5 * grad_output[index] * up[index] * sigmoid;
+                expected_r_up[index] = 0.5 * grad_output[index] * silu;
+            }
+
+            let (actual_j_gate, actual_j_up) = silu_mul_vjp_f32_readback_for_test(
+                &ctx,
+                &gate,
+                &up,
+                &grad_output,
+                row_count,
+                N_DIM,
+                SwiGluVjpRule::Jacobian,
+            )
+            .unwrap();
+            let (actual_r_gate, actual_r_up) = silu_mul_vjp_f32_readback_for_test(
+                &ctx,
+                &gate,
+                &up,
+                &grad_output,
+                row_count,
+                N_DIM,
+                SwiGluVjpRule::RelpIdentityHalf,
+            )
+            .unwrap();
+            for (label, actual, expected) in [
+                ("j_gate", &actual_j_gate, &expected_j_gate),
+                ("j_up", &actual_j_up, &expected_j_up),
+                ("r_gate", &actual_r_gate, &expected_r_gate),
+                ("r_up", &actual_r_up, &expected_r_up),
+            ] {
+                let max_abs = actual
+                    .iter()
+                    .zip(expected)
+                    .map(|(actual, expected)| (actual - expected).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(max_abs < 2e-6, "rows={row_count} {label} error {max_abs}");
+            }
+
+            let index = len - 3;
+            let epsilon = 1e-4f64;
+            let objective = |gate_delta: f64, up_delta: f64| {
+                let gate_value = f64::from(gate[index]) + gate_delta;
+                let up_value = f64::from(up[index]) + up_delta;
+                f64::from(grad_output[index]) * gate_value / (1.0 + (-gate_value).exp()) * up_value
+            };
+            let gate_fd = (objective(epsilon, 0.0) - objective(-epsilon, 0.0)) / (2.0 * epsilon);
+            let up_fd = (objective(0.0, epsilon) - objective(0.0, -epsilon)) / (2.0 * epsilon);
+            assert!((gate_fd - f64::from(actual_j_gate[index])).abs() < 1e-5);
+            assert!((up_fd - f64::from(actual_j_up[index])).abs() < 1e-5);
         }
     }
 
@@ -32379,6 +33324,309 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn frozen_linear_dense_vjp_matches_stored_precision() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const N_IN: usize = 73;
+        const N_OUT: usize = 37;
+        for dtype in [GgmlType::F32, GgmlType::F16, GgmlType::BF16] {
+            let (weight_bytes, weight_f32) = synthetic_dense_linear_bank(dtype, N_IN, N_OUT);
+            for n_query in [1usize, 2, 8] {
+                let grad_output: Vec<f32> = (0..n_query * N_OUT)
+                    .map(|index| ((index * 17 + 3) % 29) as f32 * 0.007 - 0.091)
+                    .collect();
+                let mut expected = vec![0.0f32; n_query * N_IN];
+                for query in 0..n_query {
+                    for input in 0..N_IN {
+                        expected[query * N_IN + input] = (0..N_OUT)
+                            .map(|output| {
+                                weight_f32[output * N_IN + input]
+                                    * grad_output[query * N_OUT + output]
+                            })
+                            .sum();
+                    }
+                }
+                let actual = frozen_linear_vjp_f32_readback_for_test(
+                    &ctx,
+                    &weight_bytes,
+                    dtype,
+                    &grad_output,
+                    N_IN,
+                    N_OUT,
+                    n_query,
+                )
+                .unwrap();
+                let max_abs = actual
+                    .iter()
+                    .zip(&expected)
+                    .map(|(actual, expected)| (actual - expected).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    max_abs < 1e-5,
+                    "dtype={dtype:?} n_query={n_query}: max absolute error {max_abs}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frozen_linear_q8_0_vjp_matches_dequantized_adjoint() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const N_IN: usize = 96;
+        const N_OUT: usize = 37;
+        let (weight_bytes, weight_f32) = synthetic_q8_0_bank(N_IN, N_OUT);
+
+        for n_query in [1usize, 2, 8] {
+            let grad_output: Vec<f32> = (0..n_query * N_OUT)
+                .map(|index| ((index * 17 + 3) % 29) as f32 * 0.007 - 0.091)
+                .collect();
+            let mut expected = vec![0.0f32; n_query * N_IN];
+            for query in 0..n_query {
+                for input in 0..N_IN {
+                    let mut sum = 0.0f32;
+                    for output in 0..N_OUT {
+                        sum +=
+                            weight_f32[output * N_IN + input] * grad_output[query * N_OUT + output];
+                    }
+                    expected[query * N_IN + input] = sum;
+                }
+            }
+
+            let gpu = frozen_linear_q8_0_vjp_f32_readback_for_test(
+                &ctx,
+                &weight_bytes,
+                &grad_output,
+                N_IN,
+                N_OUT,
+                n_query,
+            )
+            .expect("Q8_0 activation VJP");
+            let max_abs = gpu
+                .iter()
+                .zip(&expected)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs < 1e-4,
+                "n_query={n_query}: max absolute error {max_abs}"
+            );
+
+            let primal: Vec<f32> = (0..n_query * N_IN)
+                .map(|index| ((index * 11 + 1) % 41) as f32 * 0.003 - 0.057)
+                .collect();
+            let mut forward_inner_product = 0.0f64;
+            for query in 0..n_query {
+                for output in 0..N_OUT {
+                    let mut value = 0.0f64;
+                    for input in 0..N_IN {
+                        value += weight_f32[output * N_IN + input] as f64
+                            * primal[query * N_IN + input] as f64;
+                    }
+                    forward_inner_product += value * grad_output[query * N_OUT + output] as f64;
+                }
+            }
+            let reverse_inner_product: f64 = gpu
+                .iter()
+                .zip(&primal)
+                .map(|(gradient, input)| *gradient as f64 * *input as f64)
+                .sum();
+            assert!(
+                (forward_inner_product - reverse_inner_product).abs() < 2e-5,
+                "n_query={n_query}: adjoint mismatch forward={forward_inner_product} reverse={reverse_inner_product}"
+            );
+
+            let query = n_query - 1;
+            for input in [0usize, 47, N_IN - 1] {
+                let epsilon = 1e-3f64;
+                let objective = |delta: f64| {
+                    let mut value = 0.0f64;
+                    for output in 0..N_OUT {
+                        let mut projected = 0.0f64;
+                        for column in 0..N_IN {
+                            let primal_value = primal[query * N_IN + column] as f64
+                                + if column == input { delta } else { 0.0 };
+                            projected += weight_f32[output * N_IN + column] as f64 * primal_value;
+                        }
+                        value += projected * grad_output[query * N_OUT + output] as f64;
+                    }
+                    value
+                };
+                let finite_difference =
+                    (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon);
+                let reverse = gpu[query * N_IN + input] as f64;
+                assert!(
+                    (finite_difference - reverse).abs() < 1e-4,
+                    "n_query={n_query} input={input}: finite difference {finite_difference} != reverse {reverse}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frozen_linear_q8_0_vjp_supports_offset_tensor_views() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const N_IN: usize = 64;
+        const N_OUT: usize = 5;
+        const N_QUERY: usize = 2;
+        let (weight_bytes, weight_f32) = synthetic_q8_0_bank(N_IN, N_OUT);
+        let grad_output: Vec<f32> = (0..N_QUERY * N_OUT)
+            .map(|index| index as f32 * 0.03 - 0.11)
+            .collect();
+        let weight = offset_tensor(
+            &ctx,
+            10,
+            &weight_bytes,
+            7,
+            vec![N_IN as u64, N_OUT as u64],
+            GgmlType::Q8_0,
+        );
+        let grad_output_tensor = offset_tensor(
+            &ctx,
+            8,
+            bytemuck::cast_slice(&grad_output),
+            12,
+            vec![N_OUT as u64, N_QUERY as u64],
+            GgmlType::F32,
+        );
+        let grad_input = offset_tensor(
+            &ctx,
+            12,
+            &vec![0u8; N_QUERY * N_IN * std::mem::size_of::<f32>()],
+            16,
+            vec![N_IN as u64, N_QUERY as u64],
+            GgmlType::F32,
+        );
+        one_shot(&ctx, |encoder| {
+            encode_frozen_linear_q8_0_vjp_f32(
+                &ctx,
+                encoder,
+                &weight,
+                &grad_output_tensor,
+                &grad_input,
+                N_IN,
+                N_OUT,
+                N_QUERY,
+            )
+        })
+        .unwrap();
+
+        let actual = tensor_f32_at_offset(&grad_input);
+        for query in 0..N_QUERY {
+            for input in 0..N_IN {
+                let expected: f32 = (0..N_OUT)
+                    .map(|output| {
+                        weight_f32[output * N_IN + input] * grad_output[query * N_OUT + output]
+                    })
+                    .sum();
+                assert!((actual[query * N_IN + input] - expected).abs() < 1e-5);
+            }
+        }
+        assert_offset_guards(&weight, 10, 7);
+        assert_offset_guards(&grad_output_tensor, 8, 12);
+        assert_offset_guards(&grad_input, 12, 16);
+    }
+
+    #[test]
+    fn frozen_linear_q8_0_vjp_rejects_invalid_contracts() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const N: usize = 32;
+        const N_QUERY: usize = 2;
+        let (weight_bytes, _) = synthetic_q8_0_bank(N, N);
+        let weight = MetalTensor::from_bytes(
+            &ctx,
+            &weight_bytes,
+            vec![N as u64, N as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap();
+        let grad_output = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![0.25f32; N * N_QUERY]),
+            vec![N as u64, N_QUERY as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let grad_input = MetalTensor::zeros_f32(&ctx, vec![N as u64, N_QUERY as u64]).unwrap();
+
+        let error = one_shot(&ctx, |enc| {
+            encode_frozen_linear_q8_0_vjp_f32(
+                &ctx,
+                enc,
+                &weight,
+                &grad_output,
+                &grad_input,
+                N - 1,
+                N,
+                N_QUERY,
+            )
+        })
+        .expect_err("non-block-aligned input must fail");
+        assert!(format!("{error}").contains("frozen_linear_q8_0_vjp"));
+
+        let mut read_only_output = grad_input.clone();
+        read_only_output.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        one_shot(&ctx, |enc| {
+            encode_frozen_linear_q8_0_vjp_f32(
+                &ctx,
+                enc,
+                &weight,
+                &grad_output,
+                &read_only_output,
+                N,
+                N,
+                N_QUERY,
+            )
+        })
+        .expect_err("read-only output must fail");
+
+        let overlapping_output = grad_output.clone();
+        one_shot(&ctx, |enc| {
+            encode_frozen_linear_q8_0_vjp_f32(
+                &ctx,
+                enc,
+                &weight,
+                &grad_output,
+                &overlapping_output,
+                N,
+                N,
+                N_QUERY,
+            )
+        })
+        .expect_err("overlapping output must fail");
+
+        let mut misaligned_output = grad_input.clone();
+        misaligned_output.offset = 2;
+        one_shot(&ctx, |enc| {
+            encode_frozen_linear_q8_0_vjp_f32(
+                &ctx,
+                enc,
+                &weight,
+                &grad_output,
+                &misaligned_output,
+                N,
+                N,
+                N_QUERY,
+            )
+        })
+        .expect_err("misaligned output must fail");
     }
 
     /// v0.73b.0 gate: Q8_0 mat-vec correctness. Uses a real Q8_0 weight

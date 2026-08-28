@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod full_lens;
-use full_lens::{CompareTransferArgs, ImportFullArgs, compare_transfer, import_full};
+use full_lens::{
+    CompareTransferArgs, ImportFullArgs, ReadFullArgs, compare_transfer, import_full, read_full,
+};
 
 const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
 const CHECKPOINT_SCHEMA: &str = "qwen.workspace_lens_row_checkpoint";
@@ -63,6 +65,8 @@ enum Command {
     /// Compare the published J-lens with native deployed-checkpoint J directions.
     #[command(alias = "validate-transfer")]
     CompareTransfer(CompareTransferArgs),
+    /// Read full-vocabulary logits through an imported published J-lens.
+    ReadFull(ReadFullArgs),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -477,6 +481,7 @@ fn main() -> Result<()> {
         Command::FitTokens(args) => fit_tokens(args),
         Command::ImportFull(args) => import_full(args),
         Command::CompareTransfer(args) => compare_transfer(args),
+        Command::ReadFull(args) => read_full(args),
     }
 }
 
@@ -2934,6 +2939,73 @@ mod tests {
         assert!(validate_token_args(&invalid).is_err());
         validate_prompt_id(&"x".repeat(MAX_PROMPT_ID_BYTES), 1).unwrap();
         assert!(validate_prompt_id(&"x".repeat(MAX_PROMPT_ID_BYTES + 1), 1).is_err());
+    }
+
+    #[test]
+    fn full_readout_cli_requires_exactly_one_input_form() {
+        let parsed = Cli::try_parse_from([
+            "qwen-lens",
+            "read-full",
+            "--model",
+            "model.gguf",
+            "--full-lens",
+            "full-lens",
+            "--prompt",
+            "The capital of France is",
+            "--layers",
+            "0,31,62",
+            "--identity-cache",
+            "identity-cache",
+            "--allow-unvalidated-transfer",
+        ])
+        .unwrap();
+        assert!(matches!(parsed.command, Command::ReadFull(_)));
+
+        let hyphen_prompt = Cli::try_parse_from([
+            "qwen-lens",
+            "read-full",
+            "--model",
+            "model.gguf",
+            "--full-lens",
+            "full-lens",
+            "--prompt",
+            "--help",
+            "--identity-cache",
+            "identity-cache",
+        ])
+        .unwrap();
+        assert!(matches!(hyphen_prompt.command, Command::ReadFull(_)));
+
+        assert!(
+            Cli::try_parse_from([
+                "qwen-lens",
+                "read-full",
+                "--model",
+                "model.gguf",
+                "--full-lens",
+                "full-lens",
+                "--prompt",
+                "hello",
+                "--token-ids",
+                "1,2",
+                "--identity-cache",
+                "identity-cache",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "qwen-lens",
+                "read-full",
+                "--model",
+                "model.gguf",
+                "--full-lens",
+                "full-lens",
+                "--identity-cache",
+                "identity-cache",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

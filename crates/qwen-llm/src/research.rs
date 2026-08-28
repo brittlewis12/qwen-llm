@@ -10,11 +10,12 @@ use crate::metal::{
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_vjp_f32,
     encode_gdn_prep_packed_ckpt_f32, encode_gdn_step_decay_packed_ckpt_f32,
     encode_gdn_step_decay_packed_vjp_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_l2_norm_vjp_batched_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_broadcast_f32,
+    encode_l2_norm_vjp_batched_f32, encode_mat_vec_f16_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_broadcast_f32,
     encode_rms_norm_mul_vjp_rows_f32, encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32,
     encode_sigmoid_f32, encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32,
     encode_silu_mul_vjp_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_split_packed_vjp_f32,
+    encode_topk16_f32,
 };
 use crate::metal_forward::{
     MetalAttnBlock, MetalBlock, MetalGdnBlock, MfError, RMS_EPS, encode_mat_vec_dispatch,
@@ -547,6 +548,27 @@ impl ResearchTokenReadouts {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchPromptLastCapture {
+    pub position: usize,
+    pub token_id: i32,
+    pub capture: ActivationCapture,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchVocabularyScore {
+    pub token_id: u32,
+    pub logit: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchFullVocabularyReadout {
+    /// Diagnostic F64 host recomputation, rounded to F32. The deployed Metal
+    /// RMSNorm performs its own F32 parallel reduction for the actual logits.
+    pub rms_denominator_f64_recomputed: f32,
+    pub scores: Vec<ResearchVocabularyScore>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResearchError {
     #[error("runtime: {0}")]
@@ -719,6 +741,16 @@ pub enum ResearchError {
     },
     #[error("selected-token readout {name} contains a non-finite value at flat index {index}")]
     NonFiniteTokenReadoutData { name: &'static str, index: usize },
+    #[error("full-vocabulary lens readout requires at least one prompt token")]
+    EmptyFullReadoutPrompt,
+    #[error("full-vocabulary prompt capture requires a fresh sequence at position zero, got {0}")]
+    FullReadoutRequiresFreshSequence(usize),
+    #[error("full-vocabulary lens top-k {got} is outside the supported range 1..={max}")]
+    InvalidFullReadoutTopK { got: usize, max: usize },
+    #[error(
+        "full-vocabulary lens top-k returned token ID {token_id} outside vocabulary {vocab_size}"
+    )]
+    InvalidFullReadoutToken { token_id: i32, vocab_size: u32 },
     #[error(
         "research allocation for {name} requires {requested_bytes} bytes, exceeding the {max_bytes}-byte budget"
     )]
@@ -1032,6 +1064,279 @@ impl ResearchSession<'_, '_> {
             expected_covectors,
             "projected F16 transport readouts",
         )
+    }
+
+    /// Consume a fresh prompt without running the final norm or LM head and
+    /// capture post-block residuals for its final token in caller layer order.
+    pub fn forward_prompt_last_post_block_residuals(
+        &mut self,
+        token_ids: &[i32],
+        capture_layers: &[u32],
+    ) -> Result<ResearchPromptLastCapture, ResearchError> {
+        if token_ids.is_empty() {
+            return Err(ResearchError::EmptyFullReadoutPrompt);
+        }
+        if self.sequence.position() != 0 {
+            return Err(ResearchError::FullReadoutRequiresFreshSequence(
+                self.sequence.position(),
+            ));
+        }
+        if capture_layers.is_empty() {
+            return Err(ResearchError::EmptyWorkspaceSourceLayers);
+        }
+        let arch = self.arch();
+        validate_capture_layers(arch.n_layer, capture_layers)?;
+        for &token_id in token_ids {
+            if token_id < 0 || token_id as u32 >= arch.vocab_size {
+                return Err(MfError::BadToken(token_id, arch.vocab_size).into());
+            }
+        }
+        self.sequence.ensure_can_append(token_ids.len())?;
+        let hidden_size = arch.hidden_size as usize;
+        let capture_len = checked_product(capture_layers.len(), hidden_size)?;
+        let capture = MetalTensor::zeros_f32(
+            self.model.context(),
+            vec![u64::try_from(capture_len).map_err(|_| ResearchError::SizeOverflow)?],
+        )?;
+        let forward = self.model.forward();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            let position_u32 =
+                u32::try_from(position).map_err(|_| ResearchError::PositionOverflow(position))?;
+            let state = unsafe { self.sequence.metal_session_mut() };
+            state.ensure_usable()?;
+            let result = if position + 1 == token_ids.len() {
+                forward.single_token_with_multi_hidden_no_tail(
+                    token_id,
+                    position_u32,
+                    state,
+                    capture_layers,
+                    &capture,
+                )
+            } else {
+                forward.single_token_no_tail(token_id, position_u32, state)
+            };
+            if let Err(error) = result {
+                state.poison("full-vocabulary prompt capture forward failed");
+                return Err(error.into());
+            }
+            self.sequence.advance_by(1)?;
+        }
+        let position = token_ids.len() - 1;
+        Ok(ResearchPromptLastCapture {
+            position,
+            token_id: token_ids[position],
+            capture: ActivationCapture {
+                layer_ids: try_clone_slice(capture_layers, "full readout capture layers")?,
+                hidden_size,
+                values: read_f32_fallible(
+                    &capture,
+                    capture_len,
+                    "full readout post-block residuals",
+                )?,
+            },
+        })
+    }
+
+    /// Apply one row-major F16 transport, the deployed final RMSNorm, and the
+    /// deployed LM head, then return exact full-vocabulary top-k logits.
+    pub fn apply_f16_transport_topk(
+        &self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+        top_k: usize,
+    ) -> Result<ResearchFullVocabularyReadout, ResearchError> {
+        const TOP_K_MAX: usize = 16;
+        if top_k == 0 || top_k > TOP_K_MAX {
+            return Err(ResearchError::InvalidFullReadoutTopK {
+                got: top_k,
+                max: TOP_K_MAX,
+            });
+        }
+        let arch = self.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let vocab_size = arch.vocab_size as usize;
+        if source_residual.len() != hidden_size {
+            return Err(ResearchError::ActivationSize {
+                name: "full readout source residual",
+                got: source_residual.len(),
+                expected: hidden_size,
+            });
+        }
+        if let Some(index) = source_residual.iter().position(|value| !value.is_finite()) {
+            return Err(ResearchError::NonFiniteTokenReadoutData {
+                name: "full readout source residual",
+                index,
+            });
+        }
+        let model = self.model.metal_model();
+        let expected_lm_head_shape = [hidden_size, vocab_size];
+        if linear_shape(ResearchLinear::LmHead, &model.lm_head).ok() != Some(expected_lm_head_shape)
+        {
+            return Err(ResearchError::InvalidTokenReadoutLmHeadShape {
+                got: model.lm_head.shape.clone(),
+                expected: expected_lm_head_shape,
+            });
+        }
+        if !matches!(
+            model.lm_head.dtype,
+            GgmlType::F32
+                | GgmlType::F16
+                | GgmlType::BF16
+                | GgmlType::Q4_K
+                | GgmlType::Q6_K
+                | GgmlType::Q8_0
+                | GgmlType::IQ4_NL
+        ) {
+            return Err(ResearchError::UnsupportedTokenReadoutLmHeadDtype {
+                dtype: model.lm_head.dtype,
+            });
+        }
+        if model.output_norm.dtype != GgmlType::F32
+            || model.output_norm.shape.as_slice() != [hidden_size as u64]
+        {
+            return Err(ResearchError::InvalidTokenReadoutOutputNorm {
+                dtype: model.output_norm.dtype,
+                shape: model.output_norm.shape.clone(),
+                expected: hidden_size,
+            });
+        }
+        let hidden_bytes = checked_product(hidden_size, std::mem::size_of::<f32>())?;
+        let logits_bytes = checked_product(vocab_size, std::mem::size_of::<f32>())?;
+        let peak_bytes = transport_bytes
+            .len()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(5)?))
+            .and_then(|bytes| bytes.checked_add(logits_bytes.checked_mul(2)?))
+            .and_then(|bytes| bytes.checked_add(TOP_K_MAX * 8))
+            .ok_or(ResearchError::SizeOverflow)?;
+        enforce_research_byte_budget("full-vocabulary F16 transport readout", peak_bytes)?;
+
+        let context = self.model.context();
+        let transport = MetalTensor::from_bytes(
+            context,
+            transport_bytes,
+            vec![hidden_size as u64, hidden_size as u64],
+            GgmlType::F16,
+        )?;
+        let source = MetalTensor::from_bytes(
+            context,
+            bytemuck::cast_slice(source_residual),
+            vec![hidden_size as u64],
+            GgmlType::F32,
+        )?;
+        let transported = MetalTensor::zeros_f32(context, vec![hidden_size as u64])?;
+        let normalized = MetalTensor::zeros_f32(context, vec![hidden_size as u64])?;
+        let logits = MetalTensor::zeros_f32(context, vec![vocab_size as u64])?;
+        let top_ids = MetalTensor::zeros_i32(context, vec![TOP_K_MAX as u64])?;
+        let top_values = MetalTensor::zeros_f32(context, vec![TOP_K_MAX as u64])?;
+        let command = context
+            .queue
+            .commandBuffer()
+            .ok_or(ResearchError::MissingCommandBuffer)?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = (|| -> Result<(), ResearchError> {
+            encode_mat_vec_f16_f32(
+                context,
+                &encoder,
+                &transport,
+                &source,
+                &transported,
+                hidden_size,
+                hidden_size,
+            )?;
+            encode_rms_norm_mul_f32(
+                context,
+                &encoder,
+                &transported,
+                &model.output_norm,
+                &normalized,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                &encoder,
+                &model.lm_head,
+                &normalized,
+                &logits,
+                hidden_size,
+                vocab_size,
+            )?;
+            encode_topk16_f32(
+                context,
+                &encoder,
+                &logits,
+                &top_ids,
+                &top_values,
+                1,
+                vocab_size,
+            )?;
+            Ok(())
+        })();
+        encoder.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        validate_completed_command(&command)?;
+
+        let transported_values = read_f32_fallible(
+            &transported,
+            hidden_size,
+            "full readout transported residual",
+        )?;
+        if let Some(index) = transported_values
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            return Err(ResearchError::NonFiniteTokenReadoutData {
+                name: "full readout transported residual",
+                index,
+            });
+        }
+        let rms_denominator_f64_recomputed = (transported_values
+            .iter()
+            .map(|value| f64::from(*value) * f64::from(*value))
+            .sum::<f64>()
+            / hidden_size as f64
+            + f64::from(RMS_EPS))
+        .sqrt() as f32;
+        let full_logits = read_f32_fallible(&logits, vocab_size, "full readout logits")?;
+        if let Some(index) = full_logits.iter().position(|value| !value.is_finite()) {
+            return Err(ResearchError::NonFiniteTokenReadoutData {
+                name: "full readout logits",
+                index,
+            });
+        }
+        let ids = read_i32_fallible(&top_ids, TOP_K_MAX, "full readout top-k IDs")?;
+        let values = read_f32_fallible(&top_values, TOP_K_MAX, "full readout top-k logits")?;
+        let mut scores = Vec::new();
+        scores.try_reserve_exact(top_k).map_err(|_| {
+            ResearchError::ResearchHostAllocationFailed {
+                name: "full readout top-k scores",
+                elements: top_k,
+            }
+        })?;
+        for (&token_id, &logit) in ids.iter().zip(&values).take(top_k) {
+            if token_id < 0 || token_id as u32 >= arch.vocab_size {
+                return Err(ResearchError::InvalidFullReadoutToken {
+                    token_id,
+                    vocab_size: arch.vocab_size,
+                });
+            }
+            if !logit.is_finite() {
+                return Err(ResearchError::NonFiniteTokenReadoutData {
+                    name: "full readout top-k logits",
+                    index: scores.len(),
+                });
+            }
+            scores.push(ResearchVocabularyScore {
+                token_id: token_id as u32,
+                logit,
+            });
+        }
+        Ok(ResearchFullVocabularyReadout {
+            rms_denominator_f64_recomputed,
+            scores,
+        })
     }
 
     /// Advance one token and return post-block residuals in caller layer order.
@@ -5649,6 +5954,32 @@ fn read_f32_fallible(
             .cast::<u8>()
             .add(tensor.offset as usize)
             .cast::<f32>();
+        std::ptr::copy_nonoverlapping(source, output.as_mut_ptr(), len);
+    }
+    Ok(output)
+}
+
+fn read_i32_fallible(
+    tensor: &MetalTensor,
+    len: usize,
+    name: &'static str,
+) -> Result<Vec<i32>, ResearchError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(len)
+        .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+            name,
+            elements: len,
+        })?;
+    output.resize(len, 0);
+    unsafe {
+        let source = tensor
+            .buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(tensor.offset as usize)
+            .cast::<i32>();
         std::ptr::copy_nonoverlapping(source, output.as_mut_ptr(), len);
     }
     Ok(output)

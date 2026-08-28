@@ -10639,6 +10639,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(), MfError> {
+        session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
             return Err(MfError::UnsupportedMoe);
         }
@@ -10653,7 +10654,14 @@ impl<'a> MetalForward<'a> {
             *ptr = token_id;
         }
 
-        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let cmd_buf = self
+            .ctx
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| MfError::CommandBuffer {
+                status: "unavailable".into(),
+                error: "Metal did not provide a command buffer".into(),
+            })?;
         let enc = KernelEncoder::begin(&cmd_buf);
 
         encode_get_rows_f32(
@@ -10691,6 +10699,15 @@ impl<'a> MetalForward<'a> {
         // read the overwritten id. Defer real async pipelining to
         // v0.75.1 where packed prefill restructures this.
         cmd_buf.waitUntilCompleted();
+        let status = cmd_buf.status();
+        let error = cmd_buf.error();
+        if status != MTLCommandBufferStatus::Completed || error.is_some() {
+            session.poison("no-tail forward command failed");
+            return Err(MfError::CommandBuffer {
+                status: format!("{status:?}"),
+                error: format!("{error:?}"),
+            });
+        }
         Ok(())
     }
 
@@ -10710,6 +10727,7 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         hidden_dst: &MetalTensor,
     ) -> Result<(), MfError> {
+        session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
             return Err(MfError::UnsupportedMoe);
         }
@@ -10743,7 +10761,14 @@ impl<'a> MetalForward<'a> {
             *ptr = token_id;
         }
 
-        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let cmd_buf = self
+            .ctx
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| MfError::CommandBuffer {
+                status: "unavailable".into(),
+                error: "Metal did not provide a command buffer".into(),
+            })?;
         let enc = KernelEncoder::begin(&cmd_buf);
 
         encode_get_rows_f32(
@@ -10790,6 +10815,15 @@ impl<'a> MetalForward<'a> {
         enc.end();
         cmd_buf.commit();
         cmd_buf.waitUntilCompleted();
+        let status = cmd_buf.status();
+        let error = cmd_buf.error();
+        if status != MTLCommandBufferStatus::Completed || error.is_some() {
+            session.poison("multi-hidden no-tail forward command failed");
+            return Err(MfError::CommandBuffer {
+                status: format!("{status:?}"),
+                error: format!("{error:?}"),
+            });
+        }
         Ok(())
     }
 

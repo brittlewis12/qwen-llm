@@ -5,8 +5,8 @@
 //! F32 pending index keys with an explicit pooled F16 rounding point, F16
 //! compressed index keys, and F16 main K/V caches are this Metal checkpoint's
 //! numerical contract. It intentionally differs from BF16 serving backends.
-//! Dense packed attention preserves that state contract while qualifying the
-//! F16-staged matrix kernels against chronological scalar execution.
+//! Packed attention preserves that state contract while qualifying the
+//! F16-staged dense and selected kernels against chronological scalar execution.
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
@@ -42,8 +42,6 @@ const PACKED_ATTENTION_THREADS: usize = 128;
 const SELECTED_COUNT_MISMATCH_STATUS: i32 = 4;
 const SELECTED_AUDIT_ORDER_MISMATCH_STATUS: i32 = 5;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
-// Staged for the all-layer packed composer in the next checkpoint.
-#[allow(dead_code)]
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1556,6 +1554,7 @@ pub fn encode_qwen_sparse_attention_text<'a>(
 /// causal order. Any encode or command failure makes mutable state
 /// indeterminate and requires poisoning the enclosing transaction.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1583,9 +1582,18 @@ pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor(
     }
 }
 
+/// Encode a consecutive text chunk, using block selection for queries beyond
+/// the dense QSA range, into the scalar QSA cache owner.
+///
+/// # Safety
+///
+/// The caller must retain every tensor and exclusive logical ownership of
+/// `workspace` and `scratch` until the command completes successfully or is
+/// permanently abandoned. Commands touching this workspace must execute in
+/// causal order. Any encode or command failure makes mutable state
+/// indeterminate and requires poisoning the enclosing transaction.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-unsafe fn encode_qwen_sparse_attention_text_packed_motor(
+pub(crate) unsafe fn encode_qwen_sparse_attention_text_packed_motor(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     input: &MetalTensor,
@@ -1613,6 +1621,7 @@ unsafe fn encode_qwen_sparse_attention_text_packed_motor(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_profiled(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1638,6 +1647,36 @@ pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_profil
             layer,
             Some(recorder),
             false,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn encode_qwen_sparse_attention_text_packed_motor_profiled(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    workspace: &mut QwenSparseAttentionMetalWorkspace,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    tokens: usize,
+    layer: u32,
+    recorder: &mut Qwen4ExpPackedProfileRecorder<'_>,
+) -> Result<MetalTensor, Qwen4ExpQsaError> {
+    unsafe {
+        encode_qwen_sparse_attention_text_dense_packed_motor_inner(
+            ctx,
+            enc,
+            input,
+            weights,
+            workspace,
+            scratch,
+            start_position,
+            tokens,
+            layer,
+            Some(recorder),
+            true,
         )
     }
 }
@@ -1803,6 +1842,7 @@ fn prepare_packed_control_scalars(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) fn validate_dense_packed_contract(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1825,6 +1865,31 @@ pub(crate) fn validate_dense_packed_contract(
         false,
     )
     .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_and_preflight_packed_contract(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    workspace: &QwenSparseAttentionMetalWorkspace,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    tokens: usize,
+) -> Result<(), Qwen4ExpQsaError> {
+    let plan = validate_packed_contract(
+        ctx,
+        enc,
+        input,
+        weights,
+        workspace,
+        scratch,
+        start_position,
+        tokens,
+        true,
+    )?;
+    preflight_packed(ctx, weights, plan)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3217,16 +3282,14 @@ fn encode_packed_step(
             let band_tag = crate::metal::dispatch_census_tag_scope(|| {
                 format!("qwen4exp.qsa.selected_band.{band_ordinal}")
             });
-            if band_ordinal > 0 {
-                encode_selected_control_reset(
-                    ctx,
-                    enc,
-                    &band_views.visible_blocks,
-                    &band_views.selected_count,
-                    &band_views.selector_status,
-                    band_rows,
-                )?;
-            }
+            encode_selected_control_reset(
+                ctx,
+                enc,
+                &band_views.visible_blocks,
+                &band_views.selected_count,
+                &band_views.selector_status,
+                band_rows,
+            )?;
             let packet = encode_selected_attention_packet(
                 ctx,
                 enc,
@@ -7291,13 +7354,9 @@ mod tests {
                     .filter(|row| row.tag.as_deref() == Some(tag.as_str()))
                     .map(|row| row.kernel.as_str())
                     .collect::<Vec<_>>();
-                if ordinal == 0 {
-                    assert_eq!(names, packet);
-                } else {
-                    let mut expected = vec!["kernel_qwen4exp_qsa_reset_selected_controls_i32"];
-                    expected.extend(packet);
-                    assert_eq!(names, expected);
-                }
+                let mut expected = vec!["kernel_qwen4exp_qsa_reset_selected_controls_i32"];
+                expected.extend(packet);
+                assert_eq!(names, expected);
             }
             assert!(
                 !census
@@ -7327,7 +7386,7 @@ mod tests {
                     .iter()
                     .filter(|&&name| { name == "kernel_qwen4exp_qsa_reset_selected_controls_i32" })
                     .count(),
-                1
+                2
             );
             assert_eq!(
                 names

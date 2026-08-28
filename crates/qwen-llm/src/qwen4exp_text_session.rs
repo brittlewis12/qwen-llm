@@ -1031,7 +1031,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         ctx: &MetalContext,
         geometry: Qwen4ExpTextSessionMetalGeometry,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::new_for_tests_with_options(ctx, geometry, false)
+        Self::new_for_tests_with_options(ctx, geometry, None)
     }
 
     #[cfg(test)]
@@ -1039,22 +1039,36 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         ctx: &MetalContext,
         geometry: Qwen4ExpTextSessionMetalGeometry,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::new_for_tests_with_options(ctx, geometry, true)
+        let selected_capable = geometry.packed_selected_capable_for_extent(geometry.capacity())?;
+        Self::new_for_tests_with_options(ctx, geometry, Some(selected_capable))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests_with_dense_packed(
+        ctx: &MetalContext,
+        geometry: Qwen4ExpTextSessionMetalGeometry,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        Self::new_for_tests_with_options(ctx, geometry, Some(false))
     }
 
     #[cfg(test)]
     fn new_for_tests_with_options(
         ctx: &MetalContext,
         geometry: Qwen4ExpTextSessionMetalGeometry,
-        include_packed_prefill: bool,
+        packed_selected_capable: Option<bool>,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let _allocation_transaction = ctx.begin_allocation_transaction();
-        let memory = if include_packed_prefill {
-            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_packed_residency_bytes(
-                ctx, &geometry, 0,
-            )?
-        } else {
-            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_residency_bytes(ctx, &geometry, 0)?
+        let memory = match packed_selected_capable {
+            Some(selected_capable) => Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+                ctx,
+                &geometry,
+                0,
+                Some(geometry.packed_capacity()?),
+                selected_capable,
+            )?,
+            None => {
+                Qwen4ExpTextSessionMemoryPlan::for_geometry_with_residency_bytes(ctx, &geometry, 0)?
+            }
         };
         let admission = memory.admission_after_residency(MetalMemorySignals {
             recommended_max_bytes: u64::MAX,
@@ -1118,6 +1132,19 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             tensors.extend(block.persistent_state_tensors());
         }
         tensors
+    }
+
+    #[cfg(test)]
+    pub(crate) fn qsa_persistent_state_tensors(&self) -> Vec<(u32, Vec<MetalTensor>)> {
+        self.geometry
+            .post_ple
+            .iter()
+            .zip(&self.post_ple)
+            .filter_map(|(geometry, workspace)| {
+                (geometry.mixer().kind() == MixerKind::QwenSparseAttention)
+                    .then(|| (geometry.layer(), workspace.persistent_state_tensors()))
+            })
+            .collect()
     }
 
     #[cfg(test)]

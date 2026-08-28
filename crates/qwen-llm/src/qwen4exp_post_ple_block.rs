@@ -32,9 +32,9 @@ use crate::qwen4exp_profile::{
 use crate::qwen4exp_qsa::{
     Qwen4ExpQsaError, QwenSparseAttentionMetalGeometry, QwenSparseAttentionMetalWeights,
     QwenSparseAttentionMetalWorkspace, QwenSparseAttentionPackedScratch,
-    encode_qwen_sparse_attention_text, encode_qwen_sparse_attention_text_dense_packed_motor,
-    encode_qwen_sparse_attention_text_dense_packed_motor_profiled, preflight_dense_packed,
-    validate_dense_packed_contract,
+    encode_qwen_sparse_attention_text, encode_qwen_sparse_attention_text_packed_motor,
+    encode_qwen_sparse_attention_text_packed_motor_profiled,
+    validate_and_preflight_packed_contract as validate_and_preflight_qsa_packed,
 };
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
@@ -727,7 +727,7 @@ pub(crate) fn validate_and_preflight_packed(
             Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights),
             Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace),
         ) => {
-            validate_dense_packed_contract(
+            validate_and_preflight_qsa_packed(
                 ctx,
                 enc,
                 &mixed,
@@ -737,7 +737,6 @@ pub(crate) fn validate_and_preflight_packed(
                 start_position,
                 tokens,
             )?;
-            preflight_dense_packed(ctx, weights)?;
         }
         _ => return invalid("packed mixer weight and workspace variants differ"),
     }
@@ -922,7 +921,7 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
             ) => {
                 if let Some(recorder) = profile.as_deref_mut() {
                     unsafe {
-                        encode_qwen_sparse_attention_text_dense_packed_motor_profiled(
+                        encode_qwen_sparse_attention_text_packed_motor_profiled(
                             ctx,
                             enc,
                             attention.mixed(),
@@ -937,7 +936,7 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
                     }?
                 } else {
                     unsafe {
-                        encode_qwen_sparse_attention_text_dense_packed_motor(
+                        encode_qwen_sparse_attention_text_packed_motor(
                             ctx,
                             enc,
                             attention.mixed(),
@@ -1134,7 +1133,7 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_stage_sampled(
                 Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights),
                 Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace),
             ) => unsafe {
-                encode_qwen_sparse_attention_text_dense_packed_motor(
+                encode_qwen_sparse_attention_text_packed_motor(
                     ctx,
                     &mixer_encoder,
                     attention.mixed(),

@@ -760,15 +760,18 @@ mod tests {
     use crate::qwen4exp_post_ple_block::{
         Qwen4ExpPostPleMixerMetalGeometry, Qwen4ExpPostPleMixerMetalWeights,
     };
+    use crate::qwen4exp_profile::packed_stage_sample_count;
     use crate::qwen4exp_qsa::{QwenSparseAttentionMetalGeometry, QwenSparseAttentionMetalWeights};
     use crate::qwen4exp_residency::Qwen4ExpMetalWeightPlan;
     use crate::qwen4exp_runtime::forward_qwen4exp_text_token_sync;
     use crate::qwen4exp_text_session::{
-        Qwen4ExpTextSessionMetalGeometry, Qwen4ExpTextSessionMetalWeights,
-        Qwen4ExpTextSessionMetalWorkspace, encode_qwen4exp_text_packed, encode_qwen4exp_text_token,
+        Qwen4ExpPackedEncodeCpuTiming, Qwen4ExpTextSessionMetalGeometry,
+        Qwen4ExpTextSessionMetalWeights, Qwen4ExpTextSessionMetalWorkspace,
+        encode_qwen4exp_text_packed, encode_qwen4exp_text_packed_layer_sampled,
+        encode_qwen4exp_text_token,
     };
     use crate::tensor::TensorDesc;
-    use half::bf16;
+    use half::{bf16, f16};
     use objc2_metal::MTLCommandQueue;
 
     const BRANCHES: usize = 4;
@@ -950,6 +953,26 @@ mod tests {
                 .add(tensor.offset as usize)
                 .cast::<f32>();
             std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
+        }
+    }
+
+    fn read_numeric_tensor(tensor: &MetalTensor) -> Vec<f32> {
+        match tensor.dtype {
+            GgmlType::F32 => read_f32(tensor),
+            GgmlType::F16 => unsafe {
+                let source = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize)
+                    .cast::<u16>();
+                std::slice::from_raw_parts(source, tensor.n_elements() as usize)
+                    .iter()
+                    .map(|&bits| f16::from_bits(bits).to_f32())
+                    .collect()
+            },
+            dtype => panic!("unsupported numeric test tensor type {dtype:?}"),
         }
     }
 
@@ -1273,39 +1296,42 @@ mod tests {
     }
 
     impl QsaFixture {
-        fn new(ctx: &MetalContext, seed: usize) -> Self {
+        fn new(ctx: &MetalContext, query_heads: usize, kv_heads: usize, seed: usize) -> Self {
+            let query_width = query_heads * 256;
+            let query_projection_width = query_width * 2;
+            let kv_width = kv_heads * 256;
             Self {
                 tensors: [
                     weight_quant(
                         ctx,
-                        HIDDEN * 2048,
-                        vec![HIDDEN as u64, 2048],
+                        HIDDEN * query_projection_width,
+                        vec![HIDDEN as u64, query_projection_width as u64],
                         GgmlType::Q8_0,
                         HIDDEN,
                         seed,
                     ),
                     weight_quant(
                         ctx,
-                        HIDDEN * 512,
-                        vec![HIDDEN as u64, 512],
+                        HIDDEN * kv_width,
+                        vec![HIDDEN as u64, kv_width as u64],
                         GgmlType::Q8_0,
                         HIDDEN,
                         seed + 1,
                     ),
                     weight_quant(
                         ctx,
-                        HIDDEN * 512,
-                        vec![HIDDEN as u64, 512],
+                        HIDDEN * kv_width,
+                        vec![HIDDEN as u64, kv_width as u64],
                         GgmlType::Q8_0,
                         HIDDEN,
                         seed + 2,
                     ),
                     weight_quant(
                         ctx,
-                        1024 * HIDDEN,
-                        vec![1024, HIDDEN as u64],
+                        query_width * HIDDEN,
+                        vec![query_width as u64, HIDDEN as u64],
                         GgmlType::Q8_0,
-                        1024,
+                        query_width,
                         seed + 3,
                     ),
                     weight_f32(ctx, 256, vec![256], seed + 4, 1.0),
@@ -1435,10 +1461,32 @@ mod tests {
 
     impl SyntheticFixture {
         fn new(ctx: &MetalContext) -> Self {
-            let config = synthetic_config();
+            Self::new_with_qsa_kv_heads(ctx, 2)
+        }
+
+        fn new_with_qsa_kv_heads(ctx: &MetalContext, qsa_kv_heads: u32) -> Self {
+            let mut config = synthetic_config();
+            config.attention.kv_heads = qsa_kv_heads;
+            Self::new_with_config(ctx, config)
+        }
+
+        fn new_with_two_qsa_layers(ctx: &MetalContext) -> Self {
+            let mut config = synthetic_config();
+            config.layer_count = 8;
+            config.attention.kv_heads = 1;
+            config.compress_ratios = (0..config.layer_count)
+                .map(|layer| if layer % 4 == 3 { 4 } else { 0 })
+                .collect();
+            Self::new_with_config(ctx, config)
+        }
+
+        fn new_with_config(ctx: &MetalContext, config: Qwen4ExpConfig) -> Self {
+            config.validate().unwrap();
             let geometry =
                 Qwen4ExpLayersZeroThreeMetalGeometry::from_config(&config, CAPACITY).unwrap();
             let gdn = geometry.zero_one().layer_zero().gdn();
+            let qsa_query_heads = config.attention.query_heads as usize;
+            let qsa_kv_heads = config.attention.kv_heads as usize;
             Self {
                 token: weight_quant(
                     ctx,
@@ -1454,7 +1502,7 @@ mod tests {
                     GdnLayerFixture::new(ctx, gdn, 210),
                 ],
                 layer_three_attention: ResidualFixture::new(ctx, 310),
-                layer_three_qsa: QsaFixture::new(ctx, 330),
+                layer_three_qsa: QsaFixture::new(ctx, qsa_query_heads, qsa_kv_heads, 330),
                 layer_three_ffn: ResidualFixture::new(ctx, 350),
                 layer_three_moe: MoeFixture::new(ctx, 370),
                 ple: PleFixture::new(ctx),
@@ -1533,36 +1581,39 @@ mod tests {
             tail: &'a TextSessionTailFixture,
             geometry: &Qwen4ExpTextSessionMetalGeometry,
         ) -> Qwen4ExpTextSessionMetalWeights<'a> {
-            let layer_two = geometry.post_ple()[0];
-            let layer_three = geometry.post_ple()[1];
-            let layer_two_gdn = match layer_two.mixer() {
-                Qwen4ExpPostPleMixerMetalGeometry::GatedDeltaNet(geometry) => geometry,
-                _ => unreachable!(),
-            };
+            let post_ple = geometry
+                .post_ple()
+                .iter()
+                .copied()
+                .map(|block| match block.mixer() {
+                    Qwen4ExpPostPleMixerMetalGeometry::GatedDeltaNet(gdn) => {
+                        Qwen4ExpPostPleBlockMetalWeights {
+                            geometry: block,
+                            attention_residual: self.layers[2].attention.weights(),
+                            mixer: Qwen4ExpPostPleMixerMetalWeights::GatedDeltaNet(
+                                self.layers[2].gdn.weights(gdn),
+                            ),
+                            ffn_residual: self.layers[2].ffn.weights(),
+                            moe: self.layers[2].moe.weights(block.moe()),
+                        }
+                    }
+                    Qwen4ExpPostPleMixerMetalGeometry::QwenSparseAttention(qsa) => {
+                        Qwen4ExpPostPleBlockMetalWeights {
+                            geometry: block,
+                            attention_residual: self.layer_three_attention.weights(),
+                            mixer: Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(
+                                self.layer_three_qsa.weights(qsa),
+                            ),
+                            ffn_residual: self.layer_three_ffn.weights(),
+                            moe: self.layer_three_moe.weights(block.moe()),
+                        }
+                    }
+                })
+                .collect();
             Qwen4ExpTextSessionMetalWeights {
                 geometry: geometry.clone(),
                 zero_one: self.zero_one_weights(),
-                post_ple: vec![
-                    Qwen4ExpPostPleBlockMetalWeights {
-                        geometry: layer_two,
-                        attention_residual: self.layers[2].attention.weights(),
-                        mixer: Qwen4ExpPostPleMixerMetalWeights::GatedDeltaNet(
-                            self.layers[2].gdn.weights(layer_two_gdn),
-                        ),
-                        ffn_residual: self.layers[2].ffn.weights(),
-                        moe: self.layers[2].moe.weights(layer_two.moe()),
-                    },
-                    Qwen4ExpPostPleBlockMetalWeights {
-                        geometry: layer_three,
-                        attention_residual: self.layer_three_attention.weights(),
-                        mixer: Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(
-                            self.layer_three_qsa
-                                .weights(layer_three.mixer().qsa().unwrap()),
-                        ),
-                        ffn_residual: self.layer_three_ffn.weights(),
-                        moe: self.layer_three_moe.weights(layer_three.moe()),
-                    },
-                ],
+                post_ple,
                 final_read: tail.final_residual.weights().read,
                 output: &tail.output,
             }
@@ -1713,6 +1764,65 @@ mod tests {
         assert_eq!(logits.dtype(), GgmlType::F32);
         let logits = logits.to_vec();
         (read_f32(workspace.final_hidden_tensor()), logits)
+    }
+
+    fn run_packed_text_session(
+        ctx: &MetalContext,
+        fixture: &SyntheticFixture,
+        tail: &TextSessionTailFixture,
+        geometry: &Qwen4ExpTextSessionMetalGeometry,
+        workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+        tokens: &[u32],
+        start_position: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let weights = fixture.text_weights(tail, geometry);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let pending = encode_qwen4exp_text_packed(
+            ctx,
+            &encoder,
+            tokens,
+            start_position,
+            fixture.table.table(),
+            &weights,
+            workspace,
+        )
+        .unwrap();
+        assert_eq!(pending.position(), start_position + tokens.len() - 1);
+        drop(pending);
+        encoder.end();
+        command.commit();
+        workspace.release_after().unwrap();
+        (
+            read_f32(workspace.final_hidden_tensor()),
+            workspace.logits().unwrap().to_vec(),
+        )
+    }
+
+    fn assert_selected_band_reset_sequences(
+        census: &[crate::metal::DispatchCensusRow],
+        expected_qsa_layers: usize,
+    ) {
+        let expected = [
+            "kernel_qwen4exp_qsa_reset_selected_controls_i32",
+            "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+            "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
+            "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+            "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+            "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+            "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+            "kernel_qwen4exp_qsa_audit_selected_i32",
+        ];
+        let names = census
+            .iter()
+            .filter(|row| row.tag.as_deref() == Some("qwen4exp.qsa.selected_band.0"))
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), expected.len() * expected_qsa_layers);
+        for layer in 0..expected_qsa_layers {
+            let start = layer * expected.len();
+            assert_eq!(&names[start..start + expected.len()], expected);
+        }
     }
 
     fn argmax(values: &[f32]) -> usize {
@@ -1954,6 +2064,366 @@ mod tests {
         assert_eq!(argmax(&packed_logits), argmax(&scalar_logits));
         assert_eq!(packed.committed_length(), tokens.len() + 1);
         assert_eq!(packed.qsa_committed_lengths(), vec![(3, tokens.len() + 1)]);
+    }
+
+    #[test]
+    fn packed_text_session_composes_selected_qsa_and_returns_to_scalar() {
+        const SELECTED_CAPACITY: usize = 16;
+
+        let Some(ctx) = context() else { return };
+        let fixture = SyntheticFixture::new_with_qsa_kv_heads(&ctx, 1);
+        let tail = TextSessionTailFixture::new(&ctx);
+        let geometry =
+            Qwen4ExpTextSessionMetalGeometry::from_config(&fixture.config, SELECTED_CAPACITY)
+                .unwrap();
+        let mut scalar =
+            Qwen4ExpTextSessionMetalWorkspace::new_for_tests(&ctx, geometry.clone()).unwrap();
+        let mut packed =
+            Qwen4ExpTextSessionMetalWorkspace::new_for_tests_with_packed(&ctx, geometry.clone())
+                .unwrap();
+        assert_eq!(packed.packed_prefill_capacity(), Some(8));
+        assert!(packed.packed_selected_capable());
+
+        let tokens = [1_u32, 7, 3, 11, 5, 9, 2, 13, 4, 6, 8, 10, 12];
+        let persistent_before = packed.persistent_state_tensors();
+        let weights = fixture.text_weights(&tail, &geometry);
+        let mut start = 0;
+        for chunk_tokens in [8, 4] {
+            let end = start + chunk_tokens;
+            let mut scalar_hidden = Vec::new();
+            let mut scalar_logits = Vec::new();
+            for (position, &token) in tokens.iter().enumerate().take(end).skip(start) {
+                (scalar_hidden, scalar_logits) = run_text_session(
+                    &ctx,
+                    &fixture,
+                    &tail,
+                    &geometry,
+                    &mut scalar,
+                    token,
+                    position,
+                );
+            }
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let pending = encode_qwen4exp_text_packed(
+                &ctx,
+                &encoder,
+                &tokens[start..end],
+                start,
+                fixture.table.table(),
+                &weights,
+                &mut packed,
+            )
+            .unwrap();
+            assert_eq!(pending.position(), end - 1);
+            drop(pending);
+            encoder.end();
+            command.commit();
+            packed.release_after().unwrap();
+
+            let packed_hidden = read_f32(packed.final_hidden_tensor());
+            let packed_logits = packed.logits().unwrap().to_vec();
+            assert_close(
+                &format!("selected packed boundary {end} hidden"),
+                &packed_hidden,
+                &scalar_hidden,
+                2e-3,
+            );
+            assert_close(
+                &format!("selected packed boundary {end} logits"),
+                &packed_logits,
+                &scalar_logits,
+                5e-3,
+            );
+            assert_eq!(argmax(&packed_logits), argmax(&scalar_logits));
+            assert_eq!(packed.committed_length(), end);
+            assert_eq!(packed.qsa_committed_lengths(), vec![(3, end)]);
+            assert_eq!(packed.ple_prior_tokens(), scalar.ple_prior_tokens());
+
+            let scalar_qsa = scalar.qsa_persistent_state_tensors();
+            let packed_qsa = packed.qsa_persistent_state_tensors();
+            assert_eq!(packed_qsa.len(), scalar_qsa.len());
+            for ((packed_layer, packed_state), (scalar_layer, scalar_state)) in
+                packed_qsa.iter().zip(&scalar_qsa)
+            {
+                assert_eq!(packed_layer, scalar_layer);
+                assert_eq!(packed_state.len(), scalar_state.len());
+                for (state_index, (packed_tensor, scalar_tensor)) in
+                    packed_state.iter().zip(scalar_state).enumerate()
+                {
+                    assert_eq!(packed_tensor.dtype, scalar_tensor.dtype);
+                    assert_eq!(packed_tensor.shape, scalar_tensor.shape);
+                    assert_close(
+                        &format!("QSA layer {packed_layer} state {state_index} at boundary {end}"),
+                        &read_numeric_tensor(packed_tensor),
+                        &read_numeric_tensor(scalar_tensor),
+                        5e-3,
+                    );
+                }
+            }
+            start = end;
+        }
+
+        let persistent_after = packed.persistent_state_tensors();
+        assert_eq!(persistent_before.len(), persistent_after.len());
+        for (before, after) in persistent_before.iter().zip(&persistent_after) {
+            assert_eq!(
+                Retained::as_ptr(&after.buffer),
+                Retained::as_ptr(&before.buffer)
+            );
+            assert_eq!(after.offset, before.offset);
+            assert_eq!(after.shape, before.shape);
+            assert_eq!(after.dtype, before.dtype);
+            assert_eq!(after.provenance(), before.provenance());
+        }
+
+        let continuation = tokens[start];
+        let (scalar_hidden, scalar_logits) = run_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut scalar,
+            continuation,
+            start,
+        );
+        let (packed_hidden, packed_logits) = run_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut packed,
+            continuation,
+            start,
+        );
+        assert_close(
+            "selected packed-to-scalar handoff hidden",
+            &packed_hidden,
+            &scalar_hidden,
+            2e-3,
+        );
+        assert_close(
+            "selected packed-to-scalar handoff logits",
+            &packed_logits,
+            &scalar_logits,
+            5e-3,
+        );
+        assert_eq!(argmax(&packed_logits), argmax(&scalar_logits));
+        assert_eq!(packed.committed_length(), start + 1);
+        assert_eq!(packed.qsa_committed_lengths(), vec![(3, start + 1)]);
+    }
+
+    #[test]
+    fn selected_packed_session_preflight_and_abandon_preserve_boundaries() {
+        const SELECTED_CAPACITY: usize = 16;
+
+        let Some(ctx) = context() else { return };
+        let fixture = SyntheticFixture::new_with_qsa_kv_heads(&ctx, 1);
+        let tail = TextSessionTailFixture::new(&ctx);
+        let geometry =
+            Qwen4ExpTextSessionMetalGeometry::from_config(&fixture.config, SELECTED_CAPACITY)
+                .unwrap();
+        let tokens = [1_u32, 7, 3, 11, 5, 9, 2, 13, 4, 6, 8, 10];
+        let weights = fixture.text_weights(&tail, &geometry);
+
+        let mut dense_only = Qwen4ExpTextSessionMetalWorkspace::new_for_tests_with_dense_packed(
+            &ctx,
+            geometry.clone(),
+        )
+        .unwrap();
+        assert!(!dense_only.packed_selected_capable());
+        run_packed_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut dense_only,
+            &tokens[..8],
+            0,
+        );
+        let dense_logits = dense_only.logits().unwrap().to_vec();
+        let dense_history = dense_only.ple_prior_tokens().to_vec();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        let error = match encode_qwen4exp_text_packed(
+            &ctx,
+            &encoder,
+            &tokens[8..],
+            8,
+            fixture.table.table(),
+            &weights,
+            &mut dense_only,
+        ) {
+            Ok(_) => panic!("dense-only scratch unexpectedly admitted selected QSA"),
+            Err(error) => error,
+        };
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        drop(command);
+        assert!(error.to_string().contains("selected-capable scratch"));
+        assert!(census.is_empty());
+        dense_only.release_after().unwrap();
+        assert!(!dense_only.is_poisoned());
+        assert_eq!(dense_only.committed_length(), 8);
+        assert_eq!(dense_only.qsa_committed_lengths(), vec![(3, 8)]);
+        assert_eq!(dense_only.ple_prior_tokens(), dense_history);
+        assert_eq!(dense_only.logits().unwrap().as_slice(), dense_logits);
+
+        let mut selected =
+            Qwen4ExpTextSessionMetalWorkspace::new_for_tests_with_packed(&ctx, geometry.clone())
+                .unwrap();
+        run_packed_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut selected,
+            &tokens[..8],
+            0,
+        );
+        let selected_logits = selected.logits().unwrap().to_vec();
+        let selected_history = selected.ple_prior_tokens().to_vec();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let pending = encode_qwen4exp_text_packed(
+            &ctx,
+            &encoder,
+            &tokens[8..],
+            8,
+            fixture.table.table(),
+            &weights,
+            &mut selected,
+        )
+        .unwrap();
+        drop(pending);
+        encoder.end();
+        unsafe { selected.abandon_uncommitted().unwrap() };
+        drop(command);
+        assert!(!selected.is_poisoned());
+        assert_eq!(selected.committed_length(), 8);
+        assert_eq!(selected.qsa_committed_lengths(), vec![(3, 8)]);
+        assert_eq!(selected.ple_prior_tokens(), selected_history);
+        assert_eq!(selected.logits().unwrap().as_slice(), selected_logits);
+
+        run_packed_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut selected,
+            &tokens[8..],
+            8,
+        );
+        assert_eq!(selected.committed_length(), tokens.len());
+        assert_eq!(selected.qsa_committed_lengths(), vec![(3, tokens.len())]);
+    }
+
+    #[test]
+    fn shared_selected_controls_reset_for_each_qsa_layer_and_profile_route() {
+        const SELECTED_CAPACITY: usize = 16;
+
+        let Some(ctx) = context() else { return };
+        let fixture = SyntheticFixture::new_with_two_qsa_layers(&ctx);
+        let tail = TextSessionTailFixture::new(&ctx);
+        let geometry =
+            Qwen4ExpTextSessionMetalGeometry::from_config(&fixture.config, SELECTED_CAPACITY)
+                .unwrap();
+        assert_eq!(
+            geometry
+                .post_ple()
+                .iter()
+                .filter(|block| block.mixer().kind() == MixerKind::QwenSparseAttention)
+                .count(),
+            2
+        );
+        let tokens = [1_u32, 7, 3, 11, 5, 9, 2, 13, 4, 6, 8, 10];
+        let weights = fixture.text_weights(&tail, &geometry);
+
+        let mut ordinary =
+            Qwen4ExpTextSessionMetalWorkspace::new_for_tests_with_packed(&ctx, geometry.clone())
+                .unwrap();
+        run_packed_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut ordinary,
+            &tokens[..8],
+            0,
+        );
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        let pending = encode_qwen4exp_text_packed(
+            &ctx,
+            &encoder,
+            &tokens[8..],
+            8,
+            fixture.table.table(),
+            &weights,
+            &mut ordinary,
+        )
+        .unwrap();
+        let ordinary_census = crate::metal::dispatch_census_take();
+        drop(pending);
+        encoder.end();
+        command.commit();
+        ordinary.release_after().unwrap();
+        assert_selected_band_reset_sequences(&ordinary_census, 2);
+        assert_eq!(ordinary.qsa_committed_lengths(), vec![(3, 12), (7, 12)]);
+        let ordinary_hidden = read_f32(ordinary.final_hidden_tensor());
+        let ordinary_logits = ordinary.logits().unwrap().to_vec();
+
+        let mut sampled =
+            Qwen4ExpTextSessionMetalWorkspace::new_for_tests_with_packed(&ctx, geometry.clone())
+                .unwrap();
+        run_packed_text_session(
+            &ctx,
+            &fixture,
+            &tail,
+            &geometry,
+            &mut sampled,
+            &tokens[..8],
+            0,
+        );
+        let sample_count = packed_stage_sample_count(weights.post_ple.len()).unwrap();
+        let samples = ctx.timestamp_sample_buffer(sample_count).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let mut cpu_timing = Qwen4ExpPackedEncodeCpuTiming::default();
+        crate::metal::dispatch_census_begin();
+        let (pending, spans) = encode_qwen4exp_text_packed_layer_sampled(
+            &ctx,
+            &command,
+            &samples,
+            &tokens[8..],
+            8,
+            fixture.table.table(),
+            &weights,
+            &mut sampled,
+            &mut cpu_timing,
+        )
+        .unwrap();
+        let sampled_census = crate::metal::dispatch_census_take();
+        drop(pending);
+        assert!(!spans.is_empty());
+        command.commit();
+        sampled.release_after().unwrap();
+        assert_selected_band_reset_sequences(&sampled_census, 2);
+        assert_eq!(sampled.qsa_committed_lengths(), vec![(3, 12), (7, 12)]);
+        assert_close(
+            "ordinary/stage-sampled selected hidden",
+            &read_f32(sampled.final_hidden_tensor()),
+            &ordinary_hidden,
+            1e-6,
+        );
+        assert_close(
+            "ordinary/stage-sampled selected logits",
+            &sampled.logits().unwrap().to_vec(),
+            &ordinary_logits,
+            1e-6,
+        );
     }
 
     #[test]

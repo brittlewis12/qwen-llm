@@ -29,6 +29,7 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLComman
 pub const RESEARCH_IDENTITY_SCHEME: &str = "qwen_llm_model_locator_v1";
 pub const MAX_RESEARCH_GDN_TOKENS: usize = 16;
 pub const MAX_RESEARCH_ATTN_TOKENS: usize = 16;
+pub const MAX_RESEARCH_WORKSPACE_TOKENS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ResearchModelIdentity {
@@ -302,6 +303,118 @@ pub struct ResearchAttnBlockVjp {
     pub residual_replay_max_abs_error: f32,
 }
 
+/// One fresh prompt's post-block residual boundaries and post-mixer residuals.
+/// Banks are owned CPU F32 data in layer-major, token-major order. Layer IDs
+/// follow the Hugging Face hook convention: layer `l` is the output of block
+/// `l`, so fitting from target `t` to source `s` reverses blocks `t..s+1`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchWorkspaceForward {
+    identity: ResearchModelIdentity,
+    owner_token_id: u64,
+    token_ids: Vec<i32>,
+    n_layers: u32,
+    hidden_size: usize,
+    post_mixer_residuals: Vec<f32>,
+    post_block_residuals: Vec<f32>,
+}
+
+impl ResearchWorkspaceForward {
+    pub fn identity(&self) -> ResearchModelIdentity {
+        self.identity
+    }
+
+    pub fn token_ids(&self) -> &[i32] {
+        &self.token_ids
+    }
+
+    pub fn n_tokens(&self) -> usize {
+        self.token_ids.len()
+    }
+
+    pub fn n_layers(&self) -> u32 {
+        self.n_layers
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    /// Real `input + mixer(input)` residuals for one layer, flattened `[T,H]`.
+    pub fn post_mixer_residuals(&self, layer: u32) -> Option<&[f32]> {
+        self.layer_bank(&self.post_mixer_residuals, layer)
+    }
+
+    /// Real post-FFN block outputs for one layer, flattened `[T,H]`.
+    pub fn post_block_residuals(&self, layer: u32) -> Option<&[f32]> {
+        self.layer_bank(&self.post_block_residuals, layer)
+    }
+
+    /// Real block inputs, flattened `[T,H]`. Layer zero's embedding input is
+    /// intentionally absent because the reference lens only fits source layers
+    /// strictly below a target layer and never reverses through block zero.
+    pub fn input_residuals(&self, layer: u32) -> Option<&[f32]> {
+        layer
+            .checked_sub(1)
+            .and_then(|previous| self.post_block_residuals(previous))
+    }
+
+    fn layer_bank<'a>(&self, values: &'a [f32], layer: u32) -> Option<&'a [f32]> {
+        if layer >= self.n_layers {
+            return None;
+        }
+        let layer_elements = self.n_tokens().checked_mul(self.hidden_size)?;
+        let start = usize::try_from(layer).ok()?.checked_mul(layer_elements)?;
+        values.get(start..start.checked_add(layer_elements)?)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceLensRule {
+    /// Ordinary activation Jacobians throughout every traversed block.
+    Jacobian,
+    /// Released Qwen R-lens transport rules at residual RMSNorm and SwiGLU
+    /// sites; attention and GDN internals retain ordinary Jacobians.
+    Relp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResearchWorkspaceBlockKind {
+    Gdn,
+    Attention,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchWorkspaceReplayDiagnostic {
+    pub layer: u32,
+    pub kind: ResearchWorkspaceBlockKind,
+    /// Drift between replayed `input + mixer(input)` and the production
+    /// residual. Attention replay is an F32 model-level oracle and therefore
+    /// does not differentiate production F16/Q8 KV conversion.
+    pub residual_replay_max_abs_error: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchWorkspaceVjp {
+    pub target_layer: u32,
+    /// Caller order, including duplicates.
+    pub source_layers: Vec<u32>,
+    pub n_tokens: usize,
+    pub hidden_size: usize,
+    /// Source-layer order, flattened `[K,T,H]`.
+    pub values: Vec<f32>,
+    /// Reverse traversal order, from the target block toward the earliest
+    /// requested source layer.
+    pub diagnostics: Vec<ResearchWorkspaceReplayDiagnostic>,
+}
+
+impl ResearchWorkspaceVjp {
+    pub fn source_values(&self, slot: usize) -> Option<&[f32]> {
+        let source_elements = self.n_tokens.checked_mul(self.hidden_size)?;
+        let start = slot.checked_mul(source_elements)?;
+        self.values.get(start..start.checked_add(source_elements)?)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResearchError {
     #[error("runtime: {0}")]
@@ -404,6 +517,25 @@ pub enum ResearchError {
         dtype: GgmlType,
         shape: Vec<u64>,
         expected_elements: usize,
+    },
+    #[error("workspace prompt capture requires a fresh sequence at position zero, got {0}")]
+    WorkspaceCaptureRequiresFreshSequence(usize),
+    #[error("workspace prompt capture requires at least one token")]
+    EmptyWorkspacePrompt,
+    #[error("workspace prompt capture length {got} exceeds the bounded limit {max}")]
+    WorkspacePromptTooLong { got: usize, max: usize },
+    #[error("workspace capture belongs to a different model identity")]
+    WorkspaceCaptureModelMismatch,
+    #[error("workspace capture belongs to a different loaded-model owner")]
+    WorkspaceCaptureOwnerMismatch,
+    #[error("workspace VJP requires at least one source layer")]
+    EmptyWorkspaceSourceLayers,
+    #[error(
+        "workspace source layer {source_layer} must be strictly below target layer {target_layer}"
+    )]
+    WorkspaceSourceNotBeforeTarget {
+        source_layer: u32,
+        target_layer: u32,
     },
     #[error("{name} length {got} does not match expected length {expected}")]
     ActivationSize {
@@ -624,6 +756,50 @@ impl ResearchSession<'_, '_> {
                 pre_ffn_residuals,
                 post_block_residuals,
             },
+        })
+    }
+
+    fn forward_token_with_dense_ffn_capture_no_tail(
+        &mut self,
+        token_id: i32,
+        capture_layers: &[u32],
+    ) -> Result<DenseFfnActivationCapture, ResearchError> {
+        self.sequence.ensure_can_append(1)?;
+        validate_capture_layers(self.arch().n_layer, capture_layers)?;
+        let position = self.sequence.position();
+        let position_u32 =
+            u32::try_from(position).map_err(|_| ResearchError::PositionOverflow(position))?;
+        let hidden_size = self.arch().hidden_size as usize;
+        let capture_len = checked_product(capture_layers.len(), hidden_size)?;
+        let forward = self.model.forward();
+        let state = unsafe { self.sequence.metal_session_mut() };
+        state.ensure_usable()?;
+        let (pre_ffn_residuals, post_block_residuals) = if capture_layers.is_empty() {
+            forward.single_token_no_tail(token_id, position_u32, state)?;
+            (Vec::new(), Vec::new())
+        } else {
+            let shape = vec![hidden_size as u64, capture_layers.len() as u64];
+            let pre_ffn = MetalTensor::zeros_f32(self.model.context(), shape.clone())?;
+            let post_block = MetalTensor::zeros_f32(self.model.context(), shape)?;
+            forward.single_token_with_dense_ffn_capture_no_tail(
+                token_id,
+                position_u32,
+                state,
+                capture_layers,
+                &pre_ffn,
+                &post_block,
+            )?;
+            (
+                read_f32(&pre_ffn, capture_len),
+                read_f32(&post_block, capture_len),
+            )
+        };
+        self.sequence.advance_by(1)?;
+        Ok(DenseFfnActivationCapture {
+            layer_ids: capture_layers.to_vec(),
+            hidden_size,
+            pre_ffn_residuals,
+            post_block_residuals,
         })
     }
 
@@ -951,6 +1127,7 @@ impl ResearchSession<'_, '_> {
             grad_mixer_output,
             n_tokens,
             rule,
+            true,
         )?;
         let residual_replay_max_abs_error = forward
             .input_residuals
@@ -1211,6 +1388,379 @@ impl ResearchSession<'_, '_> {
             replay_mixer_outputs: mixer.mixer_outputs,
             residual_replay_max_abs_error,
         })
+    }
+
+    /// Advance one fresh bounded prompt once while capturing every block's
+    /// post-mixer and post-block residuals. The final RMSNorm and LM head are
+    /// skipped because reference J/R-lens fitting targets a block residual. A
+    /// failure after a successful token poisons the partially consumed
+    /// sequence rather than exposing stitchable state.
+    pub fn forward_prompt_with_workspace_capture(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<ResearchWorkspaceForward, ResearchError> {
+        if token_ids.is_empty() {
+            return Err(ResearchError::EmptyWorkspacePrompt);
+        }
+        if token_ids.len() > MAX_RESEARCH_WORKSPACE_TOKENS {
+            return Err(ResearchError::WorkspacePromptTooLong {
+                got: token_ids.len(),
+                max: MAX_RESEARCH_WORKSPACE_TOKENS,
+            });
+        }
+        if self.sequence.position() != 0 {
+            return Err(ResearchError::WorkspaceCaptureRequiresFreshSequence(
+                self.sequence.position(),
+            ));
+        }
+        let arch = self.arch();
+        for &token_id in token_ids {
+            if token_id < 0 || token_id as u32 >= arch.vocab_size {
+                return Err(MfError::BadToken(token_id, arch.vocab_size).into());
+            }
+        }
+        self.sequence.ensure_can_append(token_ids.len())?;
+        let last_position = token_ids.len() - 1;
+        u32::try_from(last_position).map_err(|_| ResearchError::PositionOverflow(last_position))?;
+        self.validate_workspace_weights()?;
+
+        let n_layers = usize::try_from(arch.n_layer).map_err(|_| ResearchError::SizeOverflow)?;
+        let hidden_size = arch.hidden_size as usize;
+        let layer_elements = checked_product(token_ids.len(), hidden_size)?;
+        let bank_elements = checked_product(n_layers, layer_elements)?;
+        let capture_layers: Vec<u32> = (0..arch.n_layer).collect();
+        let mut post_mixer_residuals = vec![0.0f32; bank_elements];
+        let mut post_block_residuals = vec![0.0f32; bank_elements];
+        for (token, &token_id) in token_ids.iter().enumerate() {
+            let capture = match self
+                .forward_token_with_dense_ffn_capture_no_tail(token_id, &capture_layers)
+            {
+                Ok(capture) => capture,
+                Err(error) => {
+                    let state = unsafe { self.sequence.metal_session_mut() };
+                    state.poison("workspace prompt capture forward failed");
+                    return Err(error);
+                }
+            };
+            copy_workspace_token_capture(
+                &mut post_mixer_residuals,
+                &capture.pre_ffn_residuals,
+                token,
+                token_ids.len(),
+                n_layers,
+                hidden_size,
+            )?;
+            copy_workspace_token_capture(
+                &mut post_block_residuals,
+                &capture.post_block_residuals,
+                token,
+                token_ids.len(),
+                n_layers,
+                hidden_size,
+            )?;
+        }
+        Ok(ResearchWorkspaceForward {
+            identity: self.identity(),
+            owner_token_id: self.model.owner_token_id(),
+            token_ids: token_ids.to_vec(),
+            n_layers: arch.n_layer,
+            hidden_size,
+            post_mixer_residuals,
+            post_block_residuals,
+        })
+    }
+
+    /// Apply one target-layer cotangent trajectory to every requested source
+    /// layer using the reference current-and-future-position VJP semantics.
+    /// The caller performs any source-position reduction (for example, the
+    /// paper's mean over valid positions) on the returned `[K,T,H]` values.
+    pub fn workspace_vjp(
+        &self,
+        forward: &ResearchWorkspaceForward,
+        target_layer: u32,
+        source_layers: &[u32],
+        target_cotangent: &[f32],
+        rule: WorkspaceLensRule,
+    ) -> Result<ResearchWorkspaceVjp, ResearchError> {
+        if forward.identity != self.identity() {
+            return Err(ResearchError::WorkspaceCaptureModelMismatch);
+        }
+        if forward.owner_token_id != self.model.owner_token_id() {
+            return Err(ResearchError::WorkspaceCaptureOwnerMismatch);
+        }
+        let arch = self.arch();
+        if target_layer >= arch.n_layer {
+            return Err(ResearchError::InvalidLayer {
+                layer: target_layer,
+                n_layers: arch.n_layer,
+            });
+        }
+        let n_tokens = forward.n_tokens();
+        if n_tokens == 0 || n_tokens > MAX_RESEARCH_WORKSPACE_TOKENS {
+            return Err(ResearchError::WorkspacePromptTooLong {
+                got: n_tokens,
+                max: MAX_RESEARCH_WORKSPACE_TOKENS,
+            });
+        }
+        if forward.n_layers != arch.n_layer {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace capture layer count",
+                got: forward.n_layers as usize,
+                expected: arch.n_layer as usize,
+            });
+        }
+        if forward.hidden_size != arch.hidden_size as usize {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace capture hidden size",
+                got: forward.hidden_size,
+                expected: arch.hidden_size as usize,
+            });
+        }
+        let hidden_elements = checked_product(n_tokens, forward.hidden_size)?;
+        let bank_elements = checked_product(arch.n_layer as usize, hidden_elements)?;
+        for (name, values) in [
+            (
+                "workspace post-mixer residual bank",
+                forward.post_mixer_residuals.as_slice(),
+            ),
+            (
+                "workspace post-block residual bank",
+                forward.post_block_residuals.as_slice(),
+            ),
+        ] {
+            if values.len() != bank_elements {
+                return Err(ResearchError::ActivationSize {
+                    name,
+                    got: values.len(),
+                    expected: bank_elements,
+                });
+            }
+        }
+        if target_cotangent.len() != hidden_elements {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace target cotangent",
+                got: target_cotangent.len(),
+                expected: hidden_elements,
+            });
+        }
+        let (values, diagnostics) = compose_workspace_vjp(
+            target_layer,
+            source_layers,
+            hidden_elements,
+            target_cotangent,
+            |layer, grad_output| {
+                let input = forward.input_residuals(layer).ok_or(
+                    ResearchError::WorkspaceSourceNotBeforeTarget {
+                        source_layer: layer,
+                        target_layer,
+                    },
+                )?;
+                let post_mixer =
+                    forward
+                        .post_mixer_residuals(layer)
+                        .ok_or(ResearchError::InvalidLayer {
+                            layer,
+                            n_layers: arch.n_layer,
+                        })?;
+                self.workspace_block_vjp(layer, input, post_mixer, grad_output, n_tokens, rule)
+            },
+        )?;
+        Ok(ResearchWorkspaceVjp {
+            target_layer,
+            source_layers: source_layers.to_vec(),
+            n_tokens,
+            hidden_size: forward.hidden_size,
+            values,
+            diagnostics,
+        })
+    }
+
+    fn validate_workspace_weights(&self) -> Result<(), ResearchError> {
+        let arch = self.arch();
+        if self.model.metal_model().blocks.len() != arch.n_layer as usize {
+            return Err(ResearchError::ActivationSize {
+                name: "resident workspace block schedule",
+                got: self.model.metal_model().blocks.len(),
+                expected: arch.n_layer as usize,
+            });
+        }
+        for (layer, block) in self.model.metal_model().blocks.iter().enumerate() {
+            let layer = u32::try_from(layer).map_err(|_| ResearchError::SizeOverflow)?;
+            let (post_norm, gate, up, down) = match block {
+                MetalBlock::Gdn(block) => (
+                    &block.post_attn_norm,
+                    &block.ffn_gate,
+                    &block.ffn_up,
+                    &block.ffn_down,
+                ),
+                MetalBlock::Attn(block) => (
+                    &block.post_attn_norm,
+                    &block.ffn_gate,
+                    &block.ffn_up,
+                    &block.ffn_down,
+                ),
+            };
+            validate_dense_ffn_weights(
+                layer,
+                arch.hidden_size as usize,
+                arch.intermediate_size as usize,
+                post_norm,
+                gate,
+                up,
+                down,
+            )?;
+            match block {
+                MetalBlock::Gdn(block) => {
+                    let geometry = GdnGeometry::new(layer, arch)?;
+                    validate_gdn_weights(layer, block, geometry)?;
+                }
+                MetalBlock::Attn(block) => {
+                    let geometry = AttnGeometry::new(arch)?;
+                    validate_attn_weights(layer, block, geometry)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn workspace_block_vjp(
+        &self,
+        layer: u32,
+        input_residuals: &[f32],
+        post_mixer_residuals: &[f32],
+        grad_block_output: &[f32],
+        n_tokens: usize,
+        rule: WorkspaceLensRule,
+    ) -> Result<(Vec<f32>, ResearchWorkspaceReplayDiagnostic), ResearchError> {
+        let arch = self.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let hidden_elements = checked_product(n_tokens, hidden_size)?;
+        for (name, values) in [
+            ("workspace block inputs", input_residuals),
+            ("workspace post-mixer residuals", post_mixer_residuals),
+            ("workspace block cotangent", grad_block_output),
+        ] {
+            if values.len() != hidden_elements {
+                return Err(ResearchError::ActivationSize {
+                    name,
+                    got: values.len(),
+                    expected: hidden_elements,
+                });
+            }
+        }
+        let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
+            ResearchError::InvalidLayer {
+                layer,
+                n_layers: arch.n_layer,
+            },
+        )?;
+        let (post_norm, gate, up, down) = match block {
+            MetalBlock::Gdn(block) => (
+                &block.post_attn_norm,
+                &block.ffn_gate,
+                &block.ffn_up,
+                &block.ffn_down,
+            ),
+            MetalBlock::Attn(block) => (
+                &block.post_attn_norm,
+                &block.ffn_gate,
+                &block.ffn_up,
+                &block.ffn_down,
+            ),
+        };
+        let grad_post_mixer = dense_ffn_vjp_rows_readback(
+            self.model.context(),
+            layer,
+            hidden_size,
+            arch.intermediate_size as usize,
+            post_mixer_residuals,
+            post_norm,
+            gate,
+            up,
+            down,
+            grad_block_output,
+            n_tokens,
+            match rule {
+                WorkspaceLensRule::Jacobian => DenseFfnVjpRule::Jacobian,
+                WorkspaceLensRule::Relp => DenseFfnVjpRule::Relp,
+            },
+        )?;
+        let (mixer_outputs, grad_mixer_input, kind) = match block {
+            MetalBlock::Gdn(block) => {
+                let geometry = GdnGeometry::new(layer, arch)?;
+                validate_gdn_weights(layer, block, geometry)?;
+                let initial_conv_state = vec![0.0f32; geometry.conv_state_elements];
+                let initial_recurrence_state = vec![0.0f32; geometry.state_elements];
+                let replay = gdn_mixer_replay_vjp_readback(
+                    self.model.context(),
+                    geometry,
+                    GdnMixerWeights::from(block),
+                    input_residuals,
+                    &initial_conv_state,
+                    &initial_recurrence_state,
+                    &grad_post_mixer,
+                    n_tokens,
+                    match rule {
+                        WorkspaceLensRule::Jacobian => GdnMixerVjpRule::Jacobian,
+                        WorkspaceLensRule::Relp => GdnMixerVjpRule::Relp,
+                    },
+                    false,
+                )?;
+                (
+                    replay.mixer_outputs,
+                    replay.grad_input,
+                    ResearchWorkspaceBlockKind::Gdn,
+                )
+            }
+            MetalBlock::Attn(block) => {
+                let geometry = AttnGeometry::new(arch)?;
+                validate_attn_weights(layer, block, geometry)?;
+                let replay = attn_mixer_replay_vjp_readback(
+                    self.model.context(),
+                    geometry,
+                    AttnMixerWeights::from(block),
+                    input_residuals,
+                    &grad_post_mixer,
+                    n_tokens,
+                    match rule {
+                        WorkspaceLensRule::Jacobian => AttnBlockVjpRule::Jacobian,
+                        WorkspaceLensRule::Relp => AttnBlockVjpRule::Relp,
+                    },
+                )?;
+                (
+                    replay.mixer_outputs,
+                    replay.grad_input,
+                    ResearchWorkspaceBlockKind::Attention,
+                )
+            }
+        };
+        let residual_replay_max_abs_error = input_residuals
+            .iter()
+            .zip(&mixer_outputs)
+            .zip(post_mixer_residuals)
+            .map(|((&input, &mixer), &observed)| finite_abs_difference(input + mixer, observed))
+            .fold(0.0f32, f32::max);
+        if grad_mixer_input.len() != grad_post_mixer.len() {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace mixer branch cotangent",
+                got: grad_mixer_input.len(),
+                expected: grad_post_mixer.len(),
+            });
+        }
+        let values = grad_post_mixer
+            .iter()
+            .zip(grad_mixer_input)
+            .map(|(&identity, branch)| identity + branch)
+            .collect();
+        Ok((
+            values,
+            ResearchWorkspaceReplayDiagnostic {
+                layer,
+                kind,
+                residual_replay_max_abs_error,
+            },
+        ))
     }
 
     fn resolve_attn(&self, layer: u32) -> Result<(&MetalAttnBlock, AttnGeometry), ResearchError> {
@@ -2533,6 +3083,7 @@ fn gdn_mixer_replay_vjp_readback(
     grad_mixer_output: &[f32],
     n_tokens: usize,
     rule: GdnMixerVjpRule,
+    read_state_diagnostics: bool,
 ) -> Result<GdnReplayVjpReadback, ResearchError> {
     if n_tokens == 0 || n_tokens > MAX_RESEARCH_GDN_TOKENS {
         return Err(ResearchError::GdnPromptTooLong {
@@ -2814,17 +3365,147 @@ fn gdn_mixer_replay_vjp_readback(
     command.commit();
     command.waitUntilCompleted();
     validate_completed_command(&command)?;
+    let (
+        final_conv_state,
+        final_recurrence_state,
+        grad_initial_conv_state,
+        grad_initial_recurrence_state,
+    ) = if read_state_diagnostics {
+        (
+            read_f32(&replay.conv_state, geometry.conv_state_elements),
+            read_f32(&replay.recurrence_state, geometry.state_elements),
+            read_f32(&grad_initial_conv_state, geometry.conv_state_elements),
+            read_f32(&grad_initial_recurrence_state, geometry.state_elements),
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
     Ok(GdnReplayVjpReadback {
         mixer_outputs: read_f32(&replay.mixer_output, hidden_elements),
-        final_conv_state: read_f32(&replay.conv_state, geometry.conv_state_elements),
-        final_recurrence_state: read_f32(&replay.recurrence_state, geometry.state_elements),
+        final_conv_state,
+        final_recurrence_state,
         grad_input: read_f32(&grad_input, hidden_elements),
-        grad_initial_conv_state: read_f32(&grad_initial_conv_state, geometry.conv_state_elements),
-        grad_initial_recurrence_state: read_f32(
-            &grad_initial_recurrence_state,
-            geometry.state_elements,
-        ),
+        grad_initial_conv_state,
+        grad_initial_recurrence_state,
     })
+}
+
+fn copy_workspace_token_capture(
+    destination: &mut [f32],
+    token_capture: &[f32],
+    token: usize,
+    n_tokens: usize,
+    n_layers: usize,
+    hidden_size: usize,
+) -> Result<(), ResearchError> {
+    let token_elements = checked_product(n_layers, hidden_size)?;
+    let layer_elements = checked_product(n_tokens, hidden_size)?;
+    let bank_elements = checked_product(n_layers, layer_elements)?;
+    if token_capture.len() != token_elements {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace token capture",
+            got: token_capture.len(),
+            expected: token_elements,
+        });
+    }
+    if destination.len() != bank_elements {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace layer-major destination",
+            got: destination.len(),
+            expected: bank_elements,
+        });
+    }
+    if token >= n_tokens {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace token index",
+            got: token,
+            expected: n_tokens,
+        });
+    }
+    for layer in 0..n_layers {
+        let source = checked_product(layer, hidden_size)?;
+        let source_end = source
+            .checked_add(hidden_size)
+            .ok_or(ResearchError::SizeOverflow)?;
+        let destination_row = checked_product(layer, n_tokens)?
+            .checked_add(token)
+            .ok_or(ResearchError::SizeOverflow)?;
+        let destination_start = checked_product(destination_row, hidden_size)?;
+        let destination_end = destination_start
+            .checked_add(hidden_size)
+            .ok_or(ResearchError::SizeOverflow)?;
+        destination[destination_start..destination_end]
+            .copy_from_slice(&token_capture[source..source_end]);
+    }
+    Ok(())
+}
+
+fn compose_workspace_vjp(
+    target_layer: u32,
+    source_layers: &[u32],
+    hidden_elements: usize,
+    target_cotangent: &[f32],
+    mut reverse_block: impl FnMut(
+        u32,
+        &[f32],
+    ) -> Result<
+        (Vec<f32>, ResearchWorkspaceReplayDiagnostic),
+        ResearchError,
+    >,
+) -> Result<(Vec<f32>, Vec<ResearchWorkspaceReplayDiagnostic>), ResearchError> {
+    if source_layers.is_empty() {
+        return Err(ResearchError::EmptyWorkspaceSourceLayers);
+    }
+    for &source in source_layers {
+        if source >= target_layer {
+            return Err(ResearchError::WorkspaceSourceNotBeforeTarget {
+                source_layer: source,
+                target_layer,
+            });
+        }
+    }
+    if target_cotangent.len() != hidden_elements {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace target cotangent",
+            got: target_cotangent.len(),
+            expected: hidden_elements,
+        });
+    }
+    let output_elements = checked_product(source_layers.len(), hidden_elements)?;
+    let mut values = vec![0.0f32; output_elements];
+    let mut diagnostics = Vec::new();
+    let earliest_source = source_layers
+        .iter()
+        .copied()
+        .min()
+        .ok_or(ResearchError::EmptyWorkspaceSourceLayers)?;
+    let first_block = earliest_source
+        .checked_add(1)
+        .ok_or(ResearchError::SizeOverflow)?;
+    let mut gradient = target_cotangent.to_vec();
+    for layer in (first_block..=target_layer).rev() {
+        let (next_gradient, diagnostic) = reverse_block(layer, &gradient)?;
+        if next_gradient.len() != hidden_elements {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace reversed block cotangent",
+                got: next_gradient.len(),
+                expected: hidden_elements,
+            });
+        }
+        gradient = next_gradient;
+        diagnostics.push(diagnostic);
+        let crossed_source = layer - 1;
+        for (slot, &source) in source_layers.iter().enumerate() {
+            if source == crossed_source {
+                let start = checked_product(slot, hidden_elements)?;
+                let end = start
+                    .checked_add(hidden_elements)
+                    .ok_or(ResearchError::SizeOverflow)?;
+                values[start..end].copy_from_slice(&gradient);
+            }
+        }
+    }
+    Ok((values, diagnostics))
 }
 
 fn checked_product(left: usize, right: usize) -> Result<usize, ResearchError> {
@@ -3422,6 +4103,64 @@ fn compose_gdn_block_vjp(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_dense_ffn_weights(
+    layer: u32,
+    hidden_size: usize,
+    intermediate_size: usize,
+    post_norm: &MetalTensor,
+    gate_weight: &MetalTensor,
+    up_weight: &MetalTensor,
+    down_weight: &MetalTensor,
+) -> Result<(), ResearchError> {
+    let gate_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnGate,
+    };
+    let up_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnUp,
+    };
+    let down_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnDown,
+    };
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnGate,
+        linear_shape(gate_id, gate_weight)?,
+        [hidden_size, intermediate_size],
+    )?;
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnUp,
+        linear_shape(up_id, up_weight)?,
+        [hidden_size, intermediate_size],
+    )?;
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnDown,
+        linear_shape(down_id, down_weight)?,
+        [intermediate_size, hidden_size],
+    )?;
+    if post_norm.dtype != GgmlType::F32 || post_norm.shape != [hidden_size as u64] {
+        return Err(ResearchError::InvalidDenseFfnNorm {
+            layer,
+            dtype: post_norm.dtype,
+            shape: post_norm.shape.clone(),
+            expected: hidden_size,
+        });
+    }
+    for (id, weight) in [
+        (gate_id, gate_weight),
+        (up_id, up_weight),
+        (down_id, down_weight),
+    ] {
+        validate_vjp_dtype(id, weight)?;
+    }
+    Ok(())
+}
+
 fn validate_dense_ffn_shape(
     layer: u32,
     role: LinearRole,
@@ -3594,6 +4333,86 @@ mod tests {
             ResearchError::InvalidLayer {
                 layer: 8,
                 n_layers: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn workspace_capture_transposes_tokens_into_layer_major_banks() {
+        const TOKENS: usize = 3;
+        const LAYERS: usize = 2;
+        const HIDDEN: usize = 2;
+        let token_captures = [
+            [0.0, 1.0, 10.0, 11.0],
+            [2.0, 3.0, 12.0, 13.0],
+            [4.0, 5.0, 14.0, 15.0],
+        ];
+        let mut bank = vec![0.0; TOKENS * LAYERS * HIDDEN];
+        for (token, capture) in token_captures.iter().enumerate() {
+            copy_workspace_token_capture(&mut bank, capture, token, TOKENS, LAYERS, HIDDEN)
+                .unwrap();
+        }
+        assert_eq!(
+            bank,
+            [
+                0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_vjp_crosses_sources_in_caller_order_without_reversing_them() {
+        let source_layers = [0, 3, 1, 3];
+        let target_cotangent = [1.0f32, 2.0, 3.0];
+        let mut traversed = Vec::new();
+        let (values, diagnostics) = compose_workspace_vjp(
+            4,
+            &source_layers,
+            target_cotangent.len(),
+            &target_cotangent,
+            |layer, gradient| {
+                traversed.push(layer);
+                Ok((
+                    gradient.iter().map(|value| value * layer as f32).collect(),
+                    ResearchWorkspaceReplayDiagnostic {
+                        layer,
+                        kind: if layer == 4 {
+                            ResearchWorkspaceBlockKind::Attention
+                        } else {
+                            ResearchWorkspaceBlockKind::Gdn
+                        },
+                        residual_replay_max_abs_error: layer as f32 * 1e-6,
+                    },
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(traversed, [4, 3, 2, 1]);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.layer)
+                .collect::<Vec<_>>(),
+            traversed
+        );
+        assert_eq!(&values[0..3], &[24.0, 48.0, 72.0]);
+        assert_eq!(&values[3..6], &[4.0, 8.0, 12.0]);
+        assert_eq!(&values[6..9], &[24.0, 48.0, 72.0]);
+        assert_eq!(&values[9..12], &[4.0, 8.0, 12.0]);
+
+        let error = compose_workspace_vjp(
+            4,
+            &[4],
+            target_cotangent.len(),
+            &target_cotangent,
+            |_, _| unreachable!(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ResearchError::WorkspaceSourceNotBeforeTarget {
+                source_layer: 4,
+                target_layer: 4
             }
         ));
     }
@@ -4000,6 +4819,7 @@ mod tests {
                 grad_output,
                 N_TOKENS,
                 rule,
+                true,
             )
             .unwrap()
         };

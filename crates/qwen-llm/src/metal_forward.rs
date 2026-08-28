@@ -10352,6 +10352,7 @@ impl<'a> MetalForward<'a> {
             target_layer_ids,
             Some(hidden_dst),
             None,
+            true,
         )
     }
 
@@ -10378,7 +10379,33 @@ impl<'a> MetalForward<'a> {
             target_layer_ids,
             Some(post_block_dst),
             Some(pre_ffn_dst),
+            true,
         )
+    }
+
+    /// Skip-tail variant of [`single_token_with_dense_ffn_capture`]. Captures
+    /// both residual sites but does not run final RMSNorm, the LM head, or a
+    /// logits readback. The mutable sequence state advances exactly as in the
+    /// ordinary token forward.
+    pub fn single_token_with_dense_ffn_capture_no_tail(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        pre_ffn_dst: &MetalTensor,
+        post_block_dst: &MetalTensor,
+    ) -> Result<(), MfError> {
+        self.single_token_with_hidden_sites(
+            token_id,
+            position,
+            session,
+            target_layer_ids,
+            Some(post_block_dst),
+            Some(pre_ffn_dst),
+            false,
+        )?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -10390,6 +10417,7 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         post_block_dst: Option<&MetalTensor>,
         pre_ffn_dst: Option<&MetalTensor>,
+        run_tail: bool,
     ) -> Result<Vec<f32>, MfError> {
         session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
@@ -10544,24 +10572,26 @@ impl<'a> MetalForward<'a> {
             }
         }
 
-        // Final RMSNorm + lm_head — produces final logits as usual.
-        encode_rms_norm_mul_f32(
-            self.ctx,
-            &enc,
-            &session.x,
-            &self.model.output_norm,
-            &session.h,
-            RMS_EPS,
-        )?;
-        encode_mat_vec_dispatch(
-            self.ctx,
-            &enc,
-            &self.model.lm_head,
-            &session.h,
-            &session.logits,
-            h,
-            arch.vocab_size as usize,
-        )?;
+        if run_tail {
+            // Final RMSNorm + lm_head — produces final logits as usual.
+            encode_rms_norm_mul_f32(
+                self.ctx,
+                &enc,
+                &session.x,
+                &self.model.output_norm,
+                &session.h,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                self.ctx,
+                &enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                h,
+                arch.vocab_size as usize,
+            )?;
+        }
 
         enc.end();
         cmd_buf.commit();
@@ -10575,10 +10605,13 @@ impl<'a> MetalForward<'a> {
                 error: format!("{error:?}"),
             });
         }
-        let mut logits = vec![0.0f32; arch.vocab_size as usize];
-        unsafe {
-            let src = session.logits.buffer.contents().as_ptr() as *const f32;
-            std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
+        let mut logits = Vec::new();
+        if run_tail {
+            logits.resize(arch.vocab_size as usize, 0.0);
+            unsafe {
+                let src = session.logits.buffer.contents().as_ptr() as *const f32;
+                std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
+            }
         }
         Ok(logits)
     }

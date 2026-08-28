@@ -1,6 +1,6 @@
 use qwen_llm::research::{
     AttnBlockVjpRule, DenseFfnVjpRule, GdnBlockVjpRule, GdnMixerVjpRule, LinearRole,
-    RESEARCH_IDENTITY_SCHEME, ResearchLinear,
+    RESEARCH_IDENTITY_SCHEME, ResearchLinear, ResearchWorkspaceBlockKind, WorkspaceLensRule,
 };
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use qwen_llm::tensor::GgmlType;
@@ -129,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
-    drop(research);
+    drop(sequence);
     let mut attn_sequence = loaded.create_sequence(SequenceConfig::new(8))?;
     let mut attn_research = loaded.research_session(&mut attn_sequence)?;
     let attn_layer = (1..arch.n_layer)
@@ -180,11 +180,141 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    drop(attn_sequence);
+    let mut workspace_sequence = loaded.create_sequence(SequenceConfig::new(8))?;
+    let mut workspace_research = loaded.research_session(&mut workspace_sequence)?;
+    let workspace_forward = workspace_research
+        .forward_prompt_with_workspace_capture(&[token_id, token_id, token_id, token_id])?;
+    let workspace_sources = [0, attn_layer.saturating_sub(2), attn_layer - 1];
+    let workspace_r_vjp = workspace_research.workspace_vjp(
+        &workspace_forward,
+        attn_layer,
+        &workspace_sources,
+        &attn_cotangent,
+        WorkspaceLensRule::Relp,
+    )?;
+    let workspace_source_zero = workspace_r_vjp
+        .source_values(0)
+        .ok_or("workspace VJP omitted source slot zero")?;
+    let workspace_source_zero_norm = workspace_source_zero
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt();
+    let workspace_capture_max_abs_error = workspace_forward
+        .post_block_residuals(attn_layer)
+        .ok_or("workspace capture omitted attention target layer")?
+        .iter()
+        .zip(attn_forward.post_block_residuals())
+        .map(|(&left, &right)| (left - right).abs())
+        .fold(0.0f32, f32::max);
+    let workspace_one_block_max_abs_error = workspace_r_vjp
+        .source_values(2)
+        .ok_or("workspace VJP omitted nearest source slot")?
+        .iter()
+        .zip(&attn_block_r_vjp.values)
+        .map(|(&left, &right)| (left - right).abs())
+        .fold(0.0f32, f32::max);
+    if !workspace_source_zero_norm.is_finite()
+        || !workspace_capture_max_abs_error.is_finite()
+        || !workspace_one_block_max_abs_error.is_finite()
+        || workspace_capture_max_abs_error > 1e-6
+        || workspace_one_block_max_abs_error > 1e-6
+        || workspace_r_vjp.diagnostics.iter().any(|diagnostic| {
+            !diagnostic.residual_replay_max_abs_error.is_finite()
+                || diagnostic.residual_replay_max_abs_error > 5e-3
+        })
+    {
+        return Err(format!(
+            "workspace chain failed: norm={workspace_source_zero_norm} capture={workspace_capture_max_abs_error} one_block={workspace_one_block_max_abs_error} diagnostics={:?}",
+            workspace_r_vjp.diagnostics
+        )
+        .into());
+    }
+    if model.file_name().and_then(|name| name.to_str()) == Some("Qwen3.8-27B-Q8_0.gguf")
+        && token_id == 0
+        && ((workspace_source_zero_norm - 2.595_755_330_594_522_5).abs() > 1e-4
+            || workspace_r_vjp
+                .diagnostics
+                .iter()
+                .map(|diagnostic| (diagnostic.layer, diagnostic.kind))
+                .collect::<Vec<_>>()
+                != [
+                    (3, ResearchWorkspaceBlockKind::Attention),
+                    (2, ResearchWorkspaceBlockKind::Gdn),
+                    (1, ResearchWorkspaceBlockKind::Gdn),
+                ])
+    {
+        return Err(format!(
+            "27B mixed workspace fixture drifted: norm={} diagnostics={:?}",
+            workspace_source_zero_norm, workspace_r_vjp.diagnostics
+        )
+        .into());
+    }
+    let workspace_full = if std::env::var_os("QWEN_WORKSPACE_FULL_CHAIN").is_some() {
+        let target_layer = arch.n_layer - 1;
+        let full = workspace_research.workspace_vjp(
+            &workspace_forward,
+            target_layer,
+            &[0],
+            &attn_cotangent,
+            WorkspaceLensRule::Relp,
+        )?;
+        let source = full
+            .source_values(0)
+            .ok_or("full workspace VJP omitted source layer zero")?;
+        let norm = source
+            .iter()
+            .map(|&value| f64::from(value) * f64::from(value))
+            .sum::<f64>()
+            .sqrt();
+        let max_replay_error = full
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.residual_replay_max_abs_error)
+            .fold(0.0f32, f32::max);
+        let max_replay_diagnostic = full
+            .diagnostics
+            .iter()
+            .max_by(|left, right| {
+                left.residual_replay_max_abs_error
+                    .total_cmp(&right.residual_replay_max_abs_error)
+            })
+            .ok_or("full workspace VJP returned no diagnostics")?;
+        if !norm.is_finite()
+            || !max_replay_error.is_finite()
+            || full.diagnostics.len() != target_layer as usize
+        {
+            return Err(format!(
+                "full workspace chain failed: norm={norm} replay={max_replay_error} blocks={}",
+                full.diagnostics.len()
+            )
+            .into());
+        }
+        if model.file_name().and_then(|name| name.to_str()) == Some("Qwen3.8-27B-Q8_0.gguf")
+            && token_id == 0
+            && (norm - 5.784_035_851_424_877).abs() > 1e-4
+        {
+            return Err(format!("27B full workspace fixture drifted: norm={norm}").into());
+        }
+        Some(json!({
+            "target_layer": target_layer,
+            "source_layer": 0,
+            "tokens": full.n_tokens,
+            "traversed_blocks": full.diagnostics.len(),
+            "source_l2_norm": norm,
+            "max_residual_replay_abs_error": max_replay_error,
+            "max_replay_layer": max_replay_diagnostic.layer,
+            "max_replay_kind": format!("{:?}", max_replay_diagnostic.kind),
+        }))
+    } else {
+        None
+    };
 
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schema": "qwen.workspace_lens_smoke.v3",
+            "schema": "qwen.workspace_lens_smoke.v4",
             "model": model,
             "identity": {
                 "scheme": RESEARCH_IDENTITY_SCHEME,
@@ -243,7 +373,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "input_width": attn_block_r_vjp.values.len(),
                 "l2_norm": attn_block_r_vjp_norm,
                 "f32_oracle_residual_replay_max_abs_error": attn_block_r_vjp.residual_replay_max_abs_error,
-            }
+            },
+            "workspace_mixed_r_vjp": {
+                "target_layer": workspace_r_vjp.target_layer,
+                "source_layers": workspace_r_vjp.source_layers,
+                "tokens": workspace_r_vjp.n_tokens,
+                "source_zero_input_width": workspace_source_zero.len(),
+                "source_zero_l2_norm": workspace_source_zero_norm,
+                "capture_max_abs_error": workspace_capture_max_abs_error,
+                "nearest_source_one_block_max_abs_error": workspace_one_block_max_abs_error,
+                "diagnostics": workspace_r_vjp.diagnostics.iter().map(|diagnostic| json!({
+                    "layer": diagnostic.layer,
+                    "kind": format!("{:?}", diagnostic.kind),
+                    "residual_replay_max_abs_error": diagnostic.residual_replay_max_abs_error,
+                })).collect::<Vec<_>>(),
+            },
+            "workspace_full_r_vjp": workspace_full,
         }))?
     );
     Ok(())

@@ -3716,10 +3716,12 @@ mod tests {
             .map(|&(_, command, _)| command)
             .fold(f64::INFINITY, f64::min);
         let all_sequences_valid = sequence_headroom.iter().all(|&(_, _, valid)| valid);
-        assert!(
-            all_sequences_valid,
-            "standalone IQ3 gate/up probe failed a validity gate"
-        );
+        if !all_sequences_valid {
+            panic!(
+                "standalone IQ3 gate/up probe failed a validity gate:\n{}",
+                serde_json::to_string_pretty(&sequence_rows).unwrap()
+            );
+        }
         let heuristic_prototype_triage_pass = all_sequences_valid
             && minimum_leaf_headroom >= LEAF_GATE
             && minimum_command_headroom >= COMMAND_GATE;

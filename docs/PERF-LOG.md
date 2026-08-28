@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next IQ3 Gate/Up Range Screen Invalid
+
+Status: close as `INVALID_SCREEN / NO_CANDIDATE`; do not rerun this
+condition or implement the compact N16 active-panel falsifier.
+
+- The repaired clean probe at `b8bf850` passed capture and standalone topology
+  qualification, then failed closed before report creation. A diagnostic-only
+  rerun declared tracked diff
+  `98e3e779b7087ddd842c25c7fa4bc103a7d4077272b8d2dcca8a6d630945b567`;
+  its sole tracked Rust diff exposed the already-computed sequence diagnostics
+  in the panic.
+- Full-control bracket drift was 3.198%, 2.008%, 2.711%, and 0.170%; the first
+  three sequences exceed the frozen 2% limit. Full controls rose from 705.47 ms
+  through 792.23 ms; the final bracket was 797.11/795.75 ms.
+- Full/interpolated-control disagreement was 0.667%, 1.221%, 0.564%, and
+  0.649%. Absolute additivity residual was 2.82%, 1.32%, 5.63%, and 3.07%;
+  Full-minus-NoWork and every band increment remained positive.
+- No JSON evidence report was written. For rerun-value assessment only, the
+  unscored optimistic leaf heuristics were 5.97%, 5.74%, 5.52%, and 5.34%
+  against 10%; command heuristics were 0.928%, 0.892%, 0.858%, and 0.830%
+  against 1%.
+- These diagnostics are not a valid KILL or performance result. They make a
+  same-condition rerun decision-insensitive, so the existing active-panel
+  mechanism closes without a candidate. A materially different weight-
+  stationary gate/up design remains a separate hypothesis.
+
 ## 2026-08-27 - Flash-Next IQ3 Gate/Up Observer Replacement
 
 Status: qualify and run the counter-free range screen before implementing an

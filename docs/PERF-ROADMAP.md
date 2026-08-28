@@ -217,29 +217,34 @@ gate. The experiment is removed. Do not infer a large decode win from launch
 count alone when the fusion leaves all material weight and activation traffic
 intact. The force-ranked lane is now:
 
-1. Pin the upstream full-logit row for the HELLO boundary and one selected-QSA
+1. Extend packed QSA through the selected-attention range above 2,048 tokens.
+   Dense packed prefill currently hands every overflow token to scalar commands,
+   so long prompts retain a product-defining throughput cliff. Preserve the
+   scalar cache owners and use scalar selected attention as the exact reference.
+   Prototyping may precede the upstream oracle; promotion may not.
+2. Pin the upstream full-logit row for the HELLO boundary and one selected-QSA
    row above 4,096 tokens so packed qualification no longer rests solely on the
    local scalar engine.
-2. Test count-banded standard IQ3 gate/up geometry after routing attribution.
-   It owns 14.56% of N=18 and 15.55% of N=2,048 command GPU time; require at
-   least a 10% stage saving and 1% whole-command gain.
 3. Run an internal-SSD cold first-touch control. Keep storage/residency work
    separate from warm kernel claims; warm packed execution is already >99% GPU.
-4. For interactive TTFT only, consider a routed-down path that avoids material
-   output traffic while preserving slot order. N=18 down owns 11.08%; N=2,048
-   down is parked at 6.78%, and reduction alone is decisively too small.
-5. Then price packed GDN and QSA mechanisms against their
-   measured 25.4% and 10.6% full-chunk command shares. Require at least 1%
-   projected whole-command leverage before implementing either candidate.
-6. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
+4. Add one natural mid-N attribution point before interactive-shape or MTP
+   decisions. N=18 and N=2,048 do not identify where fixed bridge/setup costs
+   yield to projection and mixer work.
+5. Price materially different full-chunk kernel-efficiency mechanisms for IQ3
+   gate/up and packed GDN. The direct-grid active-panel screen is closed; do not
+   repackage launch compaction as a weight-stationary candidate. Require at
+   least 1% projected whole-command leverage before implementing either path.
+6. For interactive TTFT only, consider a routed-down path that avoids material
+   output traffic while preserving slot order if the mid-N point supports it.
+   N=18 down owns 11.08%; N=2,048 down is parked at 6.78%.
+7. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
    sum analogue of the existing Q8 fused path. Require at least `0.5 ms/token`
    median command-GPU saving with a positive paired direction.
-7. Then test each Q8 HC down projection with its
-   low-SiLU epilogue (97 dispatches/token) because it also removes a scratch
-   pass; preserve the exact Q8 reduction and branch-count scaling.
-8. Then consider shared-MoE down plus gated accumulation (48 dispatches/token)
-   only if the HC result supports epilogue fusion; its routed-output read/modify/
-   write dependency makes it the riskier candidate.
+8. Then test each Q8 HC down projection with its low-SiLU epilogue because it
+   also removes a scratch pass; preserve exact Q8 reduction and branch scaling.
+9. Consider shared-MoE down plus gated accumulation only if the HC result
+   supports epilogue fusion; its routed-output read/modify/write dependency
+   makes it the riskier candidate.
 
 Packed-prefill S1 is closed at released `16/48/128` GDN geometry. For one and
 two token rows, the existing packed convolution/SiLU prep, paired L2 norm,
@@ -320,7 +325,8 @@ non-router dispatch topology exact. At N=2,048, router time falls
 reaching the command. Exact N=2,048 is default on Apple M4 Max with
 `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0` rollback. N=18 saves only
 `0.005791 ms/layer` and regresses warm command GPU, so it remains generic.
-Do not reopen selector/bucket work; count-banded standard IQ3 gate/up is next.
+Do not reopen selector/bucket work; the active-panel gate/up screen below is
+closed, and selected-range packed QSA is now the structural priority.
 
 The clean route census at `69e51c9` now separates prompt shape from kernel
 geometry. N=18 puts 80.10% of credited route mass in count 1-8 and reaches only
@@ -332,29 +338,17 @@ width-16 panels are 86.10% occupied. The current direct grid still launches
 2,818,048 panels before the ten-output-panel multiplier, so 97.73% return before
 matrix work.
 
-The inline range observer at `1dd43b9` produced no evidence because M4 Max does
-not support manual `sampleCountersInBuffer` calls with its stage-boundary sample
-buffer. Do not retry it. The counter-free replacement captures the natural F32
-input, route counts, and physical route slots once for each of the same 43
-credited layers, then runs no-work, 1-8, 9-16, 17-32, 33-64, 65+, or full as a
-standalone 43-dispatch command over operator-supplied, descriptor-stamped local
-weight banks. Dedicated capture/output storage is admission-priced, capture-on
-replay must preserve output, persistent state, and ordinary topology exactly,
-imported counts must match, and every active slot prefix must be an exact
-permutation of the 20,480 routes. Timing uses supported command-buffer GPU
-start/end intervals, not counter samples.
-
-Two forward/reverse mirrored pairs each run Full control, all seven arms, then
-Full control. Every sequence must keep control drift at or below 2%, keep its
-in-sequence Full within 2% of linearly interpolated controls, put full above
-no-work, keep all band increments nonnegative, and hold absolute additivity
-residual at or below 20% of the useful full-minus-no-work increment. Only if all
-four sequences pass and their minimum optimistic screens exceed 10% of the
-gate/up leaf and 1% of command GPU may implementation begin. That result
-authorizes only a compact N16 active-panel descriptor plus indirect-dispatch
-falsifier; descriptor build cost belongs inside its later paired A/B. Dedicated
-capture addresses, standalone leaf adjacency, width 8, width 32, and TGM
-reduction remain separate limitations or parked hypotheses.
+The counter-free IQ3 gate/up screen is closed as
+`INVALID_SCREEN / NO_CANDIDATE`. Three of four Full-control brackets exceeded
+the frozen 2% drift limit, so validation stopped before report creation and no
+KILL or triage result exists. Full/interpolated-control agreement, positive
+Full-minus-NoWork, nonnegative band increments, and additivity all passed. For
+rerun-value assessment only, every unscored optimistic leaf estimate was
+5.34-5.97% against the conjunctive 10% screen; command estimates were
+0.830-0.928% against 1%. Do not retrofit cooldown or warm-state selection,
+rerun this condition, or implement the compact N16 active-panel descriptor plus
+indirect-dispatch falsifier. Reopen gate/up only for a materially different
+mechanism or an independently justified prospective measurement-policy change.
 
 Runtime admission now separates exact-release qualification from behavioral
 contracts. The full tokenizer fingerprint and released stop vector remain

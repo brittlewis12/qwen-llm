@@ -7878,7 +7878,14 @@ impl<'a> MetalForward<'a> {
         }
 
         let t_encode = std::time::Instant::now();
-        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let cmd_buf = self
+            .ctx
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| MfError::CommandBuffer {
+                status: "unavailable".into(),
+                error: "Metal did not provide a command buffer".into(),
+            })?;
 
         {
             let enc = KernelEncoder::begin(&cmd_buf);
@@ -7967,6 +7974,15 @@ impl<'a> MetalForward<'a> {
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
         cmd_buf.waitUntilCompleted();
+        let status = cmd_buf.status();
+        let error = cmd_buf.error();
+        if status != MTLCommandBufferStatus::Completed || error.is_some() {
+            session.poison("concurrent dense single-token command failed");
+            return Err(MfError::CommandBuffer {
+                status: format!("{status:?}"),
+                error: format!("{error:?}"),
+            });
+        }
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -10329,6 +10345,7 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         hidden_dst: &MetalTensor,
     ) -> Result<Vec<f32>, MfError> {
+        session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
             return Err(MfError::UnsupportedMoe);
         }
@@ -10363,7 +10380,14 @@ impl<'a> MetalForward<'a> {
             *ptr = token_id;
         }
 
-        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let cmd_buf = self
+            .ctx
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| MfError::CommandBuffer {
+                status: "unavailable".into(),
+                error: "Metal did not provide a command buffer".into(),
+            })?;
         let enc = KernelEncoder::begin(&cmd_buf);
 
         // Embed → s.x.
@@ -10432,6 +10456,15 @@ impl<'a> MetalForward<'a> {
         enc.end();
         cmd_buf.commit();
         cmd_buf.waitUntilCompleted();
+        let status = cmd_buf.status();
+        let error = cmd_buf.error();
+        if status != MTLCommandBufferStatus::Completed || error.is_some() {
+            session.poison("multi-hidden forward command failed");
+            return Err(MfError::CommandBuffer {
+                status: format!("{status:?}"),
+                error: format!("{error:?}"),
+            });
+        }
         let mut logits = vec![0.0f32; arch.vocab_size as usize];
         unsafe {
             let src = session.logits.buffer.contents().as_ptr() as *const f32;
@@ -11989,7 +12022,14 @@ impl<'a> MetalForward<'a> {
         }
 
         let t_encode = std::time::Instant::now();
-        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let cmd_buf = self
+            .ctx
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| MfError::CommandBuffer {
+                status: "unavailable".into(),
+                error: "Metal did not provide a command buffer".into(),
+            })?;
         let enc = KernelEncoder::begin(&cmd_buf);
 
         // (1) Embedding lookup → x.
@@ -12045,6 +12085,15 @@ impl<'a> MetalForward<'a> {
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
         cmd_buf.waitUntilCompleted();
+        let status = cmd_buf.status();
+        let error = cmd_buf.error();
+        if status != MTLCommandBufferStatus::Completed || error.is_some() {
+            session.poison("dense serial single-token command failed");
+            return Err(MfError::CommandBuffer {
+                status: format!("{status:?}"),
+                error: format!("{error:?}"),
+            });
+        }
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
 
         // GPU-reported wall-clock execution time (CFTimeInterval seconds).

@@ -75,6 +75,7 @@ pub mod qwen4exp_residency;
 pub mod qwen4exp_runtime;
 pub mod qwen4exp_text_session;
 mod qwen_queue2;
+pub mod research;
 pub mod runtime;
 pub mod sampling;
 pub mod tensor;

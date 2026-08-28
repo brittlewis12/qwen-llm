@@ -1444,8 +1444,14 @@ impl LoadedModel {
         )?)
     }
 
-    fn ensure_owns(&self, sequence: &Sequence) -> Result<(), RuntimeError> {
+    pub(crate) fn ensure_owns(&self, sequence: &Sequence) -> Result<(), RuntimeError> {
         ensure_same_model_owner(&self.owner, &sequence.owner)
+    }
+
+    pub(crate) fn lightweight_identity_parts(&self) -> (u64, u64) {
+        *self.identity_parts.get_or_init(|| {
+            snapshot_identity_parts(&self.gguf, self.metal_model.arch, &self.identity_shards)
+        })
     }
 
     pub fn prefix_cache_stats(&self) -> PrefixCacheStats {

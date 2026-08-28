@@ -1610,8 +1610,9 @@ impl ResearchSession<'_, '_> {
     }
 
     /// Apply a query-major bank of target-layer cotangent trajectories while
-    /// sharing each block's dense-FFN primal replay. Mixer reverse passes are
-    /// currently isolated per query. Returned values use `[K,Q,T,H]` order.
+    /// sharing dense-FFN and full-attention primal replay. GDN mixer reverse
+    /// passes are currently isolated per query. Returned values use
+    /// `[K,Q,T,H]` order.
     pub fn workspace_vjp_batch(
         &self,
         forward: &ResearchWorkspaceForward,
@@ -2251,38 +2252,35 @@ impl ResearchSession<'_, '_> {
             MetalBlock::Attn(block) => {
                 let geometry = AttnGeometry::new(arch)?;
                 validate_attn_weights(layer, block, geometry)?;
-                for grad_query in grad_post_mixer.chunks_exact(hidden_elements) {
-                    let replay = attn_mixer_replay_vjp_readback(
-                        self.model.context(),
-                        geometry,
-                        AttnMixerWeights::from(block),
-                        input_residuals,
-                        grad_query,
-                        n_tokens,
-                        match rule {
-                            WorkspaceLensRule::Jacobian => AttnBlockVjpRule::Jacobian,
-                            WorkspaceLensRule::Relp => AttnBlockVjpRule::Relp,
-                        },
-                    )?;
-                    residual_replay_max_abs_error = residual_replay_max_abs_error.max(
-                        input_residuals
-                            .iter()
-                            .zip(&replay.mixer_outputs)
-                            .zip(post_mixer_residuals)
-                            .map(|((&input, &mixer), &observed)| {
-                                finite_abs_difference(input + mixer, observed)
-                            })
-                            .fold(0.0f32, f32::max),
-                    );
-                    if replay.grad_input.len() != hidden_elements {
-                        return Err(ResearchError::ActivationSize {
-                            name: "workspace attention mixer branch cotangent",
-                            got: replay.grad_input.len(),
-                            expected: hidden_elements,
-                        });
-                    }
-                    grad_mixer_input.extend(replay.grad_input);
+                let replay = attn_mixer_replay_vjp_batch_readback(
+                    self.model.context(),
+                    geometry,
+                    AttnMixerWeights::from(block),
+                    input_residuals,
+                    &grad_post_mixer,
+                    n_tokens,
+                    n_query,
+                    match rule {
+                        WorkspaceLensRule::Jacobian => AttnBlockVjpRule::Jacobian,
+                        WorkspaceLensRule::Relp => AttnBlockVjpRule::Relp,
+                    },
+                )?;
+                residual_replay_max_abs_error = input_residuals
+                    .iter()
+                    .zip(&replay.mixer_outputs)
+                    .zip(post_mixer_residuals)
+                    .map(|((&input, &mixer), &observed)| {
+                        finite_abs_difference(input + mixer, observed)
+                    })
+                    .fold(0.0f32, f32::max);
+                if replay.grad_input.len() != query_elements {
+                    return Err(ResearchError::ActivationSize {
+                        name: "workspace attention mixer branch cotangent query bank",
+                        got: replay.grad_input.len(),
+                        expected: query_elements,
+                    });
                 }
+                grad_mixer_input = replay.grad_input;
                 ResearchWorkspaceBlockKind::Attention
             }
         };
@@ -2606,12 +2604,49 @@ fn cpu_causal_gated_attention_vjp(
     geometry: AttnGeometry,
 ) -> Result<CpuCausalAttentionVjp, ResearchError> {
     let forward = cpu_causal_gated_attention_forward(q, k, v, gate, n_tokens, geometry)?;
+    cpu_causal_gated_attention_vjp_with_forward(
+        q,
+        k,
+        v,
+        gate,
+        grad_gated_output,
+        n_tokens,
+        geometry,
+        &forward,
+    )
+}
+
+#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+fn cpu_causal_gated_attention_vjp_with_forward(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    gate: &[f32],
+    grad_gated_output: &[f32],
+    n_tokens: usize,
+    geometry: AttnGeometry,
+    forward: &CpuCausalAttentionForward,
+) -> Result<CpuCausalAttentionVjp, ResearchError> {
     let q_total = checked_product(n_tokens, geometry.q_elements)?;
     let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
-    if grad_gated_output.len() != q_total {
+    for (name, values, expected) in [
+        ("attention VJP Q", q, q_total),
+        ("attention VJP K", k, kv_total),
+        ("attention VJP V", v, kv_total),
+        ("attention VJP gate", gate, q_total),
+    ] {
+        if values.len() != expected {
+            return Err(ResearchError::ActivationSize {
+                name,
+                got: values.len(),
+                expected,
+            });
+        }
+    }
+    if grad_gated_output.len() != q_total || forward.attention_output.len() != q_total {
         return Err(ResearchError::ActivationSize {
-            name: "gated attention cotangent",
-            got: grad_gated_output.len(),
+            name: "gated attention cotangent/shared forward",
+            got: grad_gated_output.len().min(forward.attention_output.len()),
             expected: q_total,
         });
     }
@@ -3210,6 +3245,344 @@ fn attn_mixer_replay_vjp_readback(
     Ok(AttnMixerVjpReadback {
         mixer_outputs,
         grad_input: read_f32(&grad_input, hidden_total),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attn_mixer_replay_vjp_batch_readback(
+    context: &MetalContext,
+    geometry: AttnGeometry,
+    weights: AttnMixerWeights<'_>,
+    input: &[f32],
+    grad_mixer_outputs: &[f32],
+    n_tokens: usize,
+    n_query: usize,
+    rule: AttnBlockVjpRule,
+) -> Result<AttnMixerVjpReadback, ResearchError> {
+    if n_tokens == 0 || n_tokens > MAX_RESEARCH_ATTN_TOKENS {
+        return Err(ResearchError::AttnPromptTooLong {
+            got: n_tokens,
+            max: MAX_RESEARCH_ATTN_TOKENS,
+        });
+    }
+    if n_query == 0 {
+        return Err(ResearchError::EmptyQueryBatch);
+    }
+    if n_query > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
+        return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+            got: n_query,
+            max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+        });
+    }
+    let hidden_total = checked_product(n_tokens, geometry.hidden_size)?;
+    let q_total = checked_product(n_tokens, geometry.q_elements)?;
+    let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
+    let q_full_total = checked_product(n_tokens, geometry.q_full_elements)?;
+    let query_rows = checked_product(n_query, n_tokens)?;
+    let hidden_query_total = checked_product(n_query, hidden_total)?;
+    let q_query_total = checked_product(n_query, q_total)?;
+    let kv_query_total = checked_product(n_query, kv_total)?;
+    let q_full_query_total = checked_product(n_query, q_full_total)?;
+    if input.len() != hidden_total {
+        return Err(ResearchError::ActivationSize {
+            name: "attention mixer input",
+            got: input.len(),
+            expected: hidden_total,
+        });
+    }
+    if grad_mixer_outputs.len() != hidden_query_total {
+        return Err(ResearchError::ActivationSize {
+            name: "attention mixer cotangent query bank",
+            got: grad_mixer_outputs.len(),
+            expected: hidden_query_total,
+        });
+    }
+
+    let front = AttnReplayFrontTensors::new(context, geometry, input, n_tokens)?;
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = front.encode(context, &encoder, geometry, weights, n_tokens);
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+
+    let q_raw = read_f32(&front.q_raw, q_total);
+    let k_raw = read_f32(&front.k_raw, kv_total);
+    let gate = read_f32(&front.gate, q_total);
+    let v = read_f32(&front.v, kv_total);
+    let mut q = read_f32(&front.q_normed, q_total);
+    let mut k = read_f32(&front.k_normed, kv_total);
+    rope_neox_rows_in_place(
+        &mut q,
+        n_tokens,
+        geometry.n_q_heads,
+        geometry.head_dim,
+        geometry.n_rot,
+        0,
+        geometry.rope_theta,
+        false,
+    )?;
+    rope_neox_rows_in_place(
+        &mut k,
+        n_tokens,
+        geometry.n_kv_heads,
+        geometry.head_dim,
+        geometry.n_rot,
+        0,
+        geometry.rope_theta,
+        false,
+    )?;
+    let attention = cpu_causal_gated_attention_forward(&q, &k, &v, &gate, n_tokens, geometry)?;
+
+    let gated_output = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(&attention.gated_output),
+        row_shape(geometry.q_elements, n_tokens)?,
+        GgmlType::F32,
+    )?;
+    let mixer_output = MetalTensor::zeros_f32(context, row_shape(geometry.hidden_size, n_tokens)?)?;
+    let grad_mixer = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(grad_mixer_outputs),
+        row_shape(geometry.hidden_size, query_rows)?,
+        GgmlType::F32,
+    )?;
+    let grad_gated = MetalTensor::zeros_f32(context, row_shape(geometry.q_elements, query_rows)?)?;
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = (|| -> Result<(), ResearchError> {
+        for token in 0..n_tokens {
+            let gated = row_view(&gated_output, token, geometry.q_elements);
+            let mixer = row_view(&mixer_output, token, geometry.hidden_size);
+            encode_mat_vec_dispatch(
+                context,
+                &encoder,
+                weights.o,
+                &gated,
+                &mixer,
+                geometry.q_elements,
+                geometry.hidden_size,
+            )?;
+        }
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            weights.o,
+            &grad_mixer,
+            &grad_gated,
+            geometry.q_elements,
+            geometry.hidden_size,
+            query_rows,
+        )?;
+        Ok(())
+    })();
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+    let mixer_outputs = read_f32(&mixer_output, hidden_total);
+    let grad_gated = read_f32(&grad_gated, q_query_total);
+
+    let q_norm_weight = read_f32(weights.q_norm, geometry.head_dim);
+    let k_norm_weight = read_f32(weights.k_norm, geometry.head_dim);
+    let mut grad_q_full_values = Vec::with_capacity(q_full_query_total);
+    let mut grad_k_values = Vec::with_capacity(kv_query_total);
+    let mut grad_v_values = Vec::with_capacity(kv_query_total);
+    for grad_gated_query in grad_gated.chunks_exact(q_total) {
+        let mut attention_vjp = cpu_causal_gated_attention_vjp_with_forward(
+            &q,
+            &k,
+            &v,
+            &gate,
+            grad_gated_query,
+            n_tokens,
+            geometry,
+            &attention,
+        )?;
+        rope_neox_rows_in_place(
+            &mut attention_vjp.grad_q,
+            n_tokens,
+            geometry.n_q_heads,
+            geometry.head_dim,
+            geometry.n_rot,
+            0,
+            geometry.rope_theta,
+            true,
+        )?;
+        rope_neox_rows_in_place(
+            &mut attention_vjp.grad_k,
+            n_tokens,
+            geometry.n_kv_heads,
+            geometry.head_dim,
+            geometry.n_rot,
+            0,
+            geometry.rope_theta,
+            true,
+        )?;
+        let grad_q_raw = cpu_weighted_rms_vjp_rows(
+            &q_raw,
+            &q_norm_weight,
+            &attention_vjp.grad_q,
+            checked_product(n_tokens, geometry.n_q_heads)?,
+            geometry.head_dim,
+            false,
+        )?;
+        let grad_k_raw = cpu_weighted_rms_vjp_rows(
+            &k_raw,
+            &k_norm_weight,
+            &attention_vjp.grad_k,
+            checked_product(n_tokens, geometry.n_kv_heads)?,
+            geometry.head_dim,
+            false,
+        )?;
+        let mut grad_q_full = vec![0.0f32; q_full_total];
+        for token in 0..n_tokens {
+            for head in 0..geometry.n_q_heads {
+                let source = (token * geometry.n_q_heads + head) * geometry.head_dim;
+                let destination = (token * geometry.n_q_heads + head) * 2 * geometry.head_dim;
+                grad_q_full[destination..destination + geometry.head_dim]
+                    .copy_from_slice(&grad_q_raw[source..source + geometry.head_dim]);
+                grad_q_full[destination + geometry.head_dim..destination + 2 * geometry.head_dim]
+                    .copy_from_slice(&attention_vjp.grad_gate[source..source + geometry.head_dim]);
+            }
+        }
+        grad_q_full_values.extend(grad_q_full);
+        grad_k_values.extend(grad_k_raw);
+        grad_v_values.extend(attention_vjp.grad_v);
+    }
+    for (name, got, expected) in [
+        (
+            "attention packed Q/gate cotangent query bank",
+            grad_q_full_values.len(),
+            q_full_query_total,
+        ),
+        (
+            "attention K cotangent query bank",
+            grad_k_values.len(),
+            kv_query_total,
+        ),
+        (
+            "attention V cotangent query bank",
+            grad_v_values.len(),
+            kv_query_total,
+        ),
+    ] {
+        if got != expected {
+            return Err(ResearchError::ActivationSize {
+                name,
+                got,
+                expected,
+            });
+        }
+    }
+
+    let grad_q_full = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(&grad_q_full_values),
+        row_shape(geometry.q_full_elements, query_rows)?,
+        GgmlType::F32,
+    )?;
+    let grad_k = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(&grad_k_values),
+        row_shape(geometry.kv_elements, query_rows)?,
+        GgmlType::F32,
+    )?;
+    let grad_v = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(&grad_v_values),
+        row_shape(geometry.kv_elements, query_rows)?,
+        GgmlType::F32,
+    )?;
+    let hidden_shape = row_shape(geometry.hidden_size, n_tokens)?;
+    let hidden_query_shape = row_shape(geometry.hidden_size, query_rows)?;
+    let grad_hidden_q = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden_k = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden_v = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden_qk = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_input = MetalTensor::zeros_f32(context, hidden_query_shape)?;
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = (|| -> Result<(), ResearchError> {
+        for (weight, grad_output, grad_hidden, n_out) in [
+            (
+                weights.q,
+                &grad_q_full,
+                &grad_hidden_q,
+                geometry.q_full_elements,
+            ),
+            (weights.k, &grad_k, &grad_hidden_k, geometry.kv_elements),
+            (weights.v, &grad_v, &grad_hidden_v, geometry.kv_elements),
+        ] {
+            encode_frozen_linear_vjp_f32(
+                context,
+                &encoder,
+                weight,
+                grad_output,
+                grad_hidden,
+                geometry.hidden_size,
+                n_out,
+                query_rows,
+            )?;
+        }
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_q,
+            &grad_hidden_k,
+            &grad_hidden_qk,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_qk,
+            &grad_hidden_v,
+            &grad_hidden,
+        )?;
+        for query in 0..n_query {
+            let offset = u64::try_from(checked_product(query, hidden_total)?)
+                .map_err(|_| ResearchError::SizeOverflow)?;
+            let grad_hidden_query = grad_hidden.view_subrange(offset, hidden_shape.clone());
+            let grad_input_query = grad_input.view_subrange(offset, hidden_shape.clone());
+            encode_rms_norm_mul_vjp_rows_f32(
+                context,
+                &encoder,
+                &front.input,
+                weights.attn_norm,
+                &grad_hidden_query,
+                &grad_input_query,
+                n_tokens,
+                geometry.hidden_size,
+                RMS_EPS,
+                match rule {
+                    AttnBlockVjpRule::Jacobian => RmsNormVjpRule::Jacobian,
+                    AttnBlockVjpRule::Relp => RmsNormVjpRule::RelpDetachedScale,
+                },
+            )?;
+        }
+        Ok(())
+    })();
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+    Ok(AttnMixerVjpReadback {
+        mixer_outputs,
+        grad_input: read_f32(&grad_input, hidden_query_total),
     })
 }
 
@@ -5664,6 +6037,88 @@ mod tests {
                 .zip(&actual.grad_input)
                 .any(|(relp, jacobian)| relp.to_bits() != jacobian.to_bits())
         );
+
+        let hidden_elements = TOKENS * HIDDEN;
+        for rule in [AttnBlockVjpRule::Jacobian, AttnBlockVjpRule::Relp] {
+            for query_batches in [1, 2, 8] {
+                let grad_bank: Vec<f32> = (0..query_batches * hidden_elements)
+                    .map(|index| {
+                        let query = index / hidden_elements;
+                        let local = index % hidden_elements;
+                        ((local * 31 + query * 11 + 5) % 59) as f32 * 0.009 - 0.24
+                            + query as f32 * 0.007
+                    })
+                    .collect();
+                let batched = attn_mixer_replay_vjp_batch_readback(
+                    &context,
+                    geometry,
+                    weights,
+                    &input,
+                    &grad_bank,
+                    TOKENS,
+                    query_batches,
+                    rule,
+                )
+                .unwrap();
+                for query in 0..query_batches {
+                    let start = query * hidden_elements;
+                    let end = start + hidden_elements;
+                    let serial = run(&input, &grad_bank[start..end], rule);
+                    let mixer_error = batched
+                        .mixer_outputs
+                        .iter()
+                        .zip(&serial.mixer_outputs)
+                        .map(|(&batched, &serial)| finite_abs_difference(batched, serial))
+                        .fold(0.0f32, f32::max);
+                    let gradient_error = batched.grad_input[start..end]
+                        .iter()
+                        .zip(&serial.grad_input)
+                        .map(|(&batched, &serial)| finite_abs_difference(batched, serial))
+                        .fold(0.0f32, f32::max);
+                    assert!(
+                        mixer_error < 1e-6 && gradient_error < 2e-5,
+                        "{rule:?} attention batch {query_batches} query {query}: mixer={mixer_error} gradient={gradient_error}"
+                    );
+                }
+            }
+
+            const QUERY_BATCHES: usize = 4;
+            const ACTIVE_QUERY: usize = 2;
+            let mut isolated_grad = vec![0.0f32; QUERY_BATCHES * hidden_elements];
+            let active_start = ACTIVE_QUERY * hidden_elements;
+            isolated_grad[active_start..active_start + hidden_elements].copy_from_slice(&grad);
+            let isolated = attn_mixer_replay_vjp_batch_readback(
+                &context,
+                geometry,
+                weights,
+                &input,
+                &isolated_grad,
+                TOKENS,
+                QUERY_BATCHES,
+                rule,
+            )
+            .unwrap();
+            let serial = run(&input, &grad, rule);
+            for query in 0..QUERY_BATCHES {
+                let start = query * hidden_elements;
+                let end = start + hidden_elements;
+                if query == ACTIVE_QUERY {
+                    let error = isolated.grad_input[start..end]
+                        .iter()
+                        .zip(&serial.grad_input)
+                        .map(|(&batched, &serial)| finite_abs_difference(batched, serial))
+                        .fold(0.0f32, f32::max);
+                    assert!(error < 2e-5, "{rule:?} isolated attention error {error}");
+                } else {
+                    assert!(
+                        isolated.grad_input[start..end]
+                            .iter()
+                            .all(|value| *value == 0.0),
+                        "{rule:?} attention query {query} received another query's cotangent"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

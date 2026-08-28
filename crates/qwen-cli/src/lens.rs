@@ -92,7 +92,7 @@ struct FitRowsArgs {
     row_end: u32,
 
     /// Number of target/output rows propagated in one query-major batch.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 8)]
     dim_batch: usize,
 
     /// Leading attention-sink positions excluded from target and source means.

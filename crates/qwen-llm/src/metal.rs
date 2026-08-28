@@ -23836,6 +23836,257 @@ pub fn encode_gdn_step_decay_f32(
     Ok(())
 }
 
+/// Activation VJP for one direct-decay GDN recurrence step.
+///
+/// The immutable `state_in` is the state before the step. Cotangents may enter
+/// through both the recurrence output and the post-step state. Q/K gradients
+/// are accumulated over every V head mapped by `hi % n_k_heads`; all output
+/// tensors and the two row scratch tensors must be distinct writable F32
+/// storage. This first research primitive is fixed to `head_dim = 128` and one
+/// cotangent query.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_gdn_step_decay_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k: &MetalTensor,
+    v: &MetalTensor,
+    decay: &MetalTensor,
+    beta: &MetalTensor,
+    state_in: &MetalTensor,
+    grad_out: &MetalTensor,
+    grad_state_out: &MetalTensor,
+    grad_q: &MetalTensor,
+    grad_k: &MetalTensor,
+    grad_v: &MetalTensor,
+    grad_decay: &MetalTensor,
+    grad_beta: &MetalTensor,
+    grad_state_in: &MetalTensor,
+    grad_correction_scratch: &MetalTensor,
+    residual_scratch: &MetalTensor,
+    n_v_heads: usize,
+    n_k_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "gdn_step_decay_vjp";
+    if enc.is_concurrent() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "dependent VJP dispatches require a serial encoder".into(),
+        });
+    }
+    if head_dim != 128
+        || n_v_heads == 0
+        || n_k_heads == 0
+        || !n_v_heads.is_multiple_of(n_k_heads)
+        || u32::try_from(n_v_heads).is_err()
+        || u32::try_from(n_k_heads).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected head_dim=128 and nonzero u32 head counts with n_v divisible by n_k, got n_v={n_v_heads} n_k={n_k_heads} head_dim={head_dim}"
+            ),
+        });
+    }
+    let qk_elements = n_k_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "Q/K element count overflow".into(),
+        })?;
+    let vector_elements = n_v_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "V-head element count overflow".into(),
+        })?;
+    let state_elements =
+        vector_elements
+            .checked_mul(head_dim)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "state element count overflow".into(),
+            })?;
+    let validate = |name: &str,
+                    tensor: &MetalTensor,
+                    elements: usize,
+                    writable: bool|
+     -> Result<(), MetalError> {
+        let elements_u64 = u64::try_from(elements).map_err(|_| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("{name} element count does not fit u64"),
+        })?;
+        let shape = vec![elements_u64];
+        let (_, bytes) = checked_shape_bytes(&shape, std::mem::size_of::<f32>())?;
+        if tensor.dtype != GgmlType::F32
+            || tensor.shape != shape
+            || (writable && !tensor.is_writable())
+            || !tensor_physical_range_valid(tensor, bytes, 4)
+        {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!(
+                    "{name} expected {}F32 {shape:?}, got {:?} {:?} writable={} offset={}",
+                    if writable { "writable " } else { "" },
+                    tensor.dtype,
+                    tensor.shape,
+                    tensor.is_writable(),
+                    tensor.offset
+                ),
+            });
+        }
+        Ok(())
+    };
+    for (name, tensor, elements) in [
+        ("q", q, qk_elements),
+        ("k", k, qk_elements),
+        ("v", v, vector_elements),
+        ("decay", decay, n_v_heads),
+        ("beta", beta, n_v_heads),
+        ("state_in", state_in, state_elements),
+        ("grad_out", grad_out, vector_elements),
+        ("grad_state_out", grad_state_out, state_elements),
+    ] {
+        validate(name, tensor, elements, false)?;
+    }
+    for (name, tensor, elements) in [
+        ("grad_q", grad_q, qk_elements),
+        ("grad_k", grad_k, qk_elements),
+        ("grad_v", grad_v, vector_elements),
+        ("grad_decay", grad_decay, n_v_heads),
+        ("grad_beta", grad_beta, n_v_heads),
+        ("grad_state_in", grad_state_in, state_elements),
+        (
+            "grad_correction_scratch",
+            grad_correction_scratch,
+            vector_elements,
+        ),
+        ("residual_scratch", residual_scratch, vector_elements),
+    ] {
+        validate(name, tensor, elements, true)?;
+    }
+    let inputs = [q, k, v, decay, beta, state_in, grad_out, grad_state_out];
+    let outputs = [
+        grad_q,
+        grad_k,
+        grad_v,
+        grad_decay,
+        grad_beta,
+        grad_state_in,
+        grad_correction_scratch,
+        residual_scratch,
+    ];
+    for (index, output) in outputs.iter().enumerate() {
+        if inputs
+            .iter()
+            .any(|input| tensor_ranges_overlap(output, input))
+            || outputs[index + 1..]
+                .iter()
+                .any(|other| tensor_ranges_overlap(output, other))
+        {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "gradient and scratch outputs must not overlap inputs or each other".into(),
+            });
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_v_heads: u32,
+        n_k_heads: u32,
+    }
+    let args = Args {
+        n_v_heads: n_v_heads as u32,
+        n_k_heads: n_k_heads as u32,
+    };
+
+    let rows = ctx.pipeline("kernel_gdn_step_decay_vjp_rows_f32")?;
+    let qk = ctx.pipeline("kernel_gdn_step_decay_vjp_qk_f32")?;
+    let scalars = ctx.pipeline("kernel_gdn_step_decay_vjp_scalars_f32")?;
+    enc.set_pipeline(&rows);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k);
+    enc.set_tensor(3, v);
+    enc.set_tensor(4, decay);
+    enc.set_tensor(5, beta);
+    enc.set_tensor(6, state_in);
+    enc.set_tensor(7, grad_out);
+    enc.set_tensor(8, grad_state_out);
+    enc.set_tensor(9, grad_state_in);
+    enc.set_tensor(10, grad_v);
+    enc.set_tensor(11, grad_correction_scratch);
+    enc.set_tensor(12, residual_scratch);
+    enc.dispatch(
+        MTLSize {
+            width: head_dim,
+            height: n_v_heads,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    enc.set_pipeline(&qk);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k);
+    enc.set_tensor(3, decay);
+    enc.set_tensor(4, beta);
+    enc.set_tensor(5, state_in);
+    enc.set_tensor(6, grad_out);
+    enc.set_tensor(7, grad_state_out);
+    enc.set_tensor(8, grad_correction_scratch);
+    enc.set_tensor(9, residual_scratch);
+    enc.set_tensor(10, grad_q);
+    enc.set_tensor(11, grad_k);
+    enc.dispatch(
+        MTLSize {
+            width: n_k_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: head_dim,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    enc.set_pipeline(&scalars);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k);
+    enc.set_tensor(3, beta);
+    enc.set_tensor(4, state_in);
+    enc.set_tensor(5, grad_out);
+    enc.set_tensor(6, grad_state_out);
+    enc.set_tensor(7, grad_correction_scratch);
+    enc.set_tensor(8, residual_scratch);
+    enc.set_tensor(9, grad_decay);
+    enc.set_tensor(10, grad_beta);
+    enc.set_threadgroup_memory(0, 8 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_v_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: head_dim,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_gdn_step_decay_packed_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -37664,6 +37915,472 @@ mod tests {
             assert!(max_out < 1e-4, "out drift {max_out}");
             assert!(max_state < 1e-4, "state drift {max_state}");
         }
+    }
+
+    struct GdnStepVjpReference {
+        grad_q: Vec<f64>,
+        grad_k: Vec<f64>,
+        grad_v: Vec<f64>,
+        grad_decay: Vec<f64>,
+        grad_beta: Vec<f64>,
+        grad_state: Vec<f64>,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_step_decay_objective_f64(
+        q: &[f64],
+        k: &[f64],
+        v: &[f64],
+        decay: &[f64],
+        beta: &[f64],
+        state: &[f64],
+        grad_out: &[f64],
+        grad_state_out: &[f64],
+        n_v: usize,
+        n_k: usize,
+        head_dim: usize,
+    ) -> f64 {
+        let mut objective = 0.0f64;
+        for hi in 0..n_v {
+            let hk = hi % n_k;
+            for dv in 0..head_dim {
+                let vector_index = hi * head_dim + dv;
+                let row_offset = vector_index * head_dim;
+                let prediction: f64 = (0..head_dim)
+                    .map(|dk| decay[hi] * state[row_offset + dk] * k[hk * head_dim + dk])
+                    .sum();
+                let residual = v[vector_index] - prediction;
+                let correction = beta[hi] * residual;
+                let mut output = 0.0f64;
+                for dk in 0..head_dim {
+                    let state_out =
+                        decay[hi] * state[row_offset + dk] + correction * k[hk * head_dim + dk];
+                    output += state_out * q[hk * head_dim + dk];
+                    objective += state_out * grad_state_out[row_offset + dk];
+                }
+                objective += output * grad_out[vector_index];
+            }
+        }
+        objective
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_step_decay_vjp_f64(
+        q: &[f64],
+        k: &[f64],
+        v: &[f64],
+        decay: &[f64],
+        beta: &[f64],
+        state: &[f64],
+        grad_out: &[f64],
+        grad_state_out: &[f64],
+        n_v: usize,
+        n_k: usize,
+        head_dim: usize,
+    ) -> GdnStepVjpReference {
+        let mut result = GdnStepVjpReference {
+            grad_q: vec![0.0; n_k * head_dim],
+            grad_k: vec![0.0; n_k * head_dim],
+            grad_v: vec![0.0; n_v * head_dim],
+            grad_decay: vec![0.0; n_v],
+            grad_beta: vec![0.0; n_v],
+            grad_state: vec![0.0; n_v * head_dim * head_dim],
+        };
+        for hi in 0..n_v {
+            let hk = hi % n_k;
+            for dv in 0..head_dim {
+                let vector_index = hi * head_dim + dv;
+                let row_offset = vector_index * head_dim;
+                let prediction: f64 = (0..head_dim)
+                    .map(|dk| decay[hi] * state[row_offset + dk] * k[hk * head_dim + dk])
+                    .sum();
+                let residual = v[vector_index] - prediction;
+                let correction = beta[hi] * residual;
+                let mut grad_c = 0.0f64;
+                for dk in 0..head_dim {
+                    let g = grad_state_out[row_offset + dk]
+                        + grad_out[vector_index] * q[hk * head_dim + dk];
+                    grad_c += g * k[hk * head_dim + dk];
+                }
+                result.grad_v[vector_index] = beta[hi] * grad_c;
+                result.grad_beta[hi] += grad_c * residual;
+                for dk in 0..head_dim {
+                    let qk_index = hk * head_dim + dk;
+                    let state_in = state[row_offset + dk];
+                    let predicted = decay[hi] * state_in;
+                    let state_out = predicted + correction * k[qk_index];
+                    let g = grad_state_out[row_offset + dk] + grad_out[vector_index] * q[qk_index];
+                    let grad_predicted = g - beta[hi] * grad_c * k[qk_index];
+                    result.grad_q[qk_index] += state_out * grad_out[vector_index];
+                    result.grad_k[qk_index] += beta[hi] * (residual * g - grad_c * predicted);
+                    result.grad_decay[hi] += grad_predicted * state_in;
+                    result.grad_state[row_offset + dk] = decay[hi] * grad_predicted;
+                }
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn gdn_step_decay_vjp_matches_adjoint_and_finite_differences() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_V: usize = 6;
+        const N_K: usize = 2;
+        const HEAD_DIM: usize = 128;
+        let q: Vec<f32> = (0..N_K * HEAD_DIM)
+            .map(|index| ((index * 11 + 3) % 43) as f32 * 0.002 - 0.041)
+            .collect();
+        let k: Vec<f32> = (0..N_K * HEAD_DIM)
+            .map(|index| ((index * 13 + 5) % 47) as f32 * 0.0017 - 0.039)
+            .collect();
+        let v: Vec<f32> = (0..N_V * HEAD_DIM)
+            .map(|index| ((index * 17 + 1) % 53) as f32 * 0.0023 - 0.057)
+            .collect();
+        let decay: Vec<f32> = (0..N_V).map(|head| 0.89 + head as f32 * 0.021).collect();
+        let beta: Vec<f32> = (0..N_V).map(|head| 0.23 + head as f32 * 0.14).collect();
+        let state: Vec<f32> = (0..N_V * HEAD_DIM * HEAD_DIM)
+            .map(|index| ((index * 19 + 7) % 59) as f32 * 0.0007 - 0.019)
+            .collect();
+        let grad_out: Vec<f32> = (0..N_V * HEAD_DIM)
+            .map(|index| ((index * 23 + 2) % 61) as f32 * 0.0011 - 0.031)
+            .collect();
+        let grad_state_out: Vec<f32> = (0..N_V * HEAD_DIM * HEAD_DIM)
+            .map(|index| ((index * 29 + 11) % 67) as f32 * 0.00009 - 0.003)
+            .collect();
+
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let q_t = tensor(&q);
+        let k_t = tensor(&k);
+        let v_t = tensor(&v);
+        let decay_t = tensor(&decay);
+        let beta_t = tensor(&beta);
+        let state_t = tensor(&state);
+        let grad_out_t = tensor(&grad_out);
+        let grad_state_out_t = tensor(&grad_state_out);
+        let grad_q_t = MetalTensor::zeros_f32(&ctx, vec![(N_K * HEAD_DIM) as u64]).unwrap();
+        let grad_k_t = MetalTensor::zeros_f32(&ctx, vec![(N_K * HEAD_DIM) as u64]).unwrap();
+        let grad_v_t = MetalTensor::zeros_f32(&ctx, vec![(N_V * HEAD_DIM) as u64]).unwrap();
+        let grad_decay_t = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let grad_beta_t = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let grad_state_t =
+            MetalTensor::zeros_f32(&ctx, vec![(N_V * HEAD_DIM * HEAD_DIM) as u64]).unwrap();
+        let grad_c_t = MetalTensor::zeros_f32(&ctx, vec![(N_V * HEAD_DIM) as u64]).unwrap();
+        let residual_t = MetalTensor::zeros_f32(&ctx, vec![(N_V * HEAD_DIM) as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_gdn_step_decay_vjp_f32(
+                &ctx,
+                encoder,
+                &q_t,
+                &k_t,
+                &v_t,
+                &decay_t,
+                &beta_t,
+                &state_t,
+                &grad_out_t,
+                &grad_state_out_t,
+                &grad_q_t,
+                &grad_k_t,
+                &grad_v_t,
+                &grad_decay_t,
+                &grad_beta_t,
+                &grad_state_t,
+                &grad_c_t,
+                &residual_t,
+                N_V,
+                N_K,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+
+        let actual = GdnStepVjpReference {
+            grad_q: read_back_f32(&grad_q_t.buffer, N_K * HEAD_DIM)
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_k: read_back_f32(&grad_k_t.buffer, N_K * HEAD_DIM)
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_v: read_back_f32(&grad_v_t.buffer, N_V * HEAD_DIM)
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_decay: read_back_f32(&grad_decay_t.buffer, N_V)
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_beta: read_back_f32(&grad_beta_t.buffer, N_V)
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_state: read_back_f32(&grad_state_t.buffer, N_V * HEAD_DIM * HEAD_DIM)
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+        };
+        let as_f64 = |values: &[f32]| values.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let q64 = as_f64(&q);
+        let k64 = as_f64(&k);
+        let v64 = as_f64(&v);
+        let decay64 = as_f64(&decay);
+        let beta64 = as_f64(&beta);
+        let state64 = as_f64(&state);
+        let grad_out64 = as_f64(&grad_out);
+        let grad_state_out64 = as_f64(&grad_state_out);
+        let expected = gdn_step_decay_vjp_f64(
+            &q64,
+            &k64,
+            &v64,
+            &decay64,
+            &beta64,
+            &state64,
+            &grad_out64,
+            &grad_state_out64,
+            N_V,
+            N_K,
+            HEAD_DIM,
+        );
+        for (name, gpu, cpu, tolerance) in [
+            ("q", &actual.grad_q, &expected.grad_q, 3e-5),
+            ("k", &actual.grad_k, &expected.grad_k, 3e-5),
+            ("v", &actual.grad_v, &expected.grad_v, 2e-6),
+            ("decay", &actual.grad_decay, &expected.grad_decay, 5e-5),
+            ("beta", &actual.grad_beta, &expected.grad_beta, 5e-5),
+            ("state", &actual.grad_state, &expected.grad_state, 3e-6),
+        ] {
+            let max_abs = gpu
+                .iter()
+                .zip(cpu)
+                .map(|(gpu, cpu)| (gpu - cpu).abs())
+                .fold(0.0f64, f64::max);
+            assert!(max_abs < tolerance, "{name} VJP error {max_abs}");
+        }
+
+        let objective =
+            |q: &[f64], k: &[f64], v: &[f64], decay: &[f64], beta: &[f64], state: &[f64]| {
+                gdn_step_decay_objective_f64(
+                    q,
+                    k,
+                    v,
+                    decay,
+                    beta,
+                    state,
+                    &grad_out64,
+                    &grad_state_out64,
+                    N_V,
+                    N_K,
+                    HEAD_DIM,
+                )
+            };
+        let epsilon = 1e-5;
+        let finite_difference = |values: &[f64], index: usize, evaluate: &dyn Fn(&[f64]) -> f64| {
+            let mut plus = values.to_vec();
+            let mut minus = values.to_vec();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            (evaluate(&plus) - evaluate(&minus)) / (2.0 * epsilon)
+        };
+        for &index in &[0usize, 127, N_K * HEAD_DIM - 1] {
+            let fd = finite_difference(&q64, index, &|candidate| {
+                objective(candidate, &k64, &v64, &decay64, &beta64, &state64)
+            });
+            assert!((fd - actual.grad_q[index]).abs() < 2e-5);
+            let fd = finite_difference(&k64, index, &|candidate| {
+                objective(&q64, candidate, &v64, &decay64, &beta64, &state64)
+            });
+            assert!((fd - actual.grad_k[index]).abs() < 2e-5);
+        }
+        for &index in &[0usize, 255, N_V * HEAD_DIM - 1] {
+            let fd = finite_difference(&v64, index, &|candidate| {
+                objective(&q64, &k64, candidate, &decay64, &beta64, &state64)
+            });
+            assert!((fd - actual.grad_v[index]).abs() < 2e-5);
+        }
+        for index in 0..N_V {
+            let fd = finite_difference(&decay64, index, &|candidate| {
+                objective(&q64, &k64, &v64, candidate, &beta64, &state64)
+            });
+            assert!((fd - actual.grad_decay[index]).abs() < 3e-5);
+            let fd = finite_difference(&beta64, index, &|candidate| {
+                objective(&q64, &k64, &v64, &decay64, candidate, &state64)
+            });
+            assert!((fd - actual.grad_beta[index]).abs() < 3e-5);
+        }
+        for &index in &[
+            0usize,
+            HEAD_DIM - 1,
+            HEAD_DIM,
+            2 * HEAD_DIM * HEAD_DIM + 31 * HEAD_DIM + 32,
+            N_V * HEAD_DIM * HEAD_DIM - 1,
+        ] {
+            let fd = finite_difference(&state64, index, &|candidate| {
+                objective(&q64, &k64, &v64, &decay64, &beta64, candidate)
+            });
+            assert!((fd - actual.grad_state[index]).abs() < 2e-5);
+        }
+
+        let direction = |len: usize, stride: usize| {
+            (0..len)
+                .map(|index| ((index * stride + 3) % 29) as f64 * 0.001 - 0.014)
+                .collect::<Vec<_>>()
+        };
+        let dq = direction(q64.len(), 5);
+        let dk = direction(k64.len(), 7);
+        let dv = direction(v64.len(), 11);
+        let ddecay = direction(decay64.len(), 13);
+        let dbeta = direction(beta64.len(), 17);
+        let dstate = direction(state64.len(), 19);
+        let inner = |gradient: &[f64], tangent: &[f64]| {
+            gradient
+                .iter()
+                .zip(tangent)
+                .map(|(gradient, tangent)| gradient * tangent)
+                .sum::<f64>()
+        };
+        let reverse_directional = inner(&actual.grad_q, &dq)
+            + inner(&actual.grad_k, &dk)
+            + inner(&actual.grad_v, &dv)
+            + inner(&actual.grad_decay, &ddecay)
+            + inner(&actual.grad_beta, &dbeta)
+            + inner(&actual.grad_state, &dstate);
+        let shift = |base: &[f64], tangent: &[f64], amount: f64| {
+            base.iter()
+                .zip(tangent)
+                .map(|(base, tangent)| base + amount * tangent)
+                .collect::<Vec<_>>()
+        };
+        let directional_epsilon = 1e-5;
+        let plus = objective(
+            &shift(&q64, &dq, directional_epsilon),
+            &shift(&k64, &dk, directional_epsilon),
+            &shift(&v64, &dv, directional_epsilon),
+            &shift(&decay64, &ddecay, directional_epsilon),
+            &shift(&beta64, &dbeta, directional_epsilon),
+            &shift(&state64, &dstate, directional_epsilon),
+        );
+        let minus = objective(
+            &shift(&q64, &dq, -directional_epsilon),
+            &shift(&k64, &dk, -directional_epsilon),
+            &shift(&v64, &dv, -directional_epsilon),
+            &shift(&decay64, &ddecay, -directional_epsilon),
+            &shift(&beta64, &dbeta, -directional_epsilon),
+            &shift(&state64, &dstate, -directional_epsilon),
+        );
+        let forward_directional = (plus - minus) / (2.0 * directional_epsilon);
+        assert!(
+            (forward_directional - reverse_directional).abs() < 2e-5,
+            "directional adjoint mismatch forward={forward_directional} reverse={reverse_directional}"
+        );
+
+        for (tensor, original) in [
+            (&q_t, &q),
+            (&k_t, &k),
+            (&v_t, &v),
+            (&decay_t, &decay),
+            (&beta_t, &beta),
+            (&state_t, &state),
+            (&grad_out_t, &grad_out),
+            (&grad_state_out_t, &grad_state_out),
+        ] {
+            assert_eq!(
+                read_back_f32(&tensor.buffer, original.len())
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                original
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn gdn_step_decay_vjp_rejects_unsafe_contracts() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_V: usize = 3;
+        const N_K: usize = 1;
+        const HEAD_DIM: usize = 128;
+        let qk_elements = N_K * HEAD_DIM;
+        let vector_elements = N_V * HEAD_DIM;
+        let state_elements = N_V * HEAD_DIM * HEAD_DIM;
+        let q = MetalTensor::zeros_f32(&ctx, vec![qk_elements as u64]).unwrap();
+        let k = MetalTensor::zeros_f32(&ctx, vec![qk_elements as u64]).unwrap();
+        let v = MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        let decay = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let beta = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let state = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_out = MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        let grad_state_out = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_q = MetalTensor::zeros_f32(&ctx, vec![qk_elements as u64]).unwrap();
+        let grad_k = MetalTensor::zeros_f32(&ctx, vec![qk_elements as u64]).unwrap();
+        let grad_v = MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        let grad_decay = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let grad_beta = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let grad_state = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_c = MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        let residual = MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        let invoke = |encoder: &KernelEncoder, grad_q_output: &MetalTensor| {
+            encode_gdn_step_decay_vjp_f32(
+                &ctx,
+                encoder,
+                &q,
+                &k,
+                &v,
+                &decay,
+                &beta,
+                &state,
+                &grad_out,
+                &grad_state_out,
+                grad_q_output,
+                &grad_k,
+                &grad_v,
+                &grad_decay,
+                &grad_beta,
+                &grad_state,
+                &grad_c,
+                &residual,
+                N_V,
+                N_K,
+                HEAD_DIM,
+            )
+        };
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let concurrent = KernelEncoder::begin_concurrent(&command);
+        invoke(&concurrent, &grad_q).expect_err("concurrent encoder must fail");
+        concurrent.end();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        invoke(&encoder, &q).expect_err("output/input alias must fail");
+        encoder.end();
+
+        let mut read_only = grad_q.clone();
+        read_only.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        invoke(&encoder, &read_only).expect_err("read-only output must fail");
+        encoder.end();
+
+        let short = MetalTensor::zeros_f32(&ctx, vec![(qk_elements - 1) as u64]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        invoke(&encoder, &short).expect_err("short output must fail");
+        encoder.end();
     }
 
     /// Ensures the chained-encoding API is correctness-equivalent to one-shot.

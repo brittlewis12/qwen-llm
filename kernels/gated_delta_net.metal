@@ -199,6 +199,181 @@ kernel void kernel_gdn_step_decay_f32(
     }
 }
 
+// Reverse one recurrence step with direct decay input. The VJP consumes the
+// immutable pre-step state and cotangents for both the recurrence output and
+// post-step state. Three dispatches avoid floating-point atomics:
+//   1. rows: state/V gradients plus reusable grad-correction and residual rows
+//   2. qk: deterministic aggregation over V heads sharing each Q/K head
+//   3. scalars: per-V-head decay and beta reductions
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_gdn_step_decay_vjp_rows_f32(
+        constant gdn_step_args & args          [[buffer(0)]],
+        device const float * q                 [[buffer(1)]],
+        device const float * k                 [[buffer(2)]],
+        device const float * v                 [[buffer(3)]],
+        device const float * decay             [[buffer(4)]],
+        device const float * beta              [[buffer(5)]],
+        device const float * state_in          [[buffer(6)]],
+        device const float * grad_out          [[buffer(7)]],
+        device const float * grad_state_out    [[buffer(8)]],
+        device       float * grad_state_in     [[buffer(9)]],
+        device       float * grad_v            [[buffer(10)]],
+        device       float * grad_correction   [[buffer(11)]],
+        device       float * residual          [[buffer(12)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint dv = tgpig.x;
+    const uint hi = tgpig.y;
+    if (hi >= args.n_v_heads || dv >= HEAD_DIM) return;
+
+    const uint hk = hi % args.n_k_heads;
+    const ulong vector_index = (ulong)hi * HEAD_DIM + dv;
+    const ulong row_offset = ((ulong)hi * HEAD_DIM + dv) * HEAD_DIM;
+    device const float * q_h = q + (ulong)hk * HEAD_DIM;
+    device const float * k_h = k + (ulong)hk * HEAD_DIM;
+    const float decay_h = decay[hi];
+    const float beta_h = beta[hi];
+    const float grad_o = grad_out[vector_index];
+    const ushort dk_base = tiisg * DKS_PER_LANE;
+
+    float state_reg[DKS_PER_LANE];
+    float predicted_reg[DKS_PER_LANE];
+    float k_reg[DKS_PER_LANE];
+    float q_reg[DKS_PER_LANE];
+    float grad_state_reg[DKS_PER_LANE];
+    float prediction_partial = 0.0f;
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        const ushort dk = dk_base + j;
+        state_reg[j] = state_in[row_offset + dk];
+        predicted_reg[j] = decay_h * state_reg[j];
+        k_reg[j] = k_h[dk];
+        q_reg[j] = q_h[dk];
+        grad_state_reg[j] = grad_state_out[row_offset + dk];
+        prediction_partial += predicted_reg[j] * k_reg[j];
+    }
+    const float prediction = simd_sum(prediction_partial);
+    const float residual_value = v[vector_index] - prediction;
+
+    float grad_c_partial = 0.0f;
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        const float g = grad_state_reg[j] + grad_o * q_reg[j];
+        grad_c_partial += g * k_reg[j];
+    }
+    const float grad_c = simd_sum(grad_c_partial);
+
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        const ushort dk = dk_base + j;
+        const float g = grad_state_reg[j] + grad_o * q_reg[j];
+        const float grad_predicted = g - beta_h * grad_c * k_reg[j];
+        grad_state_in[row_offset + dk] = decay_h * grad_predicted;
+    }
+    if (tiisg == 0) {
+        grad_v[vector_index] = beta_h * grad_c;
+        grad_correction[vector_index] = grad_c;
+        residual[vector_index] = residual_value;
+    }
+}
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_gdn_step_decay_vjp_qk_f32(
+        constant gdn_step_args & args          [[buffer(0)]],
+        device const float * q                 [[buffer(1)]],
+        device const float * k                 [[buffer(2)]],
+        device const float * decay             [[buffer(3)]],
+        device const float * beta              [[buffer(4)]],
+        device const float * state_in          [[buffer(5)]],
+        device const float * grad_out          [[buffer(6)]],
+        device const float * grad_state_out    [[buffer(7)]],
+        device const float * grad_correction   [[buffer(8)]],
+        device const float * residual          [[buffer(9)]],
+        device       float * grad_q            [[buffer(10)]],
+        device       float * grad_k            [[buffer(11)]],
+        uint hk [[threadgroup_position_in_grid]],
+        uint dk [[thread_position_in_threadgroup]]) {
+    if (hk >= args.n_k_heads || dk >= HEAD_DIM) return;
+
+    const float q_value = q[(ulong)hk * HEAD_DIM + dk];
+    const float k_value = k[(ulong)hk * HEAD_DIM + dk];
+    float grad_q_value = 0.0f;
+    float grad_k_value = 0.0f;
+    for (uint hi = hk; hi < args.n_v_heads; hi += args.n_k_heads) {
+        const float decay_h = decay[hi];
+        const float beta_h = beta[hi];
+        for (uint dv = 0; dv < HEAD_DIM; ++dv) {
+            const ulong vector_index = (ulong)hi * HEAD_DIM + dv;
+            const ulong state_index = vector_index * HEAD_DIM + dk;
+            const float predicted = decay_h * state_in[state_index];
+            const float residual_value = residual[vector_index];
+            const float correction = beta_h * residual_value;
+            const float state_out_value = predicted + correction * k_value;
+            const float grad_o = grad_out[vector_index];
+            const float g = grad_state_out[state_index] + grad_o * q_value;
+            const float grad_c = grad_correction[vector_index];
+            grad_q_value += state_out_value * grad_o;
+            grad_k_value += beta_h * (residual_value * g - grad_c * predicted);
+        }
+    }
+    grad_q[(ulong)hk * HEAD_DIM + dk] = grad_q_value;
+    grad_k[(ulong)hk * HEAD_DIM + dk] = grad_k_value;
+}
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_gdn_step_decay_vjp_scalars_f32(
+        constant gdn_step_args & args          [[buffer(0)]],
+        device const float * q                 [[buffer(1)]],
+        device const float * k                 [[buffer(2)]],
+        device const float * beta              [[buffer(3)]],
+        device const float * state_in          [[buffer(4)]],
+        device const float * grad_out          [[buffer(5)]],
+        device const float * grad_state_out    [[buffer(6)]],
+        device const float * grad_correction   [[buffer(7)]],
+        device const float * residual          [[buffer(8)]],
+        device       float * grad_decay        [[buffer(9)]],
+        device       float * grad_beta         [[buffer(10)]],
+        threadgroup float * shmem              [[threadgroup(0)]],
+        uint hi [[threadgroup_position_in_grid]],
+        uint dv [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    if (hi >= args.n_v_heads || dv >= HEAD_DIM) return;
+
+    const uint hk = hi % args.n_k_heads;
+    const ulong vector_index = (ulong)hi * HEAD_DIM + dv;
+    const ulong row_offset = vector_index * HEAD_DIM;
+    const float beta_h = beta[hi];
+    const float grad_o = grad_out[vector_index];
+    const float grad_c = grad_correction[vector_index];
+    float grad_decay_partial = 0.0f;
+    for (uint dk = 0; dk < HEAD_DIM; ++dk) {
+        const float g = grad_state_out[row_offset + dk]
+            + grad_o * q[(ulong)hk * HEAD_DIM + dk];
+        const float grad_predicted = g
+            - beta_h * grad_c * k[(ulong)hk * HEAD_DIM + dk];
+        grad_decay_partial += grad_predicted * state_in[row_offset + dk];
+    }
+    float grad_beta_partial = grad_c * residual[vector_index];
+
+    grad_decay_partial = simd_sum(grad_decay_partial);
+    grad_beta_partial = simd_sum(grad_beta_partial);
+    const uint nsg = (ntg + 31) / 32;
+    if (tiisg == 0) {
+        shmem[sgitg] = grad_decay_partial;
+        shmem[nsg + sgitg] = grad_beta_partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgitg == 0) {
+        grad_decay_partial = tiisg < nsg ? shmem[tiisg] : 0.0f;
+        grad_beta_partial = tiisg < nsg ? shmem[nsg + tiisg] : 0.0f;
+        grad_decay_partial = simd_sum(grad_decay_partial);
+        grad_beta_partial = simd_sum(grad_beta_partial);
+        if (tiisg == 0) {
+            grad_decay[hi] = grad_decay_partial;
+            grad_beta[hi] = grad_beta_partial;
+        }
+    }
+}
+
 [[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_gdn_step_decay_packed_f32(
         constant gdn_step_packed_args & args [[buffer(0)]],

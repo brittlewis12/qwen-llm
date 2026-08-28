@@ -509,6 +509,19 @@ struct qwen4exp_qsa_attention_args {
     float scale;
 };
 
+struct qwen4exp_qsa_packed_attention_args {
+    uint start_position;
+    uint query_count;
+    uint query_heads;
+    uint kv_heads;
+    uint head_dim;
+    uint block_budget;
+    uint ratio;
+    uint row_stride;
+    uint cache_capacity;
+    float scale;
+};
+
 static inline float qwen4exp_qsa_rope_value(
         device const float * row,
         device const float * weight,
@@ -1001,6 +1014,157 @@ kernel void kernel_qwen4exp_qsa_attention_softmax_value_f16(
     }
     const uint output_index = query_head * args.head_dim + lane;
     const float gate = 1.0f / (1.0f + exp(-raw_gate[output_index]));
+    output[output_index] = scratch[8] > 0.0f
+        ? accumulator / scratch[8] * gate
+        : 0.0f;
+}
+
+kernel void kernel_qwen4exp_qsa_attention_logits_packed_f16(
+        constant qwen4exp_qsa_packed_attention_args & args [[buffer(0)]],
+        device const float * query [[buffer(1)]],
+        device const half * key_cache [[buffer(2)]],
+        device const int * token_ids [[buffer(3)]],
+        device const int * selected_counts [[buffer(4)]],
+        device const int * status [[buffer(5)]],
+        device float * logits [[buffer(6)]],
+        threadgroup ushort * staged_key [[threadgroup(0)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    if (args.head_dim != 256u
+            || args.kv_heads == 0u
+            || args.query_heads % args.kv_heads != 0u
+            || args.ratio == 0u) return;
+    const uint heads_per_kv = args.query_heads / args.kv_heads;
+    if (heads_per_kv % 4u != 0u
+            || group.x >= heads_per_kv / 4u
+            || group.y >= args.kv_heads
+            || group.z >= args.query_count) return;
+    const uint query_index = group.z;
+    const uint query_head = group.y * heads_per_kv + group.x * 4u + uint(simdgroup);
+    const uint sequence_length = args.start_position + query_index + 1u;
+    const int selected_i = selected_counts[query_index];
+    const bool metadata_valid = status[query_index] == 0
+        && selected_i == int(args.block_budget);
+    const uint active_count = metadata_valid
+        ? uint(selected_i) * args.ratio + sequence_length % args.ratio
+        : 0u;
+    const ulong query_start = ((ulong)query_index * args.query_heads + query_head)
+        * args.head_dim;
+    const ulong id_start = (ulong)query_index * args.row_stride;
+    const ulong logit_start = ((ulong)query_index * args.query_heads + query_head)
+        * args.row_stride;
+    for (uint slot = 0u; slot < args.row_stride; ++slot) {
+        const int position = slot < active_count ? token_ids[id_start + slot] : -1;
+        const bool position_valid = metadata_valid
+            && active_count <= args.row_stride
+            && position >= 0
+            && uint(position) < args.cache_capacity
+            && uint(position) < sequence_length;
+        if (!position_valid) {
+            if (simd_lane == 0u) logits[logit_start + slot] = -INFINITY;
+            continue;
+        }
+        const ulong key_start = ((ulong)uint(position) * args.kv_heads + group.y)
+            * args.head_dim;
+        staged_key[lane] = as_type<ushort>(key_cache[key_start + lane]);
+        staged_key[lane + 128u] = as_type<ushort>(key_cache[key_start + lane + 128u]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float partial = 0.0f;
+        for (uint dimension = uint(simd_lane); dimension < 256u; dimension += 32u) {
+            partial += query[query_start + dimension]
+                * float(as_type<half>(staged_key[dimension]));
+        }
+        partial = simd_sum(partial);
+        if (simd_lane == 0u) logits[logit_start + slot] = partial * args.scale;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+kernel void kernel_qwen4exp_qsa_attention_softmax_value_packed_f16(
+        constant qwen4exp_qsa_packed_attention_args & args [[buffer(0)]],
+        device const float * query_gate_projection [[buffer(1)]],
+        device const half * value_cache [[buffer(2)]],
+        device const int * token_ids [[buffer(3)]],
+        device const int * selected_counts [[buffer(4)]],
+        device const int * status [[buffer(5)]],
+        device float * logits [[buffer(6)]],
+        device float * output [[buffer(7)]],
+        threadgroup float * scratch [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    if (args.head_dim != 256u
+            || args.kv_heads == 0u
+            || args.query_heads % args.kv_heads != 0u
+            || args.ratio == 0u
+            || group.x >= args.query_heads
+            || group.y >= args.query_count) return;
+    const uint query_head = group.x;
+    const uint query_index = group.y;
+    const uint sequence_length = args.start_position + query_index + 1u;
+    const int selected_i = selected_counts[query_index];
+    const bool metadata_valid = status[query_index] == 0
+        && selected_i == int(args.block_budget);
+    const uint id_count = metadata_valid
+        ? uint(selected_i) * args.ratio + sequence_length % args.ratio
+        : 0u;
+    const ulong output_index = ((ulong)query_index * args.query_heads + query_head)
+        * args.head_dim + lane;
+    if (!metadata_valid || id_count == 0u || id_count > args.row_stride) {
+        output[output_index] = 0.0f;
+        return;
+    }
+    device float * head_logits = logits
+        + ((ulong)query_index * args.query_heads + query_head) * args.row_stride;
+    float local_maximum = -INFINITY;
+    for (uint slot = lane; slot < id_count; slot += 256u) {
+        local_maximum = max(local_maximum, head_logits[slot]);
+    }
+    local_maximum = simd_max(local_maximum);
+    if (simd_lane == 0u) scratch[uint(simdgroup)] = local_maximum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdgroup == 0u) {
+        const float candidate = simd_lane < 8u ? scratch[uint(simd_lane)] : -INFINITY;
+        const float maximum = simd_max(candidate);
+        if (simd_lane == 0u) scratch[8] = maximum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float maximum = scratch[8];
+
+    float local_denominator = 0.0f;
+    for (uint slot = lane; slot < id_count; slot += 256u) {
+        const float mass = exp(head_logits[slot] - maximum);
+        head_logits[slot] = mass;
+        local_denominator += mass;
+    }
+    local_denominator = simd_sum(local_denominator);
+    if (simd_lane == 0u) scratch[uint(simdgroup)] = local_denominator;
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    if (simdgroup == 0u) {
+        const float candidate = simd_lane < 8u ? scratch[uint(simd_lane)] : 0.0f;
+        const float denominator = simd_sum(candidate);
+        if (simd_lane == 0u) scratch[8] = denominator;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint kv_head = query_head / (args.query_heads / args.kv_heads);
+    const ulong id_start = (ulong)query_index * args.row_stride;
+    float accumulator = 0.0f;
+    for (uint slot = 0u; slot < id_count; ++slot) {
+        const int position = token_ids[id_start + slot];
+        if (position < 0
+                || uint(position) >= args.cache_capacity
+                || uint(position) >= sequence_length) continue;
+        const ulong value_start = ((ulong)uint(position) * args.kv_heads + kv_head)
+            * args.head_dim;
+        accumulator += float(value_cache[value_start + lane]) * head_logits[slot];
+    }
+    const ulong gate_index = ((ulong)query_index * args.query_heads + query_head)
+        * args.head_dim * 2u + args.head_dim + lane;
+    const float gate = 1.0f / (1.0f + exp(-query_gate_projection[gate_index]));
     output[output_index] = scratch[8] > 0.0f
         ? accumulator / scratch[8] * gate
         : 0.0f;

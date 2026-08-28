@@ -274,8 +274,12 @@ selected-index packet is now internally qualified over one 32-query band: packed
 norm/RoPE and scores match repeated scalar kernels byte-for-byte across the
 visible-block 8-to-9 boundary, while the shared radix selector and parallel
 expansion preserve lower-ID ties, cache order, failure status, and all
-modulo-four tails. Its tagged topology is exactly four dispatches. Gathered
-attention, persistent publication, and the production selected route remain
+modulo-four tails. Its tagged topology is exactly four dispatches. The dormant
+selected-attention continuation is now qualified at production stride 2,051:
+four-head K-sharing logits plus scalar-order softmax/value/qgate match repeated
+scalar kernels byte-for-byte at B=1 and B=32, and exact six-dispatch grids are
+locked. Invalid metadata and future IDs fail without cache reads. Persistent
+publication, completion auditing, and the production selected route remain
 absent. Released N=2,048 measures 457.229 tok/s wall, and four scalar
 continuations cross into QSA selection at length 2,052 with all state bindings
 and 12 cache lengths intact. Runtime and CLI promotion is now closed. Unprofiled

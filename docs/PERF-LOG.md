@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Packed QSA Selected Attention Primitives
+
+Status: qualify the dormant six-dispatch selected-attention packet; production
+routing, cache publication, and completion auditing remain disabled.
+
+- The gathered-logit kernel assigns one 128-thread group to four sibling query
+  heads. It stages each F16 K row once, preserves the scalar SIMD dot order, and
+  uses barriers before consumption and overwrite. Production geometry launches
+  `(3,2,B)` groups for 24Q/2KV GQA.
+- A separate `(24,B,1)` by 256-thread kernel preserves scalar natural-exp max
+  and denominator reductions, cache-order F16 V accumulation, divide order, and
+  sigmoid qgate. It overwrites only active logits with masses.
+- Production-width rows use physical stride 2,051. Pre-softmax logits,
+  post-softmax masses, and gated attention match repeated scalar kernels
+  byte-for-byte at B=1 and B=32; the maximum band replays three times and all
+  exact grids, threadgroup sizes, flattened volumes, and packet order are locked.
+- Nonzero selector status or a count other than the block budget writes complete
+  `-inf` logit rows and positive-zero attention without cache reads. Invalid,
+  capacity, and future IDs cannot address K/V; padding remains `-inf`.
+- The private encoder validates the full index-plus-attention tensor union and
+  both pipeline families before its first dispatch. Alias, crossing-range,
+  malformed-shape, missing-capability, thread-limit, and memory-limit gates fail
+  with zero dispatches.
+- This is correctness scaffolding, not a long-prompt speed claim. Next compose
+  selected query bands with packed Q/K/V projection and publication, then audit
+  every row status before committing shared causal state.
+
 ## 2026-08-27 - Flash-Next Packed QSA Index Selection Primitives
 
 Status: qualify the dormant selected-index packet; gathered attention and the

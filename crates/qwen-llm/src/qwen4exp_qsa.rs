@@ -37,6 +37,8 @@ const MAIN_HEAD_DIM: usize = 256;
 const ATTENTION_THREADS: usize = 256;
 const ATTENTION_SCRATCH_FLOATS: usize = 9;
 const LOGITS_SIMDGROUPS_PER_TG: usize = 8;
+const PACKED_ATTENTION_HEADS_PER_TG: usize = 4;
+const PACKED_ATTENTION_THREADS: usize = 128;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 // Staged for the all-layer packed composer in the next checkpoint.
 #[allow(dead_code)]
@@ -2044,6 +2046,210 @@ fn preflight_selected_index_primitives(ctx: &MetalContext) -> Result<(), Qwen4Ex
 }
 
 #[allow(dead_code)]
+fn preflight_selected_attention_primitives(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
+    for (kernel, threads, dynamic_memory) in [
+        (
+            "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+            PACKED_ATTENTION_THREADS,
+            MAIN_HEAD_DIM * size_of::<u16>(),
+        ),
+        (
+            "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+            ATTENTION_THREADS,
+            ATTENTION_SCRATCH_FLOATS * size_of::<f32>(),
+        ),
+    ] {
+        let pipeline = ctx.pipeline(kernel)?;
+        validate_cooperative_pipeline_threads(
+            kernel,
+            pipeline.threadExecutionWidth(),
+            pipeline.maxTotalThreadsPerThreadgroup(),
+            threads,
+            pipeline.staticThreadgroupMemoryLength(),
+            dynamic_memory,
+            ctx.device.maxThreadgroupMemoryLength(),
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn validate_selected_attention_packet(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    norm_weight: &MetalTensor,
+    compressed_keys: &MetalTensor,
+    query: &MetalTensor,
+    query_gate_projection: &MetalTensor,
+    key_cache: &MetalTensor,
+    value_cache: &MetalTensor,
+    attention: &MetalTensor,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    query_count: usize,
+) -> Result<(), Qwen4ExpQsaError> {
+    validate_encoder(ctx, enc)?;
+    let g = scratch.geometry;
+    let plan = g.plan_packed_range(start_position, query_count)?;
+    if plan.dense_tokens != 0 || plan.selected_tokens != query_count || plan.selected_bands != 1 {
+        return invalid(format!(
+            "selected packed QSA attention range start={start_position} queries={query_count} is not one fully selected band"
+        ));
+    }
+    if g.head_dim != MAIN_HEAD_DIM
+        || g.kv_heads == 0
+        || !g.query_heads.is_multiple_of(g.kv_heads)
+        || !(g.query_heads / g.kv_heads).is_multiple_of(PACKED_ATTENTION_HEADS_PER_TG)
+    {
+        return invalid(format!(
+            "selected packed QSA attention requires head dim {MAIN_HEAD_DIM} and GQA groups divisible by {PACKED_ATTENTION_HEADS_PER_TG}"
+        ));
+    }
+    if g.ratio == 0 || g.block_budget() == 0 {
+        return invalid("selected packed QSA attention requires nonzero ratio and block budget");
+    }
+    let selected = scratch.selected.as_ref().ok_or_else(|| {
+        Qwen4ExpQsaError::Invalid("selected packed QSA scratch was not admitted".into())
+    })?;
+    let views = selected.views(g, scratch.capacity, scratch.query_tile, query_count)?;
+    require_tensor(
+        "selected packed QSA index-query norm",
+        norm_weight,
+        GgmlType::F32,
+        &[g.index_head_dim as u64],
+        false,
+    )?;
+    require_read_only_weights(&[("selected packed QSA index-query norm", norm_weight)])?;
+    for (name, tensor, dtype, shape, writable) in [
+        (
+            "selected packed QSA compressed index keys",
+            compressed_keys,
+            GgmlType::F16,
+            vec![g.index_head_dim as u64, g.block_capacity() as u64],
+            false,
+        ),
+        (
+            "selected packed QSA query",
+            query,
+            GgmlType::F32,
+            vec![g.query_width() as u64, query_count as u64],
+            false,
+        ),
+        (
+            "selected packed QSA query/gate projection",
+            query_gate_projection,
+            GgmlType::F32,
+            vec![g.query_projection_width() as u64, query_count as u64],
+            false,
+        ),
+        (
+            "selected packed QSA key cache",
+            key_cache,
+            GgmlType::F16,
+            vec![g.head_dim as u64, g.kv_heads as u64, g.capacity as u64],
+            false,
+        ),
+        (
+            "selected packed QSA value cache",
+            value_cache,
+            GgmlType::F16,
+            vec![g.head_dim as u64, g.kv_heads as u64, g.capacity as u64],
+            false,
+        ),
+        (
+            "selected packed QSA attention",
+            attention,
+            GgmlType::F32,
+            vec![g.query_width() as u64, query_count as u64],
+            true,
+        ),
+    ] {
+        require_tensor(name, tensor, dtype, &shape, writable)?;
+    }
+    for (name, value) in [
+        ("start position", start_position),
+        ("query count", query_count),
+        ("query end", plan.end_position),
+        ("query heads", g.query_heads),
+        ("KV heads", g.kv_heads),
+        ("head dimension", g.head_dim),
+        ("block budget", g.block_budget()),
+        ("ratio", g.ratio),
+        ("output width", g.output_width()),
+        ("cache capacity", g.capacity),
+    ] {
+        if u32::try_from(value).is_err() {
+            return invalid(format!(
+                "selected packed QSA attention {name} {value} exceeds u32"
+            ));
+        }
+    }
+    for (name, elements) in [
+        ("query", g.query_width().checked_mul(query_count)),
+        (
+            "query/gate projection",
+            g.query_projection_width().checked_mul(query_count),
+        ),
+        (
+            "attention logits",
+            g.output_width()
+                .checked_mul(g.query_heads)
+                .and_then(|elements| elements.checked_mul(query_count)),
+        ),
+        (
+            "cache",
+            g.head_dim
+                .checked_mul(g.kv_heads)
+                .and_then(|elements| elements.checked_mul(g.capacity)),
+        ),
+    ] {
+        if elements.is_none() {
+            return invalid(format!(
+                "selected packed QSA attention {name} element span overflows"
+            ));
+        }
+    }
+    let tensors = vec![
+        ("selected packed QSA index-query norm", norm_weight),
+        ("selected packed QSA compressed index keys", compressed_keys),
+        ("selected packed QSA query", query),
+        (
+            "selected packed QSA query/gate projection",
+            query_gate_projection,
+        ),
+        ("selected packed QSA key cache", key_cache),
+        ("selected packed QSA value cache", value_cache),
+        ("selected packed QSA attention", attention),
+        (
+            "selected packed QSA raw index query",
+            &views.index_query_raw,
+        ),
+        ("selected packed QSA index query", &views.index_query),
+        ("selected packed QSA scores", &views.scores),
+        ("selected packed QSA visible blocks", &views.visible_blocks),
+        (
+            "selected packed QSA selected blocks",
+            &views.selected_blocks,
+        ),
+        ("selected packed QSA selected count", &views.selected_count),
+        (
+            "selected packed QSA selector status",
+            &views.selector_status,
+        ),
+        ("selected packed QSA token IDs", &views.token_ids),
+        (
+            "selected packed QSA attention logits",
+            &views.attention_logits,
+        ),
+    ];
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)?;
+    preflight_selected_index_primitives(ctx)?;
+    preflight_selected_attention_primitives(ctx)
+}
+
+#[allow(dead_code)]
 fn encode_selected_index_primitives(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2172,6 +2378,75 @@ fn encode_selected_index_primitives(
         g.block_budget(),
         g.ratio,
         g.output_width(),
+    )?;
+    Ok(views)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn encode_selected_attention_packet(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    norm_weight: &MetalTensor,
+    compressed_keys: &MetalTensor,
+    query: &MetalTensor,
+    query_gate_projection: &MetalTensor,
+    key_cache: &MetalTensor,
+    value_cache: &MetalTensor,
+    attention: &MetalTensor,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    query_count: usize,
+) -> Result<QwenSparseAttentionSelectedPackedViews, Qwen4ExpQsaError> {
+    validate_selected_attention_packet(
+        ctx,
+        enc,
+        norm_weight,
+        compressed_keys,
+        query,
+        query_gate_projection,
+        key_cache,
+        value_cache,
+        attention,
+        scratch,
+        start_position,
+        query_count,
+    )?;
+    let views = encode_selected_index_primitives(
+        ctx,
+        enc,
+        norm_weight,
+        compressed_keys,
+        scratch,
+        start_position,
+        query_count,
+    )?;
+    encode_attention_logits_packed(
+        ctx,
+        enc,
+        query,
+        key_cache,
+        &views.token_ids,
+        &views.selected_count,
+        &views.selector_status,
+        &views.attention_logits,
+        scratch.geometry,
+        start_position,
+        query_count,
+    )?;
+    encode_attention_softmax_value_packed(
+        ctx,
+        enc,
+        query_gate_projection,
+        value_cache,
+        &views.token_ids,
+        &views.selected_count,
+        &views.selector_status,
+        &views.attention_logits,
+        attention,
+        scratch.geometry,
+        start_position,
+        query_count,
     )?;
     Ok(views)
 }
@@ -2983,14 +3258,35 @@ fn validate_cooperative_pipeline(
     dynamic_threadgroup_memory: usize,
     max_threadgroup_memory: usize,
 ) -> Result<(), Qwen4ExpQsaError> {
+    validate_cooperative_pipeline_threads(
+        name,
+        simd_width,
+        max_threads,
+        ATTENTION_THREADS,
+        static_threadgroup_memory,
+        dynamic_threadgroup_memory,
+        max_threadgroup_memory,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_cooperative_pipeline_threads(
+    name: &str,
+    simd_width: usize,
+    max_threads: usize,
+    required_threads: usize,
+    static_threadgroup_memory: usize,
+    dynamic_threadgroup_memory: usize,
+    max_threadgroup_memory: usize,
+) -> Result<(), Qwen4ExpQsaError> {
     if simd_width != 32 {
         return invalid(format!(
             "QSA pipeline {name} requires SIMD width 32, got {simd_width}"
         ));
     }
-    if max_threads < ATTENTION_THREADS {
+    if max_threads < required_threads {
         return invalid(format!(
-            "QSA pipeline {name} requires at least {ATTENTION_THREADS} threads per threadgroup, got {max_threads}"
+            "QSA pipeline {name} requires at least {required_threads} threads per threadgroup, got {max_threads}"
         ));
     }
     let required_memory = static_threadgroup_memory
@@ -3584,12 +3880,46 @@ struct AttentionArgs {
     scale: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedAttentionArgs {
+    start_position: u32,
+    query_count: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_budget: u32,
+    ratio: u32,
+    row_stride: u32,
+    cache_capacity: u32,
+    scale: f32,
+}
+
 fn attention_args(g: QwenSparseAttentionMetalGeometry, id_count: usize) -> AttentionArgs {
     AttentionArgs {
         query_heads: g.query_heads as u32,
         kv_heads: g.kv_heads as u32,
         head_dim: g.head_dim as u32,
         id_count: id_count as u32,
+        row_stride: g.output_width() as u32,
+        cache_capacity: g.capacity as u32,
+        scale: 1.0 / (g.head_dim as f32).sqrt(),
+    }
+}
+
+fn packed_attention_args(
+    g: QwenSparseAttentionMetalGeometry,
+    start_position: usize,
+    query_count: usize,
+) -> PackedAttentionArgs {
+    PackedAttentionArgs {
+        start_position: start_position as u32,
+        query_count: query_count as u32,
+        query_heads: g.query_heads as u32,
+        kv_heads: g.kv_heads as u32,
+        head_dim: g.head_dim as u32,
+        block_budget: g.block_budget() as u32,
+        ratio: g.ratio as u32,
         row_stride: g.output_width() as u32,
         cache_capacity: g.capacity as u32,
         scale: 1.0 / (g.head_dim as f32).sqrt(),
@@ -3603,13 +3933,37 @@ fn encode_attention_logits(
     id_count: usize,
 ) -> Result<(), MetalError> {
     let g = workspace.geometry;
+    encode_attention_logits_tensors(
+        ctx,
+        enc,
+        &workspace.query,
+        &workspace.key_cache,
+        &workspace.token_ids,
+        &workspace.attention_logits,
+        g,
+        id_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_attention_logits_tensors(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key_cache: &MetalTensor,
+    token_ids: &MetalTensor,
+    logits: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    id_count: usize,
+) -> Result<(), MetalError> {
+    let g = geometry;
     let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_logits_f16")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &attention_args(g, id_count));
-    enc.set_tensor(1, &workspace.query);
-    enc.set_tensor(2, &workspace.key_cache);
-    enc.set_tensor(3, &workspace.token_ids);
-    enc.set_tensor(4, &workspace.attention_logits);
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, key_cache);
+    enc.set_tensor(3, token_ids);
+    enc.set_tensor(4, logits);
     let pairs = id_count * g.query_heads;
     enc.dispatch(
         MTLSize {
@@ -3633,19 +3987,130 @@ fn encode_attention_softmax_value(
     id_count: usize,
 ) -> Result<(), MetalError> {
     let g = workspace.geometry;
+    encode_attention_softmax_value_tensors(
+        ctx,
+        enc,
+        &workspace.raw_gate,
+        &workspace.value_cache,
+        &workspace.token_ids,
+        &workspace.attention_logits,
+        &workspace.attention,
+        g,
+        id_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_attention_softmax_value_tensors(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    raw_gate: &MetalTensor,
+    value_cache: &MetalTensor,
+    token_ids: &MetalTensor,
+    logits: &MetalTensor,
+    attention: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    id_count: usize,
+) -> Result<(), MetalError> {
+    let g = geometry;
     let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_softmax_value_f16")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &attention_args(g, id_count));
-    enc.set_tensor(1, &workspace.raw_gate);
-    enc.set_tensor(2, &workspace.value_cache);
-    enc.set_tensor(3, &workspace.token_ids);
-    enc.set_tensor(4, &workspace.attention_logits);
-    enc.set_tensor(5, &workspace.attention);
+    enc.set_tensor(1, raw_gate);
+    enc.set_tensor(2, value_cache);
+    enc.set_tensor(3, token_ids);
+    enc.set_tensor(4, logits);
+    enc.set_tensor(5, attention);
     enc.set_threadgroup_memory(0, ATTENTION_SCRATCH_FLOATS * size_of::<f32>());
     enc.dispatch(
         MTLSize {
             width: g.query_heads,
             height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: ATTENTION_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn encode_attention_logits_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key_cache: &MetalTensor,
+    token_ids: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    logits: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    start_position: usize,
+    query_count: usize,
+) -> Result<(), MetalError> {
+    let g = geometry;
+    let heads_per_kv = g.query_heads / g.kv_heads;
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_logits_packed_f16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &packed_attention_args(g, start_position, query_count));
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, key_cache);
+    enc.set_tensor(3, token_ids);
+    enc.set_tensor(4, selected_count);
+    enc.set_tensor(5, selector_status);
+    enc.set_tensor(6, logits);
+    enc.set_threadgroup_memory(0, g.head_dim * size_of::<u16>());
+    enc.dispatch(
+        MTLSize {
+            width: heads_per_kv / PACKED_ATTENTION_HEADS_PER_TG,
+            height: g.kv_heads,
+            depth: query_count,
+        },
+        MTLSize {
+            width: PACKED_ATTENTION_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn encode_attention_softmax_value_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query_gate_projection: &MetalTensor,
+    value_cache: &MetalTensor,
+    token_ids: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    logits: &MetalTensor,
+    attention: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    start_position: usize,
+    query_count: usize,
+) -> Result<(), MetalError> {
+    let g = geometry;
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_softmax_value_packed_f16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &packed_attention_args(g, start_position, query_count));
+    enc.set_tensor(1, query_gate_projection);
+    enc.set_tensor(2, value_cache);
+    enc.set_tensor(3, token_ids);
+    enc.set_tensor(4, selected_count);
+    enc.set_tensor(5, selector_status);
+    enc.set_tensor(6, logits);
+    enc.set_tensor(7, attention);
+    enc.set_threadgroup_memory(0, ATTENTION_SCRATCH_FLOATS * size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: g.query_heads,
+            height: query_count,
             depth: 1,
         },
         MTLSize {
@@ -3957,6 +4422,16 @@ mod tests {
         QwenSparseAttentionMetalGeometry::from_config(&config, 3, capacity).unwrap()
     }
 
+    fn selected_attention_test_geometry(capacity: usize) -> QwenSparseAttentionMetalGeometry {
+        let mut config = Qwen4ExpConfig::flash_next_reference();
+        config.context_length = 4_096;
+        config.hidden_size = 16;
+        config.qsa.token_budget = 2_048;
+        config.ple = None;
+        config.validate().unwrap();
+        QwenSparseAttentionMetalGeometry::from_config(&config, 3, capacity).unwrap()
+    }
+
     fn values(count: usize, seed: usize, scale: f32) -> Vec<f32> {
         (0..count)
             .map(|index| {
@@ -4003,6 +4478,142 @@ mod tests {
                 .unwrap();
         tensor.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
         tensor
+    }
+
+    fn f16_tensor(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
+        let bits = values
+            .iter()
+            .map(|&value| f16::from_f32(value).to_bits())
+            .collect::<Vec<_>>();
+        MetalTensor::from_bytes(ctx, bytemuck::cast_slice(&bits), shape, GgmlType::F16).unwrap()
+    }
+
+    struct SelectedAttentionFixture {
+        geometry: QwenSparseAttentionMetalGeometry,
+        scratch: QwenSparseAttentionPackedScratch,
+        index_query_norm: MetalTensor,
+        compressed_keys: MetalTensor,
+        key_cache: MetalTensor,
+        value_cache: MetalTensor,
+        compact_gate: MetalTensor,
+    }
+
+    fn selected_attention_fixture(
+        ctx: &MetalContext,
+        query_count: usize,
+    ) -> SelectedAttentionFixture {
+        let geometry = selected_attention_test_geometry(4_096);
+        let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            ctx,
+            geometry,
+            query_count,
+            true,
+        )
+        .unwrap();
+        let views = scratch.views(query_count).unwrap();
+        let selected = scratch.selected.as_ref().unwrap();
+        write_f32_tensor(
+            &selected.index_query_raw,
+            &values(
+                geometry.index_query_width() * query_count,
+                2_101 + query_count,
+                0.002_1,
+            ),
+        );
+        write_f32_tensor(
+            &views.query,
+            &values(
+                geometry.query_width() * query_count,
+                2_111 + query_count,
+                0.003_3,
+            ),
+        );
+        let projected = values(
+            geometry.query_projection_width() * query_count,
+            2_123 + query_count,
+            0.007_1,
+        );
+        write_f32_tensor(&views.query_gate_projection, &projected);
+        write_f32_tensor(
+            &views.attention,
+            &values(
+                geometry.query_width() * query_count,
+                2_129 + query_count,
+                100.0,
+            ),
+        );
+        let mut compact_gate = vec![0.0_f32; geometry.query_width() * query_count];
+        for query in 0..query_count {
+            for head in 0..geometry.query_heads {
+                let source = query * geometry.query_projection_width()
+                    + head * 2 * geometry.head_dim
+                    + geometry.head_dim;
+                let destination = query * geometry.query_width() + head * geometry.head_dim;
+                compact_gate[destination..destination + geometry.head_dim]
+                    .copy_from_slice(&projected[source..source + geometry.head_dim]);
+            }
+        }
+        let index_query_norm = weight(
+            ctx,
+            &(0..geometry.index_head_dim)
+                .map(|lane| 0.69 + (lane % 13) as f32 * 0.017)
+                .collect::<Vec<_>>(),
+            vec![geometry.index_head_dim as u64],
+        );
+        let compressed_keys = f16_tensor(
+            ctx,
+            &values(
+                geometry.index_head_dim * geometry.block_capacity(),
+                2_137 + query_count,
+                0.003_7,
+            ),
+            vec![
+                geometry.index_head_dim as u64,
+                geometry.block_capacity() as u64,
+            ],
+        );
+        let key_cache = f16_tensor(
+            ctx,
+            &values(
+                geometry.head_dim * geometry.kv_heads * geometry.capacity,
+                2_143 + query_count,
+                0.004_1,
+            ),
+            vec![
+                geometry.head_dim as u64,
+                geometry.kv_heads as u64,
+                geometry.capacity as u64,
+            ],
+        );
+        let value_cache = f16_tensor(
+            ctx,
+            &values(
+                geometry.head_dim * geometry.kv_heads * geometry.capacity,
+                2_147 + query_count,
+                0.004_3,
+            ),
+            vec![
+                geometry.head_dim as u64,
+                geometry.kv_heads as u64,
+                geometry.capacity as u64,
+            ],
+        );
+        let compact_gate = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&compact_gate),
+            vec![geometry.query_width() as u64, query_count as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        SelectedAttentionFixture {
+            geometry,
+            scratch,
+            index_query_norm,
+            compressed_keys,
+            key_cache,
+            value_cache,
+            compact_gate,
+        }
     }
 
     fn test_weights(ctx: &MetalContext, geometry: QwenSparseAttentionMetalGeometry) -> TestWeights {
@@ -4195,6 +4806,51 @@ mod tests {
                 destination.add(index).write(f16::from_f32(value).to_bits());
             }
         }
+    }
+
+    fn assert_dispatch_shape(
+        census: &[crate::metal::DispatchCensusRow],
+        tag: &str,
+        kernel: &str,
+        grid: [u64; 3],
+        threads: [u64; 3],
+    ) {
+        let matches = census
+            .iter()
+            .filter(|row| row.tag.as_deref() == Some(tag) && row.kernel == kernel)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "{tag} {kernel}");
+        let row = matches[0];
+        assert_eq!(
+            [row.grid_width, row.grid_height, row.grid_depth],
+            grid,
+            "{tag} {kernel} grid"
+        );
+        assert_eq!(
+            [row.threads_width, row.threads_height, row.threads_depth,],
+            threads,
+            "{tag} {kernel} threads"
+        );
+        assert_eq!(row.grid_tgs, grid.iter().product::<u64>());
+        assert_eq!(row.tg_threads, threads.iter().product::<u64>());
+    }
+
+    fn assert_qsa_rejected_without_dispatch(
+        ctx: &MetalContext,
+        label: &str,
+        encode: impl FnOnce(&KernelEncoder) -> Result<(), Qwen4ExpQsaError>,
+    ) {
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let error = match encode(&encoder) {
+            Ok(()) => panic!("{label} unexpectedly passed"),
+            Err(error) => error,
+        };
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        assert!(census.is_empty(), "{label} dispatched before {error}");
+        assert_eq!(command.status(), MTLCommandBufferStatus::NotEnqueued);
     }
 
     fn assert_close(actual: &[f32], expected: &[f32], atol: f32, rtol: f32) {
@@ -4932,6 +5588,547 @@ mod tests {
                 "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
                 "kernel_qwen4exp_qsa_expand_ids_packed_i32",
             ]
+        );
+    }
+
+    #[test]
+    fn selected_attention_logits_match_repeated_scalar_kernels() {
+        const QUERIES: usize = 5;
+        let Some(ctx) = context() else { return };
+        let fixture = selected_attention_fixture(&ctx, QUERIES);
+        let g = fixture.geometry;
+        let start_position = g.output_width();
+        let packed = fixture.scratch.views(QUERIES).unwrap();
+        let reference_logits = MetalTensor::zeros_f32(
+            &ctx,
+            vec![
+                g.output_width() as u64,
+                g.query_heads as u64,
+                QUERIES as u64,
+            ],
+        )
+        .unwrap();
+        write_f32_tensor(
+            &reference_logits,
+            &vec![f32::NEG_INFINITY; g.output_width() * g.query_heads * QUERIES],
+        );
+
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let packet_tag = crate::metal::dispatch_census_tag_scope(|| {
+            "qwen4exp.qsa.selected_attention.logits_packet".into()
+        });
+        let selected = encode_selected_index_primitives(
+            &ctx,
+            &encoder,
+            &fixture.index_query_norm,
+            &fixture.compressed_keys,
+            &fixture.scratch,
+            start_position,
+            QUERIES,
+        )
+        .unwrap();
+        encode_attention_logits_packed(
+            &ctx,
+            &encoder,
+            &packed.query,
+            &fixture.key_cache,
+            &selected.token_ids,
+            &selected.selected_count,
+            &selected.selector_status,
+            &selected.attention_logits,
+            g,
+            start_position,
+            QUERIES,
+        )
+        .unwrap();
+        drop(packet_tag);
+        for query in 0..QUERIES {
+            let id_count = g.block_budget() * g.ratio + (start_position + query + 1) % g.ratio;
+            let query_view = packed.query.view_subrange(
+                (query * g.query_width()) as u64,
+                vec![g.query_width() as u64],
+            );
+            let ids = selected.token_ids.view_subrange(
+                (query * g.output_width()) as u64,
+                vec![g.output_width() as u64],
+            );
+            let logits = reference_logits.view_subrange(
+                (query * g.query_heads * g.output_width()) as u64,
+                vec![g.output_width() as u64, g.query_heads as u64],
+            );
+            encode_attention_logits_tensors(
+                &ctx,
+                &encoder,
+                &query_view,
+                &fixture.key_cache,
+                &ids,
+                &logits,
+                g,
+                id_count,
+            )
+            .unwrap();
+        }
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+
+        assert_eq!(
+            read_i32(&selected.selected_count),
+            vec![g.block_budget() as i32; QUERIES]
+        );
+        assert_eq!(read_i32(&selected.selector_status), vec![0; QUERIES]);
+        assert_eq!(
+            read_tensor_bytes(&selected.attention_logits),
+            read_tensor_bytes(&reference_logits)
+        );
+        assert_eq!(
+            census
+                .iter()
+                .filter(|row| {
+                    row.tag.as_deref() == Some("qwen4exp.qsa.selected_attention.logits_packet")
+                })
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+                "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
+                "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+                "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+                "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+            ]
+        );
+        assert_dispatch_shape(
+            &census,
+            "qwen4exp.qsa.selected_attention.logits_packet",
+            "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+            [
+                (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                g.kv_heads as u64,
+                QUERIES as u64,
+            ],
+            [PACKED_ATTENTION_THREADS as u64, 1, 1],
+        );
+    }
+
+    #[test]
+    fn selected_attention_packet_matches_repeated_scalar_kernels() {
+        let Some(ctx) = context() else { return };
+        for (query_count, repetitions) in [(1, 1), (32, 3)] {
+            let fixture = selected_attention_fixture(&ctx, query_count);
+            let g = fixture.geometry;
+            let start_position = g.output_width();
+            let packed = fixture.scratch.views(query_count).unwrap();
+            for _ in 0..repetitions {
+                let reference_logits = MetalTensor::zeros_f32(
+                    &ctx,
+                    vec![
+                        g.output_width() as u64,
+                        g.query_heads as u64,
+                        query_count as u64,
+                    ],
+                )
+                .unwrap();
+                write_f32_tensor(
+                    &reference_logits,
+                    &vec![f32::NEG_INFINITY; g.output_width() * g.query_heads * query_count],
+                );
+                let reference_attention =
+                    MetalTensor::zeros_f32(&ctx, vec![g.query_width() as u64, query_count as u64])
+                        .unwrap();
+
+                crate::metal::dispatch_census_begin();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                let packet_tag = crate::metal::dispatch_census_tag_scope(|| {
+                    "qwen4exp.qsa.selected_attention.packet".into()
+                });
+                let actual = encode_selected_attention_packet(
+                    &ctx,
+                    &encoder,
+                    &fixture.index_query_norm,
+                    &fixture.compressed_keys,
+                    &packed.query,
+                    &packed.query_gate_projection,
+                    &fixture.key_cache,
+                    &fixture.value_cache,
+                    &packed.attention,
+                    &fixture.scratch,
+                    start_position,
+                    query_count,
+                )
+                .unwrap();
+                drop(packet_tag);
+                for query in 0..query_count {
+                    let id_count =
+                        g.block_budget() * g.ratio + (start_position + query + 1) % g.ratio;
+                    let query_view = packed.query.view_subrange(
+                        (query * g.query_width()) as u64,
+                        vec![g.query_width() as u64],
+                    );
+                    let gate = fixture.compact_gate.view_subrange(
+                        (query * g.query_width()) as u64,
+                        vec![g.query_width() as u64],
+                    );
+                    let ids = actual.token_ids.view_subrange(
+                        (query * g.output_width()) as u64,
+                        vec![g.output_width() as u64],
+                    );
+                    let logits = reference_logits.view_subrange(
+                        (query * g.query_heads * g.output_width()) as u64,
+                        vec![g.output_width() as u64, g.query_heads as u64],
+                    );
+                    let attention = reference_attention.view_subrange(
+                        (query * g.query_width()) as u64,
+                        vec![g.query_width() as u64],
+                    );
+                    encode_attention_logits_tensors(
+                        &ctx,
+                        &encoder,
+                        &query_view,
+                        &fixture.key_cache,
+                        &ids,
+                        &logits,
+                        g,
+                        id_count,
+                    )
+                    .unwrap();
+                    encode_attention_softmax_value_tensors(
+                        &ctx,
+                        &encoder,
+                        &gate,
+                        &fixture.value_cache,
+                        &ids,
+                        &logits,
+                        &attention,
+                        g,
+                        id_count,
+                    )
+                    .unwrap();
+                }
+                let census = crate::metal::dispatch_census_take();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                assert!(command.error().is_none());
+
+                assert_eq!(
+                    read_i32(&actual.selected_count),
+                    vec![g.block_budget() as i32; query_count]
+                );
+                assert_eq!(read_i32(&actual.selector_status), vec![0; query_count]);
+                assert_eq!(
+                    read_tensor_bytes(&actual.attention_logits),
+                    read_tensor_bytes(&reference_logits)
+                );
+                assert_eq!(
+                    read_tensor_bytes(&packed.attention),
+                    read_tensor_bytes(&reference_attention)
+                );
+                assert_eq!(
+                    census
+                        .iter()
+                        .filter(|row| {
+                            row.tag.as_deref() == Some("qwen4exp.qsa.selected_attention.packet")
+                        })
+                        .map(|row| row.kernel.as_str())
+                        .collect::<Vec<_>>(),
+                    [
+                        "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+                        "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
+                        "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+                        "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+                        "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+                        "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                    ]
+                );
+                assert_dispatch_shape(
+                    &census,
+                    "qwen4exp.qsa.selected_attention.packet",
+                    "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+                    [
+                        (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                        g.kv_heads as u64,
+                        query_count as u64,
+                    ],
+                    [PACKED_ATTENTION_THREADS as u64, 1, 1],
+                );
+                assert_dispatch_shape(
+                    &census,
+                    "qwen4exp.qsa.selected_attention.packet",
+                    "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                    [g.query_heads as u64, query_count as u64, 1],
+                    [ATTENTION_THREADS as u64, 1, 1],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selected_attention_packet_validation_fails_before_dispatch() {
+        const QUERIES: usize = 2;
+        let Some(ctx) = context() else { return };
+        let fixture = selected_attention_fixture(&ctx, QUERIES);
+        let g = fixture.geometry;
+        let start_position = g.output_width();
+        let packed = fixture.scratch.views(QUERIES).unwrap();
+        assert_eq!(size_of::<PackedAttentionArgs>(), 40);
+
+        assert_qsa_rejected_without_dispatch(&ctx, "aliased attention", |encoder| {
+            encode_selected_attention_packet(
+                &ctx,
+                encoder,
+                &fixture.index_query_norm,
+                &fixture.compressed_keys,
+                &packed.query,
+                &packed.query_gate_projection,
+                &fixture.key_cache,
+                &fixture.value_cache,
+                &packed.query,
+                &fixture.scratch,
+                start_position,
+                QUERIES,
+            )
+            .map(|_| ())
+        });
+        assert_qsa_rejected_without_dispatch(&ctx, "crossing range", |encoder| {
+            encode_selected_attention_packet(
+                &ctx,
+                encoder,
+                &fixture.index_query_norm,
+                &fixture.compressed_keys,
+                &packed.query,
+                &packed.query_gate_projection,
+                &fixture.key_cache,
+                &fixture.value_cache,
+                &packed.attention,
+                &fixture.scratch,
+                start_position - 1,
+                QUERIES,
+            )
+            .map(|_| ())
+        });
+        let short_query = packed
+            .query
+            .view_subrange(0, vec![g.query_width() as u64, 1]);
+        assert_qsa_rejected_without_dispatch(&ctx, "malformed query shape", |encoder| {
+            encode_selected_attention_packet(
+                &ctx,
+                encoder,
+                &fixture.index_query_norm,
+                &fixture.compressed_keys,
+                &short_query,
+                &packed.query_gate_projection,
+                &fixture.key_cache,
+                &fixture.value_cache,
+                &packed.attention,
+                &fixture.scratch,
+                start_position,
+                QUERIES,
+            )
+            .map(|_| ())
+        });
+        let dense_scratch = QwenSparseAttentionPackedScratch::new(&ctx, g, QUERIES).unwrap();
+        let dense = dense_scratch.views(QUERIES).unwrap();
+        assert_qsa_rejected_without_dispatch(&ctx, "missing selected scratch", |encoder| {
+            encode_selected_attention_packet(
+                &ctx,
+                encoder,
+                &fixture.index_query_norm,
+                &fixture.compressed_keys,
+                &dense.query,
+                &dense.query_gate_projection,
+                &fixture.key_cache,
+                &fixture.value_cache,
+                &dense.attention,
+                &dense_scratch,
+                start_position,
+                QUERIES,
+            )
+            .map(|_| ())
+        });
+
+        assert!(
+            validate_cooperative_pipeline_threads(
+                "test selected logits",
+                32,
+                PACKED_ATTENTION_THREADS - 1,
+                PACKED_ATTENTION_THREADS,
+                0,
+                MAIN_HEAD_DIM * size_of::<u16>(),
+                usize::MAX,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_cooperative_pipeline_threads(
+                "test selected logits",
+                32,
+                PACKED_ATTENTION_THREADS,
+                PACKED_ATTENTION_THREADS,
+                0,
+                MAIN_HEAD_DIM * size_of::<u16>(),
+                MAIN_HEAD_DIM * size_of::<u16>() - 1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_attention_faults_overwrite_outputs_without_cache_reads() {
+        const QUERIES: usize = 4;
+        let Some(ctx) = context() else { return };
+        let fixture = selected_attention_fixture(&ctx, QUERIES);
+        let g = fixture.geometry;
+        let start_position = g.output_width();
+        let packed = fixture.scratch.views(QUERIES).unwrap();
+        let selected = fixture
+            .scratch
+            .selected
+            .as_ref()
+            .unwrap()
+            .views(g, QUERIES, QUERIES, QUERIES)
+            .unwrap();
+        let budget = g.block_budget() as i32;
+        write_i32_tensor(
+            &selected.selected_count,
+            &[budget, budget - 1, budget, budget],
+        );
+        write_i32_tensor(&selected.selector_status, &[2, 0, 0, 0]);
+        let mut ids = vec![-1_i32; g.output_width() * QUERIES];
+        for query in 0..QUERIES {
+            let start = query * g.output_width();
+            for (slot, id) in ids[start..start + g.output_width()].iter_mut().enumerate() {
+                *id = slot as i32;
+            }
+        }
+        let fault_start = 2 * g.output_width();
+        ids[fault_start + 6] = -1;
+        ids[fault_start + 7] = g.capacity as i32;
+        ids[fault_start + 8] = (start_position + 3) as i32;
+        write_i32_tensor(&selected.token_ids, &ids);
+        write_f32_tensor(
+            &selected.attention_logits,
+            &vec![123.5; g.output_width() * g.query_heads * QUERIES],
+        );
+        write_f32_tensor(&packed.attention, &vec![-456.25; g.query_width() * QUERIES]);
+
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let packet_tag = crate::metal::dispatch_census_tag_scope(|| {
+            "qwen4exp.qsa.selected_attention.faults".into()
+        });
+        encode_attention_logits_packed(
+            &ctx,
+            &encoder,
+            &packed.query,
+            &fixture.key_cache,
+            &selected.token_ids,
+            &selected.selected_count,
+            &selected.selector_status,
+            &selected.attention_logits,
+            g,
+            start_position,
+            QUERIES,
+        )
+        .unwrap();
+        encode_attention_softmax_value_packed(
+            &ctx,
+            &encoder,
+            &packed.query_gate_projection,
+            &fixture.value_cache,
+            &selected.token_ids,
+            &selected.selected_count,
+            &selected.selector_status,
+            &selected.attention_logits,
+            &packed.attention,
+            g,
+            start_position,
+            QUERIES,
+        )
+        .unwrap();
+        drop(packet_tag);
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+
+        assert_eq!(
+            read_i32(&selected.selected_count),
+            [budget, budget - 1, budget, budget]
+        );
+        assert_eq!(read_i32(&selected.selector_status), [2, 0, 0, 0]);
+        let logits = read_f32(&selected.attention_logits);
+        let attention = read_f32(&packed.attention);
+        for query in 0..2 {
+            for head in 0..g.query_heads {
+                let start = (query * g.query_heads + head) * g.output_width();
+                assert!(
+                    logits[start..start + g.output_width()]
+                        .iter()
+                        .all(|value| value.to_bits() == f32::NEG_INFINITY.to_bits())
+                );
+            }
+            let start = query * g.query_width();
+            assert!(
+                attention[start..start + g.query_width()]
+                    .iter()
+                    .all(|value| value.to_bits() == 0)
+            );
+        }
+        for head in 0..g.query_heads {
+            let start = (2 * g.query_heads + head) * g.output_width();
+            for slot in [6, 7, 8] {
+                assert_eq!(logits[start + slot].to_bits(), 0);
+            }
+            assert_eq!(
+                logits[start + g.output_width() - 1].to_bits(),
+                f32::NEG_INFINITY.to_bits()
+            );
+        }
+        assert!(
+            attention[2 * g.query_width()..]
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        assert_eq!(
+            census
+                .iter()
+                .filter(|row| {
+                    row.tag.as_deref() == Some("qwen4exp.qsa.selected_attention.faults")
+                })
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+                "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+            ]
+        );
+        assert_dispatch_shape(
+            &census,
+            "qwen4exp.qsa.selected_attention.faults",
+            "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+            [
+                (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                g.kv_heads as u64,
+                QUERIES as u64,
+            ],
+            [PACKED_ATTENTION_THREADS as u64, 1, 1],
+        );
+        assert_dispatch_shape(
+            &census,
+            "qwen4exp.qsa.selected_attention.faults",
+            "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+            [g.query_heads as u64, QUERIES as u64, 1],
+            [ATTENTION_THREADS as u64, 1, 1],
         );
     }
 

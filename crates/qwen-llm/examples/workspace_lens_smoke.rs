@@ -1,6 +1,6 @@
 use qwen_llm::research::{
-    DenseFfnVjpRule, GdnBlockVjpRule, GdnMixerVjpRule, LinearRole, RESEARCH_IDENTITY_SCHEME,
-    ResearchLinear,
+    AttnBlockVjpRule, DenseFfnVjpRule, GdnBlockVjpRule, GdnMixerVjpRule, LinearRole,
+    RESEARCH_IDENTITY_SCHEME, ResearchLinear,
 };
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use qwen_llm::tensor::GgmlType;
@@ -129,11 +129,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
+    drop(research);
+    let mut attn_sequence = loaded.create_sequence(SequenceConfig::new(8))?;
+    let mut attn_research = loaded.research_session(&mut attn_sequence)?;
+    let attn_layer = (1..arch.n_layer)
+        .find(|&layer| {
+            attn_research
+                .linear_info(ResearchLinear::Layer {
+                    index: layer,
+                    role: LinearRole::AttentionQAndGate,
+                })
+                .is_ok()
+        })
+        .ok_or("model has no nonzero full-attention layer")?;
+    let attn_forward = attn_research
+        .forward_prompt_with_attn_capture(&[token_id, token_id, token_id, token_id], attn_layer)?;
+    let mut attn_cotangent = vec![0.0f32; 4 * attn_forward.hidden_size()];
+    for token in 0..4 {
+        attn_cotangent[token * attn_forward.hidden_size()
+            + (hidden_coordinate + token) % attn_forward.hidden_size()] = 1.0;
+    }
+    let attn_block_r_vjp =
+        attn_research.attn_block_vjp(&attn_forward, &attn_cotangent, AttnBlockVjpRule::Relp)?;
+    let attn_block_r_vjp_norm = attn_block_r_vjp
+        .values
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt();
+    if !attn_block_r_vjp_norm.is_finite()
+        || !attn_block_r_vjp.residual_replay_max_abs_error.is_finite()
+    {
+        return Err("attention VJP or replay diagnostic is non-finite".into());
+    }
+    if attn_block_r_vjp.residual_replay_max_abs_error > 5e-3 {
+        return Err(format!(
+            "attention F32-oracle replay drift {} exceeds 0.005",
+            attn_block_r_vjp.residual_replay_max_abs_error
+        )
+        .into());
+    }
+    if model.file_name().and_then(|name| name.to_str()) == Some("Qwen3.8-27B-Q8_0.gguf")
+        && token_id == 0
+        && ((attn_block_r_vjp_norm - 2.056_573_313_704_004_3).abs() > 1e-4
+            || (attn_block_r_vjp.residual_replay_max_abs_error - 0.000_644_683_84).abs() > 2e-4)
+    {
+        return Err(format!(
+            "27B attention fixture drifted: norm={} replay={}",
+            attn_block_r_vjp_norm, attn_block_r_vjp.residual_replay_max_abs_error
+        )
+        .into());
+    }
 
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schema": "qwen.workspace_lens_smoke.v2",
+            "schema": "qwen.workspace_lens_smoke.v3",
             "model": model,
             "identity": {
                 "scheme": RESEARCH_IDENTITY_SCHEME,
@@ -185,6 +236,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "tokens": gdn_block_r_vjp.n_tokens,
                 "input_width": gdn_block_r_vjp.values.len(),
                 "l2_norm": gdn_block_r_vjp_norm,
+            },
+            "attention_block_r_vjp": {
+                "layer": attn_block_r_vjp.layer,
+                "tokens": attn_block_r_vjp.n_tokens,
+                "input_width": attn_block_r_vjp.values.len(),
+                "l2_norm": attn_block_r_vjp_norm,
+                "f32_oracle_residual_replay_max_abs_error": attn_block_r_vjp.residual_replay_max_abs_error,
             }
         }))?
     );

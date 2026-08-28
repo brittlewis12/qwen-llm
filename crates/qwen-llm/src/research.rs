@@ -10,13 +10,15 @@ use crate::metal::{
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_vjp_f32,
     encode_gdn_prep_packed_ckpt_f32, encode_gdn_step_decay_packed_ckpt_f32,
     encode_gdn_step_decay_packed_vjp_f32, encode_l2_norm_batched_f32,
-    encode_l2_norm_vjp_batched_f32, encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32,
-    encode_rms_norm_mul_vjp_broadcast_f32, encode_rms_norm_mul_vjp_rows_f32,
-    encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32, encode_sigmoid_f32,
-    encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32, encode_silu_mul_vjp_f32,
-    encode_ssm_conv_silu_split_packed_vjp_f32,
+    encode_l2_norm_vjp_batched_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_broadcast_f32,
+    encode_rms_norm_mul_vjp_rows_f32, encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32,
+    encode_sigmoid_f32, encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32,
+    encode_silu_mul_vjp_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_split_packed_vjp_f32,
 };
-use crate::metal_forward::{MetalBlock, MetalGdnBlock, MfError, RMS_EPS, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MetalAttnBlock, MetalBlock, MetalGdnBlock, MfError, RMS_EPS, encode_mat_vec_dispatch,
+};
 use crate::model::{Arch, ArchKind};
 use crate::runtime::{LoadedModel, RuntimeError, Sequence};
 use crate::tensor::GgmlType;
@@ -26,6 +28,7 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLComman
 /// file stamps. It is useful within one machine, but is not a content digest.
 pub const RESEARCH_IDENTITY_SCHEME: &str = "qwen_llm_model_locator_v1";
 pub const MAX_RESEARCH_GDN_TOKENS: usize = 16;
+pub const MAX_RESEARCH_ATTN_TOKENS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ResearchModelIdentity {
@@ -226,6 +229,79 @@ pub struct ResearchGdnBlockVjp {
     pub mixer: ResearchGdnVjp,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchAttnForward {
+    identity: ResearchModelIdentity,
+    owner_token_id: u64,
+    layer: u32,
+    token_ids: Vec<i32>,
+    hidden_size: usize,
+    final_logits: Vec<f32>,
+    input_residuals: Vec<f32>,
+    post_mixer_residuals: Vec<f32>,
+    post_block_residuals: Vec<f32>,
+}
+
+impl ResearchAttnForward {
+    pub fn identity(&self) -> ResearchModelIdentity {
+        self.identity
+    }
+
+    pub fn layer(&self) -> u32 {
+        self.layer
+    }
+
+    pub fn token_ids(&self) -> &[i32] {
+        &self.token_ids
+    }
+
+    pub fn n_tokens(&self) -> usize {
+        self.token_ids.len()
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    pub fn final_logits(&self) -> &[f32] {
+        &self.final_logits
+    }
+
+    pub fn input_residuals(&self) -> &[f32] {
+        &self.input_residuals
+    }
+
+    pub fn post_mixer_residuals(&self) -> &[f32] {
+        &self.post_mixer_residuals
+    }
+
+    pub fn post_block_residuals(&self) -> &[f32] {
+        &self.post_block_residuals
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttnBlockVjpRule {
+    /// Ordinary Jacobians throughout the block.
+    Jacobian,
+    /// Released Qwen R-lens rules on residual-stream RMSNorms and the FFN.
+    /// Attention, Q/K normalization, RoPE, softmax, and gating stay ordinary.
+    Relp,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchAttnBlockVjp {
+    pub layer: u32,
+    pub n_tokens: usize,
+    pub hidden_size: usize,
+    pub values: Vec<f32>,
+    pub grad_post_mixer_residuals: Vec<f32>,
+    pub replay_mixer_outputs: Vec<f32>,
+    /// Drift between the F32 model-level oracle replay and the production
+    /// residual, whose KV path rounds K/V to F16 or Q8.
+    pub residual_replay_max_abs_error: f32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResearchError {
     #[error("runtime: {0}")]
@@ -298,6 +374,37 @@ pub enum ResearchError {
     GdnCaptureModelMismatch,
     #[error("GDN capture belongs to a different loaded-model owner")]
     GdnCaptureOwnerMismatch,
+    #[error("layer {layer} is not a full-attention layer")]
+    NotAttentionLayer { layer: u32 },
+    #[error("attention prompt capture requires layer > 0")]
+    AttnCaptureRequiresPreviousLayer,
+    #[error("attention prompt capture requires a fresh sequence at position zero, got {0}")]
+    AttnCaptureRequiresFreshSequence(usize),
+    #[error("attention prompt capture requires at least one token")]
+    EmptyAttnPrompt,
+    #[error("attention prompt capture length {got} exceeds the bounded F32-oracle limit {max}")]
+    AttnPromptTooLong { got: usize, max: usize },
+    #[error("attention capture belongs to a different model identity")]
+    AttnCaptureModelMismatch,
+    #[error("attention capture belongs to a different loaded-model owner")]
+    AttnCaptureOwnerMismatch,
+    #[error("layer {layer} {role:?} has shape {got:?}, expected {expected:?}")]
+    InvalidAttnLinearShape {
+        layer: u32,
+        role: LinearRole,
+        got: [usize; 2],
+        expected: [usize; 2],
+    },
+    #[error(
+        "layer {layer} attention tensor {name} must be F32 with {expected_elements} elements, got {dtype:?} {shape:?}"
+    )]
+    InvalidAttnTensor {
+        layer: u32,
+        name: &'static str,
+        dtype: GgmlType,
+        shape: Vec<u64>,
+        expected_elements: usize,
+    },
     #[error("{name} length {got} does not match expected length {expected}")]
     ActivationSize {
         name: &'static str,
@@ -930,6 +1037,195 @@ impl ResearchSession<'_, '_> {
         })
     }
 
+    /// Advance a fresh bounded prompt while capturing one full-attention block.
+    /// The replay derivative is the model-level F32 attention Jacobian; it does
+    /// not differentiate the production F16/Q8 KV storage conversion.
+    pub fn forward_prompt_with_attn_capture(
+        &mut self,
+        token_ids: &[i32],
+        layer: u32,
+    ) -> Result<ResearchAttnForward, ResearchError> {
+        if token_ids.is_empty() {
+            return Err(ResearchError::EmptyAttnPrompt);
+        }
+        if token_ids.len() > MAX_RESEARCH_ATTN_TOKENS {
+            return Err(ResearchError::AttnPromptTooLong {
+                got: token_ids.len(),
+                max: MAX_RESEARCH_ATTN_TOKENS,
+            });
+        }
+        if layer == 0 {
+            return Err(ResearchError::AttnCaptureRequiresPreviousLayer);
+        }
+        if self.sequence.position() != 0 {
+            return Err(ResearchError::AttnCaptureRequiresFreshSequence(
+                self.sequence.position(),
+            ));
+        }
+        for &token_id in token_ids {
+            if token_id < 0 || token_id as u32 >= self.arch().vocab_size {
+                return Err(MfError::BadToken(token_id, self.arch().vocab_size).into());
+            }
+        }
+        self.sequence.ensure_can_append(token_ids.len())?;
+        let geometry = {
+            let (block, geometry) = self.resolve_attn(layer)?;
+            validate_attn_weights(layer, block, geometry)?;
+            geometry
+        };
+        let hidden_elements = checked_product(token_ids.len(), geometry.hidden_size)?;
+        let mut input_residuals = Vec::with_capacity(hidden_elements);
+        let mut post_mixer_residuals = Vec::with_capacity(hidden_elements);
+        let mut post_block_residuals = Vec::with_capacity(hidden_elements);
+        let mut final_logits = Vec::new();
+        let capture_layers = [layer - 1, layer];
+        for &token_id in token_ids {
+            let forward = match self.forward_token_with_dense_ffn_capture(token_id, &capture_layers)
+            {
+                Ok(forward) => forward,
+                Err(error) => {
+                    let state = unsafe { self.sequence.metal_session_mut() };
+                    state.poison("attention prompt capture forward failed");
+                    return Err(error);
+                }
+            };
+            let hidden = geometry.hidden_size;
+            input_residuals.extend_from_slice(&forward.capture.post_block_residuals[..hidden]);
+            post_mixer_residuals
+                .extend_from_slice(&forward.capture.pre_ffn_residuals[hidden..2 * hidden]);
+            post_block_residuals
+                .extend_from_slice(&forward.capture.post_block_residuals[hidden..2 * hidden]);
+            final_logits = forward.logits;
+        }
+        Ok(ResearchAttnForward {
+            identity: self.identity(),
+            owner_token_id: self.model.owner_token_id(),
+            layer,
+            token_ids: token_ids.to_vec(),
+            hidden_size: geometry.hidden_size,
+            final_logits,
+            input_residuals,
+            post_mixer_residuals,
+            post_block_residuals,
+        })
+    }
+
+    /// Reverse one captured full-attention block using an ordinary F32 causal
+    /// attention Jacobian and the selected residual-stream/FFN lens rule.
+    pub fn attn_block_vjp(
+        &self,
+        forward: &ResearchAttnForward,
+        grad_block_output: &[f32],
+        rule: AttnBlockVjpRule,
+    ) -> Result<ResearchAttnBlockVjp, ResearchError> {
+        if forward.identity != self.identity() {
+            return Err(ResearchError::AttnCaptureModelMismatch);
+        }
+        if forward.owner_token_id != self.model.owner_token_id() {
+            return Err(ResearchError::AttnCaptureOwnerMismatch);
+        }
+        let (block, geometry) = self.resolve_attn(forward.layer)?;
+        validate_attn_weights(forward.layer, block, geometry)?;
+        let n_tokens = forward.n_tokens();
+        if n_tokens == 0 || n_tokens > MAX_RESEARCH_ATTN_TOKENS {
+            return Err(ResearchError::AttnPromptTooLong {
+                got: n_tokens,
+                max: MAX_RESEARCH_ATTN_TOKENS,
+            });
+        }
+        let hidden_elements = checked_product(n_tokens, geometry.hidden_size)?;
+        for (name, values) in [
+            (
+                "attention captured inputs",
+                forward.input_residuals.as_slice(),
+            ),
+            (
+                "attention captured post-mixer residuals",
+                forward.post_mixer_residuals.as_slice(),
+            ),
+            (
+                "attention captured post-block residuals",
+                forward.post_block_residuals.as_slice(),
+            ),
+            ("attention block cotangent", grad_block_output),
+        ] {
+            if values.len() != hidden_elements {
+                return Err(ResearchError::ActivationSize {
+                    name,
+                    got: values.len(),
+                    expected: hidden_elements,
+                });
+            }
+        }
+        if forward.hidden_size != geometry.hidden_size {
+            return Err(ResearchError::ActivationSize {
+                name: "attention capture hidden size",
+                got: forward.hidden_size,
+                expected: geometry.hidden_size,
+            });
+        }
+        let grad_post_mixer_residuals = dense_ffn_vjp_rows_readback(
+            self.model.context(),
+            forward.layer,
+            geometry.hidden_size,
+            self.arch().intermediate_size as usize,
+            &forward.post_mixer_residuals,
+            &block.post_attn_norm,
+            &block.ffn_gate,
+            &block.ffn_up,
+            &block.ffn_down,
+            grad_block_output,
+            n_tokens,
+            match rule {
+                AttnBlockVjpRule::Jacobian => DenseFfnVjpRule::Jacobian,
+                AttnBlockVjpRule::Relp => DenseFfnVjpRule::Relp,
+            },
+        )?;
+        let mixer = attn_mixer_replay_vjp_readback(
+            self.model.context(),
+            geometry,
+            AttnMixerWeights::from(block),
+            &forward.input_residuals,
+            &grad_post_mixer_residuals,
+            n_tokens,
+            rule,
+        )?;
+        let values = grad_post_mixer_residuals
+            .iter()
+            .zip(&mixer.grad_input)
+            .map(|(&identity, &branch)| identity + branch)
+            .collect();
+        let residual_replay_max_abs_error = forward
+            .input_residuals
+            .iter()
+            .zip(&mixer.mixer_outputs)
+            .zip(&forward.post_mixer_residuals)
+            .map(|((&input, &mixer), &observed)| finite_abs_difference(input + mixer, observed))
+            .fold(0.0f32, f32::max);
+        Ok(ResearchAttnBlockVjp {
+            layer: forward.layer,
+            n_tokens,
+            hidden_size: geometry.hidden_size,
+            values,
+            grad_post_mixer_residuals,
+            replay_mixer_outputs: mixer.mixer_outputs,
+            residual_replay_max_abs_error,
+        })
+    }
+
+    fn resolve_attn(&self, layer: u32) -> Result<(&MetalAttnBlock, AttnGeometry), ResearchError> {
+        let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
+            ResearchError::InvalidLayer {
+                layer,
+                n_layers: self.arch().n_layer,
+            },
+        )?;
+        let MetalBlock::Attn(block) = block else {
+            return Err(ResearchError::NotAttentionLayer { layer });
+        };
+        Ok((block, AttnGeometry::new(self.arch())?))
+    }
+
     fn resolve_gdn(
         &self,
         layer: u32,
@@ -1019,6 +1315,807 @@ struct GdnGeometry {
     conv_dim: usize,
     state_elements: usize,
     conv_state_elements: usize,
+}
+
+#[derive(Clone, Copy)]
+struct AttnGeometry {
+    hidden_size: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_rot: usize,
+    q_elements: usize,
+    q_full_elements: usize,
+    kv_elements: usize,
+    rope_theta: f32,
+}
+
+impl AttnGeometry {
+    fn new(arch: Arch) -> Result<Self, ResearchError> {
+        let hidden_size = arch.hidden_size as usize;
+        let n_q_heads = arch.n_q_heads as usize;
+        let n_kv_heads = arch.n_kv_heads as usize;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+        if hidden_size == 0
+            || n_q_heads == 0
+            || n_kv_heads == 0
+            || !n_q_heads.is_multiple_of(n_kv_heads)
+            || head_dim == 0
+            || n_rot == 0
+            || n_rot > head_dim
+            || !n_rot.is_multiple_of(2)
+            || !arch.rope_theta.is_finite()
+            || arch.rope_theta <= 0.0
+        {
+            return Err(ResearchError::SizeOverflow);
+        }
+        let q_elements = checked_product(n_q_heads, head_dim)?;
+        Ok(Self {
+            hidden_size,
+            n_q_heads,
+            n_kv_heads,
+            head_dim,
+            n_rot,
+            q_elements,
+            q_full_elements: checked_product(q_elements, 2)?,
+            kv_elements: checked_product(n_kv_heads, head_dim)?,
+            rope_theta: arch.rope_theta,
+        })
+    }
+}
+
+struct CpuCausalAttentionForward {
+    attention_output: Vec<f32>,
+    gated_output: Vec<f32>,
+}
+
+struct CpuCausalAttentionVjp {
+    grad_q: Vec<f32>,
+    grad_k: Vec<f32>,
+    grad_v: Vec<f32>,
+    grad_gate: Vec<f32>,
+}
+
+fn rope_neox_rows_in_place(
+    values: &mut [f32],
+    n_tokens: usize,
+    n_heads: usize,
+    head_dim: usize,
+    n_rot: usize,
+    start_position: u32,
+    rope_theta: f32,
+    transpose: bool,
+) -> Result<(), ResearchError> {
+    let expected = checked_product(checked_product(n_tokens, n_heads)?, head_dim)?;
+    if values.len() != expected
+        || n_tokens == 0
+        || n_heads == 0
+        || head_dim == 0
+        || n_rot == 0
+        || n_rot > head_dim
+        || !n_rot.is_multiple_of(2)
+        || !rope_theta.is_finite()
+        || rope_theta <= 0.0
+    {
+        return Err(ResearchError::ActivationSize {
+            name: "RoPE row bank",
+            got: values.len(),
+            expected,
+        });
+    }
+    let half = n_rot / 2;
+    for token in 0..n_tokens {
+        let position = start_position
+            .checked_add(u32::try_from(token).map_err(|_| ResearchError::SizeOverflow)?)
+            .ok_or(ResearchError::SizeOverflow)? as f32;
+        for head in 0..n_heads {
+            let base = (token * n_heads + head) * head_dim;
+            for index in 0..half {
+                let exponent = (2 * index) as f32 / n_rot as f32;
+                let angle = position / rope_theta.powf(exponent);
+                let (sin, cos) = angle.sin_cos();
+                let left = values[base + index];
+                let right = values[base + index + half];
+                if transpose {
+                    values[base + index] = left * cos + right * sin;
+                    values[base + index + half] = -left * sin + right * cos;
+                } else {
+                    values[base + index] = left * cos - right * sin;
+                    values[base + index + half] = left * sin + right * cos;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::needless_range_loop)]
+fn cpu_causal_gated_attention_forward(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    gate: &[f32],
+    n_tokens: usize,
+    geometry: AttnGeometry,
+) -> Result<CpuCausalAttentionForward, ResearchError> {
+    let q_total = checked_product(n_tokens, geometry.q_elements)?;
+    let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
+    for (name, values, expected) in [
+        ("attention Q", q, q_total),
+        ("attention K", k, kv_total),
+        ("attention V", v, kv_total),
+        ("attention gate", gate, q_total),
+    ] {
+        if values.len() != expected {
+            return Err(ResearchError::ActivationSize {
+                name,
+                got: values.len(),
+                expected,
+            });
+        }
+    }
+    let group = geometry.n_q_heads / geometry.n_kv_heads;
+    let scale = (geometry.head_dim as f32).sqrt().recip();
+    let mut attention_output = vec![0.0f32; q_total];
+    for token in 0..n_tokens {
+        for q_head in 0..geometry.n_q_heads {
+            let kv_head = q_head / group;
+            let q_base = (token * geometry.n_q_heads + q_head) * geometry.head_dim;
+            let mut scores = vec![0.0f32; token + 1];
+            for key_token in 0..=token {
+                let k_base = (key_token * geometry.n_kv_heads + kv_head) * geometry.head_dim;
+                let mut score = 0.0f32;
+                for index in 0..geometry.head_dim {
+                    score += q[q_base + index] * k[k_base + index];
+                }
+                scores[key_token] = score * scale;
+            }
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut denominator = 0.0f32;
+            for score in &mut scores {
+                *score = (*score - max).exp();
+                denominator += *score;
+            }
+            for score in &mut scores {
+                *score /= denominator;
+            }
+            for key_token in 0..=token {
+                let v_base = (key_token * geometry.n_kv_heads + kv_head) * geometry.head_dim;
+                let probability = scores[key_token];
+                for index in 0..geometry.head_dim {
+                    attention_output[q_base + index] += probability * v[v_base + index];
+                }
+            }
+        }
+    }
+    let gated_output = attention_output
+        .iter()
+        .zip(gate)
+        .map(|(&attention, &gate)| attention * (1.0 + (-gate).exp()).recip())
+        .collect();
+    Ok(CpuCausalAttentionForward {
+        attention_output,
+        gated_output,
+    })
+}
+
+#[allow(clippy::needless_range_loop)]
+fn cpu_causal_gated_attention_vjp(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    gate: &[f32],
+    grad_gated_output: &[f32],
+    n_tokens: usize,
+    geometry: AttnGeometry,
+) -> Result<CpuCausalAttentionVjp, ResearchError> {
+    let forward = cpu_causal_gated_attention_forward(q, k, v, gate, n_tokens, geometry)?;
+    let q_total = checked_product(n_tokens, geometry.q_elements)?;
+    let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
+    if grad_gated_output.len() != q_total {
+        return Err(ResearchError::ActivationSize {
+            name: "gated attention cotangent",
+            got: grad_gated_output.len(),
+            expected: q_total,
+        });
+    }
+    let group = geometry.n_q_heads / geometry.n_kv_heads;
+    let scale = (geometry.head_dim as f32).sqrt().recip();
+    let mut grad_q = vec![0.0f32; q_total];
+    let mut grad_k = vec![0.0f32; kv_total];
+    let mut grad_v = vec![0.0f32; kv_total];
+    let mut grad_gate = vec![0.0f32; q_total];
+    for token in 0..n_tokens {
+        for q_head in 0..geometry.n_q_heads {
+            let kv_head = q_head / group;
+            let q_base = (token * geometry.n_q_heads + q_head) * geometry.head_dim;
+            let mut grad_attention = vec![0.0f32; geometry.head_dim];
+            for index in 0..geometry.head_dim {
+                let sigmoid = (1.0 + (-gate[q_base + index]).exp()).recip();
+                grad_attention[index] = grad_gated_output[q_base + index] * sigmoid;
+                grad_gate[q_base + index] = grad_gated_output[q_base + index]
+                    * forward.attention_output[q_base + index]
+                    * sigmoid
+                    * (1.0 - sigmoid);
+            }
+            let mut scores = vec![0.0f32; token + 1];
+            for key_token in 0..=token {
+                let k_base = (key_token * geometry.n_kv_heads + kv_head) * geometry.head_dim;
+                let mut score = 0.0f32;
+                for index in 0..geometry.head_dim {
+                    score += q[q_base + index] * k[k_base + index];
+                }
+                scores[key_token] = score * scale;
+            }
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut denominator = 0.0f32;
+            for score in &mut scores {
+                *score = (*score - max).exp();
+                denominator += *score;
+            }
+            for score in &mut scores {
+                *score /= denominator;
+            }
+            let mut grad_probability = vec![0.0f32; token + 1];
+            for key_token in 0..=token {
+                let v_base = (key_token * geometry.n_kv_heads + kv_head) * geometry.head_dim;
+                for index in 0..geometry.head_dim {
+                    grad_probability[key_token] += grad_attention[index] * v[v_base + index];
+                    grad_v[v_base + index] += scores[key_token] * grad_attention[index];
+                }
+            }
+            let probability_dot = scores
+                .iter()
+                .zip(&grad_probability)
+                .map(|(&probability, &gradient)| probability * gradient)
+                .sum::<f32>();
+            for key_token in 0..=token {
+                let grad_score =
+                    scores[key_token] * (grad_probability[key_token] - probability_dot);
+                let k_base = (key_token * geometry.n_kv_heads + kv_head) * geometry.head_dim;
+                for index in 0..geometry.head_dim {
+                    grad_q[q_base + index] += scale * grad_score * k[k_base + index];
+                    grad_k[k_base + index] += scale * grad_score * q[q_base + index];
+                }
+            }
+        }
+    }
+    Ok(CpuCausalAttentionVjp {
+        grad_q,
+        grad_k,
+        grad_v,
+        grad_gate,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct AttnMixerWeights<'a> {
+    attn_norm: &'a MetalTensor,
+    q: &'a MetalTensor,
+    k: &'a MetalTensor,
+    v: &'a MetalTensor,
+    o: &'a MetalTensor,
+    q_norm: &'a MetalTensor,
+    k_norm: &'a MetalTensor,
+}
+
+impl<'a> From<&'a MetalAttnBlock> for AttnMixerWeights<'a> {
+    fn from(block: &'a MetalAttnBlock) -> Self {
+        Self {
+            attn_norm: &block.attn_norm,
+            q: &block.q,
+            k: &block.k,
+            v: &block.v,
+            o: &block.o,
+            q_norm: &block.q_norm,
+            k_norm: &block.k_norm,
+        }
+    }
+}
+
+fn validate_attn_weights(
+    layer: u32,
+    block: &MetalAttnBlock,
+    geometry: AttnGeometry,
+) -> Result<(), ResearchError> {
+    let weights = AttnMixerWeights::from(block);
+    for (role, weight, expected) in [
+        (
+            LinearRole::AttentionQAndGate,
+            weights.q,
+            [geometry.hidden_size, geometry.q_full_elements],
+        ),
+        (
+            LinearRole::AttentionK,
+            weights.k,
+            [geometry.hidden_size, geometry.kv_elements],
+        ),
+        (
+            LinearRole::AttentionV,
+            weights.v,
+            [geometry.hidden_size, geometry.kv_elements],
+        ),
+        (
+            LinearRole::AttentionOut,
+            weights.o,
+            [geometry.q_elements, geometry.hidden_size],
+        ),
+    ] {
+        let id = ResearchLinear::Layer { index: layer, role };
+        let got = linear_shape(id, weight)?;
+        if got != expected {
+            return Err(ResearchError::InvalidAttnLinearShape {
+                layer,
+                role,
+                got,
+                expected,
+            });
+        }
+        validate_vjp_dtype(id, weight)?;
+    }
+    for (name, tensor, expected_elements) in [
+        ("pre-mixer norm", weights.attn_norm, geometry.hidden_size),
+        ("Q norm", weights.q_norm, geometry.head_dim),
+        ("K norm", weights.k_norm, geometry.head_dim),
+    ] {
+        if tensor.dtype != GgmlType::F32 || tensor.n_elements() as usize != expected_elements {
+            return Err(ResearchError::InvalidAttnTensor {
+                layer,
+                name,
+                dtype: tensor.dtype,
+                shape: tensor.shape.clone(),
+                expected_elements,
+            });
+        }
+    }
+    Ok(())
+}
+
+struct AttnReplayFrontTensors {
+    input: MetalTensor,
+    normalized: MetalTensor,
+    q_full: MetalTensor,
+    q_raw: MetalTensor,
+    gate: MetalTensor,
+    k_raw: MetalTensor,
+    v: MetalTensor,
+    q_normed: MetalTensor,
+    k_normed: MetalTensor,
+}
+
+impl AttnReplayFrontTensors {
+    fn new(
+        context: &MetalContext,
+        geometry: AttnGeometry,
+        input: &[f32],
+        n_tokens: usize,
+    ) -> Result<Self, ResearchError> {
+        let hidden_total = checked_product(n_tokens, geometry.hidden_size)?;
+        if input.len() != hidden_total {
+            return Err(ResearchError::ActivationSize {
+                name: "attention replay input",
+                got: input.len(),
+                expected: hidden_total,
+            });
+        }
+        let q_total = checked_product(n_tokens, geometry.q_elements)?;
+        let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
+        let q_full_total = checked_product(n_tokens, geometry.q_full_elements)?;
+        let hidden_shape = row_shape(geometry.hidden_size, n_tokens)?;
+        Ok(Self {
+            input: MetalTensor::from_bytes(
+                context,
+                bytemuck::cast_slice(input),
+                hidden_shape.clone(),
+                GgmlType::F32,
+            )?,
+            normalized: MetalTensor::zeros_f32(context, hidden_shape)?,
+            q_full: flat_f32(context, q_full_total)?,
+            q_raw: flat_f32(context, q_total)?,
+            gate: flat_f32(context, q_total)?,
+            k_raw: flat_f32(context, kv_total)?,
+            v: flat_f32(context, kv_total)?,
+            q_normed: flat_f32(context, q_total)?,
+            k_normed: flat_f32(context, kv_total)?,
+        })
+    }
+
+    fn encode(
+        &self,
+        context: &MetalContext,
+        encoder: &KernelEncoder,
+        geometry: AttnGeometry,
+        weights: AttnMixerWeights<'_>,
+        n_tokens: usize,
+    ) -> Result<(), ResearchError> {
+        encode_rms_norm_mul_rows_f32(
+            context,
+            encoder,
+            &self.input,
+            weights.attn_norm,
+            &self.normalized,
+            n_tokens,
+            geometry.hidden_size,
+            RMS_EPS,
+        )?;
+        for token in 0..n_tokens {
+            let hidden = row_view(&self.normalized, token, geometry.hidden_size);
+            let q_full = row_view(&self.q_full, token, geometry.q_full_elements);
+            let q = row_view(&self.q_raw, token, geometry.q_elements);
+            let gate = row_view(&self.gate, token, geometry.q_elements);
+            let k = row_view(&self.k_raw, token, geometry.kv_elements);
+            let v = row_view(&self.v, token, geometry.kv_elements);
+            encode_mat_vec_dispatch(
+                context,
+                encoder,
+                weights.q,
+                &hidden,
+                &q_full,
+                geometry.hidden_size,
+                geometry.q_full_elements,
+            )?;
+            encode_split_q_gate_f32(
+                context,
+                encoder,
+                &q_full,
+                &q,
+                &gate,
+                geometry.n_q_heads,
+                geometry.head_dim,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                encoder,
+                weights.k,
+                &hidden,
+                &k,
+                geometry.hidden_size,
+                geometry.kv_elements,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                encoder,
+                weights.v,
+                &hidden,
+                &v,
+                geometry.hidden_size,
+                geometry.kv_elements,
+            )?;
+        }
+        encode_rms_norm_batched_f32(
+            context,
+            encoder,
+            &self.q_raw,
+            weights.q_norm,
+            &self.q_normed,
+            checked_product(n_tokens, geometry.n_q_heads)?,
+            geometry.head_dim,
+            RMS_EPS,
+        )?;
+        encode_rms_norm_batched_f32(
+            context,
+            encoder,
+            &self.k_raw,
+            weights.k_norm,
+            &self.k_normed,
+            checked_product(n_tokens, geometry.n_kv_heads)?,
+            geometry.head_dim,
+            RMS_EPS,
+        )?;
+        Ok(())
+    }
+}
+
+fn cpu_weighted_rms_vjp_rows(
+    x: &[f32],
+    weight: &[f32],
+    grad_output: &[f32],
+    n_rows: usize,
+    width: usize,
+    detach_scale: bool,
+) -> Result<Vec<f32>, ResearchError> {
+    let expected = checked_product(n_rows, width)?;
+    if x.len() != expected || grad_output.len() != expected || weight.len() != width {
+        return Err(ResearchError::ActivationSize {
+            name: "CPU weighted RMSNorm VJP",
+            got: x.len().min(grad_output.len()),
+            expected,
+        });
+    }
+    let mut result = vec![0.0f32; expected];
+    for row in 0..n_rows {
+        let base = row * width;
+        let sum_squares = x[base..base + width]
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>();
+        let scale = (sum_squares / width as f32 + RMS_EPS).sqrt().recip();
+        let dot = (0..width)
+            .map(|index| x[base + index] * grad_output[base + index] * weight[index])
+            .sum::<f32>();
+        let correction = dot * scale * scale * scale / width as f32;
+        for index in 0..width {
+            let direct = grad_output[base + index] * weight[index] * scale;
+            result[base + index] = if detach_scale {
+                direct
+            } else {
+                direct - x[base + index] * correction
+            };
+        }
+    }
+    Ok(result)
+}
+
+struct AttnMixerVjpReadback {
+    mixer_outputs: Vec<f32>,
+    grad_input: Vec<f32>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attn_mixer_replay_vjp_readback(
+    context: &MetalContext,
+    geometry: AttnGeometry,
+    weights: AttnMixerWeights<'_>,
+    input: &[f32],
+    grad_mixer_output: &[f32],
+    n_tokens: usize,
+    rule: AttnBlockVjpRule,
+) -> Result<AttnMixerVjpReadback, ResearchError> {
+    if n_tokens == 0 || n_tokens > MAX_RESEARCH_ATTN_TOKENS {
+        return Err(ResearchError::AttnPromptTooLong {
+            got: n_tokens,
+            max: MAX_RESEARCH_ATTN_TOKENS,
+        });
+    }
+    let hidden_total = checked_product(n_tokens, geometry.hidden_size)?;
+    let q_total = checked_product(n_tokens, geometry.q_elements)?;
+    let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
+    if input.len() != hidden_total || grad_mixer_output.len() != hidden_total {
+        return Err(ResearchError::ActivationSize {
+            name: "attention mixer input/cotangent",
+            got: input.len().min(grad_mixer_output.len()),
+            expected: hidden_total,
+        });
+    }
+    let front = AttnReplayFrontTensors::new(context, geometry, input, n_tokens)?;
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = front.encode(context, &encoder, geometry, weights, n_tokens);
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+
+    let q_raw = read_f32(&front.q_raw, q_total);
+    let k_raw = read_f32(&front.k_raw, kv_total);
+    let gate = read_f32(&front.gate, q_total);
+    let v = read_f32(&front.v, kv_total);
+    let mut q = read_f32(&front.q_normed, q_total);
+    let mut k = read_f32(&front.k_normed, kv_total);
+    rope_neox_rows_in_place(
+        &mut q,
+        n_tokens,
+        geometry.n_q_heads,
+        geometry.head_dim,
+        geometry.n_rot,
+        0,
+        geometry.rope_theta,
+        false,
+    )?;
+    rope_neox_rows_in_place(
+        &mut k,
+        n_tokens,
+        geometry.n_kv_heads,
+        geometry.head_dim,
+        geometry.n_rot,
+        0,
+        geometry.rope_theta,
+        false,
+    )?;
+    let attention = cpu_causal_gated_attention_forward(&q, &k, &v, &gate, n_tokens, geometry)?;
+
+    let gated_output = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(&attention.gated_output),
+        row_shape(geometry.q_elements, n_tokens)?,
+        GgmlType::F32,
+    )?;
+    let mixer_output = MetalTensor::zeros_f32(context, row_shape(geometry.hidden_size, n_tokens)?)?;
+    let grad_mixer = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(grad_mixer_output),
+        row_shape(geometry.hidden_size, n_tokens)?,
+        GgmlType::F32,
+    )?;
+    let grad_gated = MetalTensor::zeros_f32(context, row_shape(geometry.q_elements, n_tokens)?)?;
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = (|| -> Result<(), ResearchError> {
+        for token in 0..n_tokens {
+            let gated = row_view(&gated_output, token, geometry.q_elements);
+            let mixer = row_view(&mixer_output, token, geometry.hidden_size);
+            encode_mat_vec_dispatch(
+                context,
+                &encoder,
+                weights.o,
+                &gated,
+                &mixer,
+                geometry.q_elements,
+                geometry.hidden_size,
+            )?;
+        }
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            weights.o,
+            &grad_mixer,
+            &grad_gated,
+            geometry.q_elements,
+            geometry.hidden_size,
+            n_tokens,
+        )?;
+        Ok(())
+    })();
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+    let mixer_outputs = read_f32(&mixer_output, hidden_total);
+    let grad_gated = read_f32(&grad_gated, q_total);
+
+    let mut attention_vjp =
+        cpu_causal_gated_attention_vjp(&q, &k, &v, &gate, &grad_gated, n_tokens, geometry)?;
+    rope_neox_rows_in_place(
+        &mut attention_vjp.grad_q,
+        n_tokens,
+        geometry.n_q_heads,
+        geometry.head_dim,
+        geometry.n_rot,
+        0,
+        geometry.rope_theta,
+        true,
+    )?;
+    rope_neox_rows_in_place(
+        &mut attention_vjp.grad_k,
+        n_tokens,
+        geometry.n_kv_heads,
+        geometry.head_dim,
+        geometry.n_rot,
+        0,
+        geometry.rope_theta,
+        true,
+    )?;
+    let q_norm_weight = read_f32(weights.q_norm, geometry.head_dim);
+    let k_norm_weight = read_f32(weights.k_norm, geometry.head_dim);
+    let grad_q_raw = cpu_weighted_rms_vjp_rows(
+        &q_raw,
+        &q_norm_weight,
+        &attention_vjp.grad_q,
+        checked_product(n_tokens, geometry.n_q_heads)?,
+        geometry.head_dim,
+        false,
+    )?;
+    let grad_k_raw = cpu_weighted_rms_vjp_rows(
+        &k_raw,
+        &k_norm_weight,
+        &attention_vjp.grad_k,
+        checked_product(n_tokens, geometry.n_kv_heads)?,
+        geometry.head_dim,
+        false,
+    )?;
+    let mut grad_q_full = vec![0.0f32; checked_product(n_tokens, geometry.q_full_elements)?];
+    for token in 0..n_tokens {
+        for head in 0..geometry.n_q_heads {
+            let source = (token * geometry.n_q_heads + head) * geometry.head_dim;
+            let destination = (token * geometry.n_q_heads + head) * 2 * geometry.head_dim;
+            grad_q_full[destination..destination + geometry.head_dim]
+                .copy_from_slice(&grad_q_raw[source..source + geometry.head_dim]);
+            grad_q_full[destination + geometry.head_dim..destination + 2 * geometry.head_dim]
+                .copy_from_slice(&attention_vjp.grad_gate[source..source + geometry.head_dim]);
+        }
+    }
+
+    let grad_q_full = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(&grad_q_full),
+        row_shape(geometry.q_full_elements, n_tokens)?,
+        GgmlType::F32,
+    )?;
+    let grad_k = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(&grad_k_raw),
+        row_shape(geometry.kv_elements, n_tokens)?,
+        GgmlType::F32,
+    )?;
+    let grad_v = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(&attention_vjp.grad_v),
+        row_shape(geometry.kv_elements, n_tokens)?,
+        GgmlType::F32,
+    )?;
+    let hidden_shape = row_shape(geometry.hidden_size, n_tokens)?;
+    let grad_hidden_q = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden_k = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden_v = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden_qk = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_input = MetalTensor::zeros_f32(context, hidden_shape)?;
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = (|| -> Result<(), ResearchError> {
+        for (weight, grad_output, grad_hidden, n_out) in [
+            (
+                weights.q,
+                &grad_q_full,
+                &grad_hidden_q,
+                geometry.q_full_elements,
+            ),
+            (weights.k, &grad_k, &grad_hidden_k, geometry.kv_elements),
+            (weights.v, &grad_v, &grad_hidden_v, geometry.kv_elements),
+        ] {
+            encode_frozen_linear_vjp_f32(
+                context,
+                &encoder,
+                weight,
+                grad_output,
+                grad_hidden,
+                geometry.hidden_size,
+                n_out,
+                n_tokens,
+            )?;
+        }
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_q,
+            &grad_hidden_k,
+            &grad_hidden_qk,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_qk,
+            &grad_hidden_v,
+            &grad_hidden,
+        )?;
+        encode_rms_norm_mul_vjp_rows_f32(
+            context,
+            &encoder,
+            &front.input,
+            weights.attn_norm,
+            &grad_hidden,
+            &grad_input,
+            n_tokens,
+            geometry.hidden_size,
+            RMS_EPS,
+            match rule {
+                AttnBlockVjpRule::Jacobian => RmsNormVjpRule::Jacobian,
+                AttnBlockVjpRule::Relp => RmsNormVjpRule::RelpDetachedScale,
+            },
+        )?;
+        Ok(())
+    })();
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+    Ok(AttnMixerVjpReadback {
+        mixer_outputs,
+        grad_input: read_f32(&grad_input, hidden_total),
+    })
 }
 
 impl GdnGeometry {
@@ -2508,6 +3605,294 @@ mod tests {
         assert_eq!(
             max_abs_difference(&[0.0, f32::NAN], &[0.0, 0.0]),
             f32::INFINITY
+        );
+    }
+
+    #[test]
+    fn causal_gated_attention_and_rope_vjps_match_finite_differences() {
+        const TOKENS: usize = 4;
+        const N_Q: usize = 4;
+        const N_KV: usize = 2;
+        const HEAD_DIM: usize = 8;
+        const N_ROT: usize = 4;
+        let geometry = AttnGeometry {
+            hidden_size: 13,
+            n_q_heads: N_Q,
+            n_kv_heads: N_KV,
+            head_dim: HEAD_DIM,
+            n_rot: N_ROT,
+            q_elements: N_Q * HEAD_DIM,
+            q_full_elements: 2 * N_Q * HEAD_DIM,
+            kv_elements: N_KV * HEAD_DIM,
+            rope_theta: 10_000.0,
+        };
+        let values = |len: usize, stride: usize, scale: f32, offset: f32| {
+            (0..len)
+                .map(|index| ((index * stride + 3) % 47) as f32 * scale + offset)
+                .collect::<Vec<_>>()
+        };
+        let q = values(TOKENS * geometry.q_elements, 5, 0.013, -0.27);
+        let k = values(TOKENS * geometry.kv_elements, 7, 0.011, -0.23);
+        let v = values(TOKENS * geometry.kv_elements, 11, 0.017, -0.35);
+        let gate = values(TOKENS * geometry.q_elements, 13, 0.029, -0.61);
+        let grad = values(TOKENS * geometry.q_elements, 17, 0.019, -0.41);
+        let actual =
+            cpu_causal_gated_attention_vjp(&q, &k, &v, &gate, &grad, TOKENS, geometry).unwrap();
+        let objective = |q: &[f32], k: &[f32], v: &[f32], gate: &[f32]| {
+            cpu_causal_gated_attention_forward(q, k, v, gate, TOKENS, geometry)
+                .unwrap()
+                .gated_output
+                .iter()
+                .zip(&grad)
+                .map(|(&value, &gradient)| f64::from(value) * f64::from(gradient))
+                .sum::<f64>()
+        };
+        let epsilon = 2e-3f32;
+        let finite_difference = |values: &[f32], index: usize, evaluate: &dyn Fn(&[f32]) -> f64| {
+            let mut plus = values.to_vec();
+            let mut minus = values.to_vec();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            (evaluate(&plus) - evaluate(&minus)) / (2.0 * f64::from(epsilon))
+        };
+        for &index in &[
+            2 * geometry.q_elements,
+            3 * geometry.q_elements + HEAD_DIM - 1,
+        ] {
+            let fd = finite_difference(&q, index, &|candidate| objective(candidate, &k, &v, &gate));
+            assert!((fd - f64::from(actual.grad_q[index])).abs() < 2e-3);
+        }
+        for &index in &[0usize, geometry.kv_elements + 3, k.len() - 1] {
+            let fd = finite_difference(&k, index, &|candidate| objective(&q, candidate, &v, &gate));
+            assert!((fd - f64::from(actual.grad_k[index])).abs() < 2e-3);
+            let fd = finite_difference(&v, index, &|candidate| objective(&q, &k, candidate, &gate));
+            assert!((fd - f64::from(actual.grad_v[index])).abs() < 2e-3);
+        }
+        for &index in &[0usize, 2 * geometry.q_elements + 5, gate.len() - 1] {
+            let fd = finite_difference(&gate, index, &|candidate| objective(&q, &k, &v, candidate));
+            assert!((fd - f64::from(actual.grad_gate[index])).abs() < 2e-3);
+        }
+        let direction = |len: usize, stride: usize| {
+            (0..len)
+                .map(|index| ((index * stride + 1) % 31) as f32 * 0.0013 - 0.019)
+                .collect::<Vec<_>>()
+        };
+        let dq = direction(q.len(), 19);
+        let dk = direction(k.len(), 23);
+        let dv = direction(v.len(), 29);
+        let dg = direction(gate.len(), 31);
+        let shift = |base: &[f32], tangent: &[f32], amount: f32| {
+            base.iter()
+                .zip(tangent)
+                .map(|(&base, &tangent)| base + amount * tangent)
+                .collect::<Vec<_>>()
+        };
+        let plus = objective(
+            &shift(&q, &dq, epsilon),
+            &shift(&k, &dk, epsilon),
+            &shift(&v, &dv, epsilon),
+            &shift(&gate, &dg, epsilon),
+        );
+        let minus = objective(
+            &shift(&q, &dq, -epsilon),
+            &shift(&k, &dk, -epsilon),
+            &shift(&v, &dv, -epsilon),
+            &shift(&gate, &dg, -epsilon),
+        );
+        let forward_directional = (plus - minus) / (2.0 * f64::from(epsilon));
+        let inner = |gradient: &[f32], tangent: &[f32]| {
+            gradient
+                .iter()
+                .zip(tangent)
+                .map(|(&gradient, &tangent)| f64::from(gradient) * f64::from(tangent))
+                .sum::<f64>()
+        };
+        let reverse_directional = inner(&actual.grad_q, &dq)
+            + inner(&actual.grad_k, &dk)
+            + inner(&actual.grad_v, &dv)
+            + inner(&actual.grad_gate, &dg);
+        assert!((forward_directional - reverse_directional).abs() < 2e-3);
+
+        let rope_input = values(TOKENS * N_Q * HEAD_DIM, 37, 0.021, -0.44);
+        let rope_grad = values(TOKENS * N_Q * HEAD_DIM, 41, 0.018, -0.39);
+        let mut rotated = rope_input.clone();
+        rope_neox_rows_in_place(
+            &mut rotated,
+            TOKENS,
+            N_Q,
+            HEAD_DIM,
+            N_ROT,
+            7,
+            geometry.rope_theta,
+            false,
+        )
+        .unwrap();
+        let mut transposed = rope_grad.clone();
+        rope_neox_rows_in_place(
+            &mut transposed,
+            TOKENS,
+            N_Q,
+            HEAD_DIM,
+            N_ROT,
+            7,
+            geometry.rope_theta,
+            true,
+        )
+        .unwrap();
+        let left = inner(&rotated, &rope_grad);
+        let right = inner(&rope_input, &transposed);
+        assert!((left - right).abs() < 2e-5);
+        for token in 0..TOKENS {
+            for head in 0..N_Q {
+                let base = (token * N_Q + head) * HEAD_DIM;
+                for index in N_ROT..HEAD_DIM {
+                    assert_eq!(
+                        rotated[base + index].to_bits(),
+                        rope_input[base + index].to_bits()
+                    );
+                    assert_eq!(
+                        transposed[base + index].to_bits(),
+                        rope_grad[base + index].to_bits()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hybrid_attention_mixer_vjp_matches_directional_finite_differences() {
+        let context = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const TOKENS: usize = 3;
+        const HIDDEN: usize = 16;
+        const N_Q: usize = 2;
+        const N_KV: usize = 1;
+        const HEAD_DIM: usize = 8;
+        let geometry = AttnGeometry {
+            hidden_size: HIDDEN,
+            n_q_heads: N_Q,
+            n_kv_heads: N_KV,
+            head_dim: HEAD_DIM,
+            n_rot: 4,
+            q_elements: N_Q * HEAD_DIM,
+            q_full_elements: 2 * N_Q * HEAD_DIM,
+            kv_elements: N_KV * HEAD_DIM,
+            rope_theta: 10_000.0,
+        };
+        let values = |len: usize, stride: usize, scale: f32, offset: f32| {
+            (0..len)
+                .map(|index| ((index * stride + 3) % 47) as f32 * scale + offset)
+                .collect::<Vec<_>>()
+        };
+        let attn_norm = f32_tensor(
+            &context,
+            &values(HIDDEN, 5, 0.011, 0.67),
+            vec![HIDDEN as u64],
+        );
+        let q_weight_values = values(HIDDEN * 2 * geometry.q_elements, 7, 0.0017, -0.037);
+        let q_weight = f32_tensor(
+            &context,
+            &q_weight_values,
+            vec![HIDDEN as u64, (2 * geometry.q_elements) as u64],
+        );
+        let k_weight_values = values(HIDDEN * geometry.kv_elements, 11, 0.0021, -0.043);
+        let k_weight = f32_tensor(
+            &context,
+            &k_weight_values,
+            vec![HIDDEN as u64, geometry.kv_elements as u64],
+        );
+        let v_weight_values = values(HIDDEN * geometry.kv_elements, 13, 0.0023, -0.047);
+        let v_weight = f32_tensor(
+            &context,
+            &v_weight_values,
+            vec![HIDDEN as u64, geometry.kv_elements as u64],
+        );
+        let o_weight_values = values(geometry.q_elements * HIDDEN, 17, 0.0019, -0.039);
+        let o_weight = f32_tensor(
+            &context,
+            &o_weight_values,
+            vec![geometry.q_elements as u64, HIDDEN as u64],
+        );
+        let q_norm = f32_tensor(
+            &context,
+            &values(HEAD_DIM, 19, 0.017, 0.59),
+            vec![HEAD_DIM as u64],
+        );
+        let k_norm = f32_tensor(
+            &context,
+            &values(HEAD_DIM, 23, 0.019, 0.57),
+            vec![HEAD_DIM as u64],
+        );
+        let weights = AttnMixerWeights {
+            attn_norm: &attn_norm,
+            q: &q_weight,
+            k: &k_weight,
+            v: &v_weight,
+            o: &o_weight,
+            q_norm: &q_norm,
+            k_norm: &k_norm,
+        };
+        let input = values(TOKENS * HIDDEN, 29, 0.009, -0.19);
+        let grad = values(TOKENS * HIDDEN, 31, 0.013, -0.27);
+        let run = |input: &[f32], grad: &[f32], rule| {
+            attn_mixer_replay_vjp_readback(&context, geometry, weights, input, grad, TOKENS, rule)
+                .unwrap()
+        };
+        let actual = run(&input, &grad, AttnBlockVjpRule::Jacobian);
+        assert!(actual.grad_input.iter().all(|value| value.is_finite()));
+        assert!(actual.grad_input.iter().any(|value| *value != 0.0));
+        let objective = |candidate: &[f32]| {
+            run(candidate, &grad, AttnBlockVjpRule::Jacobian)
+                .mixer_outputs
+                .iter()
+                .zip(&grad)
+                .map(|(&value, &gradient)| f64::from(value) * f64::from(gradient))
+                .sum::<f64>()
+        };
+        let epsilon = 2e-2f32;
+        for index in [0usize, HIDDEN, input.len() - 1] {
+            let mut plus = input.clone();
+            let mut minus = input.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let fd = (objective(&plus) - objective(&minus)) / (2.0 * f64::from(epsilon));
+            assert!(
+                (fd - f64::from(actual.grad_input[index])).abs() < 2e-3,
+                "coordinate {index} fd={fd} reverse={}",
+                actual.grad_input[index]
+            );
+        }
+        let direction = values(input.len(), 37, 0.0013, -0.021);
+        let shift = |amount: f32| {
+            input
+                .iter()
+                .zip(&direction)
+                .map(|(&value, &direction)| value + amount * direction)
+                .collect::<Vec<_>>()
+        };
+        let forward_directional =
+            (objective(&shift(epsilon)) - objective(&shift(-epsilon))) / (2.0 * f64::from(epsilon));
+        let reverse_directional = actual
+            .grad_input
+            .iter()
+            .zip(&direction)
+            .map(|(&gradient, &direction)| f64::from(gradient) * f64::from(direction))
+            .sum::<f64>();
+        assert!(
+            (forward_directional - reverse_directional).abs() < 2e-3,
+            "hybrid attention directional mismatch forward={forward_directional} reverse={reverse_directional}"
+        );
+        let zero = run(&input, &vec![0.0; grad.len()], AttnBlockVjpRule::Jacobian);
+        assert!(zero.grad_input.iter().all(|value| *value == 0.0));
+        let relp = run(&input, &grad, AttnBlockVjpRule::Relp);
+        assert!(
+            relp.grad_input
+                .iter()
+                .zip(&actual.grad_input)
+                .any(|(relp, jacobian)| relp.to_bits() != jacobian.to_bits())
         );
     }
 

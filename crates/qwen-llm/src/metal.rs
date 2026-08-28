@@ -23640,6 +23640,221 @@ pub fn encode_ssm_conv_silu_split_vjp_f32(
     Ok(())
 }
 
+/// Temporal VJP for a packed width-4 depthwise conv+SiLU sequence.
+///
+/// Checkpoint row `t` is the post-token state after token `t`. Reverse token
+/// `t` therefore reads `initial_state` when `t == 0` and checkpoint `t - 1`
+/// otherwise. Both the full `n_tokens` checkpoint tape and the production
+/// `n_tokens - 1` tape that omits the unused final state are accepted.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_ssm_conv_silu_split_packed_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    qkv_pack: &MetalTensor,
+    initial_state: &MetalTensor,
+    state_checkpoints: &MetalTensor,
+    n_checkpoints: usize,
+    conv_w: &MetalTensor,
+    grad_q_raw_pack: &MetalTensor,
+    grad_k_raw_pack: &MetalTensor,
+    grad_v_pack: &MetalTensor,
+    grad_final_state: &MetalTensor,
+    grad_qkv_pack: &MetalTensor,
+    grad_initial_state: &MetalTensor,
+    grad_state_scratch_a: &MetalTensor,
+    grad_state_scratch_b: &MetalTensor,
+    n_tokens: usize,
+    n_k_heads: usize,
+    n_v_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "ssm_conv_silu_split_packed_vjp";
+    if enc.is_concurrent() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "temporal state dependencies require a serial encoder".into(),
+        });
+    }
+    if n_tokens == 0
+        || u32::try_from(n_tokens).is_err()
+        || n_k_heads == 0
+        || n_v_heads == 0
+        || head_dim == 0
+        || u32::try_from(n_k_heads).is_err()
+        || u32::try_from(n_v_heads).is_err()
+        || u32::try_from(head_dim).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "token/head geometry must fit nonzero u32, got tokens={n_tokens} n_k={n_k_heads} n_v={n_v_heads} head_dim={head_dim}"
+            ),
+        });
+    }
+    if n_checkpoints < n_tokens - 1 || n_checkpoints > n_tokens {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected n_tokens-1 or n_tokens post-state checkpoints, got tokens={n_tokens} checkpoints={n_checkpoints}"
+            ),
+        });
+    }
+    let qk_elements = n_k_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "Q/K element count overflow".into(),
+        })?;
+    let v_elements = n_v_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "V element count overflow".into(),
+        })?;
+    let conv_dim = qk_elements
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(v_elements))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "convolution dimension overflow".into(),
+        })?;
+    if u32::try_from(conv_dim).is_err() || u32::try_from(qk_elements).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "convolution geometry exceeds u32 shader addressing".into(),
+        });
+    }
+    let state_elements = conv_dim
+        .checked_mul(3)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "convolution state element count overflow".into(),
+        })?;
+    let weight_elements = conv_dim
+        .checked_mul(4)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "convolution weight element count overflow".into(),
+        })?;
+    let packed = |per_token: usize, name: &str| {
+        n_tokens
+            .checked_mul(per_token)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name} packed element count overflow"),
+            })
+    };
+    let qkv_pack_elements = packed(conv_dim, "QKV")?;
+    let qk_pack_elements = packed(qk_elements, "Q/K gradient")?;
+    let v_pack_elements = packed(v_elements, "V gradient")?;
+    let checkpoint_elements =
+        n_checkpoints
+            .checked_mul(state_elements)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "checkpoint element count overflow".into(),
+            })?;
+    let shape = |elements: usize| -> Result<Vec<u64>, MetalError> {
+        Ok(vec![u64::try_from(elements).map_err(|_| {
+            MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("element count {elements} does not fit u64"),
+            }
+        })?])
+    };
+    let qkv_pack_shape = shape(qkv_pack_elements)?;
+    let qk_pack_shape = shape(qk_pack_elements)?;
+    let v_pack_shape = shape(v_pack_elements)?;
+    let state_shape = shape(state_elements)?;
+    let checkpoint_shape = shape(checkpoint_elements)?;
+    let weight_shape = shape(weight_elements)?;
+    for (name, tensor, expected_shape) in [
+        ("qkv_pack", qkv_pack, &qkv_pack_shape),
+        ("initial_state", initial_state, &state_shape),
+        ("state_checkpoints", state_checkpoints, &checkpoint_shape),
+        ("conv_w", conv_w, &weight_shape),
+        ("grad_q_raw_pack", grad_q_raw_pack, &qk_pack_shape),
+        ("grad_k_raw_pack", grad_k_raw_pack, &qk_pack_shape),
+        ("grad_v_pack", grad_v_pack, &v_pack_shape),
+        ("grad_final_state", grad_final_state, &state_shape),
+    ] {
+        validate_compact_f32_tensor(KERNEL, name, tensor, expected_shape, false)?;
+    }
+    for (name, tensor, expected_shape) in [
+        ("grad_qkv_pack", grad_qkv_pack, &qkv_pack_shape),
+        ("grad_initial_state", grad_initial_state, &state_shape),
+        ("grad_state_scratch_a", grad_state_scratch_a, &state_shape),
+        ("grad_state_scratch_b", grad_state_scratch_b, &state_shape),
+    ] {
+        validate_compact_f32_tensor(KERNEL, name, tensor, expected_shape, true)?;
+    }
+    validate_vjp_storage_disjoint(
+        KERNEL,
+        &[
+            qkv_pack,
+            initial_state,
+            state_checkpoints,
+            conv_w,
+            grad_q_raw_pack,
+            grad_k_raw_pack,
+            grad_v_pack,
+            grad_final_state,
+        ],
+        &[
+            grad_qkv_pack,
+            grad_initial_state,
+            grad_state_scratch_a,
+            grad_state_scratch_b,
+        ],
+    )?;
+
+    let mut current_grad_state = grad_final_state;
+    for token in (0..n_tokens).rev() {
+        let qkv = qkv_pack.view_subrange((token * conv_dim) as u64, vec![conv_dim as u64]);
+        let grad_q_raw =
+            grad_q_raw_pack.view_subrange((token * qk_elements) as u64, vec![qk_elements as u64]);
+        let grad_k_raw =
+            grad_k_raw_pack.view_subrange((token * qk_elements) as u64, vec![qk_elements as u64]);
+        let grad_v =
+            grad_v_pack.view_subrange((token * v_elements) as u64, vec![v_elements as u64]);
+        let grad_qkv =
+            grad_qkv_pack.view_subrange((token * conv_dim) as u64, vec![conv_dim as u64]);
+        let checkpoint = (token > 0).then(|| {
+            state_checkpoints.view_subrange(
+                ((token - 1) * state_elements) as u64,
+                vec![state_elements as u64],
+            )
+        });
+        let state_in = checkpoint.as_ref().unwrap_or(initial_state);
+        let reverse_index = n_tokens - 1 - token;
+        let next_grad_state = if token == 0 {
+            grad_initial_state
+        } else if reverse_index.is_multiple_of(2) {
+            grad_state_scratch_a
+        } else {
+            grad_state_scratch_b
+        };
+        encode_ssm_conv_silu_split_vjp_f32(
+            ctx,
+            enc,
+            &qkv,
+            state_in,
+            conv_w,
+            &grad_q_raw,
+            &grad_k_raw,
+            &grad_v,
+            current_grad_state,
+            &grad_qkv,
+            next_grad_state,
+            n_k_heads,
+            n_v_heads,
+            head_dim,
+        )?;
+        current_grad_state = next_grad_state;
+    }
+    Ok(())
+}
+
 crate::env_flag!(
     default_off configured_prefill_gdn_prep_parallel_enabled,
     "QWEN_PREFILL_GDN_PREP_PARALLEL"
@@ -24639,6 +24854,251 @@ pub fn encode_gdn_step_decay_vjp_f32(
             depth: 1,
         },
     );
+    Ok(())
+}
+
+/// Temporal VJP for a packed direct-decay GDN recurrence.
+///
+/// `state_checkpoints[t]` is the post-token state after token `t`; reverse
+/// token `t` reads `initial_state` for token zero and checkpoint `t - 1`
+/// otherwise. The final post-token checkpoint is never needed, so this accepts
+/// either `n_tokens - 1` checkpoints or a full `n_tokens` forward tape. State
+/// cotangents are carried backward through two reusable scratch tensors.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_gdn_step_decay_packed_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_pack: &MetalTensor,
+    k_pack: &MetalTensor,
+    v_pack: &MetalTensor,
+    decay_pack: &MetalTensor,
+    beta_pack: &MetalTensor,
+    initial_state: &MetalTensor,
+    state_checkpoints: &MetalTensor,
+    n_checkpoints: usize,
+    grad_out_pack: &MetalTensor,
+    grad_final_state: &MetalTensor,
+    grad_q_pack: &MetalTensor,
+    grad_k_pack: &MetalTensor,
+    grad_v_pack: &MetalTensor,
+    grad_decay_pack: &MetalTensor,
+    grad_beta_pack: &MetalTensor,
+    grad_initial_state: &MetalTensor,
+    grad_state_scratch_a: &MetalTensor,
+    grad_state_scratch_b: &MetalTensor,
+    grad_correction_scratch: &MetalTensor,
+    residual_scratch: &MetalTensor,
+    n_tokens: usize,
+    n_v_heads: usize,
+    n_k_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "gdn_step_decay_packed_vjp";
+    if enc.is_concurrent() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "temporal state dependencies require a serial encoder".into(),
+        });
+    }
+    if n_tokens == 0
+        || u32::try_from(n_tokens).is_err()
+        || head_dim != 128
+        || n_v_heads == 0
+        || n_k_heads == 0
+        || !n_v_heads.is_multiple_of(n_k_heads)
+        || u32::try_from(n_v_heads).is_err()
+        || u32::try_from(n_k_heads).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected nonzero u32 token/head counts, head_dim=128, and n_v divisible by n_k; got tokens={n_tokens} n_v={n_v_heads} n_k={n_k_heads} head_dim={head_dim}"
+            ),
+        });
+    }
+    if n_checkpoints < n_tokens - 1 || n_checkpoints > n_tokens {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected n_tokens-1 or n_tokens post-state checkpoints, got tokens={n_tokens} checkpoints={n_checkpoints}"
+            ),
+        });
+    }
+    let qk_elements = n_k_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "Q/K element count overflow".into(),
+        })?;
+    let vector_elements = n_v_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "V-head element count overflow".into(),
+        })?;
+    let state_elements =
+        vector_elements
+            .checked_mul(head_dim)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "state element count overflow".into(),
+            })?;
+    let packed = |per_token: usize, name: &str| {
+        n_tokens
+            .checked_mul(per_token)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("{name} packed element count overflow"),
+            })
+    };
+    let qk_pack_elements = packed(qk_elements, "Q/K")?;
+    let vector_pack_elements = packed(vector_elements, "V/output")?;
+    let scalar_pack_elements = packed(n_v_heads, "decay/beta")?;
+    let checkpoint_elements =
+        n_checkpoints
+            .checked_mul(state_elements)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "checkpoint element count overflow".into(),
+            })?;
+    let shape = |elements: usize| -> Result<Vec<u64>, MetalError> {
+        Ok(vec![u64::try_from(elements).map_err(|_| {
+            MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("element count {elements} does not fit u64"),
+            }
+        })?])
+    };
+    let qk_pack_shape = shape(qk_pack_elements)?;
+    let vector_pack_shape = shape(vector_pack_elements)?;
+    let scalar_pack_shape = shape(scalar_pack_elements)?;
+    let state_shape = shape(state_elements)?;
+    let checkpoint_shape = shape(checkpoint_elements)?;
+    let vector_shape = shape(vector_elements)?;
+    for (name, tensor, expected_shape) in [
+        ("q_pack", q_pack, &qk_pack_shape),
+        ("k_pack", k_pack, &qk_pack_shape),
+        ("v_pack", v_pack, &vector_pack_shape),
+        ("decay_pack", decay_pack, &scalar_pack_shape),
+        ("beta_pack", beta_pack, &scalar_pack_shape),
+        ("initial_state", initial_state, &state_shape),
+        ("state_checkpoints", state_checkpoints, &checkpoint_shape),
+        ("grad_out_pack", grad_out_pack, &vector_pack_shape),
+        ("grad_final_state", grad_final_state, &state_shape),
+    ] {
+        validate_compact_f32_tensor(KERNEL, name, tensor, expected_shape, false)?;
+    }
+    for (name, tensor, expected_shape) in [
+        ("grad_q_pack", grad_q_pack, &qk_pack_shape),
+        ("grad_k_pack", grad_k_pack, &qk_pack_shape),
+        ("grad_v_pack", grad_v_pack, &vector_pack_shape),
+        ("grad_decay_pack", grad_decay_pack, &scalar_pack_shape),
+        ("grad_beta_pack", grad_beta_pack, &scalar_pack_shape),
+        ("grad_initial_state", grad_initial_state, &state_shape),
+        ("grad_state_scratch_a", grad_state_scratch_a, &state_shape),
+        ("grad_state_scratch_b", grad_state_scratch_b, &state_shape),
+        (
+            "grad_correction_scratch",
+            grad_correction_scratch,
+            &vector_shape,
+        ),
+        ("residual_scratch", residual_scratch, &vector_shape),
+    ] {
+        validate_compact_f32_tensor(KERNEL, name, tensor, expected_shape, true)?;
+    }
+    validate_vjp_storage_disjoint(
+        KERNEL,
+        &[
+            q_pack,
+            k_pack,
+            v_pack,
+            decay_pack,
+            beta_pack,
+            initial_state,
+            state_checkpoints,
+            grad_out_pack,
+            grad_final_state,
+        ],
+        &[
+            grad_q_pack,
+            grad_k_pack,
+            grad_v_pack,
+            grad_decay_pack,
+            grad_beta_pack,
+            grad_initial_state,
+            grad_state_scratch_a,
+            grad_state_scratch_b,
+            grad_correction_scratch,
+            residual_scratch,
+        ],
+    )?;
+
+    let mut current_grad_state = grad_final_state;
+    for token in (0..n_tokens).rev() {
+        let q = q_pack.view_subrange((token * qk_elements) as u64, vec![qk_elements as u64]);
+        let k = k_pack.view_subrange((token * qk_elements) as u64, vec![qk_elements as u64]);
+        let v = v_pack.view_subrange(
+            (token * vector_elements) as u64,
+            vec![vector_elements as u64],
+        );
+        let decay = decay_pack.view_subrange((token * n_v_heads) as u64, vec![n_v_heads as u64]);
+        let beta = beta_pack.view_subrange((token * n_v_heads) as u64, vec![n_v_heads as u64]);
+        let grad_out = grad_out_pack.view_subrange(
+            (token * vector_elements) as u64,
+            vec![vector_elements as u64],
+        );
+        let grad_q =
+            grad_q_pack.view_subrange((token * qk_elements) as u64, vec![qk_elements as u64]);
+        let grad_k =
+            grad_k_pack.view_subrange((token * qk_elements) as u64, vec![qk_elements as u64]);
+        let grad_v = grad_v_pack.view_subrange(
+            (token * vector_elements) as u64,
+            vec![vector_elements as u64],
+        );
+        let grad_decay =
+            grad_decay_pack.view_subrange((token * n_v_heads) as u64, vec![n_v_heads as u64]);
+        let grad_beta =
+            grad_beta_pack.view_subrange((token * n_v_heads) as u64, vec![n_v_heads as u64]);
+        let checkpoint = (token > 0).then(|| {
+            state_checkpoints.view_subrange(
+                ((token - 1) * state_elements) as u64,
+                vec![state_elements as u64],
+            )
+        });
+        let state_in = checkpoint.as_ref().unwrap_or(initial_state);
+        let reverse_index = n_tokens - 1 - token;
+        let next_grad_state = if token == 0 {
+            grad_initial_state
+        } else if reverse_index.is_multiple_of(2) {
+            grad_state_scratch_a
+        } else {
+            grad_state_scratch_b
+        };
+        encode_gdn_step_decay_vjp_f32(
+            ctx,
+            enc,
+            &q,
+            &k,
+            &v,
+            &decay,
+            &beta,
+            state_in,
+            &grad_out,
+            current_grad_state,
+            &grad_q,
+            &grad_k,
+            &grad_v,
+            &grad_decay,
+            &grad_beta,
+            next_grad_state,
+            grad_correction_scratch,
+            residual_scratch,
+            n_v_heads,
+            n_k_heads,
+            head_dim,
+        )?;
+        current_grad_state = next_grad_state;
+    }
     Ok(())
 }
 
@@ -26034,6 +26494,28 @@ fn validate_compact_f32_tensor(
                 tensor.offset
             ),
         });
+    }
+    Ok(())
+}
+
+fn validate_vjp_storage_disjoint(
+    kernel: &'static str,
+    inputs: &[&MetalTensor],
+    outputs: &[&MetalTensor],
+) -> Result<(), MetalError> {
+    for (index, output) in outputs.iter().enumerate() {
+        if inputs
+            .iter()
+            .any(|input| tensor_ranges_overlap(output, input))
+            || outputs[index + 1..]
+                .iter()
+                .any(|other| tensor_ranges_overlap(output, other))
+        {
+            return Err(MetalError::BadShape {
+                kernel,
+                detail: "gradient and scratch outputs must not overlap inputs or each other".into(),
+            });
+        }
     }
     Ok(())
 }
@@ -38605,6 +39087,303 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn gdn_sequence_forward_f64(
+        q: &[f64],
+        k: &[f64],
+        v: &[f64],
+        decay: &[f64],
+        beta: &[f64],
+        initial_state: &[f64],
+        n_tokens: usize,
+        n_v: usize,
+        n_k: usize,
+        head_dim: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let qk_elements = n_k * head_dim;
+        let vector_elements = n_v * head_dim;
+        let state_elements = vector_elements * head_dim;
+        let mut outputs = vec![0.0f64; n_tokens * vector_elements];
+        let mut checkpoints = vec![0.0f64; n_tokens * state_elements];
+        let mut state = initial_state.to_vec();
+        for token in 0..n_tokens {
+            let q = &q[token * qk_elements..(token + 1) * qk_elements];
+            let k = &k[token * qk_elements..(token + 1) * qk_elements];
+            let v = &v[token * vector_elements..(token + 1) * vector_elements];
+            let decay = &decay[token * n_v..(token + 1) * n_v];
+            let beta = &beta[token * n_v..(token + 1) * n_v];
+            let output = &mut outputs[token * vector_elements..(token + 1) * vector_elements];
+            let mut next_state = vec![0.0f64; state_elements];
+            for hi in 0..n_v {
+                let hk = hi % n_k;
+                for dv in 0..head_dim {
+                    let vector_index = hi * head_dim + dv;
+                    let row_offset = vector_index * head_dim;
+                    let prediction = (0..head_dim)
+                        .map(|dk| decay[hi] * state[row_offset + dk] * k[hk * head_dim + dk])
+                        .sum::<f64>();
+                    let correction = beta[hi] * (v[vector_index] - prediction);
+                    for dk in 0..head_dim {
+                        let qk_index = hk * head_dim + dk;
+                        let value = decay[hi] * state[row_offset + dk] + correction * k[qk_index];
+                        next_state[row_offset + dk] = value;
+                        output[vector_index] += value * q[qk_index];
+                    }
+                }
+            }
+            checkpoints[token * state_elements..(token + 1) * state_elements]
+                .copy_from_slice(&next_state);
+            state = next_state;
+        }
+        (outputs, checkpoints)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_sequence_objective_f64(
+        q: &[f64],
+        k: &[f64],
+        v: &[f64],
+        decay: &[f64],
+        beta: &[f64],
+        initial_state: &[f64],
+        grad_out: &[f64],
+        grad_final_state: &[f64],
+        n_tokens: usize,
+        n_v: usize,
+        n_k: usize,
+        head_dim: usize,
+    ) -> f64 {
+        let (outputs, checkpoints) = gdn_sequence_forward_f64(
+            q,
+            k,
+            v,
+            decay,
+            beta,
+            initial_state,
+            n_tokens,
+            n_v,
+            n_k,
+            head_dim,
+        );
+        let state_elements = n_v * head_dim * head_dim;
+        outputs
+            .iter()
+            .zip(grad_out)
+            .map(|(value, gradient)| value * gradient)
+            .sum::<f64>()
+            + checkpoints[(n_tokens - 1) * state_elements..]
+                .iter()
+                .zip(grad_final_state)
+                .map(|(value, gradient)| value * gradient)
+                .sum::<f64>()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_sequence_vjp_f64(
+        q: &[f64],
+        k: &[f64],
+        v: &[f64],
+        decay: &[f64],
+        beta: &[f64],
+        initial_state: &[f64],
+        grad_out: &[f64],
+        grad_final_state: &[f64],
+        n_tokens: usize,
+        n_v: usize,
+        n_k: usize,
+        head_dim: usize,
+    ) -> GdnStepVjpReference {
+        let qk_elements = n_k * head_dim;
+        let vector_elements = n_v * head_dim;
+        let state_elements = vector_elements * head_dim;
+        let (_, checkpoints) = gdn_sequence_forward_f64(
+            q,
+            k,
+            v,
+            decay,
+            beta,
+            initial_state,
+            n_tokens,
+            n_v,
+            n_k,
+            head_dim,
+        );
+        let mut result = GdnStepVjpReference {
+            grad_q: vec![0.0; n_tokens * qk_elements],
+            grad_k: vec![0.0; n_tokens * qk_elements],
+            grad_v: vec![0.0; n_tokens * vector_elements],
+            grad_decay: vec![0.0; n_tokens * n_v],
+            grad_beta: vec![0.0; n_tokens * n_v],
+            grad_state: grad_final_state.to_vec(),
+        };
+        for token in (0..n_tokens).rev() {
+            let state = if token == 0 {
+                initial_state
+            } else {
+                &checkpoints[(token - 1) * state_elements..token * state_elements]
+            };
+            let step = gdn_step_decay_vjp_f64(
+                &q[token * qk_elements..(token + 1) * qk_elements],
+                &k[token * qk_elements..(token + 1) * qk_elements],
+                &v[token * vector_elements..(token + 1) * vector_elements],
+                &decay[token * n_v..(token + 1) * n_v],
+                &beta[token * n_v..(token + 1) * n_v],
+                state,
+                &grad_out[token * vector_elements..(token + 1) * vector_elements],
+                &result.grad_state,
+                n_v,
+                n_k,
+                head_dim,
+            );
+            result.grad_q[token * qk_elements..(token + 1) * qk_elements]
+                .copy_from_slice(&step.grad_q);
+            result.grad_k[token * qk_elements..(token + 1) * qk_elements]
+                .copy_from_slice(&step.grad_k);
+            result.grad_v[token * vector_elements..(token + 1) * vector_elements]
+                .copy_from_slice(&step.grad_v);
+            result.grad_decay[token * n_v..(token + 1) * n_v].copy_from_slice(&step.grad_decay);
+            result.grad_beta[token * n_v..(token + 1) * n_v].copy_from_slice(&step.grad_beta);
+            result.grad_state = step.grad_state;
+        }
+        result
+    }
+
+    struct SsmConvSequenceVjpReference {
+        grad_qkv: Vec<f64>,
+        grad_state: Vec<f64>,
+    }
+
+    fn ssm_conv_sequence_forward_f64(
+        qkv: &[f64],
+        initial_state: &[f64],
+        weight: &[f64],
+        n_tokens: usize,
+        conv_dim: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let state_elements = 3 * conv_dim;
+        let mut outputs = vec![0.0f64; n_tokens * conv_dim];
+        let mut checkpoints = vec![0.0f64; n_tokens * state_elements];
+        let mut state = initial_state.to_vec();
+        for token in 0..n_tokens {
+            let qkv = &qkv[token * conv_dim..(token + 1) * conv_dim];
+            let output = &mut outputs[token * conv_dim..(token + 1) * conv_dim];
+            for channel in 0..conv_dim {
+                let preactivation = weight[4 * channel] * state[channel]
+                    + weight[4 * channel + 1] * state[conv_dim + channel]
+                    + weight[4 * channel + 2] * state[2 * conv_dim + channel]
+                    + weight[4 * channel + 3] * qkv[channel];
+                output[channel] = preactivation / (1.0 + (-preactivation).exp());
+            }
+            let checkpoint = &mut checkpoints[token * state_elements..(token + 1) * state_elements];
+            checkpoint[..2 * conv_dim].copy_from_slice(&state[conv_dim..]);
+            checkpoint[2 * conv_dim..].copy_from_slice(qkv);
+            state.copy_from_slice(checkpoint);
+        }
+        (outputs, checkpoints)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ssm_conv_sequence_objective_f64(
+        qkv: &[f64],
+        initial_state: &[f64],
+        weight: &[f64],
+        grad_q: &[f64],
+        grad_k: &[f64],
+        grad_v: &[f64],
+        grad_final_state: &[f64],
+        n_tokens: usize,
+        qk_elements: usize,
+        v_elements: usize,
+    ) -> f64 {
+        let conv_dim = 2 * qk_elements + v_elements;
+        let state_elements = 3 * conv_dim;
+        let (outputs, checkpoints) =
+            ssm_conv_sequence_forward_f64(qkv, initial_state, weight, n_tokens, conv_dim);
+        let mut objective = 0.0f64;
+        for token in 0..n_tokens {
+            let output = &outputs[token * conv_dim..(token + 1) * conv_dim];
+            objective += output[..qk_elements]
+                .iter()
+                .zip(&grad_q[token * qk_elements..(token + 1) * qk_elements])
+                .map(|(value, gradient)| value * gradient)
+                .sum::<f64>();
+            objective += output[qk_elements..2 * qk_elements]
+                .iter()
+                .zip(&grad_k[token * qk_elements..(token + 1) * qk_elements])
+                .map(|(value, gradient)| value * gradient)
+                .sum::<f64>();
+            objective += output[2 * qk_elements..]
+                .iter()
+                .zip(&grad_v[token * v_elements..(token + 1) * v_elements])
+                .map(|(value, gradient)| value * gradient)
+                .sum::<f64>();
+        }
+        objective
+            + checkpoints[(n_tokens - 1) * state_elements..]
+                .iter()
+                .zip(grad_final_state)
+                .map(|(value, gradient)| value * gradient)
+                .sum::<f64>()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ssm_conv_sequence_vjp_f64(
+        qkv: &[f64],
+        initial_state: &[f64],
+        weight: &[f64],
+        grad_q: &[f64],
+        grad_k: &[f64],
+        grad_v: &[f64],
+        grad_final_state: &[f64],
+        n_tokens: usize,
+        qk_elements: usize,
+        v_elements: usize,
+    ) -> SsmConvSequenceVjpReference {
+        let conv_dim = 2 * qk_elements + v_elements;
+        let state_elements = 3 * conv_dim;
+        let (_, checkpoints) =
+            ssm_conv_sequence_forward_f64(qkv, initial_state, weight, n_tokens, conv_dim);
+        let mut grad_qkv = vec![0.0f64; n_tokens * conv_dim];
+        let mut grad_state = grad_final_state.to_vec();
+        for token in (0..n_tokens).rev() {
+            let state = if token == 0 {
+                initial_state
+            } else {
+                &checkpoints[(token - 1) * state_elements..token * state_elements]
+            };
+            let qkv = &qkv[token * conv_dim..(token + 1) * conv_dim];
+            let mut next_grad_state = vec![0.0f64; state_elements];
+            for channel in 0..conv_dim {
+                let preactivation = weight[4 * channel] * state[channel]
+                    + weight[4 * channel + 1] * state[conv_dim + channel]
+                    + weight[4 * channel + 2] * state[2 * conv_dim + channel]
+                    + weight[4 * channel + 3] * qkv[channel];
+                let sigmoid = 1.0 / (1.0 + (-preactivation).exp());
+                let grad_output = if channel < qk_elements {
+                    grad_q[token * qk_elements + channel]
+                } else if channel < 2 * qk_elements {
+                    grad_k[token * qk_elements + channel - qk_elements]
+                } else {
+                    grad_v[token * v_elements + channel - 2 * qk_elements]
+                };
+                let grad_preactivation =
+                    grad_output * sigmoid * (1.0 + preactivation * (1.0 - sigmoid));
+                grad_qkv[token * conv_dim + channel] = grad_preactivation * weight[4 * channel + 3]
+                    + grad_state[2 * conv_dim + channel];
+                next_grad_state[channel] = grad_preactivation * weight[4 * channel];
+                next_grad_state[conv_dim + channel] =
+                    grad_preactivation * weight[4 * channel + 1] + grad_state[channel];
+                next_grad_state[2 * conv_dim + channel] =
+                    grad_preactivation * weight[4 * channel + 2] + grad_state[conv_dim + channel];
+            }
+            grad_state = next_grad_state;
+        }
+        SsmConvSequenceVjpReference {
+            grad_qkv,
+            grad_state,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn gdn_envelope_objective_f64(
         qkv_now: &[f64],
         conv_state: &[f64],
@@ -39000,6 +39779,331 @@ mod tests {
     }
 
     #[test]
+    fn gdn_step_decay_packed_vjp_matches_temporal_oracle_and_adjoint() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_TOKENS: usize = 4;
+        const N_CHECKPOINTS: usize = N_TOKENS - 1;
+        const N_V: usize = 3;
+        const N_K: usize = 1;
+        const HEAD_DIM: usize = 128;
+        let qk_elements = N_K * HEAD_DIM;
+        let vector_elements = N_V * HEAD_DIM;
+        let state_elements = vector_elements * HEAD_DIM;
+        let q: Vec<f32> = (0..N_TOKENS * qk_elements)
+            .map(|index| ((index * 11 + 3) % 43) as f32 * 0.0017 - 0.035)
+            .collect();
+        let k: Vec<f32> = (0..N_TOKENS * qk_elements)
+            .map(|index| ((index * 13 + 5) % 47) as f32 * 0.0015 - 0.033)
+            .collect();
+        let v: Vec<f32> = (0..N_TOKENS * vector_elements)
+            .map(|index| ((index * 17 + 1) % 53) as f32 * 0.0019 - 0.049)
+            .collect();
+        let decay: Vec<f32> = (0..N_TOKENS * N_V)
+            .map(|index| 0.89 + (index % N_V) as f32 * 0.026 + (index / N_V) as f32 * 0.004)
+            .collect();
+        let beta: Vec<f32> = (0..N_TOKENS * N_V)
+            .map(|index| 0.21 + (index % N_V) as f32 * 0.17 + (index / N_V) as f32 * 0.013)
+            .collect();
+        let initial_state: Vec<f32> = (0..state_elements)
+            .map(|index| ((index * 19 + 7) % 59) as f32 * 0.00061 - 0.017)
+            .collect();
+        let grad_out: Vec<f32> = (0..N_TOKENS * vector_elements)
+            .map(|index| ((index * 23 + 2) % 61) as f32 * 0.00093 - 0.027)
+            .collect();
+        let grad_final_state: Vec<f32> = (0..state_elements)
+            .map(|index| ((index * 29 + 11) % 67) as f32 * 0.000071 - 0.0023)
+            .collect();
+        let as_f64 = |values: &[f32]| values.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let q64 = as_f64(&q);
+        let k64 = as_f64(&k);
+        let v64 = as_f64(&v);
+        let decay64 = as_f64(&decay);
+        let beta64 = as_f64(&beta);
+        let initial_state64 = as_f64(&initial_state);
+        let grad_out64 = as_f64(&grad_out);
+        let grad_final_state64 = as_f64(&grad_final_state);
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let q_t = tensor(&q);
+        let k_t = tensor(&k);
+        let v_t = tensor(&v);
+        let decay_t = tensor(&decay);
+        let beta_t = tensor(&beta);
+        let initial_state_t = tensor(&initial_state);
+        let forward_state_t = tensor(&initial_state);
+        let forward_out_t =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * vector_elements) as u64]).unwrap();
+        let checkpoints_t =
+            MetalTensor::zeros_f32(&ctx, vec![(N_CHECKPOINTS * state_elements) as u64]).unwrap();
+        let grad_out_t = tensor(&grad_out);
+        let grad_final_state_t = tensor(&grad_final_state);
+        let grad_q_t = MetalTensor::zeros_f32(&ctx, vec![q.len() as u64]).unwrap();
+        let grad_k_t = MetalTensor::zeros_f32(&ctx, vec![k.len() as u64]).unwrap();
+        let grad_v_t = MetalTensor::zeros_f32(&ctx, vec![v.len() as u64]).unwrap();
+        let grad_decay_t = MetalTensor::zeros_f32(&ctx, vec![decay.len() as u64]).unwrap();
+        let grad_beta_t = MetalTensor::zeros_f32(&ctx, vec![beta.len() as u64]).unwrap();
+        let grad_initial_state_t =
+            MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_state_a_t = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_state_b_t = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_correction_t = MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        let residual_t = MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_gdn_step_decay_packed_ckpt_f32(
+                &ctx,
+                encoder,
+                &q_t,
+                &k_t,
+                &v_t,
+                &decay_t,
+                &beta_t,
+                &forward_state_t,
+                &forward_out_t,
+                &checkpoints_t,
+                N_CHECKPOINTS,
+                N_TOKENS,
+                N_V,
+                N_K,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+        let checkpoints = read_back_f32(&checkpoints_t.buffer, N_CHECKPOINTS * state_elements);
+        one_shot(&ctx, |encoder| {
+            encode_gdn_step_decay_packed_vjp_f32(
+                &ctx,
+                encoder,
+                &q_t,
+                &k_t,
+                &v_t,
+                &decay_t,
+                &beta_t,
+                &initial_state_t,
+                &checkpoints_t,
+                N_CHECKPOINTS,
+                &grad_out_t,
+                &grad_final_state_t,
+                &grad_q_t,
+                &grad_k_t,
+                &grad_v_t,
+                &grad_decay_t,
+                &grad_beta_t,
+                &grad_initial_state_t,
+                &grad_state_a_t,
+                &grad_state_b_t,
+                &grad_correction_t,
+                &residual_t,
+                N_TOKENS,
+                N_V,
+                N_K,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+        let actual = GdnStepVjpReference {
+            grad_q: read_back_f32(&grad_q_t.buffer, q.len())
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_k: read_back_f32(&grad_k_t.buffer, k.len())
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_v: read_back_f32(&grad_v_t.buffer, v.len())
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_decay: read_back_f32(&grad_decay_t.buffer, decay.len())
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_beta: read_back_f32(&grad_beta_t.buffer, beta.len())
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_state: read_back_f32(&grad_initial_state_t.buffer, state_elements)
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+        };
+        let expected = gdn_sequence_vjp_f64(
+            &q64,
+            &k64,
+            &v64,
+            &decay64,
+            &beta64,
+            &initial_state64,
+            &grad_out64,
+            &grad_final_state64,
+            N_TOKENS,
+            N_V,
+            N_K,
+            HEAD_DIM,
+        );
+        for (name, gpu, cpu, tolerance) in [
+            ("q", &actual.grad_q, &expected.grad_q, 4e-5),
+            ("k", &actual.grad_k, &expected.grad_k, 5e-5),
+            ("v", &actual.grad_v, &expected.grad_v, 4e-6),
+            ("decay", &actual.grad_decay, &expected.grad_decay, 7e-5),
+            ("beta", &actual.grad_beta, &expected.grad_beta, 5e-5),
+            (
+                "initial_state",
+                &actual.grad_state,
+                &expected.grad_state,
+                5e-6,
+            ),
+        ] {
+            let max_abs = gpu
+                .iter()
+                .zip(cpu)
+                .map(|(gpu, cpu)| (gpu - cpu).abs())
+                .fold(0.0f64, f64::max);
+            assert!(max_abs < tolerance, "{name} temporal VJP error {max_abs}");
+        }
+
+        let objective =
+            |q: &[f64], k: &[f64], v: &[f64], decay: &[f64], beta: &[f64], state: &[f64]| {
+                gdn_sequence_objective_f64(
+                    q,
+                    k,
+                    v,
+                    decay,
+                    beta,
+                    state,
+                    &grad_out64,
+                    &grad_final_state64,
+                    N_TOKENS,
+                    N_V,
+                    N_K,
+                    HEAD_DIM,
+                )
+            };
+        let epsilon = 1e-5;
+        let finite_difference = |values: &[f64], index: usize, evaluate: &dyn Fn(&[f64]) -> f64| {
+            let mut plus = values.to_vec();
+            let mut minus = values.to_vec();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            (evaluate(&plus) - evaluate(&minus)) / (2.0 * epsilon)
+        };
+        for &index in &[0usize, qk_elements - 1, q64.len() - 1] {
+            let fd = finite_difference(&q64, index, &|candidate| {
+                objective(candidate, &k64, &v64, &decay64, &beta64, &initial_state64)
+            });
+            assert!((fd - actual.grad_q[index]).abs() < 4e-5);
+            let fd = finite_difference(&k64, index, &|candidate| {
+                objective(&q64, candidate, &v64, &decay64, &beta64, &initial_state64)
+            });
+            assert!((fd - actual.grad_k[index]).abs() < 4e-5);
+        }
+        for &index in &[0usize, vector_elements - 1, v64.len() - 1] {
+            let fd = finite_difference(&v64, index, &|candidate| {
+                objective(&q64, &k64, candidate, &decay64, &beta64, &initial_state64)
+            });
+            assert!((fd - actual.grad_v[index]).abs() < 3e-5);
+        }
+        for &index in &[0usize, N_V, decay64.len() - 1] {
+            let fd = finite_difference(&decay64, index, &|candidate| {
+                objective(&q64, &k64, &v64, candidate, &beta64, &initial_state64)
+            });
+            assert!((fd - actual.grad_decay[index]).abs() < 5e-5);
+            let fd = finite_difference(&beta64, index, &|candidate| {
+                objective(&q64, &k64, &v64, &decay64, candidate, &initial_state64)
+            });
+            assert!((fd - actual.grad_beta[index]).abs() < 5e-5);
+        }
+        for &index in &[0usize, HEAD_DIM, initial_state64.len() - 1] {
+            let fd = finite_difference(&initial_state64, index, &|candidate| {
+                objective(&q64, &k64, &v64, &decay64, &beta64, candidate)
+            });
+            assert!((fd - actual.grad_state[index]).abs() < 3e-5);
+        }
+
+        let direction = |len: usize, stride: usize| {
+            (0..len)
+                .map(|index| ((index * stride + 3) % 37) as f64 * 0.0007 - 0.012)
+                .collect::<Vec<_>>()
+        };
+        let dq = direction(q64.len(), 5);
+        let dk = direction(k64.len(), 7);
+        let dv = direction(v64.len(), 11);
+        let ddecay = direction(decay64.len(), 13);
+        let dbeta = direction(beta64.len(), 17);
+        let dstate = direction(initial_state64.len(), 19);
+        let inner = |gradient: &[f64], tangent: &[f64]| {
+            gradient
+                .iter()
+                .zip(tangent)
+                .map(|(gradient, tangent)| gradient * tangent)
+                .sum::<f64>()
+        };
+        let reverse_directional = inner(&actual.grad_q, &dq)
+            + inner(&actual.grad_k, &dk)
+            + inner(&actual.grad_v, &dv)
+            + inner(&actual.grad_decay, &ddecay)
+            + inner(&actual.grad_beta, &dbeta)
+            + inner(&actual.grad_state, &dstate);
+        let shift = |base: &[f64], tangent: &[f64], amount: f64| {
+            base.iter()
+                .zip(tangent)
+                .map(|(base, tangent)| base + amount * tangent)
+                .collect::<Vec<_>>()
+        };
+        let plus = objective(
+            &shift(&q64, &dq, epsilon),
+            &shift(&k64, &dk, epsilon),
+            &shift(&v64, &dv, epsilon),
+            &shift(&decay64, &ddecay, epsilon),
+            &shift(&beta64, &dbeta, epsilon),
+            &shift(&initial_state64, &dstate, epsilon),
+        );
+        let minus = objective(
+            &shift(&q64, &dq, -epsilon),
+            &shift(&k64, &dk, -epsilon),
+            &shift(&v64, &dv, -epsilon),
+            &shift(&decay64, &ddecay, -epsilon),
+            &shift(&beta64, &dbeta, -epsilon),
+            &shift(&initial_state64, &dstate, -epsilon),
+        );
+        let forward_directional = (plus - minus) / (2.0 * epsilon);
+        assert!(
+            (forward_directional - reverse_directional).abs() < 6e-5,
+            "temporal adjoint mismatch forward={forward_directional} reverse={reverse_directional}"
+        );
+        for (tensor, original) in [
+            (&q_t, &q),
+            (&k_t, &k),
+            (&v_t, &v),
+            (&decay_t, &decay),
+            (&beta_t, &beta),
+            (&initial_state_t, &initial_state),
+            (&checkpoints_t, &checkpoints),
+            (&grad_out_t, &grad_out),
+            (&grad_final_state_t, &grad_final_state),
+        ] {
+            assert_eq!(
+                read_back_f32(&tensor.buffer, original.len())
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                original
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn gdn_step_decay_vjp_rejects_unsafe_contracts() {
         let Some(ctx) = metal_test_context() else {
             return;
@@ -39073,6 +40177,163 @@ mod tests {
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
         invoke(&encoder, &short).expect_err("short output must fail");
+        encoder.end();
+    }
+
+    #[test]
+    fn gdn_packed_temporal_vjps_enforce_safe_tapes_and_storage() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_TOKENS: usize = 3;
+        const N_V: usize = 3;
+        const N_K: usize = 1;
+        const HEAD_DIM: usize = 128;
+        let qk_elements = N_K * HEAD_DIM;
+        let vector_elements = N_V * HEAD_DIM;
+        let state_elements = vector_elements * HEAD_DIM;
+        let q = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * qk_elements) as u64]).unwrap();
+        let k = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * qk_elements) as u64]).unwrap();
+        let v = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * vector_elements) as u64]).unwrap();
+        let decay = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * N_V) as u64]).unwrap();
+        let beta = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * N_V) as u64]).unwrap();
+        let initial_state = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let full_checkpoints =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * state_elements) as u64]).unwrap();
+        let short_checkpoints =
+            MetalTensor::zeros_f32(&ctx, vec![((N_TOKENS - 2) * state_elements) as u64]).unwrap();
+        let grad_out =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * vector_elements) as u64]).unwrap();
+        let grad_final_state = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_q = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * qk_elements) as u64]).unwrap();
+        let grad_k = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * qk_elements) as u64]).unwrap();
+        let grad_v =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * vector_elements) as u64]).unwrap();
+        let grad_decay = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * N_V) as u64]).unwrap();
+        let grad_beta = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * N_V) as u64]).unwrap();
+        let grad_initial_state = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let state_scratch_a = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let state_scratch_b = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let correction_scratch =
+            MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        let residual_scratch = MetalTensor::zeros_f32(&ctx, vec![vector_elements as u64]).unwrap();
+        let invoke_recurrence = |encoder: &KernelEncoder,
+                                 q_input: &MetalTensor,
+                                 checkpoints: &MetalTensor,
+                                 n_checkpoints: usize,
+                                 grad_q_output: &MetalTensor| {
+            encode_gdn_step_decay_packed_vjp_f32(
+                &ctx,
+                encoder,
+                q_input,
+                &k,
+                &v,
+                &decay,
+                &beta,
+                &initial_state,
+                checkpoints,
+                n_checkpoints,
+                &grad_out,
+                &grad_final_state,
+                grad_q_output,
+                &grad_k,
+                &grad_v,
+                &grad_decay,
+                &grad_beta,
+                &grad_initial_state,
+                &state_scratch_a,
+                &state_scratch_b,
+                &correction_scratch,
+                &residual_scratch,
+                N_TOKENS,
+                N_V,
+                N_K,
+                HEAD_DIM,
+            )
+        };
+        one_shot(&ctx, |encoder| {
+            invoke_recurrence(encoder, &q, &full_checkpoints, N_TOKENS, &grad_q)
+        })
+        .unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let concurrent = KernelEncoder::begin_concurrent(&command);
+        invoke_recurrence(&concurrent, &q, &full_checkpoints, N_TOKENS, &grad_q)
+            .expect_err("concurrent temporal recurrence must fail");
+        concurrent.end();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        invoke_recurrence(&encoder, &q, &short_checkpoints, N_TOKENS - 2, &grad_q)
+            .expect_err("missing pre-state checkpoint must fail");
+        encoder.end();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        invoke_recurrence(&encoder, &q, &full_checkpoints, N_TOKENS, &q)
+            .expect_err("packed gradient/input alias must fail");
+        encoder.end();
+
+        let mut malformed_q = q.clone();
+        malformed_q.shape = vec![u64::MAX, 2];
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        invoke_recurrence(&encoder, &malformed_q, &full_checkpoints, N_TOKENS, &grad_q)
+            .expect_err("malformed packed shape must fail without panicking");
+        encoder.end();
+
+        const CONV_N_V: usize = 2;
+        let conv_v_elements = CONV_N_V * HEAD_DIM;
+        let conv_dim = 2 * qk_elements + conv_v_elements;
+        let conv_state_elements = 3 * conv_dim;
+        let qkv = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * conv_dim) as u64]).unwrap();
+        let conv_initial_state =
+            MetalTensor::zeros_f32(&ctx, vec![conv_state_elements as u64]).unwrap();
+        let conv_full_checkpoints =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * conv_state_elements) as u64]).unwrap();
+        let conv_weight = MetalTensor::zeros_f32(&ctx, vec![(4 * conv_dim) as u64]).unwrap();
+        let conv_grad_q =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * qk_elements) as u64]).unwrap();
+        let conv_grad_k =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * qk_elements) as u64]).unwrap();
+        let conv_grad_v =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * conv_v_elements) as u64]).unwrap();
+        let conv_grad_final_state =
+            MetalTensor::zeros_f32(&ctx, vec![conv_state_elements as u64]).unwrap();
+        let grad_qkv = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * conv_dim) as u64]).unwrap();
+        let conv_grad_initial_state =
+            MetalTensor::zeros_f32(&ctx, vec![conv_state_elements as u64]).unwrap();
+        let conv_state_scratch_a =
+            MetalTensor::zeros_f32(&ctx, vec![conv_state_elements as u64]).unwrap();
+        let conv_state_scratch_b =
+            MetalTensor::zeros_f32(&ctx, vec![conv_state_elements as u64]).unwrap();
+        let invoke_conv = |encoder: &KernelEncoder, grad_qkv_output: &MetalTensor| {
+            encode_ssm_conv_silu_split_packed_vjp_f32(
+                &ctx,
+                encoder,
+                &qkv,
+                &conv_initial_state,
+                &conv_full_checkpoints,
+                N_TOKENS,
+                &conv_weight,
+                &conv_grad_q,
+                &conv_grad_k,
+                &conv_grad_v,
+                &conv_grad_final_state,
+                grad_qkv_output,
+                &conv_grad_initial_state,
+                &conv_state_scratch_a,
+                &conv_state_scratch_b,
+                N_TOKENS,
+                N_K,
+                CONV_N_V,
+                HEAD_DIM,
+            )
+        };
+        one_shot(&ctx, |encoder| invoke_conv(encoder, &grad_qkv)).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        invoke_conv(&encoder, &qkv).expect_err("packed conv gradient/input alias must fail");
         encoder.end();
     }
 
@@ -39552,6 +40813,248 @@ mod tests {
         assert!((grad_qkv - expected_gradient).abs() < 2e-6);
         for gradient in grad_state {
             assert!((gradient - expected_gradient).abs() < 2e-6);
+        }
+    }
+
+    #[test]
+    fn ssm_conv_silu_split_packed_vjp_matches_temporal_oracle_and_adjoint() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_TOKENS: usize = 4;
+        const N_CHECKPOINTS: usize = N_TOKENS - 1;
+        const N_K: usize = 1;
+        const N_V: usize = 2;
+        const HEAD_DIM: usize = 128;
+        let qk_elements = N_K * HEAD_DIM;
+        let v_elements = N_V * HEAD_DIM;
+        let conv_dim = 2 * qk_elements + v_elements;
+        let state_elements = 3 * conv_dim;
+        let qkv: Vec<f32> = (0..N_TOKENS * conv_dim)
+            .map(|index| ((index * 7 + 3) % 41) as f32 * 0.0023 - 0.045)
+            .collect();
+        let initial_state: Vec<f32> = (0..state_elements)
+            .map(|index| ((index * 11 + 5) % 43) as f32 * 0.0019 - 0.039)
+            .collect();
+        let weight: Vec<f32> = (0..4 * conv_dim)
+            .map(|index| ((index * 13 + 1) % 47) as f32 * 0.0031 - 0.071)
+            .collect();
+        let grad_q: Vec<f32> = (0..N_TOKENS * qk_elements)
+            .map(|index| ((index * 17 + 7) % 53) as f32 * 0.0017 - 0.043)
+            .collect();
+        let grad_k: Vec<f32> = (0..N_TOKENS * qk_elements)
+            .map(|index| ((index * 19 + 2) % 59) as f32 * 0.0015 - 0.041)
+            .collect();
+        let grad_v: Vec<f32> = (0..N_TOKENS * v_elements)
+            .map(|index| ((index * 23 + 4) % 61) as f32 * 0.0013 - 0.037)
+            .collect();
+        let grad_final_state: Vec<f32> = (0..state_elements)
+            .map(|index| ((index * 29 + 11) % 67) as f32 * 0.00031 - 0.009)
+            .collect();
+        let as_f64 = |values: &[f32]| values.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let qkv64 = as_f64(&qkv);
+        let initial_state64 = as_f64(&initial_state);
+        let weight64 = as_f64(&weight);
+        let grad_q64 = as_f64(&grad_q);
+        let grad_k64 = as_f64(&grad_k);
+        let grad_v64 = as_f64(&grad_v);
+        let grad_final_state64 = as_f64(&grad_final_state);
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let qkv_t = tensor(&qkv);
+        let initial_state_t = tensor(&initial_state);
+        let forward_state_t = tensor(&initial_state);
+        let checkpoints_t =
+            MetalTensor::zeros_f32(&ctx, vec![(N_CHECKPOINTS * state_elements) as u64]).unwrap();
+        let weight_t = tensor(&weight);
+        let forward_q_t =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * qk_elements) as u64]).unwrap();
+        let forward_k_t =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * qk_elements) as u64]).unwrap();
+        let forward_v_t =
+            MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * v_elements) as u64]).unwrap();
+        let grad_q_t = tensor(&grad_q);
+        let grad_k_t = tensor(&grad_k);
+        let grad_v_t = tensor(&grad_v);
+        let grad_final_state_t = tensor(&grad_final_state);
+        let grad_qkv_t = MetalTensor::zeros_f32(&ctx, vec![qkv.len() as u64]).unwrap();
+        let grad_initial_state_t =
+            MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_state_a_t = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_state_b_t = MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_gdn_prep_packed_ckpt_f32(
+                &ctx,
+                encoder,
+                &qkv_t,
+                &forward_state_t,
+                &weight_t,
+                &forward_q_t,
+                &forward_k_t,
+                &forward_v_t,
+                &checkpoints_t,
+                N_TOKENS,
+                N_CHECKPOINTS,
+                N_K,
+                N_V,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+        let checkpoints = read_back_f32(&checkpoints_t.buffer, N_CHECKPOINTS * state_elements);
+        one_shot(&ctx, |encoder| {
+            encode_ssm_conv_silu_split_packed_vjp_f32(
+                &ctx,
+                encoder,
+                &qkv_t,
+                &initial_state_t,
+                &checkpoints_t,
+                N_CHECKPOINTS,
+                &weight_t,
+                &grad_q_t,
+                &grad_k_t,
+                &grad_v_t,
+                &grad_final_state_t,
+                &grad_qkv_t,
+                &grad_initial_state_t,
+                &grad_state_a_t,
+                &grad_state_b_t,
+                N_TOKENS,
+                N_K,
+                N_V,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+        let actual = SsmConvSequenceVjpReference {
+            grad_qkv: read_back_f32(&grad_qkv_t.buffer, qkv.len())
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+            grad_state: read_back_f32(&grad_initial_state_t.buffer, state_elements)
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+        };
+        let expected = ssm_conv_sequence_vjp_f64(
+            &qkv64,
+            &initial_state64,
+            &weight64,
+            &grad_q64,
+            &grad_k64,
+            &grad_v64,
+            &grad_final_state64,
+            N_TOKENS,
+            qk_elements,
+            v_elements,
+        );
+        for (name, gpu, cpu) in [
+            ("qkv", &actual.grad_qkv, &expected.grad_qkv),
+            ("initial_state", &actual.grad_state, &expected.grad_state),
+        ] {
+            let max_abs = gpu
+                .iter()
+                .zip(cpu)
+                .map(|(gpu, cpu)| (gpu - cpu).abs())
+                .fold(0.0f64, f64::max);
+            assert!(max_abs < 3e-6, "{name} temporal conv VJP error {max_abs}");
+        }
+
+        let objective = |qkv: &[f64], state: &[f64]| {
+            ssm_conv_sequence_objective_f64(
+                qkv,
+                state,
+                &weight64,
+                &grad_q64,
+                &grad_k64,
+                &grad_v64,
+                &grad_final_state64,
+                N_TOKENS,
+                qk_elements,
+                v_elements,
+            )
+        };
+        let epsilon = 1e-5;
+        for &index in &[0usize, conv_dim - 1, qkv64.len() - 1] {
+            let mut plus = qkv64.clone();
+            let mut minus = qkv64.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference = (objective(&plus, &initial_state64)
+                - objective(&minus, &initial_state64))
+                / (2.0 * epsilon);
+            assert!((finite_difference - actual.grad_qkv[index]).abs() < 2e-5);
+        }
+        for &index in &[0usize, conv_dim, initial_state64.len() - 1] {
+            let mut plus = initial_state64.clone();
+            let mut minus = initial_state64.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference =
+                (objective(&qkv64, &plus) - objective(&qkv64, &minus)) / (2.0 * epsilon);
+            assert!((finite_difference - actual.grad_state[index]).abs() < 2e-5);
+        }
+
+        let direction = |len: usize, stride: usize| {
+            (0..len)
+                .map(|index| ((index * stride + 3) % 31) as f64 * 0.0009 - 0.013)
+                .collect::<Vec<_>>()
+        };
+        let dqkv = direction(qkv64.len(), 5);
+        let dstate = direction(initial_state64.len(), 7);
+        let inner = |gradient: &[f64], tangent: &[f64]| {
+            gradient
+                .iter()
+                .zip(tangent)
+                .map(|(gradient, tangent)| gradient * tangent)
+                .sum::<f64>()
+        };
+        let reverse_directional =
+            inner(&actual.grad_qkv, &dqkv) + inner(&actual.grad_state, &dstate);
+        let shift = |base: &[f64], tangent: &[f64], amount: f64| {
+            base.iter()
+                .zip(tangent)
+                .map(|(base, tangent)| base + amount * tangent)
+                .collect::<Vec<_>>()
+        };
+        let forward_directional = (objective(
+            &shift(&qkv64, &dqkv, epsilon),
+            &shift(&initial_state64, &dstate, epsilon),
+        ) - objective(
+            &shift(&qkv64, &dqkv, -epsilon),
+            &shift(&initial_state64, &dstate, -epsilon),
+        )) / (2.0 * epsilon);
+        assert!(
+            (forward_directional - reverse_directional).abs() < 2e-5,
+            "temporal conv adjoint mismatch forward={forward_directional} reverse={reverse_directional}"
+        );
+        for (tensor, original) in [
+            (&qkv_t, &qkv),
+            (&initial_state_t, &initial_state),
+            (&checkpoints_t, &checkpoints),
+            (&weight_t, &weight),
+            (&grad_q_t, &grad_q),
+            (&grad_k_t, &grad_k),
+            (&grad_v_t, &grad_v),
+            (&grad_final_state_t, &grad_final_state),
+        ] {
+            assert_eq!(
+                read_back_f32(&tensor.buffer, original.len())
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                original
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
         }
     }
 

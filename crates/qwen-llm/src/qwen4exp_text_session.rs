@@ -3371,8 +3371,8 @@ mod tests {
             .unwrap();
             let packed_capacity = geometry.packed_capacity().unwrap();
             let packed_expected = match packed_capacity {
-                4 => 4_476_448_u64,
-                2_048 => 1_894_533_120_u64,
+                4 => 4_477_600_u64,
+                2_048 => 1_894_542_336_u64,
                 other => panic!("unexpected packed capacity {other}"),
             };
             let scalar_expected = 143_207_764_u64 + 25_356_u64 * capacity as u64;

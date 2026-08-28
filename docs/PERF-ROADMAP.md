@@ -254,17 +254,19 @@ optional parallel prep kernel remains outside this proof and must stay disabled
 for the Flash-Next lane until separately qualified. This checkpoint led into
 the now-complete packed PLE, HC, MoE, and QSA motors.
 
-Dense packed QSA is now closed through a total sequence length of 2,048. N=1
-delegates exactly; N=2/8/16/33/64 and all modulo-4 continuation residues retain
-the scalar cache state, including the N=64 full-tile attention route. Released
-Q8/BF16 layer-3 rows qualify every production small-N projection route. Keep
-F32 activations for the persistent BF16 index-key projection.
+Dense packed QSA is now closed through a total sequence length of 2,051, the
+last query before block selection is required. N=1 delegates exactly;
+N=2/8/16/33/64, the three-token dense shoulder, and all modulo-4 continuation
+residues retain the scalar cache state. Multi-token selected suffixes remain
+fail-closed before dispatch. Released Q8/BF16 layer-3 rows qualify every
+production small-N projection route. Keep F32 activations for the persistent
+BF16 index-key projection.
 
 The full dense packed session is now closed internally. One command composes
 all 48 layers and final logits into the existing scalar GDN, PLE, and QSA state
 owners; the first scalar continuation requires no state copy or migration.
 Packed PLE stages IQ4_NL rows and dequantizes them on GPU. The opt-in 2,048-row
-activation sidecar is admission-priced at 55 allocations and 1,894,533,120
+activation sidecar is admission-priced at 55 allocations and 1,894,542,336
 logical bytes; scalar-only plans preserve their previous inventory. Released
 N=2,048 measures 457.229 tok/s wall, and four scalar continuations cross into
 QSA selection at length 2,052 with all state bindings and 12 cache lengths

@@ -42,6 +42,16 @@ const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 #[allow(dead_code)]
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QwenSparseAttentionPackedRangePlan {
+    end_position: usize,
+    dense_tokens: usize,
+    // Chunk-local offset of the first query that requires block selection.
+    selected_offset: usize,
+    selected_tokens: usize,
+    selected_bands: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpQsaError {
     #[error(transparent)]
@@ -410,7 +420,6 @@ impl QwenSparseAttentionMetalGeometry {
                     ))
                 })
         };
-        let query_tile = capacity.min(DENSE_PACKED_QUERY_TILE);
         Ok(vec![
             f32_bytes("index key", &[self.index_head_dim, capacity])?,
             f32_bytes(
@@ -423,7 +432,7 @@ impl QwenSparseAttentionMetalGeometry {
             f32_bytes("value", &[self.kv_width(), capacity])?,
             f32_bytes(
                 "attention scores",
-                &[self.token_budget, self.query_heads, query_tile],
+                &[self.packed_attention_score_elements(capacity)?],
             )?,
             f32_bytes("attention", &[self.query_width(), capacity])?,
             f32_bytes("output", &[self.hidden_size, capacity])?,
@@ -456,6 +465,67 @@ impl QwenSparseAttentionMetalGeometry {
 
     pub fn output_width(self) -> usize {
         self.token_budget + self.ratio - 1
+    }
+
+    fn plan_packed_range(
+        self,
+        start_position: usize,
+        tokens: usize,
+    ) -> Result<QwenSparseAttentionPackedRangePlan, Qwen4ExpQsaError> {
+        if tokens == 0 || tokens > self.token_budget {
+            return invalid(format!(
+                "packed QSA token count must be in 1..={}, got {tokens}",
+                self.token_budget
+            ));
+        }
+        let end_position = start_position.checked_add(tokens).ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid("packed QSA sequence length overflow".into())
+        })?;
+        if end_position > self.capacity {
+            return invalid(format!(
+                "packed QSA end {end_position} exceeds cache capacity {}",
+                self.capacity
+            ));
+        }
+        let dense_end = end_position.min(self.output_width());
+        let dense_tokens = dense_end.saturating_sub(start_position).min(tokens);
+        let selected_offset = dense_tokens;
+        let selected_tokens = tokens - dense_tokens;
+        let selected_bands = selected_tokens.div_ceil(DENSE_PACKED_QUERY_TILE);
+        Ok(QwenSparseAttentionPackedRangePlan {
+            end_position,
+            dense_tokens,
+            selected_offset,
+            selected_tokens,
+            selected_bands,
+        })
+    }
+
+    fn packed_attention_score_elements(self, capacity: usize) -> Result<usize, Qwen4ExpQsaError> {
+        if capacity == 0 || capacity > self.token_budget {
+            return invalid(format!(
+                "dense packed QSA capacity must be in 1..={}, got {capacity}",
+                self.token_budget
+            ));
+        }
+        let elements = self
+            .output_width()
+            .checked_mul(self.query_heads)
+            .and_then(|elements| elements.checked_mul(capacity.min(DENSE_PACKED_QUERY_TILE)))
+            .ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid(
+                    "dense packed QSA attention-score capacity overflow".into(),
+                )
+            })?;
+        if u32::try_from(elements).is_err() {
+            return invalid(format!(
+                "dense packed QSA attention-score scratch has {elements} elements, exceeding u32"
+            ));
+        }
+        elements.checked_mul(size_of::<f32>()).ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid("dense packed QSA attention-score byte count overflow".into())
+        })?;
+        Ok(elements)
     }
 
     fn index_query_width(self) -> usize {
@@ -611,27 +681,7 @@ impl QwenSparseAttentionPackedScratch {
                 ))
             })?;
         }
-        let score_elements = geometry
-            .token_budget
-            .checked_mul(geometry.query_heads)
-            .and_then(|elements| elements.checked_mul(query_tile))
-            .ok_or_else(|| {
-                Qwen4ExpQsaError::Invalid(
-                    "dense packed QSA attention-score capacity overflow".into(),
-                )
-            })?;
-        if u32::try_from(score_elements).is_err() {
-            return invalid(format!(
-                "dense packed QSA attention-score scratch has {score_elements} elements, exceeding u32"
-            ));
-        }
-        score_elements
-            .checked_mul(size_of::<f32>())
-            .ok_or_else(|| {
-                Qwen4ExpQsaError::Invalid(
-                    "dense packed QSA attention-score byte count overflow".into(),
-                )
-            })?;
+        geometry.packed_attention_score_elements(capacity)?;
 
         let shape = |width: usize| vec![width as u64, capacity as u64];
         Ok(Self {
@@ -650,7 +700,7 @@ impl QwenSparseAttentionPackedScratch {
             attention_scores: MetalTensor::zeros_f32(
                 ctx,
                 vec![
-                    geometry.token_budget as u64,
+                    geometry.output_width() as u64,
                     geometry.query_heads as u64,
                     query_tile as u64,
                 ],
@@ -732,10 +782,11 @@ impl QwenSparseAttentionPackedScratch {
         rows: usize,
         sequence_length: usize,
     ) -> Result<MetalTensor, Qwen4ExpQsaError> {
-        if rows == 0 || rows > self.query_tile || sequence_length > self.geometry.token_budget {
+        if rows == 0 || rows > self.query_tile || sequence_length > self.geometry.output_width() {
             return invalid(format!(
-                "dense packed QSA score view rows={rows} length={sequence_length} exceeds tile={} budget={}",
-                self.query_tile, self.geometry.token_budget
+                "dense packed QSA score view rows={rows} length={sequence_length} exceeds tile={} dense limit={}",
+                self.query_tile,
+                self.geometry.output_width()
             ));
         }
         let elements = rows
@@ -1082,6 +1133,8 @@ pub fn encode_qwen_sparse_attention_text<'a>(
 }
 
 /// Encode a dense, consecutive text chunk into the scalar QSA cache owner.
+/// Multi-token chunks reject any query that requires block selection; `N=1`
+/// delegates to the scalar path at every position.
 ///
 /// # Safety
 ///
@@ -1259,19 +1312,22 @@ fn prepare_dense_packed_control_scalars(
             workspace.committed_length
         ));
     }
-    let sequence_length = start_position.checked_add(tokens).ok_or_else(|| {
-        Qwen4ExpQsaError::Invalid("dense packed QSA sequence length overflow".into())
-    })?;
-    if tokens <= 1
-        || tokens > workspace.geometry.token_budget
-        || sequence_length > workspace.geometry.capacity
-        || sequence_length > workspace.geometry.token_budget
-    {
+    if tokens <= 1 {
         return invalid(format!(
-            "dense packed QSA range start={start_position} tokens={tokens} end={sequence_length} exceeds capacity={} or dense budget={}",
-            workspace.geometry.capacity, workspace.geometry.token_budget
+            "dense packed QSA requires at least two tokens, got {tokens}"
         ));
     }
+    let plan = workspace
+        .geometry
+        .plan_packed_range(start_position, tokens)?;
+    if plan.selected_tokens != 0 {
+        return invalid(format!(
+            "dense packed QSA range start={start_position} tokens={tokens} end={} exceeds dense limit {}",
+            plan.end_position,
+            workspace.geometry.output_width()
+        ));
+    }
+    let sequence_length = plan.end_position;
     let visible_blocks = sequence_length / workspace.geometry.ratio;
     write_i32_scalar(&workspace.visible_blocks, visible_blocks as i32)?;
     write_i32_scalar(&workspace.selector_status, 0)?;
@@ -1311,15 +1367,15 @@ pub(crate) fn validate_dense_packed_contract(
             workspace.committed_length
         ));
     }
-    let sequence_length = start_position.checked_add(tokens).ok_or_else(|| {
-        Qwen4ExpQsaError::Invalid("dense packed QSA sequence length overflow".into())
-    })?;
-    if sequence_length > g.capacity || sequence_length > g.token_budget {
+    let plan = g.plan_packed_range(start_position, tokens)?;
+    if plan.selected_tokens != 0 {
         return invalid(format!(
-            "dense packed QSA end {sequence_length} exceeds cache capacity {} or dense budget {}",
-            g.capacity, g.token_budget
+            "dense packed QSA end {} exceeds dense limit {}",
+            plan.end_position,
+            g.output_width()
         ));
     }
+    let sequence_length = plan.end_position;
     if g.theta <= 1.0 {
         return invalid(format!(
             "dense packed QSA requires RoPE theta greater than one, got {}",
@@ -1524,7 +1580,7 @@ fn validate_dense_packed_scratch(
         &scratch.attention_scores,
         GgmlType::F32,
         &[
-            g.token_budget as u64,
+            g.output_width() as u64,
             g.query_heads as u64,
             scratch.query_tile as u64,
         ],
@@ -3201,7 +3257,7 @@ mod tests {
 
     fn packed_test_geometry(capacity: usize) -> QwenSparseAttentionMetalGeometry {
         let mut config = Qwen4ExpConfig::flash_next_reference();
-        config.context_length = 64;
+        config.context_length = 128;
         config.hidden_size = 16;
         config.qsa.token_budget = 64;
         config.ple = None;
@@ -3327,6 +3383,18 @@ mod tests {
                 .cast::<f32>();
             std::slice::from_raw_parts(source, tensor.shape.iter().product::<u64>() as usize)
                 .to_vec()
+        }
+    }
+
+    fn read_tensor_bytes(tensor: &MetalTensor) -> Vec<u8> {
+        unsafe {
+            let source = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize);
+            std::slice::from_raw_parts(source, tensor.n_bytes() as usize).to_vec()
         }
     }
 
@@ -3788,6 +3856,235 @@ mod tests {
         drop(read);
         workspace.release_after().unwrap();
         read_f32(&copied)
+    }
+
+    #[test]
+    fn packed_range_plan_separates_dense_shoulder_and_selected_suffix() {
+        let geometry = packed_test_geometry(128);
+        assert_eq!(geometry.output_width(), 67);
+        for (start, tokens, expected) in [
+            (0, 64, (64, 64, 64, 0, 0)),
+            (64, 1, (65, 1, 1, 0, 0)),
+            (64, 3, (67, 3, 3, 0, 0)),
+            (64, 4, (68, 3, 3, 1, 1)),
+            (65, 2, (67, 2, 2, 0, 0)),
+            (66, 2, (68, 1, 1, 1, 1)),
+            (67, 33, (100, 0, 0, 33, 2)),
+            (68, 2, (70, 0, 0, 2, 1)),
+            (120, 8, (128, 0, 0, 8, 1)),
+        ] {
+            let plan = geometry.plan_packed_range(start, tokens).unwrap();
+            assert_eq!(
+                (
+                    plan.end_position,
+                    plan.dense_tokens,
+                    plan.selected_offset,
+                    plan.selected_tokens,
+                    plan.selected_bands,
+                ),
+                expected,
+                "start={start} tokens={tokens}"
+            );
+        }
+        assert!(geometry.plan_packed_range(0, 0).is_err());
+        assert!(geometry.plan_packed_range(0, 65).is_err());
+        assert!(geometry.plan_packed_range(120, 9).is_err());
+        assert!(geometry.plan_packed_range(usize::MAX, 1).is_err());
+
+        let production = QwenSparseAttentionMetalGeometry::from_config(
+            &Qwen4ExpConfig::flash_next_reference(),
+            3,
+            4_096,
+        )
+        .unwrap();
+        assert_eq!(
+            production.plan_packed_range(2_048, 3).unwrap(),
+            QwenSparseAttentionPackedRangePlan {
+                end_position: 2_051,
+                dense_tokens: 3,
+                selected_offset: 3,
+                selected_tokens: 0,
+                selected_bands: 0,
+            }
+        );
+        assert_eq!(
+            production.plan_packed_range(2_048, 4).unwrap(),
+            QwenSparseAttentionPackedRangePlan {
+                end_position: 2_052,
+                dense_tokens: 3,
+                selected_offset: 3,
+                selected_tokens: 1,
+                selected_bands: 1,
+            }
+        );
+        let allocations = production.packed_scratch_logical_allocations(18).unwrap();
+        let score_bytes = allocations[6];
+        assert_eq!(score_bytes, 2_051 * 24 * 18 * size_of::<f32>());
+        assert_eq!(score_bytes - 2_048 * 24 * 18 * size_of::<f32>(), 5_184);
+    }
+
+    #[test]
+    fn dense_packed_qsa_covers_the_preselection_shoulder() {
+        const TOKEN_BUDGET: usize = 8;
+        const TOKENS: usize = TOKEN_BUDGET + 3;
+        let Some(ctx) = context() else { return };
+        let geometry = test_geometry(12);
+        assert_eq!(geometry.token_budget(), TOKEN_BUDGET);
+        assert_eq!(geometry.output_width(), TOKENS);
+        let weights = test_weights(&ctx, geometry);
+        let inputs = values(TOKENS * geometry.hidden_size, 1_663, 0.002_2);
+        let serial = serial_dense_trace(&ctx, &weights, &inputs, TOKENS);
+        let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+        for token in 0..TOKEN_BUDGET {
+            let start = token * geometry.hidden_size;
+            encode_one(
+                &ctx,
+                &weights,
+                &mut workspace,
+                &inputs[start..start + geometry.hidden_size],
+            );
+        }
+        let scratch = QwenSparseAttentionPackedScratch::new(&ctx, geometry, 3).unwrap();
+        assert_eq!(
+            scratch.attention_scores.shape,
+            [TOKENS as u64, geometry.query_heads as u64, 3]
+        );
+        let input_start = TOKEN_BUDGET * geometry.hidden_size;
+        let (actual, census) = encode_dense_packed_chunk(
+            &ctx,
+            &weights,
+            &mut workspace,
+            &scratch,
+            &inputs[input_start..],
+            TOKEN_BUDGET,
+            3,
+        );
+        let expected = &serial.outputs[input_start..];
+        for token in 0..3 {
+            let row = token * geometry.hidden_size;
+            assert_similarity(
+                &format!("dense packed QSA shoulder token={token}"),
+                &actual[row..row + geometry.hidden_size],
+                &expected[row..row + geometry.hidden_size],
+                1e-3,
+                0.9999997,
+                1e-5,
+            );
+        }
+        assert_dense_state_matches(
+            "dense packed QSA shoulder",
+            &workspace,
+            &serial.states[TOKENS - 1],
+        );
+        let names = census
+            .iter()
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"kernel_attn_matrix_softmax_f32"));
+        for absent in [
+            "qsa_index_scores",
+            "select_top_k",
+            "qsa_expand_ids",
+            "qsa_attention_logits",
+            "qsa_attention_softmax_value",
+        ] {
+            assert!(
+                !names.iter().any(|name| name.contains(absent)),
+                "shoulder unexpectedly dispatched {absent}"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_packed_qsa_rejects_selected_suffix_before_dispatch() {
+        let Some(ctx) = context() else { return };
+        let geometry = test_geometry(16);
+        let weights = test_weights(&ctx, geometry);
+        let all_inputs = values(14 * geometry.hidden_size, 1_727, 0.001_8);
+
+        for (start_position, tokens, selected_offset) in
+            [(8_usize, 4_usize, 3_usize), (11, 2, 0), (12, 2, 0)]
+        {
+            let plan = geometry.plan_packed_range(start_position, tokens).unwrap();
+            assert_eq!(plan.selected_offset, selected_offset);
+            assert!(plan.selected_tokens > 0);
+
+            let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+            for token in 0..start_position {
+                let start = token * geometry.hidden_size;
+                encode_one(
+                    &ctx,
+                    &weights,
+                    &mut workspace,
+                    &all_inputs[start..start + geometry.hidden_size],
+                );
+            }
+            let scratch = QwenSparseAttentionPackedScratch::new(&ctx, geometry, tokens).unwrap();
+            let input_start = start_position * geometry.hidden_size;
+            let input_end = (start_position + tokens) * geometry.hidden_size;
+            let input = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&all_inputs[input_start..input_end]),
+                vec![geometry.hidden_size as u64, tokens as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let before = (
+                read_tensor_bytes(&workspace.pending_index_keys),
+                read_tensor_bytes(&workspace.compressed_index_keys),
+                read_tensor_bytes(&workspace.key_cache),
+                read_tensor_bytes(&workspace.value_cache),
+                read_i32(&workspace.visible_blocks),
+                read_i32(&workspace.selected_blocks),
+                read_i32(&workspace.selected_count),
+                read_i32(&workspace.selector_status),
+                read_i32(&workspace.token_ids),
+            );
+            crate::metal::dispatch_census_begin();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let error = match unsafe {
+                encode_qwen_sparse_attention_text_dense_packed_motor(
+                    &ctx,
+                    &encoder,
+                    &input,
+                    weights.borrowed(),
+                    &mut workspace,
+                    &scratch,
+                    start_position,
+                    tokens,
+                )
+            } {
+                Ok(_) => {
+                    panic!("selected suffix start={start_position} tokens={tokens} was accepted")
+                }
+                Err(error) => error,
+            };
+            let census = crate::metal::dispatch_census_take();
+            encoder.end();
+            assert!(error.to_string().contains("dense limit"));
+            assert!(census.is_empty());
+            assert_eq!(command.status(), MTLCommandBufferStatus::NotEnqueued);
+            assert!(workspace.active_command.is_none());
+            assert!(workspace.pending_length.is_none());
+            assert_eq!(workspace.committed_length(), start_position);
+            assert!(!workspace.is_poisoned());
+            assert_eq!(
+                (
+                    read_tensor_bytes(&workspace.pending_index_keys),
+                    read_tensor_bytes(&workspace.compressed_index_keys),
+                    read_tensor_bytes(&workspace.key_cache),
+                    read_tensor_bytes(&workspace.value_cache),
+                    read_i32(&workspace.visible_blocks),
+                    read_i32(&workspace.selected_blocks),
+                    read_i32(&workspace.selected_count),
+                    read_i32(&workspace.selector_status),
+                    read_i32(&workspace.token_ids),
+                ),
+                before,
+                "start={start_position} tokens={tokens}"
+            );
+        }
     }
 
     #[test]

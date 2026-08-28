@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Packed QSA Dense Shoulder
+
+Status: stage capability-aware selected-range scratch and primitives; runtime
+still packs at most the initial 2,048-token prefix.
+
+- A pure range plan now separates the chunk-local dense prefix from the first
+  query requiring block selection. Production `start=2,048,N=3` remains fully
+  dense through length 2,051; `N=4` has selected offset 3 and one selected row.
+- The existing dense motor now covers that three-token shoulder using the same
+  scalar cache owners and chronological matrix attention. Reduced-geometry rows
+  and final pending/compressed/K/V state match scalar execution, and selector,
+  expansion, and gathered-attention kernels remain absent.
+- Crossing, all-selected, and post-limit multi-token calls fail before dispatch,
+  command ownership, control writes, persistent-state mutation, or poisoning.
+  `N=1` deliberately continues to delegate to scalar QSA at every position.
+- Dense score scratch grows from token budget to `budget + ratio - 1`. This adds
+  1,152 bytes at N=4, 5,184 bytes at N=18, and 9,216 bytes at N=2,048 without a
+  new allocation; the maximum 55-allocation sidecar is now 1,894,542,336 logical
+  bytes.
+- This is a boundary seam, not selected packed attention or a long-prompt speed
+  claim. Next add prompt-capability-aware selected scratch while keeping outer
+  command chunks capped at 2,048 rows.
+
 ## 2026-08-27 - Flash-Next IQ3 Gate/Up Range Screen Invalid
 
 Status: close as `INVALID_SCREEN / NO_CANDIDATE`; do not rerun this

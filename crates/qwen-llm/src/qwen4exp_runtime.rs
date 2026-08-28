@@ -432,6 +432,12 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             .and_then(Qwen4ExpTextSessionMetalWorkspace::packed_prefill_capacity)
     }
 
+    pub fn packed_selected_capable(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(Qwen4ExpTextSessionMetalWorkspace::packed_selected_capable)
+    }
+
     pub fn create_runner<'ctx, 'model>(
         &'model mut self,
         ctx: &'ctx MetalContext,

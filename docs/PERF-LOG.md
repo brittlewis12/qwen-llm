@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Selected QSA Scratch Admission
+
+Status: implement and qualify packed index scoring, selection, and expansion
+primitives; no selected dispatch is enabled yet.
+
+- Prompt-aware plans keep the reusable outer scratch capped at 2,048 rows and
+  separately mark whether the full prompt enters selection. Extent 2,051 keeps
+  the dense-only plan; extent 2,052 admits selected scratch.
+- Selection capability adds nine explicit buffers: full-chunk raw/normalized
+  index queries plus 32-query-band scores, visibility, selected IDs/counts,
+  status, expanded token IDs, and gathered-attention logits.
+- The maximum selected delta is 23,406,336 logical bytes. The selection-capable
+  packed inventory is 64 allocations and 1,917,948,672 logical bytes; short
+  prompts retain 55 allocations and omit every selected buffer.
+- Planning, actual allocation, shape validation, and post-residency
+  reconciliation share the same capability bit. A selected plan without packed
+  scratch is rejected, and the loaded model exposes the admitted capability.
+- These buffers are dormant qualification scaffolding. Dense dispatch topology,
+  the one-packed-prefix runtime policy, and scalar overflow behavior are
+  unchanged.
+
 ## 2026-08-27 - Flash-Next Packed QSA Dense Shoulder
 
 Status: stage capability-aware selected-range scratch and primitives; runtime

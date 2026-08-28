@@ -266,17 +266,19 @@ The full dense packed session is now closed internally. One command composes
 all 48 layers and final logits into the existing scalar GDN, PLE, and QSA state
 owners; the first scalar continuation requires no state copy or migration.
 Packed PLE stages IQ4_NL rows and dequantizes them on GPU. The opt-in 2,048-row
-activation sidecar is admission-priced at 55 allocations and 1,894,542,336
-logical bytes; scalar-only plans preserve their previous inventory. Released
+activation sidecar keeps a 55-allocation dense-only plan for prompts through
+length 2,051. Longer prompt plans add nine 32-query-band selected-QSA buffers;
+the maximum selection-capable inventory is 64 allocations and 1,917,948,672
+logical bytes. Scalar-only plans preserve their previous inventory. Released
 N=2,048 measures 457.229 tok/s wall, and four scalar continuations cross into
 QSA selection at length 2,052 with all state bindings and 12 cache lengths
 intact. Runtime and CLI promotion is now closed. Unprofiled prompts of two or
-more tokens request packed execution; scratch admission follows the actual prompt
+more tokens request packed execution; scratch admission follows actual prompt
 extent rather than the full decode budget and visibly falls back to scalar if
-the packed-only plan cannot load. The runtime submits one dense prefix command,
-checks shutdown before every scalar overflow command, and reports the actual
-packed/scalar split. Released 18-token HELLO runs retain output and scalar decode
-handoff.
+the packed-only plan cannot load. The runtime still submits one dense prefix
+command, checks shutdown before every scalar overflow command, and reports the
+actual packed/scalar split. Released 18-token HELLO runs retain output and scalar
+decode handoff.
 
 Accepted N=18 and N=2,048 first/warm/profile packets close the broad attribution
 step. Warm outside-GPU time is only `2.026/6.397 ms`; child publication is

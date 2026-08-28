@@ -276,6 +276,19 @@ impl Qwen4ExpTextSessionMetalGeometry {
             .capacity
             .min(self.packed_qsa_geometry()?.token_budget()))
     }
+
+    fn packed_selected_capable_for_extent(
+        &self,
+        prompt_extent: usize,
+    ) -> Result<bool, Qwen4ExpTextSessionError> {
+        if prompt_extent > self.capacity {
+            return invalid(format!(
+                "packed prompt extent {prompt_extent} exceeds session capacity {}",
+                self.capacity
+            ));
+        }
+        Ok(prompt_extent > self.packed_qsa_geometry()?.output_width())
+    }
 }
 
 pub struct Qwen4ExpTextSessionMetalWeights<'a> {
@@ -328,6 +341,7 @@ pub struct Qwen4ExpTextSessionMemoryPlan {
     session_logical_bytes: u64,
     session_priced_upper_bytes: u64,
     packed_capacity: Option<usize>,
+    packed_selected_capable: bool,
     allocations: Vec<Qwen4ExpTextSessionAllocation>,
 }
 
@@ -340,16 +354,21 @@ impl Qwen4ExpTextSessionMemoryPlan {
         Self::for_geometry_with_residency_bytes(ctx, geometry, residency.priced_upper_bytes())
     }
 
+    /// Reserve the maximum packed plan implied by the full session geometry.
+    /// Use the prompt-aware plan when the actual prompt extent is known.
     pub fn for_geometry_with_packed_prefill(
         ctx: &MetalContext,
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         residency: &Qwen4ExpMetalWeightMemoryPlan,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let packed_selected_capable =
+            geometry.packed_selected_capable_for_extent(geometry.capacity())?;
         Self::for_geometry_with_options(
             ctx,
             geometry,
             residency.priced_upper_bytes(),
             Some(geometry.packed_capacity()?),
+            packed_selected_capable,
         )
     }
 
@@ -358,7 +377,7 @@ impl Qwen4ExpTextSessionMemoryPlan {
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         residency_priced_upper_bytes: u64,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_geometry_with_options(ctx, geometry, residency_priced_upper_bytes, None)
+        Self::for_geometry_with_options(ctx, geometry, residency_priced_upper_bytes, None, false)
     }
 
     #[cfg(test)]
@@ -367,11 +386,14 @@ impl Qwen4ExpTextSessionMemoryPlan {
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         residency_priced_upper_bytes: u64,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let packed_selected_capable =
+            geometry.packed_selected_capable_for_extent(geometry.capacity())?;
         Self::for_geometry_with_options(
             ctx,
             geometry,
             residency_priced_upper_bytes,
             Some(geometry.packed_capacity()?),
+            packed_selected_capable,
         )
     }
 
@@ -380,7 +402,11 @@ impl Qwen4ExpTextSessionMemoryPlan {
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         residency_priced_upper_bytes: u64,
         packed_capacity: Option<usize>,
+        packed_selected_capable: bool,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
+        if packed_capacity.is_none() && packed_selected_capable {
+            return invalid("selected packed QSA scratch requires packed prefill");
+        }
         let mut builder = AllocationBuilder::default();
         add_zero_one_allocations(&mut builder, geometry.zero_one)?;
         if let Some(capacity) = packed_capacity {
@@ -390,7 +416,7 @@ impl Qwen4ExpTextSessionMemoryPlan {
                     "packed prefill capacity {capacity} is outside 2..={maximum}"
                 ));
             }
-            add_packed_allocations(&mut builder, geometry, capacity)?;
+            add_packed_allocations(&mut builder, geometry, capacity, packed_selected_capable)?;
         }
         builder.f32("session.hyper_residual", geometry.hyper_width())?;
         for block in &geometry.post_ple {
@@ -442,6 +468,7 @@ impl Qwen4ExpTextSessionMemoryPlan {
             session_logical_bytes,
             session_priced_upper_bytes,
             packed_capacity,
+            packed_selected_capable,
             allocations,
         })
     }
@@ -464,6 +491,10 @@ impl Qwen4ExpTextSessionMemoryPlan {
 
     pub fn packed_prefill_capacity(&self) -> Option<usize> {
         self.packed_capacity
+    }
+
+    pub fn packed_selected_capable(&self) -> bool {
+        self.packed_selected_capable
     }
 
     pub fn priced_upper_bytes_for_sessions(
@@ -527,12 +558,13 @@ impl fmt::Display for Qwen4ExpTextSessionMemoryPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "residency_priced={} session_allocations={} session_logical={} session_priced={} packed_capacity={:?} reserve={}",
+            "residency_priced={} session_allocations={} session_logical={} session_priced={} packed_capacity={:?} packed_selected_capable={} reserve={}",
             self.residency_priced_upper_bytes,
             self.allocations.len(),
             self.session_logical_bytes,
             self.session_priced_upper_bytes,
             self.packed_capacity,
+            self.packed_selected_capable,
             QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES
         )
     }
@@ -551,9 +583,11 @@ impl Qwen4ExpTextSessionPlan {
         capacity: usize,
         residency: &Qwen4ExpMetalWeightMemoryPlan,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_config_with_options(ctx, config, capacity, residency, None)
+        Self::for_config_with_options(ctx, config, capacity, residency, None, false)
     }
 
+    /// Reserve packed scratch against the full session geometry when no prompt
+    /// extent is available.
     pub fn for_config_with_packed_prefill(
         ctx: &MetalContext,
         config: &Qwen4ExpConfig,
@@ -562,9 +596,19 @@ impl Qwen4ExpTextSessionPlan {
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(config, capacity)?;
         let packed_capacity = geometry.packed_capacity()?;
-        Self::from_geometry(ctx, geometry, residency, Some(packed_capacity))
+        let packed_selected_capable =
+            geometry.packed_selected_capable_for_extent(geometry.capacity())?;
+        Self::from_geometry(
+            ctx,
+            geometry,
+            residency,
+            Some(packed_capacity),
+            packed_selected_capable,
+        )
     }
 
+    /// Reserve an explicit dense-only packed capacity. Selected-range callers
+    /// must use the prompt-aware constructor.
     pub fn for_config_with_packed_prefill_capacity(
         ctx: &MetalContext,
         config: &Qwen4ExpConfig,
@@ -572,9 +616,18 @@ impl Qwen4ExpTextSessionPlan {
         residency: &Qwen4ExpMetalWeightMemoryPlan,
         packed_capacity: usize,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_config_with_options(ctx, config, capacity, residency, Some(packed_capacity))
+        Self::for_config_with_options(
+            ctx,
+            config,
+            capacity,
+            residency,
+            Some(packed_capacity),
+            false,
+        )
     }
 
+    /// Reserve reusable packed rows from prompt length and add selected-range
+    /// scratch only when the full prompt crosses the QSA dense limit.
     pub fn for_config_with_packed_prefill_tokens(
         ctx: &MetalContext,
         config: &Qwen4ExpConfig,
@@ -583,8 +636,25 @@ impl Qwen4ExpTextSessionPlan {
         prompt_tokens: usize,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(config, capacity)?;
-        let packed_capacity = prompt_tokens.min(geometry.packed_capacity()?);
-        Self::from_geometry(ctx, geometry, residency, Some(packed_capacity))
+        let (packed_capacity, packed_selected_capable) =
+            Self::packed_prefill_options_for_prompt(&geometry, prompt_tokens)?;
+        Self::from_geometry(
+            ctx,
+            geometry,
+            residency,
+            Some(packed_capacity),
+            packed_selected_capable,
+        )
+    }
+
+    fn packed_prefill_options_for_prompt(
+        geometry: &Qwen4ExpTextSessionMetalGeometry,
+        prompt_tokens: usize,
+    ) -> Result<(usize, bool), Qwen4ExpTextSessionError> {
+        Ok((
+            prompt_tokens.min(geometry.packed_capacity()?),
+            geometry.packed_selected_capable_for_extent(prompt_tokens)?,
+        ))
     }
 
     fn for_config_with_options(
@@ -593,9 +663,16 @@ impl Qwen4ExpTextSessionPlan {
         capacity: usize,
         residency: &Qwen4ExpMetalWeightMemoryPlan,
         packed_capacity: Option<usize>,
+        packed_selected_capable: bool,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(config, capacity)?;
-        Self::from_geometry(ctx, geometry, residency, packed_capacity)
+        Self::from_geometry(
+            ctx,
+            geometry,
+            residency,
+            packed_capacity,
+            packed_selected_capable,
+        )
     }
 
     fn from_geometry(
@@ -603,12 +680,14 @@ impl Qwen4ExpTextSessionPlan {
         geometry: Qwen4ExpTextSessionMetalGeometry,
         residency: &Qwen4ExpMetalWeightMemoryPlan,
         packed_capacity: Option<usize>,
+        packed_selected_capable: bool,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let memory = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
             ctx,
             &geometry,
             residency.priced_upper_bytes(),
             packed_capacity,
+            packed_selected_capable,
         )?;
         Ok(Self {
             geometry,
@@ -708,6 +787,7 @@ impl Qwen4ExpTextPackedScratch {
         ctx: &MetalContext,
         geometry: &Qwen4ExpTextSessionMetalGeometry,
         capacity: usize,
+        selected_capable: bool,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let maximum = geometry.packed_capacity()?;
         if !(2..=maximum).contains(&capacity) {
@@ -738,6 +818,17 @@ impl Qwen4ExpTextPackedScratch {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let qsa_geometry = geometry.packed_qsa_geometry()?;
+        let qsa = if selected_capable {
+            QwenSparseAttentionPackedScratch::new_with_selected_capability(
+                ctx,
+                qsa_geometry,
+                capacity,
+                true,
+            )?
+        } else {
+            QwenSparseAttentionPackedScratch::new(ctx, qsa_geometry, capacity)?
+        };
         let shape = |width: usize| vec![width as u64, capacity as u64];
         Ok(Self {
             capacity,
@@ -768,11 +859,7 @@ impl Qwen4ExpTextPackedScratch {
             gdn: GatedDeltaNetPackedScratch::new(ctx, zero_one.layer_zero().gdn(), capacity)?,
             ple: Qwen4ExpPlePackedMotorScratch::new(ctx, ple_geometry, capacity)?,
             moe: Qwen4ExpMoePackedMotorScratch::new(ctx, zero_one.layer_zero().moe(), capacity)?,
-            qsa: QwenSparseAttentionPackedScratch::new(
-                ctx,
-                geometry.packed_qsa_geometry()?,
-                capacity,
-            )?,
+            qsa,
         })
     }
 
@@ -887,12 +974,20 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             post_ple.push(Qwen4ExpPostPleBlockMetalWorkspace::new(ctx, *block)?);
         }
         let packed = if let Some(planned_capacity) = memory.packed_prefill_capacity() {
-            let scratch = Qwen4ExpTextPackedScratch::new(ctx, &geometry, planned_capacity)?;
+            let scratch = Qwen4ExpTextPackedScratch::new(
+                ctx,
+                &geometry,
+                planned_capacity,
+                memory.packed_selected_capable(),
+            )?;
             if scratch.capacity != planned_capacity {
                 return invalid(format!(
                     "packed scratch capacity {} differs from admitted {planned_capacity}",
                     scratch.capacity
                 ));
+            }
+            if scratch.qsa.selected_capable() != memory.packed_selected_capable() {
+                return invalid("packed selected QSA scratch differs from admitted plan");
             }
             Some(scratch)
         } else {
@@ -989,6 +1084,10 @@ impl Qwen4ExpTextSessionMetalWorkspace {
 
     pub fn packed_prefill_capacity(&self) -> Option<usize> {
         self.memory.packed_prefill_capacity()
+    }
+
+    pub fn packed_selected_capable(&self) -> bool {
+        self.memory.packed_selected_capable()
     }
 
     pub fn observed_allocation_delta(&self) -> u64 {
@@ -2765,6 +2864,7 @@ fn add_packed_allocations(
     builder: &mut AllocationBuilder,
     geometry: &Qwen4ExpTextSessionMetalGeometry,
     capacity: usize,
+    selected_capable: bool,
 ) -> Result<(), Qwen4ExpTextSessionError> {
     let zero_one = geometry.zero_one();
     let hidden = geometry.hidden_size();
@@ -2903,6 +3003,32 @@ fn add_packed_allocations(
         .enumerate()
     {
         builder.bytes(format!("packed.qsa.{index}"), bytes)?;
+    }
+    if selected_capable {
+        let names = [
+            "index_query_raw",
+            "index_query",
+            "scores",
+            "visible_blocks",
+            "selected_blocks",
+            "selected_count",
+            "selector_status",
+            "token_ids",
+            "attention_logits",
+        ];
+        let allocations = geometry
+            .packed_qsa_geometry()?
+            .selected_packed_scratch_logical_allocations(capacity)?;
+        if allocations.len() != names.len() {
+            return invalid(format!(
+                "selected packed QSA allocation count {} differs from {} names",
+                allocations.len(),
+                names.len()
+            ));
+        }
+        for (name, bytes) in names.into_iter().zip(allocations) {
+            builder.bytes(format!("packed.qsa.selected.{name}"), bytes)?;
+        }
     }
     Ok(())
 }
@@ -3370,9 +3496,14 @@ mod tests {
             )
             .unwrap();
             let packed_capacity = geometry.packed_capacity().unwrap();
-            let packed_expected = match packed_capacity {
-                4 => 4_477_600_u64,
-                2_048 => 1_894_542_336_u64,
+            let (
+                packed_expected,
+                packed_selected_capable,
+                total_allocations,
+                expected_packed_allocations,
+            ) = match packed_capacity {
+                4 => (4_477_600_u64, false, 1_578, 55),
+                2_048 => (1_917_948_672_u64, true, 1_587, 64),
                 other => panic!("unexpected packed capacity {other}"),
             };
             let scalar_expected = 143_207_764_u64 + 25_356_u64 * capacity as u64;
@@ -3382,8 +3513,9 @@ mod tests {
                 .filter(|allocation| allocation.name.starts_with("packed."))
                 .collect::<Vec<_>>();
             assert_eq!(plan.packed_prefill_capacity(), Some(packed_capacity));
-            assert_eq!(plan.allocations().len(), 1_578);
-            assert_eq!(packed_allocations.len(), 55);
+            assert_eq!(plan.packed_selected_capable(), packed_selected_capable);
+            assert_eq!(plan.allocations().len(), total_allocations);
+            assert_eq!(packed_allocations.len(), expected_packed_allocations);
             assert_eq!(
                 packed_allocations
                     .iter()
@@ -3403,25 +3535,61 @@ mod tests {
         let Some(ctx) = context() else { return };
         let config = Qwen4ExpConfig::flash_next_reference();
         let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 2_052).unwrap();
-        let prompt_plan =
-            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(&ctx, &geometry, 0, Some(18))
-                .unwrap();
+        assert_eq!(
+            Qwen4ExpTextSessionPlan::packed_prefill_options_for_prompt(&geometry, 2_051).unwrap(),
+            (2_048, false)
+        );
+        assert_eq!(
+            Qwen4ExpTextSessionPlan::packed_prefill_options_for_prompt(&geometry, 2_052).unwrap(),
+            (2_048, true)
+        );
+        let prompt_plan = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+            &ctx,
+            &geometry,
+            0,
+            Some(18),
+            false,
+        )
+        .unwrap();
         let maximum_plan = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
             &ctx,
             &geometry,
             0,
             Some(2_048),
+            true,
         )
         .unwrap();
         assert_eq!(prompt_plan.packed_prefill_capacity(), Some(18));
+        assert!(!prompt_plan.packed_selected_capable());
+        assert!(maximum_plan.packed_selected_capable());
         assert_eq!(
-            prompt_plan.allocations().len(),
-            maximum_plan.allocations().len()
+            maximum_plan.allocations().len(),
+            prompt_plan.allocations().len() + 9
+        );
+        assert!(
+            prompt_plan
+                .allocations()
+                .iter()
+                .all(|allocation| !allocation.name.starts_with("packed.qsa.selected."))
+        );
+        assert_eq!(
+            maximum_plan
+                .allocations()
+                .iter()
+                .filter(|allocation| allocation.name.starts_with("packed.qsa.selected."))
+                .count(),
+            9
         );
         assert!(prompt_plan.session_logical_bytes() < maximum_plan.session_logical_bytes());
         assert!(
-            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(&ctx, &geometry, 0, Some(1),)
-                .is_err()
+            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+                &ctx,
+                &geometry,
+                0,
+                Some(1),
+                false,
+            )
+            .is_err()
         );
         assert!(
             Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
@@ -3429,6 +3597,13 @@ mod tests {
                 &geometry,
                 0,
                 Some(2_049),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+                &ctx, &geometry, 0, None, true,
             )
             .is_err()
         );

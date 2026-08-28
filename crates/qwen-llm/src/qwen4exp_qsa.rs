@@ -439,6 +439,51 @@ impl QwenSparseAttentionMetalGeometry {
         ])
     }
 
+    pub(crate) fn selected_packed_scratch_logical_allocations(
+        self,
+        capacity: usize,
+    ) -> Result<Vec<usize>, Qwen4ExpQsaError> {
+        if capacity == 0 || capacity > self.token_budget {
+            return invalid(format!(
+                "selected packed QSA capacity must be in 1..={}, got {capacity}",
+                self.token_budget
+            ));
+        }
+        let query_tile = capacity.min(DENSE_PACKED_QUERY_TILE);
+        let bytes = |name: &str, factors: &[usize]| {
+            let elements = factors
+                .iter()
+                .try_fold(1_usize, |product, &factor| product.checked_mul(factor))
+                .ok_or_else(|| {
+                    Qwen4ExpQsaError::Invalid(format!(
+                        "selected packed QSA {name} element count overflow"
+                    ))
+                })?;
+            if u32::try_from(elements).is_err() {
+                return invalid(format!(
+                    "selected packed QSA {name} has {elements} elements, exceeding u32"
+                ));
+            }
+            elements.checked_mul(size_of::<u32>()).ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid(format!("selected packed QSA {name} byte count overflow"))
+            })
+        };
+        Ok(vec![
+            bytes("raw index query", &[self.index_query_width(), capacity])?,
+            bytes("index query", &[self.index_query_width(), capacity])?,
+            bytes("scores", &[self.block_capacity(), query_tile])?,
+            bytes("visible blocks", &[query_tile])?,
+            bytes("selected blocks", &[self.block_budget(), query_tile])?,
+            bytes("selected count", &[query_tile])?,
+            bytes("selector status", &[query_tile])?,
+            bytes("token IDs", &[self.output_width(), query_tile])?,
+            bytes(
+                "attention logits",
+                &[self.output_width(), self.query_heads, query_tile],
+            )?,
+        ])
+    }
+
     pub fn hidden_size(self) -> usize {
         self.hidden_size
     }
@@ -628,6 +673,19 @@ pub(crate) struct QwenSparseAttentionPackedScratch {
     attention_scores: MetalTensor,
     attention: MetalTensor,
     output: MetalTensor,
+    selected: Option<QwenSparseAttentionSelectedPackedScratch>,
+}
+
+struct QwenSparseAttentionSelectedPackedScratch {
+    index_query_raw: MetalTensor,
+    index_query: MetalTensor,
+    scores: MetalTensor,
+    visible_blocks: MetalTensor,
+    selected_blocks: MetalTensor,
+    selected_count: MetalTensor,
+    selector_status: MetalTensor,
+    token_ids: MetalTensor,
+    attention_logits: MetalTensor,
 }
 
 struct QwenSparseAttentionPackedViews {
@@ -646,6 +704,15 @@ impl QwenSparseAttentionPackedScratch {
         ctx: &MetalContext,
         geometry: QwenSparseAttentionMetalGeometry,
         capacity: usize,
+    ) -> Result<Self, Qwen4ExpQsaError> {
+        Self::new_with_selected_capability(ctx, geometry, capacity, false)
+    }
+
+    pub(crate) fn new_with_selected_capability(
+        ctx: &MetalContext,
+        geometry: QwenSparseAttentionMetalGeometry,
+        capacity: usize,
+        selected_capable: bool,
     ) -> Result<Self, Qwen4ExpQsaError> {
         geometry.validate(geometry.capacity)?;
         if capacity == 0 || capacity > geometry.token_budget {
@@ -684,6 +751,11 @@ impl QwenSparseAttentionPackedScratch {
         geometry.packed_attention_score_elements(capacity)?;
 
         let shape = |width: usize| vec![width as u64, capacity as u64];
+        let selected = selected_capable
+            .then(|| {
+                QwenSparseAttentionSelectedPackedScratch::new(ctx, geometry, capacity, query_tile)
+            })
+            .transpose()?;
         Ok(Self {
             geometry,
             capacity,
@@ -707,7 +779,12 @@ impl QwenSparseAttentionPackedScratch {
             )?,
             attention: MetalTensor::zeros_f32(ctx, shape(geometry.query_width()))?,
             output: MetalTensor::zeros_f32(ctx, shape(geometry.hidden_size))?,
+            selected,
         })
+    }
+
+    pub(crate) fn selected_capable(&self) -> bool {
+        self.selected.is_some()
     }
 
     fn prefix_view(
@@ -812,6 +889,139 @@ impl QwenSparseAttentionPackedScratch {
                 invalid("dense packed QSA score view has the wrong element count")
             }
         })
+    }
+}
+
+impl QwenSparseAttentionSelectedPackedScratch {
+    fn new(
+        ctx: &MetalContext,
+        geometry: QwenSparseAttentionMetalGeometry,
+        capacity: usize,
+        query_tile: usize,
+    ) -> Result<Self, Qwen4ExpQsaError> {
+        geometry.selected_packed_scratch_logical_allocations(capacity)?;
+        let scratch = Self {
+            index_query_raw: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    geometry.index_head_dim as u64,
+                    geometry.index_query_heads as u64,
+                    capacity as u64,
+                ],
+            )?,
+            index_query: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    geometry.index_head_dim as u64,
+                    geometry.index_query_heads as u64,
+                    capacity as u64,
+                ],
+            )?,
+            scores: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.block_capacity() as u64, query_tile as u64],
+            )?,
+            visible_blocks: MetalTensor::zeros_i32(ctx, vec![query_tile as u64])?,
+            selected_blocks: MetalTensor::zeros_i32(
+                ctx,
+                vec![geometry.block_budget() as u64, query_tile as u64],
+            )?,
+            selected_count: MetalTensor::zeros_i32(ctx, vec![query_tile as u64])?,
+            selector_status: MetalTensor::zeros_i32(ctx, vec![query_tile as u64])?,
+            token_ids: MetalTensor::zeros_i32(
+                ctx,
+                vec![geometry.output_width() as u64, query_tile as u64],
+            )?,
+            attention_logits: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    geometry.output_width() as u64,
+                    geometry.query_heads as u64,
+                    query_tile as u64,
+                ],
+            )?,
+        };
+        scratch.validate(geometry, capacity, query_tile)?;
+        Ok(scratch)
+    }
+
+    fn validate(
+        &self,
+        geometry: QwenSparseAttentionMetalGeometry,
+        capacity: usize,
+        query_tile: usize,
+    ) -> Result<(), Qwen4ExpQsaError> {
+        for (name, tensor, dtype, shape) in [
+            (
+                "selected packed QSA raw index query",
+                &self.index_query_raw,
+                GgmlType::F32,
+                vec![
+                    geometry.index_head_dim as u64,
+                    geometry.index_query_heads as u64,
+                    capacity as u64,
+                ],
+            ),
+            (
+                "selected packed QSA index query",
+                &self.index_query,
+                GgmlType::F32,
+                vec![
+                    geometry.index_head_dim as u64,
+                    geometry.index_query_heads as u64,
+                    capacity as u64,
+                ],
+            ),
+            (
+                "selected packed QSA scores",
+                &self.scores,
+                GgmlType::F32,
+                vec![geometry.block_capacity() as u64, query_tile as u64],
+            ),
+            (
+                "selected packed QSA visible blocks",
+                &self.visible_blocks,
+                GgmlType::I32,
+                vec![query_tile as u64],
+            ),
+            (
+                "selected packed QSA selected blocks",
+                &self.selected_blocks,
+                GgmlType::I32,
+                vec![geometry.block_budget() as u64, query_tile as u64],
+            ),
+            (
+                "selected packed QSA selected count",
+                &self.selected_count,
+                GgmlType::I32,
+                vec![query_tile as u64],
+            ),
+            (
+                "selected packed QSA selector status",
+                &self.selector_status,
+                GgmlType::I32,
+                vec![query_tile as u64],
+            ),
+            (
+                "selected packed QSA token IDs",
+                &self.token_ids,
+                GgmlType::I32,
+                vec![geometry.output_width() as u64, query_tile as u64],
+            ),
+            (
+                "selected packed QSA attention logits",
+                &self.attention_logits,
+                GgmlType::F32,
+                vec![
+                    geometry.output_width() as u64,
+                    geometry.query_heads as u64,
+                    query_tile as u64,
+                ],
+            ),
+        ] {
+            require_tensor(name, tensor, dtype, &shape, true)?;
+        }
+        Ok(())
     }
 }
 
@@ -3921,6 +4131,36 @@ mod tests {
         let score_bytes = allocations[6];
         assert_eq!(score_bytes, 2_051 * 24 * 18 * size_of::<f32>());
         assert_eq!(score_bytes - 2_048 * 24 * 18 * size_of::<f32>(), 5_184);
+
+        let maximum = QwenSparseAttentionMetalGeometry::from_config(
+            &Qwen4ExpConfig::flash_next_reference(),
+            3,
+            262_144,
+        )
+        .unwrap();
+        let selected = maximum
+            .selected_packed_scratch_logical_allocations(2_048)
+            .unwrap();
+        assert_eq!(selected.len(), 9);
+        assert_eq!(selected.iter().sum::<usize>(), 23_406_336);
+    }
+
+    #[test]
+    fn selected_packed_qsa_scratch_is_explicit_and_optional() {
+        let Some(ctx) = context() else { return };
+        let geometry = test_geometry(16);
+        let dense = QwenSparseAttentionPackedScratch::new(&ctx, geometry, 8).unwrap();
+        assert!(!dense.selected_capable());
+        let selected =
+            QwenSparseAttentionPackedScratch::new_with_selected_capability(&ctx, geometry, 8, true)
+                .unwrap();
+        assert!(selected.selected_capable());
+        selected
+            .selected
+            .as_ref()
+            .unwrap()
+            .validate(geometry, 8, 8)
+            .unwrap();
     }
 
     #[test]

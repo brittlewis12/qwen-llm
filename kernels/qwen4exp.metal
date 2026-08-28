@@ -524,8 +524,14 @@ struct qwen4exp_qsa_packed_attention_args {
 
 struct qwen4exp_qsa_selected_audit_args {
     uint query_count;
+    uint band_ordinal;
     int expected_selected_count;
     int count_mismatch_status;
+    int order_mismatch_status;
+};
+
+struct qwen4exp_qsa_selected_reset_args {
+    uint query_count;
 };
 
 static inline float qwen4exp_qsa_rope_value(
@@ -1185,6 +1191,12 @@ kernel void kernel_qwen4exp_qsa_audit_selected_i32(
         device int * audited_bands [[buffer(5)]],
         uint index [[thread_position_in_grid]]) {
     if (index != 0u || args.query_count == 0u) return;
+    if (audited_bands[0] != int(args.band_ordinal)) {
+        if (workspace_status[0] == 0) {
+            workspace_status[0] = args.order_mismatch_status;
+        }
+        return;
+    }
     int status = workspace_status[0];
     if (status == 0) {
         for (uint query = 0u; query < args.query_count; ++query) {
@@ -1205,4 +1217,16 @@ kernel void kernel_qwen4exp_qsa_audit_selected_i32(
     workspace_status[0] = status;
     workspace_selected_count[0] = selected_counts[args.query_count - 1u];
     audited_bands[0] += 1;
+}
+
+kernel void kernel_qwen4exp_qsa_reset_selected_controls_i32(
+        constant qwen4exp_qsa_selected_reset_args & args [[buffer(0)]],
+        device int * visible_blocks [[buffer(1)]],
+        device int * selected_counts [[buffer(2)]],
+        device int * selector_status [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index >= args.query_count) return;
+    visible_blocks[index] = -1;
+    selected_counts[index] = -1;
+    selector_status[index] = -1;
 }

@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Private Multi-Band Selected QSA Motor
+
+Status: qualify reusable 32-row selected bands inside the private layer motor;
+all post-PLE, session, runtime, and CLI entry points remain dense-only.
+
+- One F32 activation projection covers the complete selected suffix. Packet
+  views advance only the raw index-query window; normalized queries, selection
+  metadata, token IDs, logits, and attention scratch remain zero-based per band.
+- Band zero uses host `-1` sentinels. Every reused band first dispatches a
+  32-thread reset over exactly its visibility, count, and status rows, then runs
+  the six-kernel packet and one audit.
+- Audits now compare an explicit band ordinal before advancing. Missing,
+  duplicate, or out-of-order work sticky-writes status 5 without publishing a
+  count or incrementing the witness; native selector failures and count mismatch
+  status 4 retain their earlier precedence.
+- Mixed three-dense plus 33-selected rows qualify the `32+1` seam. Fully
+  selected 64-row execution qualifies `32+32` with the BF16-weight/F32-activation
+  index-query route. Both match chronological scalar output and persistent
+  index/K/V state.
+- Topology contains one full-suffix projection, one common cache scatter, two
+  ordered packet-plus-audit bands, one reset only before band one, no third band,
+  no scalar selected-attention kernels, and one final packed output projection.
+- Full-projection and final-band bounds validate before reservation. Malformed
+  raw windows reject with zero dispatch and unchanged controls; reset resource,
+  used-prefix overwrite, and launch geometry have focused gates.
+- This remains an internal motor proof. Next open selected ranges in post-PLE
+  all-layer preflight/composition, then qualify one complete selected chunk
+  before changing runtime chunk scheduling.
+
 ## 2026-08-27 - Flash-Next Private One-Band Selected QSA Motor
 
 Status: qualify one selected band inside a private layer motor; post-PLE,

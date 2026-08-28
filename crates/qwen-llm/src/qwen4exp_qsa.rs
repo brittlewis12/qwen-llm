@@ -40,6 +40,7 @@ const LOGITS_SIMDGROUPS_PER_TG: usize = 8;
 const PACKED_ATTENTION_HEADS_PER_TG: usize = 4;
 const PACKED_ATTENTION_THREADS: usize = 128;
 const SELECTED_COUNT_MISMATCH_STATUS: i32 = 4;
+const SELECTED_AUDIT_ORDER_MISMATCH_STATUS: i32 = 5;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 // Staged for the all-layer packed composer in the next checkpoint.
 #[allow(dead_code)]
@@ -1049,25 +1050,76 @@ impl QwenSparseAttentionSelectedPackedScratch {
         query_tile: usize,
         query_count: usize,
     ) -> Result<QwenSparseAttentionSelectedPackedViews, Qwen4ExpQsaError> {
+        self.band_views(geometry, capacity, query_tile, 0, query_count)
+    }
+
+    fn raw_query_projection_view(
+        &self,
+        geometry: QwenSparseAttentionMetalGeometry,
+        capacity: usize,
+        query_tile: usize,
+        query_count: usize,
+    ) -> Result<MetalTensor, Qwen4ExpQsaError> {
+        if query_count == 0 || query_count > capacity {
+            return invalid(format!(
+                "selected packed QSA raw-query count {query_count} exceeds capacity {capacity}"
+            ));
+        }
+        self.validate(geometry, capacity, query_tile)?;
+        let view = self.index_query_raw.view_subrange(
+            0,
+            vec![geometry.index_query_width() as u64, query_count as u64],
+        );
+        if view.n_elements() as usize != geometry.index_query_width() * query_count {
+            return invalid("selected packed QSA raw-query projection view has the wrong size");
+        }
+        Ok(view)
+    }
+
+    fn band_views(
+        &self,
+        geometry: QwenSparseAttentionMetalGeometry,
+        capacity: usize,
+        query_tile: usize,
+        raw_query_offset: usize,
+        query_count: usize,
+    ) -> Result<QwenSparseAttentionSelectedPackedViews, Qwen4ExpQsaError> {
         if query_count == 0 || query_count > capacity.min(query_tile) {
             return invalid(format!(
                 "selected packed QSA query count {query_count} exceeds capacity {capacity} or tile {query_tile}"
             ));
         }
+        let raw_query_end = raw_query_offset.checked_add(query_count).ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid("selected packed QSA raw-query band end overflow".into())
+        })?;
+        if raw_query_end > capacity {
+            return invalid(format!(
+                "selected packed QSA raw-query band {raw_query_offset}..{raw_query_end} exceeds capacity {capacity}"
+            ));
+        }
+        let raw_element_offset = raw_query_offset
+            .checked_mul(geometry.index_query_width())
+            .ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid(
+                    "selected packed QSA raw-query band offset overflow".into(),
+                )
+            })?;
         self.validate(geometry, capacity, query_tile)?;
-        let view = |name: &str, tensor: &MetalTensor, elements: usize, shape: Vec<u64>| {
-            let view = tensor.view_subrange(0, shape);
-            if view.n_elements() as usize != elements {
-                return invalid(format!(
-                    "selected packed QSA {name} view has the wrong element count"
-                ));
-            }
-            Ok(view)
-        };
+        let view =
+            |name: &str, tensor: &MetalTensor, offset: usize, elements: usize, shape: Vec<u64>| {
+                let view = tensor.view_subrange(offset as u64, shape);
+                if view.n_elements() as usize != elements {
+                    return invalid(format!(
+                        "selected packed QSA {name} view has the wrong element count"
+                    ));
+                }
+                Ok(view)
+            };
         Ok(QwenSparseAttentionSelectedPackedViews {
             index_query_raw: view(
                 "raw index query",
                 &self.index_query_raw,
+                raw_element_offset,
                 geometry.index_query_width() * query_count,
                 vec![
                     geometry.index_head_dim as u64,
@@ -1078,6 +1130,7 @@ impl QwenSparseAttentionSelectedPackedScratch {
             index_query: view(
                 "index query",
                 &self.index_query,
+                0,
                 geometry.index_query_width() * query_count,
                 vec![
                     geometry.index_head_dim as u64,
@@ -1088,42 +1141,49 @@ impl QwenSparseAttentionSelectedPackedScratch {
             scores: view(
                 "scores",
                 &self.scores,
+                0,
                 geometry.block_capacity() * query_count,
                 vec![geometry.block_capacity() as u64, query_count as u64],
             )?,
             visible_blocks: view(
                 "visible blocks",
                 &self.visible_blocks,
+                0,
                 query_count,
                 vec![query_count as u64],
             )?,
             selected_blocks: view(
                 "selected blocks",
                 &self.selected_blocks,
+                0,
                 geometry.block_budget() * query_count,
                 vec![geometry.block_budget() as u64, query_count as u64],
             )?,
             selected_count: view(
                 "selected count",
                 &self.selected_count,
+                0,
                 query_count,
                 vec![query_count as u64],
             )?,
             selector_status: view(
                 "selector status",
                 &self.selector_status,
+                0,
                 query_count,
                 vec![query_count as u64],
             )?,
             token_ids: view(
                 "token IDs",
                 &self.token_ids,
+                0,
                 geometry.output_width() * query_count,
                 vec![geometry.output_width() as u64, query_count as u64],
             )?,
             attention_logits: view(
                 "attention logits",
                 &self.attention_logits,
+                0,
                 geometry.output_width() * geometry.query_heads * query_count,
                 vec![
                     geometry.output_width() as u64,
@@ -1719,11 +1779,13 @@ fn prepare_packed_control_scalars(
         let selected = scratch.selected.as_ref().ok_or_else(|| {
             Qwen4ExpQsaError::Invalid("packed QSA selected scratch was not admitted".into())
         })?;
-        let views = selected.views(
+        let first_band_rows = plan.selected_tokens.min(scratch.query_tile);
+        let views = selected.band_views(
             workspace.geometry,
             scratch.capacity,
             scratch.query_tile,
-            plan.selected_tokens,
+            0,
+            first_band_rows,
         )?;
         fill_i32_tensor(&views.visible_blocks, -1)?;
         fill_i32_tensor(&views.selected_count, -1)?;
@@ -1806,20 +1868,14 @@ fn validate_packed_contract(
             g.output_width()
         ));
     }
-    if plan.selected_bands > 1 {
-        return invalid(format!(
-            "packed QSA selected suffix requires {} bands; this checkpoint supports one",
-            plan.selected_bands
-        ));
-    }
     if plan.selected_tokens > 0 {
         if !scratch.selected_capable() {
             return invalid("packed QSA selected suffix requires selected-capable scratch");
         }
-        if plan.selected_tokens > scratch.query_tile {
+        if scratch.query_tile == 0 || scratch.query_tile > DENSE_PACKED_QUERY_TILE {
             return invalid(format!(
-                "packed QSA selected suffix has {} rows, exceeding query tile {}",
-                plan.selected_tokens, scratch.query_tile
+                "packed QSA selected query tile {} is outside 1..={DENSE_PACKED_QUERY_TILE}",
+                scratch.query_tile
             ));
         }
     }
@@ -2011,7 +2067,7 @@ fn validate_packed_contract(
         let selected = scratch.selected.as_ref().ok_or_else(|| {
             Qwen4ExpQsaError::Invalid("packed QSA selected scratch disappeared".into())
         })?;
-        let selected_views = selected.views(
+        let raw_query_projection = selected.raw_query_projection_view(
             g,
             scratch.capacity,
             scratch.query_tile,
@@ -2085,10 +2141,55 @@ fn validate_packed_contract(
         ] {
             require_tensor(name, tensor, GgmlType::F32, &shape, writable)?;
         }
-        if selected_views.index_query_raw.n_elements() as usize
-            != g.index_query_width() * plan.selected_tokens
-        {
-            return invalid("packed QSA selected raw index-query view has the wrong size");
+        require_tensor(
+            "packed QSA selected raw index-query projection view",
+            &raw_query_projection,
+            GgmlType::F32,
+            &[g.index_query_width() as u64, plan.selected_tokens as u64],
+            true,
+        )?;
+        let mut band_offset = 0;
+        while band_offset < plan.selected_tokens {
+            let band_rows = (plan.selected_tokens - band_offset).min(scratch.query_tile);
+            selected.band_views(
+                g,
+                scratch.capacity,
+                scratch.query_tile,
+                band_offset,
+                band_rows,
+            )?;
+            let local_offset = plan
+                .selected_offset
+                .checked_add(band_offset)
+                .ok_or_else(|| {
+                    Qwen4ExpQsaError::Invalid(
+                        "packed QSA selected band local offset overflow".into(),
+                    )
+                })?;
+            for (name, width, tensor) in [
+                ("input", g.hidden_size, input),
+                ("query", g.query_width(), &views.query),
+                (
+                    "query/gate",
+                    g.query_projection_width(),
+                    &views.query_gate_projection,
+                ),
+                ("attention", g.query_width(), &views.attention),
+            ] {
+                let offset = local_offset.checked_mul(width).ok_or_else(|| {
+                    Qwen4ExpQsaError::Invalid(format!(
+                        "packed QSA selected {name} band offset overflow"
+                    ))
+                })?;
+                let band =
+                    tensor.view_subrange(offset as u64, vec![width as u64, band_rows as u64]);
+                if band.n_elements() as usize != width * band_rows {
+                    return invalid(format!(
+                        "packed QSA selected {name} band view has the wrong size"
+                    ));
+                }
+            }
+            band_offset += band_rows;
         }
     }
     Ok(plan)
@@ -2349,6 +2450,8 @@ fn preflight_selected_index_primitives(ctx: &MetalContext) -> Result<(), Qwen4Ex
 #[allow(dead_code)]
 fn preflight_selected_attention_primitives(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
     ctx.pipeline("kernel_qwen4exp_qsa_audit_selected_i32")?;
+    let reset = ctx.pipeline("kernel_qwen4exp_qsa_reset_selected_controls_i32")?;
+    validate_selected_reset_pipeline(reset.maxTotalThreadsPerThreadgroup())?;
     for (kernel, threads, dynamic_memory) in [
         (
             "kernel_qwen4exp_qsa_attention_logits_packed_f16",
@@ -2375,6 +2478,15 @@ fn preflight_selected_attention_primitives(ctx: &MetalContext) -> Result<(), Qwe
     Ok(())
 }
 
+fn validate_selected_reset_pipeline(max_threads: usize) -> Result<(), Qwen4ExpQsaError> {
+    if max_threads < 32 {
+        return invalid(format!(
+            "selected QSA reset pipeline supports {max_threads} threads, needs 32"
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn validate_selected_attention_packet(
@@ -2389,6 +2501,7 @@ fn validate_selected_attention_packet(
     attention: &MetalTensor,
     scratch: &QwenSparseAttentionPackedScratch,
     start_position: usize,
+    raw_query_offset: usize,
     query_count: usize,
 ) -> Result<(), Qwen4ExpQsaError> {
     validate_encoder(ctx, enc)?;
@@ -2414,7 +2527,13 @@ fn validate_selected_attention_packet(
     let selected = scratch.selected.as_ref().ok_or_else(|| {
         Qwen4ExpQsaError::Invalid("selected packed QSA scratch was not admitted".into())
     })?;
-    let views = selected.views(g, scratch.capacity, scratch.query_tile, query_count)?;
+    let views = selected.band_views(
+        g,
+        scratch.capacity,
+        scratch.query_tile,
+        raw_query_offset,
+        query_count,
+    )?;
     require_tensor(
         "selected packed QSA index-query norm",
         norm_weight,
@@ -2559,6 +2678,7 @@ fn encode_selected_index_primitives(
     compressed_keys: &MetalTensor,
     scratch: &QwenSparseAttentionPackedScratch,
     start_position: usize,
+    raw_query_offset: usize,
     query_count: usize,
 ) -> Result<QwenSparseAttentionSelectedPackedViews, Qwen4ExpQsaError> {
     validate_encoder(ctx, enc)?;
@@ -2572,7 +2692,13 @@ fn encode_selected_index_primitives(
     let selected = scratch.selected.as_ref().ok_or_else(|| {
         Qwen4ExpQsaError::Invalid("selected packed QSA scratch was not admitted".into())
     })?;
-    let views = selected.views(g, scratch.capacity, scratch.query_tile, query_count)?;
+    let views = selected.band_views(
+        g,
+        scratch.capacity,
+        scratch.query_tile,
+        raw_query_offset,
+        query_count,
+    )?;
     require_tensor(
         "selected packed QSA index-query norm",
         norm_weight,
@@ -2698,6 +2824,7 @@ fn encode_selected_attention_packet(
     attention: &MetalTensor,
     scratch: &QwenSparseAttentionPackedScratch,
     start_position: usize,
+    raw_query_offset: usize,
     query_count: usize,
 ) -> Result<QwenSparseAttentionSelectedPackedViews, Qwen4ExpQsaError> {
     validate_selected_attention_packet(
@@ -2712,6 +2839,7 @@ fn encode_selected_attention_packet(
         attention,
         scratch,
         start_position,
+        raw_query_offset,
         query_count,
     )?;
     let views = encode_selected_index_primitives(
@@ -2721,6 +2849,7 @@ fn encode_selected_attention_packet(
         compressed_keys,
         scratch,
         start_position,
+        raw_query_offset,
         query_count,
     )?;
     encode_attention_logits_packed(
@@ -3000,23 +3129,25 @@ fn encode_packed_step(
         let selected = scratch.selected.as_ref().ok_or_else(|| {
             Qwen4ExpQsaError::Invalid("packed QSA selected scratch was not admitted".into())
         })?;
-        let selected_views = selected.views(
+        let selected_raw_query = selected.raw_query_projection_view(
             g,
             scratch.capacity,
             scratch.query_tile,
             plan.selected_tokens,
         )?;
-        let input_offset = plan.selected_offset * g.hidden_size;
-        let query_offset = plan.selected_offset * g.query_width();
-        let projected_offset = plan.selected_offset * g.query_projection_width();
+        let input_offset = plan
+            .selected_offset
+            .checked_mul(g.hidden_size)
+            .ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("packed QSA selected input offset overflow".into())
+            })?;
         let selected_input = input.view_subrange(
             input_offset as u64,
             vec![g.hidden_size as u64, plan.selected_tokens as u64],
         );
-        let selected_raw_query = selected_views.index_query_raw.view_subrange(
-            0,
-            vec![g.index_query_width() as u64, plan.selected_tokens as u64],
-        );
+        let projection_tag = crate::metal::dispatch_census_tag_scope(|| {
+            "qwen4exp.qsa.selected_index_projection".into()
+        });
         if weights.index_query.dtype == GgmlType::BF16 {
             encode_mat_mat_bf16_f32(
                 ctx,
@@ -3040,46 +3171,93 @@ fn encode_packed_step(
                 plan.selected_tokens,
             )?;
         }
-        let selected_query = views.query.view_subrange(
-            query_offset as u64,
-            vec![g.query_width() as u64, plan.selected_tokens as u64],
-        );
-        let selected_query_gate = views.query_gate_projection.view_subrange(
-            projected_offset as u64,
-            vec![
-                g.query_projection_width() as u64,
-                plan.selected_tokens as u64,
-            ],
-        );
-        let selected_attention = views.attention.view_subrange(
-            query_offset as u64,
-            vec![g.query_width() as u64, plan.selected_tokens as u64],
-        );
-        let packet = encode_selected_attention_packet(
-            ctx,
-            enc,
-            weights.index_query_norm,
-            &workspace.compressed_index_keys,
-            &selected_query,
-            &selected_query_gate,
-            &workspace.key_cache,
-            &workspace.value_cache,
-            &selected_attention,
-            scratch,
-            start_position + plan.selected_offset,
-            plan.selected_tokens,
-        )?;
-        encode_selected_audit(
-            ctx,
-            enc,
-            &packet.selected_count,
-            &packet.selector_status,
-            &workspace.selected_count,
-            &workspace.selector_status,
-            &workspace.visible_blocks,
-            plan.selected_tokens,
-            g.block_budget(),
-        )?;
+        drop(projection_tag);
+
+        let mut band_offset = 0;
+        let mut band_ordinal = 0;
+        while band_offset < plan.selected_tokens {
+            let band_rows = (plan.selected_tokens - band_offset).min(scratch.query_tile);
+            let band_views = selected.band_views(
+                g,
+                scratch.capacity,
+                scratch.query_tile,
+                band_offset,
+                band_rows,
+            )?;
+            let local_offset = plan
+                .selected_offset
+                .checked_add(band_offset)
+                .ok_or_else(|| {
+                    Qwen4ExpQsaError::Invalid(
+                        "packed QSA selected band local offset overflow".into(),
+                    )
+                })?;
+            let query_offset = local_offset.checked_mul(g.query_width()).ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("packed QSA selected query offset overflow".into())
+            })?;
+            let projected_offset = local_offset
+                .checked_mul(g.query_projection_width())
+                .ok_or_else(|| {
+                    Qwen4ExpQsaError::Invalid(
+                        "packed QSA selected query/gate offset overflow".into(),
+                    )
+                })?;
+            let selected_query = views.query.view_subrange(
+                query_offset as u64,
+                vec![g.query_width() as u64, band_rows as u64],
+            );
+            let selected_query_gate = views.query_gate_projection.view_subrange(
+                projected_offset as u64,
+                vec![g.query_projection_width() as u64, band_rows as u64],
+            );
+            let selected_attention = views.attention.view_subrange(
+                query_offset as u64,
+                vec![g.query_width() as u64, band_rows as u64],
+            );
+            let band_tag = crate::metal::dispatch_census_tag_scope(|| {
+                format!("qwen4exp.qsa.selected_band.{band_ordinal}")
+            });
+            if band_ordinal > 0 {
+                encode_selected_control_reset(
+                    ctx,
+                    enc,
+                    &band_views.visible_blocks,
+                    &band_views.selected_count,
+                    &band_views.selector_status,
+                    band_rows,
+                )?;
+            }
+            let packet = encode_selected_attention_packet(
+                ctx,
+                enc,
+                weights.index_query_norm,
+                &workspace.compressed_index_keys,
+                &selected_query,
+                &selected_query_gate,
+                &workspace.key_cache,
+                &workspace.value_cache,
+                &selected_attention,
+                scratch,
+                start_position + local_offset,
+                band_offset,
+                band_rows,
+            )?;
+            encode_selected_audit(
+                ctx,
+                enc,
+                &packet.selected_count,
+                &packet.selector_status,
+                &workspace.selected_count,
+                &workspace.selector_status,
+                &workspace.visible_blocks,
+                band_rows,
+                g.block_budget(),
+                band_ordinal,
+            )?;
+            drop(band_tag);
+            band_offset += band_rows;
+            band_ordinal += 1;
+        }
     }
     end_optional(&mut profile, enc, marker)?;
     if plan.dense_tokens > 0 {
@@ -3113,6 +3291,8 @@ fn encode_packed_step(
         enc,
         Qwen4ExpPackedProfileLabel::detail("qsa.output", layer, MixerKind::QwenSparseAttention),
     )?;
+    let output_tag =
+        crate::metal::dispatch_census_tag_scope(|| "qwen4exp.qsa.output_projection".into());
     encode_mat_mat_dispatch(
         ctx,
         enc,
@@ -3123,6 +3303,7 @@ fn encode_packed_step(
         g.hidden_size,
         tokens,
     )?;
+    drop(output_tag);
     end_optional(&mut profile, enc, marker)?;
     Ok(())
 }
@@ -4301,8 +4482,16 @@ struct PackedAttentionArgs {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SelectedAuditArgs {
     query_count: u32,
+    band_ordinal: u32,
     expected_selected_count: i32,
     count_mismatch_status: i32,
+    order_mismatch_status: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SelectedResetArgs {
+    query_count: u32,
 }
 
 fn attention_args(g: QwenSparseAttentionMetalGeometry, id_count: usize) -> AttentionArgs {
@@ -4544,6 +4733,7 @@ fn encode_selected_audit(
     audited_bands: &MetalTensor,
     query_count: usize,
     expected_selected_count: usize,
+    band_ordinal: usize,
 ) -> Result<(), MetalError> {
     let pso = ctx.pipeline("kernel_qwen4exp_qsa_audit_selected_i32")?;
     enc.set_pipeline(&pso);
@@ -4551,8 +4741,10 @@ fn encode_selected_audit(
         0,
         &SelectedAuditArgs {
             query_count: query_count as u32,
+            band_ordinal: band_ordinal as u32,
             expected_selected_count: expected_selected_count as i32,
             count_mismatch_status: SELECTED_COUNT_MISMATCH_STATUS,
+            order_mismatch_status: SELECTED_AUDIT_ORDER_MISMATCH_STATUS,
         },
     );
     enc.set_tensor(1, selected_count);
@@ -4568,6 +4760,41 @@ fn encode_selected_audit(
         },
         MTLSize {
             width: 1,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn encode_selected_control_reset(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    visible_blocks: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    query_count: usize,
+) -> Result<(), MetalError> {
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_reset_selected_controls_i32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &SelectedResetArgs {
+            query_count: query_count as u32,
+        },
+    );
+    enc.set_tensor(1, visible_blocks);
+    enc.set_tensor(2, selected_count);
+    enc.set_tensor(3, selector_status);
+    enc.dispatch(
+        MTLSize {
+            width: query_count.div_ceil(32),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
             height: 1,
             depth: 1,
         },
@@ -4922,6 +5149,16 @@ mod tests {
         config.context_length = 128;
         config.hidden_size = 16;
         config.qsa.token_budget = 32;
+        config.ple = None;
+        config.validate().unwrap();
+        QwenSparseAttentionMetalGeometry::from_config(&config, 3, capacity).unwrap()
+    }
+
+    fn selected_multi_band_test_geometry(capacity: usize) -> QwenSparseAttentionMetalGeometry {
+        let mut config = Qwen4ExpConfig::flash_next_reference();
+        config.context_length = 192;
+        config.hidden_size = 16;
+        config.qsa.token_budget = 64;
         config.ple = None;
         config.validate().unwrap();
         QwenSparseAttentionMetalGeometry::from_config(&config, 3, capacity).unwrap()
@@ -5850,6 +6087,51 @@ mod tests {
     }
 
     #[test]
+    fn selected_packed_qsa_band_views_advance_only_raw_queries() {
+        const CAPACITY: usize = 64;
+        let Some(ctx) = context() else { return };
+        let geometry = selected_multi_band_test_geometry(160);
+        let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            &ctx, geometry, CAPACITY, true,
+        )
+        .unwrap();
+        let selected = scratch.selected.as_ref().unwrap();
+        let raw = values(geometry.index_query_width() * CAPACITY, 2_299, 0.002_1);
+        write_f32_tensor(&selected.index_query_raw, &raw);
+        let first = selected.band_views(geometry, CAPACITY, 32, 0, 32).unwrap();
+        let second = selected.band_views(geometry, CAPACITY, 32, 32, 32).unwrap();
+        assert_eq!(
+            read_f32(&second.index_query_raw)[0],
+            raw[32 * geometry.index_query_width()]
+        );
+        assert_eq!(
+            second.index_query_raw.offset,
+            first.index_query_raw.offset
+                + (32 * geometry.index_query_width() * size_of::<f32>()) as u64
+        );
+        for (first, second) in [
+            (&first.index_query, &second.index_query),
+            (&first.scores, &second.scores),
+            (&first.visible_blocks, &second.visible_blocks),
+            (&first.selected_blocks, &second.selected_blocks),
+            (&first.selected_count, &second.selected_count),
+            (&first.selector_status, &second.selector_status),
+            (&first.token_ids, &second.token_ids),
+            (&first.attention_logits, &second.attention_logits),
+        ] {
+            assert_eq!(first.offset, second.offset);
+        }
+        assert_eq!(
+            selected
+                .raw_query_projection_view(geometry, CAPACITY, 32, CAPACITY)
+                .unwrap()
+                .shape,
+            [geometry.index_query_width() as u64, CAPACITY as u64]
+        );
+        assert!(selected.band_views(geometry, CAPACITY, 32, 63, 2).is_err());
+    }
+
+    #[test]
     fn selected_index_primitives_match_repeated_scalar_kernels() {
         const CAPACITY: usize = 8;
         const QUERIES: usize = 5;
@@ -5926,6 +6208,7 @@ mod tests {
             &compressed_keys,
             &scratch,
             start_position,
+            0,
             QUERIES,
         )
         .unwrap();
@@ -6174,6 +6457,7 @@ mod tests {
             &fixture.compressed_keys,
             &fixture.scratch,
             start_position,
+            0,
             QUERIES,
         )
         .unwrap();
@@ -6307,6 +6591,7 @@ mod tests {
                     &packed.attention,
                     &fixture.scratch,
                     start_position,
+                    0,
                     query_count,
                 )
                 .unwrap();
@@ -6440,6 +6725,7 @@ mod tests {
                 &packed.query,
                 &fixture.scratch,
                 start_position,
+                0,
                 QUERIES,
             )
             .map(|_| ())
@@ -6457,6 +6743,7 @@ mod tests {
                 &packed.attention,
                 &fixture.scratch,
                 start_position - 1,
+                0,
                 QUERIES,
             )
             .map(|_| ())
@@ -6477,6 +6764,7 @@ mod tests {
                 &packed.attention,
                 &fixture.scratch,
                 start_position,
+                0,
                 QUERIES,
             )
             .map(|_| ())
@@ -6496,10 +6784,50 @@ mod tests {
                 &dense.attention,
                 &dense_scratch,
                 start_position,
+                0,
                 QUERIES,
             )
             .map(|_| ())
         });
+        let controls_before = fixture
+            .scratch
+            .selected
+            .as_ref()
+            .map(|selected| {
+                (
+                    read_i32(&selected.visible_blocks),
+                    read_i32(&selected.selected_count),
+                    read_i32(&selected.selector_status),
+                )
+            })
+            .unwrap();
+        assert_qsa_rejected_without_dispatch(&ctx, "raw-query band overflow", |encoder| {
+            encode_selected_attention_packet(
+                &ctx,
+                encoder,
+                &fixture.index_query_norm,
+                &fixture.compressed_keys,
+                &packed.query,
+                &packed.query_gate_projection,
+                &fixture.key_cache,
+                &fixture.value_cache,
+                &packed.attention,
+                &fixture.scratch,
+                start_position,
+                fixture.scratch.capacity - 1,
+                QUERIES,
+            )
+            .map(|_| ())
+        });
+        let selected = fixture.scratch.selected.as_ref().unwrap();
+        assert_eq!(
+            (
+                read_i32(&selected.visible_blocks),
+                read_i32(&selected.selected_count),
+                read_i32(&selected.selector_status),
+            ),
+            controls_before
+        );
 
         assert!(
             validate_cooperative_pipeline_threads(
@@ -6525,6 +6853,7 @@ mod tests {
             )
             .is_err()
         );
+        assert!(validate_selected_reset_pipeline(31).is_err());
     }
 
     #[test]
@@ -6874,52 +7203,163 @@ mod tests {
     }
 
     #[test]
-    fn selected_packed_motor_rejects_a_second_band_before_dispatch() {
-        const TOKENS: usize = 33;
+    fn selected_packed_motor_reuses_two_bands_in_order() {
+        const TOTAL_TOKENS: usize = 131;
         let Some(ctx) = context() else { return };
-        let geometry = packed_test_geometry(128);
-        let weights = test_weights(&ctx, geometry);
-        let start_position = geometry.output_width();
-        let input = MetalTensor::from_bytes(
-            &ctx,
-            bytemuck::cast_slice(&values(geometry.hidden_size * TOKENS, 2_317, 0.002_3)),
-            vec![geometry.hidden_size as u64, TOKENS as u64],
-            GgmlType::F32,
-        )
-        .unwrap();
-        let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
-            &ctx, geometry, TOKENS, true,
-        )
-        .unwrap();
-        let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
-        workspace.committed_length = start_position;
-        crate::metal::dispatch_census_begin();
-        let command = ctx.queue.commandBuffer().unwrap();
-        let encoder = KernelEncoder::begin(&command);
-        let error = match unsafe {
-            encode_qwen_sparse_attention_text_packed_motor(
+        let geometry = selected_multi_band_test_geometry(160);
+        assert_eq!(geometry.output_width(), 67);
+        let inputs = values(TOTAL_TOKENS * geometry.hidden_size, 2_317, 0.002_3);
+
+        let run_case = |weights: &TestWeights,
+                        start_position: usize,
+                        tokens: usize,
+                        expected_dense: bool,
+                        expected_projection: &str| {
+            let serial_end = (start_position + tokens) * geometry.hidden_size;
+            let serial = serial_dense_trace(
                 &ctx,
-                &encoder,
-                &input,
-                weights.borrowed(),
+                weights,
+                &inputs[..serial_end],
+                start_position + tokens,
+            );
+            let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+            for token in 0..start_position {
+                let offset = token * geometry.hidden_size;
+                encode_one(
+                    &ctx,
+                    weights,
+                    &mut workspace,
+                    &inputs[offset..offset + geometry.hidden_size],
+                );
+            }
+            let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+                &ctx, geometry, tokens, true,
+            )
+            .unwrap();
+            let input_start = start_position * geometry.hidden_size;
+            let input_end = (start_position + tokens) * geometry.hidden_size;
+            let (actual, census) = encode_selected_packed_chunk(
+                &ctx,
+                weights,
                 &mut workspace,
                 &scratch,
+                &inputs[input_start..input_end],
                 start_position,
-                TOKENS,
-            )
-        } {
-            Ok(_) => panic!("two selected bands were accepted"),
-            Err(error) => error,
+                tokens,
+            );
+            assert_similarity(
+                &format!("selected packed QSA two-band start={start_position}"),
+                &actual,
+                &serial.outputs[input_start..input_end],
+                1e-3,
+                0.999999,
+                1e-5,
+            );
+            assert_dense_state_matches(
+                &format!("selected packed QSA two-band start={start_position}"),
+                &workspace,
+                &serial.states[start_position + tokens - 1],
+            );
+            assert_eq!(read_i32_scalar(&workspace.visible_blocks).unwrap(), 2);
+
+            let projection = census
+                .iter()
+                .filter(|row| row.tag.as_deref() == Some("qwen4exp.qsa.selected_index_projection"))
+                .collect::<Vec<_>>();
+            assert_eq!(projection.len(), 1);
+            assert_eq!(projection[0].kernel, expected_projection);
+            assert_eq!(
+                census
+                    .iter()
+                    .filter(|row| { row.tag.as_deref() == Some("qwen4exp.qsa.output_projection") })
+                    .count(),
+                1
+            );
+            let packet = [
+                "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+                "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
+                "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+                "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+                "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+                "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                "kernel_qwen4exp_qsa_audit_selected_i32",
+            ];
+            for ordinal in 0..2 {
+                let tag = format!("qwen4exp.qsa.selected_band.{ordinal}");
+                let names = census
+                    .iter()
+                    .filter(|row| row.tag.as_deref() == Some(tag.as_str()))
+                    .map(|row| row.kernel.as_str())
+                    .collect::<Vec<_>>();
+                if ordinal == 0 {
+                    assert_eq!(names, packet);
+                } else {
+                    let mut expected = vec!["kernel_qwen4exp_qsa_reset_selected_controls_i32"];
+                    expected.extend(packet);
+                    assert_eq!(names, expected);
+                }
+            }
+            assert!(
+                !census
+                    .iter()
+                    .any(|row| { row.tag.as_deref() == Some("qwen4exp.qsa.selected_band.2") })
+            );
+            let names = census
+                .iter()
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|&&name| name == "kernel_scatter_offset_f32_to_f16_kv")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|&&name| name == "kernel_qwen4exp_qsa_audit_selected_i32")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|&&name| { name == "kernel_qwen4exp_qsa_reset_selected_controls_i32" })
+                    .count(),
+                1
+            );
+            assert_eq!(
+                names
+                    .iter()
+                    .any(|&name| name == "kernel_sigmoid_mul_gate_strided_f32"),
+                expected_dense
+            );
+            assert!(!names.contains(&"kernel_qwen4exp_qsa_attention_logits_f16"));
+            assert!(!names.contains(&"kernel_qwen4exp_qsa_attention_softmax_value_f16"));
         };
-        let census = crate::metal::dispatch_census_take();
-        encoder.end();
-        assert!(error.to_string().contains("supports one"));
-        assert!(census.is_empty());
-        assert_eq!(command.status(), MTLCommandBufferStatus::NotEnqueued);
-        assert!(workspace.active_command.is_none());
-        assert!(workspace.pending_length.is_none());
-        assert!(workspace.pending_selected_bands.is_none());
-        assert!(!workspace.is_poisoned());
+
+        let weights = test_weights(&ctx, geometry);
+        run_case(&weights, 64, 36, true, "kernel_mat_mat_f32_f32");
+
+        let mut bf16_weights = test_weights(&ctx, geometry);
+        bf16_weights.index_query = bf16_weight(
+            &ctx,
+            &read_f32(&bf16_weights.index_query),
+            vec![
+                geometry.hidden_size as u64,
+                geometry.index_query_width() as u64,
+            ],
+        );
+        crate::metal_forward::with_matmat_bf16_bfloat_act_override(true, || {
+            run_case(
+                &bf16_weights,
+                geometry.output_width(),
+                64,
+                false,
+                "kernel_mat_mat_bf16_f32",
+            )
+        });
     }
 
     #[test]
@@ -7079,14 +7519,14 @@ mod tests {
     fn selected_audit_preserves_native_failures_and_detects_stale_rows() {
         const QUERIES: usize = 4;
         let Some(ctx) = context() else { return };
-        assert_eq!(size_of::<SelectedAuditArgs>(), 12);
+        assert_eq!(size_of::<SelectedAuditArgs>(), 20);
         let counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
         let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
         let workspace_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
         let workspace_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
         let audited = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
 
-        let run = |counts_values: &[i32], status_values: &[i32]| {
+        let run = |counts_values: &[i32], status_values: &[i32], band_ordinal: usize| {
             write_i32_tensor(&counts, counts_values);
             write_i32_tensor(&status, status_values);
             crate::metal::dispatch_census_begin();
@@ -7102,6 +7542,7 @@ mod tests {
                 &audited,
                 QUERIES,
                 2,
+                band_ordinal,
             )
             .unwrap();
             let census = crate::metal::dispatch_census_take();
@@ -7122,17 +7563,17 @@ mod tests {
             );
         };
 
-        run(&[2, 1, 2, 2], &[0, 7, 0, 0]);
+        run(&[2, 1, 2, 2], &[0, 7, 0, 0], 0);
         assert_eq!(read_i32_scalar(&workspace_status).unwrap(), 7);
         assert_eq!(read_i32_scalar(&workspace_count).unwrap(), 2);
         assert_eq!(read_i32_scalar(&audited).unwrap(), 1);
-        run(&[2, 2, 2, 2], &[0, 0, 0, 0]);
+        run(&[2, 2, 2, 2], &[0, 0, 0, 0], 1);
         assert_eq!(read_i32_scalar(&workspace_status).unwrap(), 7);
         assert_eq!(read_i32_scalar(&audited).unwrap(), 2);
 
         write_i32_scalar(&workspace_status, 0).unwrap();
         write_i32_scalar(&audited, 0).unwrap();
-        run(&[2, 1, 2, 2], &[0, 0, 0, 0]);
+        run(&[2, 1, 2, 2], &[0, 0, 0, 0], 0);
         assert_eq!(
             read_i32_scalar(&workspace_status).unwrap(),
             SELECTED_COUNT_MISMATCH_STATUS
@@ -7141,9 +7582,73 @@ mod tests {
 
         write_i32_scalar(&workspace_status, 0).unwrap();
         write_i32_scalar(&audited, 0).unwrap();
-        run(&[2, 2, 2, 2], &[-1, 0, 0, 0]);
+        run(&[2, 2, 2, 2], &[-1, 0, 0, 0], 0);
         assert_eq!(read_i32_scalar(&workspace_status).unwrap(), -1);
         assert_eq!(read_i32_scalar(&audited).unwrap(), 1);
+
+        write_i32_scalar(&workspace_status, 0).unwrap();
+        write_i32_scalar(&workspace_count, -1).unwrap();
+        write_i32_scalar(&audited, 0).unwrap();
+        run(&[2, 2, 2, 2], &[0, 0, 0, 0], 1);
+        assert_eq!(
+            read_i32_scalar(&workspace_status).unwrap(),
+            SELECTED_AUDIT_ORDER_MISMATCH_STATUS
+        );
+        assert_eq!(read_i32_scalar(&workspace_count).unwrap(), -1);
+        assert_eq!(read_i32_scalar(&audited).unwrap(), 0);
+
+        write_i32_scalar(&workspace_status, 0).unwrap();
+        write_i32_scalar(&workspace_count, -1).unwrap();
+        write_i32_scalar(&audited, 0).unwrap();
+        run(&[2, 2, 2, 2], &[0, 0, 0, 0], 0);
+        run(&[2, 2, 2, 2], &[0, 0, 0, 0], 0);
+        assert_eq!(
+            read_i32_scalar(&workspace_status).unwrap(),
+            SELECTED_AUDIT_ORDER_MISMATCH_STATUS
+        );
+        assert_eq!(read_i32_scalar(&workspace_count).unwrap(), 2);
+        assert_eq!(read_i32_scalar(&audited).unwrap(), 1);
+    }
+
+    #[test]
+    fn selected_control_reset_clears_only_the_reused_band() {
+        const CAPACITY: usize = 32;
+        const USED: usize = 17;
+        let Some(ctx) = context() else { return };
+        let visible = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64]).unwrap();
+        let counts = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64]).unwrap();
+        for tensor in [&visible, &counts, &status] {
+            write_i32_tensor(tensor, &vec![7; CAPACITY]);
+        }
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_selected_control_reset(&ctx, &encoder, &visible, &counts, &status, USED).unwrap();
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        for tensor in [&visible, &counts, &status] {
+            let values = read_i32(tensor);
+            assert!(values[..USED].iter().all(|&value| value == -1));
+            assert!(values[USED..].iter().all(|&value| value == 7));
+        }
+        assert_eq!(census.len(), 1);
+        assert_eq!(
+            census[0].kernel,
+            "kernel_qwen4exp_qsa_reset_selected_controls_i32"
+        );
+        assert_eq!(
+            (
+                census[0].grid_width,
+                census[0].threads_width,
+                census[0].grid_tgs,
+                census[0].tg_threads,
+            ),
+            (1, 32, 1, 32)
+        );
     }
 
     #[test]

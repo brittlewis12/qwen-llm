@@ -283,10 +283,13 @@ publication and completion auditing now compose one selected band inside a
 private layer motor. Mixed three-dense/one-selected and fully selected rows
 match scalar output and persistent state; B=32 preserves the released BF16
 index-query/F32-activation route. Sticky audit witnesses prevent stale, missing,
-or failed rows from publishing committed length. The outer dense motor,
-post-PLE composition, session, and production selected route remain closed
-until multi-band scratch reuse is qualified. Released N=2,048 measures
-457.229 tok/s wall, and four scalar
+or failed rows from publishing committed length. Multi-band reuse is now also
+closed internally: mixed `32+1` and fully selected `32+32` bands use one
+full-suffix projection, band-relative raw-query views, one reset per reused
+band, and ordered audits that cannot trade a duplicate for missing work. The
+outer dense motor, post-PLE composition, session, and production selected route
+remain closed until one complete all-layer selected chunk is qualified.
+Released N=2,048 measures 457.229 tok/s wall, and four scalar
 continuations cross into QSA selection at length 2,052 with all state bindings
 and 12 cache lengths intact. Runtime and CLI promotion is now closed. Unprofiled
 prompts of two or more tokens request packed execution; scratch admission

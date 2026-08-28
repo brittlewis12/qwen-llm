@@ -233,7 +233,10 @@ struct ValidatedFixtures {
 }
 
 fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 
 fn token_domain(fixture_id: &str, role: &str, count: usize) -> String {

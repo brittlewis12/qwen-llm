@@ -1610,9 +1610,8 @@ impl ResearchSession<'_, '_> {
     }
 
     /// Apply a query-major bank of target-layer cotangent trajectories while
-    /// sharing dense-FFN and full-attention primal replay. GDN mixer reverse
-    /// passes are currently isolated per query. Returned values use
-    /// `[K,Q,T,H]` order.
+    /// sharing each block's dense-FFN and mixer primal replay. Returned values
+    /// use `[K,Q,T,H]` order.
     pub fn workspace_vjp_batch(
         &self,
         forward: &ResearchWorkspaceForward,
@@ -2204,50 +2203,48 @@ impl ResearchSession<'_, '_> {
             },
         )?;
 
-        let mut grad_mixer_input = Vec::with_capacity(query_elements);
-        let mut residual_replay_max_abs_error = 0.0f32;
-        let kind = match block {
+        let (grad_mixer_input, residual_replay_max_abs_error, kind) = match block {
             MetalBlock::Gdn(block) => {
                 let geometry = GdnGeometry::new(layer, arch)?;
                 validate_gdn_weights(layer, block, geometry)?;
                 let initial_conv_state = vec![0.0f32; geometry.conv_state_elements];
                 let initial_recurrence_state = vec![0.0f32; geometry.state_elements];
-                for grad_query in grad_post_mixer.chunks_exact(hidden_elements) {
-                    let replay = gdn_mixer_replay_vjp_readback(
-                        self.model.context(),
-                        geometry,
-                        GdnMixerWeights::from(block),
-                        input_residuals,
-                        &initial_conv_state,
-                        &initial_recurrence_state,
-                        grad_query,
-                        n_tokens,
-                        match rule {
-                            WorkspaceLensRule::Jacobian => GdnMixerVjpRule::Jacobian,
-                            WorkspaceLensRule::Relp => GdnMixerVjpRule::Relp,
-                        },
-                        false,
-                    )?;
-                    residual_replay_max_abs_error = residual_replay_max_abs_error.max(
-                        input_residuals
-                            .iter()
-                            .zip(&replay.mixer_outputs)
-                            .zip(post_mixer_residuals)
-                            .map(|((&input, &mixer), &observed)| {
-                                finite_abs_difference(input + mixer, observed)
-                            })
-                            .fold(0.0f32, f32::max),
-                    );
-                    if replay.grad_input.len() != hidden_elements {
-                        return Err(ResearchError::ActivationSize {
-                            name: "workspace GDN mixer branch cotangent",
-                            got: replay.grad_input.len(),
-                            expected: hidden_elements,
-                        });
-                    }
-                    grad_mixer_input.extend(replay.grad_input);
+                let replay = gdn_mixer_replay_vjp_batch_readback(
+                    self.model.context(),
+                    geometry,
+                    GdnMixerWeights::from(block),
+                    input_residuals,
+                    &initial_conv_state,
+                    &initial_recurrence_state,
+                    &grad_post_mixer,
+                    n_tokens,
+                    n_query,
+                    match rule {
+                        WorkspaceLensRule::Jacobian => GdnMixerVjpRule::Jacobian,
+                        WorkspaceLensRule::Relp => GdnMixerVjpRule::Relp,
+                    },
+                    false,
+                )?;
+                let residual_replay_max_abs_error = input_residuals
+                    .iter()
+                    .zip(&replay.mixer_outputs)
+                    .zip(post_mixer_residuals)
+                    .map(|((&input, &mixer), &observed)| {
+                        finite_abs_difference(input + mixer, observed)
+                    })
+                    .fold(0.0f32, f32::max);
+                if replay.grad_input.len() != query_elements {
+                    return Err(ResearchError::ActivationSize {
+                        name: "workspace GDN mixer branch cotangent query bank",
+                        got: replay.grad_input.len(),
+                        expected: query_elements,
+                    });
                 }
-                ResearchWorkspaceBlockKind::Gdn
+                (
+                    replay.grad_input,
+                    residual_replay_max_abs_error,
+                    ResearchWorkspaceBlockKind::Gdn,
+                )
             }
             MetalBlock::Attn(block) => {
                 let geometry = AttnGeometry::new(arch)?;
@@ -2265,7 +2262,7 @@ impl ResearchSession<'_, '_> {
                         WorkspaceLensRule::Relp => AttnBlockVjpRule::Relp,
                     },
                 )?;
-                residual_replay_max_abs_error = input_residuals
+                let residual_replay_max_abs_error = input_residuals
                     .iter()
                     .zip(&replay.mixer_outputs)
                     .zip(post_mixer_residuals)
@@ -2280,8 +2277,11 @@ impl ResearchSession<'_, '_> {
                         expected: query_elements,
                     });
                 }
-                grad_mixer_input = replay.grad_input;
-                ResearchWorkspaceBlockKind::Attention
+                (
+                    replay.grad_input,
+                    residual_replay_max_abs_error,
+                    ResearchWorkspaceBlockKind::Attention,
+                )
             }
         };
         if grad_mixer_input.len() != query_elements {
@@ -4308,6 +4308,389 @@ fn gdn_mixer_replay_vjp_readback(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn gdn_mixer_replay_vjp_batch_readback(
+    context: &MetalContext,
+    geometry: GdnGeometry,
+    weights: GdnMixerWeights<'_>,
+    input: &[f32],
+    initial_conv_state: &[f32],
+    initial_recurrence_state: &[f32],
+    grad_mixer_outputs: &[f32],
+    n_tokens: usize,
+    n_query: usize,
+    rule: GdnMixerVjpRule,
+    read_state_diagnostics: bool,
+) -> Result<GdnReplayVjpReadback, ResearchError> {
+    if n_tokens == 0 || n_tokens > MAX_RESEARCH_GDN_TOKENS {
+        return Err(ResearchError::GdnPromptTooLong {
+            got: n_tokens,
+            max: MAX_RESEARCH_GDN_TOKENS,
+        });
+    }
+    if n_query == 0 {
+        return Err(ResearchError::EmptyQueryBatch);
+    }
+    if n_query > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
+        return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+            got: n_query,
+            max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+        });
+    }
+    let hidden_elements = checked_product(n_tokens, geometry.hidden_size)?;
+    let qkv_elements = checked_product(n_tokens, geometry.conv_dim)?;
+    let qk_elements = checked_product(n_tokens, geometry.qk_elements)?;
+    let v_elements = checked_product(n_tokens, geometry.v_elements)?;
+    let scalar_elements = checked_product(n_tokens, geometry.n_v_heads)?;
+    let query_rows = checked_product(n_query, n_tokens)?;
+    let hidden_query_elements = checked_product(n_query, hidden_elements)?;
+    let qkv_query_elements = checked_product(n_query, qkv_elements)?;
+    let qk_query_elements = checked_product(n_query, qk_elements)?;
+    let v_query_elements = checked_product(n_query, v_elements)?;
+    let scalar_query_elements = checked_product(n_query, scalar_elements)?;
+    let state_query_elements = checked_product(n_query, geometry.state_elements)?;
+    let conv_state_query_elements = checked_product(n_query, geometry.conv_state_elements)?;
+    if grad_mixer_outputs.len() != hidden_query_elements {
+        return Err(ResearchError::ActivationSize {
+            name: "GDN mixer cotangent query bank",
+            got: grad_mixer_outputs.len(),
+            expected: hidden_query_elements,
+        });
+    }
+    let replay = GdnReplayTensors::new(
+        context,
+        geometry,
+        input,
+        initial_conv_state,
+        initial_recurrence_state,
+        n_tokens,
+    )?;
+    let grad_mixer = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(grad_mixer_outputs),
+        row_shape(geometry.hidden_size, query_rows)?,
+        GgmlType::F32,
+    )?;
+    let grad_normed = MetalTensor::zeros_f32(context, row_shape(geometry.v_elements, query_rows)?)?;
+    let grad_recurrence_output = flat_f32(context, v_query_elements)?;
+    let grad_z = flat_f32(context, v_query_elements)?;
+    let grad_q = flat_f32(context, qk_query_elements)?;
+    let grad_k = flat_f32(context, qk_query_elements)?;
+    let grad_v = flat_f32(context, v_query_elements)?;
+    let grad_decay = flat_f32(context, scalar_query_elements)?;
+    let grad_beta = flat_f32(context, scalar_query_elements)?;
+    let zero_final_recurrence_state = flat_f32(context, geometry.state_elements)?;
+    let grad_initial_recurrence_state = flat_f32(context, state_query_elements)?;
+    let recurrence_state_scratch_a = flat_f32(context, state_query_elements)?;
+    let recurrence_state_scratch_b = flat_f32(context, state_query_elements)?;
+    let correction_scratch = flat_f32(context, v_query_elements)?;
+    let residual_scratch = flat_f32(context, v_query_elements)?;
+    let grad_q_raw = flat_f32(context, qk_query_elements)?;
+    let grad_k_raw = flat_f32(context, qk_query_elements)?;
+    let grad_qkv = flat_f32(context, qkv_query_elements)?;
+    let zero_final_conv_state = flat_f32(context, geometry.conv_state_elements)?;
+    let grad_initial_conv_state = flat_f32(context, conv_state_query_elements)?;
+    let conv_state_scratch_a = flat_f32(context, conv_state_query_elements)?;
+    let conv_state_scratch_b = flat_f32(context, conv_state_query_elements)?;
+    let grad_alpha_source = flat_f32(context, scalar_query_elements)?;
+    let grad_beta_source = flat_f32(context, scalar_query_elements)?;
+    let hidden_shape = row_shape(geometry.hidden_size, n_tokens)?;
+    let hidden_query_shape = row_shape(geometry.hidden_size, query_rows)?;
+    let grad_hidden_qkv = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden_z = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden_alpha = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden_beta = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden_sum_a = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden_sum_b = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_hidden = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_input = MetalTensor::zeros_f32(context, hidden_query_shape)?;
+
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = (|| -> Result<(), ResearchError> {
+        replay.encode_forward(context, &encoder, geometry, weights, n_tokens)?;
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            weights.out_proj,
+            &grad_mixer,
+            &grad_normed,
+            geometry.v_elements,
+            geometry.hidden_size,
+            query_rows,
+        )?;
+        encode_fill_f32(context, &encoder, &zero_final_recurrence_state, 0.0)?;
+        encode_fill_f32(context, &encoder, &zero_final_conv_state, 0.0)?;
+        let conv_weight = weights
+            .conv1d
+            .view_subrange(0, vec![(geometry.conv_dim * 4) as u64]);
+        let packed_k_heads = checked_product(n_tokens, geometry.n_k_heads)?;
+        for query in 0..n_query {
+            let grad_normed_query = flat_query_view(&grad_normed, query, v_elements)?;
+            let grad_recurrence_output_query =
+                flat_query_view(&grad_recurrence_output, query, v_elements)?;
+            let grad_z_query = flat_query_view(&grad_z, query, v_elements)?;
+            let grad_q_query = flat_query_view(&grad_q, query, qk_elements)?;
+            let grad_k_query = flat_query_view(&grad_k, query, qk_elements)?;
+            let grad_v_query = flat_query_view(&grad_v, query, v_elements)?;
+            let grad_decay_query = flat_query_view(&grad_decay, query, scalar_elements)?;
+            let grad_beta_query = flat_query_view(&grad_beta, query, scalar_elements)?;
+            let grad_initial_recurrence_state_query = flat_query_view(
+                &grad_initial_recurrence_state,
+                query,
+                geometry.state_elements,
+            )?;
+            let recurrence_state_scratch_a_query =
+                flat_query_view(&recurrence_state_scratch_a, query, geometry.state_elements)?;
+            let recurrence_state_scratch_b_query =
+                flat_query_view(&recurrence_state_scratch_b, query, geometry.state_elements)?;
+            let correction_scratch_query =
+                flat_query_view(&correction_scratch, query, geometry.v_elements)?;
+            let residual_scratch_query =
+                flat_query_view(&residual_scratch, query, geometry.v_elements)?;
+            let grad_q_raw_query = flat_query_view(&grad_q_raw, query, qk_elements)?;
+            let grad_k_raw_query = flat_query_view(&grad_k_raw, query, qk_elements)?;
+            let grad_qkv_query = flat_query_view(&grad_qkv, query, qkv_elements)?;
+            let grad_initial_conv_state_query = flat_query_view(
+                &grad_initial_conv_state,
+                query,
+                geometry.conv_state_elements,
+            )?;
+            let conv_state_scratch_a_query =
+                flat_query_view(&conv_state_scratch_a, query, geometry.conv_state_elements)?;
+            let conv_state_scratch_b_query =
+                flat_query_view(&conv_state_scratch_b, query, geometry.conv_state_elements)?;
+            let grad_alpha_source_query =
+                flat_query_view(&grad_alpha_source, query, scalar_elements)?;
+            let grad_beta_source_query =
+                flat_query_view(&grad_beta_source, query, scalar_elements)?;
+
+            encode_rmsnorm_gated_vjp_f32(
+                context,
+                &encoder,
+                &replay.recurrence_output,
+                weights.norm,
+                &replay.z,
+                &grad_normed_query,
+                &grad_recurrence_output_query,
+                &grad_z_query,
+                checked_product(n_tokens, geometry.n_v_heads)?,
+                geometry.head_dim,
+                RMS_EPS * geometry.head_dim as f32,
+            )?;
+            encode_gdn_step_decay_packed_vjp_f32(
+                context,
+                &encoder,
+                &replay.q,
+                &replay.k,
+                &replay.v,
+                &replay.decay,
+                &replay.beta,
+                &replay.initial_recurrence_state,
+                &replay.recurrence_checkpoints,
+                n_tokens,
+                &grad_recurrence_output_query,
+                &zero_final_recurrence_state,
+                &grad_q_query,
+                &grad_k_query,
+                &grad_v_query,
+                &grad_decay_query,
+                &grad_beta_query,
+                &grad_initial_recurrence_state_query,
+                &recurrence_state_scratch_a_query,
+                &recurrence_state_scratch_b_query,
+                &correction_scratch_query,
+                &residual_scratch_query,
+                n_tokens,
+                geometry.n_v_heads,
+                geometry.n_k_heads,
+                geometry.head_dim,
+            )?;
+            encode_l2_norm_vjp_batched_f32(
+                context,
+                &encoder,
+                &replay.q_raw,
+                &grad_q_query,
+                &grad_q_raw_query,
+                packed_k_heads,
+                geometry.head_dim,
+                RMS_EPS,
+            )?;
+            encode_l2_norm_vjp_batched_f32(
+                context,
+                &encoder,
+                &replay.k_raw,
+                &grad_k_query,
+                &grad_k_raw_query,
+                packed_k_heads,
+                geometry.head_dim,
+                RMS_EPS,
+            )?;
+            encode_ssm_conv_silu_split_packed_vjp_f32(
+                context,
+                &encoder,
+                &replay.qkv_source,
+                &replay.initial_conv_state,
+                &replay.conv_checkpoints,
+                n_tokens,
+                &conv_weight,
+                &grad_q_raw_query,
+                &grad_k_raw_query,
+                &grad_v_query,
+                &zero_final_conv_state,
+                &grad_qkv_query,
+                &grad_initial_conv_state_query,
+                &conv_state_scratch_a_query,
+                &conv_state_scratch_b_query,
+                n_tokens,
+                geometry.n_k_heads,
+                geometry.n_v_heads,
+                geometry.head_dim,
+            )?;
+            for token in 0..n_tokens {
+                let alpha_source = row_view(&replay.alpha_source, token, geometry.n_v_heads);
+                let decay = row_view(&replay.decay, token, geometry.n_v_heads);
+                let grad_decay_row = row_view(&grad_decay_query, token, geometry.n_v_heads);
+                let grad_alpha_row = row_view(&grad_alpha_source_query, token, geometry.n_v_heads);
+                encode_gdn_decay_chain_vjp_f32(
+                    context,
+                    &encoder,
+                    &alpha_source,
+                    weights.dt_bias,
+                    weights.a_log,
+                    &decay,
+                    &grad_decay_row,
+                    &grad_alpha_row,
+                )?;
+            }
+            encode_sigmoid_output_vjp_f32(
+                context,
+                &encoder,
+                &replay.beta,
+                &grad_beta_query,
+                &grad_beta_source_query,
+            )?;
+        }
+        let grad_qkv_rows = grad_qkv.view_subrange(0, row_shape(geometry.conv_dim, query_rows)?);
+        let grad_z_rows = grad_z.view_subrange(0, row_shape(geometry.v_elements, query_rows)?);
+        let grad_alpha_rows =
+            grad_alpha_source.view_subrange(0, row_shape(geometry.n_v_heads, query_rows)?);
+        let grad_beta_rows =
+            grad_beta_source.view_subrange(0, row_shape(geometry.n_v_heads, query_rows)?);
+        for (weight, grad_output, grad_hidden_output, n_out) in [
+            (
+                weights.in_proj_qkv,
+                &grad_qkv_rows,
+                &grad_hidden_qkv,
+                geometry.conv_dim,
+            ),
+            (
+                weights.in_proj_z,
+                &grad_z_rows,
+                &grad_hidden_z,
+                geometry.v_elements,
+            ),
+            (
+                weights.alpha_proj,
+                &grad_alpha_rows,
+                &grad_hidden_alpha,
+                geometry.n_v_heads,
+            ),
+            (
+                weights.beta_proj,
+                &grad_beta_rows,
+                &grad_hidden_beta,
+                geometry.n_v_heads,
+            ),
+        ] {
+            encode_frozen_linear_vjp_f32(
+                context,
+                &encoder,
+                weight,
+                grad_output,
+                grad_hidden_output,
+                geometry.hidden_size,
+                n_out,
+                query_rows,
+            )?;
+        }
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_qkv,
+            &grad_hidden_z,
+            &grad_hidden_sum_a,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_alpha,
+            &grad_hidden_beta,
+            &grad_hidden_sum_b,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_sum_a,
+            &grad_hidden_sum_b,
+            &grad_hidden,
+        )?;
+        for query in 0..n_query {
+            let offset = u64::try_from(checked_product(query, hidden_elements)?)
+                .map_err(|_| ResearchError::SizeOverflow)?;
+            let grad_hidden_query = grad_hidden.view_subrange(offset, hidden_shape.clone());
+            let grad_input_query = grad_input.view_subrange(offset, hidden_shape.clone());
+            encode_rms_norm_mul_vjp_rows_f32(
+                context,
+                &encoder,
+                &replay.input,
+                weights.attn_norm,
+                &grad_hidden_query,
+                &grad_input_query,
+                n_tokens,
+                geometry.hidden_size,
+                RMS_EPS,
+                match rule {
+                    GdnMixerVjpRule::Jacobian => RmsNormVjpRule::Jacobian,
+                    GdnMixerVjpRule::Relp => RmsNormVjpRule::RelpDetachedScale,
+                },
+            )?;
+        }
+        Ok(())
+    })();
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+    let (
+        final_conv_state,
+        final_recurrence_state,
+        grad_initial_conv_state,
+        grad_initial_recurrence_state,
+    ) = if read_state_diagnostics {
+        (
+            read_f32(&replay.conv_state, geometry.conv_state_elements),
+            read_f32(&replay.recurrence_state, geometry.state_elements),
+            read_f32(&grad_initial_conv_state, conv_state_query_elements),
+            read_f32(&grad_initial_recurrence_state, state_query_elements),
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
+    Ok(GdnReplayVjpReadback {
+        mixer_outputs: read_f32(&replay.mixer_output, hidden_elements),
+        final_conv_state,
+        final_recurrence_state,
+        grad_input: read_f32(&grad_input, hidden_query_elements),
+        grad_initial_conv_state,
+        grad_initial_recurrence_state,
+    })
+}
+
 fn copy_workspace_token_capture(
     destination: &mut [f32],
     token_capture: &[f32],
@@ -4539,6 +4922,17 @@ fn f32_from_slice(context: &MetalContext, values: &[f32]) -> Result<MetalTensor,
 
 fn row_view(tensor: &MetalTensor, row: usize, width: usize) -> MetalTensor {
     tensor.view_subrange((row * width) as u64, vec![width as u64])
+}
+
+fn flat_query_view(
+    tensor: &MetalTensor,
+    query: usize,
+    elements: usize,
+) -> Result<MetalTensor, ResearchError> {
+    let offset = u64::try_from(checked_product(query, elements)?)
+        .map_err(|_| ResearchError::SizeOverflow)?;
+    let elements = u64::try_from(elements).map_err(|_| ResearchError::SizeOverflow)?;
+    Ok(tensor.view_subrange(offset, vec![elements]))
 }
 
 fn validate_completed_command(
@@ -6299,6 +6693,141 @@ mod tests {
                 .zip(&actual.grad_input)
                 .any(|(relp, jacobian)| relp.to_bits() != jacobian.to_bits())
         );
+
+        let hidden_elements = N_TOKENS * HIDDEN;
+        let max_error = |left: &[f32], right: &[f32]| {
+            if left.len() != right.len() {
+                return f32::INFINITY;
+            }
+            left.iter()
+                .zip(right)
+                .map(|(&left, &right)| finite_abs_difference(left, right))
+                .fold(0.0f32, f32::max)
+        };
+        for rule in [GdnMixerVjpRule::Jacobian, GdnMixerVjpRule::Relp] {
+            for query_batches in [1, 2, 8] {
+                let grad_bank: Vec<f32> = (0..query_batches * hidden_elements)
+                    .map(|index| {
+                        let query = index / hidden_elements;
+                        let local = index % hidden_elements;
+                        ((local * 43 + query * 13 + 7) % 61) as f32 * 0.006 - 0.17
+                            + query as f32 * 0.005
+                    })
+                    .collect();
+                let batched = gdn_mixer_replay_vjp_batch_readback(
+                    &context,
+                    geometry,
+                    weights,
+                    &input,
+                    &initial_conv_state,
+                    &initial_recurrence_state,
+                    &grad_bank,
+                    N_TOKENS,
+                    query_batches,
+                    rule,
+                    true,
+                )
+                .unwrap();
+                for query in 0..query_batches {
+                    let hidden_start = query * hidden_elements;
+                    let hidden_end = hidden_start + hidden_elements;
+                    let serial = run(&input, &grad_bank[hidden_start..hidden_end], rule);
+                    let conv_start = query * conv_state_elements;
+                    let recurrence_start = query * state_elements;
+                    let errors = [
+                        max_error(&batched.mixer_outputs, &serial.mixer_outputs),
+                        max_error(&batched.final_conv_state, &serial.final_conv_state),
+                        max_error(
+                            &batched.final_recurrence_state,
+                            &serial.final_recurrence_state,
+                        ),
+                        max_error(
+                            &batched.grad_input[hidden_start..hidden_end],
+                            &serial.grad_input,
+                        ),
+                        max_error(
+                            &batched.grad_initial_conv_state
+                                [conv_start..conv_start + conv_state_elements],
+                            &serial.grad_initial_conv_state,
+                        ),
+                        max_error(
+                            &batched.grad_initial_recurrence_state
+                                [recurrence_start..recurrence_start + state_elements],
+                            &serial.grad_initial_recurrence_state,
+                        ),
+                    ];
+                    let error = errors.into_iter().fold(0.0f32, f32::max);
+                    assert!(
+                        error < 2e-5,
+                        "{rule:?} GDN batch {query_batches} query {query} error {error}"
+                    );
+                }
+            }
+
+            const QUERY_BATCHES: usize = 4;
+            const ACTIVE_QUERY: usize = 2;
+            let mut isolated_grad = vec![0.0f32; QUERY_BATCHES * hidden_elements];
+            let active_start = ACTIVE_QUERY * hidden_elements;
+            isolated_grad[active_start..active_start + hidden_elements]
+                .copy_from_slice(&grad_output);
+            let isolated = gdn_mixer_replay_vjp_batch_readback(
+                &context,
+                geometry,
+                weights,
+                &input,
+                &initial_conv_state,
+                &initial_recurrence_state,
+                &isolated_grad,
+                N_TOKENS,
+                QUERY_BATCHES,
+                rule,
+                true,
+            )
+            .unwrap();
+            let serial = run(&input, &grad_output, rule);
+            for query in 0..QUERY_BATCHES {
+                let hidden_start = query * hidden_elements;
+                let hidden_end = hidden_start + hidden_elements;
+                let conv_start = query * conv_state_elements;
+                let recurrence_start = query * state_elements;
+                if query == ACTIVE_QUERY {
+                    let error = [
+                        max_error(
+                            &isolated.grad_input[hidden_start..hidden_end],
+                            &serial.grad_input,
+                        ),
+                        max_error(
+                            &isolated.grad_initial_conv_state
+                                [conv_start..conv_start + conv_state_elements],
+                            &serial.grad_initial_conv_state,
+                        ),
+                        max_error(
+                            &isolated.grad_initial_recurrence_state
+                                [recurrence_start..recurrence_start + state_elements],
+                            &serial.grad_initial_recurrence_state,
+                        ),
+                    ]
+                    .into_iter()
+                    .fold(0.0f32, f32::max);
+                    assert!(error < 2e-5, "{rule:?} isolated GDN error {error}");
+                } else {
+                    assert!(
+                        isolated.grad_input[hidden_start..hidden_end]
+                            .iter()
+                            .chain(
+                                &isolated.grad_initial_conv_state
+                                    [conv_start..conv_start + conv_state_elements],
+                            )
+                            .chain(
+                                &isolated.grad_initial_recurrence_state
+                                    [recurrence_start..recurrence_start + state_elements],
+                            )
+                            .all(|value| *value == 0.0),
+                        "{rule:?} GDN query {query} received another query's cotangent"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

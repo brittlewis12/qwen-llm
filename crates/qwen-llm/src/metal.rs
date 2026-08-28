@@ -14472,6 +14472,56 @@ pub fn encode_sigmoid_f32(
     encode_elementwise_1in_1out(ctx, enc, "kernel_sigmoid_f32", x, y)
 }
 
+/// Ordinary sigmoid VJP using the saved forward output.
+pub fn encode_sigmoid_output_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    sigmoid_output: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "sigmoid_output_vjp";
+    let shape = sigmoid_output.shape.clone();
+    let (n, _) = checked_shape_bytes(&shape, std::mem::size_of::<f32>())?;
+    if n == 0 || u32::try_from(n).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("element count {n} must fit nonzero u32"),
+        });
+    }
+    validate_compact_f32_tensor(KERNEL, "sigmoid_output", sigmoid_output, &shape, false)?;
+    validate_compact_f32_tensor(KERNEL, "grad_output", grad_output, &shape, false)?;
+    validate_compact_f32_tensor(KERNEL, "grad_input", grad_input, &shape, true)?;
+    if tensor_ranges_overlap(grad_input, sigmoid_output)
+        || tensor_ranges_overlap(grad_input, grad_output)
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "grad_input must not overlap the sigmoid output or incoming gradient".into(),
+        });
+    }
+    let pipeline = ctx.pipeline("kernel_sigmoid_output_vjp_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_tensor(1, sigmoid_output);
+    enc.set_tensor(2, grad_output);
+    enc.set_tensor(3, grad_input);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_softplus_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -14587,6 +14637,80 @@ pub fn encode_gdn_decay_chain_f32(
         },
         MTLSize {
             width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Activation VJP for `decay = exp(softplus(a + dt_bias) * a_log)`.
+///
+/// `dt_bias` and transformed `a_log` are frozen model parameters. The saved
+/// direct `decay` is used to chain through the exact forward primal.
+pub fn encode_gdn_decay_chain_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: &MetalTensor,
+    dt_bias: &MetalTensor,
+    a_log: &MetalTensor,
+    decay: &MetalTensor,
+    grad_decay: &MetalTensor,
+    grad_a: &MetalTensor,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "gdn_decay_chain_vjp";
+    let input_shape = a.shape.clone();
+    let (n, _) = checked_shape_bytes(&input_shape, std::mem::size_of::<f32>())?;
+    if n == 0 || u32::try_from(n).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("element count {n} must fit nonzero u32"),
+        });
+    }
+    let shape = vec![n as u64];
+    if input_shape != shape {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("a must be one compact row, got {input_shape:?}"),
+        });
+    }
+    for (name, tensor) in [
+        ("a", a),
+        ("dt_bias", dt_bias),
+        ("a_log", a_log),
+        ("decay", decay),
+        ("grad_decay", grad_decay),
+    ] {
+        validate_compact_f32_tensor(KERNEL, name, tensor, &shape, false)?;
+    }
+    validate_compact_f32_tensor(KERNEL, "grad_a", grad_a, &shape, true)?;
+    if [a, dt_bias, a_log, decay, grad_decay]
+        .iter()
+        .any(|input| tensor_ranges_overlap(grad_a, input))
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "grad_a must not overlap any input".into(),
+        });
+    }
+    let pipeline = ctx.pipeline("kernel_gdn_decay_chain_vjp_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_tensor(1, a);
+    enc.set_tensor(2, dt_bias);
+    enc.set_tensor(3, a_log);
+    enc.set_tensor(4, decay);
+    enc.set_tensor(5, grad_decay);
+    enc.set_tensor(6, grad_a);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
             height: 1,
             depth: 1,
         },
@@ -16068,6 +16192,87 @@ pub fn encode_l2_norm_f32(
         },
         MTLSize {
             width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Ordinary VJP for compact rows normalized as `x / max(||x||, eps)`.
+/// The nondifferentiable equality case follows the clamped branch.
+pub fn encode_l2_norm_vjp_batched_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "l2_norm_vjp_batched";
+    if n_heads == 0
+        || head_dim == 0
+        || !eps.is_finite()
+        || eps <= 0.0
+        || u32::try_from(n_heads).is_err()
+        || u32::try_from(head_dim).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected nonzero u32 geometry and finite positive eps, got heads={n_heads} dim={head_dim} eps={eps}"
+            ),
+        });
+    }
+    let elements = n_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "element count overflow".into(),
+        })?;
+    let shape = vec![elements as u64];
+    validate_compact_f32_tensor(KERNEL, "x", x, &shape, false)?;
+    validate_compact_f32_tensor(KERNEL, "grad_output", grad_output, &shape, false)?;
+    validate_compact_f32_tensor(KERNEL, "grad_input", grad_input, &shape, true)?;
+    if tensor_ranges_overlap(grad_input, x) || tensor_ranges_overlap(grad_input, grad_output) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "grad_input must not overlap primal or incoming gradient".into(),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+        eps: f32,
+    }
+    let pipeline = ctx.pipeline("kernel_l2_norm_vjp_batched_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, grad_output);
+    enc.set_tensor(3, grad_input);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(1024);
+    let simdgroups = threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (2 * simdgroups * std::mem::size_of::<f32>()).max(32));
+    enc.dispatch(
+        MTLSize {
+            width: n_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
             height: 1,
             depth: 1,
         },
@@ -23187,6 +23392,254 @@ pub fn encode_ssm_conv_silu_f32(
     Ok(())
 }
 
+/// Activation VJP for an immutable width-4 depthwise conv+SiLU step and its
+/// shifted three-row causal state.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_ssm_conv_silu_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    qkv_now: &MetalTensor,
+    conv_state_in: &MetalTensor,
+    conv_w: &MetalTensor,
+    grad_out: &MetalTensor,
+    grad_state_out: &MetalTensor,
+    grad_qkv: &MetalTensor,
+    grad_state_in: &MetalTensor,
+    conv_dim: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "ssm_conv_silu_vjp";
+    if conv_dim == 0 || u32::try_from(conv_dim).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("conv_dim {conv_dim} must fit nonzero u32"),
+        });
+    }
+    let state_elements = conv_dim
+        .checked_mul(3)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "state element count overflow".into(),
+        })?;
+    let weight_elements = conv_dim
+        .checked_mul(4)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "weight element count overflow".into(),
+        })?;
+    let vector_shape = vec![conv_dim as u64];
+    let state_shape = vec![state_elements as u64];
+    let weight_shape = vec![weight_elements as u64];
+    for (name, tensor, shape) in [
+        ("qkv_now", qkv_now, &vector_shape),
+        ("conv_state_in", conv_state_in, &state_shape),
+        ("conv_w", conv_w, &weight_shape),
+        ("grad_out", grad_out, &vector_shape),
+        ("grad_state_out", grad_state_out, &state_shape),
+    ] {
+        validate_compact_f32_tensor(KERNEL, name, tensor, shape, false)?;
+    }
+    validate_compact_f32_tensor(KERNEL, "grad_qkv", grad_qkv, &vector_shape, true)?;
+    validate_compact_f32_tensor(KERNEL, "grad_state_in", grad_state_in, &state_shape, true)?;
+    let inputs = [qkv_now, conv_state_in, conv_w, grad_out, grad_state_out];
+    if inputs
+        .iter()
+        .any(|input| tensor_ranges_overlap(grad_qkv, input))
+        || inputs
+            .iter()
+            .any(|input| tensor_ranges_overlap(grad_state_in, input))
+        || tensor_ranges_overlap(grad_qkv, grad_state_in)
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "gradient outputs must not overlap inputs or each other".into(),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        conv_dim: u32,
+    }
+    let pipeline = ctx.pipeline("kernel_ssm_conv_silu_vjp_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            conv_dim: conv_dim as u32,
+        },
+    );
+    enc.set_tensor(1, qkv_now);
+    enc.set_tensor(2, conv_state_in);
+    enc.set_tensor(3, conv_w);
+    enc.set_tensor(4, grad_out);
+    enc.set_tensor(5, grad_state_out);
+    enc.set_tensor(6, grad_qkv);
+    enc.set_tensor(7, grad_state_in);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: conv_dim.div_ceil(threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Conv+SiLU/state VJP consuming separate raw-Q, raw-K, and V cotangents.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_ssm_conv_silu_split_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    qkv_now: &MetalTensor,
+    conv_state_in: &MetalTensor,
+    conv_w: &MetalTensor,
+    grad_q_raw: &MetalTensor,
+    grad_k_raw: &MetalTensor,
+    grad_v: &MetalTensor,
+    grad_state_out: &MetalTensor,
+    grad_qkv: &MetalTensor,
+    grad_state_in: &MetalTensor,
+    n_k_heads: usize,
+    n_v_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "ssm_conv_silu_split_vjp";
+    if n_k_heads == 0
+        || n_v_heads == 0
+        || head_dim == 0
+        || u32::try_from(n_k_heads).is_err()
+        || u32::try_from(n_v_heads).is_err()
+        || u32::try_from(head_dim).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "head counts and dimension must fit nonzero u32, got n_k={n_k_heads} n_v={n_v_heads} dim={head_dim}"
+            ),
+        });
+    }
+    let qk_elements = n_k_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "Q/K element count overflow".into(),
+        })?;
+    let v_elements = n_v_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "V element count overflow".into(),
+        })?;
+    let conv_dim = qk_elements
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(v_elements))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "convolution dimension overflow".into(),
+        })?;
+    if u32::try_from(conv_dim).is_err() || u32::try_from(qk_elements).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "convolution geometry exceeds u32 shader addressing".into(),
+        });
+    }
+    let state_elements = conv_dim
+        .checked_mul(3)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "state element count overflow".into(),
+        })?;
+    let weight_elements = conv_dim
+        .checked_mul(4)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "weight element count overflow".into(),
+        })?;
+    let qk_shape = vec![qk_elements as u64];
+    let v_shape = vec![v_elements as u64];
+    let conv_shape = vec![conv_dim as u64];
+    let state_shape = vec![state_elements as u64];
+    let weight_shape = vec![weight_elements as u64];
+    for (name, tensor, shape) in [
+        ("qkv_now", qkv_now, &conv_shape),
+        ("conv_state_in", conv_state_in, &state_shape),
+        ("conv_w", conv_w, &weight_shape),
+        ("grad_q_raw", grad_q_raw, &qk_shape),
+        ("grad_k_raw", grad_k_raw, &qk_shape),
+        ("grad_v", grad_v, &v_shape),
+        ("grad_state_out", grad_state_out, &state_shape),
+    ] {
+        validate_compact_f32_tensor(KERNEL, name, tensor, shape, false)?;
+    }
+    validate_compact_f32_tensor(KERNEL, "grad_qkv", grad_qkv, &conv_shape, true)?;
+    validate_compact_f32_tensor(KERNEL, "grad_state_in", grad_state_in, &state_shape, true)?;
+    let inputs = [
+        qkv_now,
+        conv_state_in,
+        conv_w,
+        grad_q_raw,
+        grad_k_raw,
+        grad_v,
+        grad_state_out,
+    ];
+    if inputs
+        .iter()
+        .any(|input| tensor_ranges_overlap(grad_qkv, input))
+        || inputs
+            .iter()
+            .any(|input| tensor_ranges_overlap(grad_state_in, input))
+        || tensor_ranges_overlap(grad_qkv, grad_state_in)
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "gradient outputs must not overlap inputs or each other".into(),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        conv_dim: u32,
+        qk_dim: u32,
+    }
+    let pipeline = ctx.pipeline("kernel_ssm_conv_silu_split_vjp_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            conv_dim: conv_dim as u32,
+            qk_dim: qk_elements as u32,
+        },
+    );
+    enc.set_tensor(1, qkv_now);
+    enc.set_tensor(2, conv_state_in);
+    enc.set_tensor(3, conv_w);
+    enc.set_tensor(4, grad_q_raw);
+    enc.set_tensor(5, grad_k_raw);
+    enc.set_tensor(6, grad_v);
+    enc.set_tensor(7, grad_state_out);
+    enc.set_tensor(8, grad_qkv);
+    enc.set_tensor(9, grad_state_in);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: conv_dim.div_ceil(threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 crate::env_flag!(
     default_off configured_prefill_gdn_prep_parallel_enabled,
     "QWEN_PREFILL_GDN_PREP_PARALLEL"
@@ -23608,6 +24061,108 @@ pub fn encode_rmsnorm_gated_f32(
         },
         MTLSize {
             width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Ordinary activation VJP for per-head `RMSNorm(o) * SiLU(z)`.
+///
+/// The released Qwen R-lens leaves this GDN-internal gated norm on the
+/// ordinary Jacobian; RelP rules apply only to residual-stream norms and FFNs.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_rmsnorm_gated_vjp_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    o: &MetalTensor,
+    weight: &MetalTensor,
+    z: &MetalTensor,
+    grad_y: &MetalTensor,
+    grad_o: &MetalTensor,
+    grad_z: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "rmsnorm_gated_vjp";
+    if n_heads == 0
+        || head_dim == 0
+        || !eps.is_finite()
+        || eps < 0.0
+        || u32::try_from(n_heads).is_err()
+        || u32::try_from(head_dim).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected nonzero u32 geometry and finite nonnegative eps, got heads={n_heads} dim={head_dim} eps={eps}"
+            ),
+        });
+    }
+    let elements = n_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "element count overflow".into(),
+        })?;
+    let vector_shape = vec![elements as u64];
+    let weight_shape = vec![head_dim as u64];
+    for (name, tensor) in [("o", o), ("z", z), ("grad_y", grad_y)] {
+        validate_compact_f32_tensor(KERNEL, name, tensor, &vector_shape, false)?;
+    }
+    validate_compact_f32_tensor(KERNEL, "weight", weight, &weight_shape, false)?;
+    validate_compact_f32_tensor(KERNEL, "grad_o", grad_o, &vector_shape, true)?;
+    validate_compact_f32_tensor(KERNEL, "grad_z", grad_z, &vector_shape, true)?;
+    let inputs = [o, weight, z, grad_y];
+    if inputs
+        .iter()
+        .any(|input| tensor_ranges_overlap(grad_o, input))
+        || inputs
+            .iter()
+            .any(|input| tensor_ranges_overlap(grad_z, input))
+        || tensor_ranges_overlap(grad_o, grad_z)
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "gradient outputs must not overlap inputs or each other".into(),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+        eps: f32,
+    }
+    let pipeline = ctx.pipeline("kernel_rmsnorm_gated_vjp_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, o);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, z);
+    enc.set_tensor(4, grad_y);
+    enc.set_tensor(5, grad_o);
+    enc.set_tensor(6, grad_z);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(1024);
+    let simdgroups = threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (2 * simdgroups * std::mem::size_of::<f32>()).max(32));
+    enc.dispatch(
+        MTLSize {
+            width: n_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
             height: 1,
             depth: 1,
         },
@@ -25452,6 +26007,34 @@ pub fn encode_ds4_shared_swiglu_q6_k_f32(
             depth: 1,
         },
     );
+    Ok(())
+}
+
+fn validate_compact_f32_tensor(
+    kernel: &'static str,
+    name: &str,
+    tensor: &MetalTensor,
+    shape: &[u64],
+    writable: bool,
+) -> Result<(), MetalError> {
+    let (_, bytes) = checked_shape_bytes(shape, std::mem::size_of::<f32>())?;
+    if tensor.dtype != GgmlType::F32
+        || tensor.shape != shape
+        || (writable && !tensor.is_writable())
+        || !tensor_physical_range_valid(tensor, bytes, std::mem::align_of::<f32>() as u64)
+    {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "{name} expected {}F32 {shape:?}, got {:?} {:?} writable={} offset={}",
+                if writable { "writable " } else { "" },
+                tensor.dtype,
+                tensor.shape,
+                tensor.is_writable(),
+                tensor.offset
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -38021,6 +38604,116 @@ mod tests {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_envelope_objective_f64(
+        qkv_now: &[f64],
+        conv_state: &[f64],
+        conv_weight: &[f64],
+        alpha_source: &[f64],
+        dt_bias: &[f64],
+        a_log: &[f64],
+        beta_source: &[f64],
+        recurrence_state: &[f64],
+        z: &[f64],
+        norm_weight: &[f64],
+        grad_y: &[f64],
+        grad_recurrence_state: &[f64],
+        grad_conv_state: &[f64],
+        n_v: usize,
+        n_k: usize,
+        head_dim: usize,
+        l2_eps: f64,
+        rms_eps: f64,
+    ) -> f64 {
+        let qk_elements = n_k * head_dim;
+        let v_elements = n_v * head_dim;
+        let conv_dim = 2 * qk_elements + v_elements;
+        let mut conv_output = vec![0.0f64; conv_dim];
+        let mut objective = 0.0f64;
+        for channel in 0..conv_dim {
+            let preactivation = (0..3)
+                .map(|row| conv_weight[channel * 4 + row] * conv_state[row * conv_dim + channel])
+                .sum::<f64>()
+                + conv_weight[channel * 4 + 3] * qkv_now[channel];
+            conv_output[channel] = preactivation / (1.0 + (-preactivation).exp());
+            objective += grad_conv_state[channel] * conv_state[conv_dim + channel];
+            objective += grad_conv_state[conv_dim + channel] * conv_state[2 * conv_dim + channel];
+            objective += grad_conv_state[2 * conv_dim + channel] * qkv_now[channel];
+        }
+        let normalize = |rows: &[f64]| {
+            let mut output = vec![0.0f64; rows.len()];
+            for head in 0..n_k {
+                let base = head * head_dim;
+                let radius = rows[base..base + head_dim]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    .sqrt()
+                    .max(l2_eps);
+                for index in 0..head_dim {
+                    output[base + index] = rows[base + index] / radius;
+                }
+            }
+            output
+        };
+        let q = normalize(&conv_output[..qk_elements]);
+        let k = normalize(&conv_output[qk_elements..2 * qk_elements]);
+        let v = &conv_output[2 * qk_elements..];
+        let decay: Vec<f64> = (0..n_v)
+            .map(|head| {
+                let value = alpha_source[head] + dt_bias[head];
+                let softplus = if value > 20.0 {
+                    value
+                } else if value < -20.0 {
+                    value.exp()
+                } else {
+                    (1.0 + value.exp()).ln()
+                };
+                (softplus * a_log[head]).exp()
+            })
+            .collect();
+        let beta: Vec<f64> = beta_source
+            .iter()
+            .map(|value| 1.0 / (1.0 + (-value).exp()))
+            .collect();
+        let mut recurrence_output = vec![0.0f64; v_elements];
+        for hi in 0..n_v {
+            let hk = hi % n_k;
+            for dv in 0..head_dim {
+                let vector_index = hi * head_dim + dv;
+                let row_offset = vector_index * head_dim;
+                let prediction: f64 = (0..head_dim)
+                    .map(|dk| decay[hi] * recurrence_state[row_offset + dk] * k[hk * head_dim + dk])
+                    .sum();
+                let correction = beta[hi] * (v[vector_index] - prediction);
+                for dk in 0..head_dim {
+                    let state_out = decay[hi] * recurrence_state[row_offset + dk]
+                        + correction * k[hk * head_dim + dk];
+                    recurrence_output[vector_index] += state_out * q[hk * head_dim + dk];
+                    objective += state_out * grad_recurrence_state[row_offset + dk];
+                }
+            }
+        }
+        for hi in 0..n_v {
+            let base = hi * head_dim;
+            let sumsq = recurrence_output[base..base + head_dim]
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+            let scale = (sumsq / head_dim as f64 + rms_eps).sqrt().recip();
+            for index in 0..head_dim {
+                let offset = base + index;
+                let silu_z = z[offset] / (1.0 + (-z[offset]).exp());
+                objective += grad_y[offset]
+                    * recurrence_output[offset]
+                    * scale
+                    * norm_weight[index]
+                    * silu_z;
+            }
+        }
+        objective
+    }
+
     #[test]
     fn gdn_step_decay_vjp_matches_adjoint_and_finite_differences() {
         let Some(ctx) = metal_test_context() else {
@@ -38380,6 +39073,1121 @@ mod tests {
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
         invoke(&encoder, &short).expect_err("short output must fail");
+        encoder.end();
+    }
+
+    #[test]
+    fn l2_norm_vjp_matches_clamp_and_finite_differences() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_HEADS: usize = 4;
+        const HEAD_DIM: usize = 128;
+        const EPS: f32 = 0.5;
+        let mut x = vec![0.0f32; N_HEADS * HEAD_DIM];
+        for (index, value) in x[..HEAD_DIM].iter_mut().enumerate() {
+            *value = ((index * 7 + 3) % 23) as f32 * 0.009 - 0.099;
+        }
+        x[2 * HEAD_DIM] = EPS;
+        x[3 * HEAD_DIM] = EPS * 0.5;
+        let grad_output: Vec<f32> = (0..x.len())
+            .map(|index| ((index * 11 + 1) % 31) as f32 * 0.013 - 0.19)
+            .collect();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![x.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let grad_output_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&grad_output),
+            vec![grad_output.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let grad_input_t = MetalTensor::zeros_f32(&ctx, vec![x.len() as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_l2_norm_vjp_batched_f32(
+                &ctx,
+                encoder,
+                &x_t,
+                &grad_output_t,
+                &grad_input_t,
+                N_HEADS,
+                HEAD_DIM,
+                EPS,
+            )
+        })
+        .unwrap();
+        let actual = read_back_f32(&grad_input_t.buffer, x.len());
+        let mut expected = vec![0.0f64; x.len()];
+        for head in 0..N_HEADS {
+            let base = head * HEAD_DIM;
+            let radius = x[base..base + HEAD_DIM]
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            if radius > f64::from(EPS) {
+                let dot = (0..HEAD_DIM)
+                    .map(|index| f64::from(x[base + index]) * f64::from(grad_output[base + index]))
+                    .sum::<f64>();
+                for index in 0..HEAD_DIM {
+                    expected[base + index] = f64::from(grad_output[base + index]) / radius
+                        - f64::from(x[base + index]) * dot / radius.powi(3);
+                }
+            } else {
+                for index in 0..HEAD_DIM {
+                    expected[base + index] = f64::from(grad_output[base + index]) / f64::from(EPS);
+                }
+            }
+        }
+        let max_abs = actual
+            .iter()
+            .zip(&expected)
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_abs < 2e-5, "L2 VJP error {max_abs}");
+        for head in [1usize, 2, 3] {
+            let base = head * HEAD_DIM;
+            for index in 0..HEAD_DIM {
+                assert_eq!(
+                    actual[base + index].to_bits(),
+                    (grad_output[base + index] / EPS).to_bits(),
+                    "clamped row {head} index {index}"
+                );
+            }
+        }
+
+        let epsilon = 1e-5f64;
+        for index in [0usize, 31, HEAD_DIM - 1] {
+            let objective = |delta: f64| {
+                let mut row = x[..HEAD_DIM]
+                    .iter()
+                    .copied()
+                    .map(f64::from)
+                    .collect::<Vec<_>>();
+                row[index] += delta;
+                let radius = row.iter().map(|value| value * value).sum::<f64>().sqrt();
+                row.iter()
+                    .zip(&grad_output[..HEAD_DIM])
+                    .map(|(value, grad)| value / radius * f64::from(*grad))
+                    .sum::<f64>()
+            };
+            let finite_difference = (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual[index])).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn gdn_scalar_chain_vjps_match_piecewise_oracles() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let source = [-15.0f32, -3.0, -0.25, 0.0, 0.75, 4.0, 15.0];
+        let sigmoid_output: Vec<f32> = source
+            .iter()
+            .map(|value| 1.0 / (1.0 + (-value).exp()))
+            .collect();
+        let sigmoid_grad: Vec<f32> = (0..source.len())
+            .map(|index| index as f32 * 0.07 - 0.19)
+            .collect();
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let sigmoid_output_t = tensor(&sigmoid_output);
+        let sigmoid_grad_t = tensor(&sigmoid_grad);
+        let sigmoid_source_grad_t =
+            MetalTensor::zeros_f32(&ctx, vec![source.len() as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_sigmoid_output_vjp_f32(
+                &ctx,
+                encoder,
+                &sigmoid_output_t,
+                &sigmoid_grad_t,
+                &sigmoid_source_grad_t,
+            )
+        })
+        .unwrap();
+        let actual_sigmoid = read_back_f32(&sigmoid_source_grad_t.buffer, source.len());
+        for index in 0..source.len() {
+            let expected =
+                sigmoid_grad[index] * sigmoid_output[index] * (1.0 - sigmoid_output[index]);
+            assert!((actual_sigmoid[index] - expected).abs() < 2e-7);
+            let epsilon = 1e-4f64;
+            let objective = |delta: f64| {
+                let value = f64::from(source[index]) + delta;
+                f64::from(sigmoid_grad[index]) / (1.0 + (-value).exp())
+            };
+            let finite_difference = (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual_sigmoid[index])).abs() < 2e-6);
+        }
+
+        let totals = [
+            -25.0f32, -20.25, -20.0, -19.75, 0.0, 19.75, 20.0, 20.25, 25.0,
+        ];
+        let dt_bias: Vec<f32> = (0..totals.len())
+            .map(|index| (index as f32 - 4.0) * 0.125)
+            .collect();
+        let alpha: Vec<f32> = totals
+            .iter()
+            .zip(&dt_bias)
+            .map(|(total, bias)| total - bias)
+            .collect();
+        let a_log: Vec<f32> = (0..totals.len())
+            .map(|index| -0.015 - index as f32 * 0.004)
+            .collect();
+        let grad_decay: Vec<f32> = (0..totals.len())
+            .map(|index| index as f32 * 0.031 - 0.11)
+            .collect();
+        let alpha_t = tensor(&alpha);
+        let dt_t = tensor(&dt_bias);
+        let a_log_t = tensor(&a_log);
+        let decay_t = MetalTensor::zeros_f32(&ctx, vec![totals.len() as u64]).unwrap();
+        let grad_decay_t = tensor(&grad_decay);
+        let grad_alpha_t = MetalTensor::zeros_f32(&ctx, vec![totals.len() as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_gdn_decay_chain_f32(&ctx, encoder, &alpha_t, &dt_t, &a_log_t, &decay_t)?;
+            encode_gdn_decay_chain_vjp_f32(
+                &ctx,
+                encoder,
+                &alpha_t,
+                &dt_t,
+                &a_log_t,
+                &decay_t,
+                &grad_decay_t,
+                &grad_alpha_t,
+            )
+        })
+        .unwrap();
+        let decay = read_back_f32(&decay_t.buffer, totals.len());
+        let actual_alpha = read_back_f32(&grad_alpha_t.buffer, totals.len());
+        for index in 0..totals.len() {
+            let value = totals[index];
+            let softplus_derivative = if value > 20.0 {
+                1.0
+            } else if value < -20.0 {
+                value.exp()
+            } else {
+                let exponential = value.exp();
+                exponential / (1.0 + exponential)
+            };
+            let expected = grad_decay[index] * decay[index] * a_log[index] * softplus_derivative;
+            assert!(
+                (actual_alpha[index] - expected).abs() < 2e-6,
+                "decay chain index {index}: {} != {expected}",
+                actual_alpha[index]
+            );
+        }
+        for &index in &[0usize, 1, 3, 4, 5, 7, 8] {
+            let epsilon = 1e-4f64;
+            let objective = |delta: f64| {
+                let value = f64::from(alpha[index]) + f64::from(dt_bias[index]) + delta;
+                let softplus = if value > 20.0 {
+                    value
+                } else if value < -20.0 {
+                    value.exp()
+                } else {
+                    (1.0 + value.exp()).ln()
+                };
+                f64::from(grad_decay[index]) * (softplus * f64::from(a_log[index])).exp()
+            };
+            let finite_difference = (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual_alpha[index])).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn ssm_conv_silu_vjp_matches_shifted_state_oracle() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_K: usize = 1;
+        const N_V: usize = 1;
+        const HEAD_DIM: usize = 128;
+        const CONV_DIM: usize = (2 * N_K + N_V) * HEAD_DIM;
+        let qkv: Vec<f32> = (0..CONV_DIM)
+            .map(|index| ((index * 7 + 2) % 31) as f32 * 0.009 - 0.13)
+            .collect();
+        let state: Vec<f32> = (0..3 * CONV_DIM)
+            .map(|index| ((index * 11 + 5) % 37) as f32 * 0.006 - 0.105)
+            .collect();
+        let weight: Vec<f32> = (0..4 * CONV_DIM)
+            .map(|index| ((index * 13 + 1) % 41) as f32 * 0.004 - 0.077)
+            .collect();
+        let grad_out: Vec<f32> = (0..CONV_DIM)
+            .map(|index| ((index * 17 + 3) % 43) as f32 * 0.008 - 0.16)
+            .collect();
+        let grad_state_out: Vec<f32> = (0..3 * CONV_DIM)
+            .map(|index| ((index * 19 + 7) % 47) as f32 * 0.005 - 0.11)
+            .collect();
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let qkv_t = tensor(&qkv);
+        let state_t = tensor(&state);
+        let weight_t = tensor(&weight);
+        let grad_out_t = tensor(&grad_out);
+        let grad_state_out_t = tensor(&grad_state_out);
+        let grad_qkv_t = MetalTensor::zeros_f32(&ctx, vec![CONV_DIM as u64]).unwrap();
+        let grad_state_t = MetalTensor::zeros_f32(&ctx, vec![(3 * CONV_DIM) as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_ssm_conv_silu_vjp_f32(
+                &ctx,
+                encoder,
+                &qkv_t,
+                &state_t,
+                &weight_t,
+                &grad_out_t,
+                &grad_state_out_t,
+                &grad_qkv_t,
+                &grad_state_t,
+                CONV_DIM,
+            )
+        })
+        .unwrap();
+        let actual_qkv = read_back_f32(&grad_qkv_t.buffer, CONV_DIM);
+        let actual_state = read_back_f32(&grad_state_t.buffer, 3 * CONV_DIM);
+        let split_grad_q_t = tensor(&grad_out[..HEAD_DIM]);
+        let split_grad_k_t = tensor(&grad_out[HEAD_DIM..2 * HEAD_DIM]);
+        let split_grad_v_t = tensor(&grad_out[2 * HEAD_DIM..]);
+        let split_grad_qkv_t = MetalTensor::zeros_f32(&ctx, vec![CONV_DIM as u64]).unwrap();
+        let split_grad_state_t = MetalTensor::zeros_f32(&ctx, vec![(3 * CONV_DIM) as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_ssm_conv_silu_split_vjp_f32(
+                &ctx,
+                encoder,
+                &qkv_t,
+                &state_t,
+                &weight_t,
+                &split_grad_q_t,
+                &split_grad_k_t,
+                &split_grad_v_t,
+                &grad_state_out_t,
+                &split_grad_qkv_t,
+                &split_grad_state_t,
+                N_K,
+                N_V,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+        let split_qkv = read_back_f32(&split_grad_qkv_t.buffer, CONV_DIM);
+        let split_state = read_back_f32(&split_grad_state_t.buffer, 3 * CONV_DIM);
+        let split_qkv_error = split_qkv
+            .iter()
+            .zip(&actual_qkv)
+            .map(|(split, joined)| (split - joined).abs())
+            .fold(0.0f32, f32::max);
+        let split_state_error = split_state
+            .iter()
+            .zip(&actual_state)
+            .map(|(split, joined)| (split - joined).abs())
+            .fold(0.0f32, f32::max);
+        assert!(split_qkv_error < 2e-7, "split QKV error {split_qkv_error}");
+        assert!(
+            split_state_error < 2e-7,
+            "split state error {split_state_error}"
+        );
+        let mut expected_qkv = vec![0.0f64; CONV_DIM];
+        let mut expected_state = vec![0.0f64; 3 * CONV_DIM];
+        for channel in 0..CONV_DIM {
+            let preactivation = (0..3)
+                .map(|row| {
+                    f64::from(weight[channel * 4 + row])
+                        * f64::from(state[row * CONV_DIM + channel])
+                })
+                .sum::<f64>()
+                + f64::from(weight[channel * 4 + 3]) * f64::from(qkv[channel]);
+            let sigmoid = 1.0 / (1.0 + (-preactivation).exp());
+            let derivative = sigmoid * (1.0 + preactivation * (1.0 - sigmoid));
+            let grad_preactivation = f64::from(grad_out[channel]) * derivative;
+            expected_qkv[channel] = grad_preactivation * f64::from(weight[channel * 4 + 3])
+                + f64::from(grad_state_out[2 * CONV_DIM + channel]);
+            expected_state[channel] = grad_preactivation * f64::from(weight[channel * 4]);
+            expected_state[CONV_DIM + channel] = grad_preactivation
+                * f64::from(weight[channel * 4 + 1])
+                + f64::from(grad_state_out[channel]);
+            expected_state[2 * CONV_DIM + channel] = grad_preactivation
+                * f64::from(weight[channel * 4 + 2])
+                + f64::from(grad_state_out[CONV_DIM + channel]);
+        }
+        let max_qkv = actual_qkv
+            .iter()
+            .zip(&expected_qkv)
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        let max_state = actual_state
+            .iter()
+            .zip(&expected_state)
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_qkv < 2e-6, "conv qkv VJP error {max_qkv}");
+        assert!(max_state < 2e-6, "conv state VJP error {max_state}");
+
+        let objective = |qkv: &[f64], state: &[f64]| {
+            let mut value = 0.0f64;
+            for channel in 0..CONV_DIM {
+                let preactivation = (0..3)
+                    .map(|row| {
+                        f64::from(weight[channel * 4 + row]) * state[row * CONV_DIM + channel]
+                    })
+                    .sum::<f64>()
+                    + f64::from(weight[channel * 4 + 3]) * qkv[channel];
+                value +=
+                    f64::from(grad_out[channel]) * preactivation / (1.0 + (-preactivation).exp());
+                value += f64::from(grad_state_out[channel]) * state[CONV_DIM + channel];
+                value +=
+                    f64::from(grad_state_out[CONV_DIM + channel]) * state[2 * CONV_DIM + channel];
+                value += f64::from(grad_state_out[2 * CONV_DIM + channel]) * qkv[channel];
+            }
+            value
+        };
+        let qkv64 = qkv.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let state64 = state.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let epsilon = 1e-5;
+        for &index in &[0usize, 128, CONV_DIM - 1] {
+            let mut plus = qkv64.clone();
+            let mut minus = qkv64.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference =
+                (objective(&plus, &state64) - objective(&minus, &state64)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual_qkv[index])).abs() < 2e-5);
+        }
+        for &index in &[
+            0usize,
+            CONV_DIM - 1,
+            CONV_DIM,
+            2 * CONV_DIM + 128,
+            3 * CONV_DIM - 1,
+        ] {
+            let mut plus = state64.clone();
+            let mut minus = state64.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference =
+                (objective(&qkv64, &plus) - objective(&qkv64, &minus)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual_state[index])).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn ssm_conv_silu_vjp_replays_forward_accumulation_order() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let qkv = [1.0f32];
+        let state = [1.0e8f32, -1.0e8, 1.0];
+        let weight = [1.0f32; 4];
+        let grad_out = [1.0f32];
+        let grad_state_out = [0.0f32; 3];
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let qkv_t = tensor(&qkv);
+        let forward_state_t = tensor(&state);
+        let weight_t = tensor(&weight);
+        let forward_out_t = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_ssm_conv_silu_f32(
+                &ctx,
+                encoder,
+                &qkv_t,
+                &forward_state_t,
+                &weight_t,
+                &forward_out_t,
+                1,
+            )
+        })
+        .unwrap();
+        let forward_out = read_back_f32(&forward_out_t.buffer, 1)[0];
+        let expected_forward = 2.0f32 / (1.0 + (-2.0f32).exp());
+        assert!((forward_out - expected_forward).abs() < 2e-6);
+
+        let state_t = tensor(&state);
+        let grad_out_t = tensor(&grad_out);
+        let grad_state_out_t = tensor(&grad_state_out);
+        let grad_qkv_t = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let grad_state_t = MetalTensor::zeros_f32(&ctx, vec![3]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_ssm_conv_silu_vjp_f32(
+                &ctx,
+                encoder,
+                &qkv_t,
+                &state_t,
+                &weight_t,
+                &grad_out_t,
+                &grad_state_out_t,
+                &grad_qkv_t,
+                &grad_state_t,
+                1,
+            )
+        })
+        .unwrap();
+        let sigmoid = 1.0f32 / (1.0 + (-2.0f32).exp());
+        let expected_gradient = sigmoid * (1.0 + 2.0 * (1.0 - sigmoid));
+        let grad_qkv = read_back_f32(&grad_qkv_t.buffer, 1)[0];
+        let grad_state = read_back_f32(&grad_state_t.buffer, 3);
+        assert!((grad_qkv - expected_gradient).abs() < 2e-6);
+        for gradient in grad_state {
+            assert!((gradient - expected_gradient).abs() < 2e-6);
+        }
+    }
+
+    #[test]
+    fn rmsnorm_gated_vjp_matches_finite_differences() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_HEADS: usize = 3;
+        const HEAD_DIM: usize = 128;
+        const EPS: f32 = HEAD_DIM as f32 * 1e-6;
+        let elements = N_HEADS * HEAD_DIM;
+        let o: Vec<f32> = (0..elements)
+            .map(|index| ((index * 7 + 1) % 37) as f32 * 0.011 - 0.19)
+            .collect();
+        let weight: Vec<f32> = (0..HEAD_DIM)
+            .map(|index| 0.55 + (index % 13) as f32 * 0.037)
+            .collect();
+        let z: Vec<f32> = (0..elements)
+            .map(|index| ((index * 11 + 5) % 43) as f32 * 0.09 - 1.8)
+            .collect();
+        let grad_y: Vec<f32> = (0..elements)
+            .map(|index| ((index * 13 + 3) % 47) as f32 * 0.007 - 0.15)
+            .collect();
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let o_t = tensor(&o);
+        let weight_t = tensor(&weight);
+        let z_t = tensor(&z);
+        let grad_y_t = tensor(&grad_y);
+        let grad_o_t = MetalTensor::zeros_f32(&ctx, vec![elements as u64]).unwrap();
+        let grad_z_t = MetalTensor::zeros_f32(&ctx, vec![elements as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_rmsnorm_gated_vjp_f32(
+                &ctx, encoder, &o_t, &weight_t, &z_t, &grad_y_t, &grad_o_t, &grad_z_t, N_HEADS,
+                HEAD_DIM, EPS,
+            )
+        })
+        .unwrap();
+        let actual_o = read_back_f32(&grad_o_t.buffer, elements);
+        let actual_z = read_back_f32(&grad_z_t.buffer, elements);
+        let mut expected_o = vec![0.0f64; elements];
+        let mut expected_z = vec![0.0f64; elements];
+        for head in 0..N_HEADS {
+            let base = head * HEAD_DIM;
+            let sumsq = o[base..base + HEAD_DIM]
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>();
+            let scale = (sumsq / HEAD_DIM as f64 + f64::from(EPS)).sqrt().recip();
+            let mut dot = 0.0f64;
+            for index in 0..HEAD_DIM {
+                let offset = base + index;
+                let z_value = f64::from(z[offset]);
+                let sigmoid = 1.0 / (1.0 + (-z_value).exp());
+                let silu = z_value * sigmoid;
+                let grad_normed = f64::from(grad_y[offset]) * silu;
+                dot += f64::from(o[offset]) * grad_normed * f64::from(weight[index]);
+                let normed = f64::from(o[offset]) * scale * f64::from(weight[index]);
+                let silu_derivative = sigmoid * (1.0 + z_value * (1.0 - sigmoid));
+                expected_z[offset] = f64::from(grad_y[offset]) * normed * silu_derivative;
+            }
+            let correction = dot * scale.powi(3) / HEAD_DIM as f64;
+            for index in 0..HEAD_DIM {
+                let offset = base + index;
+                let z_value = f64::from(z[offset]);
+                let silu = z_value / (1.0 + (-z_value).exp());
+                let weighted_grad = f64::from(grad_y[offset]) * silu * f64::from(weight[index]);
+                expected_o[offset] = weighted_grad * scale - f64::from(o[offset]) * correction;
+            }
+        }
+        let max_o = actual_o
+            .iter()
+            .zip(&expected_o)
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        let max_z = actual_z
+            .iter()
+            .zip(&expected_z)
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_o < 3e-5, "gated RMS grad_o error {max_o}");
+        assert!(max_z < 2e-5, "gated RMS grad_z error {max_z}");
+
+        let objective = |o: &[f64], z: &[f64]| {
+            let mut value = 0.0f64;
+            for head in 0..N_HEADS {
+                let base = head * HEAD_DIM;
+                let sumsq = o[base..base + HEAD_DIM]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>();
+                let scale = (sumsq / HEAD_DIM as f64 + f64::from(EPS)).sqrt().recip();
+                for index in 0..HEAD_DIM {
+                    let offset = base + index;
+                    let silu = z[offset] / (1.0 + (-z[offset]).exp());
+                    value += f64::from(grad_y[offset])
+                        * o[offset]
+                        * scale
+                        * f64::from(weight[index])
+                        * silu;
+                }
+            }
+            value
+        };
+        let o64 = o.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let z64 = z.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let epsilon = 1e-5;
+        for &index in &[0usize, 127, 128, elements - 1] {
+            let mut plus = o64.clone();
+            let mut minus = o64.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference =
+                (objective(&plus, &z64) - objective(&minus, &z64)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual_o[index])).abs() < 3e-5);
+
+            let mut plus = z64.clone();
+            let mut minus = z64.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference =
+                (objective(&o64, &plus) - objective(&o64, &minus)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual_z[index])).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn gdn_envelope_vjps_compose_to_full_step_adjoint() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_K: usize = 1;
+        const N_V: usize = 2;
+        const HEAD_DIM: usize = 128;
+        const L2_EPS: f32 = 1e-6;
+        const RMS_EPS: f32 = HEAD_DIM as f32 * 1e-6;
+        let qk_elements = N_K * HEAD_DIM;
+        let v_elements = N_V * HEAD_DIM;
+        let conv_dim = 2 * qk_elements + v_elements;
+        let state_elements = N_V * HEAD_DIM * HEAD_DIM;
+        let qkv_now: Vec<f32> = (0..conv_dim)
+            .map(|index| ((index * 7 + 3) % 41) as f32 * 0.006 - 0.115)
+            .collect();
+        let conv_state: Vec<f32> = (0..3 * conv_dim)
+            .map(|index| ((index * 11 + 5) % 43) as f32 * 0.004 - 0.083)
+            .collect();
+        let conv_weight: Vec<f32> = (0..4 * conv_dim)
+            .map(|index| ((index * 13 + 1) % 47) as f32 * 0.003 - 0.069)
+            .collect();
+        let alpha_source = [-0.7f32, 0.45];
+        let dt_bias = [0.12f32, -0.08];
+        let a_log = [-0.09f32, -0.14];
+        let beta_source = [-0.35f32, 0.8];
+        let recurrence_state: Vec<f32> = (0..state_elements)
+            .map(|index| ((index * 17 + 7) % 53) as f32 * 0.0008 - 0.021)
+            .collect();
+        let z: Vec<f32> = (0..v_elements)
+            .map(|index| ((index * 19 + 2) % 59) as f32 * 0.05 - 1.35)
+            .collect();
+        let norm_weight: Vec<f32> = (0..HEAD_DIM)
+            .map(|index| 0.62 + (index % 17) as f32 * 0.029)
+            .collect();
+        let grad_y: Vec<f32> = (0..v_elements)
+            .map(|index| ((index * 23 + 3) % 61) as f32 * 0.004 - 0.12)
+            .collect();
+        let grad_recurrence_state: Vec<f32> = (0..state_elements)
+            .map(|index| ((index * 29 + 11) % 67) as f32 * 0.00006 - 0.002)
+            .collect();
+        let grad_conv_state: Vec<f32> = (0..3 * conv_dim)
+            .map(|index| ((index * 31 + 13) % 71) as f32 * 0.0017 - 0.052)
+            .collect();
+
+        let mut conv_output = vec![0.0f32; conv_dim];
+        for channel in 0..conv_dim {
+            let mut preactivation = 0.0f32;
+            for row in 0..3 {
+                preactivation +=
+                    conv_weight[channel * 4 + row] * conv_state[row * conv_dim + channel];
+            }
+            preactivation += conv_weight[channel * 4 + 3] * qkv_now[channel];
+            conv_output[channel] = preactivation / (1.0 + (-preactivation).exp());
+        }
+        let q_raw = conv_output[..qk_elements].to_vec();
+        let k_raw = conv_output[qk_elements..2 * qk_elements].to_vec();
+        let v = conv_output[2 * qk_elements..].to_vec();
+        let normalize = |input: &[f32]| {
+            let mut output = input.to_vec();
+            for head in 0..N_K {
+                let base = head * HEAD_DIM;
+                let radius = input[base..base + HEAD_DIM]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(L2_EPS);
+                for index in 0..HEAD_DIM {
+                    output[base + index] /= radius;
+                }
+            }
+            output
+        };
+        let q = normalize(&q_raw);
+        let k = normalize(&k_raw);
+        let decay: Vec<f32> = (0..N_V)
+            .map(|head| {
+                let value = alpha_source[head] + dt_bias[head];
+                let softplus = if value > 20.0 {
+                    value
+                } else if value < -20.0 {
+                    value.exp()
+                } else {
+                    (1.0 + value.exp()).ln()
+                };
+                (softplus * a_log[head]).exp()
+            })
+            .collect();
+        let beta: Vec<f32> = beta_source
+            .iter()
+            .map(|value| 1.0 / (1.0 + (-value).exp()))
+            .collect();
+        let mut recurrence_output = vec![0.0f32; v_elements];
+        for hi in 0..N_V {
+            let hk = hi % N_K;
+            for dv in 0..HEAD_DIM {
+                let vector_index = hi * HEAD_DIM + dv;
+                let row_offset = vector_index * HEAD_DIM;
+                let prediction = (0..HEAD_DIM)
+                    .map(|dk| decay[hi] * recurrence_state[row_offset + dk] * k[hk * HEAD_DIM + dk])
+                    .sum::<f32>();
+                let correction = beta[hi] * (v[vector_index] - prediction);
+                recurrence_output[vector_index] = (0..HEAD_DIM)
+                    .map(|dk| {
+                        (decay[hi] * recurrence_state[row_offset + dk]
+                            + correction * k[hk * HEAD_DIM + dk])
+                            * q[hk * HEAD_DIM + dk]
+                    })
+                    .sum();
+            }
+        }
+
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let qkv_t = tensor(&qkv_now);
+        let conv_state_t = tensor(&conv_state);
+        let conv_weight_t = tensor(&conv_weight);
+        let q_raw_t = tensor(&q_raw);
+        let k_raw_t = tensor(&k_raw);
+        let q_t = tensor(&q);
+        let k_t = tensor(&k);
+        let v_t = tensor(&v);
+        let alpha_t = tensor(&alpha_source);
+        let dt_t = tensor(&dt_bias);
+        let a_log_t = tensor(&a_log);
+        let decay_t = tensor(&decay);
+        let beta_t = tensor(&beta);
+        let recurrence_state_t = tensor(&recurrence_state);
+        let recurrence_output_t = tensor(&recurrence_output);
+        let z_t = tensor(&z);
+        let norm_weight_t = tensor(&norm_weight);
+        let grad_y_t = tensor(&grad_y);
+        let grad_recurrence_state_t = tensor(&grad_recurrence_state);
+        let grad_conv_state_t = tensor(&grad_conv_state);
+
+        let grad_recurrence_output_t =
+            MetalTensor::zeros_f32(&ctx, vec![v_elements as u64]).unwrap();
+        let grad_z_t = MetalTensor::zeros_f32(&ctx, vec![v_elements as u64]).unwrap();
+        let grad_q_t = MetalTensor::zeros_f32(&ctx, vec![qk_elements as u64]).unwrap();
+        let grad_k_t = MetalTensor::zeros_f32(&ctx, vec![qk_elements as u64]).unwrap();
+        let grad_v_t = MetalTensor::zeros_f32(&ctx, vec![v_elements as u64]).unwrap();
+        let grad_decay_t = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let grad_beta_t = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let grad_recurrence_state_in_t =
+            MetalTensor::zeros_f32(&ctx, vec![state_elements as u64]).unwrap();
+        let grad_c_t = MetalTensor::zeros_f32(&ctx, vec![v_elements as u64]).unwrap();
+        let residual_t = MetalTensor::zeros_f32(&ctx, vec![v_elements as u64]).unwrap();
+        let grad_q_raw_t = MetalTensor::zeros_f32(&ctx, vec![qk_elements as u64]).unwrap();
+        let grad_k_raw_t = MetalTensor::zeros_f32(&ctx, vec![qk_elements as u64]).unwrap();
+        let grad_alpha_t = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let grad_beta_source_t = MetalTensor::zeros_f32(&ctx, vec![N_V as u64]).unwrap();
+        let grad_qkv_t = MetalTensor::zeros_f32(&ctx, vec![conv_dim as u64]).unwrap();
+        let grad_conv_state_in_t =
+            MetalTensor::zeros_f32(&ctx, vec![(3 * conv_dim) as u64]).unwrap();
+
+        one_shot(&ctx, |encoder| {
+            encode_rmsnorm_gated_vjp_f32(
+                &ctx,
+                encoder,
+                &recurrence_output_t,
+                &norm_weight_t,
+                &z_t,
+                &grad_y_t,
+                &grad_recurrence_output_t,
+                &grad_z_t,
+                N_V,
+                HEAD_DIM,
+                RMS_EPS,
+            )?;
+            encode_gdn_step_decay_vjp_f32(
+                &ctx,
+                encoder,
+                &q_t,
+                &k_t,
+                &v_t,
+                &decay_t,
+                &beta_t,
+                &recurrence_state_t,
+                &grad_recurrence_output_t,
+                &grad_recurrence_state_t,
+                &grad_q_t,
+                &grad_k_t,
+                &grad_v_t,
+                &grad_decay_t,
+                &grad_beta_t,
+                &grad_recurrence_state_in_t,
+                &grad_c_t,
+                &residual_t,
+                N_V,
+                N_K,
+                HEAD_DIM,
+            )?;
+            encode_l2_norm_vjp_batched_f32(
+                &ctx,
+                encoder,
+                &q_raw_t,
+                &grad_q_t,
+                &grad_q_raw_t,
+                N_K,
+                HEAD_DIM,
+                L2_EPS,
+            )?;
+            encode_l2_norm_vjp_batched_f32(
+                &ctx,
+                encoder,
+                &k_raw_t,
+                &grad_k_t,
+                &grad_k_raw_t,
+                N_K,
+                HEAD_DIM,
+                L2_EPS,
+            )?;
+            encode_gdn_decay_chain_vjp_f32(
+                &ctx,
+                encoder,
+                &alpha_t,
+                &dt_t,
+                &a_log_t,
+                &decay_t,
+                &grad_decay_t,
+                &grad_alpha_t,
+            )?;
+            encode_sigmoid_output_vjp_f32(
+                &ctx,
+                encoder,
+                &beta_t,
+                &grad_beta_t,
+                &grad_beta_source_t,
+            )?;
+            encode_ssm_conv_silu_split_vjp_f32(
+                &ctx,
+                encoder,
+                &qkv_t,
+                &conv_state_t,
+                &conv_weight_t,
+                &grad_q_raw_t,
+                &grad_k_raw_t,
+                &grad_v_t,
+                &grad_conv_state_t,
+                &grad_qkv_t,
+                &grad_conv_state_in_t,
+                N_K,
+                N_V,
+                HEAD_DIM,
+            )
+        })
+        .unwrap();
+
+        let grad_qkv = read_back_f32(&grad_qkv_t.buffer, conv_dim);
+        let grad_conv_state_in = read_back_f32(&grad_conv_state_in_t.buffer, 3 * conv_dim);
+        let grad_alpha = read_back_f32(&grad_alpha_t.buffer, N_V);
+        let grad_beta_source = read_back_f32(&grad_beta_source_t.buffer, N_V);
+        let grad_recurrence_state_in =
+            read_back_f32(&grad_recurrence_state_in_t.buffer, state_elements);
+        let grad_z = read_back_f32(&grad_z_t.buffer, v_elements);
+
+        let as_f64 = |values: &[f32]| values.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let qkv64 = as_f64(&qkv_now);
+        let conv_state64 = as_f64(&conv_state);
+        let conv_weight64 = as_f64(&conv_weight);
+        let alpha64 = as_f64(&alpha_source);
+        let dt64 = as_f64(&dt_bias);
+        let a_log64 = as_f64(&a_log);
+        let beta_source64 = as_f64(&beta_source);
+        let recurrence_state64 = as_f64(&recurrence_state);
+        let z64 = as_f64(&z);
+        let norm_weight64 = as_f64(&norm_weight);
+        let grad_y64 = as_f64(&grad_y);
+        let grad_recurrence_state64 = as_f64(&grad_recurrence_state);
+        let grad_conv_state64 = as_f64(&grad_conv_state);
+        let objective = |qkv: &[f64],
+                         conv_state: &[f64],
+                         alpha: &[f64],
+                         beta_source: &[f64],
+                         recurrence_state: &[f64],
+                         z: &[f64]| {
+            gdn_envelope_objective_f64(
+                qkv,
+                conv_state,
+                &conv_weight64,
+                alpha,
+                &dt64,
+                &a_log64,
+                beta_source,
+                recurrence_state,
+                z,
+                &norm_weight64,
+                &grad_y64,
+                &grad_recurrence_state64,
+                &grad_conv_state64,
+                N_V,
+                N_K,
+                HEAD_DIM,
+                f64::from(L2_EPS),
+                f64::from(RMS_EPS),
+            )
+        };
+        let epsilon = 1e-5;
+        let finite_difference = |values: &[f64], index: usize, evaluate: &dyn Fn(&[f64]) -> f64| {
+            let mut plus = values.to_vec();
+            let mut minus = values.to_vec();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            (evaluate(&plus) - evaluate(&minus)) / (2.0 * epsilon)
+        };
+        for &index in &[0usize, qk_elements, 2 * qk_elements, conv_dim - 1] {
+            let fd = finite_difference(&qkv64, index, &|candidate| {
+                objective(
+                    candidate,
+                    &conv_state64,
+                    &alpha64,
+                    &beta_source64,
+                    &recurrence_state64,
+                    &z64,
+                )
+            });
+            assert!((fd - f64::from(grad_qkv[index])).abs() < 2e-4);
+        }
+        for &index in &[0usize, conv_dim, 2 * conv_dim + 17, 3 * conv_dim - 1] {
+            let fd = finite_difference(&conv_state64, index, &|candidate| {
+                objective(
+                    &qkv64,
+                    candidate,
+                    &alpha64,
+                    &beta_source64,
+                    &recurrence_state64,
+                    &z64,
+                )
+            });
+            assert!((fd - f64::from(grad_conv_state_in[index])).abs() < 2e-4);
+        }
+        for index in 0..N_V {
+            let fd = finite_difference(&alpha64, index, &|candidate| {
+                objective(
+                    &qkv64,
+                    &conv_state64,
+                    candidate,
+                    &beta_source64,
+                    &recurrence_state64,
+                    &z64,
+                )
+            });
+            assert!((fd - f64::from(grad_alpha[index])).abs() < 2e-4);
+            let fd = finite_difference(&beta_source64, index, &|candidate| {
+                objective(
+                    &qkv64,
+                    &conv_state64,
+                    &alpha64,
+                    candidate,
+                    &recurrence_state64,
+                    &z64,
+                )
+            });
+            assert!((fd - f64::from(grad_beta_source[index])).abs() < 2e-4);
+        }
+        for &index in &[
+            0usize,
+            127,
+            HEAD_DIM * HEAD_DIM + 31 * HEAD_DIM + 32,
+            state_elements - 1,
+        ] {
+            let fd = finite_difference(&recurrence_state64, index, &|candidate| {
+                objective(
+                    &qkv64,
+                    &conv_state64,
+                    &alpha64,
+                    &beta_source64,
+                    candidate,
+                    &z64,
+                )
+            });
+            assert!((fd - f64::from(grad_recurrence_state_in[index])).abs() < 2e-4);
+        }
+        for &index in &[0usize, 127, v_elements - 1] {
+            let fd = finite_difference(&z64, index, &|candidate| {
+                objective(
+                    &qkv64,
+                    &conv_state64,
+                    &alpha64,
+                    &beta_source64,
+                    &recurrence_state64,
+                    candidate,
+                )
+            });
+            assert!((fd - f64::from(grad_z[index])).abs() < 2e-4);
+        }
+
+        let direction = |len: usize, stride: usize| {
+            (0..len)
+                .map(|index| ((index * stride + 3) % 37) as f64 * 0.0007 - 0.012)
+                .collect::<Vec<_>>()
+        };
+        let dqkv = direction(qkv64.len(), 5);
+        let dconv = direction(conv_state64.len(), 7);
+        let dalpha = direction(alpha64.len(), 11);
+        let dbeta = direction(beta_source64.len(), 13);
+        let dstate = direction(recurrence_state64.len(), 17);
+        let dz = direction(z64.len(), 19);
+        let inner = |gradient: &[f32], tangent: &[f64]| {
+            gradient
+                .iter()
+                .zip(tangent)
+                .map(|(gradient, tangent)| f64::from(*gradient) * tangent)
+                .sum::<f64>()
+        };
+        let reverse_directional = inner(&grad_qkv, &dqkv)
+            + inner(&grad_conv_state_in, &dconv)
+            + inner(&grad_alpha, &dalpha)
+            + inner(&grad_beta_source, &dbeta)
+            + inner(&grad_recurrence_state_in, &dstate)
+            + inner(&grad_z, &dz);
+        let shift = |base: &[f64], tangent: &[f64], amount: f64| {
+            base.iter()
+                .zip(tangent)
+                .map(|(base, tangent)| base + amount * tangent)
+                .collect::<Vec<_>>()
+        };
+        let plus = objective(
+            &shift(&qkv64, &dqkv, epsilon),
+            &shift(&conv_state64, &dconv, epsilon),
+            &shift(&alpha64, &dalpha, epsilon),
+            &shift(&beta_source64, &dbeta, epsilon),
+            &shift(&recurrence_state64, &dstate, epsilon),
+            &shift(&z64, &dz, epsilon),
+        );
+        let minus = objective(
+            &shift(&qkv64, &dqkv, -epsilon),
+            &shift(&conv_state64, &dconv, -epsilon),
+            &shift(&alpha64, &dalpha, -epsilon),
+            &shift(&beta_source64, &dbeta, -epsilon),
+            &shift(&recurrence_state64, &dstate, -epsilon),
+            &shift(&z64, &dz, -epsilon),
+        );
+        let forward_directional = (plus - minus) / (2.0 * epsilon);
+        assert!(
+            (forward_directional - reverse_directional).abs() < 3e-4,
+            "full GDN envelope adjoint mismatch forward={forward_directional} reverse={reverse_directional}"
+        );
+    }
+
+    #[test]
+    fn gdn_envelope_vjps_reject_unsafe_contracts() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let sigmoid = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let grad = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let invoke_sigmoid = |input: &MetalTensor, destination: &MetalTensor| {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let result = encode_sigmoid_output_vjp_f32(&ctx, &encoder, input, &grad, destination);
+            encoder.end();
+            result
+        };
+
+        let mut overflow_shape = sigmoid.clone();
+        overflow_shape.shape = vec![u64::MAX, 2];
+        invoke_sigmoid(&overflow_shape, &output).expect_err("overflowing shape must fail");
+        let f16 = MetalTensor::zeros_f16(&ctx, vec![4]).unwrap();
+        invoke_sigmoid(&f16, &output).expect_err("non-F32 input must fail");
+        invoke_sigmoid(&sigmoid, &sigmoid).expect_err("input/output alias must fail");
+        let mut read_only = output.clone();
+        read_only.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        invoke_sigmoid(&sigmoid, &read_only).expect_err("read-only output must fail");
+        let mut misaligned = output.clone();
+        misaligned.offset = 2;
+        invoke_sigmoid(&sigmoid, &misaligned).expect_err("misaligned output must fail");
+        let mut out_of_range = output.clone();
+        out_of_range.offset = 4;
+        invoke_sigmoid(&sigmoid, &out_of_range).expect_err("short physical range must fail");
+
+        let o = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let weight = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let z = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let grad_y = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let shared_output = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_rmsnorm_gated_vjp_f32(
+            &ctx,
+            &encoder,
+            &o,
+            &weight,
+            &z,
+            &grad_y,
+            &shared_output,
+            &shared_output,
+            1,
+            4,
+            1e-6,
+        )
+        .expect_err("gradient outputs must not alias");
         encoder.end();
     }
 

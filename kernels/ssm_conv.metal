@@ -72,6 +72,89 @@ kernel void kernel_ssm_conv_silu_f32(
     }
 }
 
+// Activation VJP for one immutable conv+SiLU step and its shifted state.
+kernel void kernel_ssm_conv_silu_vjp_f32(
+        constant ssm_conv_args & args       [[buffer(0)]],
+        device const float * qkv_now        [[buffer(1)]],
+        device const float * conv_state_in  [[buffer(2)]],
+        device const float * conv_w         [[buffer(3)]],
+        device const float * grad_out       [[buffer(4)]],
+        device const float * grad_state_out [[buffer(5)]],
+        device       float * grad_qkv       [[buffer(6)]],
+        device       float * grad_state_in  [[buffer(7)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.conv_dim) return;
+    const uint c = tid;
+    const uint cd = args.conv_dim;
+    device const float * weight = conv_w + (ulong)c * CONV_K;
+    float preactivation = 0.0f;
+    for (int row = 0; row < CONV_K - 1; ++row) {
+        preactivation += weight[row] * conv_state_in[(ulong)row * cd + c];
+    }
+    preactivation += weight[CONV_K - 1] * qkv_now[c];
+    const float sigmoid_value = 1.0f / (1.0f + exp(-preactivation));
+    const float silu_derivative = sigmoid_value
+        * (1.0f + preactivation * (1.0f - sigmoid_value));
+    const float grad_preactivation = grad_out[c] * silu_derivative;
+
+    grad_qkv[c] = grad_preactivation * weight[CONV_K - 1]
+        + grad_state_out[(ulong)(CONV_K - 2) * cd + c];
+    grad_state_in[c] = grad_preactivation * weight[0];
+    grad_state_in[(ulong)cd + c] = grad_preactivation * weight[1]
+        + grad_state_out[c];
+    grad_state_in[(ulong)2 * cd + c] = grad_preactivation * weight[2]
+        + grad_state_out[(ulong)cd + c];
+}
+
+struct ssm_conv_split_vjp_args {
+    uint conv_dim;
+    uint qk_dim;
+};
+
+// Same VJP, consuming recurrence gradients as separate raw Q, raw K, and V
+// slices so a full GDN backward does not need a concatenation dispatch.
+kernel void kernel_ssm_conv_silu_split_vjp_f32(
+        constant ssm_conv_split_vjp_args & args [[buffer(0)]],
+        device const float * qkv_now            [[buffer(1)]],
+        device const float * conv_state_in      [[buffer(2)]],
+        device const float * conv_w             [[buffer(3)]],
+        device const float * grad_q_raw         [[buffer(4)]],
+        device const float * grad_k_raw         [[buffer(5)]],
+        device const float * grad_v             [[buffer(6)]],
+        device const float * grad_state_out     [[buffer(7)]],
+        device       float * grad_qkv           [[buffer(8)]],
+        device       float * grad_state_in      [[buffer(9)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.conv_dim) return;
+    const uint c = tid;
+    const uint cd = args.conv_dim;
+    device const float * weight = conv_w + (ulong)c * CONV_K;
+    float preactivation = 0.0f;
+    for (int row = 0; row < CONV_K - 1; ++row) {
+        preactivation += weight[row] * conv_state_in[(ulong)row * cd + c];
+    }
+    preactivation += weight[CONV_K - 1] * qkv_now[c];
+    float grad_out;
+    if (c < args.qk_dim) {
+        grad_out = grad_q_raw[c];
+    } else if (c < 2u * args.qk_dim) {
+        grad_out = grad_k_raw[c - args.qk_dim];
+    } else {
+        grad_out = grad_v[c - 2u * args.qk_dim];
+    }
+    const float sigmoid_value = 1.0f / (1.0f + exp(-preactivation));
+    const float silu_derivative = sigmoid_value
+        * (1.0f + preactivation * (1.0f - sigmoid_value));
+    const float grad_preactivation = grad_out * silu_derivative;
+    grad_qkv[c] = grad_preactivation * weight[CONV_K - 1]
+        + grad_state_out[(ulong)(CONV_K - 2) * cd + c];
+    grad_state_in[c] = grad_preactivation * weight[0];
+    grad_state_in[(ulong)cd + c] = grad_preactivation * weight[1]
+        + grad_state_out[c];
+    grad_state_in[(ulong)2 * cd + c] = grad_preactivation * weight[2]
+        + grad_state_out[(ulong)cd + c];
+}
+
 struct gdn_prep_packed_args {
     uint n_tokens;
     uint n_k_heads;
@@ -310,6 +393,65 @@ kernel void kernel_rmsnorm_gated_f32(
         const float zi = z_h[i];
         const float silu_z = zi / (1.0f + exp(-zi));
         y_h[i] = normed * silu_z;
+    }
+}
+
+// Ordinary activation VJP for RMSNorm(o) * SiLU(z). The released Qwen R-lens
+// leaves this gated norm unmodified, so this kernel intentionally implements
+// the exact Jacobian rather than the residual-norm/FFN RelP rules.
+kernel void kernel_rmsnorm_gated_vjp_f32(
+        constant rmsnorm_gated_args & args [[buffer(0)]],
+        device const float * o            [[buffer(1)]],
+        device const float * weight       [[buffer(2)]],
+        device const float * z            [[buffer(3)]],
+        device const float * grad_y       [[buffer(4)]],
+        device       float * grad_o       [[buffer(5)]],
+        device       float * grad_z       [[buffer(6)]],
+        threadgroup float * shmem         [[threadgroup(0)]],
+        uint hi [[threadgroup_position_in_grid]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    if (hi >= args.n_heads) return;
+    const ulong base = (ulong)hi * args.head_dim;
+    float sumsq = 0.0f;
+    float dot = 0.0f;
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        const float o_value = o[base + i];
+        const float z_value = z[base + i];
+        const float silu_z = z_value / (1.0f + exp(-z_value));
+        const float grad_normed = grad_y[base + i] * silu_z;
+        sumsq += o_value * o_value;
+        dot += o_value * grad_normed * weight[i];
+    }
+    sumsq = simd_sum(sumsq);
+    dot = simd_sum(dot);
+    const uint nsg = (ntg + 31) / 32;
+    if (tiisg == 0) {
+        shmem[sgitg] = sumsq;
+        shmem[nsg + sgitg] = dot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = tiisg < nsg ? shmem[tiisg] : 0.0f;
+    dot = tiisg < nsg ? shmem[nsg + tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+    dot = simd_sum(dot);
+
+    const float scale = rsqrt(sumsq / float(args.head_dim) + args.eps);
+    const float correction = dot * scale * scale * scale / float(args.head_dim);
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        const float o_value = o[base + i];
+        const float z_value = z[base + i];
+        const float sigmoid_z = 1.0f / (1.0f + exp(-z_value));
+        const float silu_z = z_value * sigmoid_z;
+        const float grad_normed = grad_y[base + i] * silu_z;
+        const float weighted_grad = grad_normed * weight[i];
+        grad_o[base + i] = weighted_grad * scale - o_value * correction;
+        const float normed = o_value * scale * weight[i];
+        const float silu_derivative = sigmoid_z
+            * (1.0f + z_value * (1.0f - sigmoid_z));
+        grad_z[base + i] = grad_y[base + i] * normed * silu_derivative;
     }
 }
 

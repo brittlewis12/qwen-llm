@@ -44,6 +44,17 @@ kernel void kernel_sigmoid_f32(
     y[tid] = 1.0f / (1.0f + exp(-x[tid]));
 }
 
+kernel void kernel_sigmoid_output_vjp_f32(
+        constant n_args & args [[buffer(0)]],
+        device const float * sigmoid_output [[buffer(1)]],
+        device const float * grad_output     [[buffer(2)]],
+        device       float * grad_input      [[buffer(3)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const float value = sigmoid_output[tid];
+    grad_input[tid] = grad_output[tid] * value * (1.0f - value);
+}
+
 // y[i] = log(1 + exp(x[i]))   (numerically-stable form)
 kernel void kernel_softplus_f32(
         constant n_args & args [[buffer(0)]],
@@ -447,6 +458,56 @@ kernel void kernel_l2_norm_batched_f32(
     const float scale = 1.0f / max(sqrt(sumsq), args.eps);
     for (uint i = tpitg; i < args.head_dim; i += ntg) {
         y_h[i] = x_h[i] * scale;
+    }
+}
+
+// VJP for y = x / max(||x||, eps). Equality uses the clamped branch.
+kernel void kernel_l2_norm_vjp_batched_f32(
+        constant l2_norm_batched_args & args [[buffer(0)]],
+        device const float * x              [[buffer(1)]],
+        device const float * grad_output    [[buffer(2)]],
+        device       float * grad_input     [[buffer(3)]],
+        threadgroup  float * shmem          [[threadgroup(0)]],
+        uint row [[threadgroup_position_in_grid]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    if (row >= args.n_heads) return;
+    const ulong base = (ulong)row * args.head_dim;
+    float sumsq = 0.0f;
+    float dot = 0.0f;
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        const float value = x[base + i];
+        sumsq += value * value;
+        dot += value * grad_output[base + i];
+    }
+    sumsq = simd_sum(sumsq);
+    dot = simd_sum(dot);
+    const uint nsg = (ntg + 31) / 32;
+    if (tiisg == 0) {
+        shmem[sgitg] = sumsq;
+        shmem[nsg + sgitg] = dot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = tiisg < nsg ? shmem[tiisg] : 0.0f;
+    dot = tiisg < nsg ? shmem[nsg + tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+    dot = simd_sum(dot);
+
+    const float radius = sqrt(sumsq);
+    if (radius > args.eps) {
+        const float inverse = 1.0f / radius;
+        const float correction = dot * inverse * inverse * inverse;
+        for (uint i = tpitg; i < args.head_dim; i += ntg) {
+            grad_input[base + i] = grad_output[base + i] * inverse
+                - x[base + i] * correction;
+        }
+    } else {
+        const float inverse = 1.0f / args.eps;
+        for (uint i = tpitg; i < args.head_dim; i += ntg) {
+            grad_input[base + i] = grad_output[base + i] * inverse;
+        }
     }
 }
 
@@ -955,6 +1016,33 @@ kernel void kernel_gdn_decay_chain_f32(
         sp = log(1.0f + exp(v));
     }
     out[tid] = exp(sp * a_log[tid]);
+}
+
+// Activation VJP for direct decay = exp(softplus(a + dt_bias) * a_log).
+// Model parameters are frozen, so only the projected alpha source receives a
+// gradient. The softplus derivative follows the exact forward branches.
+kernel void kernel_gdn_decay_chain_vjp_f32(
+        constant n_args & args             [[buffer(0)]],
+        device const float * a             [[buffer(1)]],
+        device const float * dt_bias       [[buffer(2)]],
+        device const float * a_log         [[buffer(3)]],
+        device const float * decay         [[buffer(4)]],
+        device const float * grad_decay    [[buffer(5)]],
+        device       float * grad_a        [[buffer(6)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const float value = a[tid] + dt_bias[tid];
+    float softplus_derivative;
+    if (value > 20.0f) {
+        softplus_derivative = 1.0f;
+    } else if (value < -20.0f) {
+        softplus_derivative = exp(value);
+    } else {
+        const float exponential = exp(value);
+        softplus_derivative = exponential / (1.0f + exponential);
+    }
+    grad_a[tid] = grad_decay[tid] * decay[tid] * a_log[tid]
+        * softplus_derivative;
 }
 
 // Batched GDN α-chain (v0.73a layer-major batching).

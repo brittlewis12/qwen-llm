@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Private One-Band Selected QSA Motor
+
+Status: qualify one selected band inside a private layer motor; post-PLE,
+session, runtime, and CLI callers remain on the dense-only gate.
+
+- Common packed work projects and publishes full-chunk index keys, Q/gate/K/V,
+  normalized Q/K, and F16 K/V cache rows once. Dense attention stops at the
+  2,051 shoulder; one selected suffix then runs the six-dispatch packet, and one
+  packed output projection consumes all assembled rows.
+- Selected index queries preserve the BF16-weight/F32-activation route before
+  top-k. A B=32 override-on gate dispatches exactly the plain BF16/F32 kernel
+  and matches chronological scalar output and persistent state.
+- Used row visibility, count, and status controls start at `-1`. A one-thread
+  audit preserves the first native status, otherwise emits count-mismatch code
+  4, publishes the final count, and increments a durable audited-band witness.
+- QSA ownership now carries pending selected-band count through reserve,
+  release, reset, and abandonment. Release rejects prior poisoning, incomplete
+  metadata, missing or duplicate audits, bad final count, and orphaned pending
+  state before publishing committed length.
+- Mixed three-dense/one-selected rows and fully selected two-row chunks match
+  scalar outputs, pending/compressed index state, and F16 K/V caches. Exact
+  topology contains one selected packet followed immediately by one audit; no
+  scalar selected-attention kernel appears.
+- A second band, missing selected capability, selected-scratch aliases,
+  writable index-query weights, and incompatible 4Q/2KV packet geometry reject
+  before dispatch with unchanged controls and no owner or poison.
+- This does not alter production prefill behavior. Next make raw index-query
+  views band-relative, qualify B=33 and larger scratch reuse, and only then open
+  the post-PLE composition gate.
+
 ## 2026-08-27 - Flash-Next Packed QSA Selected Attention Primitives
 
 Status: qualify the dormant six-dispatch selected-attention packet; production

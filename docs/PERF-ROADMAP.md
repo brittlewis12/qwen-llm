@@ -279,8 +279,14 @@ selected-attention continuation is now qualified at production stride 2,051:
 four-head K-sharing logits plus scalar-order softmax/value/qgate match repeated
 scalar kernels byte-for-byte at B=1 and B=32, and exact six-dispatch grids are
 locked. Invalid metadata and future IDs fail without cache reads. Persistent
-publication, completion auditing, and the production selected route remain
-absent. Released N=2,048 measures 457.229 tok/s wall, and four scalar
+publication and completion auditing now compose one selected band inside a
+private layer motor. Mixed three-dense/one-selected and fully selected rows
+match scalar output and persistent state; B=32 preserves the released BF16
+index-query/F32-activation route. Sticky audit witnesses prevent stale, missing,
+or failed rows from publishing committed length. The outer dense motor,
+post-PLE composition, session, and production selected route remain closed
+until multi-band scratch reuse is qualified. Released N=2,048 measures
+457.229 tok/s wall, and four scalar
 continuations cross into QSA selection at length 2,052 with all state bindings
 and 12 cache lengths intact. Runtime and CLI promotion is now closed. Unprofiled
 prompts of two or more tokens request packed execution; scratch admission

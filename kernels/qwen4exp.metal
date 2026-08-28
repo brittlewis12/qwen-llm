@@ -522,6 +522,12 @@ struct qwen4exp_qsa_packed_attention_args {
     float scale;
 };
 
+struct qwen4exp_qsa_selected_audit_args {
+    uint query_count;
+    int expected_selected_count;
+    int count_mismatch_status;
+};
+
 static inline float qwen4exp_qsa_rope_value(
         device const float * row,
         device const float * weight,
@@ -1168,4 +1174,35 @@ kernel void kernel_qwen4exp_qsa_attention_softmax_value_packed_f16(
     output[output_index] = scratch[8] > 0.0f
         ? accumulator / scratch[8] * gate
         : 0.0f;
+}
+
+kernel void kernel_qwen4exp_qsa_audit_selected_i32(
+        constant qwen4exp_qsa_selected_audit_args & args [[buffer(0)]],
+        device const int * selected_counts [[buffer(1)]],
+        device const int * row_status [[buffer(2)]],
+        device int * workspace_status [[buffer(3)]],
+        device int * workspace_selected_count [[buffer(4)]],
+        device int * audited_bands [[buffer(5)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index != 0u || args.query_count == 0u) return;
+    int status = workspace_status[0];
+    if (status == 0) {
+        for (uint query = 0u; query < args.query_count; ++query) {
+            if (row_status[query] != 0) {
+                status = row_status[query];
+                break;
+            }
+        }
+    }
+    if (status == 0) {
+        for (uint query = 0u; query < args.query_count; ++query) {
+            if (selected_counts[query] != args.expected_selected_count) {
+                status = args.count_mismatch_status;
+                break;
+            }
+        }
+    }
+    workspace_status[0] = status;
+    workspace_selected_count[0] = selected_counts[args.query_count - 1u];
+    audited_bands[0] += 1;
 }

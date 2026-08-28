@@ -39,6 +39,7 @@ const ATTENTION_SCRATCH_FLOATS: usize = 9;
 const LOGITS_SIMDGROUPS_PER_TG: usize = 8;
 const PACKED_ATTENTION_HEADS_PER_TG: usize = 4;
 const PACKED_ATTENTION_THREADS: usize = 128;
+const SELECTED_COUNT_MISMATCH_STATUS: i32 = 4;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 // Staged for the all-layer packed composer in the next checkpoint.
 #[allow(dead_code)]
@@ -658,6 +659,7 @@ pub struct QwenSparseAttentionMetalWorkspace {
     output: MetalTensor,
     committed_length: usize,
     pending_length: Option<usize>,
+    pending_selected_bands: Option<usize>,
     active_command: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
     state_poisoned: bool,
 }
@@ -1208,6 +1210,7 @@ impl QwenSparseAttentionMetalWorkspace {
             output: MetalTensor::zeros_f32(ctx, vec![geometry.hidden_size as u64])?,
             committed_length: 0,
             pending_length: None,
+            pending_selected_bands: None,
             active_command: None,
             state_poisoned: false,
         })
@@ -1239,12 +1242,19 @@ impl QwenSparseAttentionMetalWorkspace {
         self.require_idle()?;
         self.committed_length = 0;
         self.pending_length = None;
+        self.pending_selected_bands = None;
         self.state_poisoned = false;
         Ok(())
     }
 
     pub fn release_after(&mut self) -> Result<(), Qwen4ExpQsaError> {
         let Some(command) = self.active_command.clone() else {
+            if self.pending_length.is_some() || self.pending_selected_bands.is_some() {
+                self.pending_length = None;
+                self.pending_selected_bands = None;
+                self.state_poisoned = true;
+                return invalid("QSA pending metadata has no owning command buffer");
+            }
             return Ok(());
         };
         let status = command.status();
@@ -1263,33 +1273,47 @@ impl QwenSparseAttentionMetalWorkspace {
             Ok((
                 read_i32_scalar(&self.selector_status)?,
                 read_i32_scalar(&self.selected_count)?,
+                read_i32_scalar(&self.visible_blocks)?,
             ))
         })();
         self.active_command = None;
         let pending = self.pending_length.take();
-        let (selector_status, selected_count) = match scalar_result {
+        let pending_selected_bands = self.pending_selected_bands.take();
+        let (selector_status, selected_count, audited_bands) = match scalar_result {
             Ok(scalars) => scalars,
             Err(error) => {
                 self.state_poisoned = true;
                 return Err(error);
             }
         };
-        let expected_count = pending
-            .map(|length| (length / self.geometry.ratio).min(self.geometry.block_budget()))
-            .unwrap_or(0);
+        let (pending, pending_selected_bands) = match (pending, pending_selected_bands) {
+            (Some(pending), Some(pending_selected_bands)) => (pending, pending_selected_bands),
+            _ => {
+                self.state_poisoned = true;
+                return invalid("completed QSA command had incomplete pending metadata");
+            }
+        };
+        let expected_count = (pending / self.geometry.ratio).min(self.geometry.block_budget());
+        let expected_audited_bands = i32::try_from(pending_selected_bands).map_err(|_| {
+            self.state_poisoned = true;
+            Qwen4ExpQsaError::Invalid(format!(
+                "pending QSA selected-band count {pending_selected_bands} exceeds i32"
+            ))
+        })?;
+        let audit_complete = pending_selected_bands == 0 || audited_bands == expected_audited_bands;
         if status == MTLCommandBufferStatus::Completed
             && error.is_none()
+            && !self.state_poisoned
             && selector_status == 0
             && selected_count == expected_count as i32
+            && audit_complete
         {
-            self.committed_length = pending.ok_or_else(|| {
-                Qwen4ExpQsaError::Invalid("completed QSA command had no pending length".into())
-            })?;
+            self.committed_length = pending;
             Ok(())
         } else {
             self.state_poisoned = true;
             Err(Qwen4ExpQsaError::CommandBuffer(format!(
-                "status={status:?}, error={error:?}, selector_status={selector_status}, selected_count={selected_count}, expected_count={expected_count}"
+                "status={status:?}, error={error:?}, selector_status={selector_status}, selected_count={selected_count}, expected_count={expected_count}, audited_bands={audited_bands}, expected_audited_bands={expected_audited_bands}"
             )))
         }
     }
@@ -1303,6 +1327,12 @@ impl QwenSparseAttentionMetalWorkspace {
     /// of order or race a subsequent owner.
     pub unsafe fn abandon_uncommitted(&mut self) -> Result<(), Qwen4ExpQsaError> {
         let Some(command) = self.active_command.as_ref() else {
+            if self.pending_length.is_some() || self.pending_selected_bands.is_some() {
+                self.pending_length = None;
+                self.pending_selected_bands = None;
+                self.state_poisoned = true;
+                return invalid("QSA pending metadata has no command buffer to abandon");
+            }
             return Ok(());
         };
         let status = command.status();
@@ -1313,12 +1343,16 @@ impl QwenSparseAttentionMetalWorkspace {
         }
         self.active_command = None;
         self.pending_length = None;
+        self.pending_selected_bands = None;
         self.state_poisoned = false;
         Ok(())
     }
 
     fn require_idle(&self) -> Result<(), Qwen4ExpQsaError> {
-        if self.active_command.is_some() || self.pending_length.is_some() {
+        if self.active_command.is_some()
+            || self.pending_length.is_some()
+            || self.pending_selected_bands.is_some()
+        {
             invalid("workspace causal state is still owned by a command buffer")
         } else {
             Ok(())
@@ -1429,7 +1463,7 @@ pub fn encode_qwen_sparse_attention_text<'a>(
     preflight(ctx, weights)?;
 
     let (position, sequence_length) = prepare_control_scalars(workspace)?;
-    reserve_command(workspace, enc, sequence_length)?;
+    reserve_command(workspace, enc, sequence_length, 0)?;
 
     let encoded = encode_step(
         ctx,
@@ -1484,6 +1518,36 @@ pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor(
             tokens,
             0,
             None,
+            false,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+unsafe fn encode_qwen_sparse_attention_text_packed_motor(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    workspace: &mut QwenSparseAttentionMetalWorkspace,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    tokens: usize,
+) -> Result<MetalTensor, Qwen4ExpQsaError> {
+    unsafe {
+        encode_qwen_sparse_attention_text_dense_packed_motor_inner(
+            ctx,
+            enc,
+            input,
+            weights,
+            workspace,
+            scratch,
+            start_position,
+            tokens,
+            0,
+            None,
+            true,
         )
     }
 }
@@ -1513,6 +1577,7 @@ pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_profil
             tokens,
             layer,
             Some(recorder),
+            false,
         )
     }
 }
@@ -1529,6 +1594,7 @@ unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_inner(
     tokens: usize,
     layer: u32,
     profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    selected_enabled: bool,
 ) -> Result<MetalTensor, Qwen4ExpQsaError> {
     if tokens == 0 {
         return invalid("dense packed QSA token count must be nonzero");
@@ -1558,7 +1624,7 @@ unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_inner(
         return Ok(output);
     }
 
-    validate_dense_packed_contract(
+    let plan = validate_packed_contract(
         ctx,
         enc,
         input,
@@ -1567,29 +1633,35 @@ unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_inner(
         scratch,
         start_position,
         tokens,
+        selected_enabled,
     )?;
-    preflight_dense_packed(ctx, weights)?;
-    let sequence_length = prepare_dense_packed_control_scalars(workspace, start_position, tokens)?;
-    reserve_command(workspace, enc, sequence_length)?;
+    preflight_packed(ctx, weights, plan)?;
+    prepare_packed_control_scalars(workspace, scratch, start_position, tokens, plan)?;
+    reserve_command(workspace, enc, plan.end_position, plan.selected_bands)?;
 
-    let encoded = encode_dense_packed_step(
-        ctx,
-        enc,
-        input,
-        weights,
-        workspace,
-        scratch,
-        start_position,
-        tokens,
-        sequence_length,
-        layer,
-        profile,
-    );
-    if let Err(error) = encoded {
-        workspace.state_poisoned = true;
-        return Err(error);
+    let encoded = (|| {
+        encode_packed_step(
+            ctx,
+            enc,
+            input,
+            weights,
+            workspace,
+            scratch,
+            start_position,
+            tokens,
+            plan,
+            layer,
+            profile,
+        )?;
+        scratch.views(tokens).map(|views| views.output)
+    })();
+    match encoded {
+        Ok(output) => Ok(output),
+        Err(error) => {
+            workspace.state_poisoned = true;
+            Err(error)
+        }
     }
-    scratch.views(tokens).map(|views| views.output)
 }
 
 pub(crate) fn prepare_control_scalars(
@@ -1615,11 +1687,13 @@ pub(crate) fn prepare_control_scalars(
 }
 
 #[allow(dead_code)]
-fn prepare_dense_packed_control_scalars(
+fn prepare_packed_control_scalars(
     workspace: &QwenSparseAttentionMetalWorkspace,
+    scratch: &QwenSparseAttentionPackedScratch,
     start_position: usize,
     tokens: usize,
-) -> Result<usize, Qwen4ExpQsaError> {
+    plan: QwenSparseAttentionPackedRangePlan,
+) -> Result<(), Qwen4ExpQsaError> {
     if workspace.state_poisoned {
         return invalid("workspace causal state is indeterminate; reset it before reuse");
     }
@@ -1635,22 +1709,35 @@ fn prepare_dense_packed_control_scalars(
             "dense packed QSA requires at least two tokens, got {tokens}"
         ));
     }
-    let plan = workspace
+    let expected_plan = workspace
         .geometry
         .plan_packed_range(start_position, tokens)?;
-    if plan.selected_tokens != 0 {
-        return invalid(format!(
-            "dense packed QSA range start={start_position} tokens={tokens} end={} exceeds dense limit {}",
-            plan.end_position,
-            workspace.geometry.output_width()
-        ));
+    if plan != expected_plan {
+        return invalid("packed QSA control plan differs from validated range");
     }
-    let sequence_length = plan.end_position;
-    let visible_blocks = sequence_length / workspace.geometry.ratio;
-    write_i32_scalar(&workspace.visible_blocks, visible_blocks as i32)?;
-    write_i32_scalar(&workspace.selector_status, 0)?;
-    write_i32_scalar(&workspace.selected_count, 0)?;
-    Ok(sequence_length)
+    if plan.selected_tokens > 0 {
+        let selected = scratch.selected.as_ref().ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid("packed QSA selected scratch was not admitted".into())
+        })?;
+        let views = selected.views(
+            workspace.geometry,
+            scratch.capacity,
+            scratch.query_tile,
+            plan.selected_tokens,
+        )?;
+        fill_i32_tensor(&views.visible_blocks, -1)?;
+        fill_i32_tensor(&views.selected_count, -1)?;
+        fill_i32_tensor(&views.selector_status, -1)?;
+        write_i32_scalar(&workspace.visible_blocks, 0)?;
+        write_i32_scalar(&workspace.selector_status, 0)?;
+        write_i32_scalar(&workspace.selected_count, -1)?;
+    } else {
+        let visible_blocks = plan.end_position / workspace.geometry.ratio;
+        write_i32_scalar(&workspace.visible_blocks, visible_blocks as i32)?;
+        write_i32_scalar(&workspace.selector_status, 0)?;
+        write_i32_scalar(&workspace.selected_count, 0)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1664,6 +1751,32 @@ pub(crate) fn validate_dense_packed_contract(
     start_position: usize,
     tokens: usize,
 ) -> Result<(), Qwen4ExpQsaError> {
+    validate_packed_contract(
+        ctx,
+        enc,
+        input,
+        weights,
+        workspace,
+        scratch,
+        start_position,
+        tokens,
+        false,
+    )
+    .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_packed_contract(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    workspace: &QwenSparseAttentionMetalWorkspace,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    tokens: usize,
+    selected_enabled: bool,
+) -> Result<QwenSparseAttentionPackedRangePlan, Qwen4ExpQsaError> {
     validate_encoder(ctx, enc)?;
     if workspace.state_poisoned {
         return invalid("workspace causal state is indeterminate; reset it before reuse");
@@ -1686,14 +1799,34 @@ pub(crate) fn validate_dense_packed_contract(
         ));
     }
     let plan = g.plan_packed_range(start_position, tokens)?;
-    if plan.selected_tokens != 0 {
+    if plan.selected_tokens != 0 && !selected_enabled {
         return invalid(format!(
             "dense packed QSA end {} exceeds dense limit {}",
             plan.end_position,
             g.output_width()
         ));
     }
+    if plan.selected_bands > 1 {
+        return invalid(format!(
+            "packed QSA selected suffix requires {} bands; this checkpoint supports one",
+            plan.selected_bands
+        ));
+    }
+    if plan.selected_tokens > 0 {
+        if !scratch.selected_capable() {
+            return invalid("packed QSA selected suffix requires selected-capable scratch");
+        }
+        if plan.selected_tokens > scratch.query_tile {
+            return invalid(format!(
+                "packed QSA selected suffix has {} rows, exceeding query tile {}",
+                plan.selected_tokens, scratch.query_tile
+            ));
+        }
+    }
     let sequence_length = plan.end_position;
+    let dense_end = start_position
+        .checked_add(plan.dense_tokens)
+        .ok_or_else(|| Qwen4ExpQsaError::Invalid("packed QSA dense end overflow".into()))?;
     if g.theta <= 1.0 {
         return invalid(format!(
             "dense packed QSA requires RoPE theta greater than one, got {}",
@@ -1704,10 +1837,23 @@ pub(crate) fn validate_dense_packed_contract(
         ("start position", start_position),
         ("token count", tokens),
         ("sequence length", sequence_length),
+        ("dense end", dense_end),
         ("query tile", scratch.query_tile),
     ] {
         if u32::try_from(value).is_err() {
             return invalid(format!("dense packed QSA {name} {value} exceeds u32"));
+        }
+    }
+    if plan.selected_tokens > 0 {
+        for (name, value) in [
+            ("block budget", g.block_budget()),
+            ("maximum visible blocks", sequence_length / g.ratio),
+            ("selected token count", plan.selected_tokens),
+            ("selected band count", plan.selected_bands),
+        ] {
+            if i32::try_from(value).is_err() {
+                return invalid(format!("packed QSA {name} {value} exceeds i32"));
+            }
         }
     }
     let first_input = input.view_subrange(0, vec![g.hidden_size as u64]);
@@ -1734,6 +1880,15 @@ pub(crate) fn validate_dense_packed_contract(
     ] {
         validate_f32_q8_mat_mat_addressing(dtype, n_in, n_out, tokens)?;
     }
+    if plan.selected_tokens > 0 {
+        validate_f32_q8_mat_mat_addressing(
+            weights.index_query.dtype,
+            g.hidden_size,
+            g.index_query_width(),
+            plan.selected_tokens,
+        )?;
+    }
+    let dense_score_length = if plan.dense_tokens > 0 { dense_end } else { 0 };
     for (name, elements) in [
         ("input", g.hidden_size.checked_mul(tokens)),
         ("index key", g.index_head_dim.checked_mul(tokens)),
@@ -1746,7 +1901,7 @@ pub(crate) fn validate_dense_packed_contract(
             scratch
                 .query_tile
                 .checked_mul(g.query_heads)
-                .and_then(|elements| elements.checked_mul(sequence_length)),
+                .and_then(|elements| elements.checked_mul(dense_score_length)),
         ),
         (
             "cache append offset",
@@ -1768,6 +1923,14 @@ pub(crate) fn validate_dense_packed_contract(
     }
     if g.kv_heads == 0 || !g.query_heads.is_multiple_of(g.kv_heads) {
         return invalid("dense packed QSA requires a nonzero integral GQA group");
+    }
+    if plan.selected_tokens > 0
+        && (g.head_dim != MAIN_HEAD_DIM
+            || !(g.query_heads / g.kv_heads).is_multiple_of(PACKED_ATTENTION_HEADS_PER_TG))
+    {
+        return invalid(format!(
+            "selected packed QSA requires head dim {MAIN_HEAD_DIM} and GQA groups divisible by {PACKED_ATTENTION_HEADS_PER_TG}"
+        ));
     }
 
     let weights_named = [
@@ -1841,8 +2004,94 @@ pub(crate) fn validate_dense_packed_contract(
             return invalid(format!("{name} has the wrong element count"));
         }
     }
-    scratch.score_view(scratch.query_tile.min(tokens), sequence_length)?;
-    Ok(())
+    if plan.dense_tokens > 0 {
+        scratch.score_view(scratch.query_tile.min(plan.dense_tokens), dense_end)?;
+    }
+    if plan.selected_tokens > 0 {
+        let selected = scratch.selected.as_ref().ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid("packed QSA selected scratch disappeared".into())
+        })?;
+        let selected_views = selected.views(
+            g,
+            scratch.capacity,
+            scratch.query_tile,
+            plan.selected_tokens,
+        )?;
+        let input_offset = plan
+            .selected_offset
+            .checked_mul(g.hidden_size)
+            .ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("packed QSA selected input offset overflow".into())
+            })?;
+        let query_offset = plan
+            .selected_offset
+            .checked_mul(g.query_width())
+            .ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("packed QSA selected query offset overflow".into())
+            })?;
+        let projected_offset = plan
+            .selected_offset
+            .checked_mul(g.query_projection_width())
+            .ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("packed QSA selected query/gate offset overflow".into())
+            })?;
+        let selected_input = input.view_subrange(
+            input_offset as u64,
+            vec![g.hidden_size as u64, plan.selected_tokens as u64],
+        );
+        let selected_query = views.query.view_subrange(
+            query_offset as u64,
+            vec![g.query_width() as u64, plan.selected_tokens as u64],
+        );
+        let selected_query_gate = views.query_gate_projection.view_subrange(
+            projected_offset as u64,
+            vec![
+                g.query_projection_width() as u64,
+                plan.selected_tokens as u64,
+            ],
+        );
+        let selected_attention = views.attention.view_subrange(
+            query_offset as u64,
+            vec![g.query_width() as u64, plan.selected_tokens as u64],
+        );
+        for (name, tensor, shape, writable) in [
+            (
+                "packed QSA selected input view",
+                &selected_input,
+                vec![g.hidden_size as u64, plan.selected_tokens as u64],
+                false,
+            ),
+            (
+                "packed QSA selected query view",
+                &selected_query,
+                vec![g.query_width() as u64, plan.selected_tokens as u64],
+                false,
+            ),
+            (
+                "packed QSA selected query/gate view",
+                &selected_query_gate,
+                vec![
+                    g.query_projection_width() as u64,
+                    plan.selected_tokens as u64,
+                ],
+                false,
+            ),
+            (
+                "packed QSA selected attention view",
+                &selected_attention,
+                vec![g.query_width() as u64, plan.selected_tokens as u64],
+                true,
+            ),
+        ] {
+            require_tensor(name, tensor, GgmlType::F32, &shape, writable)?;
+        }
+        if selected_views.index_query_raw.n_elements() as usize
+            != g.index_query_width() * plan.selected_tokens
+        {
+            return invalid("packed QSA selected raw index-query view has the wrong size");
+        }
+    }
+    Ok(plan)
 }
 
 fn validate_dense_packed_scratch(
@@ -1904,13 +2153,16 @@ fn validate_dense_packed_scratch(
         ],
         true,
     )?;
+    if let Some(selected) = scratch.selected.as_ref() {
+        selected.validate(g, scratch.capacity, scratch.query_tile)?;
+    }
     Ok(())
 }
 
 fn dense_packed_scratch_tensors(
     scratch: &QwenSparseAttentionPackedScratch,
 ) -> Vec<(&'static str, &MetalTensor)> {
-    vec![
+    let mut tensors = vec![
         ("dense packed QSA index key scratch", &scratch.index_key_raw),
         (
             "dense packed QSA query/gate scratch",
@@ -1926,7 +2178,42 @@ fn dense_packed_scratch_tensors(
         ),
         ("dense packed QSA attention scratch", &scratch.attention),
         ("dense packed QSA output scratch", &scratch.output),
-    ]
+    ];
+    if let Some(selected) = scratch.selected.as_ref() {
+        tensors.extend([
+            (
+                "selected packed QSA raw index query scratch",
+                &selected.index_query_raw,
+            ),
+            (
+                "selected packed QSA index query scratch",
+                &selected.index_query,
+            ),
+            ("selected packed QSA score scratch", &selected.scores),
+            (
+                "selected packed QSA visible-block scratch",
+                &selected.visible_blocks,
+            ),
+            (
+                "selected packed QSA selected-block scratch",
+                &selected.selected_blocks,
+            ),
+            (
+                "selected packed QSA selected-count scratch",
+                &selected.selected_count,
+            ),
+            (
+                "selected packed QSA selector-status scratch",
+                &selected.selector_status,
+            ),
+            ("selected packed QSA token-ID scratch", &selected.token_ids),
+            (
+                "selected packed QSA attention-logit scratch",
+                &selected.attention_logits,
+            ),
+        ]);
+    }
+    tensors
 }
 
 pub(crate) fn preflight_dense_packed(
@@ -1992,6 +2279,20 @@ pub(crate) fn preflight_dense_packed(
     Ok(())
 }
 
+fn preflight_packed(
+    ctx: &MetalContext,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    plan: QwenSparseAttentionPackedRangePlan,
+) -> Result<(), Qwen4ExpQsaError> {
+    preflight_dense_packed(ctx, weights)?;
+    if plan.selected_tokens > 0 {
+        preflight_dense_packed_projection(ctx, weights.index_query.dtype)?;
+        preflight_selected_index_primitives(ctx)?;
+        preflight_selected_attention_primitives(ctx)?;
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn preflight_dense_packed_projection(
     ctx: &MetalContext,
@@ -2047,6 +2348,7 @@ fn preflight_selected_index_primitives(ctx: &MetalContext) -> Result<(), Qwen4Ex
 
 #[allow(dead_code)]
 fn preflight_selected_attention_primitives(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
+    ctx.pipeline("kernel_qwen4exp_qsa_audit_selected_i32")?;
     for (kernel, threads, dynamic_memory) in [
         (
             "kernel_qwen4exp_qsa_attention_logits_packed_f16",
@@ -2453,7 +2755,7 @@ fn encode_selected_attention_packet(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
-fn encode_dense_packed_step(
+fn encode_packed_step(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     input: &MetalTensor,
@@ -2462,11 +2764,12 @@ fn encode_dense_packed_step(
     scratch: &QwenSparseAttentionPackedScratch,
     start_position: usize,
     tokens: usize,
-    sequence_length: usize,
+    plan: QwenSparseAttentionPackedRangePlan,
     layer: u32,
     mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
 ) -> Result<(), Qwen4ExpQsaError> {
     let g = workspace.geometry;
+    let sequence_length = plan.end_position;
     let views = scratch.views(tokens)?;
     let marker = begin_optional(
         &mut profile,
@@ -2523,18 +2826,20 @@ fn encode_dense_packed_step(
         sequence_length,
     )?;
     end_optional(&mut profile, enc, marker)?;
-    let visible_blocks = sequence_length / g.ratio;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail(
-            "qsa.visible_blocks",
-            layer,
-            MixerKind::QwenSparseAttention,
-        ),
-    )?;
-    encode_fill_blocks(ctx, enc, workspace, visible_blocks, sequence_length)?;
-    end_optional(&mut profile, enc, marker)?;
+    if plan.selected_tokens == 0 {
+        let visible_blocks = sequence_length / g.ratio;
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail(
+                "qsa.visible_blocks",
+                layer,
+                MixerKind::QwenSparseAttention,
+            ),
+        )?;
+        encode_fill_blocks(ctx, enc, workspace, visible_blocks, sequence_length)?;
+        end_optional(&mut profile, enc, marker)?;
+    }
 
     let marker = begin_optional(
         &mut profile,
@@ -2624,88 +2929,185 @@ fn encode_dense_packed_step(
     end_optional(&mut profile, enc, marker)?;
 
     let group = g.query_heads / g.kv_heads;
-    let mut tile_start = 0;
     let marker = begin_optional(
         &mut profile,
         enc,
         Qwen4ExpPackedProfileLabel::detail("qsa.attention", layer, MixerKind::QwenSparseAttention),
     )?;
-    while tile_start < tokens {
-        let rows = (tokens - tile_start).min(scratch.query_tile);
-        let query = views.query.view_subrange(
-            (tile_start * g.query_width()) as u64,
-            vec![g.query_width() as u64, rows as u64],
+    if plan.dense_tokens > 0 {
+        let dense_end = start_position + plan.dense_tokens;
+        let mut tile_start = 0;
+        while tile_start < plan.dense_tokens {
+            let rows = (plan.dense_tokens - tile_start).min(scratch.query_tile);
+            let query = views.query.view_subrange(
+                (tile_start * g.query_width()) as u64,
+                vec![g.query_width() as u64, rows as u64],
+            );
+            let attention = views.attention.view_subrange(
+                (tile_start * g.query_width()) as u64,
+                vec![g.query_width() as u64, rows as u64],
+            );
+            let scores = scratch.score_view(rows, dense_end)?;
+            let base_position = start_position + tile_start;
+            encode_attn_matrix_kq_f32(
+                ctx,
+                enc,
+                &query,
+                &workspace.key_cache,
+                &scores,
+                rows,
+                base_position,
+                dense_end,
+                g.kv_width(),
+                g.query_heads,
+                g.kv_heads,
+                group,
+                g.head_dim,
+                true,
+            )?;
+            encode_attn_matrix_softmax_f32(
+                ctx,
+                enc,
+                &scores,
+                rows,
+                base_position,
+                dense_end,
+                g.query_heads,
+                g.kv_heads,
+                group,
+                g.head_dim,
+            )?;
+            encode_attn_matrix_kqv_direct_v_f32(
+                ctx,
+                enc,
+                &scores,
+                &workspace.value_cache,
+                &attention,
+                rows,
+                base_position,
+                dense_end,
+                g.kv_width(),
+                g.query_heads,
+                g.kv_heads,
+                group,
+                g.head_dim,
+                true,
+            )?;
+            tile_start += rows;
+        }
+    }
+    if plan.selected_tokens > 0 {
+        let selected = scratch.selected.as_ref().ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid("packed QSA selected scratch was not admitted".into())
+        })?;
+        let selected_views = selected.views(
+            g,
+            scratch.capacity,
+            scratch.query_tile,
+            plan.selected_tokens,
+        )?;
+        let input_offset = plan.selected_offset * g.hidden_size;
+        let query_offset = plan.selected_offset * g.query_width();
+        let projected_offset = plan.selected_offset * g.query_projection_width();
+        let selected_input = input.view_subrange(
+            input_offset as u64,
+            vec![g.hidden_size as u64, plan.selected_tokens as u64],
         );
-        let attention = views.attention.view_subrange(
-            (tile_start * g.query_width()) as u64,
-            vec![g.query_width() as u64, rows as u64],
+        let selected_raw_query = selected_views.index_query_raw.view_subrange(
+            0,
+            vec![g.index_query_width() as u64, plan.selected_tokens as u64],
         );
-        let scores = scratch.score_view(rows, sequence_length)?;
-        let base_position = start_position + tile_start;
-        encode_attn_matrix_kq_f32(
+        if weights.index_query.dtype == GgmlType::BF16 {
+            encode_mat_mat_bf16_f32(
+                ctx,
+                enc,
+                weights.index_query,
+                &selected_input,
+                &selected_raw_query,
+                g.hidden_size,
+                g.index_query_width(),
+                plan.selected_tokens,
+            )?;
+        } else {
+            encode_mat_mat_dispatch(
+                ctx,
+                enc,
+                weights.index_query,
+                &selected_input,
+                &selected_raw_query,
+                g.hidden_size,
+                g.index_query_width(),
+                plan.selected_tokens,
+            )?;
+        }
+        let selected_query = views.query.view_subrange(
+            query_offset as u64,
+            vec![g.query_width() as u64, plan.selected_tokens as u64],
+        );
+        let selected_query_gate = views.query_gate_projection.view_subrange(
+            projected_offset as u64,
+            vec![
+                g.query_projection_width() as u64,
+                plan.selected_tokens as u64,
+            ],
+        );
+        let selected_attention = views.attention.view_subrange(
+            query_offset as u64,
+            vec![g.query_width() as u64, plan.selected_tokens as u64],
+        );
+        let packet = encode_selected_attention_packet(
             ctx,
             enc,
-            &query,
+            weights.index_query_norm,
+            &workspace.compressed_index_keys,
+            &selected_query,
+            &selected_query_gate,
             &workspace.key_cache,
-            &scores,
-            rows,
-            base_position,
-            sequence_length,
-            g.kv_width(),
-            g.query_heads,
-            g.kv_heads,
-            group,
-            g.head_dim,
-            true,
-        )?;
-        encode_attn_matrix_softmax_f32(
-            ctx,
-            enc,
-            &scores,
-            rows,
-            base_position,
-            sequence_length,
-            g.query_heads,
-            g.kv_heads,
-            group,
-            g.head_dim,
-        )?;
-        encode_attn_matrix_kqv_direct_v_f32(
-            ctx,
-            enc,
-            &scores,
             &workspace.value_cache,
-            &attention,
-            rows,
-            base_position,
-            sequence_length,
-            g.kv_width(),
-            g.query_heads,
-            g.kv_heads,
-            group,
-            g.head_dim,
-            true,
+            &selected_attention,
+            scratch,
+            start_position + plan.selected_offset,
+            plan.selected_tokens,
         )?;
-        tile_start += rows;
+        encode_selected_audit(
+            ctx,
+            enc,
+            &packet.selected_count,
+            &packet.selector_status,
+            &workspace.selected_count,
+            &workspace.selector_status,
+            &workspace.visible_blocks,
+            plan.selected_tokens,
+            g.block_budget(),
+        )?;
     }
     end_optional(&mut profile, enc, marker)?;
-    let marker = begin_optional(
-        &mut profile,
-        enc,
-        Qwen4ExpPackedProfileLabel::detail("qsa.gate", layer, MixerKind::QwenSparseAttention),
-    )?;
-    encode_sigmoid_mul_gate_strided_f32(
-        ctx,
-        enc,
-        &views.query_gate_projection,
-        &views.attention,
-        &views.attention,
-        tokens * g.query_heads,
-        g.head_dim,
-        2 * g.head_dim,
-        g.head_dim,
-    )?;
-    end_optional(&mut profile, enc, marker)?;
+    if plan.dense_tokens > 0 {
+        let marker = begin_optional(
+            &mut profile,
+            enc,
+            Qwen4ExpPackedProfileLabel::detail("qsa.gate", layer, MixerKind::QwenSparseAttention),
+        )?;
+        let dense_query_gate = views.query_gate_projection.view_subrange(
+            0,
+            vec![g.query_projection_width() as u64, plan.dense_tokens as u64],
+        );
+        let dense_attention = views
+            .attention
+            .view_subrange(0, vec![g.query_width() as u64, plan.dense_tokens as u64]);
+        encode_sigmoid_mul_gate_strided_f32(
+            ctx,
+            enc,
+            &dense_query_gate,
+            &dense_attention,
+            &dense_attention,
+            plan.dense_tokens * g.query_heads,
+            g.head_dim,
+            2 * g.head_dim,
+            g.head_dim,
+        )?;
+        end_optional(&mut profile, enc, marker)?;
+    }
     let marker = begin_optional(
         &mut profile,
         enc,
@@ -3895,6 +4297,14 @@ struct PackedAttentionArgs {
     scale: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SelectedAuditArgs {
+    query_count: u32,
+    expected_selected_count: i32,
+    count_mismatch_status: i32,
+}
+
 fn attention_args(g: QwenSparseAttentionMetalGeometry, id_count: usize) -> AttentionArgs {
     AttentionArgs {
         query_heads: g.query_heads as u32,
@@ -4122,6 +4532,49 @@ fn encode_attention_softmax_value_packed(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn encode_selected_audit(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    workspace_selected_count: &MetalTensor,
+    workspace_selector_status: &MetalTensor,
+    audited_bands: &MetalTensor,
+    query_count: usize,
+    expected_selected_count: usize,
+) -> Result<(), MetalError> {
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_audit_selected_i32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &SelectedAuditArgs {
+            query_count: query_count as u32,
+            expected_selected_count: expected_selected_count as i32,
+            count_mismatch_status: SELECTED_COUNT_MISMATCH_STATUS,
+        },
+    );
+    enc.set_tensor(1, selected_count);
+    enc.set_tensor(2, selector_status);
+    enc.set_tensor(3, workspace_selector_status);
+    enc.set_tensor(4, workspace_selected_count);
+    enc.set_tensor(5, audited_bands);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn dispatch_1d(
     enc: &KernelEncoder,
     pso: &ProtocolObject<dyn objc2_metal::MTLComputePipelineState>,
@@ -4167,10 +4620,12 @@ fn reserve_command(
     workspace: &mut QwenSparseAttentionMetalWorkspace,
     enc: &KernelEncoder,
     pending_length: usize,
+    pending_selected_bands: usize,
 ) -> Result<(), Qwen4ExpQsaError> {
     workspace.require_idle()?;
     workspace.active_command = Some(enc.parent_command_buffer());
     workspace.pending_length = Some(pending_length);
+    workspace.pending_selected_bands = Some(pending_selected_bands);
     Ok(())
 }
 
@@ -4328,6 +4783,26 @@ fn write_i32_scalar(tensor: &MetalTensor, value: i32) -> Result<(), Qwen4ExpQsaE
     Ok(())
 }
 
+fn fill_i32_tensor(tensor: &MetalTensor, value: i32) -> Result<(), Qwen4ExpQsaError> {
+    if tensor.dtype != GgmlType::I32 || !tensor.is_writable() {
+        return invalid("QSA host fill requires a writable I32 tensor");
+    }
+    require_range("QSA host fill", tensor)?;
+    let count = usize::try_from(tensor.n_elements())
+        .map_err(|_| Qwen4ExpQsaError::Invalid("QSA host fill count exceeds usize".into()))?;
+    unsafe {
+        let destination = tensor
+            .buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(tensor.offset as usize)
+            .cast::<i32>();
+        std::slice::from_raw_parts_mut(destination, count).fill(value);
+    }
+    Ok(())
+}
+
 fn read_i32_scalar(tensor: &MetalTensor) -> Result<i32, Qwen4ExpQsaError> {
     require_tensor("QSA host scalar", tensor, GgmlType::I32, &[1], true)?;
     Ok(unsafe {
@@ -4352,7 +4827,7 @@ mod tests {
     use crate::gguf::GgufFile;
     use crate::qwen4exp_gdn::GatedDeltaNetMetalWeights;
     use crate::qwen4exp_residency::Qwen4ExpMetalWeightPlan;
-    use half::f16;
+    use half::{bf16, f16};
     use objc2_metal::MTLCommandQueue;
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -4432,6 +4907,26 @@ mod tests {
         QwenSparseAttentionMetalGeometry::from_config(&config, 3, capacity).unwrap()
     }
 
+    fn selected_motor_test_geometry(capacity: usize) -> QwenSparseAttentionMetalGeometry {
+        let mut config = Qwen4ExpConfig::flash_next_reference();
+        config.context_length = 64;
+        config.hidden_size = 16;
+        config.qsa.token_budget = 8;
+        config.ple = None;
+        config.validate().unwrap();
+        QwenSparseAttentionMetalGeometry::from_config(&config, 3, capacity).unwrap()
+    }
+
+    fn selected_bf16_motor_test_geometry(capacity: usize) -> QwenSparseAttentionMetalGeometry {
+        let mut config = Qwen4ExpConfig::flash_next_reference();
+        config.context_length = 128;
+        config.hidden_size = 16;
+        config.qsa.token_budget = 32;
+        config.ple = None;
+        config.validate().unwrap();
+        QwenSparseAttentionMetalGeometry::from_config(&config, 3, capacity).unwrap()
+    }
+
     fn values(count: usize, seed: usize, scale: f32) -> Vec<f32> {
         (0..count)
             .map(|index| {
@@ -4486,6 +4981,18 @@ mod tests {
             .map(|&value| f16::from_f32(value).to_bits())
             .collect::<Vec<_>>();
         MetalTensor::from_bytes(ctx, bytemuck::cast_slice(&bits), shape, GgmlType::F16).unwrap()
+    }
+
+    fn bf16_weight(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
+        let bits = values
+            .iter()
+            .map(|&value| bf16::from_f32(value).to_bits())
+            .collect::<Vec<_>>();
+        let mut tensor =
+            MetalTensor::from_bytes(ctx, bytemuck::cast_slice(&bits), shape, GgmlType::BF16)
+                .unwrap();
+        tensor.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        tensor
     }
 
     struct SelectedAttentionFixture {
@@ -4987,6 +5494,47 @@ mod tests {
         crate::metal::dispatch_census_begin();
         let output = unsafe {
             encode_qwen_sparse_attention_text_dense_packed_motor(
+                ctx,
+                &encoder,
+                &input,
+                weights.borrowed(),
+                workspace,
+                scratch,
+                start_position,
+                tokens,
+            )
+        }
+        .unwrap();
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        workspace.release_after().unwrap();
+        (read_f32(&output), census)
+    }
+
+    fn encode_selected_packed_chunk(
+        ctx: &MetalContext,
+        weights: &TestWeights,
+        workspace: &mut QwenSparseAttentionMetalWorkspace,
+        scratch: &QwenSparseAttentionPackedScratch,
+        inputs: &[f32],
+        start_position: usize,
+        tokens: usize,
+    ) -> (Vec<f32>, Vec<crate::metal::DispatchCensusRow>) {
+        let g = weights.geometry;
+        assert_eq!(inputs.len(), g.hidden_size * tokens);
+        let input = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(inputs),
+            vec![g.hidden_size as u64, tokens as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        let output = unsafe {
+            encode_qwen_sparse_attention_text_packed_motor(
                 ctx,
                 &encoder,
                 &input,
@@ -6133,6 +6681,529 @@ mod tests {
     }
 
     #[test]
+    fn selected_packed_motor_matches_scalar_rows_state_and_topology() {
+        const TOTAL_TOKENS: usize = 13;
+        let Some(ctx) = context() else { return };
+        let geometry = selected_motor_test_geometry(16);
+        assert_eq!(geometry.query_heads, 24);
+        assert_eq!(geometry.kv_heads, 2);
+        assert_eq!(geometry.output_width(), 11);
+        let weights = test_weights(&ctx, geometry);
+        let inputs = values(TOTAL_TOKENS * geometry.hidden_size, 2_303, 0.002_1);
+        let serial = serial_dense_trace(&ctx, &weights, &inputs, TOTAL_TOKENS);
+
+        for (start_position, tokens, expected_dense) in [(8, 4, 3), (11, 2, 0)] {
+            let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+            for token in 0..start_position {
+                let offset = token * geometry.hidden_size;
+                encode_one(
+                    &ctx,
+                    &weights,
+                    &mut workspace,
+                    &inputs[offset..offset + geometry.hidden_size],
+                );
+            }
+            let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+                &ctx, geometry, tokens, true,
+            )
+            .unwrap();
+            let input_start = start_position * geometry.hidden_size;
+            let input_end = (start_position + tokens) * geometry.hidden_size;
+            let (actual, census) = encode_selected_packed_chunk(
+                &ctx,
+                &weights,
+                &mut workspace,
+                &scratch,
+                &inputs[input_start..input_end],
+                start_position,
+                tokens,
+            );
+            let expected = &serial.outputs[input_start..input_end];
+            for token in 0..tokens {
+                let row = token * geometry.hidden_size;
+                assert_similarity(
+                    &format!("selected packed QSA start={start_position} token={token}"),
+                    &actual[row..row + geometry.hidden_size],
+                    &expected[row..row + geometry.hidden_size],
+                    1e-3,
+                    0.999999,
+                    1e-5,
+                );
+            }
+            assert_dense_state_matches(
+                &format!("selected packed QSA start={start_position}"),
+                &workspace,
+                &serial.states[start_position + tokens - 1],
+            );
+            assert_eq!(workspace.pending_selected_bands, None);
+            assert_eq!(read_i32_scalar(&workspace.visible_blocks).unwrap(), 1);
+
+            let names = census
+                .iter()
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>();
+            for required in [
+                "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+                "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
+                "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+                "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+                "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+                "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                "kernel_qwen4exp_qsa_audit_selected_i32",
+            ] {
+                assert_eq!(
+                    names.iter().filter(|&&name| name == required).count(),
+                    1,
+                    "start={start_position} {required}"
+                );
+            }
+            let softmax = names
+                .iter()
+                .position(|&name| name == "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16")
+                .unwrap();
+            let audit = names
+                .iter()
+                .position(|&name| name == "kernel_qwen4exp_qsa_audit_selected_i32")
+                .unwrap();
+            assert_eq!(audit, softmax + 1);
+            for absent in [
+                "kernel_qwen4exp_qsa_attention_logits_f16",
+                "kernel_qwen4exp_qsa_attention_softmax_value_f16",
+            ] {
+                assert!(!names.contains(&absent), "start={start_position} {absent}");
+            }
+            let dense_kq = names
+                .iter()
+                .filter(|&&name| {
+                    name == "kernel_attn_matrix_kq_f32"
+                        || name == "kernel_attn_matrix_kq_f32_full_tiles"
+                })
+                .count();
+            let dense_gate = names
+                .iter()
+                .filter(|&&name| name == "kernel_sigmoid_mul_gate_strided_f32")
+                .count();
+            assert_eq!(dense_kq > 0, expected_dense > 0);
+            assert_eq!(dense_gate, usize::from(expected_dense > 0));
+        }
+    }
+
+    #[test]
+    fn selected_packed_motor_keeps_bf16_index_queries_in_f32_activations() {
+        const START_POSITION: usize = 35;
+        const TOKENS: usize = 32;
+        const TOTAL_TOKENS: usize = START_POSITION + TOKENS;
+        let Some(ctx) = context() else { return };
+        let geometry = selected_bf16_motor_test_geometry(96);
+        assert_eq!(geometry.output_width(), START_POSITION);
+        let mut weights = test_weights(&ctx, geometry);
+        let index_query_values = read_f32(&weights.index_query);
+        weights.index_query = bf16_weight(
+            &ctx,
+            &index_query_values,
+            vec![
+                geometry.hidden_size as u64,
+                geometry.index_query_width() as u64,
+            ],
+        );
+        let inputs = values(TOTAL_TOKENS * geometry.hidden_size, 2_311, 0.002_1);
+        let serial = serial_dense_trace(&ctx, &weights, &inputs, TOTAL_TOKENS);
+        let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+        for token in 0..START_POSITION {
+            let offset = token * geometry.hidden_size;
+            encode_one(
+                &ctx,
+                &weights,
+                &mut workspace,
+                &inputs[offset..offset + geometry.hidden_size],
+            );
+        }
+        let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            &ctx, geometry, TOKENS, true,
+        )
+        .unwrap();
+        let input_start = START_POSITION * geometry.hidden_size;
+        let (actual, census) =
+            crate::metal_forward::with_matmat_bf16_bfloat_act_override(true, || {
+                encode_selected_packed_chunk(
+                    &ctx,
+                    &weights,
+                    &mut workspace,
+                    &scratch,
+                    &inputs[input_start..],
+                    START_POSITION,
+                    TOKENS,
+                )
+            });
+        let expected = &serial.outputs[input_start..];
+        for token in 0..TOKENS {
+            let row = token * geometry.hidden_size;
+            assert_similarity(
+                &format!("selected packed QSA BF16 token={token}"),
+                &actual[row..row + geometry.hidden_size],
+                &expected[row..row + geometry.hidden_size],
+                1e-3,
+                0.999999,
+                1e-5,
+            );
+        }
+        assert_dense_state_matches(
+            "selected packed QSA BF16",
+            &workspace,
+            &serial.states[TOTAL_TOKENS - 1],
+        );
+        let names = census
+            .iter()
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|&&name| name == "kernel_mat_mat_bf16_f32")
+                .count(),
+            1,
+            "BF16 index-query route: {names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|&&name| name == "kernel_qwen4exp_qsa_audit_selected_i32")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn selected_packed_motor_rejects_a_second_band_before_dispatch() {
+        const TOKENS: usize = 33;
+        let Some(ctx) = context() else { return };
+        let geometry = packed_test_geometry(128);
+        let weights = test_weights(&ctx, geometry);
+        let start_position = geometry.output_width();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&values(geometry.hidden_size * TOKENS, 2_317, 0.002_3)),
+            vec![geometry.hidden_size as u64, TOKENS as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            &ctx, geometry, TOKENS, true,
+        )
+        .unwrap();
+        let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+        workspace.committed_length = start_position;
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let error = match unsafe {
+            encode_qwen_sparse_attention_text_packed_motor(
+                &ctx,
+                &encoder,
+                &input,
+                weights.borrowed(),
+                &mut workspace,
+                &scratch,
+                start_position,
+                TOKENS,
+            )
+        } {
+            Ok(_) => panic!("two selected bands were accepted"),
+            Err(error) => error,
+        };
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        assert!(error.to_string().contains("supports one"));
+        assert!(census.is_empty());
+        assert_eq!(command.status(), MTLCommandBufferStatus::NotEnqueued);
+        assert!(workspace.active_command.is_none());
+        assert!(workspace.pending_length.is_none());
+        assert!(workspace.pending_selected_bands.is_none());
+        assert!(!workspace.is_poisoned());
+    }
+
+    #[test]
+    fn selected_packed_motor_preflight_rejects_missing_or_aliased_scratch() {
+        const TOKENS: usize = 2;
+        let Some(ctx) = context() else { return };
+        let geometry = selected_motor_test_geometry(16);
+        let weights = test_weights(&ctx, geometry);
+        let start_position = geometry.output_width();
+        let input_values = values(geometry.hidden_size * TOKENS, 2_319, 0.002_1);
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&input_values),
+            vec![geometry.hidden_size as u64, TOKENS as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        let dense_scratch = QwenSparseAttentionPackedScratch::new(&ctx, geometry, TOKENS).unwrap();
+        let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+        workspace.committed_length = start_position;
+        assert_qsa_rejected_without_dispatch(&ctx, "missing selected motor scratch", |encoder| {
+            unsafe {
+                encode_qwen_sparse_attention_text_packed_motor(
+                    &ctx,
+                    encoder,
+                    &input,
+                    weights.borrowed(),
+                    &mut workspace,
+                    &dense_scratch,
+                    start_position,
+                    TOKENS,
+                )
+            }
+            .map(|_| ())
+        });
+        assert!(workspace.active_command.is_none());
+        assert!(workspace.pending_length.is_none());
+        assert!(workspace.pending_selected_bands.is_none());
+        assert!(!workspace.is_poisoned());
+
+        let mut aliased_scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            &ctx, geometry, TOKENS, true,
+        )
+        .unwrap();
+        let selected = aliased_scratch.selected.as_mut().unwrap();
+        selected.index_query = selected.index_query_raw.clone();
+        let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+        workspace.committed_length = start_position;
+        assert_qsa_rejected_without_dispatch(&ctx, "aliased selected motor scratch", |encoder| {
+            unsafe {
+                encode_qwen_sparse_attention_text_packed_motor(
+                    &ctx,
+                    encoder,
+                    &input,
+                    weights.borrowed(),
+                    &mut workspace,
+                    &aliased_scratch,
+                    start_position,
+                    TOKENS,
+                )
+            }
+            .map(|_| ())
+        });
+        assert!(workspace.active_command.is_none());
+        assert!(!workspace.is_poisoned());
+
+        let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            &ctx, geometry, TOKENS, true,
+        )
+        .unwrap();
+        let mut writable_index_query = weights.index_query.clone();
+        writable_index_query.provenance = MetalTensorProvenance::OwnedWritable;
+        let bad_weights = QwenSparseAttentionMetalWeights {
+            index_query: &writable_index_query,
+            ..weights.borrowed()
+        };
+        let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+        workspace.committed_length = start_position;
+        assert_qsa_rejected_without_dispatch(&ctx, "writable selected index query", |encoder| {
+            unsafe {
+                encode_qwen_sparse_attention_text_packed_motor(
+                    &ctx,
+                    encoder,
+                    &input,
+                    bad_weights,
+                    &mut workspace,
+                    &scratch,
+                    start_position,
+                    TOKENS,
+                )
+            }
+            .map(|_| ())
+        });
+        assert!(workspace.active_command.is_none());
+        assert!(!workspace.is_poisoned());
+
+        let incompatible_geometry = test_geometry(16);
+        assert_eq!(
+            incompatible_geometry.query_heads / incompatible_geometry.kv_heads,
+            2
+        );
+        let incompatible_weights = test_weights(&ctx, incompatible_geometry);
+        let incompatible_start = incompatible_geometry.output_width();
+        let incompatible_input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&input_values),
+            vec![incompatible_geometry.hidden_size as u64, TOKENS as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let incompatible_scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            &ctx,
+            incompatible_geometry,
+            TOKENS,
+            true,
+        )
+        .unwrap();
+        let mut incompatible_workspace =
+            QwenSparseAttentionMetalWorkspace::new(&ctx, incompatible_geometry).unwrap();
+        incompatible_workspace.committed_length = incompatible_start;
+        let controls_before = (
+            read_i32(&incompatible_workspace.visible_blocks),
+            read_i32(&incompatible_workspace.selected_count),
+            read_i32(&incompatible_workspace.selector_status),
+        );
+        assert_qsa_rejected_without_dispatch(&ctx, "incompatible selected GQA", |encoder| {
+            unsafe {
+                encode_qwen_sparse_attention_text_packed_motor(
+                    &ctx,
+                    encoder,
+                    &incompatible_input,
+                    incompatible_weights.borrowed(),
+                    &mut incompatible_workspace,
+                    &incompatible_scratch,
+                    incompatible_start,
+                    TOKENS,
+                )
+            }
+            .map(|_| ())
+        });
+        assert_eq!(
+            (
+                read_i32(&incompatible_workspace.visible_blocks),
+                read_i32(&incompatible_workspace.selected_count),
+                read_i32(&incompatible_workspace.selector_status),
+            ),
+            controls_before
+        );
+        assert!(incompatible_workspace.active_command.is_none());
+        assert!(incompatible_workspace.pending_length.is_none());
+        assert!(incompatible_workspace.pending_selected_bands.is_none());
+        assert!(!incompatible_workspace.is_poisoned());
+    }
+
+    #[test]
+    fn selected_audit_preserves_native_failures_and_detects_stale_rows() {
+        const QUERIES: usize = 4;
+        let Some(ctx) = context() else { return };
+        assert_eq!(size_of::<SelectedAuditArgs>(), 12);
+        let counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let workspace_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let workspace_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let audited = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+
+        let run = |counts_values: &[i32], status_values: &[i32]| {
+            write_i32_tensor(&counts, counts_values);
+            write_i32_tensor(&status, status_values);
+            crate::metal::dispatch_census_begin();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_selected_audit(
+                &ctx,
+                &encoder,
+                &counts,
+                &status,
+                &workspace_count,
+                &workspace_status,
+                &audited,
+                QUERIES,
+                2,
+            )
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert_eq!(census.len(), 1);
+            assert_eq!(census[0].kernel, "kernel_qwen4exp_qsa_audit_selected_i32");
+            assert_eq!(
+                (
+                    census[0].grid_width,
+                    census[0].grid_height,
+                    census[0].grid_depth,
+                    census[0].threads_width,
+                ),
+                (1, 1, 1, 1)
+            );
+        };
+
+        run(&[2, 1, 2, 2], &[0, 7, 0, 0]);
+        assert_eq!(read_i32_scalar(&workspace_status).unwrap(), 7);
+        assert_eq!(read_i32_scalar(&workspace_count).unwrap(), 2);
+        assert_eq!(read_i32_scalar(&audited).unwrap(), 1);
+        run(&[2, 2, 2, 2], &[0, 0, 0, 0]);
+        assert_eq!(read_i32_scalar(&workspace_status).unwrap(), 7);
+        assert_eq!(read_i32_scalar(&audited).unwrap(), 2);
+
+        write_i32_scalar(&workspace_status, 0).unwrap();
+        write_i32_scalar(&audited, 0).unwrap();
+        run(&[2, 1, 2, 2], &[0, 0, 0, 0]);
+        assert_eq!(
+            read_i32_scalar(&workspace_status).unwrap(),
+            SELECTED_COUNT_MISMATCH_STATUS
+        );
+        assert_eq!(read_i32_scalar(&audited).unwrap(), 1);
+
+        write_i32_scalar(&workspace_status, 0).unwrap();
+        write_i32_scalar(&audited, 0).unwrap();
+        run(&[2, 2, 2, 2], &[-1, 0, 0, 0]);
+        assert_eq!(read_i32_scalar(&workspace_status).unwrap(), -1);
+        assert_eq!(read_i32_scalar(&audited).unwrap(), 1);
+    }
+
+    #[test]
+    fn selected_release_requires_complete_audit_and_consistent_ownership() {
+        let Some(ctx) = context() else { return };
+        let geometry = selected_motor_test_geometry(16);
+        let mut workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, geometry).unwrap();
+
+        for audited_bands in [0, 2] {
+            write_i32_scalar(&workspace.selector_status, 0).unwrap();
+            write_i32_scalar(&workspace.selected_count, 2).unwrap();
+            write_i32_scalar(&workspace.visible_blocks, audited_bands).unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            reserve_command(&mut workspace, &encoder, 12, 1).unwrap();
+            encoder.end();
+            command.commit();
+            assert!(workspace.release_after().is_err());
+            assert!(workspace.is_poisoned());
+            assert_eq!(workspace.committed_length(), 0);
+            assert!(workspace.pending_length.is_none());
+            assert!(workspace.pending_selected_bands.is_none());
+            workspace.reset().unwrap();
+        }
+
+        write_i32_scalar(&workspace.selector_status, 0).unwrap();
+        write_i32_scalar(&workspace.selected_count, 2).unwrap();
+        write_i32_scalar(&workspace.visible_blocks, 1).unwrap();
+        let poisoned_command = ctx.queue.commandBuffer().unwrap();
+        let poisoned_encoder = KernelEncoder::begin(&poisoned_command);
+        reserve_command(&mut workspace, &poisoned_encoder, 12, 1).unwrap();
+        workspace.state_poisoned = true;
+        poisoned_encoder.end();
+        poisoned_command.commit();
+        assert!(workspace.release_after().is_err());
+        assert_eq!(workspace.committed_length(), 0);
+        workspace.reset().unwrap();
+
+        workspace.pending_length = Some(12);
+        workspace.pending_selected_bands = Some(1);
+        assert!(workspace.release_after().is_err());
+        assert!(workspace.is_poisoned());
+        assert!(workspace.pending_length.is_none());
+        assert!(workspace.pending_selected_bands.is_none());
+        workspace.reset().unwrap();
+
+        write_i32_scalar(&workspace.selector_status, 0).unwrap();
+        write_i32_scalar(&workspace.selected_count, 1).unwrap();
+        write_i32_scalar(&workspace.visible_blocks, 99).unwrap();
+        let dense_command = ctx.queue.commandBuffer().unwrap();
+        let dense_encoder = KernelEncoder::begin(&dense_command);
+        reserve_command(&mut workspace, &dense_encoder, 4, 0).unwrap();
+        dense_encoder.end();
+        dense_command.commit();
+        workspace.release_after().unwrap();
+        assert_eq!(workspace.committed_length(), 4);
+        assert!(!workspace.is_poisoned());
+    }
+
+    #[test]
     fn dense_packed_qsa_covers_the_preselection_shoulder() {
         const TOKEN_BUDGET: usize = 8;
         const TOKENS: usize = TOKEN_BUDGET + 3;
@@ -6228,7 +7299,10 @@ mod tests {
                     &all_inputs[start..start + geometry.hidden_size],
                 );
             }
-            let scratch = QwenSparseAttentionPackedScratch::new(&ctx, geometry, tokens).unwrap();
+            let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+                &ctx, geometry, tokens, true,
+            )
+            .unwrap();
             let input_start = start_position * geometry.hidden_size;
             let input_end = (start_position + tokens) * geometry.hidden_size;
             let input = MetalTensor::from_bytes(
@@ -6276,6 +7350,7 @@ mod tests {
             assert_eq!(command.status(), MTLCommandBufferStatus::NotEnqueued);
             assert!(workspace.active_command.is_none());
             assert!(workspace.pending_length.is_none());
+            assert!(workspace.pending_selected_bands.is_none());
             assert_eq!(workspace.committed_length(), start_position);
             assert!(!workspace.is_poisoned());
             assert_eq!(

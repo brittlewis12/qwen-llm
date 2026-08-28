@@ -6,6 +6,55 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-28 - Flash-Next N=4,099 Divergence Is Packed HC Arithmetic
+
+Status: no QSA boundary defect found. Keep selected packed prefill default-off;
+hold the test-only F32-HC-down arm for quant-native quality evaluation and kill
+the broader F32 down-plus-up arm.
+
+- The natural workload is frozen as 4,099 prompt IDs plus one teacher-forced
+  continuation ID from `docs/PERF-ROADMAP.md` at `26f3c14`. Its domain-separated
+  U32LE digest is
+  `c396eaee4de9709d7cda51ff7e9f2a63fadacd200f3fc1d50c6254c5d716ac28`.
+- Generic packed-selected and default-safe execution retain endpoint and
+  teacher-forced-continuation argmax IDs. Their relative RMS gaps are
+  `8.361495e-2` and `1.021529e-1`; cosine similarities are `0.996500190375`
+  and `0.994789378303`.
+- At the single traced row, position 2,051, layer-0 input is bit-exact. The first
+  sampled-stage difference is layer-0 attention HC output at `8.330798e-5`
+  relative RMS and `1.862049e-3` maximum absolute error. All 336 subsequent
+  row-local snapshots differ, so 336/337 total records differ.
+- Across 12 QSA layers and 2,048 selected rows, generic packed execution changes
+  `16,555/24,576` top-512 sets from default-safe arithmetic. The first change is
+  one cutoff pair at position 2,056/layer 31; the default-safe rank-512/513
+  margin is only `4.343987e-4`. QSA already receives different upstream
+  activations, so these set changes do not identify a selection or block-boundary
+  bug.
+- F32 HC down improves default-safe-relative endpoint/teacher-forced-continuation
+  RMS to `5.885396e-2/6.188921e-2` and delays the first changed set to position
+  2,060/layer 47, but total changed sets rise slightly to `16,778/24,576`.
+  Closeness to incumbent arithmetic is therefore insufficient for promotion.
+- The F32 down-plus-up probe nearly reproduced the first HC row
+  (`8.220074e-7` relative RMS) but worsened the endpoint versus down-only, barely
+  changed continuation distance, and cost materially more. Its implementation
+  is removed.
+- The final diagnostic requires exactly 96 released-shape F32-down substitutions,
+  96 tagged `kernel_mat_mat_q8_0_f32_r2c16k64` dispatches, complete unique QSA
+  capture coverage, and the three-command selected topology. Capture-off and
+  capture-on endpoint/teacher-forced logits plus every persistent-state tensor
+  are bit-identical for all three arms. GPU intervals remain instrumented
+  diagnostics, not performance rows. Focused lifecycle tests and source-only
+  adversarial review passed.
+- Upstream BF16 logits remain desirable future calibration, not an imminent
+  blocker for a roughly 360 GB checkpoint. This supersedes the immediately prior
+  entry's BF16 prerequisite. The next authority hierarchy is held-out
+  teacher-forced NLL, known-answer long-context safety, observed-token top-1 and
+  greedy sentinels, same-quant llama.cpp triangulation, then component/margin
+  evidence for localization.
+
+Evidence: `docs/bench/2026-08-28-qwen4exp-n4099-decision-trace/`.
+Next gate: `docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/`.
+
 ## 2026-08-28 - Flash-Next Selected Runtime: Residues GO, Full Chunk NO-GO
 
 Status: selected composition and multi-command scheduling are available behind

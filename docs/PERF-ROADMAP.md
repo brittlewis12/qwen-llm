@@ -204,11 +204,16 @@ Architecture reconciliation against the report, HF model code, and released
 weight map closes the Kimi-residual concern: Attention Residual was ablated, the
 shipped Gated Residual is implemented, and optional `mtp.*` speculative weights
 are absent from the pinned text GGUF by construction. The local HELLO sequence is
-an internal determinism proof only. Before declaring end-to-end numerical
-closure, pin one upstream full-logit row for that prompt and one above 4,096
-tokens where QSA selection truncates visible blocks. Fast IQ3 now also has direct
-baseline/candidate full-logit rows at three local boundaries; all argmax IDs
-match with at most `4.921e-5` relative RMS and `7.573e-4` maximum delta.
+an internal determinism proof only. Upstream BF16 full-logit rows remain useful
+future calibration, but the roughly 360 GB checkpoint is not a near-term
+promotion dependency. Immediate end-to-end authority is quant-native: held-out
+teacher-forced NLL first, known-answer long-context safety second, observed-token
+top-1 and greedy sentinels third, implementation-diverse same-quant llama.cpp
+triangulation fourth, and component oracles plus selector margins for
+localization. Scalar continuity is a diagnostic reference, not numerical truth.
+Fast IQ3 also has direct baseline/candidate full-logit rows at three local
+boundaries; all argmax IDs match with at most `4.921e-5` relative RMS and
+`7.573e-4` maximum delta.
 
 The exact beta/alpha/decay tri-fusion at checkpoint `56bc662` removed two
 dispatches from each of 36 GDN layers but saved only `0.0419 ms` at the median;
@@ -217,30 +222,68 @@ gate. The experiment is removed. Do not infer a large decode win from launch
 count alone when the fusion leaves all material weight and activation traffic
 intact.
 
-Selected-range composition is structurally complete, but full-chunk numerical
-promotion is a NO-GO. Released selected commands with total N=2-4 pass local
-full-logit and continuation gates after an exact Q8 output residue route. At
-N=4,099, one packed 2,048-row selected suffix is `6.547e-2` from default-safe
-execution at the endpoint and `1.489e-1` after one continuation. Exact Q8 output
-worsens it; 64 commands of 32 rows reproduce the endpoint, ruling out full-chunk
-width and band seams. Ordinary dense N=2,048 packed composition is already
-`8.563e-2` from singleton execution, so the scalar envelope is not a
+Selected-range composition is structurally complete. The former local
+scalar-distance promotion gate failed; default promotion remains `HOLD` pending
+semantic evidence rather than treating singleton arithmetic as truth. Released
+selected commands with total N=2-4 pass local full-logit and continuation gates
+after an exact Q8 output residue route. On the earlier N=4,099 promotion workload,
+one packed 2,048-row selected suffix is `6.547e-2` from default-safe execution at
+the endpoint and `1.489e-1` after one continuation. Exact Q8 output worsens it;
+64 commands of 32 rows reproduce the endpoint, ruling out full-chunk width and
+band seams for that workload. Ordinary dense N=2,048 packed composition is
+already `8.563e-2` from singleton execution, so the scalar envelope is not a
 selected-specific discriminator at long N. Merged llama.cpp matches all tested
 argmax IDs but its same-quant full rows are also materially separated from both
-local routes. The force-ranked lane is now:
+local routes.
 
-1. Pin upstream BF16 complete-vocabulary rows for the short HELLO boundary and
-   one natural selected-QSA prompt above 4,096 tokens. Preserve exact token IDs
-   and compare upstream against local singleton/default-safe, dense packed, and
-   packed-selected rows before assigning numerical authority.
-2. Use that oracle to choose the next correctness action. If packed-selected is
-   inside the accepted upstream error distribution, define an explicit
-   approximate-prefill quality policy and run broader greedy/eval gates. If it
-   is not, instrument the earliest MoE top-10 and QSA top-512 divergence; do not
-   resume a projection override matrix without that trace.
+A distinct pinned natural-roadmap N=4,099 trace reports
+`8.361495e-2/1.021529e-1` endpoint/teacher-forced-continuation relative RMS
+against default-safe. Capture-off/on logits and all enumerated persistent-state
+tensors are bit-identical in every arm. The row-2,051 layer input is bit-exact,
+and the first sampled-stage difference is the composite layer-0 attention HC
+output (`8.331e-5` relative RMS), before QSA receives a different activation.
+Generic packed selection first changes one cutoff pair at position 2,056/layer
+31 with a `4.344e-4` default-safe margin. This is ordinary E1 packed arithmetic
+propagation, not evidence of a block-boundary defect. The force-ranked lane is
+now:
+
+1. Run the preregistered quant-native quality packet. Freeze source, model and
+   shard hashes, tokenizer and token manifests, llama.cpp lock, scoring code,
+   bootstrap seed, and thresholds before observing arm output. Use three
+   document-disjoint natural prompts at each context `2179/2563/3075/4099`, whose
+   selected suffixes are exactly `128/512/1024/2048`, and teacher-force 96
+   held-out tokens per prompt. Exclude repository text, benchmark prompts, prior
+   tuning prompts, and near-duplicates. Add one N=2,051 no-selection scope
+   control and eight frozen N=4,099 nonce retrieval tasks with answer-sequence
+   probability plus at most eight greedy answer tokens. Compare A default-safe,
+   B generic selected-packed, C test-only F32-HC-down, and D same-token llama.cpp;
+   B is primary and C is a hierarchical challenger. Balance all six local arm
+   permutations twice across the 12 natural prompts; run D separately.
+
+   Primary deltas are `NLL(B)-NLL(A)` and `NLL(C)-NLL(A)` using F64 logsumexp.
+   Require each paired document-cluster bootstrap one-sided 97.5% percentile
+   upper bound to be at most `+0.010 nats/token`, every shape point estimate at
+   most `+0.020`, and no document above `+0.050`. A confidence miss is `HOLD`
+   and extends the frozen cohort, not a retune. Candidate total exact retrieval
+   passes may not be lower than A; failure where both A and D pass is a hard
+   kill, and answer-token NLL may worsen by at most `0.050 nats/token`. Nonfinite
+   logits, invalid state, selector failure, or topology mismatch are hard kills.
+   Top-1, greedy divergence, local RMS, top-512 overlap, and margins are
+   descriptive sentinels, not promotion gates.
+
+   Protocol: `docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/`.
+2. Use that packet to decide the arithmetic policy. F32 HC down is `HOLD`: it
+   improves default-safe-relative endpoint/teacher-forced-continuation RMS, but
+   slightly increases default-safe-relative top-512 decision mismatches. If B
+   and C both pass, choose C only if its 95% upper bound versus B is below
+   `-0.005 nats/token` under the same paired percentile document bootstrap, it
+   passes every retrieval task B passes, and a separate performance gate pays
+   for its cost; otherwise choose the simpler B. Promote neither merely for
+   closeness to incumbent arithmetic. Treat upstream BF16 rows as later
+   external calibration when practical, not a gate expected to arrive first.
 3. Run an internal-SSD cold first-touch control. Keep storage/residency work
    separate from warm kernel claims; warm packed execution is already >99% GPU.
-4. Add one natural mid-N attribution point before interactive-shape or MTP
+4. Add one natural N=512 attribution point before interactive-shape or MTP
    decisions. N=18 and N=2,048 do not identify where fixed bridge/setup costs
    yield to projection and mixer work.
 5. Price materially different full-chunk kernel-efficiency mechanisms for IQ3
@@ -298,17 +341,18 @@ Released N=2,053/2,054/2,055 runs execute `2,048+3+(2/3/4)`, publish all 12 QSA
 owners, lock reset/packet/audit order, and pass complete-vocabulary endpoint plus
 scalar-continuation gates. Their exact Q8 output residue path uses one
 token-axis GEMV dispatch per QSA layer and is scoped to total command N=2-4.
-N=4,099 proves the same scheduler and 64-band topology but fails numerical
-promotion: packed-selected is `6.547e-2` from default-safe at the endpoint.
-Retain its `393.5 tok/s` versus `32.7 tok/s` result as experimental leverage,
-not a qualified performance row.
+N=4,099 proves the same scheduler and 64-band topology but failed the former
+local-distance promotion gate: packed-selected is `6.547e-2` from default-safe
+at the endpoint on that workload. Retain its `393.5 tok/s` versus `32.7 tok/s`
+result as experimental leverage, not a qualified performance row or a semantic
+quality failure.
 
 `QWEN4EXP_PACKED_SELECTED_QSA=1` is explicitly experimental and default-off.
 Without it, the runtime still packs repeated dense chunks and scalarizes selected
-rows. Do not flip the default until upstream BF16 complete-vocabulary logits
-anchor both the short dense prompt and a natural selected endpoint above 4,096
-tokens, followed by an explicit approximate-prefill quality decision. Released
-18-token HELLO runs retain output and scalar decode handoff.
+rows. Do not flip the default until the quant-native NLL and known-answer packet
+passes its preregistered policy on natural selected prompts. An upstream BF16
+anchor may strengthen that decision later but is not a release prerequisite.
+Released 18-token HELLO runs retain output and scalar decode handoff.
 
 Accepted N=18 and N=2,048 first/warm/profile packets close the broad attribution
 step. Warm outside-GPU time is only `2.026/6.397 ms`; child publication is
@@ -360,8 +404,8 @@ reaching the command. Exact N=2,048 is default on Apple M4 Max with
 `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0` rollback. N=18 saves only
 `0.005791 ms/layer` and regresses warm command GPU, so it remains generic.
 Do not reopen selector/bucket work; the active-panel gate/up screen below is
-closed. Selected-range packed QSA is structurally implemented; its upstream
-numerical oracle, not more topology work, is now the correctness priority.
+closed. Selected-range packed QSA is structurally implemented; its quant-native
+semantic battery, not more topology work, is now the correctness priority.
 
 The clean route census at `69e51c9` now separates prompt shape from kernel
 geometry. N=18 puts 80.10% of credited route mass in count 1-8 and reaches only

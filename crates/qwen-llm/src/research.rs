@@ -13,7 +13,7 @@ use crate::metal::{
     encode_l2_norm_vjp_batched_f32, encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32,
     encode_rms_norm_mul_vjp_broadcast_f32, encode_rms_norm_mul_vjp_rows_f32,
     encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32, encode_sigmoid_f32,
-    encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32,
+    encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32, encode_silu_mul_vjp_f32,
     encode_ssm_conv_silu_split_packed_vjp_f32,
 };
 use crate::metal_forward::{MetalBlock, MetalGdnBlock, MfError, RMS_EPS, encode_mat_vec_dispatch};
@@ -127,6 +127,7 @@ pub struct ResearchGdnForward {
     final_logits: Vec<f32>,
     input_residuals: Vec<f32>,
     post_mixer_residuals: Vec<f32>,
+    post_block_residuals: Vec<f32>,
     initial_conv_state: Vec<f32>,
     initial_recurrence_state: Vec<f32>,
     final_conv_state: Vec<f32>,
@@ -171,6 +172,11 @@ impl ResearchGdnForward {
     pub fn post_mixer_residuals(&self) -> &[f32] {
         &self.post_mixer_residuals
     }
+
+    /// Real post-FFN block outputs, flattened `[T, H]`.
+    pub fn post_block_residuals(&self) -> &[f32] {
+        &self.post_block_residuals
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,6 +201,29 @@ pub struct ResearchGdnVjp {
     pub residual_replay_max_abs_error: f32,
     pub final_conv_state_max_abs_error: f32,
     pub final_recurrence_state_max_abs_error: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GdnBlockVjpRule {
+    /// Ordinary Jacobians throughout the block.
+    Jacobian,
+    /// Released Qwen R-lens rules on both residual-stream RMSNorms and the
+    /// FFN gate/product. GDN-internal normalization remains an ordinary
+    /// Jacobian.
+    Relp,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchGdnBlockVjp {
+    pub layer: u32,
+    pub n_tokens: usize,
+    pub hidden_size: usize,
+    /// Full block-input cotangents, including both residual identities.
+    pub values: Vec<f32>,
+    /// Cotangents after reversing the FFN residual update and before the mixer
+    /// residual update, flattened `[T, H]`.
+    pub grad_post_mixer_residuals: Vec<f32>,
+    pub mixer: ResearchGdnVjp,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -668,6 +697,7 @@ impl ResearchSession<'_, '_> {
             .ok_or(ResearchError::SizeOverflow)?;
         let mut input_residuals = Vec::with_capacity(hidden_elements);
         let mut post_mixer_residuals = Vec::with_capacity(hidden_elements);
+        let mut post_block_residuals = Vec::with_capacity(hidden_elements);
         let mut final_logits = Vec::new();
         let capture_layers = [layer - 1, layer];
         for &token_id in token_ids {
@@ -684,6 +714,8 @@ impl ResearchSession<'_, '_> {
             input_residuals.extend_from_slice(&forward.capture.post_block_residuals[..hidden]);
             post_mixer_residuals
                 .extend_from_slice(&forward.capture.pre_ffn_residuals[hidden..2 * hidden]);
+            post_block_residuals
+                .extend_from_slice(&forward.capture.post_block_residuals[hidden..2 * hidden]);
             final_logits = forward.logits;
         }
         let (final_conv_state, final_recurrence_state) = {
@@ -704,6 +736,7 @@ impl ResearchSession<'_, '_> {
             final_logits,
             input_residuals,
             post_mixer_residuals,
+            post_block_residuals,
             initial_conv_state,
             initial_recurrence_state,
             final_conv_state,
@@ -751,6 +784,11 @@ impl ResearchSession<'_, '_> {
             (
                 "GDN captured post-mixer residuals",
                 forward.post_mixer_residuals.as_slice(),
+                hidden_elements,
+            ),
+            (
+                "GDN captured post-block residuals",
+                forward.post_block_residuals.as_slice(),
                 hidden_elements,
             ),
             (
@@ -831,6 +869,64 @@ impl ResearchSession<'_, '_> {
                 &replay.final_recurrence_state,
                 &forward.final_recurrence_state,
             ),
+        })
+    }
+
+    /// Reverse a complete GDN block over the captured prompt trajectory.
+    /// This composes the rowwise dense FFN VJP, its residual identity, the
+    /// temporal GDN mixer VJP, and the mixer residual identity.
+    pub fn gdn_block_vjp(
+        &self,
+        forward: &ResearchGdnForward,
+        grad_block_output: &[f32],
+        rule: GdnBlockVjpRule,
+    ) -> Result<ResearchGdnBlockVjp, ResearchError> {
+        if forward.identity != self.identity() {
+            return Err(ResearchError::GdnCaptureModelMismatch);
+        }
+        if forward.owner_token_id != self.model.owner_token_id() {
+            return Err(ResearchError::GdnCaptureOwnerMismatch);
+        }
+        let n_tokens = forward.n_tokens();
+        let hidden_size = self.arch().hidden_size as usize;
+        let expected = checked_product(n_tokens, hidden_size)?;
+        if grad_block_output.len() != expected {
+            return Err(ResearchError::ActivationSize {
+                name: "GDN block cotangent",
+                got: grad_block_output.len(),
+                expected,
+            });
+        }
+        if forward.post_mixer_residuals.len() != expected {
+            return Err(ResearchError::ActivationSize {
+                name: "GDN captured post-mixer residuals",
+                got: forward.post_mixer_residuals.len(),
+                expected,
+            });
+        }
+        let (post_norm, gate, up, down) = self.resolve_dense_ffn(forward.layer)?;
+        let composition = compose_gdn_block_vjp(
+            self.model.context(),
+            forward.layer,
+            hidden_size,
+            self.arch().intermediate_size as usize,
+            &forward.post_mixer_residuals,
+            post_norm,
+            gate,
+            up,
+            down,
+            grad_block_output,
+            n_tokens,
+            rule,
+            |grad_post_mixer, mixer_rule| self.gdn_mixer_vjp(forward, grad_post_mixer, mixer_rule),
+        )?;
+        Ok(ResearchGdnBlockVjp {
+            layer: forward.layer,
+            n_tokens,
+            hidden_size,
+            values: composition.values,
+            grad_post_mixer_residuals: composition.grad_post_mixer_residuals,
+            mixer: composition.mixer,
         })
     }
 
@@ -1937,6 +2033,298 @@ fn dense_ffn_vjp_readback(
     Ok(read_f32(&grad_input, hidden_query_elements))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn dense_ffn_vjp_rows_readback(
+    context: &MetalContext,
+    layer: u32,
+    hidden_size: usize,
+    intermediate_size: usize,
+    pre_ffn_residuals: &[f32],
+    post_norm: &MetalTensor,
+    gate_weight: &MetalTensor,
+    up_weight: &MetalTensor,
+    down_weight: &MetalTensor,
+    grad_outputs: &[f32],
+    n_rows: usize,
+    rule: DenseFfnVjpRule,
+) -> Result<Vec<f32>, ResearchError> {
+    if n_rows == 0 {
+        return Err(ResearchError::EmptyQueryBatch);
+    }
+    let gate_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnGate,
+    };
+    let up_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnUp,
+    };
+    let down_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnDown,
+    };
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnGate,
+        linear_shape(gate_id, gate_weight)?,
+        [hidden_size, intermediate_size],
+    )?;
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnUp,
+        linear_shape(up_id, up_weight)?,
+        [hidden_size, intermediate_size],
+    )?;
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnDown,
+        linear_shape(down_id, down_weight)?,
+        [intermediate_size, hidden_size],
+    )?;
+    if post_norm.dtype != GgmlType::F32 || post_norm.shape != [hidden_size as u64] {
+        return Err(ResearchError::InvalidDenseFfnNorm {
+            layer,
+            dtype: post_norm.dtype,
+            shape: post_norm.shape.clone(),
+            expected: hidden_size,
+        });
+    }
+    for (id, weight) in [
+        (gate_id, gate_weight),
+        (up_id, up_weight),
+        (down_id, down_weight),
+    ] {
+        validate_vjp_dtype(id, weight)?;
+    }
+    let hidden_elements = checked_product(n_rows, hidden_size)?;
+    checked_product(n_rows, intermediate_size)?;
+    for (name, values) in [
+        ("pre-FFN residual rows", pre_ffn_residuals),
+        ("post-block cotangent rows", grad_outputs),
+    ] {
+        if values.len() != hidden_elements {
+            return Err(ResearchError::ActivationSize {
+                name,
+                got: values.len(),
+                expected: hidden_elements,
+            });
+        }
+    }
+    let hidden_shape = row_shape(hidden_size, n_rows)?;
+    let intermediate_shape = row_shape(intermediate_size, n_rows)?;
+    let residuals = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(pre_ffn_residuals),
+        hidden_shape.clone(),
+        GgmlType::F32,
+    )?;
+    let normalized = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let gate = MetalTensor::zeros_f32(context, intermediate_shape.clone())?;
+    let up = MetalTensor::zeros_f32(context, intermediate_shape.clone())?;
+    let grad_output = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(grad_outputs),
+        hidden_shape.clone(),
+        GgmlType::F32,
+    )?;
+    let grad_inner = MetalTensor::zeros_f32(context, intermediate_shape.clone())?;
+    let grad_gate = MetalTensor::zeros_f32(context, intermediate_shape.clone())?;
+    let grad_up = MetalTensor::zeros_f32(context, intermediate_shape)?;
+    let grad_norm_gate = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_norm_up = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_norm = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_ffn_input = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_input = MetalTensor::zeros_f32(context, hidden_shape)?;
+
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = (|| -> Result<(), ResearchError> {
+        encode_rms_norm_mul_rows_f32(
+            context,
+            &encoder,
+            &residuals,
+            post_norm,
+            &normalized,
+            n_rows,
+            hidden_size,
+            RMS_EPS,
+        )?;
+        for row in 0..n_rows {
+            let normalized_row = row_view(&normalized, row, hidden_size);
+            let gate_row = row_view(&gate, row, intermediate_size);
+            let up_row = row_view(&up, row, intermediate_size);
+            encode_mat_vec_dispatch(
+                context,
+                &encoder,
+                gate_weight,
+                &normalized_row,
+                &gate_row,
+                hidden_size,
+                intermediate_size,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                &encoder,
+                up_weight,
+                &normalized_row,
+                &up_row,
+                hidden_size,
+                intermediate_size,
+            )?;
+        }
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            down_weight,
+            &grad_output,
+            &grad_inner,
+            intermediate_size,
+            hidden_size,
+            n_rows,
+        )?;
+        let (rms_rule, swiglu_rule) = match rule {
+            DenseFfnVjpRule::Jacobian => (RmsNormVjpRule::Jacobian, SwiGluVjpRule::Jacobian),
+            DenseFfnVjpRule::Relp => (
+                RmsNormVjpRule::RelpDetachedScale,
+                SwiGluVjpRule::RelpIdentityHalf,
+            ),
+        };
+        encode_silu_mul_vjp_f32(
+            context,
+            &encoder,
+            &gate,
+            &up,
+            &grad_inner,
+            &grad_gate,
+            &grad_up,
+            n_rows,
+            intermediate_size,
+            swiglu_rule,
+        )?;
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            gate_weight,
+            &grad_gate,
+            &grad_norm_gate,
+            hidden_size,
+            intermediate_size,
+            n_rows,
+        )?;
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            up_weight,
+            &grad_up,
+            &grad_norm_up,
+            hidden_size,
+            intermediate_size,
+            n_rows,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_norm_gate,
+            &grad_norm_up,
+            &grad_norm,
+        )?;
+        encode_rms_norm_mul_vjp_rows_f32(
+            context,
+            &encoder,
+            &residuals,
+            post_norm,
+            &grad_norm,
+            &grad_ffn_input,
+            n_rows,
+            hidden_size,
+            RMS_EPS,
+            rms_rule,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_output,
+            &grad_ffn_input,
+            &grad_input,
+        )?;
+        Ok(())
+    })();
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+    Ok(read_f32(&grad_input, hidden_elements))
+}
+
+struct GdnBlockComposition {
+    values: Vec<f32>,
+    grad_post_mixer_residuals: Vec<f32>,
+    mixer: ResearchGdnVjp,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compose_gdn_block_vjp(
+    context: &MetalContext,
+    layer: u32,
+    hidden_size: usize,
+    intermediate_size: usize,
+    post_mixer_residuals: &[f32],
+    post_norm: &MetalTensor,
+    gate_weight: &MetalTensor,
+    up_weight: &MetalTensor,
+    down_weight: &MetalTensor,
+    grad_block_output: &[f32],
+    n_rows: usize,
+    rule: GdnBlockVjpRule,
+    mixer_vjp: impl FnOnce(&[f32], GdnMixerVjpRule) -> Result<ResearchGdnVjp, ResearchError>,
+) -> Result<GdnBlockComposition, ResearchError> {
+    let grad_post_mixer_residuals = dense_ffn_vjp_rows_readback(
+        context,
+        layer,
+        hidden_size,
+        intermediate_size,
+        post_mixer_residuals,
+        post_norm,
+        gate_weight,
+        up_weight,
+        down_weight,
+        grad_block_output,
+        n_rows,
+        match rule {
+            GdnBlockVjpRule::Jacobian => DenseFfnVjpRule::Jacobian,
+            GdnBlockVjpRule::Relp => DenseFfnVjpRule::Relp,
+        },
+    )?;
+    let mixer = mixer_vjp(
+        &grad_post_mixer_residuals,
+        match rule {
+            GdnBlockVjpRule::Jacobian => GdnMixerVjpRule::Jacobian,
+            GdnBlockVjpRule::Relp => GdnMixerVjpRule::Relp,
+        },
+    )?;
+    if mixer.values.len() != grad_post_mixer_residuals.len() {
+        return Err(ResearchError::ActivationSize {
+            name: "GDN mixer branch cotangent",
+            got: mixer.values.len(),
+            expected: grad_post_mixer_residuals.len(),
+        });
+    }
+    let values = grad_post_mixer_residuals
+        .iter()
+        .zip(&mixer.values)
+        .map(|(&identity, &branch)| identity + branch)
+        .collect();
+    Ok(GdnBlockComposition {
+        values,
+        grad_post_mixer_residuals,
+        mixer,
+    })
+}
+
 fn validate_dense_ffn_shape(
     layer: u32,
     role: LinearRole,
@@ -2300,6 +2688,219 @@ mod tests {
                 .zip(&actual.grad_input)
                 .any(|(relp, jacobian)| relp.to_bits() != jacobian.to_bits())
         );
+    }
+
+    #[test]
+    fn gdn_block_composition_matches_distinct_row_and_temporal_oracles() {
+        let context = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const ROWS: usize = 3;
+        const HIDDEN: usize = 11;
+        const INTERMEDIATE: usize = 17;
+        let residuals: Vec<f32> = (0..ROWS * HIDDEN)
+            .map(|index| ((index * 7 + 3) % 29) as f32 * 0.027 - 0.36)
+            .collect();
+        let norm: Vec<f32> = (0..HIDDEN)
+            .map(|index| 0.61 + (index % 5) as f32 * 0.08)
+            .collect();
+        let gate_weight: Vec<f32> = (0..HIDDEN * INTERMEDIATE)
+            .map(|index| ((index * 11 + 5) % 37) as f32 * 0.006 - 0.097)
+            .collect();
+        let up_weight: Vec<f32> = (0..HIDDEN * INTERMEDIATE)
+            .map(|index| ((index * 13 + 2) % 41) as f32 * 0.005 - 0.083)
+            .collect();
+        let down_weight: Vec<f32> = (0..INTERMEDIATE * HIDDEN)
+            .map(|index| ((index * 17 + 1) % 43) as f32 * 0.004 - 0.071)
+            .collect();
+        let grad_output: Vec<f32> = (0..ROWS * HIDDEN)
+            .map(|index| ((index * 19 + 4) % 47) as f32 * 0.009 - 0.18)
+            .collect();
+        let norm_tensor = f32_tensor(&context, &norm, vec![HIDDEN as u64]);
+        let gate_tensor = f32_tensor(
+            &context,
+            &gate_weight,
+            vec![HIDDEN as u64, INTERMEDIATE as u64],
+        );
+        let up_tensor = f32_tensor(
+            &context,
+            &up_weight,
+            vec![HIDDEN as u64, INTERMEDIATE as u64],
+        );
+        let down_tensor = f32_tensor(
+            &context,
+            &down_weight,
+            vec![INTERMEDIATE as u64, HIDDEN as u64],
+        );
+        for rule in [DenseFfnVjpRule::Jacobian, DenseFfnVjpRule::Relp] {
+            let actual = dense_ffn_vjp_rows_readback(
+                &context,
+                3,
+                HIDDEN,
+                INTERMEDIATE,
+                &residuals,
+                &norm_tensor,
+                &gate_tensor,
+                &up_tensor,
+                &down_tensor,
+                &grad_output,
+                ROWS,
+                rule,
+            )
+            .unwrap();
+            let mut expected = Vec::with_capacity(ROWS * HIDDEN);
+            for row in 0..ROWS {
+                expected.extend(cpu_dense_ffn_vjp(
+                    &residuals[row * HIDDEN..(row + 1) * HIDDEN],
+                    &norm,
+                    &gate_weight,
+                    &up_weight,
+                    &down_weight,
+                    &grad_output[row * HIDDEN..(row + 1) * HIDDEN],
+                    1,
+                    INTERMEDIATE,
+                    rule,
+                ));
+            }
+            let max_abs = actual
+                .iter()
+                .zip(&expected)
+                .map(|(&actual, &expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_abs < 2e-5, "{rule:?} rowwise FFN error {max_abs}");
+
+            let block_rule = match rule {
+                DenseFfnVjpRule::Jacobian => GdnBlockVjpRule::Jacobian,
+                DenseFfnVjpRule::Relp => GdnBlockVjpRule::Relp,
+            };
+            let expected_mixer_rule = match rule {
+                DenseFfnVjpRule::Jacobian => GdnMixerVjpRule::Jacobian,
+                DenseFfnVjpRule::Relp => GdnMixerVjpRule::Relp,
+            };
+            let composition = compose_gdn_block_vjp(
+                &context,
+                3,
+                HIDDEN,
+                INTERMEDIATE,
+                &residuals,
+                &norm_tensor,
+                &gate_tensor,
+                &up_tensor,
+                &down_tensor,
+                &grad_output,
+                ROWS,
+                block_rule,
+                |incoming, mixer_rule| {
+                    assert_eq!(mixer_rule, expected_mixer_rule);
+                    let incoming_error = incoming
+                        .iter()
+                        .zip(&expected)
+                        .map(|(&incoming, &expected)| (incoming - expected).abs())
+                        .fold(0.0f32, f32::max);
+                    assert!(incoming_error < 2e-5);
+                    let mut branch = vec![0.0f32; incoming.len()];
+                    for row in 0..ROWS {
+                        for column in 0..HIDDEN {
+                            let index = row * HIDDEN + column;
+                            branch[index] = 0.35 * incoming[index]
+                                + if row + 1 < ROWS {
+                                    0.2 * incoming[(row + 1) * HIDDEN + column]
+                                } else {
+                                    0.0
+                                };
+                        }
+                    }
+                    Ok(ResearchGdnVjp {
+                        layer: 3,
+                        n_tokens: ROWS,
+                        hidden_size: HIDDEN,
+                        values: branch,
+                        grad_initial_conv_state: Vec::new(),
+                        grad_initial_recurrence_state: Vec::new(),
+                        replay_mixer_outputs: Vec::new(),
+                        residual_replay_max_abs_error: 0.0,
+                        final_conv_state_max_abs_error: 0.0,
+                        final_recurrence_state_max_abs_error: 0.0,
+                    })
+                },
+            )
+            .unwrap();
+            let mut expected_full = expected.clone();
+            for row in 0..ROWS {
+                for column in 0..HIDDEN {
+                    let index = row * HIDDEN + column;
+                    expected_full[index] += 0.35 * expected[index]
+                        + if row + 1 < ROWS {
+                            0.2 * expected[(row + 1) * HIDDEN + column]
+                        } else {
+                            0.0
+                        };
+                }
+            }
+            let post_mixer_error = composition
+                .grad_post_mixer_residuals
+                .iter()
+                .zip(&expected)
+                .map(|(&actual, &expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            let full_error = composition
+                .values
+                .iter()
+                .zip(&expected_full)
+                .map(|(&actual, &expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(post_mixer_error < 2e-5);
+            assert!(full_error < 4e-5, "{rule:?} full block error {full_error}");
+        }
+
+        let zero_gate = f32_tensor(
+            &context,
+            &vec![0.0; HIDDEN * INTERMEDIATE],
+            vec![HIDDEN as u64, INTERMEDIATE as u64],
+        );
+        let zero_up = f32_tensor(
+            &context,
+            &vec![0.0; HIDDEN * INTERMEDIATE],
+            vec![HIDDEN as u64, INTERMEDIATE as u64],
+        );
+        let zero_down = f32_tensor(
+            &context,
+            &vec![0.0; INTERMEDIATE * HIDDEN],
+            vec![INTERMEDIATE as u64, HIDDEN as u64],
+        );
+        let identity_only = compose_gdn_block_vjp(
+            &context,
+            3,
+            HIDDEN,
+            INTERMEDIATE,
+            &residuals,
+            &norm_tensor,
+            &zero_gate,
+            &zero_up,
+            &zero_down,
+            &grad_output,
+            ROWS,
+            GdnBlockVjpRule::Jacobian,
+            |incoming, _| {
+                Ok(ResearchGdnVjp {
+                    layer: 3,
+                    n_tokens: ROWS,
+                    hidden_size: HIDDEN,
+                    values: vec![0.0; incoming.len()],
+                    grad_initial_conv_state: Vec::new(),
+                    grad_initial_recurrence_state: Vec::new(),
+                    replay_mixer_outputs: Vec::new(),
+                    residual_replay_max_abs_error: 0.0,
+                    final_conv_state_max_abs_error: 0.0,
+                    final_recurrence_state_max_abs_error: 0.0,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(identity_only.grad_post_mixer_residuals, grad_output);
+        assert_eq!(identity_only.values, grad_output);
     }
 
     #[test]

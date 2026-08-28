@@ -1,5 +1,6 @@
 use qwen_llm::research::{
-    DenseFfnVjpRule, GdnMixerVjpRule, LinearRole, RESEARCH_IDENTITY_SCHEME, ResearchLinear,
+    DenseFfnVjpRule, GdnBlockVjpRule, GdnMixerVjpRule, LinearRole, RESEARCH_IDENTITY_SCHEME,
+    ResearchLinear,
 };
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use qwen_llm::tensor::GgmlType;
@@ -100,20 +101,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|&value| f64::from(value) * f64::from(value))
         .sum::<f64>()
         .sqrt();
-    if !gdn_r_vjp.residual_replay_max_abs_error.is_finite()
-        || !gdn_r_vjp.final_conv_state_max_abs_error.is_finite()
-        || !gdn_r_vjp.final_recurrence_state_max_abs_error.is_finite()
-        || gdn_r_vjp.residual_replay_max_abs_error > 1e-5
-        || gdn_r_vjp.final_conv_state_max_abs_error > 1e-5
-        || gdn_r_vjp.final_recurrence_state_max_abs_error > 1e-5
-    {
-        return Err(format!(
-            "GDN replay drift residual={} conv={} recurrence={}",
-            gdn_r_vjp.residual_replay_max_abs_error,
-            gdn_r_vjp.final_conv_state_max_abs_error,
-            gdn_r_vjp.final_recurrence_state_max_abs_error,
-        )
-        .into());
+    let gdn_block_r_vjp =
+        research.gdn_block_vjp(&gdn_forward, &gdn_cotangent, GdnBlockVjpRule::Relp)?;
+    let gdn_block_r_vjp_norm = gdn_block_r_vjp
+        .values
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt();
+    if !gdn_r_vjp_norm.is_finite() || !gdn_block_r_vjp_norm.is_finite() {
+        return Err("GDN VJP returned a non-finite norm".into());
+    }
+    for (name, replay) in [("mixer", &gdn_r_vjp), ("block", &gdn_block_r_vjp.mixer)] {
+        if !replay.residual_replay_max_abs_error.is_finite()
+            || !replay.final_conv_state_max_abs_error.is_finite()
+            || !replay.final_recurrence_state_max_abs_error.is_finite()
+            || replay.residual_replay_max_abs_error > 1e-5
+            || replay.final_conv_state_max_abs_error > 1e-5
+            || replay.final_recurrence_state_max_abs_error > 1e-5
+        {
+            return Err(format!(
+                "GDN {name} replay drift residual={} conv={} recurrence={}",
+                replay.residual_replay_max_abs_error,
+                replay.final_conv_state_max_abs_error,
+                replay.final_recurrence_state_max_abs_error,
+            )
+            .into());
+        }
     }
 
     println!(
@@ -165,6 +179,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "residual_replay_max_abs_error": gdn_r_vjp.residual_replay_max_abs_error,
                 "final_conv_state_max_abs_error": gdn_r_vjp.final_conv_state_max_abs_error,
                 "final_recurrence_state_max_abs_error": gdn_r_vjp.final_recurrence_state_max_abs_error,
+            },
+            "gdn_block_r_vjp": {
+                "layer": gdn_block_r_vjp.layer,
+                "tokens": gdn_block_r_vjp.n_tokens,
+                "input_width": gdn_block_r_vjp.values.len(),
+                "l2_norm": gdn_block_r_vjp_norm,
             }
         }))?
     );

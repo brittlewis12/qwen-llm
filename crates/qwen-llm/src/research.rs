@@ -30,6 +30,7 @@ pub const RESEARCH_IDENTITY_SCHEME: &str = "qwen_llm_model_locator_v1";
 pub const MAX_RESEARCH_GDN_TOKENS: usize = 16;
 pub const MAX_RESEARCH_ATTN_TOKENS: usize = 16;
 pub const MAX_RESEARCH_WORKSPACE_TOKENS: usize = 16;
+pub const MAX_RESEARCH_WORKSPACE_DIM_BATCH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ResearchModelIdentity {
@@ -416,6 +417,43 @@ impl ResearchWorkspaceVjp {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ResearchWorkspaceVjpBatch {
+    pub target_layer: u32,
+    /// Caller order, including duplicates.
+    pub source_layers: Vec<u32>,
+    pub n_query: usize,
+    pub n_tokens: usize,
+    pub hidden_size: usize,
+    /// Source-layer major, then query major: `[K,Q,T,H]`.
+    pub values: Vec<f32>,
+    /// Reverse traversal order, from the target block toward the earliest
+    /// requested source layer.
+    pub diagnostics: Vec<ResearchWorkspaceReplayDiagnostic>,
+}
+
+impl ResearchWorkspaceVjpBatch {
+    pub fn source_values(&self, slot: usize) -> Option<&[f32]> {
+        let trajectory_elements = self.n_tokens.checked_mul(self.hidden_size)?;
+        let source_elements = self.n_query.checked_mul(trajectory_elements)?;
+        let start = slot.checked_mul(source_elements)?;
+        self.values.get(start..start.checked_add(source_elements)?)
+    }
+
+    pub fn source_query_values(&self, source_slot: usize, query_slot: usize) -> Option<&[f32]> {
+        if query_slot >= self.n_query {
+            return None;
+        }
+        let trajectory_elements = self.n_tokens.checked_mul(self.hidden_size)?;
+        let source_elements = self.n_query.checked_mul(trajectory_elements)?;
+        let start = source_slot
+            .checked_mul(source_elements)?
+            .checked_add(query_slot.checked_mul(trajectory_elements)?)?;
+        self.values
+            .get(start..start.checked_add(trajectory_elements)?)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResearchWorkspaceRows {
     pub target_layer: u32,
     pub source_layers: Vec<u32>,
@@ -583,6 +621,8 @@ pub enum ResearchError {
     WorkspaceNoValidPositions { n_tokens: usize, skip_first: usize },
     #[error("workspace replay diagnostic schedule changed across fitted rows")]
     WorkspaceDiagnosticScheduleMismatch,
+    #[error("workspace query batch {got} exceeds the bounded limit {max}")]
+    WorkspaceQueryBatchTooLarge { got: usize, max: usize },
     #[error("{name} length {got} does not match expected length {expected}")]
     ActivationSize {
         name: &'static str,
@@ -1528,60 +1568,8 @@ impl ResearchSession<'_, '_> {
         target_cotangent: &[f32],
         rule: WorkspaceLensRule,
     ) -> Result<ResearchWorkspaceVjp, ResearchError> {
-        if forward.identity != self.identity() {
-            return Err(ResearchError::WorkspaceCaptureModelMismatch);
-        }
-        if forward.owner_token_id != self.model.owner_token_id() {
-            return Err(ResearchError::WorkspaceCaptureOwnerMismatch);
-        }
-        let arch = self.arch();
-        if target_layer >= arch.n_layer {
-            return Err(ResearchError::InvalidLayer {
-                layer: target_layer,
-                n_layers: arch.n_layer,
-            });
-        }
-        let n_tokens = forward.n_tokens();
-        if n_tokens == 0 || n_tokens > MAX_RESEARCH_WORKSPACE_TOKENS {
-            return Err(ResearchError::WorkspacePromptTooLong {
-                got: n_tokens,
-                max: MAX_RESEARCH_WORKSPACE_TOKENS,
-            });
-        }
-        if forward.n_layers != arch.n_layer {
-            return Err(ResearchError::ActivationSize {
-                name: "workspace capture layer count",
-                got: forward.n_layers as usize,
-                expected: arch.n_layer as usize,
-            });
-        }
-        if forward.hidden_size != arch.hidden_size as usize {
-            return Err(ResearchError::ActivationSize {
-                name: "workspace capture hidden size",
-                got: forward.hidden_size,
-                expected: arch.hidden_size as usize,
-            });
-        }
-        let hidden_elements = checked_product(n_tokens, forward.hidden_size)?;
-        let bank_elements = checked_product(arch.n_layer as usize, hidden_elements)?;
-        for (name, values) in [
-            (
-                "workspace post-mixer residual bank",
-                forward.post_mixer_residuals.as_slice(),
-            ),
-            (
-                "workspace post-block residual bank",
-                forward.post_block_residuals.as_slice(),
-            ),
-        ] {
-            if values.len() != bank_elements {
-                return Err(ResearchError::ActivationSize {
-                    name,
-                    got: values.len(),
-                    expected: bank_elements,
-                });
-            }
-        }
+        let (arch, n_tokens, hidden_elements) =
+            self.validate_workspace_vjp_forward(forward, target_layer)?;
         if target_cotangent.len() != hidden_elements {
             return Err(ResearchError::ActivationSize {
                 name: "workspace target cotangent",
@@ -1614,6 +1602,78 @@ impl ResearchSession<'_, '_> {
         Ok(ResearchWorkspaceVjp {
             target_layer,
             source_layers: source_layers.to_vec(),
+            n_tokens,
+            hidden_size: forward.hidden_size,
+            values,
+            diagnostics,
+        })
+    }
+
+    /// Apply a query-major bank of target-layer cotangent trajectories while
+    /// sharing each block's dense-FFN primal replay. Mixer reverse passes are
+    /// currently isolated per query. Returned values use `[K,Q,T,H]` order.
+    pub fn workspace_vjp_batch(
+        &self,
+        forward: &ResearchWorkspaceForward,
+        target_layer: u32,
+        source_layers: &[u32],
+        target_cotangents: &[f32],
+        n_query: usize,
+        rule: WorkspaceLensRule,
+    ) -> Result<ResearchWorkspaceVjpBatch, ResearchError> {
+        if n_query == 0 {
+            return Err(ResearchError::EmptyQueryBatch);
+        }
+        if n_query > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
+            return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+                got: n_query,
+                max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+            });
+        }
+        let (_arch, n_tokens, hidden_elements) =
+            self.validate_workspace_vjp_forward(forward, target_layer)?;
+        let query_elements = checked_product(n_query, hidden_elements)?;
+        if target_cotangents.len() != query_elements {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace target cotangent query bank",
+                got: target_cotangents.len(),
+                expected: query_elements,
+            });
+        }
+        let (values, diagnostics) = compose_workspace_vjp(
+            target_layer,
+            source_layers,
+            query_elements,
+            target_cotangents,
+            |layer, grad_outputs| {
+                let input = forward.input_residuals(layer).ok_or(
+                    ResearchError::WorkspaceSourceNotBeforeTarget {
+                        source_layer: layer,
+                        target_layer,
+                    },
+                )?;
+                let post_mixer =
+                    forward
+                        .post_mixer_residuals(layer)
+                        .ok_or(ResearchError::InvalidLayer {
+                            layer,
+                            n_layers: forward.n_layers,
+                        })?;
+                self.workspace_block_vjp_batch(
+                    layer,
+                    input,
+                    post_mixer,
+                    grad_outputs,
+                    n_tokens,
+                    n_query,
+                    rule,
+                )
+            },
+        )?;
+        Ok(ResearchWorkspaceVjpBatch {
+            target_layer,
+            source_layers: source_layers.to_vec(),
+            n_query,
             n_tokens,
             hidden_size: forward.hidden_size,
             values,
@@ -1705,6 +1765,176 @@ impl ResearchSession<'_, '_> {
             values,
             diagnostics,
         })
+    }
+
+    /// Fit rows in query-major execution batches while preserving the public
+    /// row-shard orientation `[K,R,H]` and the reference estimator exactly.
+    pub fn workspace_fit_rows_batched(
+        &self,
+        forward: &ResearchWorkspaceForward,
+        target_layer: u32,
+        source_layers: &[u32],
+        output_rows: &[u32],
+        skip_first: usize,
+        dim_batch: usize,
+        rule: WorkspaceLensRule,
+    ) -> Result<ResearchWorkspaceRows, ResearchError> {
+        if dim_batch == 0 {
+            return Err(ResearchError::EmptyQueryBatch);
+        }
+        if dim_batch > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
+            return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+                got: dim_batch,
+                max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+            });
+        }
+        if output_rows.is_empty() {
+            return Err(ResearchError::EmptyWorkspaceOutputRows);
+        }
+        if output_rows.windows(2).any(|rows| rows[0] >= rows[1]) {
+            return Err(ResearchError::WorkspaceOutputRowsNotStrict);
+        }
+        let hidden_size = forward.hidden_size();
+        if let Some(&row) = output_rows.iter().find(|&&row| row as usize >= hidden_size) {
+            return Err(ResearchError::WorkspaceOutputRowOutOfRange { row, hidden_size });
+        }
+        let valid_positions = workspace_valid_position_range(forward.n_tokens(), skip_first)?;
+        let n_valid_positions = valid_positions.len();
+        let hidden_elements = checked_product(forward.n_tokens(), hidden_size)?;
+        let source_row_elements = checked_product(output_rows.len(), hidden_size)?;
+        let output_elements = checked_product(source_layers.len(), source_row_elements)?;
+        let mut values = vec![0.0f32; output_elements];
+        let mut diagnostics = Vec::new();
+        let mut first_row_slot = 0usize;
+        for rows in output_rows.chunks(dim_batch) {
+            let n_query = rows.len();
+            let mut target_cotangents = vec![0.0f32; checked_product(n_query, hidden_elements)?];
+            for (query_slot, &row) in rows.iter().enumerate() {
+                let query_start = checked_product(query_slot, hidden_elements)?;
+                for position in valid_positions.clone() {
+                    let offset = query_start
+                        .checked_add(checked_product(position, hidden_size)?)
+                        .and_then(|offset| offset.checked_add(row as usize))
+                        .ok_or(ResearchError::SizeOverflow)?;
+                    target_cotangents[offset] = 1.0;
+                }
+            }
+            let vjp = self.workspace_vjp_batch(
+                forward,
+                target_layer,
+                source_layers,
+                &target_cotangents,
+                n_query,
+                rule,
+            )?;
+            merge_workspace_diagnostics(&mut diagnostics, &vjp.diagnostics)?;
+            for source_slot in 0..source_layers.len() {
+                for query_slot in 0..n_query {
+                    let source = vjp.source_query_values(source_slot, query_slot).ok_or(
+                        ResearchError::ActivationSize {
+                            name: "workspace fitted source trajectory query",
+                            got: vjp.values.len(),
+                            expected: checked_product(
+                                source_layers.len(),
+                                checked_product(n_query, hidden_elements)?,
+                            )?,
+                        },
+                    )?;
+                    let row_slot = first_row_slot
+                        .checked_add(query_slot)
+                        .ok_or(ResearchError::SizeOverflow)?;
+                    let destination_row = checked_product(source_slot, output_rows.len())?
+                        .checked_add(row_slot)
+                        .ok_or(ResearchError::SizeOverflow)?;
+                    let destination_start = checked_product(destination_row, hidden_size)?;
+                    let destination_end = destination_start
+                        .checked_add(hidden_size)
+                        .ok_or(ResearchError::SizeOverflow)?;
+                    reduce_workspace_source_positions(
+                        source,
+                        forward.n_tokens(),
+                        hidden_size,
+                        valid_positions.clone(),
+                        &mut values[destination_start..destination_end],
+                    )?;
+                }
+            }
+            first_row_slot = first_row_slot
+                .checked_add(n_query)
+                .ok_or(ResearchError::SizeOverflow)?;
+        }
+        Ok(ResearchWorkspaceRows {
+            target_layer,
+            source_layers: source_layers.to_vec(),
+            output_rows: output_rows.to_vec(),
+            n_tokens: forward.n_tokens(),
+            n_valid_positions,
+            hidden_size,
+            values,
+            diagnostics,
+        })
+    }
+
+    fn validate_workspace_vjp_forward(
+        &self,
+        forward: &ResearchWorkspaceForward,
+        target_layer: u32,
+    ) -> Result<(Arch, usize, usize), ResearchError> {
+        if forward.identity != self.identity() {
+            return Err(ResearchError::WorkspaceCaptureModelMismatch);
+        }
+        if forward.owner_token_id != self.model.owner_token_id() {
+            return Err(ResearchError::WorkspaceCaptureOwnerMismatch);
+        }
+        let arch = self.arch();
+        if target_layer >= arch.n_layer {
+            return Err(ResearchError::InvalidLayer {
+                layer: target_layer,
+                n_layers: arch.n_layer,
+            });
+        }
+        let n_tokens = forward.n_tokens();
+        if n_tokens == 0 || n_tokens > MAX_RESEARCH_WORKSPACE_TOKENS {
+            return Err(ResearchError::WorkspacePromptTooLong {
+                got: n_tokens,
+                max: MAX_RESEARCH_WORKSPACE_TOKENS,
+            });
+        }
+        if forward.n_layers != arch.n_layer {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace capture layer count",
+                got: forward.n_layers as usize,
+                expected: arch.n_layer as usize,
+            });
+        }
+        if forward.hidden_size != arch.hidden_size as usize {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace capture hidden size",
+                got: forward.hidden_size,
+                expected: arch.hidden_size as usize,
+            });
+        }
+        let hidden_elements = checked_product(n_tokens, forward.hidden_size)?;
+        let bank_elements = checked_product(arch.n_layer as usize, hidden_elements)?;
+        for (name, values) in [
+            (
+                "workspace post-mixer residual bank",
+                forward.post_mixer_residuals.as_slice(),
+            ),
+            (
+                "workspace post-block residual bank",
+                forward.post_block_residuals.as_slice(),
+            ),
+        ] {
+            if values.len() != bank_elements {
+                return Err(ResearchError::ActivationSize {
+                    name,
+                    got: values.len(),
+                    expected: bank_elements,
+                });
+            }
+        }
+        Ok((arch, n_tokens, hidden_elements))
     }
 
     fn validate_workspace_weights(&self) -> Result<(), ResearchError> {
@@ -1884,6 +2114,189 @@ impl ResearchSession<'_, '_> {
             .iter()
             .zip(grad_mixer_input)
             .map(|(&identity, branch)| identity + branch)
+            .collect();
+        Ok((
+            values,
+            ResearchWorkspaceReplayDiagnostic {
+                layer,
+                kind,
+                residual_replay_max_abs_error,
+            },
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn workspace_block_vjp_batch(
+        &self,
+        layer: u32,
+        input_residuals: &[f32],
+        post_mixer_residuals: &[f32],
+        grad_block_outputs: &[f32],
+        n_tokens: usize,
+        n_query: usize,
+        rule: WorkspaceLensRule,
+    ) -> Result<(Vec<f32>, ResearchWorkspaceReplayDiagnostic), ResearchError> {
+        if n_query == 0 {
+            return Err(ResearchError::EmptyQueryBatch);
+        }
+        let arch = self.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let hidden_elements = checked_product(n_tokens, hidden_size)?;
+        let query_elements = checked_product(n_query, hidden_elements)?;
+        for (name, values, expected) in [
+            ("workspace block inputs", input_residuals, hidden_elements),
+            (
+                "workspace post-mixer residuals",
+                post_mixer_residuals,
+                hidden_elements,
+            ),
+            (
+                "workspace block cotangent query bank",
+                grad_block_outputs,
+                query_elements,
+            ),
+        ] {
+            if values.len() != expected {
+                return Err(ResearchError::ActivationSize {
+                    name,
+                    got: values.len(),
+                    expected,
+                });
+            }
+        }
+        let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
+            ResearchError::InvalidLayer {
+                layer,
+                n_layers: arch.n_layer,
+            },
+        )?;
+        let (post_norm, gate, up, down) = match block {
+            MetalBlock::Gdn(block) => (
+                &block.post_attn_norm,
+                &block.ffn_gate,
+                &block.ffn_up,
+                &block.ffn_down,
+            ),
+            MetalBlock::Attn(block) => (
+                &block.post_attn_norm,
+                &block.ffn_gate,
+                &block.ffn_up,
+                &block.ffn_down,
+            ),
+        };
+        let grad_post_mixer = dense_ffn_vjp_query_rows_readback(
+            self.model.context(),
+            layer,
+            hidden_size,
+            arch.intermediate_size as usize,
+            post_mixer_residuals,
+            post_norm,
+            gate,
+            up,
+            down,
+            grad_block_outputs,
+            n_tokens,
+            n_query,
+            match rule {
+                WorkspaceLensRule::Jacobian => DenseFfnVjpRule::Jacobian,
+                WorkspaceLensRule::Relp => DenseFfnVjpRule::Relp,
+            },
+        )?;
+
+        let mut grad_mixer_input = Vec::with_capacity(query_elements);
+        let mut residual_replay_max_abs_error = 0.0f32;
+        let kind = match block {
+            MetalBlock::Gdn(block) => {
+                let geometry = GdnGeometry::new(layer, arch)?;
+                validate_gdn_weights(layer, block, geometry)?;
+                let initial_conv_state = vec![0.0f32; geometry.conv_state_elements];
+                let initial_recurrence_state = vec![0.0f32; geometry.state_elements];
+                for grad_query in grad_post_mixer.chunks_exact(hidden_elements) {
+                    let replay = gdn_mixer_replay_vjp_readback(
+                        self.model.context(),
+                        geometry,
+                        GdnMixerWeights::from(block),
+                        input_residuals,
+                        &initial_conv_state,
+                        &initial_recurrence_state,
+                        grad_query,
+                        n_tokens,
+                        match rule {
+                            WorkspaceLensRule::Jacobian => GdnMixerVjpRule::Jacobian,
+                            WorkspaceLensRule::Relp => GdnMixerVjpRule::Relp,
+                        },
+                        false,
+                    )?;
+                    residual_replay_max_abs_error = residual_replay_max_abs_error.max(
+                        input_residuals
+                            .iter()
+                            .zip(&replay.mixer_outputs)
+                            .zip(post_mixer_residuals)
+                            .map(|((&input, &mixer), &observed)| {
+                                finite_abs_difference(input + mixer, observed)
+                            })
+                            .fold(0.0f32, f32::max),
+                    );
+                    if replay.grad_input.len() != hidden_elements {
+                        return Err(ResearchError::ActivationSize {
+                            name: "workspace GDN mixer branch cotangent",
+                            got: replay.grad_input.len(),
+                            expected: hidden_elements,
+                        });
+                    }
+                    grad_mixer_input.extend(replay.grad_input);
+                }
+                ResearchWorkspaceBlockKind::Gdn
+            }
+            MetalBlock::Attn(block) => {
+                let geometry = AttnGeometry::new(arch)?;
+                validate_attn_weights(layer, block, geometry)?;
+                for grad_query in grad_post_mixer.chunks_exact(hidden_elements) {
+                    let replay = attn_mixer_replay_vjp_readback(
+                        self.model.context(),
+                        geometry,
+                        AttnMixerWeights::from(block),
+                        input_residuals,
+                        grad_query,
+                        n_tokens,
+                        match rule {
+                            WorkspaceLensRule::Jacobian => AttnBlockVjpRule::Jacobian,
+                            WorkspaceLensRule::Relp => AttnBlockVjpRule::Relp,
+                        },
+                    )?;
+                    residual_replay_max_abs_error = residual_replay_max_abs_error.max(
+                        input_residuals
+                            .iter()
+                            .zip(&replay.mixer_outputs)
+                            .zip(post_mixer_residuals)
+                            .map(|((&input, &mixer), &observed)| {
+                                finite_abs_difference(input + mixer, observed)
+                            })
+                            .fold(0.0f32, f32::max),
+                    );
+                    if replay.grad_input.len() != hidden_elements {
+                        return Err(ResearchError::ActivationSize {
+                            name: "workspace attention mixer branch cotangent",
+                            got: replay.grad_input.len(),
+                            expected: hidden_elements,
+                        });
+                    }
+                    grad_mixer_input.extend(replay.grad_input);
+                }
+                ResearchWorkspaceBlockKind::Attention
+            }
+        };
+        if grad_mixer_input.len() != query_elements {
+            return Err(ResearchError::ActivationSize {
+                name: "workspace mixer branch cotangent query bank",
+                got: grad_mixer_input.len(),
+                expected: query_elements,
+            });
+        }
+        let values = grad_post_mixer
+            .into_iter()
+            .zip(grad_mixer_input)
+            .map(|(identity, branch)| identity + branch)
             .collect();
         Ok((
             values,
@@ -4254,6 +4667,257 @@ fn dense_ffn_vjp_rows_readback(
     Ok(read_f32(&grad_input, hidden_elements))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn dense_ffn_vjp_query_rows_readback(
+    context: &MetalContext,
+    layer: u32,
+    hidden_size: usize,
+    intermediate_size: usize,
+    pre_ffn_residuals: &[f32],
+    post_norm: &MetalTensor,
+    gate_weight: &MetalTensor,
+    up_weight: &MetalTensor,
+    down_weight: &MetalTensor,
+    grad_outputs: &[f32],
+    n_rows: usize,
+    n_query_batches: usize,
+    rule: DenseFfnVjpRule,
+) -> Result<Vec<f32>, ResearchError> {
+    if n_rows == 0 || n_query_batches == 0 {
+        return Err(ResearchError::EmptyQueryBatch);
+    }
+    let gate_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnGate,
+    };
+    let up_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnUp,
+    };
+    let down_id = ResearchLinear::Layer {
+        index: layer,
+        role: LinearRole::FfnDown,
+    };
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnGate,
+        linear_shape(gate_id, gate_weight)?,
+        [hidden_size, intermediate_size],
+    )?;
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnUp,
+        linear_shape(up_id, up_weight)?,
+        [hidden_size, intermediate_size],
+    )?;
+    validate_dense_ffn_shape(
+        layer,
+        LinearRole::FfnDown,
+        linear_shape(down_id, down_weight)?,
+        [intermediate_size, hidden_size],
+    )?;
+    if post_norm.dtype != GgmlType::F32 || post_norm.shape != [hidden_size as u64] {
+        return Err(ResearchError::InvalidDenseFfnNorm {
+            layer,
+            dtype: post_norm.dtype,
+            shape: post_norm.shape.clone(),
+            expected: hidden_size,
+        });
+    }
+    for (id, weight) in [
+        (gate_id, gate_weight),
+        (up_id, up_weight),
+        (down_id, down_weight),
+    ] {
+        validate_vjp_dtype(id, weight)?;
+    }
+
+    let hidden_elements = checked_product(n_rows, hidden_size)?;
+    checked_product(n_rows, intermediate_size)?;
+    let query_rows = checked_product(n_query_batches, n_rows)?;
+    let hidden_query_elements = checked_product(query_rows, hidden_size)?;
+    checked_product(query_rows, intermediate_size)?;
+    if pre_ffn_residuals.len() != hidden_elements {
+        return Err(ResearchError::ActivationSize {
+            name: "pre-FFN residual rows",
+            got: pre_ffn_residuals.len(),
+            expected: hidden_elements,
+        });
+    }
+    if grad_outputs.len() != hidden_query_elements {
+        return Err(ResearchError::ActivationSize {
+            name: "post-block cotangent query rows",
+            got: grad_outputs.len(),
+            expected: hidden_query_elements,
+        });
+    }
+
+    let hidden_shape = row_shape(hidden_size, n_rows)?;
+    let intermediate_shape = row_shape(intermediate_size, n_rows)?;
+    let hidden_query_shape = row_shape(hidden_size, query_rows)?;
+    let intermediate_query_shape = row_shape(intermediate_size, query_rows)?;
+    let residuals = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(pre_ffn_residuals),
+        hidden_shape.clone(),
+        GgmlType::F32,
+    )?;
+    let normalized = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let gate = MetalTensor::zeros_f32(context, intermediate_shape.clone())?;
+    let up = MetalTensor::zeros_f32(context, intermediate_shape.clone())?;
+    let grad_output = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(grad_outputs),
+        hidden_query_shape.clone(),
+        GgmlType::F32,
+    )?;
+    let grad_inner = MetalTensor::zeros_f32(context, intermediate_query_shape.clone())?;
+    let grad_gate = MetalTensor::zeros_f32(context, intermediate_query_shape.clone())?;
+    let grad_up = MetalTensor::zeros_f32(context, intermediate_query_shape)?;
+    let grad_norm_gate = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_norm_up = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_norm = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_ffn_input = MetalTensor::zeros_f32(context, hidden_query_shape.clone())?;
+    let grad_input = MetalTensor::zeros_f32(context, hidden_query_shape)?;
+
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = (|| -> Result<(), ResearchError> {
+        encode_rms_norm_mul_rows_f32(
+            context,
+            &encoder,
+            &residuals,
+            post_norm,
+            &normalized,
+            n_rows,
+            hidden_size,
+            RMS_EPS,
+        )?;
+        for row in 0..n_rows {
+            let normalized_row = row_view(&normalized, row, hidden_size);
+            let gate_row = row_view(&gate, row, intermediate_size);
+            let up_row = row_view(&up, row, intermediate_size);
+            encode_mat_vec_dispatch(
+                context,
+                &encoder,
+                gate_weight,
+                &normalized_row,
+                &gate_row,
+                hidden_size,
+                intermediate_size,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                &encoder,
+                up_weight,
+                &normalized_row,
+                &up_row,
+                hidden_size,
+                intermediate_size,
+            )?;
+        }
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            down_weight,
+            &grad_output,
+            &grad_inner,
+            intermediate_size,
+            hidden_size,
+            query_rows,
+        )?;
+        let (rms_rule, swiglu_rule) = match rule {
+            DenseFfnVjpRule::Jacobian => (RmsNormVjpRule::Jacobian, SwiGluVjpRule::Jacobian),
+            DenseFfnVjpRule::Relp => (
+                RmsNormVjpRule::RelpDetachedScale,
+                SwiGluVjpRule::RelpIdentityHalf,
+            ),
+        };
+        let intermediate_query_elements = checked_product(n_rows, intermediate_size)?;
+        for query in 0..n_query_batches {
+            let offset = u64::try_from(checked_product(query, intermediate_query_elements)?)
+                .map_err(|_| ResearchError::SizeOverflow)?;
+            let grad_inner_query = grad_inner.view_subrange(offset, intermediate_shape.clone());
+            let grad_gate_query = grad_gate.view_subrange(offset, intermediate_shape.clone());
+            let grad_up_query = grad_up.view_subrange(offset, intermediate_shape.clone());
+            encode_silu_mul_vjp_f32(
+                context,
+                &encoder,
+                &gate,
+                &up,
+                &grad_inner_query,
+                &grad_gate_query,
+                &grad_up_query,
+                n_rows,
+                intermediate_size,
+                swiglu_rule,
+            )?;
+        }
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            gate_weight,
+            &grad_gate,
+            &grad_norm_gate,
+            hidden_size,
+            intermediate_size,
+            query_rows,
+        )?;
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            up_weight,
+            &grad_up,
+            &grad_norm_up,
+            hidden_size,
+            intermediate_size,
+            query_rows,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_norm_gate,
+            &grad_norm_up,
+            &grad_norm,
+        )?;
+        for query in 0..n_query_batches {
+            let offset = u64::try_from(checked_product(query, hidden_elements)?)
+                .map_err(|_| ResearchError::SizeOverflow)?;
+            let grad_norm_query = grad_norm.view_subrange(offset, hidden_shape.clone());
+            let grad_ffn_input_query = grad_ffn_input.view_subrange(offset, hidden_shape.clone());
+            encode_rms_norm_mul_vjp_rows_f32(
+                context,
+                &encoder,
+                &residuals,
+                post_norm,
+                &grad_norm_query,
+                &grad_ffn_input_query,
+                n_rows,
+                hidden_size,
+                RMS_EPS,
+                rms_rule,
+            )?;
+        }
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_output,
+            &grad_ffn_input,
+            &grad_input,
+        )?;
+        Ok(())
+    })();
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+    Ok(read_f32(&grad_input, hidden_query_elements))
+}
+
 struct GdnBlockComposition {
     values: Vec<f32>,
     grad_post_mixer_residuals: Vec<f32>,
@@ -4574,6 +5238,29 @@ mod tests {
                 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0
             ]
         );
+    }
+
+    #[test]
+    fn workspace_batch_accessors_preserve_source_then_query_layout() {
+        let batch = ResearchWorkspaceVjpBatch {
+            target_layer: 3,
+            source_layers: vec![0, 2],
+            n_query: 3,
+            n_tokens: 2,
+            hidden_size: 2,
+            values: (0..24).map(|value| value as f32).collect(),
+            diagnostics: Vec::new(),
+        };
+        assert_eq!(
+            batch.source_values(1).unwrap(),
+            (12..24).map(|value| value as f32).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            batch.source_query_values(1, 2).unwrap(),
+            [20.0, 21.0, 22.0, 23.0]
+        );
+        assert!(batch.source_values(2).is_none());
+        assert!(batch.source_query_values(0, 3).is_none());
     }
 
     #[test]
@@ -5157,6 +5844,165 @@ mod tests {
                 .zip(&actual.grad_input)
                 .any(|(relp, jacobian)| relp.to_bits() != jacobian.to_bits())
         );
+    }
+
+    #[test]
+    fn dense_ffn_query_rows_match_serial_batches_and_do_not_cross_talk() {
+        let context = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const ROWS: usize = 3;
+        const HIDDEN: usize = 11;
+        const INTERMEDIATE: usize = 17;
+        let hidden_elements = ROWS * HIDDEN;
+        let residuals: Vec<f32> = (0..hidden_elements)
+            .map(|index| ((index * 7 + 3) % 29) as f32 * 0.027 - 0.36)
+            .collect();
+        let norm: Vec<f32> = (0..HIDDEN)
+            .map(|index| 0.61 + (index % 5) as f32 * 0.08)
+            .collect();
+        let gate_weight: Vec<f32> = (0..HIDDEN * INTERMEDIATE)
+            .map(|index| ((index * 11 + 5) % 37) as f32 * 0.006 - 0.097)
+            .collect();
+        let up_weight: Vec<f32> = (0..HIDDEN * INTERMEDIATE)
+            .map(|index| ((index * 13 + 2) % 41) as f32 * 0.005 - 0.083)
+            .collect();
+        let down_weight: Vec<f32> = (0..INTERMEDIATE * HIDDEN)
+            .map(|index| ((index * 17 + 1) % 43) as f32 * 0.004 - 0.071)
+            .collect();
+        let norm_tensor = f32_tensor(&context, &norm, vec![HIDDEN as u64]);
+        let gate_tensor = f32_tensor(
+            &context,
+            &gate_weight,
+            vec![HIDDEN as u64, INTERMEDIATE as u64],
+        );
+        let up_tensor = f32_tensor(
+            &context,
+            &up_weight,
+            vec![HIDDEN as u64, INTERMEDIATE as u64],
+        );
+        let down_tensor = f32_tensor(
+            &context,
+            &down_weight,
+            vec![INTERMEDIATE as u64, HIDDEN as u64],
+        );
+
+        for rule in [DenseFfnVjpRule::Jacobian, DenseFfnVjpRule::Relp] {
+            for query_batches in [1, 2, 8] {
+                let grad_outputs: Vec<f32> = (0..query_batches * hidden_elements)
+                    .map(|index| {
+                        let query = index / hidden_elements;
+                        let local = index % hidden_elements;
+                        ((local * 19 + query * 7 + 4) % 47) as f32 * 0.009 - 0.18
+                            + query as f32 * 0.013
+                    })
+                    .collect();
+                let batched = dense_ffn_vjp_query_rows_readback(
+                    &context,
+                    3,
+                    HIDDEN,
+                    INTERMEDIATE,
+                    &residuals,
+                    &norm_tensor,
+                    &gate_tensor,
+                    &up_tensor,
+                    &down_tensor,
+                    &grad_outputs,
+                    ROWS,
+                    query_batches,
+                    rule,
+                )
+                .unwrap();
+                for query in 0..query_batches {
+                    let start = query * hidden_elements;
+                    let end = start + hidden_elements;
+                    let serial = dense_ffn_vjp_rows_readback(
+                        &context,
+                        3,
+                        HIDDEN,
+                        INTERMEDIATE,
+                        &residuals,
+                        &norm_tensor,
+                        &gate_tensor,
+                        &up_tensor,
+                        &down_tensor,
+                        &grad_outputs[start..end],
+                        ROWS,
+                        rule,
+                    )
+                    .unwrap();
+                    let max_abs = batched[start..end]
+                        .iter()
+                        .zip(&serial)
+                        .map(|(&batched, &serial)| (batched - serial).abs())
+                        .fold(0.0f32, f32::max);
+                    assert!(
+                        max_abs < 2e-5,
+                        "{rule:?} batch {query_batches} query {query} error {max_abs}"
+                    );
+                }
+            }
+
+            const QUERY_BATCHES: usize = 4;
+            const ACTIVE_QUERY: usize = 2;
+            let active_grad: Vec<f32> = (0..hidden_elements)
+                .map(|index| ((index * 23 + 9) % 53) as f32 * 0.007 - 0.16)
+                .collect();
+            let mut isolated_grad = vec![0.0f32; QUERY_BATCHES * hidden_elements];
+            let active_start = ACTIVE_QUERY * hidden_elements;
+            isolated_grad[active_start..active_start + hidden_elements]
+                .copy_from_slice(&active_grad);
+            let isolated = dense_ffn_vjp_query_rows_readback(
+                &context,
+                3,
+                HIDDEN,
+                INTERMEDIATE,
+                &residuals,
+                &norm_tensor,
+                &gate_tensor,
+                &up_tensor,
+                &down_tensor,
+                &isolated_grad,
+                ROWS,
+                QUERY_BATCHES,
+                rule,
+            )
+            .unwrap();
+            let serial = dense_ffn_vjp_rows_readback(
+                &context,
+                3,
+                HIDDEN,
+                INTERMEDIATE,
+                &residuals,
+                &norm_tensor,
+                &gate_tensor,
+                &up_tensor,
+                &down_tensor,
+                &active_grad,
+                ROWS,
+                rule,
+            )
+            .unwrap();
+            for query in 0..QUERY_BATCHES {
+                let start = query * hidden_elements;
+                let end = start + hidden_elements;
+                if query == ACTIVE_QUERY {
+                    let max_abs = isolated[start..end]
+                        .iter()
+                        .zip(&serial)
+                        .map(|(&batched, &serial)| (batched - serial).abs())
+                        .fold(0.0f32, f32::max);
+                    assert!(max_abs < 2e-5, "{rule:?} isolated query error {max_abs}");
+                } else {
+                    assert!(
+                        isolated[start..end].iter().all(|value| *value == 0.0),
+                        "{rule:?} query {query} received another query's cotangent"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

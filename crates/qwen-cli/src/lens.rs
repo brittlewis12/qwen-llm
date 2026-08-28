@@ -3,8 +3,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::model::Arch;
 use qwen_llm::research::{
-    MAX_RESEARCH_WORKSPACE_TOKENS, ResearchWorkspaceBlockKind, ResearchWorkspaceReplayDiagnostic,
-    WorkspaceLensRule,
+    MAX_RESEARCH_WORKSPACE_DIM_BATCH, MAX_RESEARCH_WORKSPACE_TOKENS, ResearchWorkspaceBlockKind,
+    ResearchWorkspaceReplayDiagnostic, WorkspaceLensRule,
 };
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,10 @@ struct FitRowsArgs {
     /// Last target/output coordinate in this shard (exclusive).
     #[arg(long)]
     row_end: u32,
+
+    /// Number of target/output rows propagated in one query-major batch.
+    #[arg(long, default_value_t = 1)]
+    dim_batch: usize,
 
     /// Leading attention-sink positions excluded from target and source means.
     #[arg(long, default_value_t = 4)]
@@ -403,13 +407,14 @@ fn fit_rows(args: FitRowsArgs) -> Result<()> {
             continue;
         }
         eprintln!(
-            "fit prompt {}/{} id={} tokens={} rows={}..{}",
+            "fit prompt {}/{} id={} tokens={} rows={}..{} dim_batch={}",
             record_index + 1,
             prompts.len(),
             prompt.id,
             prompt.token_ids.len(),
             args.row_start,
-            args.row_end
+            args.row_end,
+            args.dim_batch,
         );
         let mut sequence = loaded
             .create_sequence(SequenceConfig::new(prompt.token_ids.len()))
@@ -424,12 +429,13 @@ fn fit_rows(args: FitRowsArgs) -> Result<()> {
         active.forward_seconds += started.elapsed().as_secs_f64();
         let started = Instant::now();
         let rows = research
-            .workspace_fit_rows(
+            .workspace_fit_rows_batched(
                 &forward,
                 args.target_layer,
                 &args.source_layers,
                 &output_rows,
                 args.skip_first,
+                args.dim_batch,
                 args.method.rule(),
             )
             .with_context(|| format!("fit workspace rows for prompt {}", prompt.id))?;
@@ -563,6 +569,13 @@ enum WorkerState {
 
 fn validate_args(args: &FitRowsArgs) -> Result<()> {
     ensure!(args.max_prompts > 0, "--max-prompts must be nonzero");
+    ensure!(args.dim_batch > 0, "--dim-batch must be nonzero");
+    ensure!(
+        args.dim_batch <= MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+        "--dim-batch {} exceeds native workspace limit {}",
+        args.dim_batch,
+        MAX_RESEARCH_WORKSPACE_DIM_BATCH
+    );
     ensure!(args.max_tokens > 0, "--max-tokens must be nonzero");
     ensure!(
         args.max_tokens <= MAX_RESEARCH_WORKSPACE_TOKENS,
@@ -986,7 +999,8 @@ fn open_or_create_state(
             config_blake3,
             [n_sources, n_rows, hidden_size],
         )?;
-        verify_payload(output, &manifest.payload)?;
+        let bytes = verify_payload(output, &manifest.payload)?;
+        decode_f32_le(&bytes, value_count)?;
         return Ok(WorkerState::Complete(Box::new(manifest)));
     }
 
@@ -1373,6 +1387,34 @@ mod tests {
         }
     }
 
+    fn test_fit_args() -> FitRowsArgs {
+        FitRowsArgs {
+            model: "model.gguf".into(),
+            prompts: "prompts.jsonl".into(),
+            output: "rows".into(),
+            identity_cache: "identity-cache".into(),
+            method: FitMethod::R,
+            target_layer: 3,
+            source_layers: vec![0],
+            row_start: 0,
+            row_end: 2,
+            dim_batch: 2,
+            skip_first: 0,
+            max_tokens: 2,
+            max_prompts: 1,
+            no_special_tokens: false,
+            resume: false,
+        }
+    }
+
+    #[test]
+    fn fit_args_bound_native_query_batch() {
+        let mut args = test_fit_args();
+        validate_args(&args).unwrap();
+        args.dim_batch = MAX_RESEARCH_WORKSPACE_DIM_BATCH + 1;
+        assert!(validate_args(&args).is_err());
+    }
+
     #[test]
     fn f32_payload_round_trips_and_rejects_non_finite_values() {
         let values = [1.25f32, -2.5, 0.0];
@@ -1418,7 +1460,7 @@ mod tests {
             residual_replay_max_abs_error: 0.2,
         };
         let mut aggregate = Vec::new();
-        merge_diagnostics(&mut aggregate, &[current.clone()]).unwrap();
+        merge_diagnostics(&mut aggregate, std::slice::from_ref(&current)).unwrap();
         let mut lower = current;
         lower.residual_replay_max_abs_error = 0.1;
         merge_diagnostics(&mut aggregate, &[lower]).unwrap();

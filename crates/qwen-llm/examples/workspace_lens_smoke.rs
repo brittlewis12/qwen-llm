@@ -193,6 +193,112 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &attn_cotangent,
         WorkspaceLensRule::Relp,
     )?;
+    let mut second_workspace_cotangent = vec![0.0f32; attn_cotangent.len()];
+    for token in 0..workspace_forward.n_tokens() {
+        second_workspace_cotangent[token * workspace_forward.hidden_size()
+            + (hidden_coordinate + token + 17) % workspace_forward.hidden_size()] = 1.0;
+    }
+    let second_workspace_vjp = workspace_research.workspace_vjp(
+        &workspace_forward,
+        attn_layer,
+        &workspace_sources,
+        &second_workspace_cotangent,
+        WorkspaceLensRule::Relp,
+    )?;
+    let mut workspace_batch_cotangents = attn_cotangent.clone();
+    workspace_batch_cotangents.extend_from_slice(&second_workspace_cotangent);
+    let workspace_batch_vjp = workspace_research.workspace_vjp_batch(
+        &workspace_forward,
+        attn_layer,
+        &workspace_sources,
+        &workspace_batch_cotangents,
+        2,
+        WorkspaceLensRule::Relp,
+    )?;
+    let mut workspace_batch_serial_max_abs_error = 0.0f32;
+    for source_slot in 0..workspace_sources.len() {
+        for (query_slot, serial) in [&workspace_r_vjp, &second_workspace_vjp]
+            .into_iter()
+            .enumerate()
+        {
+            let serial = serial
+                .source_values(source_slot)
+                .ok_or("serial workspace VJP omitted source slot")?;
+            let batched = workspace_batch_vjp
+                .source_query_values(source_slot, query_slot)
+                .ok_or("batched workspace VJP omitted source/query slot")?;
+            for (&serial, &batched) in serial.iter().zip(batched) {
+                if !serial.is_finite() || !batched.is_finite() {
+                    return Err(
+                        "batched workspace comparison encountered a non-finite value".into(),
+                    );
+                }
+                workspace_batch_serial_max_abs_error =
+                    workspace_batch_serial_max_abs_error.max((serial - batched).abs());
+            }
+        }
+    }
+    if workspace_batch_serial_max_abs_error > 1e-6
+        || workspace_batch_vjp.diagnostics != workspace_r_vjp.diagnostics
+    {
+        return Err(format!(
+            "batched workspace VJP drifted from serial: values={workspace_batch_serial_max_abs_error} batch_diagnostics={:?} serial_diagnostics={:?}",
+            workspace_batch_vjp.diagnostics, workspace_r_vjp.diagnostics
+        )
+        .into());
+    }
+    let fit_output_rows = [0, 1, 2];
+    let mut workspace_fit_batch_errors = Vec::new();
+    for rule in [WorkspaceLensRule::Jacobian, WorkspaceLensRule::Relp] {
+        let serial = workspace_research.workspace_fit_rows(
+            &workspace_forward,
+            attn_layer,
+            &workspace_sources,
+            &fit_output_rows,
+            1,
+            rule,
+        )?;
+        let batched = workspace_research.workspace_fit_rows_batched(
+            &workspace_forward,
+            attn_layer,
+            &workspace_sources,
+            &fit_output_rows,
+            1,
+            2,
+            rule,
+        )?;
+        if serial.target_layer != batched.target_layer
+            || serial.source_layers != batched.source_layers
+            || serial.output_rows != batched.output_rows
+            || serial.n_tokens != batched.n_tokens
+            || serial.n_valid_positions != batched.n_valid_positions
+            || serial.hidden_size != batched.hidden_size
+            || serial.diagnostics != batched.diagnostics
+        {
+            return Err(format!("{rule:?} batched workspace row metadata drifted").into());
+        }
+        let mut max_abs_error = 0.0f32;
+        for (&serial, &batched) in serial.values.iter().zip(&batched.values) {
+            if !serial.is_finite() || !batched.is_finite() {
+                return Err(format!("{rule:?} workspace row comparison is non-finite").into());
+            }
+            max_abs_error = max_abs_error.max((serial - batched).abs());
+        }
+        if serial.values.len() != batched.values.len() || max_abs_error > 1e-6 {
+            return Err(format!(
+                "{rule:?} batched workspace rows drifted from serial: values={max_abs_error} serial_len={} batch_len={}",
+                serial.values.len(),
+                batched.values.len()
+            )
+            .into());
+        }
+        workspace_fit_batch_errors.push(json!({
+            "rule": format!("{rule:?}"),
+            "rows": fit_output_rows,
+            "dim_batch": 2,
+            "max_abs_error": max_abs_error,
+        }));
+    }
     let workspace_source_zero = workspace_r_vjp
         .source_values(0)
         .ok_or("workspace VJP omitted source slot zero")?;
@@ -314,7 +420,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schema": "qwen.workspace_lens_smoke.v4",
+            "schema": "qwen.workspace_lens_smoke.v5",
             "model": model,
             "identity": {
                 "scheme": RESEARCH_IDENTITY_SCHEME,
@@ -382,6 +488,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "source_zero_l2_norm": workspace_source_zero_norm,
                 "capture_max_abs_error": workspace_capture_max_abs_error,
                 "nearest_source_one_block_max_abs_error": workspace_one_block_max_abs_error,
+                "batch_two_serial_max_abs_error": workspace_batch_serial_max_abs_error,
+                "fit_batch_checks": workspace_fit_batch_errors,
                 "diagnostics": workspace_r_vjp.diagnostics.iter().map(|diagnostic| json!({
                     "layer": diagnostic.layer,
                     "kind": format!("{:?}", diagnostic.kind),

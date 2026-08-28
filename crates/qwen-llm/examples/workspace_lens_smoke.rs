@@ -1,3 +1,4 @@
+use qwen_llm::metal_forward::RMS_EPS;
 use qwen_llm::research::{
     AttnBlockVjpRule, DenseFfnVjpRule, GdnBlockVjpRule, GdnMixerVjpRule, LinearRole,
     RESEARCH_IDENTITY_SCHEME, ResearchLinear, ResearchWorkspaceBlockKind, WorkspaceLensRule,
@@ -51,6 +52,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("model returned empty logits")?;
 
     let lm_head = research.linear_info(ResearchLinear::LmHead)?;
+    let mut selected_token_ids = vec![
+        0,
+        arch.vocab_size
+            .checked_sub(1)
+            .ok_or("model vocabulary is empty")?,
+        u32::try_from(top_token)?,
+    ];
+    selected_token_ids.dedup();
+    if selected_token_ids[0] == *selected_token_ids.last().unwrap_or(&selected_token_ids[0])
+        && selected_token_ids.len() > 1
+    {
+        selected_token_ids.pop();
+    }
+    let selected_readouts = research.selected_token_readouts(&selected_token_ids)?;
+    if selected_readouts.hidden_size != arch.hidden_size as usize
+        || selected_readouts.lm_head_dtype != lm_head.dtype
+        || selected_readouts.lm_head_shape != lm_head.shape
+        || selected_readouts.output_norm_dtype != GgmlType::F32
+        || selected_readouts.output_norm_shape != vec![u64::from(arch.hidden_size)]
+        || selected_readouts
+            .values
+            .iter()
+            .any(|value| !value.is_finite())
+    {
+        return Err("selected-token readout metadata or finiteness check failed".into());
+    }
     let mut cotangent = vec![0.0f32; lm_head.shape[1]];
     cotangent[top_token] = 1.0;
     let lm_head_vjp = research.frozen_linear_vjp(ResearchLinear::LmHead, &cotangent, 1)?;
@@ -62,6 +89,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last_capture_offset = (capture_layers.len() - 1) * forward.capture.hidden_size;
     let last_pre_ffn = &forward.capture.pre_ffn_residuals
         [last_capture_offset..last_capture_offset + forward.capture.hidden_size];
+    let last_residual = &forward.capture.post_block_residuals
+        [last_capture_offset..last_capture_offset + forward.capture.hidden_size];
+    let selected_numerators = selected_token_ids
+        .iter()
+        .enumerate()
+        .map(|(slot, _)| {
+            selected_readouts
+                .token_values(slot)
+                .ok_or("selected-token readout omitted a requested row")
+                .map(|readout| {
+                    readout
+                        .iter()
+                        .zip(last_residual)
+                        .map(|(&weight, &residual)| f64::from(weight) * f64::from(residual))
+                        .sum::<f64>()
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let final_rms_denominator = (last_residual
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        / last_residual.len() as f64
+        + f64::from(RMS_EPS))
+    .sqrt();
+    // Row-gather and production mat-vec use different reduction orders. These
+    // dtype-aware tolerances cover that roundoff and quantized deblocking error
+    // while remaining tight enough to catch orientation or gamma-folding drift.
+    let (selected_abs_tolerance, selected_rel_tolerance) = match lm_head.dtype {
+        GgmlType::F32 => (2e-3f64, 2e-4f64),
+        GgmlType::F16 | GgmlType::BF16 => (5e-3, 5e-4),
+        GgmlType::Q8_0 => (1e-2, 1e-3),
+        GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ4_NL => (3e-2, 3e-3),
+        dtype => return Err(format!("unexpected selected-token LM-head dtype {dtype:?}").into()),
+    };
+    for (&token_id, &numerator) in selected_token_ids.iter().zip(&selected_numerators) {
+        let production_numerator =
+            f64::from(forward.logits[usize::try_from(token_id)?]) * final_rms_denominator;
+        let error = (numerator - production_numerator).abs();
+        let tolerance = selected_abs_tolerance
+            + selected_rel_tolerance * numerator.abs().max(production_numerator.abs());
+        if !production_numerator.is_finite() || error > tolerance {
+            return Err(format!(
+                "selected-token numerator mismatch for token {token_id}: readout={numerator} production={production_numerator} error={error} tolerance={tolerance} dtype={:?}",
+                lm_head.dtype
+            )
+            .into());
+        }
+    }
     let mut hidden_cotangent = vec![0.0f32; forward.capture.hidden_size];
     let hidden_coordinate = top_token % hidden_cotangent.len();
     hidden_cotangent[hidden_coordinate] = 1.0;
@@ -248,6 +324,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let fit_output_rows = [0, 1, 2];
+    let mut fit_covectors = vec![0.0f32; fit_output_rows.len() * workspace_forward.hidden_size()];
+    for (query, &row) in fit_output_rows.iter().enumerate() {
+        fit_covectors[query * workspace_forward.hidden_size() + row as usize] = 1.0;
+    }
     let mut workspace_fit_batch_errors = Vec::new();
     for rule in [WorkspaceLensRule::Jacobian, WorkspaceLensRule::Relp] {
         let serial = workspace_research.workspace_fit_rows(
@@ -267,6 +347,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             2,
             rule,
         )?;
+        let arbitrary = workspace_research.workspace_fit_readouts_batched(
+            &workspace_forward,
+            attn_layer,
+            &workspace_sources,
+            &fit_covectors,
+            1,
+            2,
+            rule,
+        )?;
         if serial.target_layer != batched.target_layer
             || serial.source_layers != batched.source_layers
             || serial.output_rows != batched.output_rows
@@ -276,6 +365,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || serial.diagnostics != batched.diagnostics
         {
             return Err(format!("{rule:?} batched workspace row metadata drifted").into());
+        }
+        if arbitrary.target_layer != batched.target_layer
+            || arbitrary.source_layers != batched.source_layers
+            || arbitrary.n_query != batched.output_rows.len()
+            || arbitrary.n_tokens != batched.n_tokens
+            || arbitrary.n_valid_positions != batched.n_valid_positions
+            || arbitrary.hidden_size != batched.hidden_size
+            || arbitrary.diagnostics != batched.diagnostics
+            || arbitrary.values != batched.values
+        {
+            return Err(format!(
+                "{rule:?} one-hot arbitrary workspace readouts drifted from basis-row fitting"
+            )
+            .into());
         }
         let mut max_abs_error = 0.0f32;
         for (&serial, &batched) in serial.values.iter().zip(&batched.values) {

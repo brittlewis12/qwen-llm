@@ -9,7 +9,7 @@ use crate::metal::{
     encode_add_f32, encode_fill_f32, encode_frozen_linear_vjp_f32,
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_vjp_f32,
     encode_gdn_prep_packed_ckpt_f32, encode_gdn_step_decay_packed_ckpt_f32,
-    encode_gdn_step_decay_packed_vjp_f32, encode_l2_norm_batched_f32,
+    encode_gdn_step_decay_packed_vjp_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
     encode_l2_norm_vjp_batched_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
     encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_broadcast_f32,
     encode_rms_norm_mul_vjp_rows_f32, encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32,
@@ -31,6 +31,10 @@ pub const MAX_RESEARCH_GDN_TOKENS: usize = 16;
 pub const MAX_RESEARCH_ATTN_TOKENS: usize = 16;
 pub const MAX_RESEARCH_WORKSPACE_TOKENS: usize = 16;
 pub const MAX_RESEARCH_WORKSPACE_DIM_BATCH: usize = 32;
+/// Maximum peak host bytes attributable to a newly materialized research
+/// result and its immediate fitting/readout workspaces. 256 MiB keeps selected
+/// experimental banks practical while preventing accidental multi-GiB jobs.
+pub const MAX_RESEARCH_OWNED_RESULT_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ResearchModelIdentity {
@@ -487,6 +491,62 @@ impl ResearchWorkspaceRows {
     }
 }
 
+/// Arbitrary target-covector workspace fits. Values are owned CPU F32 data in
+/// source-layer-major, query-major order `[K,Q,H]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchWorkspaceReadouts {
+    pub target_layer: u32,
+    pub source_layers: Vec<u32>,
+    pub n_query: usize,
+    pub n_tokens: usize,
+    pub n_valid_positions: usize,
+    pub hidden_size: usize,
+    pub values: Vec<f32>,
+    /// Maximum replay drift observed for each traversed block across all queries.
+    pub diagnostics: Vec<ResearchWorkspaceReplayDiagnostic>,
+}
+
+impl ResearchWorkspaceReadouts {
+    pub fn source_values(&self, source_slot: usize) -> Option<&[f32]> {
+        let source_elements = self.n_query.checked_mul(self.hidden_size)?;
+        let start = source_slot.checked_mul(source_elements)?;
+        self.values.get(start..start.checked_add(source_elements)?)
+    }
+
+    pub fn query_values(&self, source_slot: usize, query_slot: usize) -> Option<&[f32]> {
+        if query_slot >= self.n_query {
+            return None;
+        }
+        let source_elements = self.n_query.checked_mul(self.hidden_size)?;
+        let start = source_slot
+            .checked_mul(source_elements)?
+            .checked_add(query_slot.checked_mul(self.hidden_size)?)?;
+        self.values.get(start..start.checked_add(self.hidden_size)?)
+    }
+}
+
+/// Selected vocabulary score numerators after folding the final RMSNorm gamma
+/// into resident LM-head rows. No RMS denominator or softmax is applied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchTokenReadouts {
+    pub token_ids: Vec<u32>,
+    pub hidden_size: usize,
+    pub lm_head_dtype: GgmlType,
+    /// Native GGUF axis order `[H,V]`.
+    pub lm_head_shape: [usize; 2],
+    pub output_norm_dtype: GgmlType,
+    pub output_norm_shape: Vec<u64>,
+    /// Token-major score covectors, flattened `[V_selected,H]`.
+    pub values: Vec<f32>,
+}
+
+impl ResearchTokenReadouts {
+    pub fn token_values(&self, slot: usize) -> Option<&[f32]> {
+        let start = slot.checked_mul(self.hidden_size)?;
+        self.values.get(start..start.checked_add(self.hidden_size)?)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResearchError {
     #[error("runtime: {0}")]
@@ -615,6 +675,20 @@ pub enum ResearchError {
     WorkspaceOutputRowsNotStrict,
     #[error("workspace output coordinate {row} is out of range for hidden size {hidden_size}")]
     WorkspaceOutputRowOutOfRange { row: u32, hidden_size: usize },
+    #[error("workspace readout fit requires at least one target covector")]
+    EmptyWorkspaceTargetCovectors,
+    #[error(
+        "workspace target covector bank length {got} is not a multiple of hidden size {hidden_size}"
+    )]
+    WorkspaceTargetCovectorSize { got: usize, hidden_size: usize },
+    #[error("workspace target covector at flat index {index} is not finite")]
+    NonFiniteWorkspaceTargetCovector { index: usize },
+    #[error("workspace VJP trajectory contains a non-finite value at flat index {index}")]
+    NonFiniteWorkspaceVjpTrajectory { index: usize },
+    #[error("workspace replay diagnostic for layer {layer} is not finite")]
+    NonFiniteWorkspaceReplayDiagnostic { layer: u32 },
+    #[error("workspace reduction produced a non-finite {stage} at flat index {index}")]
+    NonFiniteWorkspaceReduction { stage: &'static str, index: usize },
     #[error(
         "workspace prompt length {n_tokens} leaves no valid positions with skip_first={skip_first}; require length >= skip_first + 2"
     )]
@@ -623,6 +697,38 @@ pub enum ResearchError {
     WorkspaceDiagnosticScheduleMismatch,
     #[error("workspace query batch {got} exceeds the bounded limit {max}")]
     WorkspaceQueryBatchTooLarge { got: usize, max: usize },
+    #[error("selected-token readout extraction requires at least one token ID")]
+    EmptyTokenReadoutSelection,
+    #[error("selected-token readout count {got} exceeds model vocabulary size {vocab_size}")]
+    TokenReadoutCountExceedsVocabulary { got: usize, vocab_size: u32 },
+    #[error(
+        "selected-token readout ID {token_id} is out of range for vocabulary size {vocab_size}"
+    )]
+    TokenReadoutIdOutOfRange { token_id: u32, vocab_size: u32 },
+    #[error("selected-token readout ID {token_id} occurs more than once")]
+    DuplicateTokenReadoutId { token_id: u32 },
+    #[error("LM head has native shape {got:?}, expected {expected:?}")]
+    InvalidTokenReadoutLmHeadShape { got: Vec<u64>, expected: [usize; 2] },
+    #[error("LM head dtype {dtype:?} is unsupported for selected-token readout extraction")]
+    UnsupportedTokenReadoutLmHeadDtype { dtype: GgmlType },
+    #[error("output norm must be F32 [{expected}], got {dtype:?} {shape:?}")]
+    InvalidTokenReadoutOutputNorm {
+        dtype: GgmlType,
+        shape: Vec<u64>,
+        expected: usize,
+    },
+    #[error("selected-token readout {name} contains a non-finite value at flat index {index}")]
+    NonFiniteTokenReadoutData { name: &'static str, index: usize },
+    #[error(
+        "research allocation for {name} requires {requested_bytes} bytes, exceeding the {max_bytes}-byte budget"
+    )]
+    ResearchResultByteBudgetExceeded {
+        name: &'static str,
+        requested_bytes: usize,
+        max_bytes: usize,
+    },
+    #[error("host allocation for {name} failed for {elements} elements")]
+    ResearchHostAllocationFailed { name: &'static str, elements: usize },
     #[error("{name} length {got} does not match expected length {expected}")]
     ActivationSize {
         name: &'static str,
@@ -729,6 +835,117 @@ impl ResearchSession<'_, '_> {
             }
         }
         ids.into_iter().map(|id| self.linear_info(id)).collect()
+    }
+
+    /// Extract selected LM-head score covectors and fold output RMSNorm gamma
+    /// into them. Native GGUF `[H,V]` rows are gathered by `encode_get_rows_f32`;
+    /// its lower-level dtype/orientation tests are the row-lookup oracle, while
+    /// the model-backed workspace smoke checks this integration against logit
+    /// ranking. The result omits the shared RMS denominator and softmax.
+    pub fn selected_token_readouts(
+        &self,
+        token_ids: &[u32],
+    ) -> Result<ResearchTokenReadouts, ResearchError> {
+        if token_ids.is_empty() {
+            return Err(ResearchError::EmptyTokenReadoutSelection);
+        }
+        let arch = self.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let vocab_size = arch.vocab_size;
+        let selected_elements =
+            validate_selected_token_request_size(token_ids.len(), vocab_size, hidden_size)?;
+        validate_selected_token_ids(token_ids, vocab_size)?;
+
+        let model = self.model.metal_model();
+        let lm_head = &model.lm_head;
+        let expected_lm_head_shape = [hidden_size, vocab_size as usize];
+        if linear_shape(ResearchLinear::LmHead, lm_head).ok() != Some(expected_lm_head_shape) {
+            return Err(ResearchError::InvalidTokenReadoutLmHeadShape {
+                got: lm_head.shape.clone(),
+                expected: expected_lm_head_shape,
+            });
+        }
+        if !matches!(
+            lm_head.dtype,
+            GgmlType::F32
+                | GgmlType::F16
+                | GgmlType::BF16
+                | GgmlType::Q4_K
+                | GgmlType::Q6_K
+                | GgmlType::Q8_0
+                | GgmlType::IQ4_NL
+        ) {
+            return Err(ResearchError::UnsupportedTokenReadoutLmHeadDtype {
+                dtype: lm_head.dtype,
+            });
+        }
+        let output_norm = &model.output_norm;
+        if output_norm.dtype != GgmlType::F32
+            || output_norm.shape.as_slice() != [hidden_size as u64]
+        {
+            return Err(ResearchError::InvalidTokenReadoutOutputNorm {
+                dtype: output_norm.dtype,
+                shape: output_norm.shape.clone(),
+                expected: hidden_size,
+            });
+        }
+
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(token_ids.len()).map_err(|_| {
+            ResearchError::ResearchHostAllocationFailed {
+                name: "selected-token Metal IDs",
+                elements: token_ids.len(),
+            }
+        })?;
+        ids.extend(token_ids.iter().map(|&token_id| token_id as i32));
+        let ids_tensor = MetalTensor::from_bytes(
+            self.model.context(),
+            bytemuck::cast_slice(&ids),
+            vec![u64::try_from(ids.len()).map_err(|_| ResearchError::SizeOverflow)?],
+            GgmlType::I32,
+        )?;
+        let selected = MetalTensor::zeros_f32(
+            self.model.context(),
+            row_shape(hidden_size, token_ids.len())?,
+        )?;
+        let command = self
+            .model
+            .context()
+            .queue
+            .commandBuffer()
+            .ok_or(ResearchError::MissingCommandBuffer)?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = encode_get_rows_f32(
+            self.model.context(),
+            &encoder,
+            lm_head,
+            &ids_tensor,
+            &selected,
+            token_ids.len(),
+            hidden_size,
+        );
+        encoder.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        validate_completed_command(&command)?;
+
+        let mut values =
+            read_f32_fallible(&selected, selected_elements, "selected-token LM-head rows")?;
+        let gamma = read_f32_fallible(output_norm, hidden_size, "output norm gamma")?;
+        multiply_token_readout_gamma_in_place(&mut values, &gamma, token_ids.len(), hidden_size)?;
+        Ok(ResearchTokenReadouts {
+            token_ids: try_clone_slice(token_ids, "selected-token IDs")?,
+            hidden_size,
+            lm_head_dtype: lm_head.dtype,
+            lm_head_shape: expected_lm_head_shape,
+            output_norm_dtype: output_norm.dtype,
+            output_norm_shape: try_clone_slice(
+                &output_norm.shape,
+                "selected-token output norm shape",
+            )?,
+            values,
+        })
     }
 
     /// Advance one token and return post-block residuals in caller layer order.
@@ -1599,9 +1816,10 @@ impl ResearchSession<'_, '_> {
                 self.workspace_block_vjp(layer, input, post_mixer, grad_output, n_tokens, rule)
             },
         )?;
+        validate_workspace_vjp_finite(&values, &diagnostics)?;
         Ok(ResearchWorkspaceVjp {
             target_layer,
-            source_layers: source_layers.to_vec(),
+            source_layers: try_clone_slice(source_layers, "workspace VJP source layers")?,
             n_tokens,
             hidden_size: forward.hidden_size,
             values,
@@ -1670,9 +1888,10 @@ impl ResearchSession<'_, '_> {
                 )
             },
         )?;
+        validate_workspace_vjp_finite(&values, &diagnostics)?;
         Ok(ResearchWorkspaceVjpBatch {
             target_layer,
-            source_layers: source_layers.to_vec(),
+            source_layers: try_clone_slice(source_layers, "workspace VJP batch source layers")?,
             n_query,
             n_tokens,
             hidden_size: forward.hidden_size,
@@ -1867,6 +2086,121 @@ impl ResearchSession<'_, '_> {
             target_layer,
             source_layers: source_layers.to_vec(),
             output_rows: output_rows.to_vec(),
+            n_tokens: forward.n_tokens(),
+            n_valid_positions,
+            hidden_size,
+            values,
+            diagnostics,
+        })
+    }
+
+    /// Fit arbitrary query-major target covectors `[Q,H]`. Every covector is
+    /// applied at every valid target position, and the corresponding source
+    /// positions are mean-reduced into owned `[K,Q,H]` values. Peak accounting
+    /// includes caller covectors, fitting output, batched target/current/next
+    /// gradients, and the batched VJP bank. Reduce `dim_batch` when that
+    /// conservative peak exceeds [`MAX_RESEARCH_OWNED_RESULT_BYTES`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn workspace_fit_readouts_batched(
+        &self,
+        forward: &ResearchWorkspaceForward,
+        target_layer: u32,
+        source_layers: &[u32],
+        target_covectors: &[f32],
+        skip_first: usize,
+        dim_batch: usize,
+        rule: WorkspaceLensRule,
+    ) -> Result<ResearchWorkspaceReadouts, ResearchError> {
+        if dim_batch == 0 {
+            return Err(ResearchError::EmptyQueryBatch);
+        }
+        if dim_batch > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
+            return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+                got: dim_batch,
+                max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+            });
+        }
+        if target_covectors.is_empty() {
+            return Err(ResearchError::EmptyWorkspaceTargetCovectors);
+        }
+        let hidden_size = forward.hidden_size();
+        if hidden_size == 0 || !target_covectors.len().is_multiple_of(hidden_size) {
+            return Err(ResearchError::WorkspaceTargetCovectorSize {
+                got: target_covectors.len(),
+                hidden_size,
+            });
+        }
+        if let Some(index) = target_covectors.iter().position(|value| !value.is_finite()) {
+            return Err(ResearchError::NonFiniteWorkspaceTargetCovector { index });
+        }
+        let (_arch, n_tokens, hidden_elements) =
+            self.validate_workspace_vjp_forward(forward, target_layer)?;
+        validate_workspace_source_layers(target_layer, source_layers)?;
+        let n_query = target_covectors.len() / hidden_size;
+        let valid_positions = workspace_valid_position_range(n_tokens, skip_first)?;
+        let n_valid_positions = valid_positions.len();
+        let source_query_elements = checked_product(n_query, hidden_size)?;
+        let output_elements = checked_product(source_layers.len(), source_query_elements)?;
+        let chunk_queries = dim_batch.min(n_query);
+        let chunk_target_elements = checked_product(chunk_queries, hidden_elements)?;
+        let chunk_vjp_elements = checked_product(source_layers.len(), chunk_target_elements)?;
+        let caller_target_elements = target_covectors.len();
+        let peak_elements = output_elements
+            .checked_add(caller_target_elements)
+            .and_then(|elements| elements.checked_add(chunk_target_elements))
+            .and_then(|elements| elements.checked_add(chunk_target_elements))
+            .and_then(|elements| elements.checked_add(chunk_target_elements))
+            .and_then(|elements| elements.checked_add(chunk_vjp_elements))
+            .ok_or(ResearchError::SizeOverflow)?;
+        enforce_research_byte_budget(
+            "workspace readout fit",
+            checked_product(peak_elements, std::mem::size_of::<f32>())?
+                .checked_add(checked_product(
+                    source_layers.len(),
+                    std::mem::size_of::<u32>(),
+                )?)
+                .ok_or(ResearchError::SizeOverflow)?,
+        )?;
+        let mut values = try_zeroed_f32(output_elements, "workspace readout result")?;
+        let mut diagnostics = Vec::new();
+        let mut first_query = 0usize;
+        for covectors in target_covectors.chunks(checked_product(dim_batch, hidden_size)?) {
+            let chunk_queries = covectors.len() / hidden_size;
+            let target_cotangents = build_workspace_target_bank(
+                covectors,
+                chunk_queries,
+                forward.n_tokens(),
+                hidden_size,
+                valid_positions.clone(),
+            )?;
+            let vjp = self.workspace_vjp_batch(
+                forward,
+                target_layer,
+                source_layers,
+                &target_cotangents,
+                chunk_queries,
+                rule,
+            )?;
+            merge_workspace_diagnostics(&mut diagnostics, &vjp.diagnostics)?;
+            reduce_workspace_vjp_readouts(
+                &vjp.values,
+                source_layers.len(),
+                chunk_queries,
+                forward.n_tokens(),
+                hidden_size,
+                valid_positions.clone(),
+                &mut values,
+                n_query,
+                first_query,
+            )?;
+            first_query = first_query
+                .checked_add(chunk_queries)
+                .ok_or(ResearchError::SizeOverflow)?;
+        }
+        Ok(ResearchWorkspaceReadouts {
+            target_layer,
+            source_layers: try_clone_slice(source_layers, "workspace readout source layers")?,
+            n_query,
             n_tokens: forward.n_tokens(),
             n_valid_positions,
             hidden_size,
@@ -4754,17 +5088,7 @@ fn compose_workspace_vjp(
         ResearchError,
     >,
 ) -> Result<(Vec<f32>, Vec<ResearchWorkspaceReplayDiagnostic>), ResearchError> {
-    if source_layers.is_empty() {
-        return Err(ResearchError::EmptyWorkspaceSourceLayers);
-    }
-    for &source in source_layers {
-        if source >= target_layer {
-            return Err(ResearchError::WorkspaceSourceNotBeforeTarget {
-                source_layer: source,
-                target_layer,
-            });
-        }
-    }
+    validate_workspace_source_layers(target_layer, source_layers)?;
     if target_cotangent.len() != hidden_elements {
         return Err(ResearchError::ActivationSize {
             name: "workspace target cotangent",
@@ -4773,7 +5097,7 @@ fn compose_workspace_vjp(
         });
     }
     let output_elements = checked_product(source_layers.len(), hidden_elements)?;
-    let mut values = vec![0.0f32; output_elements];
+    let mut values = try_zeroed_f32(output_elements, "workspace VJP result")?;
     let mut diagnostics = Vec::new();
     let earliest_source = source_layers
         .iter()
@@ -4783,7 +5107,7 @@ fn compose_workspace_vjp(
     let first_block = earliest_source
         .checked_add(1)
         .ok_or(ResearchError::SizeOverflow)?;
-    let mut gradient = target_cotangent.to_vec();
+    let mut gradient = try_clone_slice(target_cotangent, "workspace VJP gradient")?;
     for layer in (first_block..=target_layer).rev() {
         let (next_gradient, diagnostic) = reverse_block(layer, &gradient)?;
         if next_gradient.len() != hidden_elements {
@@ -4809,6 +5133,42 @@ fn compose_workspace_vjp(
     Ok((values, diagnostics))
 }
 
+fn validate_workspace_source_layers(
+    target_layer: u32,
+    source_layers: &[u32],
+) -> Result<(), ResearchError> {
+    if source_layers.is_empty() {
+        return Err(ResearchError::EmptyWorkspaceSourceLayers);
+    }
+    for &source in source_layers {
+        if source >= target_layer {
+            return Err(ResearchError::WorkspaceSourceNotBeforeTarget {
+                source_layer: source,
+                target_layer,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_workspace_vjp_finite(
+    values: &[f32],
+    diagnostics: &[ResearchWorkspaceReplayDiagnostic],
+) -> Result<(), ResearchError> {
+    if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+        return Err(ResearchError::NonFiniteWorkspaceVjpTrajectory { index });
+    }
+    if let Some(diagnostic) = diagnostics
+        .iter()
+        .find(|diagnostic| !diagnostic.residual_replay_max_abs_error.is_finite())
+    {
+        return Err(ResearchError::NonFiniteWorkspaceReplayDiagnostic {
+            layer: diagnostic.layer,
+        });
+    }
+    Ok(())
+}
+
 pub fn workspace_valid_position_range(
     n_tokens: usize,
     skip_first: usize,
@@ -4823,6 +5183,125 @@ pub fn workspace_valid_position_range(
         });
     }
     Ok(skip_first..n_tokens - 1)
+}
+
+fn build_workspace_target_bank(
+    covectors: &[f32],
+    n_query: usize,
+    n_tokens: usize,
+    hidden_size: usize,
+    valid_positions: std::ops::Range<usize>,
+) -> Result<Vec<f32>, ResearchError> {
+    let covector_elements = checked_product(n_query, hidden_size)?;
+    if covectors.len() != covector_elements {
+        return Err(ResearchError::WorkspaceTargetCovectorSize {
+            got: covectors.len(),
+            hidden_size,
+        });
+    }
+    if n_query == 0 {
+        return Err(ResearchError::EmptyWorkspaceTargetCovectors);
+    }
+    if let Some(index) = covectors.iter().position(|value| !value.is_finite()) {
+        return Err(ResearchError::NonFiniteWorkspaceTargetCovector { index });
+    }
+    if valid_positions.is_empty() || valid_positions.end > n_tokens {
+        return Err(ResearchError::WorkspaceNoValidPositions {
+            n_tokens,
+            skip_first: valid_positions.start,
+        });
+    }
+    let trajectory_elements = checked_product(n_tokens, hidden_size)?;
+    let mut bank = try_zeroed_f32(
+        checked_product(n_query, trajectory_elements)?,
+        "workspace target cotangent bank",
+    )?;
+    for query in 0..n_query {
+        let covector_start = checked_product(query, hidden_size)?;
+        let covector_end = covector_start
+            .checked_add(hidden_size)
+            .ok_or(ResearchError::SizeOverflow)?;
+        for position in valid_positions.clone() {
+            let destination_start = checked_product(query, trajectory_elements)?
+                .checked_add(checked_product(position, hidden_size)?)
+                .ok_or(ResearchError::SizeOverflow)?;
+            let destination_end = destination_start
+                .checked_add(hidden_size)
+                .ok_or(ResearchError::SizeOverflow)?;
+            bank[destination_start..destination_end]
+                .copy_from_slice(&covectors[covector_start..covector_end]);
+        }
+    }
+    Ok(bank)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_workspace_vjp_readouts(
+    trajectories: &[f32],
+    n_sources: usize,
+    chunk_queries: usize,
+    n_tokens: usize,
+    hidden_size: usize,
+    valid_positions: std::ops::Range<usize>,
+    destination: &mut [f32],
+    total_queries: usize,
+    first_query: usize,
+) -> Result<(), ResearchError> {
+    let trajectory_elements = checked_product(n_tokens, hidden_size)?;
+    let source_elements = checked_product(chunk_queries, trajectory_elements)?;
+    let expected = checked_product(n_sources, source_elements)?;
+    if trajectories.len() != expected {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace readout source trajectory bank",
+            got: trajectories.len(),
+            expected,
+        });
+    }
+    let destination_expected =
+        checked_product(n_sources, checked_product(total_queries, hidden_size)?)?;
+    if destination.len() != destination_expected {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace readout destination bank",
+            got: destination.len(),
+            expected: destination_expected,
+        });
+    }
+    let chunk_end = first_query
+        .checked_add(chunk_queries)
+        .ok_or(ResearchError::SizeOverflow)?;
+    if chunk_end > total_queries {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace readout destination query range",
+            got: chunk_end,
+            expected: total_queries,
+        });
+    }
+    for source in 0..n_sources {
+        for query in 0..chunk_queries {
+            let source_start = checked_product(source, source_elements)?
+                .checked_add(checked_product(query, trajectory_elements)?)
+                .ok_or(ResearchError::SizeOverflow)?;
+            let source_end = source_start
+                .checked_add(trajectory_elements)
+                .ok_or(ResearchError::SizeOverflow)?;
+            let destination_row = checked_product(source, total_queries)?
+                .checked_add(first_query)
+                .and_then(|row| row.checked_add(query))
+                .ok_or(ResearchError::SizeOverflow)?;
+            let destination_start = checked_product(destination_row, hidden_size)?;
+            let destination_end = destination_start
+                .checked_add(hidden_size)
+                .ok_or(ResearchError::SizeOverflow)?;
+            reduce_workspace_source_positions(
+                &trajectories[source_start..source_end],
+                n_tokens,
+                hidden_size,
+                valid_positions.clone(),
+                &mut destination[destination_start..destination_end],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn reduce_workspace_source_positions(
@@ -4860,13 +5339,33 @@ fn reduce_workspace_source_positions(
         let end = start
             .checked_add(hidden_size)
             .ok_or(ResearchError::SizeOverflow)?;
-        for (sum, &value) in destination.iter_mut().zip(&source[start..end]) {
+        for (column, (sum, &value)) in destination.iter_mut().zip(&source[start..end]).enumerate() {
+            let source_index = start
+                .checked_add(column)
+                .ok_or(ResearchError::SizeOverflow)?;
+            if !value.is_finite() {
+                return Err(ResearchError::NonFiniteWorkspaceVjpTrajectory {
+                    index: source_index,
+                });
+            }
             *sum += value;
+            if !sum.is_finite() {
+                return Err(ResearchError::NonFiniteWorkspaceReduction {
+                    stage: "sum",
+                    index: column,
+                });
+            }
         }
     }
     let scale = (count as f32).recip();
-    for value in destination {
+    for (index, value) in destination.iter_mut().enumerate() {
         *value *= scale;
+        if !value.is_finite() {
+            return Err(ResearchError::NonFiniteWorkspaceReduction {
+                stage: "scaled output",
+                index,
+            });
+        }
     }
     Ok(())
 }
@@ -4875,6 +5374,8 @@ fn merge_workspace_diagnostics(
     aggregate: &mut Vec<ResearchWorkspaceReplayDiagnostic>,
     current: &[ResearchWorkspaceReplayDiagnostic],
 ) -> Result<(), ResearchError> {
+    validate_workspace_vjp_finite(&[], aggregate)?;
+    validate_workspace_vjp_finite(&[], current)?;
     if aggregate.is_empty() {
         aggregate.extend_from_slice(current);
         return Ok(());
@@ -4895,6 +5396,176 @@ fn merge_workspace_diagnostics(
 
 fn checked_product(left: usize, right: usize) -> Result<usize, ResearchError> {
     left.checked_mul(right).ok_or(ResearchError::SizeOverflow)
+}
+
+fn enforce_research_byte_budget(
+    name: &'static str,
+    requested_bytes: usize,
+) -> Result<(), ResearchError> {
+    if requested_bytes > MAX_RESEARCH_OWNED_RESULT_BYTES {
+        return Err(ResearchError::ResearchResultByteBudgetExceeded {
+            name,
+            requested_bytes,
+            max_bytes: MAX_RESEARCH_OWNED_RESULT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_selected_token_request_size(
+    count: usize,
+    vocab_size: u32,
+    hidden_size: usize,
+) -> Result<usize, ResearchError> {
+    if count > vocab_size as usize {
+        return Err(ResearchError::TokenReadoutCountExceedsVocabulary {
+            got: count,
+            vocab_size,
+        });
+    }
+    let selected_elements = checked_product(count, hidden_size)?;
+    enforce_research_byte_budget(
+        "selected-token readouts",
+        selected_token_peak_bytes(count, hidden_size, selected_elements)?,
+    )?;
+    Ok(selected_elements)
+}
+
+fn selected_token_peak_bytes(
+    count: usize,
+    hidden_size: usize,
+    selected_elements: usize,
+) -> Result<usize, ResearchError> {
+    // Simultaneous peak: Metal gather + host readback/result, host gamma,
+    // host/Metal/result ID copies, conservative HashSet buckets, and shape copy.
+    const LIVE_SELECTED_BANKS: usize = 2;
+    const LIVE_ID_COPIES: usize = 4;
+    const HASHSET_BYTES_PER_TOKEN: usize = 32;
+
+    let selected_bank_bytes = checked_product(selected_elements, std::mem::size_of::<f32>())?;
+    let selected_banks = checked_product(selected_bank_bytes, LIVE_SELECTED_BANKS)?;
+    let gamma_bytes = checked_product(hidden_size, std::mem::size_of::<f32>())?;
+    let id_copy_bytes = checked_product(
+        checked_product(count, std::mem::size_of::<u32>())?,
+        LIVE_ID_COPIES,
+    )?;
+    let hashset_bytes = checked_product(count, HASHSET_BYTES_PER_TOKEN)?;
+    selected_banks
+        .checked_add(gamma_bytes)
+        .and_then(|bytes| bytes.checked_add(id_copy_bytes))
+        .and_then(|bytes| bytes.checked_add(hashset_bytes))
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u64>()))
+        .ok_or(ResearchError::SizeOverflow)
+}
+
+fn try_zeroed_f32(elements: usize, name: &'static str) -> Result<Vec<f32>, ResearchError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(elements)
+        .map_err(|_| ResearchError::ResearchHostAllocationFailed { name, elements })?;
+    values.resize(elements, 0.0);
+    Ok(values)
+}
+
+fn try_clone_slice<T: Copy>(values: &[T], name: &'static str) -> Result<Vec<T>, ResearchError> {
+    let mut output = Vec::new();
+    output.try_reserve_exact(values.len()).map_err(|_| {
+        ResearchError::ResearchHostAllocationFailed {
+            name,
+            elements: values.len(),
+        }
+    })?;
+    output.extend_from_slice(values);
+    Ok(output)
+}
+
+fn multiply_token_readout_gamma_in_place(
+    rows: &mut [f32],
+    gamma: &[f32],
+    n_rows: usize,
+    hidden_size: usize,
+) -> Result<(), ResearchError> {
+    let expected_rows = checked_product(n_rows, hidden_size)?;
+    if rows.len() != expected_rows {
+        return Err(ResearchError::ActivationSize {
+            name: "selected LM-head rows",
+            got: rows.len(),
+            expected: expected_rows,
+        });
+    }
+    if gamma.len() != hidden_size {
+        return Err(ResearchError::ActivationSize {
+            name: "selected-token output norm gamma",
+            got: gamma.len(),
+            expected: hidden_size,
+        });
+    }
+    if let Some(index) = rows.iter().position(|value| !value.is_finite()) {
+        return Err(ResearchError::NonFiniteTokenReadoutData {
+            name: "LM-head rows",
+            index,
+        });
+    }
+    if let Some(index) = gamma.iter().position(|value| !value.is_finite()) {
+        return Err(ResearchError::NonFiniteTokenReadoutData {
+            name: "output norm gamma",
+            index,
+        });
+    }
+    for (index, value) in rows.iter_mut().enumerate() {
+        *value *= gamma[index % hidden_size];
+        if !value.is_finite() {
+            return Err(ResearchError::NonFiniteTokenReadoutData {
+                name: "gamma-folded LM-head rows",
+                index,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_selected_token_ids(token_ids: &[u32], vocab_size: u32) -> Result<(), ResearchError> {
+    if token_ids.is_empty() {
+        return Err(ResearchError::EmptyTokenReadoutSelection);
+    }
+    let mut unique = std::collections::HashSet::new();
+    unique.try_reserve(token_ids.len()).map_err(|_| {
+        ResearchError::ResearchHostAllocationFailed {
+            name: "selected-token uniqueness set",
+            elements: token_ids.len(),
+        }
+    })?;
+    for &token_id in token_ids {
+        if token_id >= vocab_size || token_id > i32::MAX as u32 {
+            return Err(ResearchError::TokenReadoutIdOutOfRange {
+                token_id,
+                vocab_size,
+            });
+        }
+        if !unique.insert(token_id) {
+            return Err(ResearchError::DuplicateTokenReadoutId { token_id });
+        }
+    }
+    Ok(())
+}
+
+fn read_f32_fallible(
+    tensor: &MetalTensor,
+    len: usize,
+    name: &'static str,
+) -> Result<Vec<f32>, ResearchError> {
+    let mut output = try_zeroed_f32(len, name)?;
+    unsafe {
+        let source = tensor
+            .buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(tensor.offset as usize)
+            .cast::<f32>();
+        std::ptr::copy_nonoverlapping(source, output.as_mut_ptr(), len);
+    }
+    Ok(output)
 }
 
 fn row_shape(width: usize, rows: usize) -> Result<Vec<u64>, ResearchError> {
@@ -6031,6 +6702,115 @@ mod tests {
     }
 
     #[test]
+    fn workspace_covectors_build_target_bank_and_reduce_kqh_layout() {
+        let covectors = [1.0f32, 2.0, 3.0, 4.0];
+        let target_bank = build_workspace_target_bank(&covectors, 2, 4, 2, 1..3).unwrap();
+        assert_eq!(
+            target_bank,
+            [
+                0.0, 0.0, 1.0, 2.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 4.0, 3.0, 4.0, 0.0, 0.0,
+            ]
+        );
+
+        let source_zero = (0..16).map(|value| value as f32).collect::<Vec<_>>();
+        let source_one = (100..116).map(|value| value as f32).collect::<Vec<_>>();
+        let trajectories = [source_zero, source_one].concat();
+        let mut values = vec![0.0f32; 2 * 2 * 2];
+        reduce_workspace_vjp_readouts(&trajectories, 2, 2, 4, 2, 1..3, &mut values, 2, 0).unwrap();
+        assert_eq!(values, [3.0, 4.0, 11.0, 12.0, 103.0, 104.0, 111.0, 112.0]);
+
+        let readouts = ResearchWorkspaceReadouts {
+            target_layer: 4,
+            source_layers: vec![0, 2],
+            n_query: 2,
+            n_tokens: 4,
+            n_valid_positions: 2,
+            hidden_size: 2,
+            values,
+            diagnostics: Vec::new(),
+        };
+        assert_eq!(
+            readouts.source_values(1).unwrap(),
+            [103.0, 104.0, 111.0, 112.0]
+        );
+        assert_eq!(readouts.query_values(1, 0).unwrap(), [103.0, 104.0]);
+        assert!(readouts.source_values(2).is_none());
+        assert!(readouts.query_values(0, 2).is_none());
+    }
+
+    #[test]
+    fn one_hot_covectors_construct_the_same_targets_as_basis_rows() {
+        const TOKENS: usize = 5;
+        const HIDDEN: usize = 4;
+        let rows = [1usize, 3];
+        let mut covectors = vec![0.0f32; rows.len() * HIDDEN];
+        for (query, &row) in rows.iter().enumerate() {
+            covectors[query * HIDDEN + row] = 1.0;
+        }
+        let arbitrary =
+            build_workspace_target_bank(&covectors, rows.len(), TOKENS, HIDDEN, 1..4).unwrap();
+        let mut basis = vec![0.0f32; arbitrary.len()];
+        for (query, &row) in rows.iter().enumerate() {
+            for position in 1..4 {
+                basis[query * TOKENS * HIDDEN + position * HIDDEN + row] = 1.0;
+            }
+        }
+        assert_eq!(arbitrary, basis);
+    }
+
+    #[test]
+    fn readout_helpers_reject_bad_sizes_non_finite_values_and_token_ids() {
+        assert!(matches!(
+            build_workspace_target_bank(&[1.0, 2.0, 3.0], 1, 3, 2, 0..2).unwrap_err(),
+            ResearchError::WorkspaceTargetCovectorSize { .. }
+        ));
+        assert!(matches!(
+            build_workspace_target_bank(&[1.0, f32::NAN], 1, 3, 2, 0..2).unwrap_err(),
+            ResearchError::NonFiniteWorkspaceTargetCovector { index: 1 }
+        ));
+        assert!(matches!(
+            validate_selected_token_ids(&[], 10).unwrap_err(),
+            ResearchError::EmptyTokenReadoutSelection
+        ));
+        assert!(matches!(
+            validate_selected_token_ids(&[2, 2], 10).unwrap_err(),
+            ResearchError::DuplicateTokenReadoutId { token_id: 2 }
+        ));
+        assert!(matches!(
+            validate_selected_token_ids(&[10], 10).unwrap_err(),
+            ResearchError::TokenReadoutIdOutOfRange { token_id: 10, .. }
+        ));
+        assert!(matches!(
+            validate_selected_token_request_size(11, 10, 4).unwrap_err(),
+            ResearchError::TokenReadoutCountExceedsVocabulary {
+                got: 11,
+                vocab_size: 10
+            }
+        ));
+        assert!(matches!(
+            validate_selected_token_request_size(70_000_000, u32::MAX, 1).unwrap_err(),
+            ResearchError::ResearchResultByteBudgetExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn token_readout_gamma_multiplication_is_rowwise_and_finite() {
+        let mut values = vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0];
+        multiply_token_readout_gamma_in_place(&mut values, &[0.5, 2.0, -1.0], 2, 3).unwrap();
+        assert_eq!(values, [0.5, 4.0, -3.0, -0.5, -4.0, 3.0]);
+        let mut bad_size = [1.0, 2.0];
+        assert!(matches!(
+            multiply_token_readout_gamma_in_place(&mut bad_size, &[1.0], 1, 2).unwrap_err(),
+            ResearchError::ActivationSize { .. }
+        ));
+        let mut non_finite = [f32::INFINITY];
+        assert!(matches!(
+            multiply_token_readout_gamma_in_place(&mut non_finite, &[1.0], 1, 1).unwrap_err(),
+            ResearchError::NonFiniteTokenReadoutData { .. }
+        ));
+    }
+
+    #[test]
     fn workspace_reference_positions_exclude_prefix_and_final_token() {
         assert_eq!(workspace_valid_position_range(8, 4).unwrap(), 4..7);
         assert!(matches!(
@@ -6075,6 +6855,60 @@ mod tests {
             )
             .unwrap_err(),
             ResearchError::WorkspaceDiagnosticScheduleMismatch
+        ));
+        assert!(matches!(
+            merge_workspace_diagnostics(
+                &mut aggregate,
+                &[ResearchWorkspaceReplayDiagnostic {
+                    layer: 3,
+                    kind: ResearchWorkspaceBlockKind::Attention,
+                    residual_replay_max_abs_error: f32::NAN,
+                }],
+            )
+            .unwrap_err(),
+            ResearchError::NonFiniteWorkspaceReplayDiagnostic { layer: 3 }
+        ));
+    }
+
+    #[test]
+    fn workspace_readout_budget_and_non_finite_reductions_fail_closed() {
+        assert!(matches!(
+            enforce_research_byte_budget("test result", MAX_RESEARCH_OWNED_RESULT_BYTES + 1)
+                .unwrap_err(),
+            ResearchError::ResearchResultByteBudgetExceeded { .. }
+        ));
+
+        let mut destination = [0.0f32; 1];
+        assert!(matches!(
+            reduce_workspace_source_positions(&[0.0, f32::NAN, 1.0], 3, 1, 0..2, &mut destination,)
+                .unwrap_err(),
+            ResearchError::NonFiniteWorkspaceVjpTrajectory { index: 1 }
+        ));
+        assert!(matches!(
+            reduce_workspace_source_positions(
+                &[f32::MAX, f32::MAX, 0.0],
+                3,
+                1,
+                0..2,
+                &mut destination,
+            )
+            .unwrap_err(),
+            ResearchError::NonFiniteWorkspaceReduction {
+                stage: "sum",
+                index: 0
+            }
+        ));
+        assert!(matches!(
+            validate_workspace_vjp_finite(
+                &[0.0, f32::INFINITY],
+                &[ResearchWorkspaceReplayDiagnostic {
+                    layer: 2,
+                    kind: ResearchWorkspaceBlockKind::Gdn,
+                    residual_replay_max_abs_error: 0.0,
+                }],
+            )
+            .unwrap_err(),
+            ResearchError::NonFiniteWorkspaceVjpTrajectory { index: 1 }
         ));
     }
 

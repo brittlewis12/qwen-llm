@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next Packed QSA Index Selection Primitives
+
+Status: qualify the dormant selected-index packet; gathered attention and the
+production selected-range route remain disabled.
+
+- One packed query band now has staged kernels for index-query norm/RoPE,
+  query-major index scores, the existing radix selector, and parallel token-ID
+  expansion. The tagged packet contains exactly those four dispatches.
+- Five consecutive queries at positions 31-35 match repeated scalar kernels
+  byte-for-byte for normalized F32 queries, physical score storage, visibility,
+  selected IDs/counts/status, and expanded token IDs. This crosses visible-block
+  counts 8 to 9 and covers every modulo-four expansion tail.
+- A fixed-input gate locks lower-ID tie order and nonfinite failure behavior.
+  NaN scores produce selector status 2 and expansion fills the failed query with
+  `-1` rather than publishing a partial token list.
+- Preflight requires an admitted selected-capable workspace, one fully selected
+  band, exact tensor dtypes/shapes, disjoint storage, checked integer bounds, and
+  all four pipelines, including cooperative limits for scoring and selection,
+  before encoding begins.
+- These primitives do not project Q/K/V, publish persistent cache state, run
+  selected softmax/value attention, or alter packed runtime routing. Next stage
+  the gathered-attention packet against repeated scalar selected attention.
+
 ## 2026-08-27 - Flash-Next Selected QSA Scratch Admission
 
 Status: implement and qualify packed index scoring, selection, and expansion

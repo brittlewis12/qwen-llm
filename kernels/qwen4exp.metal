@@ -452,11 +452,36 @@ struct qwen4exp_qsa_index_score_args {
     uint visible_blocks;
 };
 
+struct qwen4exp_qsa_packed_query_args {
+    uint start_position;
+    uint query_count;
+    uint head_count;
+    uint head_dim;
+    uint rotary_dim;
+    float theta;
+    float eps;
+};
+
+struct qwen4exp_qsa_packed_score_args {
+    uint start_position;
+    uint query_count;
+    uint ratio;
+    uint block_capacity;
+};
+
 struct qwen4exp_qsa_ids_args {
     uint block_budget;
     uint visible_blocks;
     uint ratio;
     uint sequence_length;
+    uint output_width;
+};
+
+struct qwen4exp_qsa_packed_ids_args {
+    uint start_position;
+    uint query_count;
+    uint block_budget;
+    uint ratio;
     uint output_width;
 };
 
@@ -525,6 +550,36 @@ kernel void kernel_qwen4exp_qsa_norm_rope_f32(
     const float norm = rsqrt(sum_square / float(args.head_dim) + args.eps);
     output[index] = qwen4exp_qsa_rope_value(
         row, weight, lane, args.rotary_dim, args.position, args.theta) * norm;
+}
+
+kernel void kernel_qwen4exp_qsa_norm_rope_packed_f32(
+        constant qwen4exp_qsa_packed_query_args & args [[buffer(0)]],
+        device const float * input [[buffer(1)]],
+        device const float * weight [[buffer(2)]],
+        device float * output [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint width = args.head_count * args.head_dim;
+    const ulong count = (ulong)width * args.query_count;
+    if ((ulong)index >= count) return;
+    const uint query = index / width;
+    const uint local = index % width;
+    const uint head = local / args.head_dim;
+    const uint lane = local % args.head_dim;
+    device const float * row = input
+        + (ulong)query * width + (ulong)head * args.head_dim;
+    float sum_square = 0.0f;
+    for (uint inner = 0u; inner < args.head_dim; ++inner) {
+        const float value = row[inner];
+        sum_square += value * value;
+    }
+    const float norm = rsqrt(sum_square / float(args.head_dim) + args.eps);
+    output[index] = qwen4exp_qsa_rope_value(
+        row,
+        weight,
+        lane,
+        args.rotary_dim,
+        args.start_position + query,
+        args.theta) * norm;
 }
 
 kernel void kernel_qwen4exp_qsa_write_pending_f32(
@@ -702,6 +757,41 @@ kernel void kernel_qwen4exp_qsa_index_scores_4x128_f16(
     if (lane == 0u) scores[block] = score * 0.08838834764831845f;
 }
 
+kernel void kernel_qwen4exp_qsa_index_scores_packed_4x128_f16(
+        constant qwen4exp_qsa_packed_score_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * compressed_keys [[buffer(2)]],
+        device float * scores [[buffer(3)]],
+        device int * visible_counts [[buffer(4)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    const uint query = group.y;
+    if (query >= args.query_count || args.ratio == 0u) return;
+    const uint visible = (args.start_position + query + 1u) / args.ratio;
+    if (group.x == 0u && simdgroup == 0u && lane == 0u) {
+        visible_counts[query] = visible <= args.block_capacity ? int(visible) : -1;
+    }
+    const uint block = group.x * 8u + uint(simdgroup);
+    if (block >= visible || block >= args.block_capacity) return;
+    device const float * query_row = queries + (ulong)query * 4u * 128u;
+    device const half * key = compressed_keys + (ulong)block * 128u;
+    float score = 0.0f;
+    for (uint head = 0u; head < 4u; ++head) {
+        device const float * query_head = query_row + head * 128u;
+        float dot = 0.0f;
+        for (uint dimension = uint(lane); dimension < 128u; dimension += 32u) {
+            dot += query_head[dimension] * float(key[dimension]);
+        }
+        dot = simd_sum(dot);
+        if (lane == 0u) score += max(dot, 0.0f);
+    }
+    if (lane == 0u) {
+        scores[(ulong)query * args.block_capacity + block]
+            = score * 0.08838834764831845f;
+    }
+}
+
 kernel void kernel_qwen4exp_qsa_fill_block_ids_i32(
         constant qwen4exp_qsa_ids_args & args [[buffer(0)]],
         device int * selected_blocks [[buffer(1)]],
@@ -739,6 +829,48 @@ kernel void kernel_qwen4exp_qsa_expand_ids_i32(
             ++position) {
         token_ids[output++] = int(position);
     }
+}
+
+kernel void kernel_qwen4exp_qsa_expand_ids_packed_i32(
+        constant qwen4exp_qsa_packed_ids_args & args [[buffer(0)]],
+        device const int * visible_counts [[buffer(1)]],
+        device const int * selected_blocks [[buffer(2)]],
+        device const int * selected_counts [[buffer(3)]],
+        device const int * status [[buffer(4)]],
+        device int * token_ids [[buffer(5)]],
+        uint index [[thread_position_in_grid]]) {
+    const ulong count = (ulong)args.output_width * args.query_count;
+    if ((ulong)index >= count || args.ratio == 0u) return;
+    const uint query = index / args.output_width;
+    const uint slot = index % args.output_width;
+    const int visible_i = visible_counts[query];
+    const int selected_i = selected_counts[query];
+    const bool valid = status[query] == 0
+        && visible_i > 0
+        && selected_i >= 0
+        && uint(selected_i) <= args.block_budget;
+    if (!valid) {
+        token_ids[index] = -1;
+        return;
+    }
+    const uint visible = uint(visible_i);
+    const uint selected = uint(selected_i);
+    const uint selected_tokens = selected * args.ratio;
+    if (slot < selected_tokens) {
+        const uint block_slot = slot / args.ratio;
+        const int block = selected_blocks[(ulong)query * args.block_budget + block_slot];
+        token_ids[index] = block >= 0 && uint(block) < visible
+            ? block * int(args.ratio) + int(slot % args.ratio)
+            : -1;
+        return;
+    }
+    const uint sequence_length = args.start_position + query + 1u;
+    const uint tail_start = visible * args.ratio;
+    const uint tail_slot = slot - selected_tokens;
+    const uint tail_count = sequence_length - tail_start;
+    token_ids[index] = tail_slot < tail_count
+        ? int(tail_start + tail_slot)
+        : -1;
 }
 
 kernel void kernel_qwen4exp_qsa_qgate_norm_rope_f32(

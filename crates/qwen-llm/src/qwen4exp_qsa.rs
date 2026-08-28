@@ -688,6 +688,19 @@ struct QwenSparseAttentionSelectedPackedScratch {
     attention_logits: MetalTensor,
 }
 
+#[allow(dead_code)]
+struct QwenSparseAttentionSelectedPackedViews {
+    index_query_raw: MetalTensor,
+    index_query: MetalTensor,
+    scores: MetalTensor,
+    visible_blocks: MetalTensor,
+    selected_blocks: MetalTensor,
+    selected_count: MetalTensor,
+    selector_status: MetalTensor,
+    token_ids: MetalTensor,
+    attention_logits: MetalTensor,
+}
+
 struct QwenSparseAttentionPackedViews {
     index_key_raw: MetalTensor,
     query_gate_projection: MetalTensor,
@@ -1022,6 +1035,99 @@ impl QwenSparseAttentionSelectedPackedScratch {
             require_tensor(name, tensor, dtype, &shape, true)?;
         }
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn views(
+        &self,
+        geometry: QwenSparseAttentionMetalGeometry,
+        capacity: usize,
+        query_tile: usize,
+        query_count: usize,
+    ) -> Result<QwenSparseAttentionSelectedPackedViews, Qwen4ExpQsaError> {
+        if query_count == 0 || query_count > capacity.min(query_tile) {
+            return invalid(format!(
+                "selected packed QSA query count {query_count} exceeds capacity {capacity} or tile {query_tile}"
+            ));
+        }
+        self.validate(geometry, capacity, query_tile)?;
+        let view = |name: &str, tensor: &MetalTensor, elements: usize, shape: Vec<u64>| {
+            let view = tensor.view_subrange(0, shape);
+            if view.n_elements() as usize != elements {
+                return invalid(format!(
+                    "selected packed QSA {name} view has the wrong element count"
+                ));
+            }
+            Ok(view)
+        };
+        Ok(QwenSparseAttentionSelectedPackedViews {
+            index_query_raw: view(
+                "raw index query",
+                &self.index_query_raw,
+                geometry.index_query_width() * query_count,
+                vec![
+                    geometry.index_head_dim as u64,
+                    geometry.index_query_heads as u64,
+                    query_count as u64,
+                ],
+            )?,
+            index_query: view(
+                "index query",
+                &self.index_query,
+                geometry.index_query_width() * query_count,
+                vec![
+                    geometry.index_head_dim as u64,
+                    geometry.index_query_heads as u64,
+                    query_count as u64,
+                ],
+            )?,
+            scores: view(
+                "scores",
+                &self.scores,
+                geometry.block_capacity() * query_count,
+                vec![geometry.block_capacity() as u64, query_count as u64],
+            )?,
+            visible_blocks: view(
+                "visible blocks",
+                &self.visible_blocks,
+                query_count,
+                vec![query_count as u64],
+            )?,
+            selected_blocks: view(
+                "selected blocks",
+                &self.selected_blocks,
+                geometry.block_budget() * query_count,
+                vec![geometry.block_budget() as u64, query_count as u64],
+            )?,
+            selected_count: view(
+                "selected count",
+                &self.selected_count,
+                query_count,
+                vec![query_count as u64],
+            )?,
+            selector_status: view(
+                "selector status",
+                &self.selector_status,
+                query_count,
+                vec![query_count as u64],
+            )?,
+            token_ids: view(
+                "token IDs",
+                &self.token_ids,
+                geometry.output_width() * query_count,
+                vec![geometry.output_width() as u64, query_count as u64],
+            )?,
+            attention_logits: view(
+                "attention logits",
+                &self.attention_logits,
+                geometry.output_width() * geometry.query_heads * query_count,
+                vec![
+                    geometry.output_width() as u64,
+                    geometry.query_heads as u64,
+                    query_count as u64,
+                ],
+            )?,
+        })
     }
 }
 
@@ -1909,6 +2015,167 @@ fn preflight_dense_packed_projection(
     Ok(())
 }
 
+#[allow(dead_code)]
+fn preflight_selected_index_primitives(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
+    for kernel in [
+        "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+        "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+    ] {
+        ctx.pipeline(kernel)?;
+    }
+    for (kernel, dynamic_memory) in [
+        ("kernel_qwen4exp_qsa_index_scores_packed_4x128_f16", 0),
+        (
+            "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+            SELECTOR_SCRATCH_BYTES,
+        ),
+    ] {
+        let pipeline = ctx.pipeline(kernel)?;
+        validate_cooperative_pipeline(
+            kernel,
+            pipeline.threadExecutionWidth(),
+            pipeline.maxTotalThreadsPerThreadgroup(),
+            pipeline.staticThreadgroupMemoryLength(),
+            dynamic_memory,
+            ctx.device.maxThreadgroupMemoryLength(),
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn encode_selected_index_primitives(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    norm_weight: &MetalTensor,
+    compressed_keys: &MetalTensor,
+    scratch: &QwenSparseAttentionPackedScratch,
+    start_position: usize,
+    query_count: usize,
+) -> Result<QwenSparseAttentionSelectedPackedViews, Qwen4ExpQsaError> {
+    validate_encoder(ctx, enc)?;
+    let g = scratch.geometry;
+    let plan = g.plan_packed_range(start_position, query_count)?;
+    if plan.dense_tokens != 0 || plan.selected_tokens != query_count || plan.selected_bands != 1 {
+        return invalid(format!(
+            "selected packed QSA primitive range start={start_position} queries={query_count} is not one fully selected band"
+        ));
+    }
+    let selected = scratch.selected.as_ref().ok_or_else(|| {
+        Qwen4ExpQsaError::Invalid("selected packed QSA scratch was not admitted".into())
+    })?;
+    let views = selected.views(g, scratch.capacity, scratch.query_tile, query_count)?;
+    require_tensor(
+        "selected packed QSA index-query norm",
+        norm_weight,
+        GgmlType::F32,
+        &[g.index_head_dim as u64],
+        false,
+    )?;
+    require_read_only_weights(&[("selected packed QSA index-query norm", norm_weight)])?;
+    require_tensor(
+        "selected packed QSA compressed index keys",
+        compressed_keys,
+        GgmlType::F16,
+        &[g.index_head_dim as u64, g.block_capacity() as u64],
+        false,
+    )?;
+    for (name, value) in [
+        ("start position", start_position),
+        ("query count", query_count),
+        ("query end", plan.end_position),
+        ("block capacity", g.block_capacity()),
+        ("block budget", g.block_budget()),
+        ("output width", g.output_width()),
+    ] {
+        if u32::try_from(value).is_err() {
+            return invalid(format!("selected packed QSA {name} {value} exceeds u32"));
+        }
+    }
+    let tensors = [
+        ("selected packed QSA index-query norm", norm_weight),
+        ("selected packed QSA compressed index keys", compressed_keys),
+        (
+            "selected packed QSA raw index query",
+            &views.index_query_raw,
+        ),
+        ("selected packed QSA index query", &views.index_query),
+        ("selected packed QSA scores", &views.scores),
+        ("selected packed QSA visible blocks", &views.visible_blocks),
+        (
+            "selected packed QSA selected blocks",
+            &views.selected_blocks,
+        ),
+        ("selected packed QSA selected count", &views.selected_count),
+        (
+            "selected packed QSA selector status",
+            &views.selector_status,
+        ),
+        ("selected packed QSA token IDs", &views.token_ids),
+        (
+            "selected packed QSA attention logits",
+            &views.attention_logits,
+        ),
+    ];
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)?;
+    preflight_selected_index_primitives(ctx)?;
+
+    encode_norm_rope_packed(
+        ctx,
+        enc,
+        &views.index_query_raw,
+        norm_weight,
+        &views.index_query,
+        start_position,
+        query_count,
+        g.index_query_heads,
+        g.index_head_dim,
+        g.rotary_dim,
+        g.theta,
+        g.eps,
+    )?;
+    encode_index_scores_packed(
+        ctx,
+        enc,
+        &views.index_query,
+        compressed_keys,
+        &views.scores,
+        &views.visible_blocks,
+        start_position,
+        query_count,
+        g.ratio,
+        g.block_capacity(),
+    )?;
+    encode_select_blocks_tensors(
+        ctx,
+        enc,
+        &views.scores,
+        &views.visible_blocks,
+        &views.selected_blocks,
+        &views.selected_count,
+        &views.selector_status,
+        g.block_capacity(),
+        g.block_budget(),
+        query_count,
+    )?;
+    encode_expand_ids_packed(
+        ctx,
+        enc,
+        &views.visible_blocks,
+        &views.selected_blocks,
+        &views.selected_count,
+        &views.selector_status,
+        &views.token_ids,
+        start_position,
+        query_count,
+        g.block_budget(),
+        g.ratio,
+        g.output_width(),
+    )?;
+    Ok(views)
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn encode_dense_packed_step(
@@ -2761,6 +3028,18 @@ struct RopeArgs {
     eps: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedQueryArgs {
+    start_position: u32,
+    query_count: u32,
+    head_count: u32,
+    head_dim: u32,
+    rotary_dim: u32,
+    theta: f32,
+    eps: f32,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_norm_rope(
     ctx: &MetalContext,
@@ -2792,6 +3071,43 @@ fn encode_norm_rope(
     enc.set_tensor(2, weight);
     enc.set_tensor(3, output);
     dispatch_1d(enc, &pso, head_count * head_dim);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn encode_norm_rope_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weight: &MetalTensor,
+    output: &MetalTensor,
+    start_position: usize,
+    query_count: usize,
+    head_count: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    theta: f32,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_norm_rope_packed_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &PackedQueryArgs {
+            start_position: start_position as u32,
+            query_count: query_count as u32,
+            head_count: head_count as u32,
+            head_dim: head_dim as u32,
+            rotary_dim: rotary_dim as u32,
+            theta,
+            eps,
+        },
+    );
+    enc.set_tensor(1, input);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, output);
+    dispatch_1d(enc, &pso, query_count * head_count * head_dim);
     Ok(())
 }
 
@@ -2877,6 +3193,24 @@ fn encode_index_scores(
     workspace: &QwenSparseAttentionMetalWorkspace,
     visible_blocks: usize,
 ) -> Result<(), MetalError> {
+    encode_index_scores_tensors(
+        ctx,
+        enc,
+        &workspace.index_query,
+        &workspace.compressed_index_keys,
+        &workspace.scores,
+        visible_blocks,
+    )
+}
+
+fn encode_index_scores_tensors(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    compressed_keys: &MetalTensor,
+    scores: &MetalTensor,
+    visible_blocks: usize,
+) -> Result<(), MetalError> {
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -2890,13 +3224,66 @@ fn encode_index_scores(
             visible_blocks: visible_blocks as u32,
         },
     );
-    enc.set_tensor(1, &workspace.index_query);
-    enc.set_tensor(2, &workspace.compressed_index_keys);
-    enc.set_tensor(3, &workspace.scores);
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, compressed_keys);
+    enc.set_tensor(3, scores);
     enc.dispatch(
         MTLSize {
             width: visible_blocks.div_ceil(LOGITS_SIMDGROUPS_PER_TG),
             height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: ATTENTION_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedScoreArgs {
+    start_position: u32,
+    query_count: u32,
+    ratio: u32,
+    block_capacity: u32,
+}
+
+#[allow(dead_code)]
+fn encode_index_scores_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    compressed_keys: &MetalTensor,
+    scores: &MetalTensor,
+    visible_counts: &MetalTensor,
+    start_position: usize,
+    query_count: usize,
+    ratio: usize,
+    block_capacity: usize,
+) -> Result<(), MetalError> {
+    let maximum_visible = (start_position + query_count) / ratio;
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_index_scores_packed_4x128_f16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &PackedScoreArgs {
+            start_position: start_position as u32,
+            query_count: query_count as u32,
+            ratio: ratio as u32,
+            block_capacity: block_capacity as u32,
+        },
+    );
+    enc.set_tensor(1, queries);
+    enc.set_tensor(2, compressed_keys);
+    enc.set_tensor(3, scores);
+    enc.set_tensor(4, visible_counts);
+    enc.dispatch(
+        MTLSize {
+            width: maximum_visible.div_ceil(LOGITS_SIMDGROUPS_PER_TG),
+            height: query_count,
             depth: 1,
         },
         MTLSize {
@@ -2962,6 +3349,34 @@ fn encode_select_blocks(
     workspace: &QwenSparseAttentionMetalWorkspace,
     _visible: usize,
 ) -> Result<(), MetalError> {
+    let g = workspace.geometry;
+    encode_select_blocks_tensors(
+        ctx,
+        enc,
+        &workspace.scores,
+        &workspace.visible_blocks,
+        &workspace.selected_blocks,
+        &workspace.selected_count,
+        &workspace.selector_status,
+        g.block_capacity(),
+        g.block_budget(),
+        1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_select_blocks_tensors(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    visible_blocks: &MetalTensor,
+    selected_blocks: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    block_capacity: usize,
+    block_budget: usize,
+    query_count: usize,
+) -> Result<(), MetalError> {
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -2970,28 +3385,27 @@ fn encode_select_blocks(
         query_count: u32,
         emit_ranked: u32,
     }
-    let g = workspace.geometry;
     let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
         &Args {
-            row_capacity: g.block_capacity() as u32,
-            top_k: g.block_budget() as u32,
-            query_count: 1,
+            row_capacity: block_capacity as u32,
+            top_k: block_budget as u32,
+            query_count: query_count as u32,
             emit_ranked: 0,
         },
     );
-    enc.set_tensor(1, &workspace.scores);
-    enc.set_tensor(2, &workspace.visible_blocks);
-    enc.set_tensor(3, &workspace.selected_blocks);
-    enc.set_tensor(4, &workspace.selected_count);
-    enc.set_tensor(5, &workspace.selector_status);
+    enc.set_tensor(1, scores);
+    enc.set_tensor(2, visible_blocks);
+    enc.set_tensor(3, selected_blocks);
+    enc.set_tensor(4, selected_count);
+    enc.set_tensor(5, selector_status);
     enc.set_threadgroup_memory(0, ATTENTION_THREADS * size_of::<u32>());
     enc.set_threadgroup_memory(1, ATTENTION_THREADS * size_of::<u32>());
     enc.dispatch(
         MTLSize {
-            width: 1,
+            width: query_count,
             height: 1,
             depth: 1,
         },
@@ -3011,11 +3425,32 @@ fn encode_expand_ids(
     visible: usize,
     length: usize,
 ) -> Result<(), MetalError> {
+    encode_expand_ids_tensors(
+        ctx,
+        enc,
+        &workspace.selected_blocks,
+        &workspace.token_ids,
+        workspace.geometry,
+        visible,
+        length,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_expand_ids_tensors(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    selected_blocks: &MetalTensor,
+    token_ids: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    visible: usize,
+    length: usize,
+) -> Result<(), MetalError> {
     let pso = ctx.pipeline("kernel_qwen4exp_qsa_expand_ids_i32")?;
     enc.set_pipeline(&pso);
-    enc.set_bytes(0, &id_args(workspace.geometry, visible, length));
-    enc.set_tensor(1, &workspace.selected_blocks);
-    enc.set_tensor(2, &workspace.token_ids);
+    enc.set_bytes(0, &id_args(geometry, visible, length));
+    enc.set_tensor(1, selected_blocks);
+    enc.set_tensor(2, token_ids);
     enc.dispatch(
         MTLSize {
             width: 1,
@@ -3028,6 +3463,53 @@ fn encode_expand_ids(
             depth: 1,
         },
     );
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedIdsArgs {
+    start_position: u32,
+    query_count: u32,
+    block_budget: u32,
+    ratio: u32,
+    output_width: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn encode_expand_ids_packed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    visible_blocks: &MetalTensor,
+    selected_blocks: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    token_ids: &MetalTensor,
+    start_position: usize,
+    query_count: usize,
+    block_budget: usize,
+    ratio: usize,
+    output_width: usize,
+) -> Result<(), MetalError> {
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_expand_ids_packed_i32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &PackedIdsArgs {
+            start_position: start_position as u32,
+            query_count: query_count as u32,
+            block_budget: block_budget as u32,
+            ratio: ratio as u32,
+            output_width: output_width as u32,
+        },
+    );
+    enc.set_tensor(1, visible_blocks);
+    enc.set_tensor(2, selected_blocks);
+    enc.set_tensor(3, selected_count);
+    enc.set_tensor(4, selector_status);
+    enc.set_tensor(5, token_ids);
+    dispatch_1d(enc, &pso, query_count * output_width);
     Ok(())
 }
 
@@ -3455,7 +3937,7 @@ mod tests {
 
     fn test_geometry(capacity: usize) -> QwenSparseAttentionMetalGeometry {
         let mut config = Qwen4ExpConfig::flash_next_reference();
-        config.context_length = 32;
+        config.context_length = 64;
         config.hidden_size = 16;
         config.attention.query_heads = 4;
         config.attention.kv_heads = 2;
@@ -4161,6 +4643,296 @@ mod tests {
             .unwrap()
             .validate(geometry, 8, 8)
             .unwrap();
+    }
+
+    #[test]
+    fn selected_index_primitives_match_repeated_scalar_kernels() {
+        const CAPACITY: usize = 8;
+        const QUERIES: usize = 5;
+        let Some(ctx) = context() else { return };
+        let geometry = test_geometry(40);
+        let start_position = 31;
+        let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            &ctx, geometry, CAPACITY, true,
+        )
+        .unwrap();
+        let selected = scratch.selected.as_ref().unwrap();
+        let raw_queries = values(geometry.index_query_width() * CAPACITY, 1_811, 0.002_4);
+        write_f32_tensor(&selected.index_query_raw, &raw_queries);
+        let norm_values = (0..geometry.index_head_dim)
+            .map(|lane| 0.71 + (lane % 11) as f32 * 0.019)
+            .collect::<Vec<_>>();
+        let norm_weight = weight(&ctx, &norm_values, vec![geometry.index_head_dim as u64]);
+        let key_values = values(
+            geometry.index_head_dim * geometry.block_capacity(),
+            1_823,
+            0.003_1,
+        );
+        let key_bits = key_values
+            .iter()
+            .map(|&value| f16::from_f32(value).to_bits())
+            .collect::<Vec<_>>();
+        let compressed_keys = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&key_bits),
+            vec![
+                geometry.index_head_dim as u64,
+                geometry.block_capacity() as u64,
+            ],
+            GgmlType::F16,
+        )
+        .unwrap();
+
+        let reference_queries = MetalTensor::zeros_f32(
+            &ctx,
+            vec![
+                geometry.index_head_dim as u64,
+                geometry.index_query_heads as u64,
+                QUERIES as u64,
+            ],
+        )
+        .unwrap();
+        let reference_scores =
+            MetalTensor::zeros_f32(&ctx, vec![geometry.block_capacity() as u64, QUERIES as u64])
+                .unwrap();
+        let reference_visible = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let reference_blocks =
+            MetalTensor::zeros_i32(&ctx, vec![geometry.block_budget() as u64, QUERIES as u64])
+                .unwrap();
+        let reference_counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let reference_status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let reference_ids =
+            MetalTensor::zeros_i32(&ctx, vec![geometry.output_width() as u64, QUERIES as u64])
+                .unwrap();
+        let visible = (0..QUERIES)
+            .map(|query| ((start_position + query + 1) / geometry.ratio) as i32)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, [8, 8, 8, 8, 9]);
+        write_i32_tensor(&reference_visible, &visible);
+
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let packed_tag =
+            crate::metal::dispatch_census_tag_scope(|| "qwen4exp.qsa.selected_index.packet".into());
+        let actual = encode_selected_index_primitives(
+            &ctx,
+            &encoder,
+            &norm_weight,
+            &compressed_keys,
+            &scratch,
+            start_position,
+            QUERIES,
+        )
+        .unwrap();
+        drop(packed_tag);
+        for query in 0..QUERIES {
+            let query_offset = query * geometry.index_query_width();
+            let raw_query = selected.index_query_raw.view_subrange(
+                query_offset as u64,
+                vec![
+                    geometry.index_head_dim as u64,
+                    geometry.index_query_heads as u64,
+                ],
+            );
+            let normalized_query = reference_queries.view_subrange(
+                query_offset as u64,
+                vec![
+                    geometry.index_head_dim as u64,
+                    geometry.index_query_heads as u64,
+                ],
+            );
+            encode_norm_rope(
+                &ctx,
+                &encoder,
+                &raw_query,
+                &norm_weight,
+                &normalized_query,
+                geometry.index_query_heads,
+                geometry.index_head_dim,
+                geometry.rotary_dim,
+                start_position + query,
+                geometry.theta,
+                geometry.eps,
+            )
+            .unwrap();
+            let score_offset = query * geometry.block_capacity();
+            let score = reference_scores.view_subrange(
+                score_offset as u64,
+                vec![geometry.block_capacity() as u64, 1],
+            );
+            encode_index_scores_tensors(
+                &ctx,
+                &encoder,
+                &normalized_query,
+                &compressed_keys,
+                &score,
+                visible[query] as usize,
+            )
+            .unwrap();
+            let visible_view = reference_visible.view_subrange(query as u64, vec![1]);
+            let block_offset = query * geometry.block_budget();
+            let blocks = reference_blocks
+                .view_subrange(block_offset as u64, vec![geometry.block_budget() as u64, 1]);
+            let count = reference_counts.view_subrange(query as u64, vec![1]);
+            let status = reference_status.view_subrange(query as u64, vec![1]);
+            encode_select_blocks_tensors(
+                &ctx,
+                &encoder,
+                &score,
+                &visible_view,
+                &blocks,
+                &count,
+                &status,
+                geometry.block_capacity(),
+                geometry.block_budget(),
+                1,
+            )
+            .unwrap();
+            let id_offset = query * geometry.output_width();
+            let ids =
+                reference_ids.view_subrange(id_offset as u64, vec![geometry.output_width() as u64]);
+            encode_expand_ids_tensors(
+                &ctx,
+                &encoder,
+                &blocks,
+                &ids,
+                geometry,
+                visible[query] as usize,
+                start_position + query + 1,
+            )
+            .unwrap();
+        }
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+
+        assert_eq!(
+            read_tensor_bytes(&actual.index_query),
+            read_tensor_bytes(&reference_queries)
+        );
+        assert_eq!(
+            read_tensor_bytes(&actual.scores),
+            read_tensor_bytes(&reference_scores)
+        );
+        assert_eq!(read_i32(&actual.visible_blocks), visible);
+        assert_eq!(
+            read_i32(&actual.selected_blocks),
+            read_i32(&reference_blocks)
+        );
+        assert_eq!(read_i32(&actual.selected_count), vec![2; QUERIES]);
+        assert_eq!(
+            read_i32(&actual.selected_count),
+            read_i32(&reference_counts)
+        );
+        assert_eq!(read_i32(&actual.selector_status), vec![0; QUERIES]);
+        assert_eq!(
+            read_i32(&actual.selector_status),
+            read_i32(&reference_status)
+        );
+        assert_eq!(read_i32(&actual.token_ids), read_i32(&reference_ids));
+
+        let packed_names = census
+            .iter()
+            .filter(|row| row.tag.as_deref() == Some("qwen4exp.qsa.selected_index.packet"))
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            packed_names,
+            [
+                "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+                "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
+                "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+                "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_index_selector_ties_and_failures_expand_deterministically() {
+        const QUERIES: usize = 2;
+        let Some(ctx) = context() else { return };
+        let geometry = test_geometry(20);
+        let scratch = QwenSparseAttentionPackedScratch::new_with_selected_capability(
+            &ctx, geometry, QUERIES, true,
+        )
+        .unwrap();
+        let views = scratch
+            .selected
+            .as_ref()
+            .unwrap()
+            .views(geometry, QUERIES, QUERIES, QUERIES)
+            .unwrap();
+        write_f32_tensor(
+            &views.scores,
+            &[1.0, 1.0, 1.0, 1.0, -99.0, f32::NAN, 3.0, 2.0, 1.0, -99.0],
+        );
+        write_i32_tensor(&views.visible_blocks, &[4, 4]);
+
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let packet_tag = crate::metal::dispatch_census_tag_scope(|| {
+            "qwen4exp.qsa.selected_index.selector_faults".into()
+        });
+        encode_select_blocks_tensors(
+            &ctx,
+            &encoder,
+            &views.scores,
+            &views.visible_blocks,
+            &views.selected_blocks,
+            &views.selected_count,
+            &views.selector_status,
+            geometry.block_capacity(),
+            geometry.block_budget(),
+            QUERIES,
+        )
+        .unwrap();
+        encode_expand_ids_packed(
+            &ctx,
+            &encoder,
+            &views.visible_blocks,
+            &views.selected_blocks,
+            &views.selected_count,
+            &views.selector_status,
+            &views.token_ids,
+            15,
+            QUERIES,
+            geometry.block_budget(),
+            geometry.ratio,
+            geometry.output_width(),
+        )
+        .unwrap();
+        drop(packet_tag);
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+
+        assert_eq!(read_i32(&views.selected_blocks), [0, 1, 0, 1]);
+        assert_eq!(read_i32(&views.selected_count), [2, 2]);
+        assert_eq!(read_i32(&views.selector_status), [0, 2]);
+        let mut expected_ids = vec![0, 1, 2, 3, 4, 5, 6, 7, -1, -1, -1];
+        expected_ids.extend(std::iter::repeat_n(-1, geometry.output_width()));
+        assert_eq!(read_i32(&views.token_ids), expected_ids);
+        assert_eq!(
+            census
+                .iter()
+                .filter(|row| {
+                    row.tag.as_deref() == Some("qwen4exp.qsa.selected_index.selector_faults")
+                })
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+                "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+            ]
+        );
     }
 
     #[test]

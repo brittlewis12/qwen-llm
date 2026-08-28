@@ -948,6 +948,92 @@ impl ResearchSession<'_, '_> {
         })
     }
 
+    /// Project selected target-score covectors through one row-major F16
+    /// transport matrix. The result is query-major `[Q,H]` and computes
+    /// `transport^T * covector` for each selected token.
+    pub fn project_f16_transport_readouts(
+        &self,
+        transport_bytes: &[u8],
+        readouts: &ResearchTokenReadouts,
+    ) -> Result<Vec<f32>, ResearchError> {
+        let hidden_size = self.arch().hidden_size as usize;
+        if readouts.hidden_size != hidden_size {
+            return Err(ResearchError::ActivationSize {
+                name: "transport readout hidden size",
+                got: readouts.hidden_size,
+                expected: hidden_size,
+            });
+        }
+        let n_query = readouts.token_ids.len();
+        if n_query == 0 {
+            return Err(ResearchError::EmptyTokenReadoutSelection);
+        }
+        let expected_covectors = n_query
+            .checked_mul(hidden_size)
+            .ok_or(ResearchError::SizeOverflow)?;
+        if readouts.values.len() != expected_covectors {
+            return Err(ResearchError::CotangentSize {
+                got: readouts.values.len(),
+                expected: expected_covectors,
+                n_query,
+                n_out: hidden_size,
+            });
+        }
+        if let Some(index) = readouts.values.iter().position(|value| !value.is_finite()) {
+            return Err(ResearchError::NonFiniteTokenReadoutData {
+                name: "transport target covectors",
+                index,
+            });
+        }
+        let covector_bytes = checked_product(expected_covectors, std::mem::size_of::<f32>())?;
+        let peak_bytes = transport_bytes
+            .len()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(covector_bytes.checked_mul(4)?))
+            .ok_or(ResearchError::SizeOverflow)?;
+        enforce_research_byte_budget("F16 transport readout projection", peak_bytes)?;
+
+        let context = self.model.context();
+        let transport = MetalTensor::from_bytes(
+            context,
+            transport_bytes,
+            vec![hidden_size as u64, hidden_size as u64],
+            GgmlType::F16,
+        )?;
+        let grad_output = MetalTensor::from_bytes(
+            context,
+            bytemuck::cast_slice(&readouts.values),
+            vec![hidden_size as u64, n_query as u64],
+            GgmlType::F32,
+        )?;
+        let grad_input = MetalTensor::zeros_f32(context, vec![hidden_size as u64, n_query as u64])?;
+        let command = context
+            .queue
+            .commandBuffer()
+            .ok_or(ResearchError::MissingCommandBuffer)?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            &transport,
+            &grad_output,
+            &grad_input,
+            hidden_size,
+            hidden_size,
+            n_query,
+        );
+        encoder.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        validate_completed_command(&command)?;
+        read_f32_fallible(
+            &grad_input,
+            expected_covectors,
+            "projected F16 transport readouts",
+        )
+    }
+
     /// Advance one token and return post-block residuals in caller layer order.
     pub fn forward_token(
         &mut self,

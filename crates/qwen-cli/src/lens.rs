@@ -15,6 +15,9 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod full_lens;
+use full_lens::{CompareTransferArgs, ImportFullArgs, compare_transfer, import_full};
+
 const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
 const CHECKPOINT_SCHEMA: &str = "qwen.workspace_lens_row_checkpoint";
 const SCHEMA_VERSION: u32 = 1;
@@ -55,6 +58,11 @@ enum Command {
     FitRows(FitRowsArgs),
     /// Fit resumable projected J-lens or R-lens selected-token readouts.
     FitTokens(FitTokensArgs),
+    /// Import the pinned Eyes ML Qwen3.8-27B full J-lens without executing pickle.
+    ImportFull(ImportFullArgs),
+    /// Compare the published J-lens with native deployed-checkpoint J directions.
+    #[command(alias = "validate-transfer")]
+    CompareTransfer(CompareTransferArgs),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -467,6 +475,8 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::FitRows(args) => fit_rows(args),
         Command::FitTokens(args) => fit_tokens(args),
+        Command::ImportFull(args) => import_full(args),
+        Command::CompareTransfer(args) => compare_transfer(args),
     }
 }
 

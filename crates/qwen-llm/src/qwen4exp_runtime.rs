@@ -1570,6 +1570,10 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
 
+    mod selected_quality {
+        include!("qwen4exp_selected_quality.rs");
+    }
+
     fn argmax(values: &[f32]) -> usize {
         values
             .iter()

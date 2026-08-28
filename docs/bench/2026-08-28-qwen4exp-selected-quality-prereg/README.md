@@ -1,7 +1,7 @@
 # Flash-Next Selected-Prefill Quality Preregistration
 
-Status: **PREREGISTERED / NOT ACQUIRED**. Freeze this protocol before running
-any candidate arm. Changes after observing outputs create a new packet.
+Status: **PREREGISTERED V2 / NOT ACQUIRED**. Freeze this protocol before
+running any candidate arm. Changes after observing outputs create a new packet.
 
 ## Decision
 
@@ -24,7 +24,14 @@ Neither default-safe nor llama.cpp is numerical truth.
 
 Before acquisition, record the clean source commit, model revision and every
 shard hash, tokenizer artifact identity, llama.cpp lock, token manifests,
-scoring-source digest, bootstrap seed, and this document's digest.
+scoring-source digest, bootstrap seed, and this document's digest. Hash every
+local model shard against the frozen release lock before the first model call;
+retained file stamps alone are not semantic-evidence identity.
+
+The clean-source contract includes every dynamically discovered Metal source
+and the pinned Git commit/tree plus clean relevant scope for both workspace path
+dependencies (`gguf-rs` and `llama-cpp-sys-2`). Bind those source manifests,
+the exact test executable, and the embedded metallib into the evidence root.
 
 Natural corpus:
 
@@ -34,11 +41,15 @@ Natural corpus:
 - 96 held-out continuation tokens per prompt, for 12 documents and 1,152 scored
   tokens; and
 - no repository text, roadmap text, benchmark or tuning prompt, prior diagnostic
-  prompt, or near-duplicate document.
+  prompt, or near-duplicate document. Enforce this against the frozen pre-packet
+  repository using whole-file and 256-word-window text audits plus exact token-ID
+  five-gram comparison with recognized prior token fixtures.
 
-Freeze token IDs before any arm output is observed. Score token one from prefill
-logits, then feed each observed token teacher-forced to score the next. Feed the
-last observed token once more only for a terminal state/logit digest.
+Freeze token IDs before any arm output is observed. Prefill the prompt. For each
+of the 96 continuation IDs, score that ID from the current logits and then feed
+it exactly once. Logits after feeding continuation token 96 are terminal-only
+and are not scored. Thus every arm performs exactly 96 continuation forwards,
+not 97.
 
 Additional fixtures:
 
@@ -47,8 +58,11 @@ Additional fixtures:
 - single-hop evidence beginning near token indices 256, 1,280, 2,304, and 3,584;
 - two-hop evidence pairs `(256,2304)`, `(512,3584)`, `(1280,3072)`, and
   `(1792,3584)`; and
-- counterbalanced distractors with frozen one- or two-token answers, scored by
-  answer-sequence NLL and at most eight greedy answer tokens.
+- matched decoy records or chains with target/decoy order counterbalanced across
+  tasks, and frozen opaque one- or two-token answers scored by answer-sequence
+  NLL and at most eight greedy answer tokens; and
+- an exclusion audit proving every generated key, relay, and answer is absent
+  from filler source and occurs only at its declared generated locations.
 
 Open 32-token greedy replay on one natural prompt at each shape is descriptive
 only.
@@ -73,18 +87,41 @@ same-arm logits and state must be bit-identical. Run D separately in a
 manifest-derived prompt permutation and never compare its timing with local
 timing.
 
+Force the production-default fast IQ3 gate/up and strict packed-router policies
+through test-scoped overrides for every local operation. Reject all undeclared
+`QWEN*` environment switches before loading the model, and record the effective
+arithmetic policy in the global evidence binding.
+
+The frozen operation list runs scope control first, then all natural semantic
+arms, four open-greedy sentinels, all retrieval semantic arms, the reverse
+replay, and finally D in its independent order. Selector-support captures are
+not part of this packet. D pins llama.cpp merge commit
+`6c84c7d5d8833c6e0df69628f75a0f599797934e` from support PR 27742.
+
 Semantic runs keep composition and QSA captures off. Separate selector-support
 runs may enable them only after capture-off/on equality at that shape.
 
+Each run binding covers its canonical semantic payload, including scored rows,
+aggregates, generated IDs, exact-pass result, topology, logits/state identity,
+and treatment records. Bind the ordered 78-run sequence at the report root.
+Reserve the destination before the first model call and publish a fully synced
+temporary report by a no-clobber atomic operation; a failed run must not leave a
+partial official report.
+
 ## Metrics
 
-Compute observed-token NLL as F64 `logsumexp` over finite F32 logits. Report
-token-weighted, document-level, and shape-level means. Primary paired deltas are
-`NLL(B)-NLL(A)` and `NLL(C)-NLL(A)`.
+Require exactly 248,320 finite F32 logits in every scored row. Compute
+observed-token NLL with a max-subtracted F64 `logsumexp` over the complete row;
+never filter values. Report token-weighted, document-level, and shape-level
+means. Primary paired deltas are `NLL(B)-NLL(A)` and `NLL(C)-NLL(A)`.
 
 Use 100,000 paired document-cluster bootstrap draws stratified by shape, with a
-frozen seed. Because there are two candidates, use one-sided 97.5% percentile
-confidence bounds.
+frozen seed and one shared resample matrix for every contrast. For each draw,
+visit shapes in ascending order and draw three document indices with replacement
+using SplitMix64 rejection mapping into `[0,3)`, then average the resulting 12
+document mean deltas. Because there are two candidates, use one-sided 97.5%
+percentile bounds for B-A and C-A. Use a one-sided 95% bound for C-B. The upper
+percentile is `sorted[ceil(p * 100000) - 1]`, without interpolation.
 
 Also report:
 
@@ -120,10 +157,12 @@ Known-answer gates:
 
 Report the unweighted per-task answer-NLL mean as a secondary statistic.
 
-Each retrieval prompt instructs the model to emit only its frozen nonce answer.
-An exact pass requires the complete one- or two-token answer sequence followed
-by a producer-declared stop token within eight generated tokens. No text, case,
-or whitespace normalization is allowed.
+Each retrieval prompt instructs the model to emit only its frozen opaque answer.
+An exact pass requires generation to begin with the complete one- or two-token
+answer sequence and the immediately following generated ID to be a
+producer-declared stop token. This is necessarily within eight generated tokens.
+No leading or intervening token and no text, case, or whitespace normalization
+is allowed.
 
 Observed-token top-1 and open greedy divergence are descriptive only and cannot
 override NLL or known-answer gates. Token predictions within a continuation are

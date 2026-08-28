@@ -2286,11 +2286,11 @@ mod tests {
         qualify_census: bool,
     ) -> (Iq3GateUpRangeObservation, Vec<DispatchCensusRow>) {
         let wall_started = Instant::now();
-        let command = ctx.queue.commandBuffer().unwrap();
-        let encoder = KernelEncoder::begin(&command);
         if qualify_census {
             crate::metal::dispatch_census_begin();
         }
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
         encode_qwen4exp_iq3_gate_up_captured_arm(
             ctx, &encoder, banks, records, weights, output, arm,
         )

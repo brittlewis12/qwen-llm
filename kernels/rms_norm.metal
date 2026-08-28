@@ -36,6 +36,7 @@ struct rms_norm_vjp_args {
     uint  row_count;
     float eps;
     uint  detach_scale;
+    uint  broadcast_primal;
 };
 
 struct ds4_prepare_norm_pair_args {
@@ -132,12 +133,13 @@ kernel void kernel_rms_norm_mul_vjp_rows_f32(
         uint ntg [[threads_per_threadgroup]]) {
     if (row >= args.row_count) return;
     const ulong base = (ulong)row * args.n_dim;
+    const ulong primal_base = args.broadcast_primal != 0u ? 0u : base;
     const uint nsg = (ntg + 31) / 32;
 
     float sumsq = 0.0f;
     float dot = 0.0f;
     for (uint i = tpitg; i < args.n_dim; i += ntg) {
-        const float xv = x[base + i];
+        const float xv = x[primal_base + i];
         const float weighted_grad = grad_output[base + i] * weight[i];
         sumsq += xv * xv;
         dot += xv * weighted_grad;
@@ -161,7 +163,7 @@ kernel void kernel_rms_norm_mul_vjp_rows_f32(
         const float direct = grad_output[base + i] * weight[i] * scale;
         grad_input[base + i] = args.detach_scale != 0u
             ? direct
-            : direct - x[base + i] * correction;
+            : direct - x[primal_base + i] * correction;
     }
 }
 

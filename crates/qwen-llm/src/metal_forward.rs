@@ -10345,6 +10345,52 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         hidden_dst: &MetalTensor,
     ) -> Result<Vec<f32>, MfError> {
+        self.single_token_with_hidden_sites(
+            token_id,
+            position,
+            session,
+            target_layer_ids,
+            Some(hidden_dst),
+            None,
+        )
+    }
+
+    /// Capture both sides of selected dense FFN residual updates in one
+    /// ordinary-Qwen token forward.
+    ///
+    /// `pre_ffn_dst[k]` receives the post-mixer residual immediately before
+    /// post-attention RMSNorm. `post_block_dst[k]` receives the residual after
+    /// the FFN update. Both destinations use caller layer order and shape
+    /// `[H, K]`.
+    pub fn single_token_with_dense_ffn_capture(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        pre_ffn_dst: &MetalTensor,
+        post_block_dst: &MetalTensor,
+    ) -> Result<Vec<f32>, MfError> {
+        self.single_token_with_hidden_sites(
+            token_id,
+            position,
+            session,
+            target_layer_ids,
+            Some(post_block_dst),
+            Some(pre_ffn_dst),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn single_token_with_hidden_sites(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        post_block_dst: Option<&MetalTensor>,
+        pre_ffn_dst: Option<&MetalTensor>,
+    ) -> Result<Vec<f32>, MfError> {
         session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
             return Err(MfError::UnsupportedMoe);
@@ -10355,13 +10401,62 @@ impl<'a> MetalForward<'a> {
         }
         let h = arch.hidden_size as usize;
         let k = target_layer_ids.len();
-        if hidden_dst.n_elements() as usize != k * h {
+        let expected_capture_elements = k.checked_mul(h).ok_or_else(|| {
+            MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_with_hidden_sites",
+                detail: "capture element count overflow".into(),
+            })
+        })?;
+        let dense_capture_shape = vec![h as u64, k as u64];
+        let flat_capture_shape = vec![expected_capture_elements as u64];
+        let expected_capture_bytes = expected_capture_elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                MfError::Metal(MetalError::BadShape {
+                    kernel: "single_token_with_hidden_sites",
+                    detail: "capture byte count overflow".into(),
+                })
+            })?;
+        let mut post_block_range = None;
+        let mut pre_ffn_range = None;
+        for (site, destination, range) in [
+            ("post_block", post_block_dst, &mut post_block_range),
+            ("pre_ffn", pre_ffn_dst, &mut pre_ffn_range),
+        ] {
+            if let Some(destination) = destination {
+                let expected_shape = if pre_ffn_dst.is_some() {
+                    &dense_capture_shape
+                } else {
+                    &flat_capture_shape
+                };
+                *range = Some(validate_hidden_capture_destination(
+                    site,
+                    destination,
+                    expected_shape,
+                    expected_capture_bytes,
+                )?);
+                if session.aliases_mutable_buffer(destination) {
+                    return Err(MfError::Metal(MetalError::BadShape {
+                        kernel: "single_token_with_hidden_sites",
+                        detail: format!("{site} destination aliases mutable session storage"),
+                    }));
+                }
+            }
+        }
+        if let (Some(pre_ffn_dst), Some(pre_range), Some(post_block_dst), Some(post_range)) =
+            (pre_ffn_dst, pre_ffn_range, post_block_dst, post_block_range)
+            && capture_ranges_overlap(pre_ffn_dst, pre_range, post_block_dst, post_range)
+        {
             return Err(MfError::Metal(MetalError::BadShape {
-                kernel: "single_token_with_multi_hidden.hidden_dst",
+                kernel: "single_token_with_hidden_sites",
+                detail: "pre_ffn and post_block destinations overlap".into(),
+            }));
+        }
+        if u32::try_from(expected_capture_elements).is_err() {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_with_hidden_sites",
                 detail: format!(
-                    "expected {} elements (K={k} layers × H={h}), got {}",
-                    k * h,
-                    hidden_dst.n_elements()
+                    "capture element count {expected_capture_elements} exceeds u32 scatter addressing"
                 ),
             }));
         }
@@ -10407,7 +10502,19 @@ impl<'a> MetalForward<'a> {
         let mut gdn_idx = 0usize;
         let mut attn_idx = 0usize;
         for (il, block) in self.model.blocks.iter().enumerate() {
-            self.encode_block(
+            let pre_ffn_offsets: Vec<usize> = if pre_ffn_dst.is_some() {
+                target_layer_ids
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, &layer)| (layer as usize == il).then_some(slot * h))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let pre_ffn_capture = pre_ffn_dst
+                .filter(|_| !pre_ffn_offsets.is_empty())
+                .map(|destination| (destination, pre_ffn_offsets.as_slice()));
+            self.encode_block_impl(
                 &enc,
                 il,
                 block,
@@ -10415,21 +10522,24 @@ impl<'a> MetalForward<'a> {
                 &mut attn_idx,
                 position,
                 session,
+                pre_ffn_capture,
             )?;
             // Capture at any (possibly multiple) target_layer_ids slot
             // matching this block. Scatters run inline with the rest of
             // the command buffer; reads s.x BEFORE the next block writes
             // it, which is required since s.x is reused per layer.
-            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
-                if lid as usize == il {
-                    encode_scatter_offset_f32(
-                        self.ctx,
-                        &enc,
-                        &session.x,
-                        hidden_dst,
-                        k_idx * h,
-                        h,
-                    )?;
+            if let Some(post_block_dst) = post_block_dst {
+                for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                    if lid as usize == il {
+                        encode_scatter_offset_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            post_block_dst,
+                            k_idx * h,
+                            h,
+                        )?;
+                    }
                 }
             }
         }
@@ -12144,12 +12254,27 @@ impl<'a> MetalForward<'a> {
     pub fn encode_block(
         &self,
         enc: &KernelEncoder,
+        il: usize,
+        block: &MetalBlock,
+        gdn_idx: &mut usize,
+        attn_idx: &mut usize,
+        position: u32,
+        s: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        self.encode_block_impl(enc, il, block, gdn_idx, attn_idx, position, s, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_block_impl(
+        &self,
+        enc: &KernelEncoder,
         _il: usize,
         block: &MetalBlock,
         gdn_idx: &mut usize,
         attn_idx: &mut usize,
         position: u32,
         s: &mut MetalSession,
+        pre_ffn_capture: Option<(&MetalTensor, &[usize])>,
     ) -> Result<(), MfError> {
         s.ensure_usable()?;
         // Pre-mixer norm.
@@ -12173,7 +12298,7 @@ impl<'a> MetalForward<'a> {
             }
         }
 
-        self.encode_post_mixer_ffn(enc, block, s)?;
+        self.encode_post_mixer_ffn_impl(enc, block, s, pre_ffn_capture)?;
         Ok(())
     }
 
@@ -12212,6 +12337,16 @@ impl<'a> MetalForward<'a> {
         block: &MetalBlock,
         s: &mut MetalSession,
     ) -> Result<(), MfError> {
+        self.encode_post_mixer_ffn_impl(enc, block, s, None)
+    }
+
+    fn encode_post_mixer_ffn_impl(
+        &self,
+        enc: &KernelEncoder,
+        block: &MetalBlock,
+        s: &mut MetalSession,
+        pre_ffn_capture: Option<(&MetalTensor, &[usize])>,
+    ) -> Result<(), MfError> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
 
@@ -12221,6 +12356,11 @@ impl<'a> MetalForward<'a> {
             MetalBlock::Attn(a) => &a.post_attn_norm,
         };
         self.encode_post_mixer_norm(enc, &s.x, &s.mixer_out, post_norm, &s.h)?;
+        if let Some((destination, offsets)) = pre_ffn_capture {
+            for &offset in offsets {
+                encode_scatter_offset_f32(self.ctx, enc, &s.x, destination, offset, h)?;
+            }
+        }
 
         // SwiGLU FFN.
         let (g_w, u_w, d_w) = match block {
@@ -13236,6 +13376,69 @@ impl<'a> MetalForward<'a> {
     }
 }
 
+fn validate_hidden_capture_destination(
+    site: &str,
+    destination: &MetalTensor,
+    expected_shape: &[u64],
+    expected_bytes: usize,
+) -> Result<(u64, u64), MfError> {
+    if destination.dtype != GgmlType::F32
+        || !destination.is_writable()
+        || destination.shape != expected_shape
+        || !destination
+            .offset
+            .is_multiple_of(std::mem::align_of::<f32>() as u64)
+    {
+        return Err(MfError::Metal(MetalError::BadShape {
+            kernel: "single_token_with_hidden_sites",
+            detail: format!(
+                "{site} destination must be writable aligned F32 {expected_shape:?}, got {:?} {:?} writable={} offset={}",
+                destination.dtype,
+                destination.shape,
+                destination.is_writable(),
+                destination.offset
+            ),
+        }));
+    }
+    let expected_bytes = u64::try_from(expected_bytes).map_err(|_| {
+        MfError::Metal(MetalError::BadShape {
+            kernel: "single_token_with_hidden_sites",
+            detail: format!("{site} byte count does not fit u64"),
+        })
+    })?;
+    let end = destination
+        .offset
+        .checked_add(expected_bytes)
+        .ok_or_else(|| {
+            MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_with_hidden_sites",
+                detail: format!("{site} destination endpoint overflow"),
+            })
+        })?;
+    if end > destination.buffer.length() as u64 {
+        return Err(MfError::Metal(MetalError::BadShape {
+            kernel: "single_token_with_hidden_sites",
+            detail: format!(
+                "{site} destination range [{}..{end}) exceeds buffer length {}",
+                destination.offset,
+                destination.buffer.length()
+            ),
+        }));
+    }
+    Ok((destination.offset, end))
+}
+
+fn capture_ranges_overlap(
+    left: &MetalTensor,
+    left_range: (u64, u64),
+    right: &MetalTensor,
+    right_range: (u64, u64),
+) -> bool {
+    Retained::as_ptr(&left.buffer) == Retained::as_ptr(&right.buffer)
+        && left_range.0 < right_range.1
+        && right_range.0 < left_range.1
+}
+
 /// Helper: scatter `n` floats from `src[0..n]` into `dst[off..off+n]`.
 /// Inverse of `copy_offset` (which gathers). Used to write into the KV
 /// cache slot for the current position, and (via the metal_mtp module)
@@ -13320,10 +13523,20 @@ pub fn encode_scatter_offset_f32(
     dst_off: usize,
     n: usize,
 ) -> Result<(), MetalError> {
-    if src.n_elements() as usize != n {
+    if src.dtype != GgmlType::F32
+        || dst.dtype != GgmlType::F32
+        || !dst.is_writable()
+        || src.n_elements() as usize != n
+    {
         return Err(MetalError::BadShape {
             kernel: "scatter_offset",
-            detail: format!("src.n={} != n={n}", src.n_elements()),
+            detail: format!(
+                "expected F32 src with n={n} and writable F32 dst, got src={:?}/{} dst={:?} writable={}",
+                src.dtype,
+                src.n_elements(),
+                dst.dtype,
+                dst.is_writable()
+            ),
         });
     }
     let dst_end = dst_off.checked_add(n).ok_or_else(|| MetalError::BadShape {
@@ -13334,6 +13547,50 @@ pub fn encode_scatter_offset_f32(
         return Err(MetalError::BadShape {
             kernel: "scatter_offset",
             detail: format!("dst_off+n={dst_end} > dst.n={}", dst.n_elements()),
+        });
+    }
+    let element_bytes = std::mem::size_of::<f32>() as u64;
+    let copy_bytes = (n as u64)
+        .checked_mul(element_bytes)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "scatter_offset",
+            detail: "copy byte count overflow".into(),
+        })?;
+    let dst_byte_offset = (dst_off as u64)
+        .checked_mul(element_bytes)
+        .and_then(|offset| dst.offset.checked_add(offset))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "scatter_offset",
+            detail: "destination byte offset overflow".into(),
+        })?;
+    let src_end = src
+        .offset
+        .checked_add(copy_bytes)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "scatter_offset",
+            detail: "source endpoint overflow".into(),
+        })?;
+    let dst_byte_end =
+        dst_byte_offset
+            .checked_add(copy_bytes)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "scatter_offset",
+                detail: "destination endpoint overflow".into(),
+            })?;
+    if !src.offset.is_multiple_of(element_bytes)
+        || !dst_byte_offset.is_multiple_of(element_bytes)
+        || src_end > src.buffer.length() as u64
+        || dst_byte_end > dst.buffer.length() as u64
+        || capture_ranges_overlap(
+            src,
+            (src.offset, src_end),
+            dst,
+            (dst_byte_offset, dst_byte_end),
+        )
+    {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset",
+            detail: "copy ranges are unaligned, out of bounds, or overlapping".into(),
         });
     }
     let n_u32 = u32::try_from(n).map_err(|_| MetalError::BadShape {
@@ -14853,6 +15110,57 @@ mod tests {
         assert!(
             validate_f32_q8_mat_mat_addressing(GgmlType::Q8_0, q8_stride_overflow, 1, 1,).is_err()
         );
+    }
+
+    #[test]
+    fn hidden_capture_destinations_require_safe_independent_f32_ranges() {
+        let Some(context) = metal_test_context() else {
+            return;
+        };
+        const HIDDEN: usize = 8;
+        const LAYERS: usize = 3;
+        const ELEMENTS: usize = HIDDEN * LAYERS;
+        let shape = vec![HIDDEN as u64, LAYERS as u64];
+        let bytes = ELEMENTS * std::mem::size_of::<f32>();
+        let valid = MetalTensor::zeros_f32(&context, shape.clone()).unwrap();
+        let valid_range = validate_hidden_capture_destination("valid", &valid, &shape, bytes)
+            .expect("valid capture destination");
+        assert_eq!(valid_range, (0, bytes as u64));
+
+        let wrong_shape = MetalTensor::zeros_f32(&context, vec![ELEMENTS as u64]).unwrap();
+        validate_hidden_capture_destination("shape", &wrong_shape, &shape, bytes)
+            .expect_err("flattened shape must be rejected");
+        let wrong_dtype = MetalTensor::zeros_f16(&context, shape.clone()).unwrap();
+        validate_hidden_capture_destination("dtype", &wrong_dtype, &shape, bytes)
+            .expect_err("F16 capture storage must be rejected");
+        let mut read_only = valid.clone();
+        read_only.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        validate_hidden_capture_destination("readonly", &read_only, &shape, bytes)
+            .expect_err("read-only capture storage must be rejected");
+        let mut short = valid.clone();
+        short.offset = std::mem::size_of::<f32>() as u64;
+        validate_hidden_capture_destination("short", &short, &shape, bytes)
+            .expect_err("out-of-range capture view must be rejected");
+
+        let arena = MetalTensor::zeros_f32(&context, vec![(2 * ELEMENTS) as u64]).unwrap();
+        let first = arena.view_subrange(0, shape.clone());
+        let overlapping = arena.view_subrange(1, shape.clone());
+        let second = arena.view_subrange(ELEMENTS as u64, shape);
+        let first_range = (first.offset, first.offset + bytes as u64);
+        let overlapping_range = (overlapping.offset, overlapping.offset + bytes as u64);
+        let second_range = (second.offset, second.offset + bytes as u64);
+        assert!(capture_ranges_overlap(
+            &first,
+            first_range,
+            &overlapping,
+            overlapping_range
+        ));
+        assert!(!capture_ranges_overlap(
+            &first,
+            first_range,
+            &second,
+            second_range
+        ));
     }
 
     #[test]
@@ -18788,6 +19096,149 @@ mod tests {
                 !identical,
                 "captured hiddens at k={k_idx} and k={} are identical — multi-hidden layout bug",
                 k_idx + 1
+            );
+        }
+    }
+
+    #[test]
+    fn dense_ffn_capture_brackets_the_residual_update() {
+        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[dense-ffn-capture] skipped - fixture missing");
+            return;
+        }
+        let Some(context) = metal_test_context() else {
+            return;
+        };
+        let gguf = GgufFile::open(model_path).expect("open");
+        let model = Model::from_gguf(&gguf).expect("load");
+        let metal_model = MetalModel::load(&context, &gguf, &model).expect("metal load");
+        let forward = MetalForward::new(&context, &metal_model);
+        let mut session = MetalSession::fresh(&context, &metal_model, 16).expect("session");
+        let hidden_size = model.arch.hidden_size as usize;
+        let intermediate_size = model.arch.intermediate_size as usize;
+        let layers = [5u32, 1, 5];
+        let capture_shape = vec![hidden_size as u64, layers.len() as u64];
+        let pre_ffn = MetalTensor::zeros_f32(&context, capture_shape.clone()).unwrap();
+        let post_block = MetalTensor::zeros_f32(&context, capture_shape).unwrap();
+        forward
+            .single_token_with_dense_ffn_capture(
+                9419,
+                0,
+                &mut session,
+                &layers,
+                &pre_ffn,
+                &post_block,
+            )
+            .expect("dense FFN capture");
+
+        let read_f32 = |tensor: &MetalTensor, len: usize| {
+            let mut values = vec![0.0f32; len];
+            unsafe {
+                let source = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize)
+                    .cast::<f32>();
+                std::ptr::copy_nonoverlapping(source, values.as_mut_ptr(), values.len());
+            }
+            values
+        };
+        let pre_values = read_f32(&pre_ffn, layers.len() * hidden_size);
+        let post_values = read_f32(&post_block, layers.len() * hidden_size);
+        assert_eq!(
+            &pre_values[..hidden_size],
+            &pre_values[2 * hidden_size..3 * hidden_size],
+            "duplicate pre-FFN layer capture differs"
+        );
+        assert_eq!(
+            &post_values[..hidden_size],
+            &post_values[2 * hidden_size..3 * hidden_size],
+            "duplicate post-block layer capture differs"
+        );
+
+        for (slot, &layer) in layers.iter().enumerate() {
+            let pre = &pre_values[slot * hidden_size..(slot + 1) * hidden_size];
+            let post = &post_values[slot * hidden_size..(slot + 1) * hidden_size];
+            let (norm, gate_weight, up_weight, down_weight) =
+                match &metal_model.blocks[layer as usize] {
+                    MetalBlock::Gdn(block) => (
+                        &block.post_attn_norm,
+                        &block.ffn_gate,
+                        &block.ffn_up,
+                        &block.ffn_down,
+                    ),
+                    MetalBlock::Attn(block) => (
+                        &block.post_attn_norm,
+                        &block.ffn_gate,
+                        &block.ffn_up,
+                        &block.ffn_down,
+                    ),
+                };
+            let pre_tensor = MetalTensor::from_bytes(
+                &context,
+                bytemuck::cast_slice(pre),
+                vec![hidden_size as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let normalized = MetalTensor::zeros_f32(&context, vec![hidden_size as u64]).unwrap();
+            let gate = MetalTensor::zeros_f32(&context, vec![intermediate_size as u64]).unwrap();
+            let up = MetalTensor::zeros_f32(&context, vec![intermediate_size as u64]).unwrap();
+            let inner = MetalTensor::zeros_f32(&context, vec![intermediate_size as u64]).unwrap();
+            let output = MetalTensor::zeros_f32(&context, vec![hidden_size as u64]).unwrap();
+            let command = context.queue.commandBuffer().expect("command buffer");
+            let encoder = KernelEncoder::begin(&command);
+            encode_rms_norm_mul_f32(&context, &encoder, &pre_tensor, norm, &normalized, RMS_EPS)
+                .unwrap();
+            encode_mat_vec_dispatch(
+                &context,
+                &encoder,
+                gate_weight,
+                &normalized,
+                &gate,
+                hidden_size,
+                intermediate_size,
+            )
+            .unwrap();
+            encode_mat_vec_dispatch(
+                &context,
+                &encoder,
+                up_weight,
+                &normalized,
+                &up,
+                hidden_size,
+                intermediate_size,
+            )
+            .unwrap();
+            encode_silu_mul_f32(&context, &encoder, &gate, &up, &inner).unwrap();
+            encode_mat_vec_dispatch(
+                &context,
+                &encoder,
+                down_weight,
+                &inner,
+                &output,
+                intermediate_size,
+                hidden_size,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+            let ffn_output = read_f32(&output, hidden_size);
+            let max_abs = pre
+                .iter()
+                .zip(&ffn_output[..hidden_size])
+                .zip(post)
+                .map(|((pre, ffn), post)| (pre + ffn - post).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs < 2e-4,
+                "layer {layer} slot {slot}: captured FFN boundary error {max_abs}"
             );
         }
     }

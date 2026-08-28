@@ -18,7 +18,9 @@ struct n_args {
 
 struct silu_mul_vjp_args {
     uint n;
+    uint n_dim;
     uint relp_identity_half;
+    uint broadcast_primal;
 };
 
 // y[i] = x[i] / (1 + exp(-x[i]))
@@ -250,18 +252,19 @@ kernel void kernel_silu_mul_vjp_f32(
         device const float * grad_output  [[buffer(3)]],
         device       float * grad_gate    [[buffer(4)]],
         device       float * grad_up      [[buffer(5)]],
-        uint tid [[thread_position_in_grid]]) {
+    uint tid [[thread_position_in_grid]]) {
     if (tid >= args.n) return;
-    const float g = gate[tid];
+    const uint primal_index = args.broadcast_primal != 0u ? tid % args.n_dim : tid;
+    const float g = gate[primal_index];
     const float sigmoid_g = 1.0f / (1.0f + exp(-g));
     const float silu_g = g * sigmoid_g;
     const float incoming = grad_output[tid];
     if (args.relp_identity_half != 0u) {
-        grad_gate[tid] = 0.5f * incoming * up[tid] * sigmoid_g;
+        grad_gate[tid] = 0.5f * incoming * up[primal_index] * sigmoid_g;
         grad_up[tid] = 0.5f * incoming * silu_g;
     } else {
         const float silu_derivative = sigmoid_g * (1.0f + g * (1.0f - sigmoid_g));
-        grad_gate[tid] = incoming * up[tid] * silu_derivative;
+        grad_gate[tid] = incoming * up[primal_index] * silu_derivative;
         grad_up[tid] = incoming * silu_g;
     }
 }

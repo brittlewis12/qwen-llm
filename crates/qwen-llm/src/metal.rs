@@ -3633,6 +3633,68 @@ pub fn encode_rms_norm_mul_vjp_rows_f32(
     eps: f32,
     rule: RmsNormVjpRule,
 ) -> Result<(), MetalError> {
+    encode_rms_norm_mul_vjp_impl_f32(
+        ctx,
+        enc,
+        x,
+        weight,
+        grad_output,
+        grad_input,
+        row_count,
+        n_dim,
+        eps,
+        rule,
+        false,
+    )
+}
+
+/// Activation VJP for a query bank sharing one weighted RMSNorm primal row.
+///
+/// `x` has shape `[n_dim]`; cotangents and results have compact-row shape
+/// `[n_dim, row_count]`. This avoids materializing one copy of the primal per
+/// lens query while preserving the arithmetic of
+/// [`encode_rms_norm_mul_vjp_rows_f32`].
+pub fn encode_rms_norm_mul_vjp_broadcast_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    weight: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+    row_count: usize,
+    n_dim: usize,
+    eps: f32,
+    rule: RmsNormVjpRule,
+) -> Result<(), MetalError> {
+    encode_rms_norm_mul_vjp_impl_f32(
+        ctx,
+        enc,
+        x,
+        weight,
+        grad_output,
+        grad_input,
+        row_count,
+        n_dim,
+        eps,
+        rule,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_rms_norm_mul_vjp_impl_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    weight: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+    row_count: usize,
+    n_dim: usize,
+    eps: f32,
+    rule: RmsNormVjpRule,
+    broadcast_primal: bool,
+) -> Result<(), MetalError> {
     const KERNEL: &str = "rms_norm_mul_vjp_rows";
     if row_count == 0 || n_dim == 0 || !eps.is_finite() || eps < 0.0 {
         return Err(MetalError::BadShape {
@@ -3651,13 +3713,18 @@ pub fn encode_rms_norm_mul_vjp_rows_f32(
         detail: "row width exceeds u32".into(),
     })?;
     let row_shape = vec![u64::from(n_dim_u32), u64::from(row_count_u32)];
+    let primal_shape = if broadcast_primal {
+        vec![u64::from(n_dim_u32)]
+    } else {
+        row_shape.clone()
+    };
     let weight_shape = vec![u64::from(n_dim_u32)];
     if x.dtype != GgmlType::F32
         || weight.dtype != GgmlType::F32
         || grad_output.dtype != GgmlType::F32
         || grad_input.dtype != GgmlType::F32
         || !grad_input.is_writable()
-        || x.shape != row_shape
+        || x.shape != primal_shape
         || grad_output.shape != row_shape
         || grad_input.shape != row_shape
         || weight.shape != weight_shape
@@ -3665,14 +3732,15 @@ pub fn encode_rms_norm_mul_vjp_rows_f32(
         return Err(MetalError::BadShape {
             kernel: KERNEL,
             detail: format!(
-                "expected F32 {:?}, weight {:?}, cotangent {:?} -> writable {:?}",
-                row_shape, weight_shape, row_shape, row_shape
+                "expected F32 primal {:?}, weight {:?}, cotangent {:?} -> writable {:?}",
+                primal_shape, weight_shape, row_shape, row_shape
             ),
         });
     }
+    let (_, primal_bytes) = checked_shape_bytes(&primal_shape, std::mem::size_of::<f32>())?;
     let (_, row_bytes) = checked_shape_bytes(&row_shape, std::mem::size_of::<f32>())?;
     let (_, weight_bytes) = checked_shape_bytes(&weight_shape, std::mem::size_of::<f32>())?;
-    if !tensor_physical_range_valid(x, row_bytes, 4)
+    if !tensor_physical_range_valid(x, primal_bytes, 4)
         || !tensor_physical_range_valid(weight, weight_bytes, 4)
         || !tensor_physical_range_valid(grad_output, row_bytes, 4)
         || !tensor_physical_range_valid(grad_input, row_bytes, 4)
@@ -3699,6 +3767,7 @@ pub fn encode_rms_norm_mul_vjp_rows_f32(
         row_count: u32,
         eps: f32,
         detach_scale: u32,
+        broadcast_primal: u32,
     }
     let pso = ctx.pipeline("kernel_rms_norm_mul_vjp_rows_f32")?;
     enc.set_pipeline(&pso);
@@ -3709,6 +3778,7 @@ pub fn encode_rms_norm_mul_vjp_rows_f32(
             row_count: row_count_u32,
             eps,
             detach_scale: u32::from(rule == RmsNormVjpRule::RelpDetachedScale),
+            broadcast_primal: u32::from(broadcast_primal),
         },
     );
     enc.set_tensor(1, x);
@@ -14801,6 +14871,66 @@ pub fn encode_silu_mul_vjp_f32(
     n_dim: usize,
     rule: SwiGluVjpRule,
 ) -> Result<(), MetalError> {
+    encode_silu_mul_vjp_impl_f32(
+        ctx,
+        enc,
+        gate,
+        up,
+        grad_output,
+        grad_gate,
+        grad_up,
+        row_count,
+        n_dim,
+        rule,
+        false,
+    )
+}
+
+/// Activation VJP for a query bank sharing one SwiGLU primal row.
+///
+/// `gate` and `up` have shape `[n_dim]`; cotangents and gradient outputs have
+/// compact-row shape `[n_dim, row_count]`.
+pub fn encode_silu_mul_vjp_broadcast_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_gate: &MetalTensor,
+    grad_up: &MetalTensor,
+    row_count: usize,
+    n_dim: usize,
+    rule: SwiGluVjpRule,
+) -> Result<(), MetalError> {
+    encode_silu_mul_vjp_impl_f32(
+        ctx,
+        enc,
+        gate,
+        up,
+        grad_output,
+        grad_gate,
+        grad_up,
+        row_count,
+        n_dim,
+        rule,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_silu_mul_vjp_impl_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_gate: &MetalTensor,
+    grad_up: &MetalTensor,
+    row_count: usize,
+    n_dim: usize,
+    rule: SwiGluVjpRule,
+    broadcast_primal: bool,
+) -> Result<(), MetalError> {
     const KERNEL: &str = "silu_mul_vjp";
     if row_count == 0 || n_dim == 0 {
         return Err(MetalError::BadShape {
@@ -14827,24 +14957,39 @@ pub fn encode_silu_mul_vjp_f32(
         detail: "element count exceeds u32".into(),
     })?;
     let shape = vec![u64::from(n_dim_u32), u64::from(row_count_u32)];
-    let inputs = [gate, up, grad_output];
+    let primal_shape = if broadcast_primal {
+        vec![u64::from(n_dim_u32)]
+    } else {
+        shape.clone()
+    };
+    let primals = [gate, up];
     let outputs = [grad_gate, grad_up];
-    if inputs
+    if primals
         .iter()
-        .chain(outputs.iter())
-        .any(|tensor| tensor.dtype != GgmlType::F32 || tensor.shape != shape)
+        .any(|tensor| tensor.dtype != GgmlType::F32 || tensor.shape != primal_shape)
+        || grad_output.dtype != GgmlType::F32
+        || grad_output.shape != shape
+        || outputs
+            .iter()
+            .any(|tensor| tensor.dtype != GgmlType::F32 || tensor.shape != shape)
         || outputs.iter().any(|tensor| !tensor.is_writable())
     {
         return Err(MetalError::BadShape {
             kernel: KERNEL,
-            detail: format!("expected five F32 tensors of shape {shape:?} with writable outputs"),
+            detail: format!(
+                "expected F32 primals {primal_shape:?} and cotangent/outputs {shape:?} with writable outputs"
+            ),
         });
     }
+    let (_, primal_bytes) = checked_shape_bytes(&primal_shape, std::mem::size_of::<f32>())?;
     let (_, bytes) = checked_shape_bytes(&shape, std::mem::size_of::<f32>())?;
-    if inputs
+    if primals
         .iter()
-        .chain(outputs.iter())
-        .any(|tensor| !tensor_physical_range_valid(tensor, bytes, 4))
+        .any(|tensor| !tensor_physical_range_valid(tensor, primal_bytes, 4))
+        || !tensor_physical_range_valid(grad_output, bytes, 4)
+        || outputs
+            .iter()
+            .any(|tensor| !tensor_physical_range_valid(tensor, bytes, 4))
     {
         return Err(MetalError::BadShape {
             kernel: KERNEL,
@@ -14853,8 +14998,9 @@ pub fn encode_silu_mul_vjp_f32(
     }
     if tensor_ranges_overlap(grad_gate, grad_up)
         || outputs.iter().any(|output| {
-            inputs
+            primals
                 .iter()
+                .chain(std::iter::once(&grad_output))
                 .any(|input| tensor_ranges_overlap(output, input))
         })
     {
@@ -14869,7 +15015,9 @@ pub fn encode_silu_mul_vjp_f32(
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
         n: u32,
+        n_dim: u32,
         relp_identity_half: u32,
+        broadcast_primal: u32,
     }
     let pso = ctx.pipeline("kernel_silu_mul_vjp_f32")?;
     enc.set_pipeline(&pso);
@@ -14877,7 +15025,9 @@ pub fn encode_silu_mul_vjp_f32(
         0,
         &Args {
             n: element_count_u32,
+            n_dim: n_dim_u32,
             relp_identity_half: u32::from(rule == SwiGluVjpRule::RelpIdentityHalf),
+            broadcast_primal: u32::from(broadcast_primal),
         },
     );
     enc.set_tensor(1, gate);

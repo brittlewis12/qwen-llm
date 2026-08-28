@@ -1,4 +1,4 @@
-use qwen_llm::research::{RESEARCH_IDENTITY_SCHEME, ResearchLinear};
+use qwen_llm::research::{DenseFfnVjpRule, RESEARCH_IDENTITY_SCHEME, ResearchLinear};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use qwen_llm::tensor::GgmlType;
 use serde_json::json;
@@ -27,10 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identity = research.identity();
     let linears = research.linears()?;
     let capture_layers = [0, arch.n_layer.saturating_sub(2), arch.n_layer - 1];
-    let forward = research.forward_token(token_id, &capture_layers)?;
+    let forward = research.forward_token_with_dense_ffn_capture(token_id, &capture_layers)?;
     let capture_norms: Vec<f64> = forward
         .capture
-        .values
+        .post_block_residuals
         .chunks_exact(forward.capture.hidden_size)
         .map(|row| {
             row.iter()
@@ -52,6 +52,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cotangent[top_token] = 1.0;
     let lm_head_vjp = research.frozen_linear_vjp(ResearchLinear::LmHead, &cotangent, 1)?;
     let lm_head_vjp_norm = lm_head_vjp
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt();
+    let last_capture_offset = (capture_layers.len() - 1) * forward.capture.hidden_size;
+    let last_pre_ffn = &forward.capture.pre_ffn_residuals
+        [last_capture_offset..last_capture_offset + forward.capture.hidden_size];
+    let mut hidden_cotangent = vec![0.0f32; forward.capture.hidden_size];
+    let hidden_coordinate = top_token % hidden_cotangent.len();
+    hidden_cotangent[hidden_coordinate] = 1.0;
+    let dense_ffn_r_vjp = research.dense_ffn_vjp(
+        arch.n_layer - 1,
+        last_pre_ffn,
+        &hidden_cotangent,
+        1,
+        DenseFfnVjpRule::Relp,
+    )?;
+    let dense_ffn_r_vjp_norm = dense_ffn_r_vjp
+        .values
         .iter()
         .map(|&value| f64::from(value) * f64::from(value))
         .sum::<f64>()
@@ -91,6 +110,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "output_token": top_token,
                 "input_width": lm_head_vjp.len(),
                 "l2_norm": lm_head_vjp_norm,
+            },
+            "last_dense_ffn_r_vjp": {
+                "layer": dense_ffn_r_vjp.layer,
+                "query_count": dense_ffn_r_vjp.n_query,
+                "input_width": dense_ffn_r_vjp.values.len(),
+                "l2_norm": dense_ffn_r_vjp_norm,
             }
         }))?
     );

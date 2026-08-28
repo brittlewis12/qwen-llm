@@ -6,6 +6,54 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-28 - Flash-Next Selected Runtime: Residues GO, Full Chunk NO-GO
+
+Status: selected composition and multi-command scheduling are available behind
+default-off `QWEN4EXP_PACKED_SELECTED_QSA=1`. Transaction topology and released
+two-to-four-row selected residues are qualified; a full selected chunk fails the
+local scalar numerical gate and must remain experimental.
+
+- Ordinary, detailed-profiled, and stage-sampled post-PLE routes now use the
+  selected-capable QSA motor. Because all 12 QSA layers share one packed scratch,
+  every layer and band issues a GPU-ordered reset immediately before its packet
+  and audit. Synthetic multi-command sessions lock ownership, state, abandon,
+  replay, and scalar handoff behavior.
+- The runner preplans every range before causal mutation, reuses the 2,048-row
+  scratch, splits exactly at dense width 2,051, validates each published
+  endpoint, and reports aggregate packed tokens. With the gate absent, it packs
+  through 2,051 and scalarizes selected overflow exactly as before.
+- The first released full-logit comparison found a `1.065e-1` relative-RMS gap
+  at selected `N=2`. Causal arms localized it to the Q8_0 QSA output projection:
+  the generic 32-column half-staged tile was insufficient for this residue.
+  One exact token-axis Q8 GEMV now covers total command rows 2-4 only. At the
+  released 6144-to-2560 shape it is bit-identical to sequential GEMV and faster:
+  12-layer GPU is `0.39/0.56/0.74 ms` versus generic
+  `2.57/2.59/2.58 ms` at N=2/3/4.
+- Released N=2,053/2,054/2,055 endpoint rows now match default-safe execution at
+  `4.077e-4/3.211e-4/2.578e-4` relative RMS; one scalar continuation is
+  `1.070e-4/6.975e-5/8.850e-5`. All endpoint and continuation argmax IDs match,
+  and each selected command has exactly 12 exact Q8 output dispatches.
+- The N=4,099 promotion falsifier is a NO-GO. One 2,048-row selected command
+  reaches `393.5 tok/s` versus `32.7 tok/s` for scalar overflow, but endpoint
+  relative RMS is `6.547e-2` and continuation is `1.489e-1`. Exact Q8 output
+  worsened the endpoint to `8.344e-2`; splitting the suffix into 64 commands of
+  32 rows reproduced `6.547e-2` while slowing to `160.1 tok/s`. Both arms are
+  closed.
+- This is not selected-QSA-specific. Ordinary dense N=2,048 packed execution is
+  `8.563e-2` from 2,048 singleton steps at the endpoint and `1.701e-1` after one
+  continuation, with matching argmax IDs. Existing long packed qualification
+  was component-level plus finite-output/handoff evidence, not a full-session
+  scalar-logit claim.
+- Merged llama.cpp build 10666 (`4e97ac86e`) tokenized the exact same sequence
+  and matched all four N=2,048/N=4,099 endpoint and continuation argmax IDs.
+  Its same-quant full rows remain 10.8-25.0% from local scalar/default-safe and
+  11.8-25.4% from local packed rows, so it is an independent architecture and
+  greedy anchor, not the missing upstream BF16 numerical oracle.
+- Do not widen the local envelope or resume projection override matrices. Pin
+  upstream BF16 complete-vocabulary rows for a short prompt and a natural prompt
+  above 4,096 tokens before changing the selected default or assigning quality
+  authority to either local numerical route.
+
 ## 2026-08-27 - Flash-Next Private Multi-Band Selected QSA Motor
 
 Status: qualify reusable 32-row selected bands inside the private layer motor;

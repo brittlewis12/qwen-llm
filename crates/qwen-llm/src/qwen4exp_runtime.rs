@@ -25,7 +25,52 @@ use crate::qwen4exp_text_session::{
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDevice};
+use std::ops::Range;
 use std::time::Instant;
+
+crate::env_flag!(
+    default_off configured_qwen4exp_packed_selected_qsa_enabled,
+    "QWEN4EXP_PACKED_SELECTED_QSA"
+);
+
+#[cfg(test)]
+thread_local! {
+    static QWEN4EXP_PACKED_SELECTED_QSA_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+fn qwen4exp_packed_selected_qsa_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = QWEN4EXP_PACKED_SELECTED_QSA_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
+    configured_qwen4exp_packed_selected_qsa_enabled()
+}
+
+#[cfg(test)]
+struct Qwen4ExpPackedSelectedQsaOverride {
+    previous: Option<bool>,
+}
+
+#[cfg(test)]
+impl Qwen4ExpPackedSelectedQsaOverride {
+    fn set(enabled: bool) -> Self {
+        let previous = QWEN4EXP_PACKED_SELECTED_QSA_OVERRIDE.with(|slot| {
+            let previous = slot.get();
+            slot.set(Some(enabled));
+            previous
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Qwen4ExpPackedSelectedQsaOverride {
+    fn drop(&mut self) {
+        QWEN4EXP_PACKED_SELECTED_QSA_OVERRIDE.with(|slot| slot.set(self.previous));
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpRuntimeError {
@@ -140,13 +185,85 @@ impl Qwen4ExpTokenTiming {
 #[derive(Clone, Copy, Debug)]
 pub struct Qwen4ExpPrefillTiming {
     pub token_count: usize,
+    /// Total tokens encoded by all packed commands in this prefill.
     pub packed_token_count: usize,
+    /// Whether any packed command crossed the QSA dense boundary.
+    pub contains_selection: bool,
     pub command_count: usize,
     pub encode_cpu_ms: f64,
     pub completion_wait_ms: f64,
     pub gpu_ms: f64,
     pub gpu_samples: usize,
     pub total_wall_ms: f64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Qwen4ExpPrefillExecutionPlan {
+    packed_ranges: Vec<Range<usize>>,
+    packed_token_count: usize,
+    scalar_start: usize,
+    contains_selection: bool,
+}
+
+fn plan_qwen4exp_prefill_execution(
+    token_count: usize,
+    packed_capacity: Option<usize>,
+    selected_enabled: bool,
+    dense_end: usize,
+) -> Result<Qwen4ExpPrefillExecutionPlan, Qwen4ExpRuntimeError> {
+    if token_count == 0 {
+        return invalid("prefill execution plan requires at least one token");
+    }
+    if dense_end == 0 {
+        return invalid("prefill execution plan requires a nonzero QSA dense end");
+    }
+    if packed_capacity.is_none() && selected_enabled {
+        return invalid("selected packed execution requires packed scratch");
+    }
+    let Some(packed_capacity) = packed_capacity else {
+        return Ok(Qwen4ExpPrefillExecutionPlan {
+            packed_ranges: Vec::new(),
+            packed_token_count: 0,
+            scalar_start: 0,
+            contains_selection: false,
+        });
+    };
+    if packed_capacity < 2 {
+        return invalid(format!(
+            "packed prefill capacity {packed_capacity} is smaller than two tokens"
+        ));
+    }
+    let packed_end = if selected_enabled {
+        token_count
+    } else {
+        token_count.min(dense_end)
+    };
+    let mut packed_ranges = Vec::with_capacity(packed_end.div_ceil(packed_capacity));
+    let mut cursor = 0_usize;
+    while packed_end - cursor >= 2 {
+        let mut rows = (packed_end - cursor).min(packed_capacity);
+        let proposed_end = cursor
+            .checked_add(rows)
+            .ok_or_else(|| Qwen4ExpRuntimeError::Invalid("packed prefill range overflow".into()))?;
+        if selected_enabled && cursor < dense_end && proposed_end > dense_end {
+            let dense_rows = dense_end - cursor;
+            if dense_rows >= 2 {
+                rows = dense_rows;
+            }
+        }
+        let end = cursor
+            .checked_add(rows)
+            .ok_or_else(|| Qwen4ExpRuntimeError::Invalid("packed prefill range overflow".into()))?;
+        packed_ranges.push(cursor..end);
+        cursor = end;
+    }
+    let contains_selection = packed_ranges.iter().any(|range| range.end > dense_end);
+    Ok(Qwen4ExpPrefillExecutionPlan {
+        packed_ranges,
+        packed_token_count: cursor,
+        scalar_start: cursor,
+        contains_selection,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -229,10 +346,11 @@ pub struct Qwen4ExpPackedProfileOutcome {
 }
 
 impl Qwen4ExpPrefillTiming {
-    fn new(token_count: usize, packed_token_count: usize) -> Self {
+    fn new(token_count: usize, packed_token_count: usize, contains_selection: bool) -> Self {
         Self {
             token_count,
             packed_token_count,
+            contains_selection,
             command_count: 0,
             encode_cpu_ms: 0.0,
             completion_wait_ms: 0.0,
@@ -317,6 +435,10 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         Self::load_with_options(ctx, gguf, capacity, None)
     }
 
+    /// Admit reusable packed scratch for a prompt of this extent. The extent
+    /// is an allocation hint, not a later request-length lock; longer requests
+    /// remain valid within the forward limit but may scalarize unadmitted
+    /// selected-range rows.
     pub fn load_with_packed_prefill(
         ctx: &MetalContext,
         gguf: &'gguf GgufFile,
@@ -436,6 +558,14 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         self.workspace
             .as_ref()
             .is_some_and(Qwen4ExpTextSessionMetalWorkspace::packed_selected_capable)
+    }
+
+    pub fn packed_selected_requested(&self) -> bool {
+        qwen4exp_packed_selected_qsa_enabled()
+    }
+
+    pub fn packed_selected_active(&self) -> bool {
+        self.packed_selected_requested() && self.packed_selected_capable()
     }
 
     pub fn create_runner<'ctx, 'model>(
@@ -567,23 +697,41 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         self.last_prefill_timing = None;
         self.validate_prefill_request(token_ids)?;
         let start = self.next_position();
-        let packed_tokens = self
-            .workspace
-            .packed_prefill_capacity()
-            .unwrap_or(0)
-            .min(token_ids.len());
-        let packed_tokens = if packed_tokens >= 2 { packed_tokens } else { 0 };
-        let mut prefill_timing = Qwen4ExpPrefillTiming::new(token_ids.len(), packed_tokens);
-        if packed_tokens != 0 {
+        let selected_enabled =
+            self.workspace.packed_selected_capable() && qwen4exp_packed_selected_qsa_enabled();
+        let plan = plan_qwen4exp_prefill_execution(
+            token_ids.len(),
+            self.workspace.packed_prefill_capacity(),
+            selected_enabled,
+            self.packed_qsa_dense_end()?,
+        )?;
+        debug_assert!(!plan.contains_selection || selected_enabled);
+        let mut prefill_timing = Qwen4ExpPrefillTiming::new(
+            token_ids.len(),
+            plan.packed_token_count,
+            plan.contains_selection,
+        );
+        for range in &plan.packed_ranges {
             self.run_prefill_checkpoint(start, token_ids.len(), &mut checkpoint)?;
             match execute_qwen4exp_text_packed_sync(
                 self.ctx,
-                &token_ids[..packed_tokens],
+                &token_ids[range.clone()],
                 self.ple_table,
                 &self.weights,
                 &mut self.workspace,
             ) {
                 Ok(timing) => {
+                    if self.next_position() != range.end {
+                        return Err(Qwen4ExpRuntimeError::Prefill {
+                            committed: self.next_position().saturating_sub(start),
+                            requested: token_ids.len(),
+                            source: Box::new(Qwen4ExpRuntimeError::Invalid(format!(
+                                "packed command published position {}, expected {}",
+                                self.next_position(),
+                                range.end
+                            ))),
+                        });
+                    }
                     self.last_token_timing = None;
                     prefill_timing.record(timing);
                 }
@@ -596,7 +744,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
                 }
             }
         }
-        for &token_id in &token_ids[packed_tokens..] {
+        for (index, &token_id) in token_ids[plan.scalar_start..].iter().enumerate() {
             self.run_prefill_checkpoint(start, token_ids.len(), &mut checkpoint)?;
             match execute_qwen4exp_text_token_sync(
                 self.ctx,
@@ -606,6 +754,17 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
                 &mut self.workspace,
             ) {
                 Ok(timing) => {
+                    let expected = plan.scalar_start + index + 1;
+                    if self.next_position() != expected {
+                        return Err(Qwen4ExpRuntimeError::Prefill {
+                            committed: self.next_position().saturating_sub(start),
+                            requested: token_ids.len(),
+                            source: Box::new(Qwen4ExpRuntimeError::Invalid(format!(
+                                "scalar command published position {}, expected {expected}",
+                                self.next_position()
+                            ))),
+                        });
+                    }
                     self.last_token_timing = Some(timing);
                     prefill_timing.record(timing);
                 }
@@ -655,7 +814,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
             }
         };
         self.last_token_timing = None;
-        let mut timing = Qwen4ExpPrefillTiming::new(token_ids.len(), token_ids.len());
+        let mut timing = Qwen4ExpPrefillTiming::new(token_ids.len(), token_ids.len(), false);
         timing.record(outcome.token);
         self.last_prefill_timing = Some(timing);
         Ok(outcome)
@@ -686,6 +845,20 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
             })?;
         }
         Ok(())
+    }
+
+    fn packed_qsa_dense_end(&self) -> Result<usize, Qwen4ExpRuntimeError> {
+        self.weights
+            .geometry
+            .post_ple()
+            .iter()
+            .filter_map(|block| block.mixer().qsa().map(|qsa| qsa.output_width()))
+            .min()
+            .ok_or_else(|| {
+                Qwen4ExpRuntimeError::Invalid(
+                    "packed prefill requires at least one QSA layer".into(),
+                )
+            })
     }
 
     fn run_prefill_checkpoint<F>(
@@ -1398,7 +1571,11 @@ mod tests {
             .unwrap()
     }
 
-    fn assert_logit_arms_close(label: &str, baseline: &[f32], candidate: &[f32]) {
+    fn report_logit_arms(
+        label: &str,
+        baseline: &[f32],
+        candidate: &[f32],
+    ) -> (bool, f64, f64, f32) {
         assert_eq!(baseline.len(), candidate.len());
         assert!(
             baseline
@@ -1428,10 +1605,33 @@ mod tests {
             argmax(baseline),
             argmax(candidate),
         );
-        assert_eq!(argmax(baseline), argmax(candidate), "{label} argmax");
+        (
+            argmax(baseline) == argmax(candidate),
+            cosine,
+            relative_rms,
+            max_abs,
+        )
+    }
+
+    fn assert_logit_arms_close(label: &str, baseline: &[f32], candidate: &[f32]) {
+        let (argmax_equal, cosine, relative_rms, max_abs) =
+            report_logit_arms(label, baseline, candidate);
+        assert!(argmax_equal, "{label} argmax");
         assert!(cosine > 0.999_999_99, "{label} cosine {cosine}");
         assert!(relative_rms < 1e-4, "{label} relative RMS {relative_rms}");
         assert!(max_abs < 1e-3, "{label} maximum delta {max_abs}");
+    }
+
+    fn assert_released_packed_logit_arms_close(label: &str, baseline: &[f32], candidate: &[f32]) {
+        let (argmax_equal, cosine, relative_rms, max_abs) =
+            report_logit_arms(label, baseline, candidate);
+        assert!(argmax_equal, "{label} argmax");
+        assert!(cosine >= 0.999_9, "{label} cosine {cosine}");
+        assert!(
+            relative_rms <= 1.5e-2,
+            "{label} relative RMS {relative_rms}"
+        );
+        assert!(max_abs <= 0.2, "{label} maximum delta {max_abs}");
     }
 
     fn assert_f32_bits_eq(label: &str, baseline: &[f32], candidate: &[f32]) {
@@ -2554,8 +2754,83 @@ mod tests {
     }
 
     #[test]
+    fn prefill_plan_chunks_dense_and_selected_ranges_before_execution() {
+        const C: usize = 2_048;
+        const D: usize = 2_051;
+        let cases = [
+            (C, false, vec![0..C], C, false),
+            (C + 1, false, vec![0..C], C, false),
+            (
+                2 * C - 1,
+                true,
+                vec![0..C, C..D, D..2 * C - 1],
+                2 * C - 1,
+                true,
+            ),
+            (2 * C, true, vec![0..C, C..D, D..2 * C], 2 * C, true),
+            (
+                2 * C + 1,
+                true,
+                vec![0..C, C..D, D..2 * C + 1],
+                2 * C + 1,
+                true,
+            ),
+            (D - 1, false, vec![0..C, C..D - 1], D - 1, false),
+            (D, false, vec![0..C, C..D], D, false),
+            (D + 1, false, vec![0..C, C..D], D, false),
+            (D + 1, true, vec![0..C, C..D], D, false),
+            (D + 2, true, vec![0..C, C..D, D..D + 2], D + 2, true),
+            (D + C + 1, true, vec![0..C, C..D, D..D + C], D + C, true),
+        ];
+        for (tokens, selected_enabled, ranges, scalar_start, contains_selection) in cases {
+            let plan =
+                plan_qwen4exp_prefill_execution(tokens, Some(C), selected_enabled, D).unwrap();
+            assert_eq!(plan.packed_ranges, ranges, "tokens={tokens}");
+            assert_eq!(plan.packed_token_count, scalar_start, "tokens={tokens}");
+            assert_eq!(plan.scalar_start, scalar_start, "tokens={tokens}");
+            assert_eq!(
+                plan.contains_selection, contains_selection,
+                "tokens={tokens}"
+            );
+            assert!(plan.packed_ranges.iter().all(|range| {
+                (2..=C).contains(&(range.end - range.start)) && (selected_enabled || range.end <= D)
+            }));
+        }
+
+        let scalar = plan_qwen4exp_prefill_execution(18, None, false, D).unwrap();
+        assert!(scalar.packed_ranges.is_empty());
+        assert_eq!((scalar.packed_token_count, scalar.scalar_start), (0, 0));
+
+        let under_hinted = plan_qwen4exp_prefill_execution(3_000, Some(100), false, D).unwrap();
+        assert_eq!(under_hinted.packed_ranges.len(), 21);
+        assert_eq!(under_hinted.packed_ranges.last(), Some(&(2_000..D)));
+        assert_eq!(under_hinted.scalar_start, D);
+        assert!(!under_hinted.contains_selection);
+
+        assert!(plan_qwen4exp_prefill_execution(0, Some(C), true, D).is_err());
+        assert!(plan_qwen4exp_prefill_execution(2, Some(1), false, D).is_err());
+        assert!(plan_qwen4exp_prefill_execution(2, None, true, D).is_err());
+        assert!(plan_qwen4exp_prefill_execution(2, Some(C), false, 0).is_err());
+    }
+
+    #[test]
+    fn selected_prefill_execution_requires_explicit_runtime_opt_in() {
+        let configured = qwen4exp_packed_selected_qsa_enabled();
+        {
+            let _override = Qwen4ExpPackedSelectedQsaOverride::set(false);
+            assert!(!qwen4exp_packed_selected_qsa_enabled());
+        }
+        assert_eq!(qwen4exp_packed_selected_qsa_enabled(), configured);
+        {
+            let _override = Qwen4ExpPackedSelectedQsaOverride::set(true);
+            assert!(qwen4exp_packed_selected_qsa_enabled());
+        }
+        assert_eq!(qwen4exp_packed_selected_qsa_enabled(), configured);
+    }
+
+    #[test]
     fn prefill_timing_retains_partial_gpu_coverage() {
-        let mut timing = Qwen4ExpPrefillTiming::new(2_050, 2_048);
+        let mut timing = Qwen4ExpPrefillTiming::new(4_097, 4_096, false);
         timing.record(Qwen4ExpTokenTiming {
             position: 2_047,
             encode_cpu_ms: 1.0,
@@ -2564,16 +2839,25 @@ mod tests {
             total_wall_ms: 5.0,
         });
         timing.record(Qwen4ExpTokenTiming {
-            position: 2_048,
+            position: 4_095,
+            encode_cpu_ms: 1.0,
+            completion_wait_ms: 4.0,
+            gpu_ms: Some(3.5),
+            total_wall_ms: 5.0,
+        });
+        timing.record(Qwen4ExpTokenTiming {
+            position: 4_096,
             encode_cpu_ms: 1.0,
             completion_wait_ms: 4.0,
             gpu_ms: None,
             total_wall_ms: 5.0,
         });
-        assert_eq!(timing.token_count, 2_050);
-        assert_eq!(timing.packed_token_count, 2_048);
-        assert_eq!((timing.gpu_samples, timing.command_count), (1, 2));
-        assert_eq!(timing.gpu_ms, 3.0);
+        assert_eq!(timing.token_count, 4_097);
+        assert_eq!(timing.packed_token_count, 4_096);
+        assert!(!timing.contains_selection);
+        assert_eq!(timing.token_count - timing.packed_token_count, 1);
+        assert_eq!((timing.gpu_samples, timing.command_count), (2, 3));
+        assert_eq!(timing.gpu_ms, 6.5);
         assert_eq!(timing.complete_gpu_ms(), None);
         assert_eq!(timing.outside_gpu_ms(), None);
     }
@@ -2779,6 +3063,199 @@ mod tests {
         assert!(profile.encoder_boundary_ms >= 0.0);
         let replay = runner.logits().unwrap().to_vec();
         assert_eq!(first, replay);
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_RUNTIME_GGUF to the pinned full release"]
+    fn released_selected_prefill_scheduler_crosses_dense_boundary() {
+        const PROMPT_LENGTHS: [usize; 3] = [2_053, 2_054, 2_055];
+        const MAX_PROMPT_TOKENS: usize = 2_055;
+
+        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
+            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+        let tokenizer = Tokenizer::from_gguf(&gguf).expect("load released tokenizer");
+        let seed = tokenizer
+            .encode(
+                "A careful systems test checks every causal boundary.\n",
+                false,
+            )
+            .unwrap();
+        assert!(seed.len() > 1);
+        let tokens = seed
+            .iter()
+            .copied()
+            .cycle()
+            .take(MAX_PROMPT_TOKENS)
+            .map(|token| u32::try_from(token).unwrap())
+            .collect::<Vec<_>>();
+        let ctx = MetalContext::new().expect("initialize Metal");
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(
+            &Qwen4ExpConfig::flash_next_reference(),
+            MAX_PROMPT_TOKENS + 1,
+        )
+        .unwrap();
+        let mut loaded =
+            Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, MAX_PROMPT_TOKENS)
+                .unwrap();
+        assert_eq!(loaded.packed_prefill_capacity(), Some(2_048));
+        assert!(loaded.packed_selected_capable());
+        {
+            let _selected_override = Qwen4ExpPackedSelectedQsaOverride::set(false);
+            assert!(!loaded.packed_selected_requested());
+            assert!(!loaded.packed_selected_active());
+        }
+        {
+            let _selected_override = Qwen4ExpPackedSelectedQsaOverride::set(true);
+            assert!(loaded.packed_selected_requested());
+            assert!(loaded.packed_selected_active());
+        }
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+        let selected_packet = [
+            "kernel_qwen4exp_qsa_reset_selected_controls_i32",
+            "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+            "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
+            "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+            "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+            "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+            "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+            "kernel_qwen4exp_qsa_audit_selected_i32",
+        ];
+        assert!(crate::metal::mat_vec_q8_0_lcpp_enabled());
+
+        for prompt_tokens in PROMPT_LENGTHS {
+            runner.reset().unwrap();
+            let prompt = &tokens[..prompt_tokens];
+            let (default_logits, default_continuation) = {
+                let _selected_override = Qwen4ExpPackedSelectedQsaOverride::set(false);
+                crate::metal::dispatch_census_begin();
+                let logits = runner.prefill(prompt).unwrap().to_vec();
+                let census = crate::metal::dispatch_census_take();
+                let timing = runner.last_prefill_timing().unwrap();
+                assert_eq!(timing.token_count, prompt_tokens);
+                assert_eq!(timing.packed_token_count, 2_051);
+                assert!(!timing.contains_selection);
+                assert_eq!(timing.command_count, 2 + prompt_tokens - 2_051);
+                assert_eq!(
+                    timing.token_count - timing.packed_token_count,
+                    prompt_tokens - 2_051
+                );
+                assert!(runner.last_token_timing().is_some());
+                assert_eq!(runner.next_position(), prompt_tokens);
+                assert!(
+                    runner
+                        .workspace
+                        .qsa_committed_lengths()
+                        .iter()
+                        .all(|(_, length)| *length == prompt_tokens)
+                );
+                assert!(!census.iter().any(|row| {
+                    row.kernel == "kernel_qwen4exp_qsa_reset_selected_controls_i32"
+                }));
+                eprintln!(
+                    "released default scheduler: tokens={prompt_tokens} commands={} packed_tokens={} wall_ms={:.3} gpu_ms={:?} tok/s={:.3}",
+                    timing.command_count,
+                    timing.packed_token_count,
+                    timing.total_wall_ms,
+                    timing.complete_gpu_ms(),
+                    prompt_tokens as f64 / (timing.total_wall_ms / 1e3)
+                );
+                let continuation = runner.forward_token(tokens[0]).unwrap().to_vec();
+                (logits, continuation)
+            };
+
+            runner.reset().unwrap();
+            let (selected_logits, selected_continuation) = {
+                let _selected_override = Qwen4ExpPackedSelectedQsaOverride::set(true);
+                crate::metal::dispatch_census_begin();
+                let logits = runner.prefill(prompt).unwrap().to_vec();
+                let census = crate::metal::dispatch_census_take();
+                let timing = runner.last_prefill_timing().unwrap();
+                assert_eq!(timing.token_count, prompt_tokens);
+                assert_eq!(timing.packed_token_count, prompt_tokens);
+                assert!(timing.contains_selection);
+                assert_eq!(timing.command_count, 3);
+                assert_eq!(timing.token_count - timing.packed_token_count, 0);
+                assert_eq!(runner.next_position(), prompt_tokens);
+                assert!(
+                    runner
+                        .workspace
+                        .qsa_committed_lengths()
+                        .iter()
+                        .all(|(_, length)| *length == prompt_tokens)
+                );
+                let selected_rows = prompt_tokens - 2_051;
+                let selected_bands = selected_rows.div_ceil(32);
+                assert_eq!(
+                    census
+                        .iter()
+                        .filter(|row| {
+                            row.kernel == "kernel_qwen4exp_qsa_reset_selected_controls_i32"
+                        })
+                        .count(),
+                    12 * selected_bands
+                );
+                assert_eq!(
+                    census
+                        .iter()
+                        .filter(|row| row.kernel == "kernel_qwen4exp_qsa_audit_selected_i32")
+                        .count(),
+                    12 * selected_bands
+                );
+                for ordinal in 0..selected_bands {
+                    let tag = format!("qwen4exp.qsa.selected_band.{ordinal}");
+                    let selected_dispatches = census
+                        .iter()
+                        .filter(|row| row.tag.as_deref() == Some(tag.as_str()))
+                        .map(|row| row.kernel.as_str())
+                        .collect::<Vec<_>>();
+                    assert_eq!(selected_dispatches.len(), 12 * selected_packet.len());
+                    assert!(
+                        selected_dispatches
+                            .chunks_exact(selected_packet.len())
+                            .all(|packet| packet == selected_packet)
+                    );
+                }
+                let exact_outputs = census
+                    .iter()
+                    .filter(|row| row.kernel == "kernel_mat_vec_q8_0_f32_lcpp_batch")
+                    .collect::<Vec<_>>();
+                assert_eq!(exact_outputs.len(), 12);
+                assert!(
+                    exact_outputs
+                        .iter()
+                        .all(|row| row.grid_height == selected_rows as u64)
+                );
+                eprintln!(
+                    "released selected scheduler: tokens={prompt_tokens} commands={} wall_ms={:.3} gpu_ms={:?} tok/s={:.3}",
+                    timing.command_count,
+                    timing.total_wall_ms,
+                    timing.complete_gpu_ms(),
+                    prompt_tokens as f64 / (timing.total_wall_ms / 1e3)
+                );
+                let continuation = runner.forward_token(tokens[0]).unwrap().to_vec();
+                assert_eq!(runner.next_position(), prompt_tokens + 1);
+                assert!(
+                    runner
+                        .workspace
+                        .qsa_committed_lengths()
+                        .iter()
+                        .all(|(_, length)| *length == prompt_tokens + 1)
+                );
+                (logits, continuation)
+            };
+
+            assert_released_packed_logit_arms_close(
+                &format!("released selected/default N={prompt_tokens} endpoint"),
+                &default_logits,
+                &selected_logits,
+            );
+            assert_released_packed_logit_arms_close(
+                &format!("released selected/default N={prompt_tokens} continuation"),
+                &default_continuation,
+                &selected_continuation,
+            );
+        }
     }
 
     #[test]

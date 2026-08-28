@@ -11,9 +11,9 @@
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     encode_attn_matrix_kq_f32, encode_attn_matrix_kqv_direct_v_f32, encode_attn_matrix_softmax_f32,
-    encode_copy_offset_f32, encode_mat_mat_bf16_f32,
+    encode_copy_offset_f32, encode_mat_mat_bf16_f32, encode_mat_vec_q8_0_batch_f32,
     encode_qk_rms_norm_rope_f32_packed_consecutive, encode_scatter_offset_f32_to_f16_kv,
-    encode_sigmoid_mul_gate_strided_f32,
+    encode_sigmoid_mul_gate_strided_f32, mat_vec_q8_0_lcpp_enabled,
 };
 use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
@@ -2455,6 +2455,27 @@ fn preflight_packed(
         preflight_dense_packed_projection(ctx, weights.index_query.dtype)?;
         preflight_selected_index_primitives(ctx)?;
         preflight_selected_attention_primitives(ctx)?;
+        let tokens = plan.dense_tokens + plan.selected_tokens;
+        if mat_vec_q8_0_lcpp_enabled()
+            && requires_exact_selected_q8_output(
+                weights.geometry,
+                weights.output.dtype,
+                plan,
+                tokens,
+            )
+        {
+            let kernel = "kernel_mat_vec_q8_0_f32_lcpp_batch";
+            let pipeline = ctx.pipeline(kernel)?;
+            validate_cooperative_pipeline_threads(
+                kernel,
+                pipeline.threadExecutionWidth(),
+                pipeline.maxTotalThreadsPerThreadgroup(),
+                128,
+                pipeline.staticThreadgroupMemoryLength(),
+                32 * 2 * size_of::<f32>(),
+                ctx.device.maxThreadgroupMemoryLength(),
+            )?;
+        }
     }
     Ok(())
 }
@@ -2948,6 +2969,46 @@ fn encode_selected_attention_packet(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn encode_projection_scalar_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+) -> Result<(), Qwen4ExpQsaError> {
+    for row in 0..rows {
+        let input_offset = row
+            .checked_mul(n_in)
+            .ok_or_else(|| Qwen4ExpQsaError::Invalid("scalar-row input offset overflow".into()))?;
+        let output_offset = row
+            .checked_mul(n_out)
+            .ok_or_else(|| Qwen4ExpQsaError::Invalid("scalar-row output offset overflow".into()))?;
+        let input_row = input.view_subrange(input_offset as u64, vec![n_in as u64]);
+        let output_row = output.view_subrange(output_offset as u64, vec![n_out as u64]);
+        encode_mat_vec_dispatch(ctx, enc, weight, &input_row, &output_row, n_in, n_out)?;
+    }
+    Ok(())
+}
+
+fn requires_exact_selected_q8_output(
+    geometry: QwenSparseAttentionMetalGeometry,
+    output_dtype: GgmlType,
+    plan: QwenSparseAttentionPackedRangePlan,
+    tokens: usize,
+) -> bool {
+    // The generic Q8_0 mat-mat half-stages a physical 32-column tile. At the
+    // released QSA shape its N=2..4 error is amplified by selected continuation.
+    plan.selected_tokens > 0
+        && (2..=4).contains(&tokens)
+        && output_dtype == GgmlType::Q8_0
+        && geometry.query_width() == 6_144
+        && geometry.hidden_size == 2_560
+}
+
+#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn encode_packed_step(
     ctx: &MetalContext,
@@ -3356,16 +3417,42 @@ fn encode_packed_step(
     )?;
     let output_tag =
         crate::metal::dispatch_census_tag_scope(|| "qwen4exp.qsa.output_projection".into());
-    encode_mat_mat_dispatch(
-        ctx,
-        enc,
-        weights.output,
-        &views.attention,
-        &views.output,
-        g.query_width(),
-        g.hidden_size,
-        tokens,
-    )?;
+    if requires_exact_selected_q8_output(g, weights.output.dtype, plan, tokens) {
+        if mat_vec_q8_0_lcpp_enabled() {
+            encode_mat_vec_q8_0_batch_f32(
+                ctx,
+                enc,
+                weights.output,
+                &views.attention,
+                &views.output,
+                g.query_width(),
+                g.hidden_size,
+                tokens,
+            )?;
+        } else {
+            encode_projection_scalar_rows(
+                ctx,
+                enc,
+                weights.output,
+                &views.attention,
+                &views.output,
+                g.query_width(),
+                g.hidden_size,
+                tokens,
+            )?;
+        }
+    } else {
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            weights.output,
+            &views.attention,
+            &views.output,
+            g.query_width(),
+            g.hidden_size,
+            tokens,
+        )?;
+    }
     drop(output_tag);
     end_optional(&mut profile, enc, marker)?;
     Ok(())
@@ -6113,6 +6200,50 @@ mod tests {
                 selected_bands: 1,
             }
         );
+        let mixed_n2 = production.plan_packed_range(2_050, 2).unwrap();
+        let selected_n2 = production.plan_packed_range(2_051, 2).unwrap();
+        assert!(requires_exact_selected_q8_output(
+            production,
+            GgmlType::Q8_0,
+            mixed_n2,
+            2,
+        ));
+        assert!(requires_exact_selected_q8_output(
+            production,
+            GgmlType::Q8_0,
+            selected_n2,
+            2,
+        ));
+        assert!(requires_exact_selected_q8_output(
+            production,
+            GgmlType::Q8_0,
+            production.plan_packed_range(2_051, 3).unwrap(),
+            3,
+        ));
+        assert!(requires_exact_selected_q8_output(
+            production,
+            GgmlType::Q8_0,
+            production.plan_packed_range(2_051, 4).unwrap(),
+            4,
+        ));
+        assert!(!requires_exact_selected_q8_output(
+            production,
+            GgmlType::Q8_0,
+            production.plan_packed_range(2_051, 5).unwrap(),
+            5,
+        ));
+        assert!(!requires_exact_selected_q8_output(
+            production,
+            GgmlType::Q8_0,
+            production.plan_packed_range(2_049, 2).unwrap(),
+            2,
+        ));
+        assert!(!requires_exact_selected_q8_output(
+            production,
+            GgmlType::F32,
+            selected_n2,
+            2,
+        ));
         let allocations = production.packed_scratch_logical_allocations(18).unwrap();
         let score_bytes = allocations[6];
         assert_eq!(score_bytes, 2_051 * 24 * 18 * size_of::<f32>());

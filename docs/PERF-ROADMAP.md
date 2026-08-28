@@ -215,16 +215,29 @@ dispatches from each of 36 GDN layers but saved only `0.0419 ms` at the median;
 its bootstrap upper bound was `0.3090 ms`, below the predeclared `0.4 ms` kill
 gate. The experiment is removed. Do not infer a large decode win from launch
 count alone when the fusion leaves all material weight and activation traffic
-intact. The force-ranked lane is now:
+intact.
 
-1. Extend packed QSA through the selected-attention range above 2,048 tokens.
-   Dense packed prefill currently hands every overflow token to scalar commands,
-   so long prompts retain a product-defining throughput cliff. Preserve the
-   scalar cache owners and use scalar selected attention as the exact reference.
-   Prototyping may precede the upstream oracle; promotion may not.
-2. Pin the upstream full-logit row for the HELLO boundary and one selected-QSA
-   row above 4,096 tokens so packed qualification no longer rests solely on the
-   local scalar engine.
+Selected-range composition is structurally complete, but full-chunk numerical
+promotion is a NO-GO. Released selected commands with total N=2-4 pass local
+full-logit and continuation gates after an exact Q8 output residue route. At
+N=4,099, one packed 2,048-row selected suffix is `6.547e-2` from default-safe
+execution at the endpoint and `1.489e-1` after one continuation. Exact Q8 output
+worsens it; 64 commands of 32 rows reproduce the endpoint, ruling out full-chunk
+width and band seams. Ordinary dense N=2,048 packed composition is already
+`8.563e-2` from singleton execution, so the scalar envelope is not a
+selected-specific discriminator at long N. Merged llama.cpp matches all tested
+argmax IDs but its same-quant full rows are also materially separated from both
+local routes. The force-ranked lane is now:
+
+1. Pin upstream BF16 complete-vocabulary rows for the short HELLO boundary and
+   one natural selected-QSA prompt above 4,096 tokens. Preserve exact token IDs
+   and compare upstream against local singleton/default-safe, dense packed, and
+   packed-selected rows before assigning numerical authority.
+2. Use that oracle to choose the next correctness action. If packed-selected is
+   inside the accepted upstream error distribution, define an explicit
+   approximate-prefill quality policy and run broader greedy/eval gates. If it
+   is not, instrument the earliest MoE top-10 and QSA top-512 divergence; do not
+   resume a projection override matrix without that trace.
 3. Run an internal-SSD cold first-touch control. Keep storage/residency work
    separate from warm kernel claims; warm packed execution is already >99% GPU.
 4. Add one natural mid-N attribution point before interactive-shape or MTP
@@ -240,11 +253,8 @@ intact. The force-ranked lane is now:
 7. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
    sum analogue of the existing Q8 fused path. Require at least `0.5 ms/token`
    median command-GPU saving with a positive paired direction.
-8. Then test each Q8 HC down projection with its low-SiLU epilogue because it
-   also removes a scratch pass; preserve exact Q8 reduction and branch scaling.
-9. Consider shared-MoE down plus gated accumulation only if the HC result
-   supports epilogue fusion; its routed-output read/modify/write dependency
-   makes it the riskier candidate.
+8. Then test Q8 HC down plus low-SiLU; consider shared-MoE down plus gated
+   accumulation only if that result supports epilogue fusion.
 
 Packed-prefill S1 is closed at released `16/48/128` GDN geometry. For one and
 two token rows, the existing packed convolution/SiLU prep, paired L2 norm,
@@ -254,50 +264,51 @@ optional parallel prep kernel remains outside this proof and must stay disabled
 for the Flash-Next lane until separately qualified. This checkpoint led into
 the now-complete packed PLE, HC, MoE, and QSA motors.
 
-Dense packed QSA is now closed through a total sequence length of 2,051, the
-last query before block selection is required. N=1 delegates exactly;
-N=2/8/16/33/64, the three-token dense shoulder, and all modulo-4 continuation
-residues retain the scalar cache state. Multi-token selected suffixes remain
-fail-closed before dispatch. Released Q8/BF16 layer-3 rows qualify every
-production small-N projection route. Keep F32 activations for the persistent
-BF16 index-key projection.
+The private packed QSA motor is closed at its component and transaction
+boundaries across dense and selected ranges. Dense N=1/2/8/16/33/64, the
+three-token shoulder through sequence length 2,051, and all modulo-four residues
+retain scalar state. Selected index and gathered-attention packets preserve
+lower-ID ties, cache order, failure status, released BF16-weight/F32-activation
+projection routes, and scalar arithmetic at B=1/32. Mixed one-band and reusable
+`32+1`/`32+32` motors match chronological scalar outputs and persistent state.
+Ordered audits prevent stale, failed, duplicate, or missing rows from publishing
+committed length. This does not claim 48-layer full-logit equivalence after a
+2,048-row packed horizon; the N=4,099 falsifier above explicitly rejects that
+stronger interpretation.
 
-The full dense packed session is now closed internally. One command composes
-all 48 layers and final logits into the existing scalar GDN, PLE, and QSA state
-owners; the first scalar continuation requires no state copy or migration.
-Packed PLE stages IQ4_NL rows and dequantizes them on GPU. The opt-in 2,048-row
-activation sidecar keeps a 55-allocation dense-only plan for prompts through
-length 2,051. Longer prompt plans add nine 32-query-band selected-QSA buffers;
-the maximum selection-capable inventory is 64 allocations and 1,917,948,672
-logical bytes. Scalar-only plans preserve their previous inventory. The dormant
-selected-index packet is now internally qualified over one 32-query band: packed
-norm/RoPE and scores match repeated scalar kernels byte-for-byte across the
-visible-block 8-to-9 boundary, while the shared radix selector and parallel
-expansion preserve lower-ID ties, cache order, failure status, and all
-modulo-four tails. Its tagged topology is exactly four dispatches. The dormant
-selected-attention continuation is now qualified at production stride 2,051:
-four-head K-sharing logits plus scalar-order softmax/value/qgate match repeated
-scalar kernels byte-for-byte at B=1 and B=32, and exact six-dispatch grids are
-locked. Invalid metadata and future IDs fail without cache reads. Persistent
-publication and completion auditing now compose one selected band inside a
-private layer motor. Mixed three-dense/one-selected and fully selected rows
-match scalar output and persistent state; B=32 preserves the released BF16
-index-query/F32-activation route. Sticky audit witnesses prevent stale, missing,
-or failed rows from publishing committed length. Multi-band reuse is now also
-closed internally: mixed `32+1` and fully selected `32+32` bands use one
-full-suffix projection, band-relative raw-query views, one reset per reused
-band, and ordered audits that cannot trade a duplicate for missing work. The
-outer dense motor, post-PLE composition, session, and production selected route
-remain closed until one complete all-layer selected chunk is qualified.
-Released N=2,048 measures 457.229 tok/s wall, and four scalar
-continuations cross into QSA selection at length 2,052 with all state bindings
-and 12 cache lengths intact. Runtime and CLI promotion is now closed. Unprofiled
-prompts of two or more tokens request packed execution; scratch admission
-follows actual prompt extent rather than the full decode budget and visibly
-falls back to scalar if the packed-only plan cannot load. The runtime still
-submits one dense prefix command, checks shutdown before every scalar overflow
-command, and reports the actual packed/scalar split. Released 18-token HELLO
-runs retain output and scalar decode handoff.
+The complete packed session now composes selected chunks through all 48 layers
+and final logits while retaining the scalar GDN, PLE, and QSA state owners.
+Because all 12 QSA layers reuse one scratch allocation inside the same command,
+every selected band now starts with a GPU-ordered control reset; host band-zero
+sentinels alone were insufficient. Ordinary and stage-sampled two-QSA gates lock
+the reset-to-packet-to-audit order. Dense-only plans retain 55 allocations;
+selected-capable plans add nine 32-query-band buffers for a 64-allocation,
+1,917,948,672-logical-byte maximum sidecar.
+
+The synchronous runner preplans consecutive commands against the reusable
+2,048-row cap before causal mutation. Selected-capable opt-in execution packs
+every eligible multirow range; dense-only execution stops at width 2,051 and
+scalarizes the suffix, and a final one-token residue remains scalar. It splits
+exactly at width 2,051 so the first selected command is never accidentally
+hidden inside the dense shoulder. Every command must publish its planned
+endpoint, and timing aggregates packed tokens rather than assuming one packed
+command.
+
+Released N=2,053/2,054/2,055 runs execute `2,048+3+(2/3/4)`, publish all 12 QSA
+owners, lock reset/packet/audit order, and pass complete-vocabulary endpoint plus
+scalar-continuation gates. Their exact Q8 output residue path uses one
+token-axis GEMV dispatch per QSA layer and is scoped to total command N=2-4.
+N=4,099 proves the same scheduler and 64-band topology but fails numerical
+promotion: packed-selected is `6.547e-2` from default-safe at the endpoint.
+Retain its `393.5 tok/s` versus `32.7 tok/s` result as experimental leverage,
+not a qualified performance row.
+
+`QWEN4EXP_PACKED_SELECTED_QSA=1` is explicitly experimental and default-off.
+Without it, the runtime still packs repeated dense chunks and scalarizes selected
+rows. Do not flip the default until upstream BF16 complete-vocabulary logits
+anchor both the short dense prompt and a natural selected endpoint above 4,096
+tokens, followed by an explicit approximate-prefill quality decision. Released
+18-token HELLO runs retain output and scalar decode handoff.
 
 Accepted N=18 and N=2,048 first/warm/profile packets close the broad attribution
 step. Warm outside-GPU time is only `2.026/6.397 ms`; child publication is
@@ -349,7 +360,8 @@ reaching the command. Exact N=2,048 is default on Apple M4 Max with
 `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0` rollback. N=18 saves only
 `0.005791 ms/layer` and regresses warm command GPU, so it remains generic.
 Do not reopen selector/bucket work; the active-panel gate/up screen below is
-closed, and selected-range packed QSA is now the structural priority.
+closed. Selected-range packed QSA is structurally implemented; its upstream
+numerical oracle, not more topology work, is now the correctness priority.
 
 The clean route census at `69e51c9` now separates prompt shape from kernel
 geometry. N=18 puts 80.10% of credited route mass in count 1-8 and reaches only

@@ -109,6 +109,7 @@ const QWEN4EXP_CHAT_TEMPLATE_SHA256: [u8; 32] = [
 ];
 const QWEN4EXP_LAYER_PROFILE_ENV: &str = "QWEN4EXP_LAYER_PROFILE";
 const QWEN4EXP_PACKED_PREFILL_PROFILE_ENV: &str = "QWEN4EXP_PACKED_PREFILL_PROFILE";
+const QWEN4EXP_PACKED_SELECTED_QSA_ENV: &str = "QWEN4EXP_PACKED_SELECTED_QSA";
 const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 #[cfg(feature = "dsv4-diagnostics")]
 const DEEPSEEK_V4_TEMPORAL_WINDOW_ENV: &str = "QWEN_DSV4_TEMPORAL_WINDOW";
@@ -3970,6 +3971,31 @@ fn qwen4exp_logits_bitwise_equal(left: &[f32], right: &[f32]) -> bool {
             .all(|(left, right)| left.to_bits() == right.to_bits())
 }
 
+fn qwen4exp_prefill_execution_mode(
+    packed_profile_enabled: bool,
+    layer_profile_enabled: bool,
+    packed_fallback: bool,
+    packed_tokens: usize,
+    scalar_tail_commands: usize,
+    contains_selection: bool,
+) -> &'static str {
+    if packed_profile_enabled {
+        "packed_profile"
+    } else if layer_profile_enabled {
+        "scalar_profiled"
+    } else if contains_selection {
+        "packed_contains_selection"
+    } else if packed_tokens != 0 && scalar_tail_commands != 0 {
+        "packed_then_scalar"
+    } else if packed_tokens != 0 {
+        "packed_dense"
+    } else if packed_fallback {
+        "scalar_fallback"
+    } else {
+        "scalar"
+    }
+}
+
 fn run_qwen4exp_single_turn(
     model_path: &Path,
     gguf: &GgufFile,
@@ -4088,23 +4114,16 @@ fn run_qwen4exp_single_turn(
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();
     let packed_prefill_capacity = loaded.packed_prefill_capacity();
-    let prefill_mode = if packed_profile_enabled {
-        "packed_profile"
-    } else if layer_profile_enabled {
-        "scalar_profiled"
-    } else if let Some(packed_capacity) = packed_prefill_capacity {
-        if prompt_tokens.len() > packed_capacity {
-            "packed_dense_then_scalar"
-        } else {
-            "packed_dense"
-        }
-    } else if packed_fallback {
-        "scalar_fallback"
-    } else {
-        "scalar"
-    };
+    let packed_selected_requested = loaded.packed_selected_requested();
+    let packed_selected_capable = loaded.packed_selected_capable();
+    let packed_selected_active = loaded.packed_selected_active();
+    if packed_selected_requested {
+        eprintln!(
+            "qwen4exp: experimental selected-range packed QSA requested via {QWEN4EXP_PACKED_SELECTED_QSA_ENV}; capable={packed_selected_capable} active={packed_selected_active}"
+        );
+    }
     eprintln!(
-        "qwen4exp: resident on {} in {:.1} ms; prefill_mode={prefill_mode} packed_prefill_capacity={packed_prefill_capacity:?} aggregate_required={:?} weight_observed={} session_observed={} session_required={:?}",
+        "qwen4exp: resident on {} in {:.1} ms; packed_prefill_capacity={packed_prefill_capacity:?} packed_selected_requested={packed_selected_requested} packed_selected_capable={packed_selected_capable} packed_selected_active={packed_selected_active} aggregate_required={:?} weight_observed={} session_observed={} session_required={:?}",
         ctx.describe(),
         load_ms,
         admission.aggregate.required_bytes,
@@ -4121,6 +4140,7 @@ fn run_qwen4exp_single_turn(
     let mut prefill_timing = Qwen4ExpTimingTotals::default();
     let mut prefill_packed_tokens = 0;
     let mut prefill_scalar_tail_commands = prompt_tokens.len();
+    let mut prefill_contains_selection = false;
     let logits = if layer_profile_enabled {
         let mut logits = None;
         for (index, &token) in prompt_tokens.iter().enumerate() {
@@ -4213,7 +4233,8 @@ fn run_qwen4exp_single_turn(
             .expect("successful profiled packed prefill records timing");
         debug_assert_eq!(timing.token_count, prompt_tokens.len());
         prefill_packed_tokens = timing.packed_token_count;
-        prefill_scalar_tail_commands = 0;
+        prefill_scalar_tail_commands = timing.token_count - timing.packed_token_count;
+        prefill_contains_selection = timing.contains_selection;
         prefill_timing.record_prefill(timing);
         let packet_ms = packet_t0.elapsed().as_secs_f64() * 1e3;
         emit_qwen4exp_packed_profile(
@@ -4247,11 +4268,21 @@ fn run_qwen4exp_single_turn(
         debug_assert_eq!(timing.token_count, prompt_tokens.len());
         prefill_packed_tokens = timing.packed_token_count;
         prefill_scalar_tail_commands = timing
-            .command_count
-            .saturating_sub(usize::from(timing.packed_token_count != 0));
+            .token_count
+            .checked_sub(timing.packed_token_count)
+            .expect("packed prefill token count cannot exceed the prompt");
+        prefill_contains_selection = timing.contains_selection;
         prefill_timing.record_prefill(timing);
         logits
     };
+    let prefill_mode = qwen4exp_prefill_execution_mode(
+        packed_profile_enabled,
+        layer_profile_enabled,
+        packed_fallback,
+        prefill_packed_tokens,
+        prefill_scalar_tail_commands,
+        prefill_contains_selection,
+    );
     let prefill_ms =
         measured_prefill_ms.unwrap_or_else(|| prefill_t0.elapsed().as_secs_f64() * 1e3);
     let mut sampler = Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
@@ -11773,6 +11804,22 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn qwen4exp_prefill_mode_reports_execution_not_selected_authority() {
+        assert_eq!(
+            qwen4exp_prefill_execution_mode(false, false, false, 2_051, 1, false),
+            "packed_then_scalar"
+        );
+        assert_eq!(
+            qwen4exp_prefill_execution_mode(false, false, false, 2_053, 0, true),
+            "packed_contains_selection"
+        );
+        assert_eq!(
+            qwen4exp_prefill_execution_mode(false, false, false, 2_048, 0, false),
+            "packed_dense"
+        );
+    }
+
+    #[test]
     fn dflash_uses_serial_tail_when_a_full_verify_block_will_not_fit() {
         const BLOCK: usize = 8;
         const OFF_CTX: usize = 16_384;
@@ -12381,6 +12428,7 @@ mod tests {
         packed.record_prefill(Qwen4ExpPrefillTiming {
             token_count: 2_050,
             packed_token_count: 2_048,
+            contains_selection: false,
             command_count: 3,
             encode_cpu_ms: 7.0,
             completion_wait_ms: 18.0,
@@ -12396,6 +12444,7 @@ mod tests {
         partial.record_prefill(Qwen4ExpPrefillTiming {
             token_count: 2_050,
             packed_token_count: 2_048,
+            contains_selection: false,
             command_count: 3,
             encode_cpu_ms: 7.0,
             completion_wait_ms: 18.0,

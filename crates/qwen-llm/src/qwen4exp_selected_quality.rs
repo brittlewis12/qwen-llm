@@ -1203,6 +1203,7 @@ fn attach_run_binding(
             "semantic_payload_encoding": "serde_json compact UTF-8 over the observation before its binding field",
             "semantic_payload_bytes": semantic_payload.len(),
             "semantic_payload_sha256": semantic_payload_sha256,
+            "semantic_payload_json_compact": String::from_utf8(semantic_payload).unwrap(),
             "domain_utf8": domain,
             "sha256": sha256_bytes(domain.as_bytes()),
         }),
@@ -1877,7 +1878,8 @@ fn validate_source_provenance(root: &Path, fixtures: &ValidatedFixtures) -> Valu
             &["Cargo.toml", "llama-cpp-sys-2"],
         ),
     });
-    let path_dependencies_sha256 = sha256_bytes(&serde_json::to_vec(&path_dependencies).unwrap());
+    let path_dependencies_compact = serde_json::to_vec(&path_dependencies).unwrap();
+    let path_dependencies_sha256 = sha256_bytes(&path_dependencies_compact);
     let packet_dir = "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg";
     let mut required_paths = vec![
         "Cargo.toml".to_string(),
@@ -1887,6 +1889,8 @@ fn validate_source_provenance(root: &Path, fixtures: &ValidatedFixtures) -> Valu
         "crates/qwen-llm/src/qwen4exp_selected_quality.rs".to_string(),
         "crates/qwen-llm/examples/qwen4exp_selected_quality_prepare.rs".to_string(),
         "scripts/bench/qwen4exp_selected_quality_prepare.py".to_string(),
+        "scripts/bench/qwen4exp_selected_quality_analyze.py".to_string(),
+        "scripts/bench/qwen4exp_selected_quality_llama.py".to_string(),
         format!("{packet_dir}/README.md"),
         format!("{packet_dir}/fixtures.json"),
     ];
@@ -1933,6 +1937,8 @@ fn validate_source_provenance(root: &Path, fixtures: &ValidatedFixtures) -> Valu
             "crates/qwen-llm",
             "kernels",
             "scripts/bench/qwen4exp_selected_quality_prepare.py",
+            "scripts/bench/qwen4exp_selected_quality_analyze.py",
+            "scripts/bench/qwen4exp_selected_quality_llama.py",
             packet_dir,
         ],
     );
@@ -1957,6 +1963,7 @@ fn validate_source_provenance(root: &Path, fixtures: &ValidatedFixtures) -> Valu
         "kernel_source_manifest": kernels,
         "kernel_source_manifest_sha256": kernel_source_manifest_sha256,
         "path_dependencies": path_dependencies,
+        "path_dependencies_json_compact": String::from_utf8(path_dependencies_compact).unwrap(),
         "path_dependencies_sha256": path_dependencies_sha256,
         "cleanliness_scope": "all tracked files plus untracked files under the crate, kernels, packet, preparation script, and workspace manifests; both external path dependencies have pinned Git trees and clean relevant scopes",
     })
@@ -2155,7 +2162,8 @@ fn released_selected_quality_local_abc_acquisition() {
     );
 
     let arithmetic_policy = validate_arithmetic_policy_environment();
-    let arithmetic_policy_sha256 = sha256_bytes(&serde_json::to_vec(&arithmetic_policy).unwrap());
+    let arithmetic_policy_compact = serde_json::to_vec(&arithmetic_policy).unwrap();
+    let arithmetic_policy_sha256 = sha256_bytes(&arithmetic_policy_compact);
     let fixtures = validate_fixture_set();
     let root = repository_root();
     let source = validate_source_provenance(&root, &fixtures);
@@ -2439,6 +2447,7 @@ fn released_selected_quality_local_abc_acquisition() {
                 "sha256": metallib_sha256,
             },
             "arithmetic_policy": arithmetic_policy,
+            "arithmetic_policy_json_compact": String::from_utf8(arithmetic_policy_compact).unwrap(),
             "arithmetic_policy_sha256": arithmetic_policy_sha256,
             "evidence_domain_utf8": evidence_domain,
             "evidence_binding_sha256": evidence_binding_sha256,

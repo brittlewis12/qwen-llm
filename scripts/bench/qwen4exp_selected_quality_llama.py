@@ -112,6 +112,20 @@ def parse_json_strict(data: bytes) -> object:
     )
 
 
+def json_equal_exact(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            json_equal_exact(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            json_equal_exact(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return left == right
+
+
 def validate_environment() -> dict[str, object]:
     forbidden_prefixes = (
         "CMAKE_",
@@ -150,6 +164,7 @@ def validate_source(
         "scripts/bench/qwen4exp_selected_quality_llama.py",
         "scripts/bench/qwen4exp_selected_quality_llama/CMakeLists.txt",
         "scripts/bench/qwen4exp_selected_quality_llama/main.cpp",
+        "scripts/bench/qwen4exp_selected_quality_analyze.py",
         "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/README.md",
         "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json",
     ]
@@ -175,6 +190,7 @@ def validate_source(
         "--",
         "scripts/bench/qwen4exp_selected_quality_llama.py",
         "scripts/bench/qwen4exp_selected_quality_llama",
+        "scripts/bench/qwen4exp_selected_quality_analyze.py",
         "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg",
     )
     if scoped_status:
@@ -196,7 +212,7 @@ def validate_source(
         raise RuntimeError(f"unsupported llama.cpp Git object format {object_format}")
 
     source_rows = []
-    for relative in required_paths[:3]:
+    for relative in required_paths[:4]:
         path = repository / relative
         before = file_stamp(path)
         observed_sha256 = sha256_file(path)
@@ -1450,7 +1466,7 @@ def validate_operation_binding(operation: dict[str, object], path: str) -> None:
         f"{path}.binding.semantic_payload_json_compact",
     )
     encoded = compact.encode()
-    if parse_json_strict(encoded) != payload:
+    if not json_equal_exact(parse_json_strict(encoded), payload):
         raise RuntimeError(f"{path}.binding semantic payload content")
     if require_int(
         binding["semantic_payload_bytes"],
@@ -2008,7 +2024,7 @@ def validate_core_report(
         "core.binding.semantic_payload_json_compact",
     )
     encoded = compact.encode()
-    if parse_json_strict(encoded) != payload:
+    if not json_equal_exact(parse_json_strict(encoded), payload):
         raise RuntimeError("core.binding semantic payload content")
     if require_int(
         binding["semantic_payload_bytes"], "core.binding.semantic_payload_bytes"
@@ -2116,6 +2132,7 @@ def main() -> None:
                     "runner or source checkout changed during acquisition"
                 )
             core_sha256 = sha256(core_bytes)
+            core_semantic_payload_sha256 = core["binding"]["semantic_payload_sha256"]
             evidence_domain = (
                 "qwen4exp-selected-quality-llama-evidence-v1\0"
                 f"packet_id={PACKET_ID}\n"
@@ -2129,6 +2146,7 @@ def main() -> None:
                 f"llama_cpp_commit={LLAMA_CPP_COMMIT}\n"
                 f"model_shard_manifest_sha256={model['shard_manifest_sha256']}\n"
                 f"core_output_sha256={core_sha256}\n"
+                f"core_semantic_payload_sha256={core_semantic_payload_sha256}\n"
             )
             report = {
                 "schema": "qwen4exp-selected-quality-llama-evidence",
@@ -2156,6 +2174,7 @@ def main() -> None:
                 "core_output": {
                     "bytes": len(core_bytes),
                     "sha256": core_sha256,
+                    "raw_json_utf8": core_bytes.decode("utf-8"),
                     "report": core,
                 },
             }

@@ -45,6 +45,7 @@ use crate::tokenizer::{TokError, Tokenizer};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -115,8 +116,20 @@ struct RuntimeInner {
     ctx: MetalContext,
 }
 
+static NEXT_MODEL_OWNER_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug)]
-struct ModelOwnerToken;
+struct ModelOwnerToken {
+    id: u64,
+}
+
+impl ModelOwnerToken {
+    fn new() -> Self {
+        let id = NEXT_MODEL_OWNER_ID.fetch_add(1, Ordering::Relaxed);
+        assert_ne!(id, 0, "model owner ID space exhausted");
+        Self { id }
+    }
+}
 
 fn ensure_same_model_owner(
     expected: &Arc<ModelOwnerToken>,
@@ -275,7 +288,7 @@ impl Runtime {
             identity_shards,
             identity_parts: OnceLock::new(),
             prefix_cache: Mutex::new(PrefixCache::with_max_bytes(config.prefix_cache_max_bytes)),
-            owner: Arc::new(ModelOwnerToken),
+            owner: Arc::new(ModelOwnerToken::new()),
             prefetch_outcome,
         })
     }
@@ -567,9 +580,10 @@ mod tests {
 
     #[test]
     fn model_owner_tokens_reject_cross_model_state() {
-        let first = Arc::new(ModelOwnerToken);
+        let first = Arc::new(ModelOwnerToken::new());
         let same = Arc::clone(&first);
-        let second = Arc::new(ModelOwnerToken);
+        let second = Arc::new(ModelOwnerToken::new());
+        assert_ne!(first.id, second.id);
         assert!(ensure_same_model_owner(&first, &same).is_ok());
         assert!(matches!(
             ensure_same_model_owner(&first, &second),
@@ -1446,6 +1460,10 @@ impl LoadedModel {
 
     pub(crate) fn ensure_owns(&self, sequence: &Sequence) -> Result<(), RuntimeError> {
         ensure_same_model_owner(&self.owner, &sequence.owner)
+    }
+
+    pub(crate) fn owner_token_id(&self) -> u64 {
+        self.owner.id
     }
 
     pub(crate) fn lightweight_identity_parts(&self) -> (u64, u64) {

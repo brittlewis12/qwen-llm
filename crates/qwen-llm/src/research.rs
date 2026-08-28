@@ -6,10 +6,17 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, RmsNormVjpRule, SwiGluVjpRule,
-    encode_add_f32, encode_frozen_linear_vjp_f32, encode_rms_norm_mul_f32,
-    encode_rms_norm_mul_vjp_broadcast_f32, encode_silu_mul_vjp_broadcast_f32,
+    encode_add_f32, encode_fill_f32, encode_frozen_linear_vjp_f32,
+    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_vjp_f32,
+    encode_gdn_prep_packed_ckpt_f32, encode_gdn_step_decay_packed_ckpt_f32,
+    encode_gdn_step_decay_packed_vjp_f32, encode_l2_norm_batched_f32,
+    encode_l2_norm_vjp_batched_f32, encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32,
+    encode_rms_norm_mul_vjp_broadcast_f32, encode_rms_norm_mul_vjp_rows_f32,
+    encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32, encode_sigmoid_f32,
+    encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32,
+    encode_ssm_conv_silu_split_packed_vjp_f32,
 };
-use crate::metal_forward::{MetalBlock, MfError, RMS_EPS, encode_mat_vec_dispatch};
+use crate::metal_forward::{MetalBlock, MetalGdnBlock, MfError, RMS_EPS, encode_mat_vec_dispatch};
 use crate::model::{Arch, ArchKind};
 use crate::runtime::{LoadedModel, RuntimeError, Sequence};
 use crate::tensor::GgmlType;
@@ -18,6 +25,7 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLComman
 /// Lightweight locator identity derived from model metadata, shard paths, and
 /// file stamps. It is useful within one machine, but is not a content digest.
 pub const RESEARCH_IDENTITY_SCHEME: &str = "qwen_llm_model_locator_v1";
+pub const MAX_RESEARCH_GDN_TOKENS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ResearchModelIdentity {
@@ -108,6 +116,87 @@ pub struct DenseFfnVjp {
     pub values: Vec<f32>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchGdnForward {
+    identity: ResearchModelIdentity,
+    owner_token_id: u64,
+    layer: u32,
+    start_position: usize,
+    token_ids: Vec<i32>,
+    hidden_size: usize,
+    final_logits: Vec<f32>,
+    input_residuals: Vec<f32>,
+    post_mixer_residuals: Vec<f32>,
+    initial_conv_state: Vec<f32>,
+    initial_recurrence_state: Vec<f32>,
+    final_conv_state: Vec<f32>,
+    final_recurrence_state: Vec<f32>,
+}
+
+impl ResearchGdnForward {
+    pub fn identity(&self) -> ResearchModelIdentity {
+        self.identity
+    }
+
+    pub fn layer(&self) -> u32 {
+        self.layer
+    }
+
+    pub fn start_position(&self) -> usize {
+        self.start_position
+    }
+
+    pub fn token_ids(&self) -> &[i32] {
+        &self.token_ids
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    pub fn final_logits(&self) -> &[f32] {
+        &self.final_logits
+    }
+
+    pub fn n_tokens(&self) -> usize {
+        self.token_ids.len()
+    }
+
+    /// Real residual-stream inputs to the selected layer, flattened `[T, H]`.
+    pub fn input_residuals(&self) -> &[f32] {
+        &self.input_residuals
+    }
+
+    /// Real post-mixer residuals `input + mixer(input)`, flattened `[T, H]`.
+    pub fn post_mixer_residuals(&self) -> &[f32] {
+        &self.post_mixer_residuals
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GdnMixerVjpRule {
+    /// Ordinary pre-mixer RMSNorm Jacobian used by J-lens.
+    Jacobian,
+    /// Released Qwen R-lens rule: detach the pre-mixer RMS denominator.
+    Relp,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchGdnVjp {
+    pub layer: u32,
+    pub n_tokens: usize,
+    pub hidden_size: usize,
+    /// Mixer-branch input cotangents, flattened `[T, H]`. The residual identity
+    /// branch is intentionally not included.
+    pub values: Vec<f32>,
+    pub grad_initial_conv_state: Vec<f32>,
+    pub grad_initial_recurrence_state: Vec<f32>,
+    pub replay_mixer_outputs: Vec<f32>,
+    pub residual_replay_max_abs_error: f32,
+    pub final_conv_state_max_abs_error: f32,
+    pub final_recurrence_state_max_abs_error: f32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResearchError {
     #[error("runtime: {0}")]
@@ -142,6 +231,44 @@ pub enum ResearchError {
         shape: Vec<u64>,
         expected: usize,
     },
+    #[error("layer {layer} is not a GDN layer")]
+    NotGdnLayer { layer: u32 },
+    #[error("GDN prompt capture requires layer > 0 so its real input residual can be observed")]
+    GdnCaptureRequiresPreviousLayer,
+    #[error("GDN prompt capture requires at least one token")]
+    EmptyGdnPrompt,
+    #[error("GDN prompt capture length {got} exceeds the bounded isolated-sequence limit {max}")]
+    GdnPromptTooLong { got: usize, max: usize },
+    #[error(
+        "layer {layer} GDN geometry must use head_dim=128 with nonzero V/K heads and V divisible by K; got n_v={n_v} n_k={n_k} head_dim={head_dim}"
+    )]
+    UnsupportedGdnGeometry {
+        layer: u32,
+        n_v: usize,
+        n_k: usize,
+        head_dim: usize,
+    },
+    #[error("layer {layer} {role:?} has shape {got:?}, expected {expected:?}")]
+    InvalidGdnLinearShape {
+        layer: u32,
+        role: LinearRole,
+        got: [usize; 2],
+        expected: [usize; 2],
+    },
+    #[error(
+        "layer {layer} GDN tensor {name} must be F32 with {expected_elements} elements, got {dtype:?} {shape:?}"
+    )]
+    InvalidGdnTensor {
+        layer: u32,
+        name: &'static str,
+        dtype: GgmlType,
+        shape: Vec<u64>,
+        expected_elements: usize,
+    },
+    #[error("GDN capture belongs to a different model identity")]
+    GdnCaptureModelMismatch,
+    #[error("GDN capture belongs to a different loaded-model owner")]
+    GdnCaptureOwnerMismatch,
     #[error("{name} length {got} does not match expected length {expected}")]
     ActivationSize {
         name: &'static str,
@@ -479,6 +606,254 @@ impl ResearchSession<'_, '_> {
         })
     }
 
+    /// Advance a bounded prompt while capturing the real input trajectory and
+    /// recurrent boundary states for one GDN layer.
+    ///
+    /// The selected layer must be nonzero. A command failure after an earlier
+    /// token succeeds can leave that successful prefix consumed, matching the
+    /// existing token-at-a-time research forward contract.
+    pub fn forward_prompt_with_gdn_capture(
+        &mut self,
+        token_ids: &[i32],
+        layer: u32,
+    ) -> Result<ResearchGdnForward, ResearchError> {
+        if token_ids.is_empty() {
+            return Err(ResearchError::EmptyGdnPrompt);
+        }
+        if token_ids.len() > MAX_RESEARCH_GDN_TOKENS {
+            return Err(ResearchError::GdnPromptTooLong {
+                got: token_ids.len(),
+                max: MAX_RESEARCH_GDN_TOKENS,
+            });
+        }
+        if layer == 0 {
+            return Err(ResearchError::GdnCaptureRequiresPreviousLayer);
+        }
+        for &token_id in token_ids {
+            if token_id < 0 || token_id as u32 >= self.arch().vocab_size {
+                return Err(MfError::BadToken(token_id, self.arch().vocab_size).into());
+            }
+        }
+        self.sequence.ensure_can_append(token_ids.len())?;
+        let start_position = self.sequence.position();
+        let last_position = start_position
+            .checked_add(token_ids.len() - 1)
+            .ok_or(ResearchError::SizeOverflow)?;
+        u32::try_from(last_position).map_err(|_| ResearchError::PositionOverflow(last_position))?;
+        let (gdn_index, geometry) = {
+            let (block, gdn_index, geometry) = self.resolve_gdn(layer)?;
+            validate_gdn_weights(layer, block, geometry)?;
+            (gdn_index, geometry)
+        };
+        let (initial_conv_state, initial_recurrence_state) = {
+            let state = unsafe { self.sequence.metal_session_mut() };
+            state.ensure_usable()?;
+            let conv = state
+                .gdn_conv
+                .get(gdn_index)
+                .ok_or(ResearchError::SizeOverflow)?;
+            let recurrence = state
+                .gdn_state
+                .get(gdn_index)
+                .ok_or(ResearchError::SizeOverflow)?;
+            (
+                read_f32(conv, geometry.conv_state_elements),
+                read_f32(recurrence, geometry.state_elements),
+            )
+        };
+
+        let hidden_elements = token_ids
+            .len()
+            .checked_mul(geometry.hidden_size)
+            .ok_or(ResearchError::SizeOverflow)?;
+        let mut input_residuals = Vec::with_capacity(hidden_elements);
+        let mut post_mixer_residuals = Vec::with_capacity(hidden_elements);
+        let mut final_logits = Vec::new();
+        let capture_layers = [layer - 1, layer];
+        for &token_id in token_ids {
+            let forward = match self.forward_token_with_dense_ffn_capture(token_id, &capture_layers)
+            {
+                Ok(forward) => forward,
+                Err(error) => {
+                    let state = unsafe { self.sequence.metal_session_mut() };
+                    state.poison("GDN prompt capture forward failed");
+                    return Err(error);
+                }
+            };
+            let hidden = geometry.hidden_size;
+            input_residuals.extend_from_slice(&forward.capture.post_block_residuals[..hidden]);
+            post_mixer_residuals
+                .extend_from_slice(&forward.capture.pre_ffn_residuals[hidden..2 * hidden]);
+            final_logits = forward.logits;
+        }
+        let (final_conv_state, final_recurrence_state) = {
+            let state = unsafe { self.sequence.metal_session_mut() };
+            state.ensure_usable()?;
+            (
+                read_f32(&state.gdn_conv[gdn_index], geometry.conv_state_elements),
+                read_f32(&state.gdn_state[gdn_index], geometry.state_elements),
+            )
+        };
+        Ok(ResearchGdnForward {
+            identity: self.identity(),
+            owner_token_id: self.model.owner_token_id(),
+            layer,
+            start_position,
+            token_ids: token_ids.to_vec(),
+            hidden_size: geometry.hidden_size,
+            final_logits,
+            input_residuals,
+            post_mixer_residuals,
+            initial_conv_state,
+            initial_recurrence_state,
+            final_conv_state,
+            final_recurrence_state,
+        })
+    }
+
+    /// Reverse the isolated mixer branch represented by a matching GDN prompt
+    /// capture. The result stops at the selected layer's input residual. If the
+    /// incoming cotangent is on `input + mixer(input)`, callers add that same
+    /// cotangent as the residual identity branch. Terminal convolution and
+    /// recurrence-state cotangents are fixed to zero, so captures are isolated
+    /// sequences and cannot be stitched into a longer reverse pass.
+    pub fn gdn_mixer_vjp(
+        &self,
+        forward: &ResearchGdnForward,
+        grad_mixer_output: &[f32],
+        rule: GdnMixerVjpRule,
+    ) -> Result<ResearchGdnVjp, ResearchError> {
+        if forward.identity != self.identity() {
+            return Err(ResearchError::GdnCaptureModelMismatch);
+        }
+        if forward.owner_token_id != self.model.owner_token_id() {
+            return Err(ResearchError::GdnCaptureOwnerMismatch);
+        }
+        let (block, _, geometry) = self.resolve_gdn(forward.layer)?;
+        validate_gdn_weights(forward.layer, block, geometry)?;
+        let n_tokens = forward.n_tokens();
+        if n_tokens == 0 || n_tokens > MAX_RESEARCH_GDN_TOKENS {
+            return Err(ResearchError::ActivationSize {
+                name: "GDN capture token count",
+                got: n_tokens,
+                expected: 1,
+            });
+        }
+        let hidden_elements = n_tokens
+            .checked_mul(geometry.hidden_size)
+            .ok_or(ResearchError::SizeOverflow)?;
+        for (name, values, expected) in [
+            (
+                "GDN captured input residuals",
+                forward.input_residuals.as_slice(),
+                hidden_elements,
+            ),
+            (
+                "GDN captured post-mixer residuals",
+                forward.post_mixer_residuals.as_slice(),
+                hidden_elements,
+            ),
+            (
+                "GDN captured initial conv state",
+                forward.initial_conv_state.as_slice(),
+                geometry.conv_state_elements,
+            ),
+            (
+                "GDN captured initial recurrence state",
+                forward.initial_recurrence_state.as_slice(),
+                geometry.state_elements,
+            ),
+            (
+                "GDN captured final conv state",
+                forward.final_conv_state.as_slice(),
+                geometry.conv_state_elements,
+            ),
+            (
+                "GDN captured final recurrence state",
+                forward.final_recurrence_state.as_slice(),
+                geometry.state_elements,
+            ),
+        ] {
+            if values.len() != expected {
+                return Err(ResearchError::ActivationSize {
+                    name,
+                    got: values.len(),
+                    expected,
+                });
+            }
+        }
+        if forward.hidden_size != geometry.hidden_size {
+            return Err(ResearchError::ActivationSize {
+                name: "GDN capture hidden size",
+                got: forward.hidden_size,
+                expected: geometry.hidden_size,
+            });
+        }
+        if grad_mixer_output.len() != hidden_elements {
+            return Err(ResearchError::ActivationSize {
+                name: "GDN mixer cotangent",
+                got: grad_mixer_output.len(),
+                expected: hidden_elements,
+            });
+        }
+        let replay = gdn_mixer_replay_vjp_readback(
+            self.model.context(),
+            geometry,
+            GdnMixerWeights::from(block),
+            &forward.input_residuals,
+            &forward.initial_conv_state,
+            &forward.initial_recurrence_state,
+            grad_mixer_output,
+            n_tokens,
+            rule,
+        )?;
+        let residual_replay_max_abs_error = forward
+            .input_residuals
+            .iter()
+            .zip(&replay.mixer_outputs)
+            .zip(&forward.post_mixer_residuals)
+            .map(|((&input, &mixer), &observed)| finite_abs_difference(input + mixer, observed))
+            .fold(0.0f32, f32::max);
+        Ok(ResearchGdnVjp {
+            layer: forward.layer,
+            n_tokens,
+            hidden_size: geometry.hidden_size,
+            values: replay.grad_input,
+            grad_initial_conv_state: replay.grad_initial_conv_state,
+            grad_initial_recurrence_state: replay.grad_initial_recurrence_state,
+            replay_mixer_outputs: replay.mixer_outputs,
+            residual_replay_max_abs_error,
+            final_conv_state_max_abs_error: max_abs_difference(
+                &replay.final_conv_state,
+                &forward.final_conv_state,
+            ),
+            final_recurrence_state_max_abs_error: max_abs_difference(
+                &replay.final_recurrence_state,
+                &forward.final_recurrence_state,
+            ),
+        })
+    }
+
+    fn resolve_gdn(
+        &self,
+        layer: u32,
+    ) -> Result<(&MetalGdnBlock, usize, GdnGeometry), ResearchError> {
+        let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
+            ResearchError::InvalidLayer {
+                layer,
+                n_layers: self.arch().n_layer,
+            },
+        )?;
+        let MetalBlock::Gdn(block) = block else {
+            return Err(ResearchError::NotGdnLayer { layer });
+        };
+        let gdn_index = self.model.metal_model().blocks[..layer as usize]
+            .iter()
+            .filter(|block| matches!(block, MetalBlock::Gdn(_)))
+            .count();
+        Ok((block, gdn_index, GdnGeometry::new(layer, self.arch())?))
+    }
+
     fn resolve_dense_ffn(
         &self,
         layer: u32,
@@ -534,6 +909,795 @@ impl ResearchSession<'_, '_> {
             _ => return Err(ResearchError::InvalidLinearRole { layer: index, role }),
         };
         Ok(tensor)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GdnGeometry {
+    hidden_size: usize,
+    n_v_heads: usize,
+    n_k_heads: usize,
+    head_dim: usize,
+    qk_elements: usize,
+    v_elements: usize,
+    conv_dim: usize,
+    state_elements: usize,
+    conv_state_elements: usize,
+}
+
+impl GdnGeometry {
+    fn new(layer: u32, arch: Arch) -> Result<Self, ResearchError> {
+        let hidden_size = arch.hidden_size as usize;
+        let n_v_heads = arch.gdn_n_v_heads as usize;
+        let n_k_heads = arch.gdn_n_k_heads as usize;
+        let head_dim = arch.gdn_head_dim as usize;
+        if hidden_size == 0
+            || head_dim != 128
+            || n_v_heads == 0
+            || n_k_heads == 0
+            || !n_v_heads.is_multiple_of(n_k_heads)
+        {
+            return Err(ResearchError::UnsupportedGdnGeometry {
+                layer,
+                n_v: n_v_heads,
+                n_k: n_k_heads,
+                head_dim,
+            });
+        }
+        let qk_elements = n_k_heads
+            .checked_mul(head_dim)
+            .ok_or(ResearchError::SizeOverflow)?;
+        let v_elements = n_v_heads
+            .checked_mul(head_dim)
+            .ok_or(ResearchError::SizeOverflow)?;
+        let conv_dim = qk_elements
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(v_elements))
+            .ok_or(ResearchError::SizeOverflow)?;
+        let state_elements = v_elements
+            .checked_mul(head_dim)
+            .ok_or(ResearchError::SizeOverflow)?;
+        let conv_state_elements = conv_dim.checked_mul(3).ok_or(ResearchError::SizeOverflow)?;
+        Ok(Self {
+            hidden_size,
+            n_v_heads,
+            n_k_heads,
+            head_dim,
+            qk_elements,
+            v_elements,
+            conv_dim,
+            state_elements,
+            conv_state_elements,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GdnMixerWeights<'a> {
+    attn_norm: &'a MetalTensor,
+    in_proj_qkv: &'a MetalTensor,
+    in_proj_z: &'a MetalTensor,
+    beta_proj: &'a MetalTensor,
+    alpha_proj: &'a MetalTensor,
+    a_log: &'a MetalTensor,
+    dt_bias: &'a MetalTensor,
+    conv1d: &'a MetalTensor,
+    norm: &'a MetalTensor,
+    out_proj: &'a MetalTensor,
+}
+
+impl<'a> From<&'a MetalGdnBlock> for GdnMixerWeights<'a> {
+    fn from(block: &'a MetalGdnBlock) -> Self {
+        Self {
+            attn_norm: &block.attn_norm,
+            in_proj_qkv: &block.in_proj_qkv,
+            in_proj_z: &block.in_proj_z,
+            beta_proj: &block.beta_proj,
+            alpha_proj: &block.alpha_proj,
+            a_log: &block.a_log,
+            dt_bias: &block.dt_bias,
+            conv1d: &block.conv1d,
+            norm: &block.norm,
+            out_proj: &block.out_proj,
+        }
+    }
+}
+
+fn validate_gdn_weights(
+    layer: u32,
+    block: &MetalGdnBlock,
+    geometry: GdnGeometry,
+) -> Result<(), ResearchError> {
+    let weights = GdnMixerWeights::from(block);
+    for (role, weight, expected) in [
+        (
+            LinearRole::GdnQkv,
+            weights.in_proj_qkv,
+            [geometry.hidden_size, geometry.conv_dim],
+        ),
+        (
+            LinearRole::GdnZ,
+            weights.in_proj_z,
+            [geometry.hidden_size, geometry.v_elements],
+        ),
+        (
+            LinearRole::GdnBeta,
+            weights.beta_proj,
+            [geometry.hidden_size, geometry.n_v_heads],
+        ),
+        (
+            LinearRole::GdnAlpha,
+            weights.alpha_proj,
+            [geometry.hidden_size, geometry.n_v_heads],
+        ),
+        (
+            LinearRole::GdnOut,
+            weights.out_proj,
+            [geometry.v_elements, geometry.hidden_size],
+        ),
+    ] {
+        let id = ResearchLinear::Layer { index: layer, role };
+        let got = linear_shape(id, weight)?;
+        if got != expected {
+            return Err(ResearchError::InvalidGdnLinearShape {
+                layer,
+                role,
+                got,
+                expected,
+            });
+        }
+        validate_vjp_dtype(id, weight)?;
+    }
+    for (name, tensor, expected_elements) in [
+        ("pre-mixer norm", weights.attn_norm, geometry.hidden_size),
+        ("A log", weights.a_log, geometry.n_v_heads),
+        ("timestep bias", weights.dt_bias, geometry.n_v_heads),
+        (
+            "conv1d",
+            weights.conv1d,
+            geometry
+                .conv_dim
+                .checked_mul(4)
+                .ok_or(ResearchError::SizeOverflow)?,
+        ),
+        ("internal norm", weights.norm, geometry.head_dim),
+    ] {
+        if tensor.dtype != GgmlType::F32 || tensor.n_elements() as usize != expected_elements {
+            return Err(ResearchError::InvalidGdnTensor {
+                layer,
+                name,
+                dtype: tensor.dtype,
+                shape: tensor.shape.clone(),
+                expected_elements,
+            });
+        }
+    }
+    Ok(())
+}
+
+struct GdnReplayTensors {
+    input: MetalTensor,
+    normalized: MetalTensor,
+    qkv_source: MetalTensor,
+    z: MetalTensor,
+    beta_source: MetalTensor,
+    beta: MetalTensor,
+    alpha_source: MetalTensor,
+    decay: MetalTensor,
+    initial_conv_state: MetalTensor,
+    conv_state: MetalTensor,
+    conv_checkpoints: MetalTensor,
+    q_raw: MetalTensor,
+    k_raw: MetalTensor,
+    v: MetalTensor,
+    q: MetalTensor,
+    k: MetalTensor,
+    initial_recurrence_state: MetalTensor,
+    recurrence_state: MetalTensor,
+    recurrence_checkpoints: MetalTensor,
+    recurrence_output: MetalTensor,
+    normed: MetalTensor,
+    mixer_output: MetalTensor,
+}
+
+impl GdnReplayTensors {
+    fn new(
+        context: &MetalContext,
+        geometry: GdnGeometry,
+        input: &[f32],
+        initial_conv_state: &[f32],
+        initial_recurrence_state: &[f32],
+        n_tokens: usize,
+    ) -> Result<Self, ResearchError> {
+        let hidden_elements = checked_product(n_tokens, geometry.hidden_size)?;
+        let qkv_elements = checked_product(n_tokens, geometry.conv_dim)?;
+        let qk_elements = checked_product(n_tokens, geometry.qk_elements)?;
+        let v_elements = checked_product(n_tokens, geometry.v_elements)?;
+        let scalar_elements = checked_product(n_tokens, geometry.n_v_heads)?;
+        let conv_checkpoint_elements = checked_product(n_tokens, geometry.conv_state_elements)?;
+        let recurrence_checkpoint_elements = checked_product(n_tokens, geometry.state_elements)?;
+        for (name, values, expected) in [
+            ("GDN replay input", input, hidden_elements),
+            (
+                "GDN initial conv state",
+                initial_conv_state,
+                geometry.conv_state_elements,
+            ),
+            (
+                "GDN initial recurrence state",
+                initial_recurrence_state,
+                geometry.state_elements,
+            ),
+        ] {
+            if values.len() != expected {
+                return Err(ResearchError::ActivationSize {
+                    name,
+                    got: values.len(),
+                    expected,
+                });
+            }
+        }
+        let hidden_shape = row_shape(geometry.hidden_size, n_tokens)?;
+        Ok(Self {
+            input: MetalTensor::from_bytes(
+                context,
+                bytemuck::cast_slice(input),
+                hidden_shape.clone(),
+                GgmlType::F32,
+            )?,
+            normalized: MetalTensor::zeros_f32(context, hidden_shape.clone())?,
+            qkv_source: flat_f32(context, qkv_elements)?,
+            z: flat_f32(context, v_elements)?,
+            beta_source: flat_f32(context, scalar_elements)?,
+            beta: flat_f32(context, scalar_elements)?,
+            alpha_source: flat_f32(context, scalar_elements)?,
+            decay: flat_f32(context, scalar_elements)?,
+            initial_conv_state: f32_from_slice(context, initial_conv_state)?,
+            conv_state: f32_from_slice(context, initial_conv_state)?,
+            conv_checkpoints: flat_f32(context, conv_checkpoint_elements)?,
+            q_raw: flat_f32(context, qk_elements)?,
+            k_raw: flat_f32(context, qk_elements)?,
+            v: flat_f32(context, v_elements)?,
+            q: flat_f32(context, qk_elements)?,
+            k: flat_f32(context, qk_elements)?,
+            initial_recurrence_state: f32_from_slice(context, initial_recurrence_state)?,
+            recurrence_state: f32_from_slice(context, initial_recurrence_state)?,
+            recurrence_checkpoints: flat_f32(context, recurrence_checkpoint_elements)?,
+            recurrence_output: flat_f32(context, v_elements)?,
+            normed: flat_f32(context, v_elements)?,
+            mixer_output: flat_f32(context, hidden_elements)?,
+        })
+    }
+
+    fn encode_forward(
+        &self,
+        context: &MetalContext,
+        encoder: &KernelEncoder,
+        geometry: GdnGeometry,
+        weights: GdnMixerWeights<'_>,
+        n_tokens: usize,
+    ) -> Result<(), ResearchError> {
+        encode_rms_norm_mul_rows_f32(
+            context,
+            encoder,
+            &self.input,
+            weights.attn_norm,
+            &self.normalized,
+            n_tokens,
+            geometry.hidden_size,
+            RMS_EPS,
+        )?;
+        for token in 0..n_tokens {
+            let hidden = row_view(&self.normalized, token, geometry.hidden_size);
+            let qkv = row_view(&self.qkv_source, token, geometry.conv_dim);
+            let z = row_view(&self.z, token, geometry.v_elements);
+            let beta = row_view(&self.beta_source, token, geometry.n_v_heads);
+            let alpha = row_view(&self.alpha_source, token, geometry.n_v_heads);
+            encode_mat_vec_dispatch(
+                context,
+                encoder,
+                weights.in_proj_qkv,
+                &hidden,
+                &qkv,
+                geometry.hidden_size,
+                geometry.conv_dim,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                encoder,
+                weights.in_proj_z,
+                &hidden,
+                &z,
+                geometry.hidden_size,
+                geometry.v_elements,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                encoder,
+                weights.beta_proj,
+                &hidden,
+                &beta,
+                geometry.hidden_size,
+                geometry.n_v_heads,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                encoder,
+                weights.alpha_proj,
+                &hidden,
+                &alpha,
+                geometry.hidden_size,
+                geometry.n_v_heads,
+            )?;
+        }
+        encode_sigmoid_f32(context, encoder, &self.beta_source, &self.beta)?;
+        encode_gdn_decay_chain_batched_f32(
+            context,
+            encoder,
+            &self.alpha_source,
+            weights.dt_bias,
+            weights.a_log,
+            &self.decay,
+            n_tokens,
+            geometry.n_v_heads,
+        )?;
+        encode_gdn_prep_packed_ckpt_f32(
+            context,
+            encoder,
+            &self.qkv_source,
+            &self.conv_state,
+            weights.conv1d,
+            &self.q_raw,
+            &self.k_raw,
+            &self.v,
+            &self.conv_checkpoints,
+            n_tokens,
+            n_tokens,
+            geometry.n_k_heads,
+            geometry.n_v_heads,
+            geometry.head_dim,
+        )?;
+        encode_l2_norm_batched_f32(
+            context,
+            encoder,
+            &self.q_raw,
+            &self.q,
+            checked_product(n_tokens, geometry.n_k_heads)?,
+            geometry.head_dim,
+            RMS_EPS,
+        )?;
+        encode_l2_norm_batched_f32(
+            context,
+            encoder,
+            &self.k_raw,
+            &self.k,
+            checked_product(n_tokens, geometry.n_k_heads)?,
+            geometry.head_dim,
+            RMS_EPS,
+        )?;
+        encode_gdn_step_decay_packed_ckpt_f32(
+            context,
+            encoder,
+            &self.q,
+            &self.k,
+            &self.v,
+            &self.decay,
+            &self.beta,
+            &self.recurrence_state,
+            &self.recurrence_output,
+            &self.recurrence_checkpoints,
+            n_tokens,
+            n_tokens,
+            geometry.n_v_heads,
+            geometry.n_k_heads,
+            geometry.head_dim,
+        )?;
+        encode_rmsnorm_gated_f32(
+            context,
+            encoder,
+            &self.recurrence_output,
+            weights.norm,
+            &self.z,
+            &self.normed,
+            checked_product(n_tokens, geometry.n_v_heads)?,
+            geometry.head_dim,
+            RMS_EPS * geometry.head_dim as f32,
+        )?;
+        for token in 0..n_tokens {
+            let normed = row_view(&self.normed, token, geometry.v_elements);
+            let mixer = row_view(&self.mixer_output, token, geometry.hidden_size);
+            encode_mat_vec_dispatch(
+                context,
+                encoder,
+                weights.out_proj,
+                &normed,
+                &mixer,
+                geometry.v_elements,
+                geometry.hidden_size,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+struct GdnReplayVjpReadback {
+    mixer_outputs: Vec<f32>,
+    final_conv_state: Vec<f32>,
+    final_recurrence_state: Vec<f32>,
+    grad_input: Vec<f32>,
+    grad_initial_conv_state: Vec<f32>,
+    grad_initial_recurrence_state: Vec<f32>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gdn_mixer_replay_vjp_readback(
+    context: &MetalContext,
+    geometry: GdnGeometry,
+    weights: GdnMixerWeights<'_>,
+    input: &[f32],
+    initial_conv_state: &[f32],
+    initial_recurrence_state: &[f32],
+    grad_mixer_output: &[f32],
+    n_tokens: usize,
+    rule: GdnMixerVjpRule,
+) -> Result<GdnReplayVjpReadback, ResearchError> {
+    if n_tokens == 0 || n_tokens > MAX_RESEARCH_GDN_TOKENS {
+        return Err(ResearchError::GdnPromptTooLong {
+            got: n_tokens,
+            max: MAX_RESEARCH_GDN_TOKENS,
+        });
+    }
+    let hidden_elements = checked_product(n_tokens, geometry.hidden_size)?;
+    let qkv_elements = checked_product(n_tokens, geometry.conv_dim)?;
+    let qk_elements = checked_product(n_tokens, geometry.qk_elements)?;
+    let v_elements = checked_product(n_tokens, geometry.v_elements)?;
+    let scalar_elements = checked_product(n_tokens, geometry.n_v_heads)?;
+    if grad_mixer_output.len() != hidden_elements {
+        return Err(ResearchError::ActivationSize {
+            name: "GDN mixer cotangent",
+            got: grad_mixer_output.len(),
+            expected: hidden_elements,
+        });
+    }
+    let replay = GdnReplayTensors::new(
+        context,
+        geometry,
+        input,
+        initial_conv_state,
+        initial_recurrence_state,
+        n_tokens,
+    )?;
+    let grad_mixer = MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(grad_mixer_output),
+        row_shape(geometry.hidden_size, n_tokens)?,
+        GgmlType::F32,
+    )?;
+    let grad_normed = MetalTensor::zeros_f32(context, row_shape(geometry.v_elements, n_tokens)?)?;
+    let grad_recurrence_output = flat_f32(context, v_elements)?;
+    let grad_z = flat_f32(context, v_elements)?;
+    let grad_q = flat_f32(context, qk_elements)?;
+    let grad_k = flat_f32(context, qk_elements)?;
+    let grad_v = flat_f32(context, v_elements)?;
+    let grad_decay = flat_f32(context, scalar_elements)?;
+    let grad_beta = flat_f32(context, scalar_elements)?;
+    let zero_final_recurrence_state = flat_f32(context, geometry.state_elements)?;
+    let grad_initial_recurrence_state = flat_f32(context, geometry.state_elements)?;
+    let recurrence_state_scratch_a = flat_f32(context, geometry.state_elements)?;
+    let recurrence_state_scratch_b = flat_f32(context, geometry.state_elements)?;
+    let correction_scratch = flat_f32(context, geometry.v_elements)?;
+    let residual_scratch = flat_f32(context, geometry.v_elements)?;
+    let grad_q_raw = flat_f32(context, qk_elements)?;
+    let grad_k_raw = flat_f32(context, qk_elements)?;
+    let grad_qkv = flat_f32(context, qkv_elements)?;
+    let zero_final_conv_state = flat_f32(context, geometry.conv_state_elements)?;
+    let grad_initial_conv_state = flat_f32(context, geometry.conv_state_elements)?;
+    let conv_state_scratch_a = flat_f32(context, geometry.conv_state_elements)?;
+    let conv_state_scratch_b = flat_f32(context, geometry.conv_state_elements)?;
+    let grad_alpha_source = flat_f32(context, scalar_elements)?;
+    let grad_beta_source = flat_f32(context, scalar_elements)?;
+    let hidden_shape = row_shape(geometry.hidden_size, n_tokens)?;
+    let grad_hidden_qkv = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden_z = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden_alpha = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden_beta = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden_sum_a = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden_sum_b = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_hidden = MetalTensor::zeros_f32(context, hidden_shape.clone())?;
+    let grad_input = MetalTensor::zeros_f32(context, hidden_shape)?;
+
+    let command = context
+        .queue
+        .commandBuffer()
+        .ok_or(ResearchError::MissingCommandBuffer)?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = (|| -> Result<(), ResearchError> {
+        replay.encode_forward(context, &encoder, geometry, weights, n_tokens)?;
+        encode_frozen_linear_vjp_f32(
+            context,
+            &encoder,
+            weights.out_proj,
+            &grad_mixer,
+            &grad_normed,
+            geometry.v_elements,
+            geometry.hidden_size,
+            n_tokens,
+        )?;
+        let grad_normed_flat = grad_normed.view_subrange(0, vec![v_elements as u64]);
+        encode_rmsnorm_gated_vjp_f32(
+            context,
+            &encoder,
+            &replay.recurrence_output,
+            weights.norm,
+            &replay.z,
+            &grad_normed_flat,
+            &grad_recurrence_output,
+            &grad_z,
+            checked_product(n_tokens, geometry.n_v_heads)?,
+            geometry.head_dim,
+            RMS_EPS * geometry.head_dim as f32,
+        )?;
+        encode_fill_f32(context, &encoder, &zero_final_recurrence_state, 0.0)?;
+        encode_gdn_step_decay_packed_vjp_f32(
+            context,
+            &encoder,
+            &replay.q,
+            &replay.k,
+            &replay.v,
+            &replay.decay,
+            &replay.beta,
+            &replay.initial_recurrence_state,
+            &replay.recurrence_checkpoints,
+            n_tokens,
+            &grad_recurrence_output,
+            &zero_final_recurrence_state,
+            &grad_q,
+            &grad_k,
+            &grad_v,
+            &grad_decay,
+            &grad_beta,
+            &grad_initial_recurrence_state,
+            &recurrence_state_scratch_a,
+            &recurrence_state_scratch_b,
+            &correction_scratch,
+            &residual_scratch,
+            n_tokens,
+            geometry.n_v_heads,
+            geometry.n_k_heads,
+            geometry.head_dim,
+        )?;
+        let packed_k_heads = checked_product(n_tokens, geometry.n_k_heads)?;
+        encode_l2_norm_vjp_batched_f32(
+            context,
+            &encoder,
+            &replay.q_raw,
+            &grad_q,
+            &grad_q_raw,
+            packed_k_heads,
+            geometry.head_dim,
+            RMS_EPS,
+        )?;
+        encode_l2_norm_vjp_batched_f32(
+            context,
+            &encoder,
+            &replay.k_raw,
+            &grad_k,
+            &grad_k_raw,
+            packed_k_heads,
+            geometry.head_dim,
+            RMS_EPS,
+        )?;
+        encode_fill_f32(context, &encoder, &zero_final_conv_state, 0.0)?;
+        let conv_weight = weights
+            .conv1d
+            .view_subrange(0, vec![(geometry.conv_dim * 4) as u64]);
+        encode_ssm_conv_silu_split_packed_vjp_f32(
+            context,
+            &encoder,
+            &replay.qkv_source,
+            &replay.initial_conv_state,
+            &replay.conv_checkpoints,
+            n_tokens,
+            &conv_weight,
+            &grad_q_raw,
+            &grad_k_raw,
+            &grad_v,
+            &zero_final_conv_state,
+            &grad_qkv,
+            &grad_initial_conv_state,
+            &conv_state_scratch_a,
+            &conv_state_scratch_b,
+            n_tokens,
+            geometry.n_k_heads,
+            geometry.n_v_heads,
+            geometry.head_dim,
+        )?;
+        for token in 0..n_tokens {
+            let alpha_source = row_view(&replay.alpha_source, token, geometry.n_v_heads);
+            let decay = row_view(&replay.decay, token, geometry.n_v_heads);
+            let grad_decay_row = row_view(&grad_decay, token, geometry.n_v_heads);
+            let grad_alpha_row = row_view(&grad_alpha_source, token, geometry.n_v_heads);
+            encode_gdn_decay_chain_vjp_f32(
+                context,
+                &encoder,
+                &alpha_source,
+                weights.dt_bias,
+                weights.a_log,
+                &decay,
+                &grad_decay_row,
+                &grad_alpha_row,
+            )?;
+        }
+        encode_sigmoid_output_vjp_f32(
+            context,
+            &encoder,
+            &replay.beta,
+            &grad_beta,
+            &grad_beta_source,
+        )?;
+        let grad_qkv_rows = grad_qkv.view_subrange(0, row_shape(geometry.conv_dim, n_tokens)?);
+        let grad_z_rows = grad_z.view_subrange(0, row_shape(geometry.v_elements, n_tokens)?);
+        let grad_alpha_rows =
+            grad_alpha_source.view_subrange(0, row_shape(geometry.n_v_heads, n_tokens)?);
+        let grad_beta_rows =
+            grad_beta_source.view_subrange(0, row_shape(geometry.n_v_heads, n_tokens)?);
+        for (weight, grad_output, grad_hidden_output, n_out) in [
+            (
+                weights.in_proj_qkv,
+                &grad_qkv_rows,
+                &grad_hidden_qkv,
+                geometry.conv_dim,
+            ),
+            (
+                weights.in_proj_z,
+                &grad_z_rows,
+                &grad_hidden_z,
+                geometry.v_elements,
+            ),
+            (
+                weights.alpha_proj,
+                &grad_alpha_rows,
+                &grad_hidden_alpha,
+                geometry.n_v_heads,
+            ),
+            (
+                weights.beta_proj,
+                &grad_beta_rows,
+                &grad_hidden_beta,
+                geometry.n_v_heads,
+            ),
+        ] {
+            encode_frozen_linear_vjp_f32(
+                context,
+                &encoder,
+                weight,
+                grad_output,
+                grad_hidden_output,
+                geometry.hidden_size,
+                n_out,
+                n_tokens,
+            )?;
+        }
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_qkv,
+            &grad_hidden_z,
+            &grad_hidden_sum_a,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_alpha,
+            &grad_hidden_beta,
+            &grad_hidden_sum_b,
+        )?;
+        encode_add_f32(
+            context,
+            &encoder,
+            &grad_hidden_sum_a,
+            &grad_hidden_sum_b,
+            &grad_hidden,
+        )?;
+        encode_rms_norm_mul_vjp_rows_f32(
+            context,
+            &encoder,
+            &replay.input,
+            weights.attn_norm,
+            &grad_hidden,
+            &grad_input,
+            n_tokens,
+            geometry.hidden_size,
+            RMS_EPS,
+            match rule {
+                GdnMixerVjpRule::Jacobian => RmsNormVjpRule::Jacobian,
+                GdnMixerVjpRule::Relp => RmsNormVjpRule::RelpDetachedScale,
+            },
+        )?;
+        Ok(())
+    })();
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    validate_completed_command(&command)?;
+    Ok(GdnReplayVjpReadback {
+        mixer_outputs: read_f32(&replay.mixer_output, hidden_elements),
+        final_conv_state: read_f32(&replay.conv_state, geometry.conv_state_elements),
+        final_recurrence_state: read_f32(&replay.recurrence_state, geometry.state_elements),
+        grad_input: read_f32(&grad_input, hidden_elements),
+        grad_initial_conv_state: read_f32(&grad_initial_conv_state, geometry.conv_state_elements),
+        grad_initial_recurrence_state: read_f32(
+            &grad_initial_recurrence_state,
+            geometry.state_elements,
+        ),
+    })
+}
+
+fn checked_product(left: usize, right: usize) -> Result<usize, ResearchError> {
+    left.checked_mul(right).ok_or(ResearchError::SizeOverflow)
+}
+
+fn row_shape(width: usize, rows: usize) -> Result<Vec<u64>, ResearchError> {
+    Ok(vec![
+        u64::try_from(width).map_err(|_| ResearchError::SizeOverflow)?,
+        u64::try_from(rows).map_err(|_| ResearchError::SizeOverflow)?,
+    ])
+}
+
+fn flat_f32(context: &MetalContext, elements: usize) -> Result<MetalTensor, ResearchError> {
+    Ok(MetalTensor::zeros_f32(
+        context,
+        vec![u64::try_from(elements).map_err(|_| ResearchError::SizeOverflow)?],
+    )?)
+}
+
+fn f32_from_slice(context: &MetalContext, values: &[f32]) -> Result<MetalTensor, ResearchError> {
+    Ok(MetalTensor::from_bytes(
+        context,
+        bytemuck::cast_slice(values),
+        vec![u64::try_from(values.len()).map_err(|_| ResearchError::SizeOverflow)?],
+        GgmlType::F32,
+    )?)
+}
+
+fn row_view(tensor: &MetalTensor, row: usize, width: usize) -> MetalTensor {
+    tensor.view_subrange((row * width) as u64, vec![width as u64])
+}
+
+fn validate_completed_command(
+    command: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn MTLCommandBuffer>>,
+) -> Result<(), ResearchError> {
+    let status = command.status();
+    let error = command.error();
+    if status != MTLCommandBufferStatus::Completed || error.is_some() {
+        return Err(ResearchError::CommandBuffer {
+            status: format!("{status:?}"),
+            error: format!("{error:?}"),
+        });
+    }
+    Ok(())
+}
+
+fn max_abs_difference(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() {
+        return f32::INFINITY;
+    }
+    left.iter()
+        .zip(right)
+        .map(|(&left, &right)| finite_abs_difference(left, right))
+        .fold(0.0f32, f32::max)
+}
+
+fn finite_abs_difference(left: f32, right: f32) -> f32 {
+    if !left.is_finite() || !right.is_finite() {
+        return f32::INFINITY;
+    }
+    let difference = (left - right).abs();
+    if difference.is_finite() {
+        difference
+    } else {
+        f32::INFINITY
     }
 }
 
@@ -947,6 +2111,195 @@ mod tests {
                 n_layers: 8
             }
         ));
+    }
+
+    #[test]
+    fn replay_diagnostics_fail_closed_on_non_finite_values() {
+        assert_eq!(finite_abs_difference(f32::NAN, 0.0), f32::INFINITY);
+        assert_eq!(finite_abs_difference(0.0, f32::INFINITY), f32::INFINITY);
+        assert_eq!(
+            max_abs_difference(&[0.0, f32::NAN], &[0.0, 0.0]),
+            f32::INFINITY
+        );
+    }
+
+    #[test]
+    fn gdn_mixer_replay_vjp_matches_directional_finite_differences() {
+        let context = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const N_TOKENS: usize = 3;
+        const HIDDEN: usize = 32;
+        const N_K: usize = 1;
+        const N_V: usize = 2;
+        const HEAD_DIM: usize = 128;
+        let qk_elements = N_K * HEAD_DIM;
+        let v_elements = N_V * HEAD_DIM;
+        let conv_dim = 2 * qk_elements + v_elements;
+        let state_elements = v_elements * HEAD_DIM;
+        let conv_state_elements = 3 * conv_dim;
+        let geometry = GdnGeometry {
+            hidden_size: HIDDEN,
+            n_v_heads: N_V,
+            n_k_heads: N_K,
+            head_dim: HEAD_DIM,
+            qk_elements,
+            v_elements,
+            conv_dim,
+            state_elements,
+            conv_state_elements,
+        };
+        let values = |len: usize, stride: usize, scale: f32, offset: f32| {
+            (0..len)
+                .map(|index| ((index * stride + 3) % 47) as f32 * scale + offset)
+                .collect::<Vec<_>>()
+        };
+        let attn_norm = f32_tensor(
+            &context,
+            &values(HIDDEN, 5, 0.013, 0.63),
+            vec![HIDDEN as u64],
+        );
+        let qkv_weight_values = values(HIDDEN * conv_dim, 7, 0.0007, -0.015);
+        let qkv_weight = f32_tensor(
+            &context,
+            &qkv_weight_values,
+            vec![HIDDEN as u64, conv_dim as u64],
+        );
+        let z_weight_values = values(HIDDEN * v_elements, 11, 0.0008, -0.017);
+        let z_weight = f32_tensor(
+            &context,
+            &z_weight_values,
+            vec![HIDDEN as u64, v_elements as u64],
+        );
+        let beta_weight_values = values(HIDDEN * N_V, 13, 0.0011, -0.021);
+        let beta_weight = f32_tensor(
+            &context,
+            &beta_weight_values,
+            vec![HIDDEN as u64, N_V as u64],
+        );
+        let alpha_weight_values = values(HIDDEN * N_V, 17, 0.0013, -0.024);
+        let alpha_weight = f32_tensor(
+            &context,
+            &alpha_weight_values,
+            vec![HIDDEN as u64, N_V as u64],
+        );
+        let a_log = f32_tensor(&context, &[-0.08, -0.13], vec![N_V as u64]);
+        let dt_bias = f32_tensor(&context, &[0.07, -0.11], vec![N_V as u64]);
+        let conv_weight_values = values(4 * conv_dim, 19, 0.0019, -0.041);
+        let conv_weight = f32_tensor(&context, &conv_weight_values, vec![4, conv_dim as u64]);
+        let internal_norm = f32_tensor(
+            &context,
+            &values(HEAD_DIM, 23, 0.009, 0.58),
+            vec![HEAD_DIM as u64],
+        );
+        let out_weight_values = values(v_elements * HIDDEN, 29, 0.0009, -0.019);
+        let out_weight = f32_tensor(
+            &context,
+            &out_weight_values,
+            vec![v_elements as u64, HIDDEN as u64],
+        );
+        let weights = GdnMixerWeights {
+            attn_norm: &attn_norm,
+            in_proj_qkv: &qkv_weight,
+            in_proj_z: &z_weight,
+            beta_proj: &beta_weight,
+            alpha_proj: &alpha_weight,
+            a_log: &a_log,
+            dt_bias: &dt_bias,
+            conv1d: &conv_weight,
+            norm: &internal_norm,
+            out_proj: &out_weight,
+        };
+        let input = values(N_TOKENS * HIDDEN, 31, 0.007, -0.15);
+        let initial_conv_state = values(conv_state_elements, 37, 0.0008, -0.018);
+        let initial_recurrence_state = values(state_elements, 41, 0.00017, -0.004);
+        let grad_output = values(N_TOKENS * HIDDEN, 43, 0.006, -0.13);
+        let run = |input: &[f32], grad_output: &[f32], rule| {
+            gdn_mixer_replay_vjp_readback(
+                &context,
+                geometry,
+                weights,
+                input,
+                &initial_conv_state,
+                &initial_recurrence_state,
+                grad_output,
+                N_TOKENS,
+                rule,
+            )
+            .unwrap()
+        };
+        let actual = run(&input, &grad_output, GdnMixerVjpRule::Jacobian);
+        assert!(actual.grad_input.iter().all(|value| value.is_finite()));
+        assert!(actual.mixer_outputs.iter().all(|value| value.is_finite()));
+        assert!(actual.grad_input.iter().any(|value| *value != 0.0));
+        assert_eq!(actual.final_conv_state.len(), conv_state_elements);
+        assert_eq!(actual.final_recurrence_state.len(), state_elements);
+
+        let objective = |candidate: &[f32]| {
+            run(candidate, &grad_output, GdnMixerVjpRule::Jacobian)
+                .mixer_outputs
+                .iter()
+                .zip(&grad_output)
+                .map(|(&value, &gradient)| f64::from(value) * f64::from(gradient))
+                .sum::<f64>()
+        };
+        let epsilon = 2e-2f32;
+        for index in [0usize, HIDDEN, input.len() - 1] {
+            let mut plus = input.clone();
+            let mut minus = input.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference =
+                (objective(&plus) - objective(&minus)) / (2.0 * f64::from(epsilon));
+            assert!(
+                (finite_difference - f64::from(actual.grad_input[index])).abs() < 8e-4,
+                "coordinate {index} finite_difference={finite_difference} reverse={}",
+                actual.grad_input[index]
+            );
+        }
+        let direction = values(input.len(), 47, 0.0011, -0.023);
+        let shift = |amount: f32| {
+            input
+                .iter()
+                .zip(&direction)
+                .map(|(&value, &direction)| value + amount * direction)
+                .collect::<Vec<_>>()
+        };
+        let forward_directional =
+            (objective(&shift(epsilon)) - objective(&shift(-epsilon))) / (2.0 * f64::from(epsilon));
+        let reverse_directional = actual
+            .grad_input
+            .iter()
+            .zip(&direction)
+            .map(|(&gradient, &direction)| f64::from(gradient) * f64::from(direction))
+            .sum::<f64>();
+        assert!(
+            (forward_directional - reverse_directional).abs() < 1e-3,
+            "directional mismatch forward={forward_directional} reverse={reverse_directional}"
+        );
+
+        let zeros = vec![0.0f32; grad_output.len()];
+        let zero = run(&input, &zeros, GdnMixerVjpRule::Jacobian);
+        assert!(zero.grad_input.iter().all(|value| *value == 0.0));
+        assert!(
+            zero.grad_initial_conv_state
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        assert!(
+            zero.grad_initial_recurrence_state
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        let relp = run(&input, &grad_output, GdnMixerVjpRule::Relp);
+        assert!(
+            relp.grad_input
+                .iter()
+                .zip(&actual.grad_input)
+                .any(|(relp, jacobian)| relp.to_bits() != jacobian.to_bits())
+        );
     }
 
     #[test]

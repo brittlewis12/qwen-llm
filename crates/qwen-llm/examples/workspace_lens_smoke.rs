@@ -1,4 +1,6 @@
-use qwen_llm::research::{DenseFfnVjpRule, RESEARCH_IDENTITY_SCHEME, ResearchLinear};
+use qwen_llm::research::{
+    DenseFfnVjpRule, GdnMixerVjpRule, LinearRole, RESEARCH_IDENTITY_SCHEME, ResearchLinear,
+};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use qwen_llm::tensor::GgmlType;
 use serde_json::json;
@@ -75,11 +77,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|&value| f64::from(value) * f64::from(value))
         .sum::<f64>()
         .sqrt();
+    let gdn_layer = (1..arch.n_layer)
+        .find(|&layer| {
+            research
+                .linear_info(ResearchLinear::Layer {
+                    index: layer,
+                    role: LinearRole::GdnQkv,
+                })
+                .is_ok()
+        })
+        .ok_or("model has no nonzero GDN layer")?;
+    let gdn_forward = research.forward_prompt_with_gdn_capture(&[token_id, token_id], gdn_layer)?;
+    let mut gdn_cotangent = vec![0.0f32; 2 * gdn_forward.hidden_size()];
+    for token in 0..2 {
+        gdn_cotangent[token * gdn_forward.hidden_size()
+            + (hidden_coordinate + token) % gdn_forward.hidden_size()] = 1.0;
+    }
+    let gdn_r_vjp = research.gdn_mixer_vjp(&gdn_forward, &gdn_cotangent, GdnMixerVjpRule::Relp)?;
+    let gdn_r_vjp_norm = gdn_r_vjp
+        .values
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt();
+    if !gdn_r_vjp.residual_replay_max_abs_error.is_finite()
+        || !gdn_r_vjp.final_conv_state_max_abs_error.is_finite()
+        || !gdn_r_vjp.final_recurrence_state_max_abs_error.is_finite()
+        || gdn_r_vjp.residual_replay_max_abs_error > 1e-5
+        || gdn_r_vjp.final_conv_state_max_abs_error > 1e-5
+        || gdn_r_vjp.final_recurrence_state_max_abs_error > 1e-5
+    {
+        return Err(format!(
+            "GDN replay drift residual={} conv={} recurrence={}",
+            gdn_r_vjp.residual_replay_max_abs_error,
+            gdn_r_vjp.final_conv_state_max_abs_error,
+            gdn_r_vjp.final_recurrence_state_max_abs_error,
+        )
+        .into());
+    }
 
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schema": "qwen.workspace_lens_smoke.v1",
+            "schema": "qwen.workspace_lens_smoke.v2",
             "model": model,
             "identity": {
                 "scheme": RESEARCH_IDENTITY_SCHEME,
@@ -116,6 +156,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "query_count": dense_ffn_r_vjp.n_query,
                 "input_width": dense_ffn_r_vjp.values.len(),
                 "l2_norm": dense_ffn_r_vjp_norm,
+            },
+            "gdn_mixer_r_vjp": {
+                "layer": gdn_r_vjp.layer,
+                "tokens": gdn_r_vjp.n_tokens,
+                "input_width": gdn_r_vjp.values.len(),
+                "l2_norm": gdn_r_vjp_norm,
+                "residual_replay_max_abs_error": gdn_r_vjp.residual_replay_max_abs_error,
+                "final_conv_state_max_abs_error": gdn_r_vjp.final_conv_state_max_abs_error,
+                "final_recurrence_state_max_abs_error": gdn_r_vjp.final_recurrence_state_max_abs_error,
             }
         }))?
     );

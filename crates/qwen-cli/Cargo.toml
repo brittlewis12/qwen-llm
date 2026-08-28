@@ -26,6 +26,10 @@ path = "src/census.rs"
 name = "qwen-grammar-oracle"
 path = "src/grammar_oracle.rs"
 
+[[bin]]
+name = "qwen-lens"
+path = "src/lens.rs"
+
 [lints]
 workspace = true
 
@@ -41,6 +45,7 @@ objc2-foundation.workspace = true
 objc2-metal.workspace = true
 
 anyhow.workspace = true
+blake3.workspace = true
 bytemuck.workspace = true
 clap.workspace = true
 half.workspace = true

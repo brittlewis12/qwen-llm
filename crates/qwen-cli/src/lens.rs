@@ -1,0 +1,1542 @@
+use anyhow::{Context, Result, bail, ensure};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
+use qwen_llm::model::Arch;
+use qwen_llm::research::{
+    MAX_RESEARCH_WORKSPACE_TOKENS, ResearchWorkspaceBlockKind, ResearchWorkspaceReplayDiagnostic,
+    WorkspaceLensRule,
+};
+use qwen_llm::runtime::{Runtime, SequenceConfig};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fs::{DirBuilder, File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
+const CHECKPOINT_SCHEMA: &str = "qwen.workspace_lens_row_checkpoint";
+const SCHEMA_VERSION: u32 = 1;
+const ESTIMATOR_VERSION: &str = "summed_causal_target_vjp_mean_source_positions_v1";
+const ORIENTATION: &str = "source_layer_output_coordinate_source_coordinate";
+const RULE_VERSION: &str = "qwen_workspace_rules_v1";
+const PAYLOAD_NAME: &str = "rows.f32le";
+const MANIFEST_NAME: &str = "shard.json";
+const CHECKPOINT_NAME: &str = "checkpoint.json";
+
+#[derive(Debug, Parser)]
+#[command(name = "qwen-lens", about = "Native Qwen workspace-lens tools")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Fit a resumable contiguous shard of J-lens or R-lens transport rows.
+    FitRows(FitRowsArgs),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum FitMethod {
+    J,
+    R,
+}
+
+impl FitMethod {
+    fn rule(self) -> WorkspaceLensRule {
+        match self {
+            Self::J => WorkspaceLensRule::Jacobian,
+            Self::R => WorkspaceLensRule::Relp,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct FitRowsArgs {
+    /// Dense Qwen3.8 GGUF model (the first shard is sufficient).
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+
+    /// Strict JSONL corpus with one `prompt` or `token_ids` field per record.
+    #[arg(long)]
+    prompts: PathBuf,
+
+    /// New shard directory, or an incomplete shard directory with --resume.
+    #[arg(long)]
+    output: PathBuf,
+
+    /// Private cache directory for the strong ordered-GGUF content identity.
+    #[arg(long)]
+    identity_cache: PathBuf,
+
+    #[arg(long, value_enum)]
+    method: FitMethod,
+
+    /// Post-block residual target layer.
+    #[arg(long)]
+    target_layer: u32,
+
+    /// Strictly increasing post-block source layers.
+    #[arg(long, value_delimiter = ',', required = true)]
+    source_layers: Vec<u32>,
+
+    /// First target/output coordinate in this shard (inclusive).
+    #[arg(long)]
+    row_start: u32,
+
+    /// Last target/output coordinate in this shard (exclusive).
+    #[arg(long)]
+    row_end: u32,
+
+    /// Leading attention-sink positions excluded from target and source means.
+    #[arg(long, default_value_t = 4)]
+    skip_first: usize,
+
+    /// Tokenize/truncate each record to this bound (maximum 16 for now).
+    #[arg(long, default_value_t = MAX_RESEARCH_WORKSPACE_TOKENS)]
+    max_tokens: usize,
+
+    /// Consume at most this many non-comment JSONL records.
+    #[arg(long, default_value_t = 25)]
+    max_prompts: usize,
+
+    /// Disable the tokenizer's configured BOS/EOS insertion policy.
+    #[arg(long)]
+    no_special_tokens: bool,
+
+    /// Resume an incomplete, configuration-identical output directory.
+    #[arg(long)]
+    resume: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptRequest {
+    id: Option<String>,
+    prompt: Option<String>,
+    token_ids: Option<Vec<i32>>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedPrompt {
+    id: String,
+    token_ids: Vec<i32>,
+    original_token_count: usize,
+    truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FitConfig {
+    estimator_version: String,
+    orientation: String,
+    rule_version: String,
+    method: FitMethod,
+    model_content_blake3: String,
+    model_locator_id: String,
+    tokenizer_metadata_id: String,
+    architecture: String,
+    n_layers: u32,
+    hidden_size: u32,
+    vocab_size: u32,
+    full_attention_interval: u32,
+    target_layer: u32,
+    source_layers: Vec<u32>,
+    row_start: u32,
+    row_end: u32,
+    skip_first: usize,
+    max_tokens: usize,
+    add_special_tokens: bool,
+    corpus_blake3: String,
+    selected_records: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PayloadDescriptor {
+    path: String,
+    dtype: String,
+    shape: [usize; 3],
+    byte_length: u64,
+    blake3: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayDiagnostic {
+    layer: u32,
+    kind: String,
+    residual_replay_max_abs_error: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SkippedPrompt {
+    id: String,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FitCheckpoint {
+    schema: String,
+    schema_version: u32,
+    config_blake3: String,
+    generation: u64,
+    next_record: usize,
+    used_prompts: u64,
+    truncated_prompts: u64,
+    skipped_prompts: Vec<SkippedPrompt>,
+    forward_seconds: f64,
+    vjp_seconds: f64,
+    sums: PayloadDescriptor,
+    diagnostics: Vec<ReplayDiagnostic>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CorpusSummary {
+    selected_records: usize,
+    used_prompts: u64,
+    skipped_prompts: Vec<SkippedPrompt>,
+    truncated_prompts: u64,
+    ordered_token_ids_blake3: String,
+    add_special_tokens: bool,
+    max_tokens: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FitSummary {
+    estimator_version: String,
+    orientation: String,
+    rule_version: String,
+    method: FitMethod,
+    target_layer: u32,
+    source_layers: Vec<u32>,
+    row_start: u32,
+    row_end: u32,
+    skip_first: usize,
+    valid_position_denominator: String,
+    accumulator_dtype: String,
+    storage_dtype: String,
+    forward_seconds: f64,
+    vjp_seconds: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSummary {
+    path: String,
+    content_blake3: String,
+    content_identity_outcome: String,
+    content_bytes_hashed: u64,
+    research_identity_scheme: String,
+    model_locator_id: String,
+    tokenizer_metadata_id: String,
+    content_authenticated: bool,
+    architecture: String,
+    n_layers: u32,
+    hidden_size: u32,
+    vocab_size: u32,
+    full_attention_interval: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Provenance {
+    build_commit: String,
+    build_dirty: String,
+    build_source_state: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FitShardManifest {
+    schema: String,
+    schema_version: u32,
+    status: String,
+    config_blake3: String,
+    config: FitConfig,
+    model: ModelSummary,
+    corpus: CorpusSummary,
+    fit: FitSummary,
+    payload: PayloadDescriptor,
+    diagnostics: Vec<ReplayDiagnostic>,
+    provenance: Provenance,
+}
+
+fn main() -> Result<()> {
+    match Cli::parse().command {
+        Command::FitRows(args) => fit_rows(args),
+    }
+}
+
+fn fit_rows(args: FitRowsArgs) -> Result<()> {
+    validate_args(&args)?;
+    let requests = read_prompt_requests(&args.prompts, args.max_prompts)?;
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let loaded = runtime
+        .load_model(&args.model)
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    let arch = loaded.arch();
+    ensure!(
+        args.target_layer < arch.n_layer,
+        "--target-layer {} is out of range for {} layers",
+        args.target_layer,
+        arch.n_layer
+    );
+    ensure!(
+        args.source_layers
+            .iter()
+            .all(|&source| source < args.target_layer),
+        "every --source-layers entry must be below --target-layer {}",
+        args.target_layer
+    );
+    ensure!(
+        args.row_end <= arch.hidden_size,
+        "row range {}..{} exceeds hidden size {}",
+        args.row_start,
+        args.row_end,
+        arch.hidden_size
+    );
+
+    let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
+    let add_special_tokens = !args.no_special_tokens;
+    let prompts = prepare_prompts(
+        requests,
+        &tokenizer,
+        add_special_tokens,
+        args.max_tokens,
+        arch.vocab_size,
+    )?;
+    let corpus_blake3 = corpus_digest(&prompts);
+    let identity = loaded.research_identity();
+    let content = checkpoint_content_identity(
+        loaded.gguf(),
+        &CheckpointIdentityCache::new(&args.identity_cache),
+    )
+    .with_context(|| {
+        format!(
+            "resolve strong model identity using {}",
+            args.identity_cache.display()
+        )
+    })?;
+    let model_content_blake3 = hex(&content.content_id);
+    let config = FitConfig {
+        estimator_version: ESTIMATOR_VERSION.into(),
+        orientation: ORIENTATION.into(),
+        rule_version: RULE_VERSION.into(),
+        method: args.method,
+        model_content_blake3: model_content_blake3.clone(),
+        model_locator_id: format!("{:016x}", identity.model_locator_id),
+        tokenizer_metadata_id: format!("{:016x}", identity.tokenizer_metadata_id),
+        architecture: "qwen3_hybrid_dense".into(),
+        n_layers: arch.n_layer,
+        hidden_size: arch.hidden_size,
+        vocab_size: arch.vocab_size,
+        full_attention_interval: arch.full_attention_interval,
+        target_layer: args.target_layer,
+        source_layers: args.source_layers.clone(),
+        row_start: args.row_start,
+        row_end: args.row_end,
+        skip_first: args.skip_first,
+        max_tokens: args.max_tokens,
+        add_special_tokens,
+        corpus_blake3: corpus_blake3.clone(),
+        selected_records: prompts.len(),
+    };
+    let config_blake3 = digest_json(&config)?;
+    let row_count = usize::try_from(args.row_end - args.row_start).context("row count")?;
+    let hidden_size = arch.hidden_size as usize;
+    let value_count = args
+        .source_layers
+        .len()
+        .checked_mul(row_count)
+        .and_then(|value| value.checked_mul(hidden_size))
+        .context("fit shard value count overflow")?;
+
+    let mut state = open_or_create_state(
+        &args.output,
+        args.resume,
+        &config,
+        &prompts,
+        &config_blake3,
+        value_count,
+        args.source_layers.len(),
+        row_count,
+        hidden_size,
+    )?;
+    if let WorkerState::Complete(manifest) = state {
+        println!("{}", serde_json::to_string_pretty(&manifest)?);
+        return Ok(());
+    }
+    let WorkerState::Active(ref mut active) = state else {
+        unreachable!();
+    };
+    validate_active_state(
+        active,
+        &prompts,
+        args.skip_first,
+        arch,
+        args.target_layer,
+        &args.source_layers,
+        value_count,
+    )?;
+
+    let output_rows: Vec<u32> = (args.row_start..args.row_end).collect();
+    for (record_index, prompt) in prompts.iter().enumerate().skip(active.next_record) {
+        if let Some(skipped) = skipped_prompt(prompt, args.skip_first) {
+            active.skipped_prompts.push(skipped);
+            active.next_record = record_index + 1;
+            checkpoint_active(
+                &args.output,
+                &config_blake3,
+                active,
+                args.source_layers.len(),
+                row_count,
+                hidden_size,
+            )?;
+            continue;
+        }
+        eprintln!(
+            "fit prompt {}/{} id={} tokens={} rows={}..{}",
+            record_index + 1,
+            prompts.len(),
+            prompt.id,
+            prompt.token_ids.len(),
+            args.row_start,
+            args.row_end
+        );
+        let mut sequence = loaded
+            .create_sequence(SequenceConfig::new(prompt.token_ids.len()))
+            .with_context(|| format!("create sequence for prompt {}", prompt.id))?;
+        let mut research = loaded
+            .research_session(&mut sequence)
+            .with_context(|| format!("open research session for prompt {}", prompt.id))?;
+        let started = Instant::now();
+        let forward = research
+            .forward_prompt_with_workspace_capture(&prompt.token_ids)
+            .with_context(|| format!("capture workspace prompt {}", prompt.id))?;
+        active.forward_seconds += started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        let rows = research
+            .workspace_fit_rows(
+                &forward,
+                args.target_layer,
+                &args.source_layers,
+                &output_rows,
+                args.skip_first,
+                args.method.rule(),
+            )
+            .with_context(|| format!("fit workspace rows for prompt {}", prompt.id))?;
+        active.vjp_seconds += started.elapsed().as_secs_f64();
+        ensure!(
+            rows.values.len() == active.sums.len(),
+            "fitted row count {} != accumulator count {}",
+            rows.values.len(),
+            active.sums.len()
+        );
+        ensure!(
+            rows.values.iter().all(|value| value.is_finite()),
+            "prompt {} produced non-finite fitted rows",
+            prompt.id
+        );
+        for (sum, value) in active.sums.iter_mut().zip(rows.values) {
+            *sum += value;
+        }
+        merge_diagnostics(&mut active.diagnostics, &rows.diagnostics)?;
+        active.used_prompts += 1;
+        active.truncated_prompts += u64::from(prompt.truncated);
+        active.next_record = record_index + 1;
+        checkpoint_active(
+            &args.output,
+            &config_blake3,
+            active,
+            args.source_layers.len(),
+            row_count,
+            hidden_size,
+        )?;
+    }
+    ensure!(active.used_prompts > 0, "no prompt had any valid positions");
+
+    let scale = (active.used_prompts as f32).recip();
+    let mut averaged = active.sums.clone();
+    for value in &mut averaged {
+        *value *= scale;
+    }
+    ensure!(
+        averaged.iter().all(|value| value.is_finite()),
+        "final averaged shard contains non-finite values"
+    );
+    let payload_bytes = encode_f32_le(&averaged)?;
+    let payload_path = args.output.join(PAYLOAD_NAME);
+    publish_immutable(&payload_path, &payload_bytes)?;
+    let payload = payload_descriptor(
+        PAYLOAD_NAME,
+        &payload_bytes,
+        [args.source_layers.len(), row_count, hidden_size],
+    );
+    let manifest = FitShardManifest {
+        schema: SHARD_SCHEMA.into(),
+        schema_version: SCHEMA_VERSION,
+        status: "complete".into(),
+        config_blake3: config_blake3.clone(),
+        config: config.clone(),
+        model: ModelSummary {
+            path: args.model.display().to_string(),
+            content_blake3: model_content_blake3,
+            content_identity_outcome: format!("{:?}", content.outcome),
+            content_bytes_hashed: content.bytes_hashed,
+            research_identity_scheme: "qwen_llm_model_locator_v1".into(),
+            model_locator_id: config.model_locator_id.clone(),
+            tokenizer_metadata_id: config.tokenizer_metadata_id.clone(),
+            content_authenticated: true,
+            architecture: config.architecture.clone(),
+            n_layers: arch.n_layer,
+            hidden_size: arch.hidden_size,
+            vocab_size: arch.vocab_size,
+            full_attention_interval: arch.full_attention_interval,
+        },
+        corpus: CorpusSummary {
+            selected_records: prompts.len(),
+            used_prompts: active.used_prompts,
+            skipped_prompts: active.skipped_prompts.clone(),
+            truncated_prompts: active.truncated_prompts,
+            ordered_token_ids_blake3: corpus_blake3,
+            add_special_tokens,
+            max_tokens: args.max_tokens,
+        },
+        fit: FitSummary {
+            estimator_version: ESTIMATOR_VERSION.into(),
+            orientation: ORIENTATION.into(),
+            rule_version: RULE_VERSION.into(),
+            method: args.method,
+            target_layer: args.target_layer,
+            source_layers: args.source_layers.clone(),
+            row_start: args.row_start,
+            row_end: args.row_end,
+            skip_first: args.skip_first,
+            valid_position_denominator: "number_of_valid_source_positions".into(),
+            accumulator_dtype: "f32".into(),
+            storage_dtype: "f32_le".into(),
+            forward_seconds: active.forward_seconds,
+            vjp_seconds: active.vjp_seconds,
+        },
+        payload,
+        diagnostics: active.diagnostics.clone(),
+        provenance: Provenance {
+            build_commit: env!("QWEN_BUILD_COMMIT").into(),
+            build_dirty: env!("QWEN_BUILD_DIRTY").into(),
+            build_source_state: env!("QWEN_BUILD_SOURCE_STATE").into(),
+        },
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+    publish_immutable(&args.output.join(MANIFEST_NAME), &manifest_bytes)?;
+    sync_directory(&args.output)?;
+    println!("{}", serde_json::to_string_pretty(&manifest)?);
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ActiveState {
+    generation: u64,
+    next_record: usize,
+    used_prompts: u64,
+    truncated_prompts: u64,
+    skipped_prompts: Vec<SkippedPrompt>,
+    forward_seconds: f64,
+    vjp_seconds: f64,
+    sums: Vec<f32>,
+    sums_path: Option<String>,
+    diagnostics: Vec<ReplayDiagnostic>,
+}
+
+#[derive(Debug)]
+enum WorkerState {
+    Active(ActiveState),
+    Complete(Box<FitShardManifest>),
+}
+
+fn validate_args(args: &FitRowsArgs) -> Result<()> {
+    ensure!(args.max_prompts > 0, "--max-prompts must be nonzero");
+    ensure!(args.max_tokens > 0, "--max-tokens must be nonzero");
+    ensure!(
+        args.max_tokens <= MAX_RESEARCH_WORKSPACE_TOKENS,
+        "--max-tokens {} exceeds native workspace limit {}",
+        args.max_tokens,
+        MAX_RESEARCH_WORKSPACE_TOKENS
+    );
+    ensure!(
+        args.skip_first
+            .checked_add(2)
+            .is_some_and(|minimum| minimum <= args.max_tokens),
+        "--max-tokens must be at least --skip-first + 2"
+    );
+    ensure!(
+        !args.source_layers.is_empty(),
+        "--source-layers must not be empty"
+    );
+    ensure!(
+        args.source_layers.windows(2).all(|pair| pair[0] < pair[1]),
+        "--source-layers must be strictly increasing and unique"
+    );
+    ensure!(
+        args.row_start < args.row_end,
+        "row range must be nonempty and half-open"
+    );
+    ensure!(
+        args.prompts != Path::new("-"),
+        "stdin prompt corpora are not supported because resumable fitting requires replayable input"
+    );
+    Ok(())
+}
+
+fn read_prompt_requests(path: &Path, max_prompts: usize) -> Result<Vec<(usize, PromptRequest)>> {
+    let file =
+        File::open(path).with_context(|| format!("open prompt corpus {}", path.display()))?;
+    let mut requests = Vec::new();
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line_number = index + 1;
+        let line = line.with_context(|| format!("read {} line {line_number}", path.display()))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let request: PromptRequest = serde_json::from_str(trimmed)
+            .with_context(|| format!("parse {} line {line_number}", path.display()))?;
+        ensure!(
+            request.prompt.is_some() ^ request.token_ids.is_some(),
+            "{} line {} must contain exactly one of prompt or token_ids",
+            path.display(),
+            line_number
+        );
+        requests.push((line_number, request));
+        if requests.len() == max_prompts {
+            break;
+        }
+    }
+    ensure!(!requests.is_empty(), "prompt corpus has no records");
+    Ok(requests)
+}
+
+fn prepare_prompts(
+    requests: Vec<(usize, PromptRequest)>,
+    tokenizer: &qwen_llm::tokenizer::Tokenizer,
+    add_special_tokens: bool,
+    max_tokens: usize,
+    vocab_size: u32,
+) -> Result<Vec<PreparedPrompt>> {
+    let mut ids = HashSet::new();
+    let mut prompts = Vec::with_capacity(requests.len());
+    for (line_number, request) in requests {
+        let id = request.id.unwrap_or_else(|| format!("line-{line_number}"));
+        ensure!(!id.is_empty(), "prompt id on line {line_number} is empty");
+        ensure!(ids.insert(id.clone()), "duplicate prompt id {id:?}");
+        let mut token_ids = match (request.prompt, request.token_ids) {
+            (Some(prompt), None) => tokenizer
+                .encode(&prompt, add_special_tokens)
+                .with_context(|| format!("tokenize prompt {id}"))?,
+            (None, Some(token_ids)) => token_ids,
+            _ => unreachable!("request shape validated before model load"),
+        };
+        let original_token_count = token_ids.len();
+        let truncated = original_token_count > max_tokens;
+        token_ids.truncate(max_tokens);
+        ensure!(!token_ids.is_empty(), "prompt {id} produced no tokens");
+        if let Some(&token_id) = token_ids
+            .iter()
+            .find(|&&token_id| token_id < 0 || token_id as u32 >= vocab_size)
+        {
+            bail!("prompt {id} contains token {token_id} outside vocab {vocab_size}");
+        }
+        prompts.push(PreparedPrompt {
+            id,
+            token_ids,
+            original_token_count,
+            truncated,
+        });
+    }
+    Ok(prompts)
+}
+
+fn corpus_digest(prompts: &[PreparedPrompt]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"qwen-workspace-lens-corpus-v1\0");
+    for prompt in prompts {
+        hasher.update(&(prompt.id.len() as u64).to_le_bytes());
+        hasher.update(prompt.id.as_bytes());
+        hasher.update(&(prompt.original_token_count as u64).to_le_bytes());
+        hasher.update(&[u8::from(prompt.truncated)]);
+        hasher.update(&(prompt.token_ids.len() as u64).to_le_bytes());
+        for token_id in &prompt.token_ids {
+            hasher.update(&token_id.to_le_bytes());
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn digest_json(value: &impl Serialize) -> Result<String> {
+    Ok(blake3::hash(&serde_json::to_vec(value)?)
+        .to_hex()
+        .to_string())
+}
+
+fn skipped_prompt(prompt: &PreparedPrompt, skip_first: usize) -> Option<SkippedPrompt> {
+    (prompt.token_ids.len() < skip_first.checked_add(2)?).then(|| SkippedPrompt {
+        id: prompt.id.clone(),
+        reason: format!(
+            "{} tokens leave no valid positions with skip_first={skip_first}",
+            prompt.token_ids.len()
+        ),
+    })
+}
+
+fn validate_active_state(
+    state: &ActiveState,
+    prompts: &[PreparedPrompt],
+    skip_first: usize,
+    arch: Arch,
+    target_layer: u32,
+    source_layers: &[u32],
+    expected_values: usize,
+) -> Result<()> {
+    ensure!(
+        state.next_record <= prompts.len(),
+        "checkpoint next_record {} exceeds corpus length {}",
+        state.next_record,
+        prompts.len()
+    );
+    ensure!(
+        state.generation == u64::try_from(state.next_record).context("checkpoint cursor")?,
+        "checkpoint generation {} does not match cursor {}",
+        state.generation,
+        state.next_record
+    );
+    let processed = &prompts[..state.next_record];
+    let expected_skipped: Vec<_> = processed
+        .iter()
+        .filter_map(|prompt| skipped_prompt(prompt, skip_first))
+        .collect();
+    let expected_used = u64::try_from(state.next_record - expected_skipped.len())
+        .context("checkpoint used prompt count")?;
+    let expected_truncated = u64::try_from(
+        processed
+            .iter()
+            .filter(|prompt| skipped_prompt(prompt, skip_first).is_none() && prompt.truncated)
+            .count(),
+    )
+    .context("checkpoint truncated prompt count")?;
+    ensure!(
+        state.used_prompts == expected_used
+            && state.skipped_prompts == expected_skipped
+            && state.truncated_prompts == expected_truncated,
+        "checkpoint cursor/counter metadata is inconsistent with the corpus prefix"
+    );
+    ensure!(
+        state.forward_seconds.is_finite()
+            && state.forward_seconds >= 0.0
+            && state.vjp_seconds.is_finite()
+            && state.vjp_seconds >= 0.0,
+        "checkpoint timings must be finite and nonnegative"
+    );
+    ensure!(
+        state.sums.len() == expected_values && state.sums.iter().all(|value| value.is_finite()),
+        "checkpoint accumulator shape or values are invalid"
+    );
+    if state.used_prompts == 0 {
+        ensure!(
+            state.diagnostics.is_empty()
+                && state.forward_seconds == 0.0
+                && state.vjp_seconds == 0.0,
+            "checkpoint without fitted prompts must not contain fit diagnostics or timings"
+        );
+    } else {
+        let earliest_source = source_layers
+            .first()
+            .copied()
+            .context("checkpoint validation has no source layers")?;
+        validate_replay_schedule(
+            &state.diagnostics,
+            target_layer,
+            earliest_source,
+            arch.full_attention_interval,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_replay_schedule(
+    diagnostics: &[ReplayDiagnostic],
+    target_layer: u32,
+    earliest_source: u32,
+    full_attention_interval: u32,
+) -> Result<()> {
+    ensure!(
+        full_attention_interval > 0 && earliest_source < target_layer,
+        "invalid replay schedule geometry"
+    );
+    let expected_count =
+        usize::try_from(target_layer - earliest_source).context("replay diagnostic count")?;
+    ensure!(
+        diagnostics.len() == expected_count,
+        "replay diagnostic schedule length {} != expected {}",
+        diagnostics.len(),
+        expected_count
+    );
+    for (offset, diagnostic) in diagnostics.iter().enumerate() {
+        let layer = target_layer - u32::try_from(offset).context("replay diagnostic offset")?;
+        let expected_kind = match layer % full_attention_interval {
+            remainder if remainder == full_attention_interval - 1 => "attention",
+            _ => "gdn",
+        };
+        ensure!(
+            diagnostic.layer == layer
+                && diagnostic.kind == expected_kind
+                && diagnostic.residual_replay_max_abs_error.is_finite(),
+            "invalid replay diagnostic at offset {}",
+            offset
+        );
+    }
+    Ok(())
+}
+
+fn validate_complete_manifest(
+    manifest: &FitShardManifest,
+    expected_config: &FitConfig,
+    prompts: &[PreparedPrompt],
+    expected_config_blake3: &str,
+    expected_shape: [usize; 3],
+) -> Result<()> {
+    ensure!(
+        manifest.schema == SHARD_SCHEMA,
+        "unknown completed shard schema"
+    );
+    ensure!(
+        manifest.schema_version == SCHEMA_VERSION,
+        "unsupported completed shard version"
+    );
+    ensure!(
+        manifest.status == "complete",
+        "shard status is not complete"
+    );
+    ensure!(
+        &manifest.config == expected_config,
+        "completed shard embedded config does not match the requested fit"
+    );
+    let embedded_digest = digest_json(&manifest.config)?;
+    ensure!(
+        manifest.config_blake3 == embedded_digest
+            && manifest.config_blake3 == expected_config_blake3,
+        "completed shard config digest is inconsistent"
+    );
+    ensure!(
+        manifest.payload.path == PAYLOAD_NAME
+            && manifest.payload.dtype == "f32_le"
+            && manifest.payload.shape == expected_shape,
+        "completed shard payload descriptor is not canonical"
+    );
+    let expected_bytes = expected_shape
+        .iter()
+        .try_fold(1usize, |product, &dimension| product.checked_mul(dimension))
+        .and_then(|values| values.checked_mul(4))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .context("completed shard byte count overflow")?;
+    ensure!(
+        manifest.payload.byte_length == expected_bytes,
+        "completed shard payload byte length is inconsistent with its shape"
+    );
+    ensure!(
+        manifest.model.content_blake3 == expected_config.model_content_blake3
+            && manifest.model.model_locator_id == expected_config.model_locator_id
+            && manifest.model.tokenizer_metadata_id == expected_config.tokenizer_metadata_id
+            && manifest.model.architecture == expected_config.architecture
+            && manifest.model.n_layers == expected_config.n_layers
+            && manifest.model.hidden_size == expected_config.hidden_size
+            && manifest.model.vocab_size == expected_config.vocab_size
+            && manifest.model.full_attention_interval == expected_config.full_attention_interval
+            && manifest.model.content_authenticated,
+        "completed shard model summary disagrees with its config"
+    );
+    ensure!(
+        manifest.corpus.selected_records == expected_config.selected_records
+            && manifest.corpus.used_prompts > 0
+            && manifest.corpus.ordered_token_ids_blake3 == expected_config.corpus_blake3
+            && manifest.corpus.add_special_tokens == expected_config.add_special_tokens
+            && manifest.corpus.max_tokens == expected_config.max_tokens
+            && manifest.corpus.used_prompts
+                + u64::try_from(manifest.corpus.skipped_prompts.len())
+                    .context("completed skipped prompt count")?
+                == u64::try_from(manifest.corpus.selected_records)
+                    .context("completed selected record count")?
+            && manifest.corpus.truncated_prompts <= manifest.corpus.used_prompts,
+        "completed shard corpus summary disagrees with its config"
+    );
+    let expected_skipped: Vec<_> = prompts
+        .iter()
+        .filter_map(|prompt| skipped_prompt(prompt, expected_config.skip_first))
+        .collect();
+    let expected_used = u64::try_from(prompts.len() - expected_skipped.len())
+        .context("completed used prompt count")?;
+    let expected_truncated = u64::try_from(
+        prompts
+            .iter()
+            .filter(|prompt| {
+                skipped_prompt(prompt, expected_config.skip_first).is_none() && prompt.truncated
+            })
+            .count(),
+    )
+    .context("completed truncated prompt count")?;
+    ensure!(
+        manifest.corpus.used_prompts == expected_used
+            && manifest.corpus.skipped_prompts == expected_skipped
+            && manifest.corpus.truncated_prompts == expected_truncated,
+        "completed shard corpus counters do not match the bound prompt corpus"
+    );
+    ensure!(
+        manifest.fit.estimator_version == expected_config.estimator_version
+            && manifest.fit.orientation == expected_config.orientation
+            && manifest.fit.rule_version == expected_config.rule_version
+            && manifest.fit.method == expected_config.method
+            && manifest.fit.target_layer == expected_config.target_layer
+            && manifest.fit.source_layers == expected_config.source_layers
+            && manifest.fit.row_start == expected_config.row_start
+            && manifest.fit.row_end == expected_config.row_end
+            && manifest.fit.skip_first == expected_config.skip_first
+            && manifest.fit.valid_position_denominator == "number_of_valid_source_positions"
+            && manifest.fit.accumulator_dtype == "f32"
+            && manifest.fit.storage_dtype == "f32_le"
+            && manifest.fit.forward_seconds.is_finite()
+            && manifest.fit.forward_seconds >= 0.0
+            && manifest.fit.vjp_seconds.is_finite()
+            && manifest.fit.vjp_seconds >= 0.0,
+        "completed shard fit summary disagrees with its config"
+    );
+    let earliest_source = expected_config
+        .source_layers
+        .first()
+        .copied()
+        .context("completed shard config has no source layers")?;
+    validate_replay_schedule(
+        &manifest.diagnostics,
+        expected_config.target_layer,
+        earliest_source,
+        expected_config.full_attention_interval,
+    )?;
+    ensure!(
+        !manifest.provenance.build_commit.is_empty()
+            && !manifest.provenance.build_dirty.is_empty()
+            && !manifest.provenance.build_source_state.is_empty(),
+        "completed shard provenance is incomplete"
+    );
+    Ok(())
+}
+
+fn open_or_create_state(
+    output: &Path,
+    resume: bool,
+    expected_config: &FitConfig,
+    prompts: &[PreparedPrompt],
+    config_blake3: &str,
+    value_count: usize,
+    n_sources: usize,
+    n_rows: usize,
+    hidden_size: usize,
+) -> Result<WorkerState> {
+    if output.exists() {
+        let metadata = std::fs::symlink_metadata(output)
+            .with_context(|| format!("inspect output {}", output.display()))?;
+        ensure!(
+            metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+            "output {} must be a real directory",
+            output.display()
+        );
+        ensure!(
+            resume,
+            "output {} already exists; pass --resume",
+            output.display()
+        );
+    } else {
+        let parent = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        ensure!(
+            parent.is_dir(),
+            "output parent {} does not exist",
+            parent.display()
+        );
+        DirBuilder::new()
+            .mode(0o700)
+            .create(output)
+            .with_context(|| format!("create output directory {}", output.display()))?;
+        sync_directory(parent)?;
+    }
+
+    let manifest_path = output.join(MANIFEST_NAME);
+    if manifest_path.exists() {
+        let manifest: FitShardManifest = read_json_file(&manifest_path)?;
+        validate_complete_manifest(
+            &manifest,
+            expected_config,
+            prompts,
+            config_blake3,
+            [n_sources, n_rows, hidden_size],
+        )?;
+        verify_payload(output, &manifest.payload)?;
+        return Ok(WorkerState::Complete(Box::new(manifest)));
+    }
+
+    let checkpoint_path = output.join(CHECKPOINT_NAME);
+    if !checkpoint_path.exists() {
+        return Ok(WorkerState::Active(ActiveState {
+            generation: 0,
+            next_record: 0,
+            used_prompts: 0,
+            truncated_prompts: 0,
+            skipped_prompts: Vec::new(),
+            forward_seconds: 0.0,
+            vjp_seconds: 0.0,
+            sums: vec![0.0; value_count],
+            sums_path: None,
+            diagnostics: Vec::new(),
+        }));
+    }
+    let checkpoint: FitCheckpoint = read_json_file(&checkpoint_path)?;
+    ensure!(
+        checkpoint.schema == CHECKPOINT_SCHEMA,
+        "unknown checkpoint schema"
+    );
+    ensure!(
+        checkpoint.schema_version == SCHEMA_VERSION,
+        "unsupported checkpoint version"
+    );
+    ensure!(
+        checkpoint.config_blake3 == config_blake3,
+        "checkpoint config {} != requested {}",
+        checkpoint.config_blake3,
+        config_blake3
+    );
+    ensure!(
+        checkpoint.sums.shape == [n_sources, n_rows, hidden_size],
+        "checkpoint sums shape {:?} != expected {:?}",
+        checkpoint.sums.shape,
+        [n_sources, n_rows, hidden_size]
+    );
+    ensure!(
+        checkpoint.sums.dtype == "f32_le",
+        "checkpoint sums dtype must be f32_le"
+    );
+    ensure!(
+        checkpoint.sums.path == format!("sums-{:08}.f32le", checkpoint.generation),
+        "checkpoint sums path does not match generation {}",
+        checkpoint.generation
+    );
+    let expected_bytes = value_count
+        .checked_mul(4)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .context("checkpoint byte count overflow")?;
+    ensure!(
+        checkpoint.sums.byte_length == expected_bytes,
+        "checkpoint sums byte length {} != expected {}",
+        checkpoint.sums.byte_length,
+        expected_bytes
+    );
+    let bytes = verify_payload(output, &checkpoint.sums)?;
+    let sums = decode_f32_le(&bytes, value_count)?;
+    Ok(WorkerState::Active(ActiveState {
+        generation: checkpoint.generation,
+        next_record: checkpoint.next_record,
+        used_prompts: checkpoint.used_prompts,
+        truncated_prompts: checkpoint.truncated_prompts,
+        skipped_prompts: checkpoint.skipped_prompts,
+        forward_seconds: checkpoint.forward_seconds,
+        vjp_seconds: checkpoint.vjp_seconds,
+        sums,
+        sums_path: Some(checkpoint.sums.path),
+        diagnostics: checkpoint.diagnostics,
+    }))
+}
+
+fn checkpoint_active(
+    output: &Path,
+    config_blake3: &str,
+    state: &mut ActiveState,
+    n_sources: usize,
+    n_rows: usize,
+    hidden_size: usize,
+) -> Result<()> {
+    state.generation = state
+        .generation
+        .checked_add(1)
+        .context("checkpoint generation overflow")?;
+    let sums_name = format!("sums-{:08}.f32le", state.generation);
+    let bytes = encode_f32_le(&state.sums)?;
+    publish_immutable(&output.join(&sums_name), &bytes)?;
+    let sums = payload_descriptor(&sums_name, &bytes, [n_sources, n_rows, hidden_size]);
+    let checkpoint = FitCheckpoint {
+        schema: CHECKPOINT_SCHEMA.into(),
+        schema_version: SCHEMA_VERSION,
+        config_blake3: config_blake3.into(),
+        generation: state.generation,
+        next_record: state.next_record,
+        used_prompts: state.used_prompts,
+        truncated_prompts: state.truncated_prompts,
+        skipped_prompts: state.skipped_prompts.clone(),
+        forward_seconds: state.forward_seconds,
+        vjp_seconds: state.vjp_seconds,
+        sums,
+        diagnostics: state.diagnostics.clone(),
+    };
+    write_atomic_replace(
+        &output.join(CHECKPOINT_NAME),
+        &serde_json::to_vec_pretty(&checkpoint)?,
+    )?;
+    if let Some(previous) = state.sums_path.replace(sums_name) {
+        let previous_path = output.join(previous);
+        if previous_path.exists() {
+            std::fs::remove_file(&previous_path)
+                .with_context(|| format!("remove prior sums {}", previous_path.display()))?;
+            sync_directory(output)?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_diagnostics(
+    aggregate: &mut Vec<ReplayDiagnostic>,
+    current: &[ResearchWorkspaceReplayDiagnostic],
+) -> Result<()> {
+    if aggregate.is_empty() {
+        aggregate.extend(current.iter().map(|diagnostic| ReplayDiagnostic {
+            layer: diagnostic.layer,
+            kind: block_kind(diagnostic.kind).into(),
+            residual_replay_max_abs_error: diagnostic.residual_replay_max_abs_error,
+        }));
+        return Ok(());
+    }
+    ensure!(
+        aggregate.len() == current.len(),
+        "replay diagnostic schedule length changed"
+    );
+    for (aggregate, current) in aggregate.iter_mut().zip(current) {
+        ensure!(
+            aggregate.layer == current.layer && aggregate.kind == block_kind(current.kind),
+            "replay diagnostic schedule changed at layer {}",
+            current.layer
+        );
+        aggregate.residual_replay_max_abs_error = aggregate
+            .residual_replay_max_abs_error
+            .max(current.residual_replay_max_abs_error);
+    }
+    Ok(())
+}
+
+fn block_kind(kind: ResearchWorkspaceBlockKind) -> &'static str {
+    match kind {
+        ResearchWorkspaceBlockKind::Gdn => "gdn",
+        ResearchWorkspaceBlockKind::Attention => "attention",
+    }
+}
+
+fn payload_descriptor(path: &str, bytes: &[u8], shape: [usize; 3]) -> PayloadDescriptor {
+    PayloadDescriptor {
+        path: path.into(),
+        dtype: "f32_le".into(),
+        shape,
+        byte_length: bytes.len() as u64,
+        blake3: blake3::hash(bytes).to_hex().to_string(),
+    }
+}
+
+fn verify_payload(directory: &Path, descriptor: &PayloadDescriptor) -> Result<Vec<u8>> {
+    ensure!(
+        Path::new(&descriptor.path).components().count() == 1,
+        "payload path must be one relative filename"
+    );
+    let path = directory.join(&descriptor.path);
+    let bytes = read_regular_file(&path)?;
+    ensure!(
+        bytes.len() as u64 == descriptor.byte_length,
+        "payload {} length {} != {}",
+        path.display(),
+        bytes.len(),
+        descriptor.byte_length
+    );
+    ensure!(
+        blake3::hash(&bytes).to_hex().as_str() == descriptor.blake3,
+        "payload {} digest mismatch",
+        path.display()
+    );
+    Ok(bytes)
+}
+
+fn encode_f32_le(values: &[f32]) -> Result<Vec<u8>> {
+    let byte_count = values
+        .len()
+        .checked_mul(4)
+        .context("F32 byte count overflow")?;
+    let mut bytes = Vec::with_capacity(byte_count);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+fn decode_f32_le(bytes: &[u8], expected_values: usize) -> Result<Vec<f32>> {
+    ensure!(
+        bytes.len()
+            == expected_values
+                .checked_mul(4)
+                .context("F32 byte count overflow")?,
+        "F32 payload length {} != expected {}",
+        bytes.len(),
+        expected_values * 4
+    );
+    let mut values = Vec::with_capacity(expected_values);
+    for chunk in bytes.chunks_exact(4) {
+        values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "F32 payload contains non-finite values"
+    );
+    Ok(values)
+}
+
+fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    serde_json::from_slice(&read_regular_file(path)?)
+        .with_context(|| format!("parse JSON {}", path.display()))
+}
+
+fn read_regular_file(path: &Path) -> Result<Vec<u8>> {
+    let metadata =
+        std::fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "{} must be a regular non-symlink file",
+        path.display()
+    );
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(bytes)
+}
+
+fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<()> {
+    if path.exists() {
+        let existing = read_regular_file(path)?;
+        ensure!(
+            existing == bytes,
+            "existing {} conflicts with publication",
+            path.display()
+        );
+        return Ok(());
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before Unix epoch")?
+        .as_nanos();
+    let name = path
+        .file_name()
+        .context("immutable output has no filename")?;
+    let staging = parent.join(format!(
+        ".{}.stage.{}.{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        nonce
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&staging)
+        .with_context(|| format!("create staging file {}", staging.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write staging file {}", staging.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync staging file {}", staging.display()))?;
+    drop(file);
+    match std::fs::hard_link(&staging, path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = read_regular_file(path)?;
+            if existing != bytes {
+                let _ = std::fs::remove_file(&staging);
+                bail!("existing {} conflicts with publication", path.display());
+            }
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&staging);
+            return Err(error).with_context(|| {
+                format!(
+                    "publish staging file {} to {}",
+                    staging.display(),
+                    path.display()
+                )
+            });
+        }
+    }
+    std::fs::remove_file(&staging)
+        .with_context(|| format!("remove staging file {}", staging.display()))?;
+    sync_directory(parent)
+}
+
+fn write_atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before Unix epoch")?
+        .as_nanos();
+    let name = path.file_name().context("atomic output has no filename")?;
+    let temporary = parent.join(format!(
+        ".{}.tmp.{}.{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        nonce
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .with_context(|| format!("create staging file {}", temporary.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write staging file {}", temporary.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync staging file {}", temporary.display()))?;
+    drop(file);
+    std::fs::rename(&temporary, path).with_context(|| {
+        format!(
+            "publish staging file {} to {}",
+            temporary.display(),
+            path.display()
+        )
+    })?;
+    sync_directory(parent)
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("open directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("sync directory {}", path.display()))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").unwrap();
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> FitConfig {
+        FitConfig {
+            estimator_version: ESTIMATOR_VERSION.into(),
+            orientation: ORIENTATION.into(),
+            rule_version: RULE_VERSION.into(),
+            method: FitMethod::R,
+            model_content_blake3: "11".repeat(32),
+            model_locator_id: "22".repeat(8),
+            tokenizer_metadata_id: "33".repeat(8),
+            architecture: "test_dense".into(),
+            n_layers: 4,
+            hidden_size: 2,
+            vocab_size: 8,
+            full_attention_interval: 4,
+            target_layer: 3,
+            source_layers: vec![0],
+            row_start: 0,
+            row_end: 2,
+            skip_first: 0,
+            max_tokens: 2,
+            add_special_tokens: true,
+            corpus_blake3: "44".repeat(32),
+            selected_records: 2,
+        }
+    }
+
+    #[test]
+    fn f32_payload_round_trips_and_rejects_non_finite_values() {
+        let values = [1.25f32, -2.5, 0.0];
+        let bytes = encode_f32_le(&values).unwrap();
+        assert_eq!(decode_f32_le(&bytes, values.len()).unwrap(), values);
+        assert!(decode_f32_le(&f32::NAN.to_le_bytes(), 1).is_err());
+    }
+
+    #[test]
+    fn corpus_digest_binds_ids_boundaries_and_tokens() {
+        let prompt = |id: &str, token_ids: &[i32]| PreparedPrompt {
+            id: id.into(),
+            token_ids: token_ids.to_vec(),
+            original_token_count: token_ids.len(),
+            truncated: false,
+        };
+        let base = corpus_digest(&[prompt("a", &[1, 2]), prompt("b", &[3])]);
+        assert_ne!(
+            base,
+            corpus_digest(&[prompt("a", &[1]), prompt("b", &[2, 3])])
+        );
+        assert_ne!(
+            base,
+            corpus_digest(&[prompt("b", &[3]), prompt("a", &[1, 2])])
+        );
+        let truncated = PreparedPrompt {
+            id: "a".into(),
+            token_ids: vec![1, 2],
+            original_token_count: 3,
+            truncated: true,
+        };
+        assert_ne!(
+            corpus_digest(&[prompt("a", &[1, 2])]),
+            corpus_digest(&[truncated])
+        );
+    }
+
+    #[test]
+    fn diagnostic_merge_is_schedule_strict_and_takes_maximum() {
+        let current = ResearchWorkspaceReplayDiagnostic {
+            layer: 3,
+            kind: ResearchWorkspaceBlockKind::Attention,
+            residual_replay_max_abs_error: 0.2,
+        };
+        let mut aggregate = Vec::new();
+        merge_diagnostics(&mut aggregate, &[current.clone()]).unwrap();
+        let mut lower = current;
+        lower.residual_replay_max_abs_error = 0.1;
+        merge_diagnostics(&mut aggregate, &[lower]).unwrap();
+        assert_eq!(aggregate[0].residual_replay_max_abs_error, 0.2);
+    }
+
+    #[test]
+    fn checkpoint_round_trip_restores_exact_sums_and_cursor() {
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-checkpoint-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let mut active = ActiveState {
+            generation: 1,
+            next_record: 2,
+            used_prompts: 1,
+            truncated_prompts: 1,
+            skipped_prompts: vec![SkippedPrompt {
+                id: "short".into(),
+                reason: "1 tokens leave no valid positions with skip_first=0".into(),
+            }],
+            forward_seconds: 1.25,
+            vjp_seconds: 2.5,
+            sums: vec![1.0, 2.0, 3.0, 4.0],
+            sums_path: None,
+            diagnostics: vec![
+                ReplayDiagnostic {
+                    layer: 3,
+                    kind: "attention".into(),
+                    residual_replay_max_abs_error: 0.1,
+                },
+                ReplayDiagnostic {
+                    layer: 2,
+                    kind: "gdn".into(),
+                    residual_replay_max_abs_error: 0.0,
+                },
+                ReplayDiagnostic {
+                    layer: 1,
+                    kind: "gdn".into(),
+                    residual_replay_max_abs_error: 0.0,
+                },
+            ],
+        };
+        let prompts = [
+            PreparedPrompt {
+                id: "valid".into(),
+                token_ids: vec![1, 2],
+                original_token_count: 3,
+                truncated: true,
+            },
+            PreparedPrompt {
+                id: "short".into(),
+                token_ids: vec![1],
+                original_token_count: 1,
+                truncated: false,
+            },
+        ];
+        let config = test_config();
+        let config_digest = digest_json(&config).unwrap();
+        checkpoint_active(&root, &config_digest, &mut active, 1, 2, 2).unwrap();
+        let WorkerState::Active(restored) =
+            open_or_create_state(&root, true, &config, &prompts, &config_digest, 4, 1, 2, 2)
+                .unwrap()
+        else {
+            panic!("expected active checkpoint");
+        };
+        assert_eq!(restored.next_record, 2);
+        assert_eq!(restored.used_prompts, 1);
+        assert_eq!(restored.sums, [1.0, 2.0, 3.0, 4.0]);
+        validate_active_state(
+            &restored,
+            &prompts,
+            0,
+            qwen_llm::model::QWEN3_0_8B,
+            3,
+            &[0],
+            4,
+        )
+        .unwrap();
+        let mut corrupted = restored;
+        corrupted.next_record = 1;
+        assert!(
+            validate_active_state(
+                &corrupted,
+                &prompts,
+                0,
+                qwen_llm::model::QWEN3_0_8B,
+                3,
+                &[0],
+                4,
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn immutable_publication_survives_orphan_staging_and_is_idempotent() {
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-publication-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        DirBuilder::new().mode(0o700).create(&root).unwrap();
+        std::fs::write(root.join(".rows.f32le.stage.crashed"), b"partial").unwrap();
+        let final_path = root.join("rows.f32le");
+        publish_immutable(&final_path, b"complete").unwrap();
+        publish_immutable(&final_path, b"complete").unwrap();
+        assert_eq!(read_regular_file(&final_path).unwrap(), b"complete");
+        assert!(publish_immutable(&final_path, b"different").is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

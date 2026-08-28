@@ -415,6 +415,40 @@ impl ResearchWorkspaceVjp {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchWorkspaceRows {
+    pub target_layer: u32,
+    pub source_layers: Vec<u32>,
+    /// Target/output coordinates in caller order.
+    pub output_rows: Vec<u32>,
+    pub n_tokens: usize,
+    pub n_valid_positions: usize,
+    pub hidden_size: usize,
+    /// Source-layer major, then output-row major: `[K,R,H]`.
+    pub values: Vec<f32>,
+    /// Maximum replay drift observed for each traversed block across all rows.
+    pub diagnostics: Vec<ResearchWorkspaceReplayDiagnostic>,
+}
+
+impl ResearchWorkspaceRows {
+    pub fn source_values(&self, slot: usize) -> Option<&[f32]> {
+        let source_elements = self.output_rows.len().checked_mul(self.hidden_size)?;
+        let start = slot.checked_mul(source_elements)?;
+        self.values.get(start..start.checked_add(source_elements)?)
+    }
+
+    pub fn row_values(&self, source_slot: usize, row_slot: usize) -> Option<&[f32]> {
+        if row_slot >= self.output_rows.len() {
+            return None;
+        }
+        let source_elements = self.output_rows.len().checked_mul(self.hidden_size)?;
+        let start = source_slot
+            .checked_mul(source_elements)?
+            .checked_add(row_slot.checked_mul(self.hidden_size)?)?;
+        self.values.get(start..start.checked_add(self.hidden_size)?)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResearchError {
     #[error("runtime: {0}")]
@@ -537,6 +571,18 @@ pub enum ResearchError {
         source_layer: u32,
         target_layer: u32,
     },
+    #[error("workspace row fit requires at least one output coordinate")]
+    EmptyWorkspaceOutputRows,
+    #[error("workspace output rows must be strictly increasing and unique")]
+    WorkspaceOutputRowsNotStrict,
+    #[error("workspace output coordinate {row} is out of range for hidden size {hidden_size}")]
+    WorkspaceOutputRowOutOfRange { row: u32, hidden_size: usize },
+    #[error(
+        "workspace prompt length {n_tokens} leaves no valid positions with skip_first={skip_first}; require length >= skip_first + 2"
+    )]
+    WorkspaceNoValidPositions { n_tokens: usize, skip_first: usize },
+    #[error("workspace replay diagnostic schedule changed across fitted rows")]
+    WorkspaceDiagnosticScheduleMismatch,
     #[error("{name} length {got} does not match expected length {expected}")]
     ActivationSize {
         name: &'static str,
@@ -1570,6 +1616,92 @@ impl ResearchSession<'_, '_> {
             source_layers: source_layers.to_vec(),
             n_tokens,
             hidden_size: forward.hidden_size,
+            values,
+            diagnostics,
+        })
+    }
+
+    /// Fit selected rows of the reference current-and-future-position
+    /// transport estimator for one captured prompt.
+    ///
+    /// For each output coordinate, the cotangent is one at every valid target
+    /// position `skip_first..T-1` (the final prompt position is excluded). The
+    /// resulting source trajectories are averaged over those same positions,
+    /// with no second normalization over target positions.
+    pub fn workspace_fit_rows(
+        &self,
+        forward: &ResearchWorkspaceForward,
+        target_layer: u32,
+        source_layers: &[u32],
+        output_rows: &[u32],
+        skip_first: usize,
+        rule: WorkspaceLensRule,
+    ) -> Result<ResearchWorkspaceRows, ResearchError> {
+        if output_rows.is_empty() {
+            return Err(ResearchError::EmptyWorkspaceOutputRows);
+        }
+        if output_rows.windows(2).any(|rows| rows[0] >= rows[1]) {
+            return Err(ResearchError::WorkspaceOutputRowsNotStrict);
+        }
+        let hidden_size = forward.hidden_size();
+        if let Some(&row) = output_rows.iter().find(|&&row| row as usize >= hidden_size) {
+            return Err(ResearchError::WorkspaceOutputRowOutOfRange { row, hidden_size });
+        }
+        let valid_positions = workspace_valid_position_range(forward.n_tokens(), skip_first)?;
+        let n_valid_positions = valid_positions.len();
+        let hidden_elements = checked_product(forward.n_tokens(), hidden_size)?;
+        let source_row_elements = checked_product(output_rows.len(), hidden_size)?;
+        let output_elements = checked_product(source_layers.len(), source_row_elements)?;
+        let mut values = vec![0.0f32; output_elements];
+        let mut diagnostics = Vec::new();
+        let mut target_cotangent = vec![0.0f32; hidden_elements];
+        for (row_slot, &row) in output_rows.iter().enumerate() {
+            target_cotangent.fill(0.0);
+            for position in valid_positions.clone() {
+                let offset = checked_product(position, hidden_size)?
+                    .checked_add(row as usize)
+                    .ok_or(ResearchError::SizeOverflow)?;
+                target_cotangent[offset] = 1.0;
+            }
+            let vjp = self.workspace_vjp(
+                forward,
+                target_layer,
+                source_layers,
+                &target_cotangent,
+                rule,
+            )?;
+            merge_workspace_diagnostics(&mut diagnostics, &vjp.diagnostics)?;
+            for source_slot in 0..source_layers.len() {
+                let source =
+                    vjp.source_values(source_slot)
+                        .ok_or(ResearchError::ActivationSize {
+                            name: "workspace fitted source trajectory",
+                            got: vjp.values.len(),
+                            expected: checked_product(source_layers.len(), hidden_elements)?,
+                        })?;
+                let destination_row = checked_product(source_slot, output_rows.len())?
+                    .checked_add(row_slot)
+                    .ok_or(ResearchError::SizeOverflow)?;
+                let destination_start = checked_product(destination_row, hidden_size)?;
+                let destination_end = destination_start
+                    .checked_add(hidden_size)
+                    .ok_or(ResearchError::SizeOverflow)?;
+                reduce_workspace_source_positions(
+                    source,
+                    forward.n_tokens(),
+                    hidden_size,
+                    valid_positions.clone(),
+                    &mut values[destination_start..destination_end],
+                )?;
+            }
+        }
+        Ok(ResearchWorkspaceRows {
+            target_layer,
+            source_layers: source_layers.to_vec(),
+            output_rows: output_rows.to_vec(),
+            n_tokens: forward.n_tokens(),
+            n_valid_positions,
+            hidden_size,
             values,
             diagnostics,
         })
@@ -3508,6 +3640,90 @@ fn compose_workspace_vjp(
     Ok((values, diagnostics))
 }
 
+pub fn workspace_valid_position_range(
+    n_tokens: usize,
+    skip_first: usize,
+) -> Result<std::ops::Range<usize>, ResearchError> {
+    let minimum = skip_first
+        .checked_add(2)
+        .ok_or(ResearchError::SizeOverflow)?;
+    if n_tokens < minimum {
+        return Err(ResearchError::WorkspaceNoValidPositions {
+            n_tokens,
+            skip_first,
+        });
+    }
+    Ok(skip_first..n_tokens - 1)
+}
+
+fn reduce_workspace_source_positions(
+    source: &[f32],
+    n_tokens: usize,
+    hidden_size: usize,
+    valid_positions: std::ops::Range<usize>,
+    destination: &mut [f32],
+) -> Result<(), ResearchError> {
+    let expected = checked_product(n_tokens, hidden_size)?;
+    if source.len() != expected {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace source trajectory reduction",
+            got: source.len(),
+            expected,
+        });
+    }
+    if destination.len() != hidden_size {
+        return Err(ResearchError::ActivationSize {
+            name: "workspace fitted row destination",
+            got: destination.len(),
+            expected: hidden_size,
+        });
+    }
+    let count = valid_positions.len();
+    if count == 0 || valid_positions.end > n_tokens {
+        return Err(ResearchError::WorkspaceNoValidPositions {
+            n_tokens,
+            skip_first: valid_positions.start,
+        });
+    }
+    destination.fill(0.0);
+    for position in valid_positions {
+        let start = checked_product(position, hidden_size)?;
+        let end = start
+            .checked_add(hidden_size)
+            .ok_or(ResearchError::SizeOverflow)?;
+        for (sum, &value) in destination.iter_mut().zip(&source[start..end]) {
+            *sum += value;
+        }
+    }
+    let scale = (count as f32).recip();
+    for value in destination {
+        *value *= scale;
+    }
+    Ok(())
+}
+
+fn merge_workspace_diagnostics(
+    aggregate: &mut Vec<ResearchWorkspaceReplayDiagnostic>,
+    current: &[ResearchWorkspaceReplayDiagnostic],
+) -> Result<(), ResearchError> {
+    if aggregate.is_empty() {
+        aggregate.extend_from_slice(current);
+        return Ok(());
+    }
+    if aggregate.len() != current.len() {
+        return Err(ResearchError::WorkspaceDiagnosticScheduleMismatch);
+    }
+    for (aggregate, current) in aggregate.iter_mut().zip(current) {
+        if aggregate.layer != current.layer || aggregate.kind != current.kind {
+            return Err(ResearchError::WorkspaceDiagnosticScheduleMismatch);
+        }
+        aggregate.residual_replay_max_abs_error = aggregate
+            .residual_replay_max_abs_error
+            .max(current.residual_replay_max_abs_error);
+    }
+    Ok(())
+}
+
 fn checked_product(left: usize, right: usize) -> Result<usize, ResearchError> {
     left.checked_mul(right).ok_or(ResearchError::SizeOverflow)
 }
@@ -4358,6 +4574,54 @@ mod tests {
                 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0
             ]
         );
+    }
+
+    #[test]
+    fn workspace_reference_positions_exclude_prefix_and_final_token() {
+        assert_eq!(workspace_valid_position_range(8, 4).unwrap(), 4..7);
+        assert!(matches!(
+            workspace_valid_position_range(5, 4).unwrap_err(),
+            ResearchError::WorkspaceNoValidPositions {
+                n_tokens: 5,
+                skip_first: 4
+            }
+        ));
+
+        let source = [0.0f32, 10.0, 2.0, 12.0, 4.0, 14.0, 6.0, 16.0, 100.0, 200.0];
+        let mut row = [0.0f32; 2];
+        reduce_workspace_source_positions(&source, 5, 2, 1..4, &mut row).unwrap();
+        assert_eq!(row, [4.0, 14.0]);
+    }
+
+    #[test]
+    fn workspace_row_diagnostics_merge_by_schedule_and_maximum() {
+        let mut aggregate = vec![ResearchWorkspaceReplayDiagnostic {
+            layer: 3,
+            kind: ResearchWorkspaceBlockKind::Attention,
+            residual_replay_max_abs_error: 0.1,
+        }];
+        merge_workspace_diagnostics(
+            &mut aggregate,
+            &[ResearchWorkspaceReplayDiagnostic {
+                layer: 3,
+                kind: ResearchWorkspaceBlockKind::Attention,
+                residual_replay_max_abs_error: 0.2,
+            }],
+        )
+        .unwrap();
+        assert_eq!(aggregate[0].residual_replay_max_abs_error, 0.2);
+        assert!(matches!(
+            merge_workspace_diagnostics(
+                &mut aggregate,
+                &[ResearchWorkspaceReplayDiagnostic {
+                    layer: 2,
+                    kind: ResearchWorkspaceBlockKind::Gdn,
+                    residual_replay_max_abs_error: 0.0,
+                }],
+            )
+            .unwrap_err(),
+            ResearchError::WorkspaceDiagnosticScheduleMismatch
+        ));
     }
 
     #[test]

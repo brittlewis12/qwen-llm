@@ -8,6 +8,8 @@
 //! Packed attention preserves that state contract while qualifying the
 //! F16-staged dense and selected kernels against chronological scalar execution.
 
+#[cfg(test)]
+use crate::metal::encode_copy_offset_i32;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     encode_attn_matrix_kq_f32, encode_attn_matrix_kqv_direct_v_f32, encode_attn_matrix_softmax_f32,
@@ -52,6 +54,263 @@ struct QwenSparseAttentionPackedRangePlan {
     selected_offset: usize,
     selected_tokens: usize,
     selected_bands: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Qwen4ExpQsaDecisionCaptureRecord {
+    pub layer: u32,
+    pub start_position: usize,
+    pub query_count: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct Qwen4ExpQsaDecisionCaptureBanks {
+    pub layers: Vec<u32>,
+    pub start_position: usize,
+    pub tokens: usize,
+    pub hidden_size: usize,
+    pub index_query_width: usize,
+    pub block_capacity: usize,
+    pub block_budget: usize,
+    pub inputs: MetalTensor,
+    pub index_queries: MetalTensor,
+    pub scores: MetalTensor,
+    pub visible_blocks: MetalTensor,
+    pub selected_blocks: MetalTensor,
+    pub selected_count: MetalTensor,
+    pub selector_status: MetalTensor,
+}
+
+#[cfg(test)]
+impl Qwen4ExpQsaDecisionCaptureBanks {
+    pub(crate) fn new(
+        ctx: &MetalContext,
+        config: &Qwen4ExpConfig,
+        capacity: usize,
+        start_position: usize,
+        tokens: usize,
+    ) -> Result<Self, Qwen4ExpQsaError> {
+        let layers = (0..config.layer_count)
+            .filter(|&layer| config.mixer_kind(layer) == Some(MixerKind::QwenSparseAttention))
+            .collect::<Vec<_>>();
+        let Some(&first_layer) = layers.first() else {
+            return invalid("QSA decision capture requires at least one QSA layer");
+        };
+        if tokens == 0 {
+            return invalid("QSA decision capture token count must be nonzero");
+        }
+        let end_position = start_position.checked_add(tokens).ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid("QSA decision capture range overflow".into())
+        })?;
+        if end_position > capacity {
+            return invalid(format!(
+                "QSA decision capture end {end_position} exceeds capacity {capacity}"
+            ));
+        }
+        let geometry =
+            QwenSparseAttentionMetalGeometry::from_config(config, first_layer, capacity)?;
+        if start_position < geometry.output_width() {
+            return invalid(format!(
+                "QSA decision capture start {start_position} precedes selected range {}",
+                geometry.output_width()
+            ));
+        }
+        for &layer in &layers[1..] {
+            let candidate = QwenSparseAttentionMetalGeometry::from_config(config, layer, capacity)?;
+            if candidate != geometry {
+                return invalid(format!(
+                    "QSA decision capture layer {layer} geometry differs from layer {first_layer}"
+                ));
+            }
+        }
+        let layer_count = layers.len();
+        let checked_elements = |name: &str, factors: &[usize]| {
+            factors
+                .iter()
+                .try_fold(1_usize, |product, &factor| product.checked_mul(factor))
+                .ok_or_else(|| {
+                    Qwen4ExpQsaError::Invalid(format!(
+                        "QSA decision capture {name} element count overflow"
+                    ))
+                })
+        };
+        for (name, factors) in [
+            (
+                "inputs",
+                [geometry.hidden_size(), tokens, layer_count].as_slice(),
+            ),
+            (
+                "index queries",
+                [geometry.index_query_width(), tokens, layer_count].as_slice(),
+            ),
+            (
+                "scores",
+                [geometry.block_capacity(), tokens, layer_count].as_slice(),
+            ),
+            (
+                "selected blocks",
+                [geometry.block_budget(), tokens, layer_count].as_slice(),
+            ),
+        ] {
+            let elements = checked_elements(name, factors)?;
+            if u32::try_from(elements).is_err() {
+                return invalid(format!(
+                    "QSA decision capture {name} has {elements} elements, exceeding u32"
+                ));
+            }
+        }
+        let rows = checked_elements("control rows", &[tokens, layer_count])?;
+        if u32::try_from(rows).is_err() {
+            return invalid(format!(
+                "QSA decision capture has {rows} control rows, exceeding u32"
+            ));
+        }
+        Ok(Self {
+            layers,
+            start_position,
+            tokens,
+            hidden_size: geometry.hidden_size(),
+            index_query_width: geometry.index_query_width(),
+            block_capacity: geometry.block_capacity(),
+            block_budget: geometry.block_budget(),
+            inputs: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    geometry.hidden_size() as u64,
+                    tokens as u64,
+                    layer_count as u64,
+                ],
+            )?,
+            index_queries: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    geometry.index_query_width() as u64,
+                    tokens as u64,
+                    layer_count as u64,
+                ],
+            )?,
+            scores: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    geometry.block_capacity() as u64,
+                    tokens as u64,
+                    layer_count as u64,
+                ],
+            )?,
+            visible_blocks: MetalTensor::zeros_i32(ctx, vec![tokens as u64, layer_count as u64])?,
+            selected_blocks: MetalTensor::zeros_i32(
+                ctx,
+                vec![
+                    geometry.block_budget() as u64,
+                    tokens as u64,
+                    layer_count as u64,
+                ],
+            )?,
+            selected_count: MetalTensor::zeros_i32(ctx, vec![tokens as u64, layer_count as u64])?,
+            selector_status: MetalTensor::zeros_i32(ctx, vec![tokens as u64, layer_count as u64])?,
+        })
+    }
+
+    fn layer_ordinal(&self, layer: u32) -> Option<usize> {
+        self.layers.iter().position(|&candidate| candidate == layer)
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct Qwen4ExpQsaDecisionCaptureBinding {
+    banks: Qwen4ExpQsaDecisionCaptureBanks,
+    records: std::rc::Rc<std::cell::RefCell<Vec<Qwen4ExpQsaDecisionCaptureRecord>>>,
+    seen: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static QWEN4EXP_QSA_CAPTURE_LAYER: std::cell::Cell<Option<u32>> = const {
+        std::cell::Cell::new(None)
+    };
+    static QWEN4EXP_QSA_DECISION_CAPTURE: std::cell::RefCell<Option<Qwen4ExpQsaDecisionCaptureBinding>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_qsa_decision_capture<R>(
+    banks: &Qwen4ExpQsaDecisionCaptureBanks,
+    f: impl FnOnce() -> R,
+) -> (R, Vec<Qwen4ExpQsaDecisionCaptureRecord>) {
+    struct RestoreCapture(Option<Qwen4ExpQsaDecisionCaptureBinding>);
+
+    impl Drop for RestoreCapture {
+        fn drop(&mut self) {
+            QWEN4EXP_QSA_DECISION_CAPTURE.with(|slot| {
+                *slot.borrow_mut() = self.0.take();
+            });
+        }
+    }
+
+    QWEN4EXP_QSA_CAPTURE_LAYER.with(|slot| {
+        assert!(
+            slot.get().is_none(),
+            "QSA decision capture cannot begin inside a layer"
+        );
+    });
+    QWEN4EXP_QSA_DECISION_CAPTURE.with(|slot| {
+        assert!(slot.borrow().is_none(), "QSA decision captures cannot nest");
+    });
+    let records = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![
+        false;
+        banks.layers.len()
+            * banks.tokens
+    ]));
+    let previous = QWEN4EXP_QSA_DECISION_CAPTURE.with(|slot| {
+        slot.borrow_mut()
+            .replace(Qwen4ExpQsaDecisionCaptureBinding {
+                banks: banks.clone(),
+                records: records.clone(),
+                seen: seen.clone(),
+            })
+    });
+    debug_assert!(previous.is_none());
+    let _restore = RestoreCapture(previous);
+    let result = f();
+    let records = records.borrow().clone();
+    (result, records)
+}
+
+#[cfg(test)]
+pub(crate) fn qwen4exp_qsa_decision_capture_active() -> bool {
+    QWEN4EXP_QSA_DECISION_CAPTURE.with(|slot| slot.borrow().is_some())
+}
+
+#[inline(always)]
+pub(crate) fn with_qwen4exp_qsa_capture_layer<R>(layer: u32, f: impl FnOnce() -> R) -> R {
+    #[cfg(test)]
+    {
+        struct RestoreLayer(Option<u32>);
+
+        impl Drop for RestoreLayer {
+            fn drop(&mut self) {
+                QWEN4EXP_QSA_CAPTURE_LAYER.with(|slot| slot.set(self.0));
+            }
+        }
+
+        let previous = QWEN4EXP_QSA_CAPTURE_LAYER.with(|slot| {
+            let previous = slot.get();
+            slot.set(Some(layer));
+            previous
+        });
+        let _restore = RestoreLayer(previous);
+        return f();
+    }
+    #[cfg(not(test))]
+    {
+        let _ = layer;
+        f()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3366,6 +3625,27 @@ fn encode_packed_step(
                 band_offset,
                 band_rows,
             )?;
+            #[cfg(test)]
+            {
+                let selected_input = input.view_subrange(
+                    (local_offset * g.hidden_size) as u64,
+                    vec![g.hidden_size as u64, band_rows as u64],
+                );
+                encode_qwen4exp_qsa_decision_capture(
+                    ctx,
+                    enc,
+                    &selected_input,
+                    &packet.index_query,
+                    &packet.scores,
+                    &packet.visible_blocks,
+                    &packet.selected_blocks,
+                    &packet.selected_count,
+                    &packet.selector_status,
+                    g,
+                    start_position + local_offset,
+                    band_rows,
+                )?;
+            }
             encode_selected_audit(
                 ctx,
                 enc,
@@ -3531,6 +3811,280 @@ fn encode_packed_index_state(
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_qwen4exp_qsa_decision_capture(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    index_queries: &MetalTensor,
+    scores: &MetalTensor,
+    visible_blocks: &MetalTensor,
+    selected_blocks: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    start_position: usize,
+    query_count: usize,
+) -> Result<(), Qwen4ExpQsaError> {
+    QWEN4EXP_QSA_DECISION_CAPTURE.with(|slot| {
+        let binding = slot.borrow();
+        let Some(binding) = binding.as_ref() else {
+            return Ok(());
+        };
+        let layer = QWEN4EXP_QSA_CAPTURE_LAYER.with(|slot| slot.get()).ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid(
+                "QSA decision capture is active without an integrated layer scope".into(),
+            )
+        })?;
+        let banks = &binding.banks;
+        let layer_ordinal = banks.layer_ordinal(layer).ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid(format!(
+                "QSA decision capture received unexpected layer {layer}"
+            ))
+        })?;
+        if geometry.hidden_size() != banks.hidden_size
+            || geometry.index_query_width() != banks.index_query_width
+            || geometry.block_capacity() != banks.block_capacity
+            || geometry.block_budget() != banks.block_budget
+        {
+            return invalid(format!(
+                "QSA decision capture layer {layer} geometry differs from its banks"
+            ));
+        }
+        if query_count == 0 {
+            return invalid("QSA decision capture source query count must be nonzero");
+        }
+        let end_position = start_position.checked_add(query_count).ok_or_else(|| {
+            Qwen4ExpQsaError::Invalid("QSA decision capture source range overflow".into())
+        })?;
+        let capture_end = banks
+            .start_position
+            .checked_add(banks.tokens)
+            .expect("validated QSA decision capture range");
+        let overlap_start = start_position.max(banks.start_position);
+        let overlap_end = end_position.min(capture_end);
+        if overlap_start >= overlap_end {
+            return Ok(());
+        }
+        let source_row = overlap_start - start_position;
+        let destination_row = overlap_start - banks.start_position;
+        let rows = overlap_end - overlap_start;
+        let expected_elements = [
+            ("input", input, GgmlType::F32, geometry.hidden_size()),
+            (
+                "index queries",
+                index_queries,
+                GgmlType::F32,
+                geometry.index_query_width(),
+            ),
+            (
+                "scores",
+                scores,
+                GgmlType::F32,
+                geometry.block_capacity(),
+            ),
+            ("visible blocks", visible_blocks, GgmlType::I32, 1),
+            (
+                "selected blocks",
+                selected_blocks,
+                GgmlType::I32,
+                geometry.block_budget(),
+            ),
+            ("selected count", selected_count, GgmlType::I32, 1),
+            ("selector status", selector_status, GgmlType::I32, 1),
+        ];
+        for (name, tensor, dtype, row_width) in expected_elements {
+            let elements = row_width.checked_mul(query_count).ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid(format!(
+                    "QSA decision capture {name} source size overflow"
+                ))
+            })?;
+            if tensor.dtype != dtype || tensor.n_elements() as usize != elements {
+                return invalid(format!(
+                    "QSA decision capture {name} must be {dtype:?} with {elements} elements, got {:?} {}",
+                    tensor.dtype,
+                    tensor.n_elements()
+                ));
+            }
+            require_range(name, tensor)?;
+        }
+
+        let layer_row = layer_ordinal
+            .checked_mul(banks.tokens)
+            .and_then(|offset| offset.checked_add(destination_row))
+            .ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("QSA decision capture destination row overflow".into())
+            })?;
+        let destination = |name: &str,
+                           tensor: &MetalTensor,
+                           row_width: usize,
+                           dtype: GgmlType|
+         -> Result<MetalTensor, Qwen4ExpQsaError> {
+            let element_offset = layer_row.checked_mul(row_width).ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid(format!(
+                    "QSA decision capture {name} destination offset overflow"
+                ))
+            })?;
+            let elements = rows.checked_mul(row_width).ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid(format!(
+                    "QSA decision capture {name} destination size overflow"
+                ))
+            })?;
+            let view = tensor.view_subrange(element_offset as u64, vec![elements as u64]);
+            require_tensor(name, &view, dtype, &[elements as u64], true)?;
+            Ok(view)
+        };
+        let input_destination = destination(
+            "QSA decision capture inputs",
+            &banks.inputs,
+            banks.hidden_size,
+            GgmlType::F32,
+        )?;
+        let query_destination = destination(
+            "QSA decision capture index queries",
+            &banks.index_queries,
+            banks.index_query_width,
+            GgmlType::F32,
+        )?;
+        let score_destination = destination(
+            "QSA decision capture scores",
+            &banks.scores,
+            banks.block_capacity,
+            GgmlType::F32,
+        )?;
+        let visible_destination = destination(
+            "QSA decision capture visible blocks",
+            &banks.visible_blocks,
+            1,
+            GgmlType::I32,
+        )?;
+        let selected_destination = destination(
+            "QSA decision capture selected blocks",
+            &banks.selected_blocks,
+            banks.block_budget,
+            GgmlType::I32,
+        )?;
+        let count_destination = destination(
+            "QSA decision capture selected count",
+            &banks.selected_count,
+            1,
+            GgmlType::I32,
+        )?;
+        let status_destination = destination(
+            "QSA decision capture selector status",
+            &banks.selector_status,
+            1,
+            GgmlType::I32,
+        )?;
+        let tensors = [
+            ("QSA decision input source", input),
+            ("QSA decision query source", index_queries),
+            ("QSA decision score source", scores),
+            ("QSA decision visibility source", visible_blocks),
+            ("QSA decision ID source", selected_blocks),
+            ("QSA decision count source", selected_count),
+            ("QSA decision status source", selector_status),
+            ("QSA decision input destination", &input_destination),
+            ("QSA decision query destination", &query_destination),
+            ("QSA decision score destination", &score_destination),
+            ("QSA decision visibility destination", &visible_destination),
+            ("QSA decision ID destination", &selected_destination),
+            ("QSA decision count destination", &count_destination),
+            ("QSA decision status destination", &status_destination),
+        ];
+        require_same_device(ctx, &tensors)?;
+        require_disjoint(&tensors)?;
+
+        {
+            let seen = binding.seen.borrow();
+            for row in destination_row..destination_row + rows {
+                let index = layer_ordinal * banks.tokens + row;
+                if seen[index] {
+                    return invalid(format!(
+                        "QSA decision capture duplicated layer {layer} position {}",
+                        banks.start_position + row
+                    ));
+                }
+            }
+        }
+
+        let copy_f32 = |kind: &'static str,
+                        source: &MetalTensor,
+                        source_width: usize,
+                        destination: &MetalTensor|
+         -> Result<(), Qwen4ExpQsaError> {
+            let _tag = crate::metal::dispatch_census_tag_scope(|| {
+                format!(
+                    "qwen4exp.qsa_decision_capture.layer{layer}.position{overlap_start}.{kind}"
+                )
+            });
+            encode_copy_offset_f32(
+                ctx,
+                enc,
+                source,
+                source_row * source_width,
+                destination,
+                rows * source_width,
+            )?;
+            Ok(())
+        };
+        let copy_i32 = |kind: &'static str,
+                        source: &MetalTensor,
+                        source_width: usize,
+                        destination: &MetalTensor|
+         -> Result<(), Qwen4ExpQsaError> {
+            let _tag = crate::metal::dispatch_census_tag_scope(|| {
+                format!(
+                    "qwen4exp.qsa_decision_capture.layer{layer}.position{overlap_start}.{kind}"
+                )
+            });
+            encode_copy_offset_i32(
+                ctx,
+                enc,
+                source,
+                source_row * source_width,
+                destination,
+                rows * source_width,
+            )?;
+            Ok(())
+        };
+        copy_f32("input", input, banks.hidden_size, &input_destination)?;
+        copy_f32(
+            "index_query",
+            index_queries,
+            banks.index_query_width,
+            &query_destination,
+        )?;
+        copy_f32("scores", scores, banks.block_capacity, &score_destination)?;
+        copy_i32("visible", visible_blocks, 1, &visible_destination)?;
+        copy_i32(
+            "selected_ids",
+            selected_blocks,
+            banks.block_budget,
+            &selected_destination,
+        )?;
+        copy_i32("selected_count", selected_count, 1, &count_destination)?;
+        copy_i32("status", selector_status, 1, &status_destination)?;
+
+        let mut seen = binding.seen.borrow_mut();
+        for row in destination_row..destination_row + rows {
+            let index = layer_ordinal * banks.tokens + row;
+            debug_assert!(!seen[index]);
+            seen[index] = true;
+        }
+        binding
+            .records
+            .borrow_mut()
+            .push(Qwen4ExpQsaDecisionCaptureRecord {
+                layer,
+                start_position: overlap_start,
+                query_count: rows,
+            });
+        Ok(())
+    })
+}
+
 fn encode_step(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -3593,6 +4147,23 @@ fn encode_step(
         encode_fill_blocks(ctx, enc, workspace, visible_blocks, sequence_length)?;
     }
     encode_expand_ids(ctx, enc, workspace, visible_blocks, sequence_length)?;
+    #[cfg(test)]
+    if visible_blocks > g.block_budget() {
+        encode_qwen4exp_qsa_decision_capture(
+            ctx,
+            enc,
+            input,
+            &workspace.index_query,
+            &workspace.scores,
+            &workspace.visible_blocks,
+            &workspace.selected_blocks,
+            &workspace.selected_count,
+            &workspace.selector_status,
+            g,
+            position,
+            1,
+        )?;
+    }
 
     encode_mat_vec_dispatch(
         ctx,
@@ -5250,6 +5821,27 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => None,
             Err(error) => panic!("Metal initialization failed: {error}"),
         }
+    }
+
+    #[test]
+    fn decision_capture_rejects_nesting_without_losing_outer_binding() {
+        let Some(ctx) = context() else { return };
+        let config = Qwen4ExpConfig::flash_next_reference();
+        let banks = Qwen4ExpQsaDecisionCaptureBanks::new(&ctx, &config, 2_052, 2_051, 1).unwrap();
+        assert!(!qwen4exp_qsa_decision_capture_active());
+
+        let outer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_qwen4exp_qsa_decision_capture(&banks, || {
+                let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    with_qwen4exp_qsa_decision_capture(&banks, || ());
+                }));
+                assert!(nested.is_err());
+                assert!(qwen4exp_qsa_decision_capture_active());
+                panic!("exercise outer QSA capture restoration");
+            });
+        }));
+        assert!(outer.is_err());
+        assert!(!qwen4exp_qsa_decision_capture_active());
     }
 
     fn test_geometry(capacity: usize) -> QwenSparseAttentionMetalGeometry {

@@ -55,6 +55,8 @@ pub mod prefetch;
 pub mod prefix_cache;
 pub mod prompt_lookup;
 pub mod qwen4exp;
+#[cfg(test)]
+pub(crate) mod qwen4exp_composition_trace;
 pub mod qwen4exp_forward;
 pub mod qwen4exp_gdn;
 pub mod qwen4exp_layer_zero;

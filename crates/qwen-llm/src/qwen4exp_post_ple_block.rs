@@ -5,6 +5,10 @@ use crate::metal::{
     MetalTimestampSampleBuffer, encode_copy_offset_f32,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
+#[cfg(test)]
+use crate::qwen4exp_composition_trace::{
+    Qwen4ExpCompositionTracePhase, Qwen4ExpCompositionTraceStage, encode_qwen4exp_composition_trace,
+};
 use crate::qwen4exp_gdn::{
     GatedDeltaNetMetalGeometry, GatedDeltaNetMetalWeights, GatedDeltaNetMetalWorkspace,
     GatedDeltaNetPackedScratch, Qwen4ExpGdnError, encode_gated_delta_net,
@@ -35,12 +39,32 @@ use crate::qwen4exp_qsa::{
     encode_qwen_sparse_attention_text, encode_qwen_sparse_attention_text_packed_motor,
     encode_qwen_sparse_attention_text_packed_motor_profiled,
     validate_and_preflight_packed_contract as validate_and_preflight_qsa_packed,
+    with_qwen4exp_qsa_capture_layer,
 };
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLDevice, MTLResource};
+
+#[cfg(test)]
+fn capture_composition_stage(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    layer: u32,
+    phase: Qwen4ExpCompositionTracePhase,
+    source: &MetalTensor,
+    width: usize,
+) -> Result<(), Qwen4ExpPostPleBlockError> {
+    encode_qwen4exp_composition_trace(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTraceStage { layer, phase },
+        source,
+        width,
+    )?;
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpPostPleBlockError {
@@ -858,6 +882,15 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
     let mut profile = profile.filter(|recorder| recorder.is_detailed_layer(layer));
     let encoded = (|| {
         let g = workspace.geometry;
+        #[cfg(test)]
+        capture_composition_stage(
+            ctx,
+            enc,
+            layer,
+            Qwen4ExpCompositionTracePhase::LayerInput,
+            hyper_residual,
+            g.hyper_width(),
+        )?;
         let marker = begin_optional(
             &mut profile,
             enc,
@@ -876,6 +909,15 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
                 tokens,
             )
         }?;
+        #[cfg(test)]
+        capture_composition_stage(
+            ctx,
+            enc,
+            layer,
+            Qwen4ExpCompositionTracePhase::AttentionInput,
+            attention.mixed(),
+            g.hidden_size,
+        )?;
         end_optional(&mut profile, enc, marker)?;
         let marker = begin_optional(
             &mut profile,
@@ -920,7 +962,7 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
                 Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace),
             ) => {
                 if let Some(recorder) = profile.as_deref_mut() {
-                    unsafe {
+                    with_qwen4exp_qsa_capture_layer(layer, || unsafe {
                         encode_qwen_sparse_attention_text_packed_motor_profiled(
                             ctx,
                             enc,
@@ -933,9 +975,9 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
                             layer,
                             recorder,
                         )
-                    }?
+                    })?
                 } else {
-                    unsafe {
+                    with_qwen4exp_qsa_capture_layer(layer, || unsafe {
                         encode_qwen_sparse_attention_text_packed_motor(
                             ctx,
                             enc,
@@ -946,11 +988,20 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
                             start_position,
                             tokens,
                         )
-                    }?
+                    })?
                 }
             }
             _ => return invalid("packed mixer weight and workspace variants differ"),
         };
+        #[cfg(test)]
+        capture_composition_stage(
+            ctx,
+            enc,
+            layer,
+            Qwen4ExpCompositionTracePhase::MixerOutput,
+            &mixer_output,
+            g.hidden_size,
+        )?;
         end_optional(&mut profile, enc, marker)?;
         let marker = begin_optional(
             &mut profile,
@@ -965,6 +1016,15 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
             Qwen4ExpPackedProfileLabel::detail("block.attention_combine", layer, mixer),
         )?;
         attention.encode_combine(enc)?;
+        #[cfg(test)]
+        capture_composition_stage(
+            ctx,
+            enc,
+            layer,
+            Qwen4ExpCompositionTracePhase::AttentionOutput,
+            hyper_residual,
+            g.hyper_width(),
+        )?;
         end_optional(&mut profile, enc, marker)?;
 
         let marker = begin_optional(
@@ -985,6 +1045,15 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
                 tokens,
             )
         }?;
+        #[cfg(test)]
+        capture_composition_stage(
+            ctx,
+            enc,
+            layer,
+            Qwen4ExpCompositionTracePhase::FfnInput,
+            ffn.mixed(),
+            g.hidden_size,
+        )?;
         end_optional(&mut profile, enc, marker)?;
         let marker = begin_optional(
             &mut profile,
@@ -1019,6 +1088,15 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
                 )
             }?
         };
+        #[cfg(test)]
+        capture_composition_stage(
+            ctx,
+            enc,
+            layer,
+            Qwen4ExpCompositionTracePhase::MoeOutput,
+            &moe_output,
+            g.hidden_size,
+        )?;
         end_optional(&mut profile, enc, marker)?;
         let marker = begin_optional(
             &mut profile,
@@ -1033,6 +1111,15 @@ unsafe fn encode_qwen4exp_post_ple_block_packed_inner(
             Qwen4ExpPackedProfileLabel::detail("block.ffn_combine", layer, mixer),
         )?;
         ffn.encode_combine(enc)?;
+        #[cfg(test)]
+        capture_composition_stage(
+            ctx,
+            enc,
+            layer,
+            Qwen4ExpCompositionTracePhase::LayerOutput,
+            hyper_residual,
+            g.hyper_width(),
+        )?;
         end_optional(&mut profile, enc, marker)?;
         Ok(())
     })();
@@ -1132,7 +1219,7 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_stage_sampled(
             (
                 Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights),
                 Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace),
-            ) => unsafe {
+            ) => with_qwen4exp_qsa_capture_layer(layer, || unsafe {
                 encode_qwen_sparse_attention_text_packed_motor(
                     ctx,
                     &mixer_encoder,
@@ -1143,7 +1230,7 @@ pub(crate) unsafe fn encode_qwen4exp_post_ple_block_packed_stage_sampled(
                     start_position,
                     tokens,
                 )
-            }?,
+            })?,
             _ => return invalid("packed mixer weight and workspace variants differ"),
         };
         mixer_encoder.end();
@@ -1324,6 +1411,15 @@ fn encode_step(
     workspace: &mut Qwen4ExpPostPleBlockMetalWorkspace,
 ) -> Result<(), Qwen4ExpPostPleBlockError> {
     let g = workspace.geometry;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        g.layer(),
+        Qwen4ExpCompositionTracePhase::LayerInput,
+        hyper_residual,
+        g.hyper_width(),
+    )?;
     let attention = encode_gated_residual_mix(
         ctx,
         enc,
@@ -1333,6 +1429,15 @@ fn encode_step(
         weights.attention_residual.read,
         weights.attention_residual.inject,
         &mut workspace.residual,
+    )?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        g.layer(),
+        Qwen4ExpCompositionTracePhase::AttentionInput,
+        attention.mixed(),
+        g.hidden_size,
     )?;
     match (weights.mixer, &mut workspace.mixer) {
         (
@@ -1348,15 +1453,34 @@ fn encode_step(
             Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(weights),
             Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(mixer),
         ) => {
-            let read =
-                encode_qwen_sparse_attention_text(ctx, enc, attention.mixed(), weights, mixer)?;
+            let read = with_qwen4exp_qsa_capture_layer(g.layer(), || {
+                encode_qwen_sparse_attention_text(ctx, enc, attention.mixed(), weights, mixer)
+            })?;
             read.output()
                 .encode_copy_to(ctx, enc, &workspace.mixer_output)?;
             drop(read);
         }
         _ => return invalid("mixer weight and workspace variants differ"),
     }
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        g.layer(),
+        Qwen4ExpCompositionTracePhase::MixerOutput,
+        &workspace.mixer_output,
+        g.hidden_size,
+    )?;
     attention.encode_combine()?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        g.layer(),
+        Qwen4ExpCompositionTracePhase::AttentionOutput,
+        hyper_residual,
+        g.hyper_width(),
+    )?;
 
     let ffn = encode_gated_residual_mix(
         ctx,
@@ -1368,11 +1492,38 @@ fn encode_step(
         weights.ffn_residual.inject,
         &mut workspace.residual,
     )?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        g.layer(),
+        Qwen4ExpCompositionTracePhase::FfnInput,
+        ffn.mixed(),
+        g.hidden_size,
+    )?;
     let moe = encode_qwen4exp_moe(ctx, enc, ffn.mixed(), weights.moe, &mut workspace.moe)?;
     moe.output()
         .encode_copy_to(ctx, enc, &workspace.moe_output)?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        g.layer(),
+        Qwen4ExpCompositionTracePhase::MoeOutput,
+        &workspace.moe_output,
+        g.hidden_size,
+    )?;
     drop(moe);
     ffn.encode_combine()?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        g.layer(),
+        Qwen4ExpCompositionTracePhase::LayerOutput,
+        hyper_residual,
+        g.hyper_width(),
+    )?;
     Ok(())
 }
 

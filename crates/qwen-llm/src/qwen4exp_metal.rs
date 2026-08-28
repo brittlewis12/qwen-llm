@@ -14,6 +14,87 @@ use objc2_metal::{
 
 const SIMD_WIDTH: usize = 32;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Qwen4ExpHcPackedProjectionArm {
+    WideF32Down,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Qwen4ExpHcPackedProjectionRecord {
+    pub arm: Qwen4ExpHcPackedProjectionArm,
+    pub start_position: usize,
+    pub tokens: usize,
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct Qwen4ExpHcPackedProjectionBinding {
+    arm: Qwen4ExpHcPackedProjectionArm,
+    start_position: usize,
+    tokens: usize,
+    records: std::rc::Rc<std::cell::RefCell<Vec<Qwen4ExpHcPackedProjectionRecord>>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static QWEN4EXP_HC_PACKED_PROJECTION_OVERRIDE: std::cell::RefCell<Option<Qwen4ExpHcPackedProjectionBinding>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_hc_packed_projection_override<R>(
+    arm: Qwen4ExpHcPackedProjectionArm,
+    start_position: usize,
+    tokens: usize,
+    f: impl FnOnce() -> R,
+) -> (R, Vec<Qwen4ExpHcPackedProjectionRecord>) {
+    assert!(tokens > 0);
+    start_position
+        .checked_add(tokens)
+        .expect("HC projection override range overflow");
+
+    struct RestoreOverride(Option<Qwen4ExpHcPackedProjectionBinding>);
+
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            QWEN4EXP_HC_PACKED_PROJECTION_OVERRIDE.with(|slot| {
+                *slot.borrow_mut() = self.0.take();
+            });
+        }
+    }
+
+    QWEN4EXP_HC_PACKED_PROJECTION_OVERRIDE.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "HC projection overrides cannot nest"
+        );
+    });
+    let records = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let binding = Qwen4ExpHcPackedProjectionBinding {
+        arm,
+        start_position,
+        tokens,
+        records: records.clone(),
+    };
+    let previous =
+        QWEN4EXP_HC_PACKED_PROJECTION_OVERRIDE.with(|slot| slot.borrow_mut().replace(binding));
+    debug_assert!(previous.is_none());
+    let _restore = RestoreOverride(previous);
+    let result = f();
+    let records = records.borrow().clone();
+    (result, records)
+}
+
+#[cfg(test)]
+pub(crate) fn qwen4exp_hc_packed_projection_override_active() -> bool {
+    QWEN4EXP_HC_PACKED_PROJECTION_OVERRIDE.with(|slot| slot.borrow().is_some())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpMetalError {
     #[error("invalid gated-residual contract: {0}")]
@@ -392,6 +473,183 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
     })
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Qwen4ExpHcPackedProjectionRole {
+    Down,
+    Up,
+}
+
+#[cfg(test)]
+fn active_hc_packed_projection_binding() -> Option<Qwen4ExpHcPackedProjectionBinding> {
+    let range = crate::qwen4exp_composition_trace::qwen4exp_diagnostic_execution_range()?;
+    QWEN4EXP_HC_PACKED_PROJECTION_OVERRIDE.with(|slot| {
+        slot.borrow()
+            .clone()
+            .filter(|binding| range == (binding.start_position, binding.tokens))
+    })
+}
+
+#[cfg(test)]
+fn preflight_hc_packed_projection_override(
+    ctx: &MetalContext,
+    weights: GatedResidualMetalReadWeights<'_>,
+    hyper_hidden: usize,
+    low_rank: usize,
+    tokens: usize,
+) -> Result<(), Qwen4ExpMetalError> {
+    if active_hc_packed_projection_binding().is_none() {
+        return Ok(());
+    }
+    let projections = [(weights.down, hyper_hidden, low_rank)];
+    for &(weight, n_in, n_out) in &projections {
+        if weight.dtype != GgmlType::Q8_0
+            || !n_in.is_multiple_of(64)
+            || !n_out.is_multiple_of(16)
+            || !tokens.is_multiple_of(128)
+        {
+            return Err(invalid(format!(
+                "HC F32 projection override rejects [{tokens},{n_in}] -> [{tokens},{n_out}] {:?}",
+                weight.dtype
+            )));
+        }
+    }
+    let pipeline = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c16k64")?;
+    if pipeline.threadExecutionWidth() != SIMD_WIDTH
+        || pipeline.maxTotalThreadsPerThreadgroup() < 128
+        || ctx.device.maxThreadgroupMemoryLength() < 4_096
+    {
+        return Err(invalid(
+            "HC F32 projection override requires four SIMDgroups and 4 KiB threadgroup memory",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_q8_f32_mma_r2c16k64(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    tokens: usize,
+) -> Result<(), Qwen4ExpMetalError> {
+    if weight.dtype != GgmlType::Q8_0
+        || input.dtype != GgmlType::F32
+        || output.dtype != GgmlType::F32
+        || weight.n_elements() as usize != n_in * n_out
+        || input.n_elements() as usize != n_in * tokens
+        || output.n_elements() as usize != n_out * tokens
+        || !n_in.is_multiple_of(64)
+        || !n_out.is_multiple_of(16)
+        || !tokens.is_multiple_of(128)
+    {
+        return Err(invalid(format!(
+            "HC Q8 F32 R2C16K64 requires aligned [{tokens},{n_in}] -> [{tokens},{n_out}]"
+        )));
+    }
+    let pipeline = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c16k64")?;
+    if pipeline.threadExecutionWidth() != SIMD_WIDTH
+        || pipeline.maxTotalThreadsPerThreadgroup() < 128
+        || ctx.device.maxThreadgroupMemoryLength() < 4_096
+    {
+        return Err(invalid(
+            "HC Q8 F32 R2C16K64 requires four SIMDgroups and 4 KiB threadgroup memory",
+        ));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let row_bytes = n_in
+        .checked_div(32)
+        .and_then(|blocks| blocks.checked_mul(34))
+        .ok_or_else(|| invalid("HC Q8 F32 R2C16K64 row-byte overflow"))?;
+    let args = Args {
+        m: u32::try_from(n_out).map_err(|_| invalid("HC F32 output exceeds u32"))?,
+        n: u32::try_from(tokens).map_err(|_| invalid("HC F32 token count exceeds u32"))?,
+        k: u32::try_from(n_in).map_err(|_| invalid("HC F32 input exceeds u32"))?,
+        nb01: u32::try_from(row_bytes).map_err(|_| invalid("HC F32 row bytes exceed u32"))?,
+        stride_b: u32::try_from(n_in).map_err(|_| invalid("HC F32 stride exceeds u32"))?,
+    };
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.set_threadgroup_memory(0, 4_096);
+    enc.dispatch(
+        MTLSize {
+            width: tokens.div_ceil(128),
+            height: n_out / 16,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_hc_packed_projection_override(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    role: Qwen4ExpHcPackedProjectionRole,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    tokens: usize,
+) -> Result<bool, Qwen4ExpMetalError> {
+    let Some(binding) = active_hc_packed_projection_binding() else {
+        return Ok(false);
+    };
+    let enabled = matches!(
+        (binding.arm, role),
+        (
+            Qwen4ExpHcPackedProjectionArm::WideF32Down,
+            Qwen4ExpHcPackedProjectionRole::Down
+        )
+    );
+    if !enabled {
+        return Ok(false);
+    }
+    if tokens != binding.tokens {
+        return Err(invalid(format!(
+            "HC projection override expected {} rows, got {tokens}",
+            binding.tokens
+        )));
+    }
+    let _tag =
+        crate::metal::dispatch_census_tag_scope(|| "qwen4exp.hc_precision.wide_f32_down".into());
+    encode_q8_f32_mma_r2c16k64(ctx, enc, weight, input, output, n_in, n_out, tokens)?;
+    binding
+        .records
+        .borrow_mut()
+        .push(Qwen4ExpHcPackedProjectionRecord {
+            arm: binding.arm,
+            start_position: binding.start_position,
+            tokens,
+            n_in,
+            n_out,
+        });
+    Ok(true)
+}
+
 /// Encode a packed HC read into transaction-owned scratch.
 ///
 /// # Safety
@@ -464,9 +722,11 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
         tokens,
         eps,
     )?;
-    encode_mat_mat_dispatch(
+    #[cfg(test)]
+    let down_overridden = encode_hc_packed_projection_override(
         ctx,
         enc,
+        Qwen4ExpHcPackedProjectionRole::Down,
         weights.down,
         &normalized,
         &low,
@@ -474,10 +734,26 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
         scratch.low_rank,
         tokens,
     )?;
+    #[cfg(not(test))]
+    let down_overridden = false;
+    if !down_overridden {
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            weights.down,
+            &normalized,
+            &low,
+            hyper_hidden,
+            scratch.low_rank,
+            tokens,
+        )?;
+    }
     encode_hc_low_activation(ctx, enc, &low, scratch.branch_count)?;
-    encode_mat_mat_dispatch(
+    #[cfg(test)]
+    let up_overridden = encode_hc_packed_projection_override(
         ctx,
         enc,
+        Qwen4ExpHcPackedProjectionRole::Up,
         weights.up,
         &low,
         &raw_gate,
@@ -485,6 +761,20 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
         hyper_hidden,
         tokens,
     )?;
+    #[cfg(not(test))]
+    let up_overridden = false;
+    if !up_overridden {
+        encode_mat_mat_dispatch(
+            ctx,
+            enc,
+            weights.up,
+            &low,
+            &raw_gate,
+            scratch.low_rank,
+            hyper_hidden,
+            tokens,
+        )?;
+    }
     encode_hc_gated_mean_packed(
         ctx,
         enc,
@@ -614,6 +904,8 @@ pub(crate) fn validate_and_preflight_gated_residual_packed_mix(
     validate_f32_q8_mat_mat_addressing(weights.down.dtype, hyper_hidden, scratch.low_rank, tokens)?;
     validate_f32_q8_mat_mat_addressing(weights.up.dtype, scratch.low_rank, hyper_hidden, tokens)?;
     validate_f32_q8_mat_mat_addressing(inject.dtype, hyper_hidden, scratch.branch_count, tokens)?;
+    #[cfg(test)]
+    preflight_hc_packed_projection_override(ctx, weights, hyper_hidden, scratch.low_rank, tokens)?;
     for (name, tensor, width) in [
         (
             "packed HC normalized scratch",
@@ -1549,6 +1841,33 @@ mod tests {
             }
             Err(error) => panic!("Metal initialization failed: {error}"),
         }
+    }
+
+    #[test]
+    fn hc_projection_override_rejects_nesting_without_losing_outer_binding() {
+        assert!(!qwen4exp_hc_packed_projection_override_active());
+        let outer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_qwen4exp_hc_packed_projection_override(
+                Qwen4ExpHcPackedProjectionArm::WideF32Down,
+                2_051,
+                2_048,
+                || {
+                    let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        with_qwen4exp_hc_packed_projection_override(
+                            Qwen4ExpHcPackedProjectionArm::WideF32Down,
+                            2_051,
+                            2_048,
+                            || (),
+                        );
+                    }));
+                    assert!(nested.is_err());
+                    assert!(qwen4exp_hc_packed_projection_override_active());
+                    panic!("exercise outer HC override restoration");
+                },
+            );
+        }));
+        assert!(outer.is_err());
+        assert!(!qwen4exp_hc_packed_projection_override_active());
     }
 
     fn tensor(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {

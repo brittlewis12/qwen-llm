@@ -1546,18 +1546,29 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpRuntimeError> {
 mod tests {
     use super::*;
     use crate::metal::{DispatchCensusRow, evaluate_metal_memory_admission, host_page_size_bytes};
+    use crate::qwen4exp_composition_trace::{
+        Qwen4ExpCompositionTraceBanks, Qwen4ExpCompositionTracePhase,
+        with_qwen4exp_composition_trace,
+    };
+    use crate::qwen4exp_metal::{
+        Qwen4ExpHcPackedProjectionArm, with_qwen4exp_hc_packed_projection_override,
+    };
     use crate::qwen4exp_moe::{
         Qwen4ExpIq3GateUpCaptureBanks, Qwen4ExpIq3GateUpCaptureRecord, Qwen4ExpIq3GateUpProbeArm,
         encode_qwen4exp_iq3_gate_up_captured_arm, with_qwen4exp_iq3_gate_up_capture,
         with_qwen4exp_moe_iq3_fast_override, with_qwen4exp_moe_route_count_capture,
         with_qwen4exp_packed_router_e8p32_strict_override,
     };
+    use crate::qwen4exp_qsa::{
+        Qwen4ExpQsaDecisionCaptureBanks, with_qwen4exp_qsa_decision_capture,
+    };
+    use crate::qwen4exp_text_session::Qwen4ExpTextSessionMetalGeometry;
     use crate::sampling::{Sampler, SamplingConfig};
     use crate::tensor::GgmlType;
     use crate::tokenizer::Tokenizer;
     use objc2_metal::{MTLBuffer, MTLCommandBufferStatus};
     use sha2::{Digest, Sha256};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn argmax(values: &[f32]) -> usize {
         values
@@ -1700,6 +1711,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    struct Qwen4ExpDecisionTraceReplay {
+        endpoint: Vec<f32>,
+        teacher_forced_continuation: Vec<f32>,
+        timing: Qwen4ExpPrefillTiming,
+        prefill_state: Vec<Vec<u8>>,
+        continuation_state: Vec<Vec<u8>>,
+    }
+
+    fn run_qwen4exp_decision_trace_replay(
+        runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+        prompt: &[u32],
+        continuation_token: u32,
+        selected_packed: bool,
+    ) -> Qwen4ExpDecisionTraceReplay {
+        let _selected_override = Qwen4ExpPackedSelectedQsaOverride::set(selected_packed);
+        let endpoint = runner.prefill(prompt).unwrap().to_vec();
+        let timing = runner.last_prefill_timing().unwrap();
+        let prefill_state = snapshot_persistent_state(runner);
+        let teacher_forced_continuation =
+            runner.forward_token(continuation_token).unwrap().to_vec();
+        Qwen4ExpDecisionTraceReplay {
+            endpoint,
+            teacher_forced_continuation,
+            timing,
+            prefill_state,
+            continuation_state: snapshot_persistent_state(runner),
+        }
+    }
+
+    fn assert_qwen4exp_decision_observer_neutral(
+        label: &str,
+        capture_off: &Qwen4ExpDecisionTraceReplay,
+        capture_on: &Qwen4ExpDecisionTraceReplay,
+    ) {
+        assert_f32_bits_eq(
+            &format!("{label} endpoint"),
+            &capture_off.endpoint,
+            &capture_on.endpoint,
+        );
+        assert_f32_bits_eq(
+            &format!("{label} teacher-forced continuation"),
+            &capture_off.teacher_forced_continuation,
+            &capture_on.teacher_forced_continuation,
+        );
+        assert_state_bytes_eq(
+            &format!("{label} prefill state"),
+            &capture_off.prefill_state,
+            &capture_on.prefill_state,
+        );
+        assert_state_bytes_eq(
+            &format!("{label} continuation state"),
+            &capture_off.continuation_state,
+            &capture_on.continuation_state,
+        );
+        assert_eq!(
+            capture_off.timing.token_count,
+            capture_on.timing.token_count
+        );
+        assert_eq!(
+            capture_off.timing.packed_token_count,
+            capture_on.timing.packed_token_count
+        );
+        assert_eq!(
+            capture_off.timing.contains_selection,
+            capture_on.timing.contains_selection
+        );
+        assert_eq!(
+            capture_off.timing.command_count,
+            capture_on.timing.command_count
+        );
     }
 
     fn assert_router_candidate_census(
@@ -1892,6 +1975,136 @@ mod tests {
                 .cast::<i32>();
             std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
         }
+    }
+
+    fn metal_f32_slice(tensor: &crate::metal::MetalTensor) -> &[f32] {
+        assert_eq!(tensor.dtype, GgmlType::F32);
+        unsafe {
+            let source = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<f32>();
+            std::slice::from_raw_parts(source, tensor.n_elements() as usize)
+        }
+    }
+
+    fn metal_i32_slice(tensor: &crate::metal::MetalTensor) -> &[i32] {
+        assert_eq!(tensor.dtype, GgmlType::I32);
+        unsafe {
+            let source = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<i32>();
+            std::slice::from_raw_parts(source, tensor.n_elements() as usize)
+        }
+    }
+
+    struct QsaDecisionTraceView<'a> {
+        banks: &'a Qwen4ExpQsaDecisionCaptureBanks,
+        inputs: &'a [f32],
+        index_queries: &'a [f32],
+        scores: &'a [f32],
+        visible_blocks: &'a [i32],
+        selected_blocks: &'a [i32],
+        selected_count: &'a [i32],
+        selector_status: &'a [i32],
+    }
+
+    impl<'a> QsaDecisionTraceView<'a> {
+        fn new(banks: &'a Qwen4ExpQsaDecisionCaptureBanks) -> Self {
+            Self {
+                banks,
+                inputs: metal_f32_slice(&banks.inputs),
+                index_queries: metal_f32_slice(&banks.index_queries),
+                scores: metal_f32_slice(&banks.scores),
+                visible_blocks: metal_i32_slice(&banks.visible_blocks),
+                selected_blocks: metal_i32_slice(&banks.selected_blocks),
+                selected_count: metal_i32_slice(&banks.selected_count),
+                selector_status: metal_i32_slice(&banks.selector_status),
+            }
+        }
+
+        fn control(&self, values: &[i32], layer: usize, row: usize) -> i32 {
+            values[layer * self.banks.tokens + row]
+        }
+
+        fn f32_row<'b>(
+            &self,
+            values: &'b [f32],
+            width: usize,
+            layer: usize,
+            row: usize,
+        ) -> &'b [f32] {
+            let start = (layer * self.banks.tokens + row) * width;
+            &values[start..start + width]
+        }
+
+        fn input(&self, layer: usize, row: usize) -> &[f32] {
+            self.f32_row(self.inputs, self.banks.hidden_size, layer, row)
+        }
+
+        fn index_query(&self, layer: usize, row: usize) -> &[f32] {
+            self.f32_row(self.index_queries, self.banks.index_query_width, layer, row)
+        }
+
+        fn score(&self, layer: usize, row: usize) -> &[f32] {
+            self.f32_row(self.scores, self.banks.block_capacity, layer, row)
+        }
+
+        fn selected(&self, layer: usize, row: usize) -> &[i32] {
+            let start = (layer * self.banks.tokens + row) * self.banks.block_budget;
+            &self.selected_blocks[start..start + self.banks.block_budget]
+        }
+
+        fn visible(&self, layer: usize, row: usize) -> i32 {
+            self.control(self.visible_blocks, layer, row)
+        }
+
+        fn count(&self, layer: usize, row: usize) -> i32 {
+            self.control(self.selected_count, layer, row)
+        }
+
+        fn status(&self, layer: usize, row: usize) -> i32 {
+            self.control(self.selector_status, layer, row)
+        }
+    }
+
+    fn relative_rms(left: &[f32], right: &[f32]) -> (f64, f32) {
+        assert_eq!(left.len(), right.len());
+        let mut reference_norm = 0.0_f64;
+        let mut difference_norm = 0.0_f64;
+        let mut maximum = 0.0_f32;
+        for (&left, &right) in left.iter().zip(right) {
+            let difference = left as f64 - right as f64;
+            reference_norm += (left as f64) * (left as f64);
+            difference_norm += difference * difference;
+            maximum = maximum.max(difference.abs() as f32);
+        }
+        (
+            (difference_norm / reference_norm.max(f64::MIN_POSITIVE)).sqrt(),
+            maximum,
+        )
+    }
+
+    fn qsa_rank_boundary(scores: &[f32], top_k: usize) -> ((usize, f32), (usize, f32), f32) {
+        assert!(scores.len() > top_k);
+        assert!(scores.iter().all(|score| score.is_finite()));
+        let mut ranked = scores.iter().copied().enumerate().collect::<Vec<_>>();
+        ranked.sort_by(|(left_id, left), (right_id, right)| {
+            right
+                .partial_cmp(left)
+                .expect("finite QSA scores")
+                .then_with(|| left_id.cmp(right_id))
+        });
+        let inside = ranked[top_k - 1];
+        let outside = ranked[top_k];
+        (inside, outside, inside.1 - outside.1)
     }
 
     fn assert_route_count_capture_census(
@@ -3254,6 +3467,662 @@ mod tests {
                 &format!("released selected/default N={prompt_tokens} continuation"),
                 &default_continuation,
                 &selected_continuation,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_RUNTIME_GGUF to the pinned full release"]
+    fn released_selected_prefill_decision_trace_localizes_n4099() {
+        const PROMPT_TOKENS: usize = 4_099;
+        const SELECTED_START: usize = 2_051;
+        const SELECTED_TOKENS: usize = PROMPT_TOKENS - SELECTED_START;
+        const TRACE_TOKEN_BYTES: &[u8] =
+            include_bytes!("../tests/fixtures/qwen4exp_n4099_perf_roadmap_26f3c14.tokens.u32le");
+
+        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
+            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+        assert_eq!(
+            TRACE_TOKEN_BYTES.len(),
+            (PROMPT_TOKENS + 1) * std::mem::size_of::<u32>()
+        );
+        let source_tokens = TRACE_TOKEN_BYTES
+            .chunks_exact(std::mem::size_of::<u32>())
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(source_tokens.len(), PROMPT_TOKENS + 1);
+        assert_eq!(
+            sha256_u32_le(b"qwen4exp-n4099-decision-trace-u32le-v1\0", &source_tokens,),
+            "c396eaee4de9709d7cda51ff7e9f2a63fadacd200f3fc1d50c6254c5d716ac28"
+        );
+        let prompt = &source_tokens[..PROMPT_TOKENS];
+        let continuation_token = source_tokens[PROMPT_TOKENS];
+        let config = Qwen4ExpConfig::flash_next_reference();
+        assert_eq!(config.qsa.token_budget, 2_048);
+        assert_eq!(config.compress_ratios[3], 4);
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, PROMPT_TOKENS + 1)
+            .expect("derive N=4099 trace capacity");
+        let ctx = MetalContext::new().expect("initialize Metal");
+        let mut loaded =
+            Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, PROMPT_TOKENS)
+                .expect("load released selected-capable runner");
+        assert_eq!(loaded.packed_prefill_capacity(), Some(2_048));
+        assert!(loaded.packed_selected_capable());
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+        let baseline_banks = Qwen4ExpQsaDecisionCaptureBanks::new(
+            &ctx,
+            &config,
+            capacity.qsa_physical_capacity(),
+            SELECTED_START,
+            SELECTED_TOKENS,
+        )
+        .expect("allocate scalar decision capture");
+        let candidate_banks = Qwen4ExpQsaDecisionCaptureBanks::new(
+            &ctx,
+            &config,
+            capacity.qsa_physical_capacity(),
+            SELECTED_START,
+            SELECTED_TOKENS,
+        )
+        .expect("allocate packed decision capture");
+        let f32_down_banks = Qwen4ExpQsaDecisionCaptureBanks::new(
+            &ctx,
+            &config,
+            capacity.qsa_physical_capacity(),
+            SELECTED_START,
+            SELECTED_TOKENS,
+        )
+        .expect("allocate F32 HC down decision capture");
+        assert_eq!(baseline_banks.layers, candidate_banks.layers);
+        assert_eq!(baseline_banks.layers, f32_down_banks.layers);
+        assert_eq!(baseline_banks.layers.len(), 12);
+        let session_geometry = Qwen4ExpTextSessionMetalGeometry::from_config(
+            &config,
+            capacity.qsa_physical_capacity(),
+        )
+        .unwrap();
+        let composition_records = config.layer_count as usize * 7 + 1;
+        let baseline_composition = Qwen4ExpCompositionTraceBanks::new(
+            &ctx,
+            SELECTED_START,
+            session_geometry.hyper_width(),
+            composition_records,
+        )
+        .unwrap();
+        let candidate_composition = Qwen4ExpCompositionTraceBanks::new(
+            &ctx,
+            SELECTED_START,
+            session_geometry.hyper_width(),
+            composition_records,
+        )
+        .unwrap();
+        let f32_down_composition = Qwen4ExpCompositionTraceBanks::new(
+            &ctx,
+            SELECTED_START,
+            session_geometry.hyper_width(),
+            composition_records,
+        )
+        .unwrap();
+        runner.reset().unwrap();
+        zero_persistent_state(&runner);
+        let ((baseline_observed, baseline_records), baseline_composition_records) = {
+            with_qwen4exp_composition_trace(&baseline_composition, || {
+                with_qwen4exp_qsa_decision_capture(&baseline_banks, || {
+                    run_qwen4exp_decision_trace_replay(
+                        &mut runner,
+                        prompt,
+                        continuation_token,
+                        false,
+                    )
+                })
+            })
+        };
+        assert_eq!(baseline_observed.timing.token_count, PROMPT_TOKENS);
+        assert_eq!(baseline_observed.timing.packed_token_count, SELECTED_START);
+        assert!(!baseline_observed.timing.contains_selection);
+        assert_eq!(
+            baseline_records
+                .iter()
+                .map(|record| record.query_count)
+                .sum::<usize>(),
+            baseline_banks.layers.len() * SELECTED_TOKENS
+        );
+        runner.reset().unwrap();
+        zero_persistent_state(&runner);
+        let baseline =
+            run_qwen4exp_decision_trace_replay(&mut runner, prompt, continuation_token, false);
+        assert_qwen4exp_decision_observer_neutral(
+            "N=4099 default-safe capture-off/on",
+            &baseline,
+            &baseline_observed,
+        );
+
+        runner.reset().unwrap();
+        zero_persistent_state(&runner);
+        let ((candidate_observed, candidate_records), candidate_composition_records) = {
+            with_qwen4exp_composition_trace(&candidate_composition, || {
+                with_qwen4exp_qsa_decision_capture(&candidate_banks, || {
+                    run_qwen4exp_decision_trace_replay(
+                        &mut runner,
+                        prompt,
+                        continuation_token,
+                        true,
+                    )
+                })
+            })
+        };
+        assert_eq!(candidate_observed.timing.token_count, PROMPT_TOKENS);
+        assert_eq!(candidate_observed.timing.packed_token_count, PROMPT_TOKENS);
+        assert!(candidate_observed.timing.contains_selection);
+        assert_eq!(candidate_observed.timing.command_count, 3);
+        assert_eq!(
+            candidate_records
+                .iter()
+                .map(|record| record.query_count)
+                .sum::<usize>(),
+            candidate_banks.layers.len() * SELECTED_TOKENS
+        );
+        runner.reset().unwrap();
+        zero_persistent_state(&runner);
+        let candidate =
+            run_qwen4exp_decision_trace_replay(&mut runner, prompt, continuation_token, true);
+        assert_qwen4exp_decision_observer_neutral(
+            "N=4099 generic selected-packed capture-off/on",
+            &candidate,
+            &candidate_observed,
+        );
+
+        let mut run_hc_precision_arm =
+            |arm: Qwen4ExpHcPackedProjectionArm,
+             banks: &Qwen4ExpCompositionTraceBanks,
+             qsa_banks: &Qwen4ExpQsaDecisionCaptureBanks| {
+                runner.reset().unwrap();
+                zero_persistent_state(&runner);
+                with_qwen4exp_hc_packed_projection_override(
+                    arm,
+                    SELECTED_START,
+                    SELECTED_TOKENS,
+                    || {
+                        let ((outcome, qsa_records), composition_records) =
+                            with_qwen4exp_composition_trace(banks, || {
+                                with_qwen4exp_qsa_decision_capture(qsa_banks, || {
+                                    let _selected_override =
+                                        Qwen4ExpPackedSelectedQsaOverride::set(true);
+                                    crate::metal::dispatch_census_begin();
+                                    let endpoint = runner.prefill(prompt).unwrap().to_vec();
+                                    let census = crate::metal::dispatch_census_take();
+                                    let timing = runner.last_prefill_timing().unwrap();
+                                    let prefill_state = snapshot_persistent_state(&runner);
+                                    let teacher_forced_continuation =
+                                        runner.forward_token(continuation_token).unwrap().to_vec();
+                                    (
+                                        Qwen4ExpDecisionTraceReplay {
+                                            endpoint,
+                                            teacher_forced_continuation,
+                                            timing,
+                                            prefill_state,
+                                            continuation_state: snapshot_persistent_state(&runner),
+                                        },
+                                        census,
+                                    )
+                                })
+                            });
+                        (outcome, composition_records, qsa_records)
+                    },
+                )
+            };
+        let (
+            ((f32_down_observed, f32_down_census), f32_down_records, f32_down_qsa_records),
+            f32_down_observed_override_records,
+        ) = run_hc_precision_arm(
+            Qwen4ExpHcPackedProjectionArm::WideF32Down,
+            &f32_down_composition,
+            &f32_down_banks,
+        );
+        drop(run_hc_precision_arm);
+        assert_eq!(f32_down_records, baseline_composition_records);
+        assert_eq!(f32_down_observed.timing.token_count, PROMPT_TOKENS);
+        assert_eq!(f32_down_observed.timing.packed_token_count, PROMPT_TOKENS);
+        assert!(f32_down_observed.timing.contains_selection);
+        assert_eq!(f32_down_observed.timing.command_count, 3);
+        runner.reset().unwrap();
+        zero_persistent_state(&runner);
+        let (f32_down, f32_down_override_records) = with_qwen4exp_hc_packed_projection_override(
+            Qwen4ExpHcPackedProjectionArm::WideF32Down,
+            SELECTED_START,
+            SELECTED_TOKENS,
+            || run_qwen4exp_decision_trace_replay(&mut runner, prompt, continuation_token, true),
+        );
+        assert_eq!(
+            f32_down_override_records,
+            f32_down_observed_override_records
+        );
+        assert_qwen4exp_decision_observer_neutral(
+            "N=4099 F32-HC-down capture-off/on",
+            &f32_down,
+            &f32_down_observed,
+        );
+        assert_eq!(
+            f32_down_override_records.len(),
+            config.layer_count as usize * 2,
+            "two packed HC down projections per layer"
+        );
+        assert!(f32_down_override_records.iter().all(|record| {
+            record.arm == Qwen4ExpHcPackedProjectionArm::WideF32Down
+                && record.start_position == SELECTED_START
+                && record.tokens == SELECTED_TOKENS
+                && record.n_in == 10_240
+                && record.n_out == 320
+        }));
+        let f32_down_dispatches = f32_down_census
+            .iter()
+            .filter(|row| row.tag.as_deref() == Some("qwen4exp.hc_precision.wide_f32_down"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            f32_down_dispatches.len(),
+            f32_down_observed_override_records.len(),
+            "each HC override record must have one tagged treatment dispatch"
+        );
+        assert!(f32_down_dispatches.iter().all(|row| {
+            row.kernel == "kernel_mat_mat_q8_0_f32_r2c16k64"
+                && (row.grid_width, row.grid_height, row.grid_depth) == (16, 20, 1)
+                && (row.threads_width, row.threads_height, row.threads_depth) == (128, 1, 1)
+        }));
+        assert_eq!(
+            f32_down_qsa_records
+                .iter()
+                .map(|record| record.query_count)
+                .sum::<usize>(),
+            f32_down_banks.layers.len() * SELECTED_TOKENS
+        );
+
+        let endpoint_metrics = report_logit_arms(
+            "N=4099 natural default-safe/packed-selected endpoint",
+            &baseline.endpoint,
+            &candidate.endpoint,
+        );
+        let continuation_metrics = report_logit_arms(
+            "N=4099 natural default-safe/packed-selected teacher-forced continuation",
+            &baseline.teacher_forced_continuation,
+            &candidate.teacher_forced_continuation,
+        );
+        assert!(endpoint_metrics.0, "natural endpoint argmax");
+        assert!(
+            continuation_metrics.0,
+            "natural teacher-forced continuation argmax"
+        );
+        let f32_down_endpoint_metrics = report_logit_arms(
+            "N=4099 natural default-safe/F32-HC-down endpoint",
+            &baseline.endpoint,
+            &f32_down.endpoint,
+        );
+        let f32_down_continuation_metrics = report_logit_arms(
+            "N=4099 natural default-safe/F32-HC-down teacher-forced continuation",
+            &baseline.teacher_forced_continuation,
+            &f32_down.teacher_forced_continuation,
+        );
+        assert!(f32_down_endpoint_metrics.0, "F32 HC down endpoint argmax");
+        assert!(
+            f32_down_continuation_metrics.0,
+            "F32 HC down continuation argmax"
+        );
+        eprintln!(
+            "qwen4exp qsa_decision_trace execution: baseline_commands={} baseline_instrumented_gpu_ms={:?} candidate_commands={} candidate_instrumented_gpu_ms={:?} f32_down_instrumented_gpu_ms={:?}",
+            baseline_observed.timing.command_count,
+            baseline_observed.timing.complete_gpu_ms(),
+            candidate_observed.timing.command_count,
+            candidate_observed.timing.complete_gpu_ms(),
+            f32_down_observed.timing.complete_gpu_ms(),
+        );
+        eprintln!(
+            "qwen4exp hc_precision_arm summary: generic_endpoint_rrms={:.6e} generic_continuation_rrms={:.6e} f32_down_endpoint_argmax={} f32_down_endpoint_rrms={:.6e} f32_down_continuation_argmax={} f32_down_continuation_rrms={:.6e}",
+            endpoint_metrics.2,
+            continuation_metrics.2,
+            f32_down_endpoint_metrics.0,
+            f32_down_endpoint_metrics.2,
+            f32_down_continuation_metrics.0,
+            f32_down_continuation_metrics.2,
+        );
+
+        assert_eq!(baseline_composition_records.len(), composition_records);
+        assert_eq!(candidate_composition_records.len(), composition_records);
+        let mut first_composition_mismatch = None;
+        let mut composition_mismatch_stages = 0_usize;
+        for (baseline_record, candidate_record) in baseline_composition_records
+            .iter()
+            .zip(&candidate_composition_records)
+        {
+            assert_eq!(baseline_record, candidate_record);
+            let baseline_tensor = baseline_composition.record_values(*baseline_record);
+            let candidate_tensor = candidate_composition.record_values(*candidate_record);
+            let baseline_values = metal_f32_slice(&baseline_tensor);
+            let candidate_values = metal_f32_slice(&candidate_tensor);
+            let exact = baseline_values
+                .iter()
+                .zip(candidate_values)
+                .all(|(&left, &right)| left.to_bits() == right.to_bits());
+            if !exact {
+                composition_mismatch_stages += 1;
+                first_composition_mismatch.get_or_insert(*baseline_record);
+            }
+            let selected_checkpoint = matches!(
+                baseline_record.stage.layer,
+                2 | 3 | 7 | 15 | 23 | 31 | 39 | 47
+            ) && baseline_record.stage.phase
+                == Qwen4ExpCompositionTracePhase::LayerOutput;
+            if baseline_record.stage.layer <= 1 || selected_checkpoint {
+                let (relative_rms, maximum) = relative_rms(baseline_values, candidate_values);
+                eprintln!(
+                    "qwen4exp composition_trace target_position={SELECTED_START} stage={:?} width={} exact={exact} rrms={relative_rms:.6e} max={maximum:.6e}",
+                    baseline_record.stage, baseline_record.width,
+                );
+            }
+        }
+        if let Some(record) = first_composition_mismatch {
+            let baseline_tensor = baseline_composition.record_values(record);
+            let candidate_tensor = candidate_composition.record_values(record);
+            let baseline_values = metal_f32_slice(&baseline_tensor);
+            let candidate_values = metal_f32_slice(&candidate_tensor);
+            let (relative_rms, maximum) = relative_rms(baseline_values, candidate_values);
+            eprintln!(
+                "qwen4exp composition_trace first_mismatch: target_position={SELECTED_START} stage={:?} width={} rrms={relative_rms:.6e} max={maximum:.6e} baseline_sha256={} candidate_sha256={} mismatched_stages={composition_mismatch_stages}/{composition_records}",
+                record.stage,
+                record.width,
+                sha256_f32_bits(
+                    b"qwen4exp-composition-trace-first-stage-v1\0",
+                    baseline_values,
+                ),
+                sha256_f32_bits(
+                    b"qwen4exp-composition-trace-first-stage-v1\0",
+                    candidate_values,
+                ),
+            );
+        } else {
+            eprintln!("qwen4exp composition_trace: all {composition_records} stages are bit-exact");
+        }
+        let first_hc_record = baseline_composition_records
+            .iter()
+            .copied()
+            .find(|record| {
+                record.stage.layer == 0
+                    && record.stage.phase == Qwen4ExpCompositionTracePhase::AttentionInput
+            })
+            .expect("layer-zero attention HC trace record");
+        let baseline_first_hc_tensor = baseline_composition.record_values(first_hc_record);
+        let baseline_first_hc = metal_f32_slice(&baseline_first_hc_tensor);
+        for (label, banks) in [
+            ("generic", &candidate_composition),
+            ("f32_down", &f32_down_composition),
+        ] {
+            let tensor = banks.record_values(first_hc_record);
+            let values = metal_f32_slice(&tensor);
+            let (relative_rms, maximum) = relative_rms(baseline_first_hc, values);
+            eprintln!(
+                "qwen4exp hc_precision_arm first_hc: arm={label} rrms={relative_rms:.6e} max={maximum:.6e} sha256={}",
+                sha256_f32_bits(b"qwen4exp-hc-precision-first-mixed-v1\0", values),
+            );
+        }
+
+        let baseline = QsaDecisionTraceView::new(&baseline_banks);
+        let candidate = QsaDecisionTraceView::new(&candidate_banks);
+        let f32_down = QsaDecisionTraceView::new(&f32_down_banks);
+        let bits_equal = |left: &[f32], right: &[f32]| {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(&left, &right)| left.to_bits() == right.to_bits())
+        };
+        let layer_count = baseline_banks.layers.len();
+        let mut first_input = vec![None; layer_count];
+        let mut first_query = vec![None; layer_count];
+        let mut first_score = vec![None; layer_count];
+        let mut first_ids = vec![None; layer_count];
+        let mut input_mismatch_rows = vec![0_usize; layer_count];
+        let mut query_mismatch_rows = vec![0_usize; layer_count];
+        let mut score_mismatch_rows = vec![0_usize; layer_count];
+        let mut id_mismatch_rows = vec![0_usize; layer_count];
+        let mut f32_down_id_mismatch_rows = vec![0_usize; layer_count];
+        let mut first_f32_down_ids = vec![None; layer_count];
+        let mut first_logical_id_mismatch = None;
+        let mut first_logical_f32_down_id_mismatch = None;
+
+        for row in 0..SELECTED_TOKENS {
+            let position = SELECTED_START + row;
+            for layer_ordinal in 0..layer_count {
+                let layer = baseline_banks.layers[layer_ordinal];
+                let ratio = config.compress_ratios[layer as usize] as usize;
+                let expected_visible = (position + 1) / ratio;
+                for trace in [&baseline, &candidate, &f32_down] {
+                    assert_eq!(
+                        trace.visible(layer_ordinal, row),
+                        expected_visible as i32,
+                        "layer {layer} position {position} visible blocks"
+                    );
+                    assert_eq!(
+                        trace.count(layer_ordinal, row),
+                        trace.banks.block_budget as i32,
+                        "layer {layer} position {position} selected count"
+                    );
+                    assert_eq!(
+                        trace.status(layer_ordinal, row),
+                        0,
+                        "layer {layer} position {position} selector status"
+                    );
+                    let selected = trace.selected(layer_ordinal, row);
+                    assert!(
+                        selected.windows(2).all(|pair| pair[0] < pair[1]),
+                        "layer {layer} position {position} cache-order IDs"
+                    );
+                    assert!(
+                        selected
+                            .iter()
+                            .all(|&id| id >= 0 && id < expected_visible as i32),
+                        "layer {layer} position {position} visible selected IDs"
+                    );
+                }
+
+                if !bits_equal(
+                    baseline.input(layer_ordinal, row),
+                    candidate.input(layer_ordinal, row),
+                ) {
+                    first_input[layer_ordinal].get_or_insert(row);
+                    input_mismatch_rows[layer_ordinal] += 1;
+                }
+                if !bits_equal(
+                    baseline.index_query(layer_ordinal, row),
+                    candidate.index_query(layer_ordinal, row),
+                ) {
+                    first_query[layer_ordinal].get_or_insert(row);
+                    query_mismatch_rows[layer_ordinal] += 1;
+                }
+                if !bits_equal(
+                    &baseline.score(layer_ordinal, row)[..expected_visible],
+                    &candidate.score(layer_ordinal, row)[..expected_visible],
+                ) {
+                    first_score[layer_ordinal].get_or_insert(row);
+                    score_mismatch_rows[layer_ordinal] += 1;
+                }
+                if baseline.selected(layer_ordinal, row) != candidate.selected(layer_ordinal, row) {
+                    first_ids[layer_ordinal].get_or_insert(row);
+                    id_mismatch_rows[layer_ordinal] += 1;
+                    first_logical_id_mismatch.get_or_insert((layer_ordinal, row));
+                }
+                if baseline.selected(layer_ordinal, row) != f32_down.selected(layer_ordinal, row) {
+                    first_f32_down_ids[layer_ordinal].get_or_insert(row);
+                    f32_down_id_mismatch_rows[layer_ordinal] += 1;
+                    first_logical_f32_down_id_mismatch.get_or_insert((layer_ordinal, row));
+                }
+            }
+        }
+
+        for layer_ordinal in 0..layer_count {
+            let layer = baseline_banks.layers[layer_ordinal];
+            let input = first_input[layer_ordinal]
+                .map(|row| {
+                    let (relative_rms, maximum) = relative_rms(
+                        baseline.input(layer_ordinal, row),
+                        candidate.input(layer_ordinal, row),
+                    );
+                    format!(
+                        "{} rrms={relative_rms:.6e} max={maximum:.6e}",
+                        SELECTED_START + row
+                    )
+                })
+                .unwrap_or_else(|| "none".into());
+            let query = first_query[layer_ordinal]
+                .map(|row| {
+                    let (relative_rms, maximum) = relative_rms(
+                        baseline.index_query(layer_ordinal, row),
+                        candidate.index_query(layer_ordinal, row),
+                    );
+                    format!(
+                        "{} rrms={relative_rms:.6e} max={maximum:.6e}",
+                        SELECTED_START + row
+                    )
+                })
+                .unwrap_or_else(|| "none".into());
+            let score = first_score[layer_ordinal]
+                .map(|row| {
+                    let visible = baseline.visible(layer_ordinal, row) as usize;
+                    let (relative_rms, maximum) = relative_rms(
+                        &baseline.score(layer_ordinal, row)[..visible],
+                        &candidate.score(layer_ordinal, row)[..visible],
+                    );
+                    format!(
+                        "{} rrms={relative_rms:.6e} max={maximum:.6e}",
+                        SELECTED_START + row
+                    )
+                })
+                .unwrap_or_else(|| "none".into());
+            let ids = first_ids[layer_ordinal]
+                .map(|row| (SELECTED_START + row).to_string())
+                .unwrap_or_else(|| "none".into());
+            let f32_down_ids = first_f32_down_ids[layer_ordinal]
+                .map(|row| (SELECTED_START + row).to_string())
+                .unwrap_or_else(|| "none".into());
+            eprintln!(
+                "qwen4exp qsa_decision_trace layer={layer} input_first={input} input_mismatch_rows={} query_first={query} query_mismatch_rows={} score_first={score} score_mismatch_rows={} ids_first={ids} ids_mismatch_rows={} f32_down_ids_first={f32_down_ids} f32_down_ids_mismatch_rows={}",
+                input_mismatch_rows[layer_ordinal],
+                query_mismatch_rows[layer_ordinal],
+                score_mismatch_rows[layer_ordinal],
+                id_mismatch_rows[layer_ordinal],
+                f32_down_id_mismatch_rows[layer_ordinal],
+            );
+        }
+
+        eprintln!(
+            "qwen4exp qsa_decision_trace selected_ids: baseline_sha256={} candidate_sha256={} mismatched_decisions={}/{} f32_down_sha256={} f32_down_mismatched_decisions={}/{}",
+            sha256_metal_tensor_bytes(
+                b"qwen4exp-qsa-decision-trace-selected-ids-i32le-v1\0",
+                &baseline_banks.selected_blocks,
+            ),
+            sha256_metal_tensor_bytes(
+                b"qwen4exp-qsa-decision-trace-selected-ids-i32le-v1\0",
+                &candidate_banks.selected_blocks,
+            ),
+            id_mismatch_rows.iter().sum::<usize>(),
+            layer_count * SELECTED_TOKENS,
+            sha256_metal_tensor_bytes(
+                b"qwen4exp-qsa-decision-trace-selected-ids-i32le-v1\0",
+                &f32_down_banks.selected_blocks,
+            ),
+            f32_down_id_mismatch_rows.iter().sum::<usize>(),
+            layer_count * SELECTED_TOKENS,
+        );
+
+        if let Some((layer_ordinal, row)) = first_logical_id_mismatch {
+            let layer = baseline_banks.layers[layer_ordinal];
+            let position = SELECTED_START + row;
+            let visible = baseline.visible(layer_ordinal, row) as usize;
+            let baseline_ids = baseline.selected(layer_ordinal, row);
+            let candidate_ids = candidate.selected(layer_ordinal, row);
+            let baseline_set = baseline_ids.iter().copied().collect::<BTreeSet<_>>();
+            let candidate_set = candidate_ids.iter().copied().collect::<BTreeSet<_>>();
+            let symmetric_difference = baseline_set
+                .symmetric_difference(&candidate_set)
+                .copied()
+                .collect::<Vec<_>>();
+            let (baseline_inside, baseline_outside, baseline_margin) = qsa_rank_boundary(
+                &baseline.score(layer_ordinal, row)[..visible],
+                baseline_banks.block_budget,
+            );
+            let (candidate_inside, candidate_outside, candidate_margin) = qsa_rank_boundary(
+                &candidate.score(layer_ordinal, row)[..visible],
+                candidate_banks.block_budget,
+            );
+            let (input_relative_rms, input_maximum) = relative_rms(
+                baseline.input(layer_ordinal, row),
+                candidate.input(layer_ordinal, row),
+            );
+            let (query_relative_rms, query_maximum) = relative_rms(
+                baseline.index_query(layer_ordinal, row),
+                candidate.index_query(layer_ordinal, row),
+            );
+            let (score_relative_rms, score_maximum) = relative_rms(
+                &baseline.score(layer_ordinal, row)[..visible],
+                &candidate.score(layer_ordinal, row)[..visible],
+            );
+            eprintln!(
+                "qwen4exp qsa_decision_trace first_id_mismatch: position={position} layer={layer} visible={visible} symmetric_difference={symmetric_difference:?} baseline_rank512={baseline_inside:?} baseline_rank513={baseline_outside:?} baseline_margin={baseline_margin:.9e} candidate_rank512={candidate_inside:?} candidate_rank513={candidate_outside:?} candidate_margin={candidate_margin:.9e} input_rrms={input_relative_rms:.6e} input_max={input_maximum:.6e} query_rrms={query_relative_rms:.6e} query_max={query_maximum:.6e} score_rrms={score_relative_rms:.6e} score_max={score_maximum:.6e} baseline_input_sha256={} candidate_input_sha256={} baseline_query_sha256={} candidate_query_sha256={} baseline_ids_sha256={} candidate_ids_sha256={}",
+                sha256_f32_bits(
+                    b"qwen4exp-qsa-decision-trace-input-row-v1\0",
+                    baseline.input(layer_ordinal, row),
+                ),
+                sha256_f32_bits(
+                    b"qwen4exp-qsa-decision-trace-input-row-v1\0",
+                    candidate.input(layer_ordinal, row),
+                ),
+                sha256_f32_bits(
+                    b"qwen4exp-qsa-decision-trace-query-row-v1\0",
+                    baseline.index_query(layer_ordinal, row),
+                ),
+                sha256_f32_bits(
+                    b"qwen4exp-qsa-decision-trace-query-row-v1\0",
+                    candidate.index_query(layer_ordinal, row),
+                ),
+                sha256_i32_le(
+                    b"qwen4exp-qsa-decision-trace-selected-row-v1\0",
+                    baseline_ids,
+                ),
+                sha256_i32_le(
+                    b"qwen4exp-qsa-decision-trace-selected-row-v1\0",
+                    candidate_ids,
+                ),
+            );
+        } else {
+            eprintln!(
+                "qwen4exp qsa_decision_trace: all {} selected-ID decisions are exact",
+                layer_count * SELECTED_TOKENS
+            );
+        }
+        if let Some((layer_ordinal, row)) = first_logical_f32_down_id_mismatch {
+            let layer = baseline_banks.layers[layer_ordinal];
+            let position = SELECTED_START + row;
+            let baseline_ids = baseline.selected(layer_ordinal, row);
+            let f32_down_ids = f32_down.selected(layer_ordinal, row);
+            let baseline_set = baseline_ids.iter().copied().collect::<BTreeSet<_>>();
+            let f32_down_set = f32_down_ids.iter().copied().collect::<BTreeSet<_>>();
+            let symmetric_difference = baseline_set
+                .symmetric_difference(&f32_down_set)
+                .copied()
+                .collect::<Vec<_>>();
+            eprintln!(
+                "qwen4exp qsa_decision_trace first_f32_down_id_mismatch: position={position} layer={layer} symmetric_difference={symmetric_difference:?} baseline_ids_sha256={} f32_down_ids_sha256={}",
+                sha256_i32_le(
+                    b"qwen4exp-qsa-decision-trace-selected-row-v1\0",
+                    baseline_ids,
+                ),
+                sha256_i32_le(
+                    b"qwen4exp-qsa-decision-trace-selected-row-v1\0",
+                    f32_down_ids,
+                ),
+            );
+        } else {
+            eprintln!(
+                "qwen4exp qsa_decision_trace: F32 HC down preserves all {} scalar selected-ID decisions",
+                layer_count * SELECTED_TOKENS
             );
         }
     }

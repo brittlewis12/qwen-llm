@@ -54,6 +54,47 @@ use std::fmt;
 use std::mem::size_of;
 use std::time::Instant;
 
+#[inline(always)]
+fn with_diagnostic_execution_range<R>(
+    start_position: usize,
+    rows: usize,
+    f: impl FnOnce() -> R,
+) -> R {
+    #[cfg(test)]
+    {
+        return crate::qwen4exp_composition_trace::with_qwen4exp_diagnostic_execution_range(
+            start_position,
+            rows,
+            f,
+        );
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (start_position, rows);
+        f()
+    }
+}
+
+#[cfg(test)]
+fn reject_active_sampled_diagnostics(kind: &str) -> Result<(), Qwen4ExpTextSessionError> {
+    if crate::qwen4exp_composition_trace::qwen4exp_composition_trace_active() {
+        return invalid(format!(
+            "composition tracing is unavailable in sampled {kind} profiles"
+        ));
+    }
+    if crate::qwen4exp_qsa::qwen4exp_qsa_decision_capture_active() {
+        return invalid(format!(
+            "QSA decision capture is unavailable in sampled {kind} profiles"
+        ));
+    }
+    if crate::qwen4exp_metal::qwen4exp_hc_packed_projection_override_active() {
+        return invalid(format!(
+            "HC projection overrides are unavailable in sampled {kind} profiles"
+        ));
+    }
+    Ok(())
+}
+
 pub const QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -1517,6 +1558,8 @@ pub(crate) fn encode_qwen4exp_text_packed_layer_sampled<'a>(
     Qwen4ExpTextSessionError,
 > {
     #[cfg(test)]
+    reject_active_sampled_diagnostics("packed")?;
+    #[cfg(test)]
     if crate::qwen4exp_moe::qwen4exp_moe_route_count_capture_active() {
         return invalid("route-count capture is unavailable in sampled packed profiles");
     }
@@ -1621,53 +1664,64 @@ fn encode_qwen4exp_text_packed_inner<'a>(
             workspace,
         );
     }
-    let preflight_started = cpu_timing.is_some().then(Instant::now);
-    let (next_history, row_ids) = validate_and_preflight_packed(
-        ctx,
-        enc,
-        token_ids,
-        start_position,
-        table,
-        weights,
-        workspace,
-    )?;
-    if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), preflight_started) {
-        timing.preflight_ms = started.elapsed().as_secs_f64() * 1e3;
-    }
-    let stage_started = cpu_timing.is_some().then(Instant::now);
-    stage_packed_inputs(token_ids, &row_ids, table, workspace)?;
-    if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), stage_started) {
-        timing.stage_inputs_ms = started.elapsed().as_secs_f64() * 1e3;
-    }
-    let pending_length = start_position
-        .checked_add(token_ids.len())
-        .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("packed length overflow".into()))?;
-    reserve_command(workspace, enc, pending_length)?;
-    workspace.logits_ready = false;
-    let graph_started = cpu_timing.is_some().then(Instant::now);
-    if let Err(error) = unsafe {
-        encode_packed_step(
+    let encode = || {
+        let preflight_started = cpu_timing.is_some().then(Instant::now);
+        let (next_history, row_ids) = validate_and_preflight_packed(
             ctx,
             enc,
+            token_ids,
             start_position,
-            next_history,
+            table,
             weights,
             workspace,
-            token_ids.len(),
-            profile,
-        )
-    } {
-        workspace.encode_failed = true;
-        workspace.state_poisoned = true;
-        return Err(error);
+        )?;
+        if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), preflight_started) {
+            timing.preflight_ms = started.elapsed().as_secs_f64() * 1e3;
+        }
+        let stage_started = cpu_timing.is_some().then(Instant::now);
+        stage_packed_inputs(token_ids, &row_ids, table, workspace)?;
+        if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), stage_started) {
+            timing.stage_inputs_ms = started.elapsed().as_secs_f64() * 1e3;
+        }
+        let pending_length = start_position
+            .checked_add(token_ids.len())
+            .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("packed length overflow".into()))?;
+        reserve_command(workspace, enc, pending_length)?;
+        workspace.logits_ready = false;
+        let graph_started = cpu_timing.is_some().then(Instant::now);
+        if let Err(error) = unsafe {
+            encode_packed_step(
+                ctx,
+                enc,
+                start_position,
+                next_history,
+                weights,
+                workspace,
+                token_ids.len(),
+                profile,
+            )
+        } {
+            workspace.encode_failed = true;
+            workspace.state_poisoned = true;
+            return Err(error);
+        }
+        if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), graph_started) {
+            timing.graph_encode_ms = started.elapsed().as_secs_f64() * 1e3;
+        }
+        Ok(Qwen4ExpTextSessionPending {
+            workspace,
+            position: pending_length - 1,
+        })
+    };
+    #[cfg(test)]
+    {
+        let has_diagnostic_range =
+            !token_ids.is_empty() && start_position.checked_add(token_ids.len()).is_some();
+        if has_diagnostic_range {
+            return with_diagnostic_execution_range(start_position, token_ids.len(), encode);
+        }
     }
-    if let (Some(timing), Some(started)) = (cpu_timing.as_deref_mut(), graph_started) {
-        timing.graph_encode_ms = started.elapsed().as_secs_f64() * 1e3;
-    }
-    Ok(Qwen4ExpTextSessionPending {
-        workspace,
-        position: pending_length - 1,
-    })
+    encode()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1681,6 +1735,8 @@ pub fn encode_qwen4exp_text_token_layer_sampled<'a>(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    #[cfg(test)]
+    reject_active_sampled_diagnostics("token")?;
     #[cfg(test)]
     if crate::qwen4exp_moe::qwen4exp_moe_route_count_capture_active() {
         return invalid("route-count capture is unavailable in sampled token profiles");
@@ -1708,7 +1764,15 @@ pub fn encode_qwen4exp_text_token_layer_sampled<'a>(
     let next_history =
         prepare_qwen4exp_text_token(ctx, &first, token_id, position, table, weights, workspace)?;
     let encoded = (|| {
-        encode_zero_one_stage(ctx, &first, token_id, next_history, weights, workspace)?;
+        encode_zero_one_stage(
+            ctx,
+            &first,
+            token_id,
+            position,
+            next_history,
+            weights,
+            workspace,
+        )?;
         first.end();
         for index in 0..weights.post_ple.len() {
             let encoder = sampled_stage_encoder(command, samples, index + 1)?;
@@ -2463,7 +2527,15 @@ fn encode_step(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<(), Qwen4ExpTextSessionError> {
-    encode_zero_one_stage(ctx, enc, token_id, next_history, weights, workspace)?;
+    encode_zero_one_stage(
+        ctx,
+        enc,
+        token_id,
+        position,
+        next_history,
+        weights,
+        workspace,
+    )?;
     for index in 0..weights.post_ple.len() {
         encode_post_ple_stage(ctx, enc, position, index, weights, workspace)?;
     }
@@ -2475,18 +2547,21 @@ fn encode_zero_one_stage(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     token_id: u32,
+    position: usize,
     next_history: PleHistory,
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<(), Qwen4ExpTextSessionError> {
-    let zero_one = encode_qwen4exp_layers_zero_one_staged(
-        ctx,
-        enc,
-        token_id,
-        weights.zero_one,
-        next_history,
-        &mut workspace.zero_one,
-    )?;
+    let zero_one = with_diagnostic_execution_range(position, 1, || {
+        encode_qwen4exp_layers_zero_one_staged(
+            ctx,
+            enc,
+            token_id,
+            weights.zero_one,
+            next_history,
+            &mut workspace.zero_one,
+        )
+    })?;
     zero_one
         .output()
         .encode_copy_to(ctx, enc, &workspace.hyper_residual)?;
@@ -2508,14 +2583,16 @@ fn encode_post_ple_stage(
     let block = workspace.post_ple.get_mut(index).ok_or_else(|| {
         Qwen4ExpTextSessionError::Invalid(format!("post-PLE workspace index {index} is absent"))
     })?;
-    let read = encode_qwen4exp_post_ple_block(
-        ctx,
-        enc,
-        position,
-        &workspace.hyper_residual,
-        block_weights,
-        block,
-    )?;
+    let read = with_diagnostic_execution_range(position, 1, || {
+        encode_qwen4exp_post_ple_block(
+            ctx,
+            enc,
+            position,
+            &workspace.hyper_residual,
+            block_weights,
+            block,
+        )
+    })?;
     drop(read);
     Ok(())
 }
@@ -3292,6 +3369,47 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => None,
             Err(error) => panic!("Metal initialization failed: {error}"),
         }
+    }
+
+    #[test]
+    fn sampled_profiles_reject_command_mutating_diagnostics() {
+        let Some(ctx) = context() else { return };
+        crate::metal::dispatch_census_begin();
+        let composition = crate::qwen4exp_composition_trace::Qwen4ExpCompositionTraceBanks::new(
+            &ctx, 2_051, 8, 1,
+        )
+        .unwrap();
+        let (result, records) = crate::qwen4exp_composition_trace::with_qwen4exp_composition_trace(
+            &composition,
+            || reject_active_sampled_diagnostics("packed"),
+        );
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("composition tracing"));
+        assert!(records.is_empty());
+
+        let config = Qwen4ExpConfig::flash_next_reference();
+        let qsa = crate::qwen4exp_qsa::Qwen4ExpQsaDecisionCaptureBanks::new(
+            &ctx, &config, 2_052, 2_051, 1,
+        )
+        .unwrap();
+        let (result, records) =
+            crate::qwen4exp_qsa::with_qwen4exp_qsa_decision_capture(&qsa, || {
+                reject_active_sampled_diagnostics("packed")
+            });
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("QSA decision capture"));
+        assert!(records.is_empty());
+
+        let (result, records) = crate::qwen4exp_metal::with_qwen4exp_hc_packed_projection_override(
+            crate::qwen4exp_metal::Qwen4ExpHcPackedProjectionArm::WideF32Down,
+            2_051,
+            2_048,
+            || reject_active_sampled_diagnostics("packed"),
+        );
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("HC projection overrides"));
+        assert!(records.is_empty());
+        assert!(crate::metal::dispatch_census_take().is_empty());
     }
 
     fn signals(available: u64) -> MetalMemorySignals {

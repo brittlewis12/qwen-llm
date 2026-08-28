@@ -11,6 +11,10 @@ use crate::metal::{
     encode_copy_offset_f32, encode_get_rows_f32,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
+#[cfg(test)]
+use crate::qwen4exp_composition_trace::{
+    Qwen4ExpCompositionTracePhase, Qwen4ExpCompositionTraceStage, encode_qwen4exp_composition_trace,
+};
 use crate::qwen4exp_gdn::{
     GatedDeltaNetMetalGeometry, GatedDeltaNetMetalWeights, GatedDeltaNetMetalWorkspace,
     GatedDeltaNetPackedScratch, Qwen4ExpGdnError, encode_gated_delta_net,
@@ -35,6 +39,27 @@ use objc2_metal::{
 };
 
 const LAYER: u32 = 0;
+
+#[cfg(test)]
+fn capture_composition_stage(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    phase: Qwen4ExpCompositionTracePhase,
+    source: &MetalTensor,
+    width: usize,
+) -> Result<(), Qwen4ExpLayerZeroError> {
+    encode_qwen4exp_composition_trace(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTraceStage {
+            layer: LAYER,
+            phase,
+        },
+        source,
+        width,
+    )?;
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpLayerZeroError {
@@ -596,6 +621,14 @@ fn encode_step(
             g.hidden_size,
         )?;
     }
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTracePhase::LayerInput,
+        &workspace.hyper_residual,
+        g.hyper_width(),
+    )?;
 
     let attention_read = encode_gated_residual_mix(
         ctx,
@@ -607,6 +640,14 @@ fn encode_step(
         weights.attention_residual.inject,
         &mut workspace.residual,
     )?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTracePhase::AttentionInput,
+        attention_read.mixed(),
+        g.hidden_size,
+    )?;
     let gdn_read = encode_gated_delta_net(
         ctx,
         enc,
@@ -617,8 +658,24 @@ fn encode_step(
     gdn_read
         .output()
         .encode_copy_to(ctx, enc, &workspace.mixer_output)?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTracePhase::MixerOutput,
+        &workspace.mixer_output,
+        g.hidden_size,
+    )?;
     drop(gdn_read);
     attention_read.encode_combine()?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTracePhase::AttentionOutput,
+        &workspace.hyper_residual,
+        g.hyper_width(),
+    )?;
 
     let ffn_read = encode_gated_residual_mix(
         ctx,
@@ -630,13 +687,37 @@ fn encode_step(
         weights.ffn_residual.inject,
         &mut workspace.residual,
     )?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTracePhase::FfnInput,
+        ffn_read.mixed(),
+        g.hidden_size,
+    )?;
     let moe_read =
         encode_qwen4exp_moe(ctx, enc, ffn_read.mixed(), weights.moe, &mut workspace.moe)?;
     moe_read
         .output()
         .encode_copy_to(ctx, enc, &workspace.moe_output)?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTracePhase::MoeOutput,
+        &workspace.moe_output,
+        g.hidden_size,
+    )?;
     drop(moe_read);
     ffn_read.encode_combine()?;
+    #[cfg(test)]
+    capture_composition_stage(
+        ctx,
+        enc,
+        Qwen4ExpCompositionTracePhase::LayerOutput,
+        &workspace.hyper_residual,
+        g.hyper_width(),
+    )?;
     Ok(())
 }
 

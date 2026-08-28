@@ -105,20 +105,53 @@ impl Qwen4ExpIq3GateUpProbeArm {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Qwen4ExpIq3GateUpProbeRecord {
+pub(crate) struct Qwen4ExpIq3GateUpCaptureRecord {
+    pub ordinal: usize,
     pub layer: u32,
-    pub start_sample: usize,
-    pub end_sample: usize,
 }
 
 #[cfg(test)]
 #[derive(Clone)]
-struct Qwen4ExpIq3GateUpProbeBinding {
-    arm: Qwen4ExpIq3GateUpProbeArm,
-    output: MetalTensor,
-    samples: std::rc::Rc<MetalTimestampSampleBuffer>,
-    next_sample: std::rc::Rc<std::cell::Cell<usize>>,
-    records: std::rc::Rc<std::cell::RefCell<Vec<Qwen4ExpIq3GateUpProbeRecord>>>,
+pub(crate) struct Qwen4ExpIq3GateUpCaptureBanks {
+    pub inputs: MetalTensor,
+    pub counts: MetalTensor,
+    pub slots: MetalTensor,
+    pub tokens: usize,
+}
+
+#[cfg(test)]
+impl Qwen4ExpIq3GateUpCaptureBanks {
+    pub(crate) fn input_view(&self, ordinal: usize) -> MetalTensor {
+        self.inputs.view_subrange(
+            (ordinal * PACKED_ROUTER_E8P32_STRICT_HIDDEN * self.tokens) as u64,
+            vec![PACKED_ROUTER_E8P32_STRICT_HIDDEN as u64, self.tokens as u64],
+        )
+    }
+
+    pub(crate) fn counts_view(&self, ordinal: usize) -> MetalTensor {
+        self.counts.view_subrange(
+            (ordinal * PACKED_ROUTER_E8P32_STRICT_EXPERTS) as u64,
+            vec![PACKED_ROUTER_E8P32_STRICT_EXPERTS as u64],
+        )
+    }
+
+    pub(crate) fn slots_view(&self, ordinal: usize) -> MetalTensor {
+        self.slots.view_subrange(
+            (ordinal * PACKED_ROUTER_E8P32_STRICT_EXPERTS * self.tokens) as u64,
+            vec![
+                self.tokens as u64,
+                PACKED_ROUTER_E8P32_STRICT_EXPERTS as u64,
+            ],
+        )
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct Qwen4ExpIq3GateUpCaptureBinding {
+    banks: Qwen4ExpIq3GateUpCaptureBanks,
+    next_ordinal: std::rc::Rc<std::cell::Cell<usize>>,
+    records: std::rc::Rc<std::cell::RefCell<Vec<Qwen4ExpIq3GateUpCaptureRecord>>>,
     seen_layers: std::rc::Rc<std::cell::RefCell<[bool; 48]>>,
 }
 
@@ -142,7 +175,7 @@ thread_local! {
     static QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE: std::cell::RefCell<Option<Qwen4ExpMoeRouteCountCaptureBinding>> = const {
         std::cell::RefCell::new(None)
     };
-    static QWEN4EXP_IQ3_GATE_UP_PROBE: std::cell::RefCell<Option<Qwen4ExpIq3GateUpProbeBinding>> = const {
+    static QWEN4EXP_IQ3_GATE_UP_CAPTURE: std::cell::RefCell<Option<Qwen4ExpIq3GateUpCaptureBinding>> = const {
         std::cell::RefCell::new(None)
     };
 }
@@ -215,7 +248,7 @@ pub(crate) fn with_qwen4exp_moe_route_count_capture<R>(
     assert_eq!(output.dtype, GgmlType::I32);
     assert_eq!(output.shape, [EXPERTS as u64, LAYERS as u64]);
     assert!(output.is_writable());
-    assert!(!qwen4exp_iq3_gate_up_probe_active());
+    assert!(!qwen4exp_iq3_gate_up_capture_active());
 
     struct RestoreCapture(Option<Qwen4ExpMoeRouteCountCaptureBinding>);
 
@@ -251,58 +284,77 @@ pub(crate) fn qwen4exp_moe_route_count_capture_active() -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn with_qwen4exp_iq3_gate_up_probe<R>(
-    arm: Qwen4ExpIq3GateUpProbeArm,
-    output: &MetalTensor,
-    samples: std::rc::Rc<MetalTimestampSampleBuffer>,
+pub(crate) fn with_qwen4exp_iq3_gate_up_capture<R>(
+    banks: &Qwen4ExpIq3GateUpCaptureBanks,
     f: impl FnOnce() -> R,
-) -> (R, Vec<Qwen4ExpIq3GateUpProbeRecord>) {
-    assert_eq!(output.dtype, GgmlType::F32);
-    assert!(output.is_writable());
-    assert!(
-        samples.sample_count() >= QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS * 2,
-        "IQ3 gate/up probe needs at least {} samples",
-        QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS * 2
+) -> (R, Vec<Qwen4ExpIq3GateUpCaptureRecord>) {
+    assert_eq!(banks.tokens, PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS);
+    assert_eq!(banks.inputs.dtype, GgmlType::F32);
+    assert_eq!(banks.counts.dtype, GgmlType::I32);
+    assert_eq!(banks.slots.dtype, GgmlType::I32);
+    assert_eq!(
+        banks.inputs.shape,
+        [
+            PACKED_ROUTER_E8P32_STRICT_HIDDEN as u64,
+            banks.tokens as u64,
+            QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS as u64,
+        ]
     );
+    assert_eq!(
+        banks.counts.shape,
+        [
+            PACKED_ROUTER_E8P32_STRICT_EXPERTS as u64,
+            QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS as u64,
+        ]
+    );
+    assert_eq!(
+        banks.slots.shape,
+        [
+            banks.tokens as u64,
+            PACKED_ROUTER_E8P32_STRICT_EXPERTS as u64,
+            QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS as u64,
+        ]
+    );
+    assert!(banks.inputs.is_writable());
+    assert!(banks.counts.is_writable());
+    assert!(banks.slots.is_writable());
     assert!(!qwen4exp_moe_route_count_capture_active());
-    QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| {
-        assert!(slot.borrow().is_none(), "IQ3 gate/up probe cannot nest");
+    QWEN4EXP_IQ3_GATE_UP_CAPTURE.with(|slot| {
+        assert!(slot.borrow().is_none(), "IQ3 gate/up capture cannot nest");
     });
 
-    struct RestoreProbe;
+    struct RestoreCapture;
 
-    impl Drop for RestoreProbe {
+    impl Drop for RestoreCapture {
         fn drop(&mut self) {
-            QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| {
+            QWEN4EXP_IQ3_GATE_UP_CAPTURE.with(|slot| {
                 slot.borrow_mut().take();
             });
         }
     }
 
-    let next_sample = std::rc::Rc::new(std::cell::Cell::new(0));
+    let next_ordinal = std::rc::Rc::new(std::cell::Cell::new(0));
     let records = std::rc::Rc::new(std::cell::RefCell::new(Vec::with_capacity(
         QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS,
     )));
     let seen_layers = std::rc::Rc::new(std::cell::RefCell::new([false; 48]));
-    QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| {
-        *slot.borrow_mut() = Some(Qwen4ExpIq3GateUpProbeBinding {
-            arm,
-            output: output.clone(),
-            samples,
-            next_sample,
+    QWEN4EXP_IQ3_GATE_UP_CAPTURE.with(|slot| {
+        *slot.borrow_mut() = Some(Qwen4ExpIq3GateUpCaptureBinding {
+            banks: banks.clone(),
+            next_ordinal,
             records: records.clone(),
             seen_layers,
         });
     });
-    let _restore = RestoreProbe;
+    let _restore = RestoreCapture;
     let result = f();
     let records = records.borrow().clone();
     (result, records)
 }
 
 #[cfg(test)]
-pub(crate) fn qwen4exp_iq3_gate_up_probe_active() -> bool {
-    QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| slot.borrow().is_some())
+pub(crate) fn qwen4exp_iq3_gate_up_capture_active() -> bool {
+    QWEN4EXP_IQ3_GATE_UP_CAPTURE.with(|slot| slot.borrow().is_some())
 }
 
 #[cfg(test)]
@@ -1454,8 +1506,6 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
         mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
     ) -> Result<(), Qwen4ExpMoeError> {
         let g = self.weights.geometry;
-        #[cfg(test)]
-        self.encode_iq3_gate_up_probe(ctx, enc, layer)?;
         let marker = begin_optional(
             &mut profile,
             enc,
@@ -1501,7 +1551,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
     }
 
     #[cfg(test)]
-    fn encode_iq3_gate_up_probe(
+    fn encode_iq3_gate_up_capture(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
@@ -1512,92 +1562,97 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
         {
             return Ok(());
         }
-        QWEN4EXP_IQ3_GATE_UP_PROBE.with(|slot| {
-            let binding = slot.borrow();
-            let Some(binding) = binding.as_ref() else {
-                return Ok(());
-            };
-            let layer_index = usize::try_from(layer).map_err(|_| {
-                Qwen4ExpMoeError::Invalid("IQ3 gate/up probe layer exceeds usize".into())
-            })?;
-            if binding.seen_layers.borrow()[layer_index] {
-                return invalid(format!(
-                    "IQ3 gate/up probe received duplicate layer {layer}"
-                ));
-            }
-            if binding.output.shape != self.views.routed_inner.shape {
-                return invalid(format!(
-                    "IQ3 gate/up probe output shape {:?} differs from routed inner {:?}",
-                    binding.output.shape, self.views.routed_inner.shape
-                ));
-            }
-            require_same_device(
-                ctx,
-                &[
-                    ("IQ3 gate/up probe output", &binding.output),
-                    ("IQ3 gate/up input", self.input),
-                    ("IQ3 gate/up route counts", &self.views.route_counts),
-                    ("IQ3 gate/up route slots", &self.views.route_slots),
-                    ("IQ3 gate/up routed inner", &self.views.routed_inner),
-                ],
-            )?;
-            require_disjoint(&[
-                ("IQ3 gate/up probe output", &binding.output),
-                ("IQ3 gate/up input", self.input),
-                ("IQ3 gate/up route counts", &self.views.route_counts),
-                ("IQ3 gate/up route slots", &self.views.route_slots),
-                ("IQ3 gate/up routed inner", &self.views.routed_inner),
-            ])?;
-            let start_sample = binding.next_sample.get();
-            let end_sample = start_sample
-                .checked_add(1)
-                .ok_or_else(|| Qwen4ExpMoeError::Invalid("probe sample index overflow".into()))?;
-            if end_sample >= binding.samples.sample_count() {
-                return invalid(format!(
-                    "IQ3 gate/up probe sample {end_sample} exceeds {} samples",
-                    binding.samples.sample_count()
-                ));
-            }
-            enc.sample_counters(&binding.samples, start_sample, true);
-            let (min_count, max_count) = binding.arm.bounds();
-            let _tag = dispatch_census_tag_scope(|| {
-                format!(
-                    "qwen4exp.iq3_gate_up_probe.{}.layer{layer}",
-                    binding.arm.as_str()
-                )
-            });
-            let g = self.weights.geometry;
-            encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+        let Some(binding) = QWEN4EXP_IQ3_GATE_UP_CAPTURE.with(|slot| slot.borrow().clone()) else {
+            return Ok(());
+        };
+        let layer_index = usize::try_from(layer).map_err(|_| {
+            Qwen4ExpMoeError::Invalid("IQ3 gate/up capture layer exceeds usize".into())
+        })?;
+        if binding.seen_layers.borrow()[layer_index] {
+            return invalid(format!(
+                "IQ3 gate/up capture received duplicate layer {layer}"
+            ));
+        }
+        let ordinal = binding.next_ordinal.get();
+        let expected_ordinal = (0..layer)
+            .filter(|&prior| qwen4exp_iq3_gate_up_probe_layer(prior))
+            .count();
+        if ordinal != expected_ordinal || ordinal >= QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS {
+            return invalid(format!(
+                "IQ3 gate/up capture layer {layer} has ordinal {ordinal}, expected {expected_ordinal}"
+            ));
+        }
+        let g = self.weights.geometry;
+        if self.tokens != binding.banks.tokens
+            || g.hidden_size != PACKED_ROUTER_E8P32_STRICT_HIDDEN
+            || g.expert_count != PACKED_ROUTER_E8P32_STRICT_EXPERTS
+        {
+            return invalid("IQ3 gate/up capture differs from released full-chunk geometry");
+        }
+        let input_destination = binding.banks.input_view(ordinal);
+        let counts_destination = binding.banks.counts_view(ordinal);
+        let slots_destination = binding.banks.slots_view(ordinal);
+        require_same_device(
+            ctx,
+            &[
+                ("IQ3 gate/up input source", self.input),
+                ("IQ3 gate/up counts source", &self.views.route_counts),
+                ("IQ3 gate/up slots source", &self.views.route_slots),
+                ("IQ3 gate/up input capture", &input_destination),
+                ("IQ3 gate/up counts capture", &counts_destination),
+                ("IQ3 gate/up slots capture", &slots_destination),
+            ],
+        )?;
+        require_disjoint(&[
+            ("IQ3 gate/up input source", self.input),
+            ("IQ3 gate/up counts source", &self.views.route_counts),
+            ("IQ3 gate/up slots source", &self.views.route_slots),
+            ("IQ3 gate/up input capture", &input_destination),
+            ("IQ3 gate/up counts capture", &counts_destination),
+            ("IQ3 gate/up slots capture", &slots_destination),
+        ])?;
+        let tag =
+            |kind| format!("qwen4exp.iq3_gate_up_capture.ordinal{ordinal}.layer{layer}.{kind}");
+        {
+            let _tag = dispatch_census_tag_scope(|| tag("input"));
+            encode_copy_offset_f32(
                 ctx,
                 enc,
-                self.weights.routed_gate,
-                self.weights.routed_up,
                 self.input,
-                &self.views.route_counts,
-                &self.views.route_slots,
-                &binding.output,
-                g.hidden_size,
-                g.routed_intermediate_size,
-                g.expert_count,
-                g.experts_per_token,
-                self.tokens,
-                min_count,
-                max_count,
+                0,
+                &input_destination,
+                g.hidden_size * self.tokens,
             )?;
-            drop(_tag);
-            enc.sample_counters(&binding.samples, end_sample, true);
-            binding.next_sample.set(end_sample + 1);
-            binding
-                .records
-                .borrow_mut()
-                .push(Qwen4ExpIq3GateUpProbeRecord {
-                    layer,
-                    start_sample,
-                    end_sample,
-                });
-            binding.seen_layers.borrow_mut()[layer_index] = true;
-            Ok(())
-        })
+        }
+        {
+            let _tag = dispatch_census_tag_scope(|| tag("counts"));
+            encode_copy_offset_i32(
+                ctx,
+                enc,
+                &self.views.route_counts,
+                0,
+                &counts_destination,
+                g.expert_count,
+            )?;
+        }
+        {
+            let _tag = dispatch_census_tag_scope(|| tag("slots"));
+            encode_copy_offset_i32(
+                ctx,
+                enc,
+                &self.views.route_slots,
+                0,
+                &slots_destination,
+                g.expert_count * self.tokens,
+            )?;
+        }
+        binding
+            .records
+            .borrow_mut()
+            .push(Qwen4ExpIq3GateUpCaptureRecord { ordinal, layer });
+        binding.next_ordinal.set(ordinal + 1);
+        binding.seen_layers.borrow_mut()[layer_index] = true;
+        Ok(())
     }
 
     fn encode_routed_down(
@@ -1818,8 +1873,8 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor(
         return invalid("route-count capture requires a layer-aware packed MoE call");
     }
     #[cfg(test)]
-    if qwen4exp_iq3_gate_up_probe_active() {
-        return invalid("IQ3 gate/up probe requires a layer-aware packed MoE call");
+    if qwen4exp_iq3_gate_up_capture_active() {
+        return invalid("IQ3 gate/up capture requires a layer-aware packed MoE call");
     }
     unsafe {
         encode_qwen4exp_moe_packed_motor_for_layer(
@@ -1915,8 +1970,8 @@ pub(crate) unsafe fn encode_qwen4exp_moe_packed_motor_stage_sampled(
         return invalid("route-count capture is unavailable in stage-sampled packed MoE");
     }
     #[cfg(test)]
-    if qwen4exp_iq3_gate_up_probe_active() {
-        return invalid("IQ3 gate/up probe is unavailable in stage-sampled packed MoE");
+    if qwen4exp_iq3_gate_up_capture_active() {
+        return invalid("IQ3 gate/up capture is unavailable in stage-sampled packed MoE");
     }
     if tokens <= 1 {
         return invalid("sampled packed MoE profiling requires at least two tokens");
@@ -2071,6 +2126,8 @@ unsafe fn encode_qwen4exp_moe_packed_motor_inner(
     };
     execution.encode_route(ctx, enc, layer, mixer, profile.as_deref_mut())?;
     #[cfg(test)]
+    execution.encode_iq3_gate_up_capture(ctx, enc, layer)?;
+    #[cfg(test)]
     encode_qwen4exp_moe_route_count_capture(
         ctx,
         enc,
@@ -2083,6 +2140,107 @@ unsafe fn encode_qwen4exp_moe_packed_motor_inner(
     execution.encode_routed_reduce(ctx, enc, layer, mixer, profile.as_deref_mut())?;
     execution.encode_shared(ctx, enc, layer, mixer, profile.as_deref_mut())?;
     Ok(execution.into_output())
+}
+
+#[cfg(test)]
+pub(crate) fn encode_qwen4exp_iq3_gate_up_captured_arm(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    banks: &Qwen4ExpIq3GateUpCaptureBanks,
+    records: &[Qwen4ExpIq3GateUpCaptureRecord],
+    weights: &[Qwen4ExpMoeMetalWeights<'_>],
+    output: &MetalTensor,
+    arm: Qwen4ExpIq3GateUpProbeArm,
+) -> Result<(), Qwen4ExpMoeError> {
+    if records.len() != QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS || weights.len() != 48 {
+        return invalid(format!(
+            "captured IQ3 gate/up replay requires {QWEN4EXP_IQ3_GATE_UP_PROBE_LAYERS} records and 48 weights, got {}/{}",
+            records.len(),
+            weights.len()
+        ));
+    }
+    require_tensor(
+        "captured IQ3 gate/up output",
+        output,
+        GgmlType::F32,
+        &[640, 10, PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS as u64],
+        true,
+    )?;
+    let (min_count, max_count) = arm.bounds();
+    for (expected_ordinal, record) in records.iter().enumerate() {
+        let expected_layer = (0_u32..48)
+            .filter(|&layer| qwen4exp_iq3_gate_up_probe_layer(layer))
+            .nth(expected_ordinal)
+            .expect("43 credited ordinals map to model layers");
+        if record.ordinal != expected_ordinal || record.layer != expected_layer {
+            return invalid(format!(
+                "captured IQ3 gate/up record {record:?} differs from ordinal {expected_ordinal} layer {expected_layer}"
+            ));
+        }
+        let layer = usize::try_from(record.layer).map_err(|_| {
+            Qwen4ExpMoeError::Invalid("captured IQ3 gate/up layer exceeds usize".into())
+        })?;
+        let layer_weights = weights[layer];
+        let g = layer_weights.geometry;
+        if g.hidden_size != PACKED_ROUTER_E8P32_STRICT_HIDDEN
+            || g.expert_count != PACKED_ROUTER_E8P32_STRICT_EXPERTS
+            || g.experts_per_token != 10
+            || g.routed_intermediate_size != 640
+            || layer_weights.routed_gate.dtype != GgmlType::IQ3_XXS
+            || layer_weights.routed_up.dtype != GgmlType::IQ3_XXS
+        {
+            return invalid(format!(
+                "captured IQ3 gate/up layer {} differs from standard released geometry",
+                record.layer
+            ));
+        }
+        let input = banks.input_view(record.ordinal);
+        let counts = banks.counts_view(record.ordinal);
+        let slots = banks.slots_view(record.ordinal);
+        require_same_device(
+            ctx,
+            &[
+                ("captured IQ3 gate/up input", &input),
+                ("captured IQ3 gate/up counts", &counts),
+                ("captured IQ3 gate/up slots", &slots),
+                ("captured IQ3 gate weights", layer_weights.routed_gate),
+                ("captured IQ3 up weights", layer_weights.routed_up),
+                ("captured IQ3 gate/up output", output),
+            ],
+        )?;
+        require_disjoint(&[
+            ("captured IQ3 gate/up input", &input),
+            ("captured IQ3 gate/up counts", &counts),
+            ("captured IQ3 gate/up slots", &slots),
+            ("captured IQ3 gate/up output", output),
+        ])?;
+        let _tag = dispatch_census_tag_scope(|| {
+            format!(
+                "qwen4exp.iq3_gate_up_range.{}.ordinal{}.layer{}",
+                arm.as_str(),
+                record.ordinal,
+                record.layer
+            )
+        });
+        encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+            ctx,
+            enc,
+            layer_weights.routed_gate,
+            layer_weights.routed_up,
+            &input,
+            &counts,
+            &slots,
+            output,
+            g.hidden_size,
+            g.routed_intermediate_size,
+            g.expert_count,
+            g.experts_per_token,
+            banks.tokens,
+            min_count,
+            max_count,
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_contract(
@@ -2506,6 +2664,11 @@ pub(crate) fn preflight_packed(
 ) -> Result<(), Qwen4ExpMoeError> {
     #[cfg(test)]
     if qwen4exp_moe_route_count_capture_active() {
+        ctx.pipeline("kernel_copy_offset_i32")?;
+    }
+    #[cfg(test)]
+    if qwen4exp_iq3_gate_up_capture_active() {
+        ctx.pipeline("kernel_copy_offset_f32")?;
         ctx.pipeline("kernel_copy_offset_i32")?;
     }
     if packed_router_e8p32_strict_qualified(ctx, weights.geometry, weights.router.dtype, tokens) {

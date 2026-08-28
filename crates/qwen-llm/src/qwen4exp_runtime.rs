@@ -1366,16 +1366,17 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metal::DispatchCensusRow;
+    use crate::metal::{DispatchCensusRow, evaluate_metal_memory_admission, host_page_size_bytes};
     use crate::qwen4exp_moe::{
-        Qwen4ExpIq3GateUpProbeArm, Qwen4ExpIq3GateUpProbeRecord, with_qwen4exp_iq3_gate_up_probe,
+        Qwen4ExpIq3GateUpCaptureBanks, Qwen4ExpIq3GateUpCaptureRecord, Qwen4ExpIq3GateUpProbeArm,
+        encode_qwen4exp_iq3_gate_up_captured_arm, with_qwen4exp_iq3_gate_up_capture,
         with_qwen4exp_moe_iq3_fast_override, with_qwen4exp_moe_route_count_capture,
         with_qwen4exp_packed_router_e8p32_strict_override,
     };
     use crate::sampling::{Sampler, SamplingConfig};
     use crate::tensor::GgmlType;
     use crate::tokenizer::Tokenizer;
-    use objc2_metal::MTLBuffer;
+    use objc2_metal::{MTLBuffer, MTLCommandBufferStatus};
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
 
@@ -1656,6 +1657,23 @@ mod tests {
         }
     }
 
+    fn sha256_metal_tensor_bytes(domain: &[u8], tensor: &crate::metal::MetalTensor) -> String {
+        let bytes = unsafe {
+            let source = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize);
+            std::slice::from_raw_parts(source, tensor.n_bytes() as usize)
+        };
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+        format!("{:x}", hash.finalize())
+    }
+
     fn read_i32_tensor(tensor: &crate::metal::MetalTensor) -> Vec<i32> {
         assert_eq!(tensor.dtype, GgmlType::I32);
         unsafe {
@@ -1739,21 +1757,19 @@ mod tests {
         }
     }
 
-    fn assert_iq3_gate_up_probe_census(
+    fn assert_iq3_gate_up_capture_census(
         label: &str,
-        arm: Qwen4ExpIq3GateUpProbeArm,
-        records: &[Qwen4ExpIq3GateUpProbeRecord],
+        records: &[Qwen4ExpIq3GateUpCaptureRecord],
         baseline: &[DispatchCensusRow],
         candidate: &[DispatchCensusRow],
     ) {
-        const PREFIX: &str = "qwen4exp.iq3_gate_up_probe.";
-        const KERNEL: &str = "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16";
+        const PREFIX: &str = "qwen4exp.iq3_gate_up_capture.";
         let expected_layers = (0_u32..48)
             .filter(|layer| !matches!(layer, 2 | 4 | 30 | 46 | 47))
             .collect::<Vec<_>>();
         assert_eq!(records.len(), expected_layers.len(), "{label} records");
-        assert_eq!(candidate.len(), baseline.len() + expected_layers.len());
-        let probe_rows = candidate
+        assert_eq!(candidate.len(), baseline.len() + expected_layers.len() * 3);
+        let capture_rows = candidate
             .iter()
             .enumerate()
             .filter(|(_, row)| {
@@ -1762,55 +1778,46 @@ mod tests {
                     .is_some_and(|tag| tag.starts_with(PREFIX))
             })
             .collect::<Vec<_>>();
-        assert_eq!(probe_rows.len(), expected_layers.len(), "{label} rows");
-        for (ordinal, ((index, row), (&layer, record))) in probe_rows
-            .iter()
-            .zip(expected_layers.iter().zip(records))
-            .enumerate()
-        {
-            let expected_tag = format!("qwen4exp.iq3_gate_up_probe.{}.layer{layer}", arm.as_str());
-            assert_eq!(row.tag.as_deref(), Some(expected_tag.as_str()));
-            assert_eq!(row.kernel, KERNEL);
-            assert_eq!(row.encoder_ordinal, 0);
-            assert!(!row.encoder_concurrent);
-            assert!(*index > 0 && *index + 1 < candidate.len());
+        assert_eq!(
+            capture_rows.len(),
+            expected_layers.len() * 3,
+            "{label} rows"
+        );
+        for (ordinal, (&layer, record)) in expected_layers.iter().zip(records).enumerate() {
+            assert_eq!(record.ordinal, ordinal);
+            assert_eq!(record.layer, layer);
+            let triple = &capture_rows[ordinal * 3..ordinal * 3 + 3];
+            let first_index = triple[0].0;
+            assert!(first_index > 0 && first_index + 3 < candidate.len());
+            assert_eq!(triple[1].0, first_index + 1);
+            assert_eq!(triple[2].0, first_index + 2);
             assert_eq!(
-                candidate[*index - 1].kernel,
+                candidate[first_index - 1].kernel,
                 "kernel_moe_route_bucket_slots_f32"
             );
-            let production = &candidate[*index + 1];
-            assert_eq!(production.kernel, KERNEL);
+            let production = &candidate[first_index + 3];
+            assert_eq!(
+                production.kernel,
+                "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16"
+            );
             assert!(
                 production
                     .tag
                     .as_deref()
                     .is_none_or(|tag| !tag.starts_with(PREFIX))
             );
-            assert_eq!(
-                (
-                    row.grid_width,
-                    row.grid_height,
-                    row.grid_depth,
-                    row.threads_width,
-                    row.threads_height,
-                    row.threads_depth,
-                    row.grid_tgs,
-                    row.tg_threads,
-                ),
-                (
-                    production.grid_width,
-                    production.grid_height,
-                    production.grid_depth,
-                    production.threads_width,
-                    production.threads_height,
-                    production.threads_depth,
-                    production.grid_tgs,
-                    production.tg_threads,
-                )
-            );
-            assert_eq!(record.layer, layer);
-            assert_eq!(record.start_sample, ordinal * 2);
-            assert_eq!(record.end_sample, ordinal * 2 + 1);
+            for ((_, row), (kind, kernel)) in triple.iter().zip([
+                ("input", "kernel_copy_offset_f32"),
+                ("counts", "kernel_copy_offset_i32"),
+                ("slots", "kernel_copy_offset_i32"),
+            ]) {
+                let expected_tag =
+                    format!("qwen4exp.iq3_gate_up_capture.ordinal{ordinal}.layer{layer}.{kind}");
+                assert_eq!(row.tag.as_deref(), Some(expected_tag.as_str()));
+                assert_eq!(row.kernel, kernel);
+                assert_eq!(row.encoder_ordinal, 0);
+                assert!(!row.encoder_concurrent);
+            }
         }
         let filtered = candidate
             .iter()
@@ -1851,6 +1858,40 @@ mod tests {
                     actual.tg_threads,
                 ),
                 "{label} geometry {index}"
+            );
+        }
+    }
+
+    fn assert_iq3_gate_up_range_census(
+        arm: Qwen4ExpIq3GateUpProbeArm,
+        records: &[Qwen4ExpIq3GateUpCaptureRecord],
+        census: &[DispatchCensusRow],
+    ) {
+        assert_eq!(census.len(), records.len());
+        for (row, record) in census.iter().zip(records) {
+            let expected_tag = format!(
+                "qwen4exp.iq3_gate_up_range.{}.ordinal{}.layer{}",
+                arm.as_str(),
+                record.ordinal,
+                record.layer
+            );
+            assert_eq!(row.tag.as_deref(), Some(expected_tag.as_str()));
+            assert_eq!(
+                row.kernel,
+                "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16"
+            );
+            assert_eq!(row.encoder_ordinal, 0);
+            assert!(!row.encoder_concurrent);
+            assert_eq!(
+                (
+                    row.grid_width,
+                    row.grid_height,
+                    row.grid_depth,
+                    row.threads_width,
+                    row.threads_height,
+                    row.threads_depth,
+                ),
+                (128, 10, 512, 128, 1, 1)
             );
         }
     }
@@ -2219,107 +2260,272 @@ mod tests {
         assert_route_count_capture_census(label, &baseline.census, &captured.census);
     }
 
-    struct Iq3GateUpProbeObservation {
+    struct Iq3GateUpRangeObservation {
         arm: Qwen4ExpIq3GateUpProbeArm,
         command_gpu_ms: f64,
         command_wall_ms: f64,
-        total_ticks: u64,
-        layer_ticks: Vec<(u32, u64)>,
     }
 
-    impl Iq3GateUpProbeObservation {
+    impl Iq3GateUpRangeObservation {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "arm": self.arm.as_str(),
-                "command_gpu_ms_with_probe": self.command_gpu_ms,
-                "command_wall_ms_with_probe": self.command_wall_ms,
-                "total_probe_ticks": self.total_ticks,
-                "raw_probe_ms_assuming_ns": self.total_ticks as f64 * 1e-6,
-                "layers": self.layer_ticks.iter().map(|&(layer, ticks)| serde_json::json!({
-                    "layer": layer,
-                    "ticks": ticks
-                })).collect::<Vec<_>>()
+                "command_gpu_ms": self.command_gpu_ms,
+                "command_wall_ms": self.command_wall_ms
             })
         }
     }
 
-    fn resolve_iq3_gate_up_probe(
+    fn run_iq3_gate_up_range_command(
         ctx: &MetalContext,
-        samples: &crate::metal::MetalTimestampSampleBuffer,
-        records: &[Qwen4ExpIq3GateUpProbeRecord],
-    ) -> (u64, Vec<(u32, u64)>) {
-        assert_eq!(records.len(), 43);
-        let sample_count = records.len() * 2;
-        let timestamps = ctx
-            .resolve_timestamp_samples(samples, sample_count)
-            .unwrap();
-        assert_eq!(timestamps.len(), sample_count);
-        assert!(!timestamps.contains(&u64::MAX));
-        assert!(timestamps.windows(2).all(|window| window[1] >= window[0]));
-        let mut total_ticks = 0_u64;
-        let mut layer_ticks = Vec::with_capacity(records.len());
-        for (ordinal, record) in records.iter().enumerate() {
-            assert_eq!(record.start_sample, ordinal * 2);
-            assert_eq!(record.end_sample, ordinal * 2 + 1);
-            let ticks = timestamps[record.end_sample]
-                .checked_sub(timestamps[record.start_sample])
-                .unwrap();
-            assert!(ticks > 0, "probe layer {} has zero ticks", record.layer);
-            total_ticks = total_ticks.checked_add(ticks).unwrap();
-            layer_ticks.push((record.layer, ticks));
-        }
-        (total_ticks, layer_ticks)
-    }
-
-    fn run_iq3_gate_up_probe_observation(
-        ctx: &MetalContext,
-        runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
-        tokens: &[u32],
-        expected_endpoint: &[f32],
-        probe_output: &crate::metal::MetalTensor,
+        banks: &Qwen4ExpIq3GateUpCaptureBanks,
+        records: &[Qwen4ExpIq3GateUpCaptureRecord],
+        weights: &[crate::qwen4exp_moe::Qwen4ExpMoeMetalWeights<'_>],
+        output: &crate::metal::MetalTensor,
         arm: Qwen4ExpIq3GateUpProbeArm,
-    ) -> Iq3GateUpProbeObservation {
-        runner.reset().unwrap();
-        zero_persistent_state(runner);
-        let samples = std::rc::Rc::new(ctx.timestamp_sample_buffer(86).unwrap());
-        let (endpoint, records) =
-            with_qwen4exp_iq3_gate_up_probe(arm, probe_output, samples.clone(), || {
-                runner.prefill(tokens).unwrap().to_vec()
-            });
-        assert_f32_bits_eq(
-            &format!("{} measured endpoint", arm.as_str()),
-            expected_endpoint,
-            &endpoint,
-        );
-        assert_eq!(runner.next_position(), tokens.len());
-        let timing = runner.last_prefill_timing().unwrap();
-        assert_eq!(timing.command_count, 1);
-        assert_eq!(timing.packed_token_count, tokens.len());
-        assert_eq!(timing.gpu_samples, 1);
-        let (total_ticks, layer_ticks) = resolve_iq3_gate_up_probe(ctx, &samples, &records);
-        Iq3GateUpProbeObservation {
-            arm,
-            command_gpu_ms: timing.gpu_ms,
-            command_wall_ms: timing.total_wall_ms,
-            total_ticks,
-            layer_ticks,
+        qualify_census: bool,
+    ) -> (Iq3GateUpRangeObservation, Vec<DispatchCensusRow>) {
+        let wall_started = Instant::now();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        if qualify_census {
+            crate::metal::dispatch_census_begin();
         }
+        encode_qwen4exp_iq3_gate_up_captured_arm(
+            ctx, &encoder, banks, records, weights, output, arm,
+        )
+        .unwrap();
+        let census = if qualify_census {
+            crate::metal::dispatch_census_take()
+        } else {
+            Vec::new()
+        };
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+        let gpu_start = command.GPUStartTime();
+        let gpu_end = command.GPUEndTime();
+        assert!(gpu_start.is_finite() && gpu_start > 0.0);
+        assert!(gpu_end.is_finite() && gpu_end > gpu_start);
+        (
+            Iq3GateUpRangeObservation {
+                arm,
+                command_gpu_ms: (gpu_end - gpu_start) * 1e3,
+                command_wall_ms: wall_started.elapsed().as_secs_f64() * 1e3,
+            },
+            census,
+        )
     }
 
-    fn run_iq3_gate_up_control(
-        runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
-        tokens: &[u32],
-        expected_endpoint: &[f32],
-    ) -> Qwen4ExpPrefillTiming {
-        runner.reset().unwrap();
-        zero_persistent_state(runner);
-        let endpoint = runner.prefill(tokens).unwrap().to_vec();
-        assert_f32_bits_eq("IQ3 gate/up control endpoint", expected_endpoint, &endpoint);
-        let timing = runner.last_prefill_timing().unwrap();
-        assert_eq!(timing.command_count, 1);
-        assert_eq!(timing.packed_token_count, tokens.len());
-        assert_eq!(timing.gpu_samples, 1);
-        timing
+    fn metal_signals_json(signals: crate::metal::MetalMemorySignals) -> serde_json::Value {
+        serde_json::json!({
+            "recommended_max_bytes": signals.recommended_max_bytes,
+            "current_allocated_bytes": signals.current_allocated_bytes,
+            "process_limit_remaining_bytes": signals.process_limit_remaining_bytes
+        })
+    }
+
+    fn allocate_iq3_gate_up_capture(
+        ctx: &MetalContext,
+    ) -> (
+        Qwen4ExpIq3GateUpCaptureBanks,
+        crate::metal::MetalTensor,
+        serde_json::Value,
+    ) {
+        const TOKENS: usize = 2_048;
+        const LAYERS: usize = 43;
+        const INPUT_BYTES: u64 = (LAYERS * 2_560 * TOKENS * 4) as u64;
+        const SLOT_BYTES: u64 = (LAYERS * 512 * TOKENS * 4) as u64;
+        const COUNT_BYTES: u64 = (LAYERS * 512 * 4) as u64;
+        const OUTPUT_BYTES: u64 = (640 * 10 * TOKENS * 4) as u64;
+        let specs = [
+            ("inputs", INPUT_BYTES),
+            ("slots", SLOT_BYTES),
+            ("counts", COUNT_BYTES),
+            ("output", OUTPUT_BYTES),
+        ];
+        let max_buffer_bytes = ctx.max_buffer_length() as u64;
+        let page_bytes = host_page_size_bytes().unwrap() as u64;
+        let mut priced_upper_bytes = 0_u64;
+        let mut price_rows = Vec::new();
+        for (name, logical_bytes) in specs {
+            assert!(logical_bytes > 0 && logical_bytes <= max_buffer_bytes);
+            let priced = ctx.shared_buffer_size_and_align(logical_bytes).unwrap();
+            assert!(priced.size >= logical_bytes);
+            assert!(priced.alignment.is_power_of_two());
+            let alignment = priced.alignment.max(page_bytes);
+            let upper_bytes = priced
+                .size
+                .checked_add(alignment - 1)
+                .unwrap()
+                .checked_div(alignment)
+                .unwrap()
+                .checked_mul(alignment)
+                .unwrap();
+            priced_upper_bytes = priced_upper_bytes.checked_add(upper_bytes).unwrap();
+            price_rows.push(serde_json::json!({
+                "name": name,
+                "logical_bytes": logical_bytes,
+                "metal_priced_bytes": priced.size,
+                "metal_alignment_bytes": priced.alignment,
+                "admission_alignment_bytes": alignment,
+                "priced_upper_bytes": upper_bytes
+            }));
+        }
+        let _transaction = ctx.begin_allocation_transaction();
+        let before = ctx.memory_signals();
+        let reserve_bytes =
+            crate::qwen4exp_text_session::QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES;
+        let admission =
+            evaluate_metal_memory_admission(priced_upper_bytes, reserve_bytes, before, true);
+        assert!(
+            admission.admitted,
+            "IQ3 gate/up capture admission denied: {}",
+            admission.reason.as_str()
+        );
+        let inputs =
+            crate::metal::MetalTensor::zeros_f32(ctx, vec![2_560, TOKENS as u64, LAYERS as u64])
+                .unwrap();
+        let slots =
+            crate::metal::MetalTensor::zeros_i32(ctx, vec![TOKENS as u64, 512, LAYERS as u64])
+                .unwrap();
+        let counts = crate::metal::MetalTensor::zeros_i32(ctx, vec![512, LAYERS as u64]).unwrap();
+        let output =
+            crate::metal::MetalTensor::zeros_f32(ctx, vec![640, 10, TOKENS as u64]).unwrap();
+        let after = ctx.memory_signals();
+        let observed_bytes = after
+            .current_allocated_bytes
+            .saturating_sub(before.current_allocated_bytes);
+        assert!(observed_bytes <= priced_upper_bytes);
+        let banks = Qwen4ExpIq3GateUpCaptureBanks {
+            inputs,
+            counts,
+            slots,
+            tokens: TOKENS,
+        };
+        let evidence = serde_json::json!({
+            "max_buffer_bytes": max_buffer_bytes,
+            "host_page_bytes": page_bytes,
+            "buffers": price_rows,
+            "logical_bytes": INPUT_BYTES + SLOT_BYTES + COUNT_BYTES + OUTPUT_BYTES,
+            "priced_upper_bytes": priced_upper_bytes,
+            "reserve_bytes": reserve_bytes,
+            "required_bytes": admission.required_bytes,
+            "admission_reason": admission.reason.as_str(),
+            "signals_before": metal_signals_json(before),
+            "signals_after": metal_signals_json(after),
+            "observed_allocation_delta_bytes": observed_bytes
+        });
+        (banks, output, evidence)
+    }
+
+    fn qualify_iq3_gate_up_capture_packets(
+        banks: &Qwen4ExpIq3GateUpCaptureBanks,
+        records: &[Qwen4ExpIq3GateUpCaptureRecord],
+        expected_counts: &serde_json::Value,
+    ) -> serde_json::Value {
+        const EXPERTS: usize = 512;
+        const TOP_K: usize = 10;
+
+        let expected_counts = expected_counts.as_array().unwrap();
+        assert_eq!(expected_counts.len(), 48);
+        assert_eq!(records.len(), 43);
+        let expected_routes = banks.tokens * TOP_K;
+        let mut aggregate_routes = 0_u64;
+        let mut aggregate_active_experts = 0_u64;
+        let mut maximum_count = 0_usize;
+        let mut layer_rows = Vec::with_capacity(records.len());
+        for record in records {
+            let counts = read_i32_tensor(&banks.counts_view(record.ordinal));
+            let slots = read_i32_tensor(&banks.slots_view(record.ordinal));
+            assert_eq!(counts.len(), EXPERTS);
+            assert_eq!(slots.len(), EXPERTS * banks.tokens);
+            let expected_layer = expected_counts[record.layer as usize].as_array().unwrap();
+            assert_eq!(expected_layer.len(), EXPERTS);
+            let mut seen_routes = vec![false; expected_routes];
+            let mut layer_routes = 0_usize;
+            let mut active_experts = 0_usize;
+            let mut layer_maximum_count = 0_usize;
+            for (expert, &raw_count) in counts.iter().enumerate() {
+                let count = usize::try_from(raw_count).unwrap();
+                assert!(
+                    count <= banks.tokens,
+                    "layer {} expert {expert} count",
+                    record.layer
+                );
+                assert_eq!(
+                    raw_count as i64,
+                    expected_layer[expert].as_i64().unwrap(),
+                    "layer {} expert {expert} imported count",
+                    record.layer
+                );
+                layer_routes += count;
+                active_experts += usize::from(count != 0);
+                layer_maximum_count = layer_maximum_count.max(count);
+                let start = expert * banks.tokens;
+                for &raw_slot in &slots[start..start + count] {
+                    let slot = usize::try_from(raw_slot).unwrap();
+                    assert!(
+                        slot < expected_routes,
+                        "layer {} expert {expert} route slot {slot}",
+                        record.layer
+                    );
+                    assert!(
+                        !std::mem::replace(&mut seen_routes[slot], true),
+                        "layer {} duplicate route slot {slot}",
+                        record.layer
+                    );
+                }
+            }
+            assert_eq!(
+                layer_routes, expected_routes,
+                "layer {} route sum",
+                record.layer
+            );
+            assert!(
+                seen_routes.into_iter().all(|seen| seen),
+                "layer {} route-slot permutation",
+                record.layer
+            );
+            aggregate_routes += layer_routes as u64;
+            aggregate_active_experts += active_experts as u64;
+            maximum_count = maximum_count.max(layer_maximum_count);
+            layer_rows.push(serde_json::json!({
+                "ordinal": record.ordinal,
+                "layer": record.layer,
+                "route_sum": layer_routes,
+                "active_experts": active_experts,
+                "maximum_count": layer_maximum_count,
+                "counts_equal_imported_census": true,
+                "active_slots_are_exact_route_permutation": true
+            }));
+        }
+        serde_json::json!({
+            "records": records.len(),
+            "tokens": banks.tokens,
+            "aggregate_routes": aggregate_routes,
+            "aggregate_active_experts": aggregate_active_experts,
+            "maximum_count": maximum_count,
+            "counts_equal_imported_census": true,
+            "active_slots_are_exact_route_permutations": true,
+            "hashes": {
+                "inputs_sha256": sha256_metal_tensor_bytes(
+                    b"qwen4exp-iq3-gate-up-capture-inputs-f32-v1\0",
+                    &banks.inputs,
+                ),
+                "counts_sha256": sha256_metal_tensor_bytes(
+                    b"qwen4exp-iq3-gate-up-capture-counts-i32-v1\0",
+                    &banks.counts,
+                ),
+                "slots_sha256": sha256_metal_tensor_bytes(
+                    b"qwen4exp-iq3-gate-up-capture-slots-i32-v1\0",
+                    &banks.slots,
+                )
+            },
+            "layers": layer_rows
+        })
     }
 
     #[test]
@@ -3158,8 +3364,6 @@ mod tests {
     #[ignore = "set the released GGUF plus QWEN4EXP_IQ3_GATE_UP_PROBE_* evidence variables"]
     fn released_iq3_gate_up_range_probe_is_noop_and_measures_headroom() {
         const TOKENS: usize = 2_048;
-        const ROUTED: usize = 640;
-        const TOP_K: usize = 10;
         const MIRRORED_PAIRS: usize = 2;
         const LEAF_GATE: f64 = 0.10;
         const COMMAND_GATE: f64 = 0.01;
@@ -3264,11 +3468,14 @@ mod tests {
         let mut loaded =
             Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, TOKENS).unwrap();
         let mut runner = loaded.create_runner(&ctx).unwrap();
-        let probe_output = crate::metal::MetalTensor::zeros_f32(
-            &ctx,
-            vec![ROUTED as u64, TOP_K as u64, TOKENS as u64],
-        )
-        .unwrap();
+        let mut moe_weights = vec![
+            runner.weights.zero_one.layer_zero.moe,
+            runner.weights.zero_one.layer_one_moe,
+        ];
+        moe_weights.extend(runner.weights.post_ple.iter().map(|weights| weights.moe));
+        assert_eq!(moe_weights.len(), 48);
+        let (capture_banks, replay_output, allocation_evidence) =
+            allocate_iq3_gate_up_capture(&ctx);
 
         runner.reset().unwrap();
         zero_persistent_state(&runner);
@@ -3281,48 +3488,61 @@ mod tests {
         let baseline_timing = runner.last_prefill_timing().unwrap();
         let baseline_digests = PackedReplayDigests::from_replay(&baseline);
 
+        runner.reset().unwrap();
+        zero_persistent_state(&runner);
+        let (captured, records) = with_qwen4exp_iq3_gate_up_capture(&capture_banks, || {
+            run_packed_replay(&mut runner, &tokens, marker)
+        });
+        let capture_timing = runner.last_prefill_timing().unwrap();
+        assert_packed_replay_state_bits_eq("capture", &baseline, &captured);
+        assert_iq3_gate_up_capture_census("capture", &records, &baseline.census, &captured.census);
+        let capture_digests = PackedReplayDigests::from_replay(&captured);
+        let capture_packet_qualification = qualify_iq3_gate_up_capture_packets(
+            &capture_banks,
+            &records,
+            &natural_census["counts"],
+        );
+
         let mut qualification_rows = Vec::new();
         for arm in Qwen4ExpIq3GateUpProbeArm::ALL {
-            runner.reset().unwrap();
-            zero_persistent_state(&runner);
-            fill_f32_tensor_bits(&probe_output, PROBE_SENTINEL);
-            let samples = std::rc::Rc::new(ctx.timestamp_sample_buffer(86).unwrap());
-            let (candidate, records) =
-                with_qwen4exp_iq3_gate_up_probe(arm, &probe_output, samples.clone(), || {
-                    run_packed_replay(&mut runner, &tokens, marker)
-                });
-            let timing = runner.last_prefill_timing().unwrap();
-            assert_packed_replay_state_bits_eq(arm.as_str(), &baseline, &candidate);
-            assert_iq3_gate_up_probe_census(
-                arm.as_str(),
-                arm,
+            fill_f32_tensor_bits(&replay_output, PROBE_SENTINEL);
+            let (observation, census) = run_iq3_gate_up_range_command(
+                &ctx,
+                &capture_banks,
                 &records,
-                &baseline.census,
-                &candidate.census,
+                &moe_weights,
+                &replay_output,
+                arm,
+                true,
             );
-            let (total_ticks, layer_ticks) = resolve_iq3_gate_up_probe(&ctx, &samples, &records);
-            if arm == Qwen4ExpIq3GateUpProbeArm::NoWork {
-                assert!(
-                    read_f32_tensor_bits(&probe_output)
-                        .iter()
-                        .all(|&bits| bits == PROBE_SENTINEL)
-                );
-            }
+            assert_iq3_gate_up_range_census(arm, &records, &census);
+            let no_work_output_unchanged = arm != Qwen4ExpIq3GateUpProbeArm::NoWork
+                || read_f32_tensor_bits(&replay_output)
+                    .iter()
+                    .all(|&bits| bits == PROBE_SENTINEL);
+            assert!(no_work_output_unchanged);
             qualification_rows.push(serde_json::json!({
                 "arm": arm.as_str(),
-                "diagnostic_non_contamination_replay_exact": true,
-                "diagnostic_output_qualified_by_explicit_synthetic_all_band_fixture": true,
-                "ordinary_topology_after_filtering": true,
-                "probe_dispatches": records.len(),
-                "total_probe_ticks": total_ticks,
-                "command_gpu_ms_with_probe": timing.gpu_ms,
-                "candidate_replay_digests": PackedReplayDigests::from_replay(&candidate).json(),
-                "layers": layer_ticks.iter().map(|&(layer, ticks)| serde_json::json!({
-                    "layer": layer,
-                    "ticks": ticks
-                })).collect::<Vec<_>>()
+                "standalone_dispatch_census_exact": true,
+                "range_kernel_source_fixture": "qwen4exp_moe::tests::packed_common_moe_motor_matches_serial_rows_and_routes",
+                "range_kernel_source_fixture_executed_by_this_test": false,
+                "standalone_output_values_compared_by_this_test": false,
+                "no_work_output_unchanged": no_work_output_unchanged,
+                "dispatches": census.len(),
+                "observation": observation.json()
             }));
         }
+
+        let (standalone_warm, standalone_warm_census) = run_iq3_gate_up_range_command(
+            &ctx,
+            &capture_banks,
+            &records,
+            &moe_weights,
+            &replay_output,
+            Qwen4ExpIq3GateUpProbeArm::Full,
+            false,
+        );
+        assert!(standalone_warm_census.is_empty());
 
         let forward = Qwen4ExpIq3GateUpProbeArm::ALL;
         let reverse = [
@@ -3340,46 +3560,65 @@ mod tests {
         for pair in 0..MIRRORED_PAIRS {
             for (direction, order) in [("forward", forward), ("reverse", reverse)] {
                 let sequence = sequence_rows.len();
-                let before = run_iq3_gate_up_control(&mut runner, &tokens, &baseline.endpoint);
+                let (before, before_census) = run_iq3_gate_up_range_command(
+                    &ctx,
+                    &capture_banks,
+                    &records,
+                    &moe_weights,
+                    &replay_output,
+                    Qwen4ExpIq3GateUpProbeArm::Full,
+                    false,
+                );
+                assert!(before_census.is_empty());
                 control_rows.push(serde_json::json!({
                     "sequence": sequence,
                     "pair": pair,
                     "direction": direction,
                     "position": "before",
-                    "gpu_ms": before.gpu_ms,
-                    "wall_ms": before.total_wall_ms
+                    "observation": before.json()
                 }));
                 let observations = order
                     .into_iter()
                     .map(|arm| {
-                        run_iq3_gate_up_probe_observation(
+                        let (observation, census) = run_iq3_gate_up_range_command(
                             &ctx,
-                            &mut runner,
-                            &tokens,
-                            &baseline.endpoint,
-                            &probe_output,
+                            &capture_banks,
+                            &records,
+                            &moe_weights,
+                            &replay_output,
                             arm,
-                        )
+                            false,
+                        );
+                        assert!(census.is_empty());
+                        observation
                     })
                     .collect::<Vec<_>>();
-                let after = run_iq3_gate_up_control(&mut runner, &tokens, &baseline.endpoint);
+                let (after, after_census) = run_iq3_gate_up_range_command(
+                    &ctx,
+                    &capture_banks,
+                    &records,
+                    &moe_weights,
+                    &replay_output,
+                    Qwen4ExpIq3GateUpProbeArm::Full,
+                    false,
+                );
+                assert!(after_census.is_empty());
                 control_rows.push(serde_json::json!({
                     "sequence": sequence,
                     "pair": pair,
                     "direction": direction,
                     "position": "after",
-                    "gpu_ms": after.gpu_ms,
-                    "wall_ms": after.total_wall_ms
+                    "observation": after.json()
                 }));
-                let ticks = |arm| {
+                let gpu_ms = |arm| {
                     observations
                         .iter()
                         .find(|observation| observation.arm == arm)
                         .unwrap()
-                        .total_ticks as f64
+                        .command_gpu_ms
                 };
-                let no_work = ticks(Qwen4ExpIq3GateUpProbeArm::NoWork);
-                let full = ticks(Qwen4ExpIq3GateUpProbeArm::Full);
+                let no_work = gpu_ms(Qwen4ExpIq3GateUpProbeArm::NoWork);
+                let full = gpu_ms(Qwen4ExpIq3GateUpProbeArm::Full);
                 let optimistic_leaf_headroom = (no_work / full) * early_return_threadgroup_fraction;
                 let optimistic_command_headroom =
                     optimistic_leaf_headroom * credited_gate_up_command_fraction;
@@ -3391,14 +3630,14 @@ mod tests {
                     Qwen4ExpIq3GateUpProbeArm::Count65Plus,
                 ]
                 .into_iter()
-                .map(|arm| (arm, ticks(arm) - no_work))
+                .map(|arm| (arm, gpu_ms(arm) - no_work))
                 .collect::<Vec<_>>();
                 let band_increments = band_increment_values
                     .iter()
                     .map(|&(arm, increment)| {
                         serde_json::json!({
                             "arm": arm.as_str(),
-                            "ticks_minus_no_work": increment,
+                            "gpu_ms_minus_no_work": increment,
                             "fraction_of_full": increment / full
                         })
                     })
@@ -3408,8 +3647,19 @@ mod tests {
                     .map(|&(_, increment)| increment)
                     .sum::<f64>();
                 let full_increment = full - no_work;
-                let control_mean = (before.gpu_ms + after.gpu_ms) * 0.5;
-                let control_drift = (after.gpu_ms - before.gpu_ms).abs() / control_mean;
+                let control_mean = (before.command_gpu_ms + after.command_gpu_ms) * 0.5;
+                let control_drift =
+                    (after.command_gpu_ms - before.command_gpu_ms).abs() / control_mean;
+                let full_index = observations
+                    .iter()
+                    .position(|observation| observation.arm == Qwen4ExpIq3GateUpProbeArm::Full)
+                    .unwrap();
+                let interpolation_fraction =
+                    (full_index + 1) as f64 / (observations.len() + 1) as f64;
+                let interpolated_full_control = before.command_gpu_ms
+                    + (after.command_gpu_ms - before.command_gpu_ms) * interpolation_fraction;
+                let full_control_agreement =
+                    (full - interpolated_full_control).abs() / interpolated_full_control;
                 let additivity_residual = additive_increment - full_increment;
                 let additivity_residual_fraction = if full_increment > 0.0 {
                     additivity_residual.abs() / full_increment
@@ -3422,7 +3672,8 @@ mod tests {
                 let sequence_valid = full_increment > 0.0
                     && band_increments_nonnegative
                     && additivity_residual_fraction <= MAX_ADDITIVITY_RESIDUAL
-                    && control_drift <= MAX_CONTROL_DRIFT;
+                    && control_drift <= MAX_CONTROL_DRIFT
+                    && full_control_agreement <= MAX_CONTROL_DRIFT;
                 sequence_headroom.push((
                     optimistic_leaf_headroom,
                     optimistic_command_headroom,
@@ -3432,17 +3683,21 @@ mod tests {
                     "sequence": sequence,
                     "pair": pair,
                     "direction": direction,
-                    "control_bracket_gpu_ms": [before.gpu_ms, after.gpu_ms],
-                    "observations": observations.iter().map(Iq3GateUpProbeObservation::json).collect::<Vec<_>>(),
+                    "control_bracket_gpu_ms": [before.command_gpu_ms, after.command_gpu_ms],
+                    "observations": observations.iter().map(Iq3GateUpRangeObservation::json).collect::<Vec<_>>(),
                     "derived": {
-                        "no_work_ticks": no_work,
-                        "full_ticks": full,
-                        "full_minus_no_work_ticks": full_increment,
+                        "no_work_gpu_ms": no_work,
+                        "full_gpu_ms": full,
+                        "full_minus_no_work_gpu_ms": full_increment,
                         "band_increments": band_increments,
                         "band_increments_nonnegative": band_increments_nonnegative,
-                        "additivity_residual_ticks": additivity_residual,
+                        "additivity_residual_gpu_ms": additivity_residual,
                         "absolute_additivity_residual_fraction_of_useful_increment": additivity_residual_fraction,
                         "control_drift_fraction": control_drift,
+                        "full_position_between_controls": full_index,
+                        "full_control_interpolation_fraction": interpolation_fraction,
+                        "interpolated_full_control_gpu_ms": interpolated_full_control,
+                        "full_control_agreement_fraction": full_control_agreement,
                         "sequence_valid": sequence_valid,
                         "optimistic_leaf_headroom_heuristic": optimistic_leaf_headroom,
                         "optimistic_command_headroom_heuristic": optimistic_command_headroom,
@@ -3461,12 +3716,16 @@ mod tests {
             .map(|&(_, command, _)| command)
             .fold(f64::INFINITY, f64::min);
         let all_sequences_valid = sequence_headroom.iter().all(|&(_, _, valid)| valid);
+        assert!(
+            all_sequences_valid,
+            "standalone IQ3 gate/up probe failed a validity gate"
+        );
         let heuristic_prototype_triage_pass = all_sequences_valid
             && minimum_leaf_headroom >= LEAF_GATE
             && minimum_command_headroom >= COMMAND_GATE;
 
         let report = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "implementation": {
                 "operator_declared_source_commit": declared_source_commit,
                 "operator_declared_tracked_diff_sha256": declared_tracked_diff_sha256,
@@ -3522,43 +3781,62 @@ mod tests {
             "protocol": {
                 "purpose": "triage compact N16 active-panel descriptors before implementation",
                 "performance_eligible": false,
-                "one_diagnostic_arm_per_command": true,
-                "production_dispatch_follows_probe": true,
+                "observer": "supported MTLCommandBuffer GPUStartTime/GPUEndTime interval",
+                "capture_once_then_replay": true,
+                "capture_compilation_scope": "cfg(test); absent from non-test production builds; capture-off test execution retains a guarded TLS lookup",
+                "dedicated_layer_major_capture_banks": true,
+                "capture_dispatches_per_layer": 3,
+                "standalone_dispatches_per_arm_command": records.len(),
+                "one_arm_per_standalone_command": true,
+                "production_dispatches_absent_from_standalone_commands": true,
                 "same_command_arm_to_arm_warming_avoided": true,
                 "cross_command_weight_and_output_residency_shared": true,
                 "mirrored_pairs": MIRRORED_PAIRS,
                 "measured_sequences": MIRRORED_PAIRS * 2,
                 "credited_layers": 43,
-                "samples_per_command": 86,
                 "early_return_threadgroup_fraction": early_return_threadgroup_fraction,
                 "credited_gate_up_command_fraction": credited_gate_up_command_fraction,
                 "optimistic_leaf_heuristic": LEAF_GATE,
                 "optimistic_command_heuristic": COMMAND_GATE,
                 "maximum_control_drift_fraction": MAX_CONTROL_DRIFT,
+                "maximum_interpolated_full_control_disagreement_fraction": MAX_CONTROL_DRIFT,
                 "maximum_absolute_additivity_residual_fraction_of_useful_increment": MAX_ADDITIVITY_RESIDUAL,
                 "limitations": [
                     "no-work is the full direct grid filtered to perform no matrix writes",
                     "the headroom heuristic is optimistic, not a confidence bound or performance gate",
                     "subtraction does not predict descriptor-build or indirect-dispatch cost",
-                    "fixed dispatch and timestamp costs remain in both direct and future compact paths",
-                    "raw timestamp ratios, not command-with-probe timing, drive triage"
+                    "fixed command and dispatch costs remain in both direct and future compact paths",
+                    "standalone commands use dedicated capture addresses and may differ in TLB state from production",
+                    "each command contains only 43 consecutive routed gate/up leaves rather than the intervening production graph"
                 ]
             },
             "warmup": {
-                "gpu_ms": warm_timing.gpu_ms,
-                "wall_ms": warm_timing.total_wall_ms
+                "ordinary_model_prefill": {
+                    "gpu_ms": warm_timing.gpu_ms,
+                    "wall_ms": warm_timing.total_wall_ms
+                },
+                "standalone_full_command": standalone_warm.json()
             },
             "ordinary_baseline": {
                 "gpu_ms": baseline_timing.gpu_ms,
                 "wall_ms": baseline_timing.total_wall_ms,
                 "replay_digests": baseline_digests.json()
             },
+            "capture": {
+                "allocation": allocation_evidence,
+                "ordinary_replay_bits_equal": true,
+                "ordinary_topology_after_filtering": true,
+                "gpu_ms_with_capture": capture_timing.gpu_ms,
+                "wall_ms_with_capture": capture_timing.total_wall_ms,
+                "replay_digests": capture_digests.json(),
+                "packets": capture_packet_qualification
+            },
             "qualification": qualification_rows,
             "controls": control_rows,
             "sequences": sequence_rows,
             "decision": {
                 "scope": "heuristic prototype triage only; cannot satisfy the candidate performance gate",
-                "rule": "all four sequences must pass drift, monotonic increment, and additivity checks; their minimum optimistic heuristics must clear both screens",
+                "rule": "all four sequences must pass bracket drift, interpolated Full agreement, monotonic increment, and additivity checks; their minimum optimistic heuristics must clear both screens",
                 "all_sequences_valid": all_sequences_valid,
                 "minimum_optimistic_leaf_headroom_heuristic": minimum_leaf_headroom,
                 "minimum_optimistic_command_headroom_heuristic": minimum_command_headroom,

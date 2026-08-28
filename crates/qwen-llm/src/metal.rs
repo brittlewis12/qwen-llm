@@ -15548,6 +15548,141 @@ pub fn encode_l2_norm_f32(
     Ok(())
 }
 
+fn validate_copy_offset_32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    src_off: usize,
+    dst: &MetalTensor,
+    n_elements: usize,
+    dtype: GgmlType,
+    kernel: &'static str,
+) -> Result<(u32, u32), MetalError> {
+    if n_elements == 0 {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: "n_elements must be nonzero".into(),
+        });
+    }
+    if src.dtype != dtype || dst.dtype != dtype {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "src/dst expected {dtype:?}, got {:?}/{:?}",
+                src.dtype, dst.dtype
+            ),
+        });
+    }
+    if !dst.is_writable() {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: "destination must be writable".into(),
+        });
+    }
+    if dst.n_elements() as usize != n_elements {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!("dst.n={} != n_elements={n_elements}", dst.n_elements()),
+        });
+    }
+    let source_end = src_off
+        .checked_add(n_elements)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "source element range overflows".into(),
+        })?;
+    if source_end as u64 > src.n_elements() {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!("src_off+n={source_end} > src.n={}", src.n_elements()),
+        });
+    }
+    if !src.offset.is_multiple_of(4) || !dst.offset.is_multiple_of(4) {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "src/dst byte offsets must be 4-byte aligned, got {}/{}",
+                src.offset, dst.offset
+            ),
+        });
+    }
+    let copy_bytes = (n_elements as u64)
+        .checked_mul(4)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "copy byte count overflows".into(),
+        })?;
+    let source_start = (src_off as u64)
+        .checked_mul(4)
+        .and_then(|offset| src.offset.checked_add(offset))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "source byte offset overflows".into(),
+        })?;
+    let source_byte_end =
+        source_start
+            .checked_add(copy_bytes)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel,
+                detail: "source byte endpoint overflows".into(),
+            })?;
+    let destination_end =
+        dst.offset
+            .checked_add(copy_bytes)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel,
+                detail: "destination byte endpoint overflows".into(),
+            })?;
+    if source_byte_end > src.buffer.length() as u64 || destination_end > dst.buffer.length() as u64
+    {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "copy range src={source_start}..{source_byte_end}/{} dst={}..{destination_end}/{} exceeds backing storage",
+                src.buffer.length(),
+                dst.offset,
+                dst.buffer.length(),
+            ),
+        });
+    }
+    let expected_device = ctx.device.registryID();
+    let encoder_device = enc.parent_command_buffer().device().registryID();
+    let source_device = src.buffer.device().registryID();
+    let destination_device = dst.buffer.device().registryID();
+    if encoder_device != expected_device
+        || source_device != expected_device
+        || destination_device != expected_device
+    {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "device mismatch context={expected_device} encoder={encoder_device} src={source_device} dst={destination_device}"
+            ),
+        });
+    }
+    if Retained::as_ptr(&src.buffer) == Retained::as_ptr(&dst.buffer)
+        && source_start < destination_end
+        && dst.offset < source_byte_end
+    {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "overlapping copy ranges src={source_start}..{source_byte_end} dst={}..{destination_end}",
+                dst.offset
+            ),
+        });
+    }
+    let n = u32::try_from(n_elements).map_err(|_| MetalError::BadShape {
+        kernel,
+        detail: format!("n_elements={n_elements} exceeds u32"),
+    })?;
+    let src_off = u32::try_from(src_off).map_err(|_| MetalError::BadShape {
+        kernel,
+        detail: format!("src_off={src_off} exceeds u32"),
+    })?;
+    Ok((n, src_off))
+}
+
 /// Copy `n_elements` floats starting at `src_off` (in elements) of `src`
 /// into `dst[0..n_elements]`. Used to slice fused buffers (e.g. the GDN
 /// post-conv qkv buffer) into per-role tensors. v2 will replace many of
@@ -15560,22 +15695,16 @@ pub fn encode_copy_offset_f32(
     dst: &MetalTensor,
     n_elements: usize,
 ) -> Result<(), MetalError> {
-    if dst.n_elements() as usize != n_elements {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset",
-            detail: format!("dst.n={} != n_elements={n_elements}", dst.n_elements()),
-        });
-    }
-    if (src_off + n_elements) as u64 > src.n_elements() {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset",
-            detail: format!(
-                "src_off+n={} > src.n={}",
-                src_off + n_elements,
-                src.n_elements()
-            ),
-        });
-    }
+    let (n, src_off) = validate_copy_offset_32(
+        ctx,
+        enc,
+        src,
+        src_off,
+        dst,
+        n_elements,
+        GgmlType::F32,
+        "copy_offset",
+    )?;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -15584,13 +15713,7 @@ pub fn encode_copy_offset_f32(
     }
     let pso = ctx.pipeline("kernel_copy_offset_f32")?;
     enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            n: n_elements as u32,
-            src_off: src_off as u32,
-        },
-    );
+    enc.set_bytes(0, &Args { n, src_off });
     enc.set_tensor(1, src);
     enc.set_tensor(2, dst);
 
@@ -15619,125 +15742,16 @@ pub fn encode_copy_offset_i32(
     dst: &MetalTensor,
     n_elements: usize,
 ) -> Result<(), MetalError> {
-    if n_elements == 0 {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: "n_elements must be nonzero".into(),
-        });
-    }
-    if src.dtype != GgmlType::I32 || dst.dtype != GgmlType::I32 {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: format!("src/dst expected I32, got {:?}/{:?}", src.dtype, dst.dtype),
-        });
-    }
-    if !dst.is_writable() {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: "destination must be writable".into(),
-        });
-    }
-    if dst.n_elements() as usize != n_elements {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: format!("dst.n={} != n_elements={n_elements}", dst.n_elements()),
-        });
-    }
-    let source_end = src_off
-        .checked_add(n_elements)
-        .ok_or_else(|| MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: "source element range overflows".into(),
-        })?;
-    if source_end as u64 > src.n_elements() {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: format!("src_off+n={source_end} > src.n={}", src.n_elements()),
-        });
-    }
-    if !src.offset.is_multiple_of(4) || !dst.offset.is_multiple_of(4) {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: format!(
-                "src/dst byte offsets must be 4-byte aligned, got {}/{}",
-                src.offset, dst.offset
-            ),
-        });
-    }
-    let copy_bytes = (n_elements as u64)
-        .checked_mul(4)
-        .ok_or_else(|| MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: "copy byte count overflows".into(),
-        })?;
-    let source_start = (src_off as u64)
-        .checked_mul(4)
-        .and_then(|offset| src.offset.checked_add(offset))
-        .ok_or_else(|| MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: "source byte offset overflows".into(),
-        })?;
-    let source_byte_end =
-        source_start
-            .checked_add(copy_bytes)
-            .ok_or_else(|| MetalError::BadShape {
-                kernel: "copy_offset_i32",
-                detail: "source byte endpoint overflows".into(),
-            })?;
-    let destination_end =
-        dst.offset
-            .checked_add(copy_bytes)
-            .ok_or_else(|| MetalError::BadShape {
-                kernel: "copy_offset_i32",
-                detail: "destination byte endpoint overflows".into(),
-            })?;
-    if source_byte_end > src.buffer.length() as u64 || destination_end > dst.buffer.length() as u64
-    {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: format!(
-                "copy range src={source_start}..{source_byte_end}/{} dst={}..{destination_end}/{} exceeds backing storage",
-                src.buffer.length(),
-                dst.offset,
-                dst.buffer.length(),
-            ),
-        });
-    }
-    let expected_device = ctx.device.registryID();
-    let encoder_device = enc.parent_command_buffer().device().registryID();
-    let source_device = src.buffer.device().registryID();
-    let destination_device = dst.buffer.device().registryID();
-    if encoder_device != expected_device
-        || source_device != expected_device
-        || destination_device != expected_device
-    {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: format!(
-                "device mismatch context={expected_device} encoder={encoder_device} src={source_device} dst={destination_device}"
-            ),
-        });
-    }
-    if Retained::as_ptr(&src.buffer) == Retained::as_ptr(&dst.buffer)
-        && source_start < destination_end
-        && dst.offset < source_byte_end
-    {
-        return Err(MetalError::BadShape {
-            kernel: "copy_offset_i32",
-            detail: format!(
-                "overlapping copy ranges src={source_start}..{source_byte_end} dst={}..{destination_end}",
-                dst.offset
-            ),
-        });
-    }
-    let n = u32::try_from(n_elements).map_err(|_| MetalError::BadShape {
-        kernel: "copy_offset_i32",
-        detail: format!("n_elements={n_elements} exceeds u32"),
-    })?;
-    let src_off = u32::try_from(src_off).map_err(|_| MetalError::BadShape {
-        kernel: "copy_offset_i32",
-        detail: format!("src_off={src_off} exceeds u32"),
-    })?;
+    let (n, src_off) = validate_copy_offset_32(
+        ctx,
+        enc,
+        src,
+        src_off,
+        dst,
+        n_elements,
+        GgmlType::I32,
+        "copy_offset_i32",
+    )?;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {

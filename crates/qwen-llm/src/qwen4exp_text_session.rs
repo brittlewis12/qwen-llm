@@ -1356,8 +1356,8 @@ pub(crate) fn encode_qwen4exp_text_packed_profiled<'a>(
     cpu_timing: &mut Qwen4ExpPackedEncodeCpuTiming,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
     #[cfg(test)]
-    if crate::qwen4exp_moe::qwen4exp_iq3_gate_up_probe_active() {
-        return invalid("IQ3 gate/up probe is unavailable in profiled packed prefill");
+    if crate::qwen4exp_moe::qwen4exp_iq3_gate_up_capture_active() {
+        return invalid("IQ3 gate/up capture is unavailable in profiled packed prefill");
     }
     encode_qwen4exp_text_packed_inner(
         ctx,
@@ -1395,8 +1395,8 @@ pub(crate) fn encode_qwen4exp_text_packed_layer_sampled<'a>(
         return invalid("route-count capture is unavailable in sampled packed profiles");
     }
     #[cfg(test)]
-    if crate::qwen4exp_moe::qwen4exp_iq3_gate_up_probe_active() {
-        return invalid("IQ3 gate/up probe is unavailable in sampled packed profiles");
+    if crate::qwen4exp_moe::qwen4exp_iq3_gate_up_capture_active() {
+        return invalid("IQ3 gate/up capture is unavailable in sampled packed profiles");
     }
     if token_ids.len() <= 1 {
         return invalid("sampled packed profile requires at least two tokens");
@@ -1560,8 +1560,8 @@ pub fn encode_qwen4exp_text_token_layer_sampled<'a>(
         return invalid("route-count capture is unavailable in sampled token profiles");
     }
     #[cfg(test)]
-    if crate::qwen4exp_moe::qwen4exp_iq3_gate_up_probe_active() {
-        return invalid("IQ3 gate/up probe is unavailable in sampled token profiles");
+    if crate::qwen4exp_moe::qwen4exp_iq3_gate_up_capture_active() {
+        return invalid("IQ3 gate/up capture is unavailable in sampled token profiles");
     }
     let stage_count = weights
         .post_ple

@@ -332,18 +332,29 @@ width-16 panels are 86.10% occupied. The current direct grid still launches
 2,818,048 panels before the ten-output-panel multiplier, so 97.73% return before
 matrix work.
 
-The next checkpoint is a performance-ineligible range probe, not a candidate.
-It measures one of no-work, 1-8, 9-16, 17-32, 33-64, 65+, or full in each
-otherwise ordinary command, with the untouched production dispatch following
-the sampled probe. Two forward/reverse mirrored pairs are bracketed by ordinary
-controls. Every sequence must keep control drift at or below 2%, full above
-no-work, all band increments nonnegative, and absolute additivity residual at
-or below 20% of the useful full-minus-no-work increment. Only if all four
-sequences pass and their minimum optimistic screens exceed 10% of the gate/up
-leaf and 1% of command GPU may implementation begin. That result authorizes
-only a compact N16 active-panel descriptor plus indirect-dispatch falsifier;
-descriptor build cost belongs inside its later paired A/B. Width 8, width 32,
-and TGM reduction remain separate and parked.
+The inline range observer at `1dd43b9` produced no evidence because M4 Max does
+not support manual `sampleCountersInBuffer` calls with its stage-boundary sample
+buffer. Do not retry it. The counter-free replacement captures the natural F32
+input, route counts, and physical route slots once for each of the same 43
+credited layers, then runs no-work, 1-8, 9-16, 17-32, 33-64, 65+, or full as a
+standalone 43-dispatch command over operator-supplied, descriptor-stamped local
+weight banks. Dedicated capture/output storage is admission-priced, capture-on
+replay must preserve output, persistent state, and ordinary topology exactly,
+imported counts must match, and every active slot prefix must be an exact
+permutation of the 20,480 routes. Timing uses supported command-buffer GPU
+start/end intervals, not counter samples.
+
+Two forward/reverse mirrored pairs each run Full control, all seven arms, then
+Full control. Every sequence must keep control drift at or below 2%, keep its
+in-sequence Full within 2% of linearly interpolated controls, put full above
+no-work, keep all band increments nonnegative, and hold absolute additivity
+residual at or below 20% of the useful full-minus-no-work increment. Only if all
+four sequences pass and their minimum optimistic screens exceed 10% of the
+gate/up leaf and 1% of command GPU may implementation begin. That result
+authorizes only a compact N16 active-panel descriptor plus indirect-dispatch
+falsifier; descriptor build cost belongs inside its later paired A/B. Dedicated
+capture addresses, standalone leaf adjacency, width 8, width 32, and TGM
+reduction remain separate limitations or parked hypotheses.
 
 Runtime admission now separates exact-release qualification from behavioral
 contracts. The full tokenizer fingerprint and released stop vector remain

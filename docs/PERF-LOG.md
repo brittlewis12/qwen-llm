@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-27 - Flash-Next IQ3 Gate/Up Observer Replacement
+
+Status: qualify and run the counter-free range screen before implementing an
+active-panel candidate.
+
+- The inline observer staged at `1dd43b9` produced no evidence: M4 Max rejects
+  manual `sampleCountersInBuffer` calls with a stage-boundary sample buffer.
+  Do not retry that unsupported observer.
+- The replacement captures each credited layer's natural F32 input, route
+  counts, and physical route slots once. Its capture-on replay must preserve
+  ordinary output, state, and non-capture topology exactly, and captured counts
+  must equal the pinned census while active slots form exact route permutations.
+- Each arm then runs as one standalone command containing exactly 43 existing
+  IQ3 gate/up range dispatches over operator-supplied, descriptor-stamped local
+  weight banks and captured packets. The observer uses supported command-buffer
+  GPU start/end times, not counter samples; dedicated capture/output storage is
+  admission-priced before use.
+- Two forward/reverse mirrored pairs retain the preregistered monotonicity and
+  additivity gates. Each sequence also requires <=2% Full-control bracket drift
+  and <=2% agreement between its in-sequence Full and interpolated controls.
+- The result remains optimistic prototype triage only. It can screen in only a
+  compact N16 active-panel descriptor plus indirect-dispatch falsifier, never a
+  production GO.
+
 ## 2026-08-27 - Flash-Next IQ3 Gate/Up Census
 
 Status: measure the full-grid no-work floor and count bands before implementing

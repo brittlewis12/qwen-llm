@@ -23,14 +23,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PACKET_ID = "2026-08-28-qwen4exp-selected-quality-v2"
-MANIFEST_SHA256 = "689e94bf135eac09f50cbf88de046004301f7937d4ded2d5cd4434ef7e45ced1"
+PACKET_ID = "2026-08-28-qwen4exp-selected-quality-v3"
+MANIFEST_SHA256 = "b3e649e99ecd069022e577d09efb6f6a968a508050257b3a34b9c204354079c5"
+PREDECESSOR_MANIFEST_SHA256 = (
+    "689e94bf135eac09f50cbf88de046004301f7937d4ded2d5cd4434ef7e45ced1"
+)
 LLAMA_CPP_COMMIT = "6c84c7d5d8833c6e0df69628f75a0f599797934e"
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 LOCAL_OPERATION_COUNT = 78
 TOTAL_OPERATION_COUNT = 98
 VOCAB_SIZE = 248_320
 PRODUCER_STOP_TOKEN_ID = 248_046
+REQUESTED_CONTEXT_TOKENS = 4_224
+EFFECTIVE_CONTEXT_TOKENS = 4_352
+REQUIRED_DECODED_TOKENS = 4_195
+CONTEXT_PADDING_MULTIPLE = 256
 CORE_OPERATION_BINDING_SCHEMA = "qwen4exp-selected-quality-llama-operation-binding-v1"
 CORE_OPERATION_BINDING_ENCODING = "nlohmann::json compact UTF-8 before binding"
 CORE_REPORT_BINDING_SCHEMA = "qwen4exp-selected-quality-llama-core-binding-v1"
@@ -165,7 +172,8 @@ def validate_source(
         "scripts/bench/qwen4exp_selected_quality_llama/CMakeLists.txt",
         "scripts/bench/qwen4exp_selected_quality_llama/main.cpp",
         "scripts/bench/qwen4exp_selected_quality_analyze.py",
-        "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/README.md",
+        "docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg/README.md",
+        "docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg/fixtures.json",
         "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json",
     ]
     for path in required_paths:
@@ -191,7 +199,8 @@ def validate_source(
         "scripts/bench/qwen4exp_selected_quality_llama.py",
         "scripts/bench/qwen4exp_selected_quality_llama",
         "scripts/bench/qwen4exp_selected_quality_analyze.py",
-        "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg",
+        "docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg",
+        "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json",
     )
     if scoped_status:
         raise RuntimeError(f"D source scope is dirty:\n{scoped_status.decode()}")
@@ -1013,6 +1022,84 @@ def ordering_key(fixture: dict[str, object]) -> str:
     return sha256(domain.encode())
 
 
+def validate_packet_lineage(path: Path, manifest: dict[str, object]) -> None:
+    if path.parent.name != "2026-08-28-qwen4exp-selected-quality-v3-prereg":
+        raise RuntimeError("v3 fixture directory")
+    preregistration_bytes = (path.parent / "README.md").read_bytes()
+    expected_preregistration = {
+        "path": ("docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg/README.md"),
+        "bytes": len(preregistration_bytes),
+        "sha256": sha256(preregistration_bytes),
+    }
+    if not json_equal_exact(manifest.get("preregistration"), expected_preregistration):
+        raise RuntimeError("v3 preregistration identity")
+    predecessor_path = (
+        path.parent.parent
+        / "2026-08-28-qwen4exp-selected-quality-prereg"
+        / "fixtures.json"
+    )
+    predecessor_bytes = predecessor_path.read_bytes()
+    if sha256(predecessor_bytes) != PREDECESSOR_MANIFEST_SHA256:
+        raise RuntimeError("predecessor fixture manifest SHA-256")
+    predecessor = parse_json_strict(predecessor_bytes)
+    if not isinstance(predecessor, dict):
+        raise RuntimeError("predecessor fixture manifest type")
+    expected_lineage = {
+        "schema": "qwen4exp-selected-quality-packet-lineage-v1",
+        "predecessor": {
+            "packet_id": "2026-08-28-qwen4exp-selected-quality-v2",
+            "fixture_manifest_path": (
+                "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json"
+            ),
+            "fixture_manifest_sha256": PREDECESSOR_MANIFEST_SHA256,
+        },
+        "transition_reason": (
+            "blind acquisition-schema repair after pinned llama.cpp reported "
+            "its padded effective context capacity"
+        ),
+        "semantic_outputs_inspected_before_freeze": False,
+        "fixture_equivalence": (
+            "all corpus, tokenizer, model, execution, operation, and token "
+            "records are exact predecessor copies"
+        ),
+        "reacquisition": (
+            "exclude predecessor evidence and reacquire every local and "
+            "llama.cpp operation from one new clean source commit"
+        ),
+        "quarantined_local_evidence": {
+            "source_commit": "5ac0346069186ab22fa2ba2d6f16a28120c9132b",
+            "bytes": 2_309_643,
+            "sha256": (
+                "69d76acca9f3ca5c2919c99e73a7748ff484782ab7354fc116e606104e6644fd"
+            ),
+            "status": "non_authoritative_uninspected",
+        },
+        "failed_llama_core": {
+            "operations_completed": 20,
+            "bytes": 1_141_883,
+            "sha256": (
+                "134d0db8f58ca632be60fd9ded559dad11943f0953f849de8796ffb070b40e63"
+            ),
+            "status": "deleted_after_outer_context_validation_failure",
+        },
+    }
+    if not json_equal_exact(manifest.get("lineage"), expected_lineage):
+        raise RuntimeError("v3 packet lineage")
+    for field in (
+        "schema",
+        "generator",
+        "acquisition_model_lock",
+        "tokenizer",
+        "corpus",
+        "execution",
+        "natural_fixtures",
+        "scope_control",
+        "retrieval_fixtures",
+    ):
+        if not json_equal_exact(manifest.get(field), predecessor.get(field)):
+            raise RuntimeError(f"v3 changed frozen predecessor field {field}")
+
+
 def validate_fixtures(
     path: Path,
 ) -> tuple[
@@ -1026,8 +1113,9 @@ def validate_fixtures(
         raise RuntimeError("fixture manifest SHA-256")
     manifest = parse_json_strict(data)
     assert isinstance(manifest, dict)
-    if manifest["packet_id"] != PACKET_ID or manifest["schema_version"] != 2:
+    if manifest["packet_id"] != PACKET_ID or manifest["schema_version"] != 3:
         raise RuntimeError("fixture manifest contract")
+    validate_packet_lineage(path, manifest)
     root = path.parent
     tokens: dict[str, list[int]] = {}
     fixtures: dict[str, dict[str, object]] = {}
@@ -1051,6 +1139,10 @@ def validate_fixtures(
             raise RuntimeError(f"natural fixture shape {fixture['fixture_id']}")
         if fixture_tokens[-1] != int(fixture["terminal_feed_token_id"]):
             raise RuntimeError(f"natural terminal token {fixture['fixture_id']}")
+    required_decoded_tokens = max(
+        int(fixture["prompt_token_count"]) + int(fixture["continuation_token_count"])
+        for fixture in manifest["natural_fixtures"]
+    )
     for fixture in manifest["retrieval_fixtures"]:
         fixture_id = str(fixture["fixture_id"])
         if len(tokens[fixture_id]) != 4099:
@@ -1063,6 +1155,12 @@ def validate_fixtures(
             raise RuntimeError(f"retrieval answer shape {fixture_id}")
         if fixture["producer_stop_token_ids"] != [PRODUCER_STOP_TOKEN_ID]:
             raise RuntimeError(f"retrieval stop token {fixture_id}")
+        required_decoded_tokens = max(
+            required_decoded_tokens,
+            len(tokens[fixture_id]) + len(answers),
+        )
+    if required_decoded_tokens != REQUIRED_DECODED_TOKENS:
+        raise RuntimeError("fixture required decoded-token capacity")
 
     expected = []
     for fixture in manifest["natural_fixtures"]:
@@ -1794,6 +1892,59 @@ def validate_backends(value: object) -> None:
         raise RuntimeError("static backend device inventory")
 
 
+def validate_core_context(value: object) -> dict[str, object]:
+    context = require_dict(value, "core.context")
+    require_exact_keys(
+        context,
+        {
+            "requested_n_ctx",
+            "effective_n_ctx",
+            "effective_n_ctx_seq",
+            "required_decoded_tokens",
+            "context_padding_multiple",
+            "n_batch",
+            "n_ubatch",
+            "n_seq_max",
+            "kv_unified",
+            "kv_type_k",
+            "kv_type_v",
+            "flash_attention",
+            "gpu_layers",
+            "memory_cleared_with_data_before_each_operation",
+        },
+        "core.context",
+    )
+    expected_context = {
+        "requested_n_ctx": REQUESTED_CONTEXT_TOKENS,
+        "effective_n_ctx": EFFECTIVE_CONTEXT_TOKENS,
+        "effective_n_ctx_seq": EFFECTIVE_CONTEXT_TOKENS,
+        "required_decoded_tokens": REQUIRED_DECODED_TOKENS,
+        "context_padding_multiple": CONTEXT_PADDING_MULTIPLE,
+        "n_batch": 512,
+        "n_ubatch": 512,
+        "n_seq_max": 1,
+        "kv_unified": False,
+        "kv_type_k": "f16",
+        "kv_type_v": "f16",
+        "flash_attention": "enabled",
+        "gpu_layers": "all",
+        "memory_cleared_with_data_before_each_operation": True,
+    }
+    for key, expected in expected_context.items():
+        if not json_equal_exact(context[key], expected):
+            raise RuntimeError(f"core.context.{key}")
+    rounded = (
+        (REQUESTED_CONTEXT_TOKENS + CONTEXT_PADDING_MULTIPLE - 1)
+        // CONTEXT_PADDING_MULTIPLE
+        * CONTEXT_PADDING_MULTIPLE
+    )
+    if rounded != EFFECTIVE_CONTEXT_TOKENS:
+        raise RuntimeError("frozen context padding arithmetic")
+    if REQUIRED_DECODED_TOKENS > REQUESTED_CONTEXT_TOKENS:
+        raise RuntimeError("frozen requested context lacks required capacity")
+    return context
+
+
 def validate_core_report(
     core: object,
     manifest: dict[str, object],
@@ -1824,7 +1975,7 @@ def validate_core_report(
     )
     if (
         report["schema"] != "qwen4exp-selected-quality-llama-core"
-        or report["schema_version"] != 1
+        or report["schema_version"] != 2
         or report["packet_id"] != PACKET_ID
         or report["fixture_manifest_sha256"] != MANIFEST_SHA256
     ):
@@ -1917,32 +2068,7 @@ def validate_core_report(
     if require_int(model["ftype"], "core.model.ftype") < 0:
         raise RuntimeError("core.model.ftype")
 
-    context = require_dict(report["context"], "core.context")
-    require_exact_keys(
-        context,
-        {
-            "n_ctx",
-            "n_batch",
-            "n_ubatch",
-            "n_seq_max",
-            "flash_attention",
-            "gpu_layers",
-            "memory_cleared_with_data_before_each_operation",
-        },
-        "core.context",
-    )
-    expected_context = {
-        "n_ctx": 4224,
-        "n_batch": 512,
-        "n_ubatch": 512,
-        "n_seq_max": 1,
-        "flash_attention": "enabled",
-        "gpu_layers": "all",
-        "memory_cleared_with_data_before_each_operation": True,
-    }
-    for key, expected in expected_context.items():
-        if context[key] != expected:
-            raise RuntimeError(f"core.context.{key}")
+    validate_core_context(report["context"])
 
     scoring = require_dict(report["scoring"], "core.scoring")
     require_exact_keys(

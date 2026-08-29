@@ -32,12 +32,22 @@ using json = nlohmann::json;
 
 namespace {
 
-constexpr std::string_view kPacketId = "2026-08-28-qwen4exp-selected-quality-v2";
+constexpr std::string_view kPacketId = "2026-08-28-qwen4exp-selected-quality-v3";
 constexpr std::string_view kManifestSha256 =
-    "689e94bf135eac09f50cbf88de046004301f7937d4ded2d5cd4434ef7e45ced1";
+    "b3e649e99ecd069022e577d09efb6f6a968a508050257b3a34b9c204354079c5";
 constexpr int32_t kVocabSize = 248320;
-constexpr uint32_t kContextTokens = 4224;
+constexpr uint32_t kRequestedContextTokens = 4224;
+constexpr uint32_t kEffectiveContextTokens = 4352;
+constexpr uint32_t kRequiredDecodedTokens = 4195;
+constexpr uint32_t kContextPaddingMultiple = 256;
 constexpr uint32_t kBatchTokens = 512;
+
+static_assert(kRequiredDecodedTokens <= kRequestedContextTokens);
+static_assert(
+    ((kRequestedContextTokens + kContextPaddingMultiple - 1) /
+     kContextPaddingMultiple) *
+        kContextPaddingMultiple ==
+    kEffectiveContextTokens);
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error(message);
@@ -635,7 +645,7 @@ int main(int argc, char ** argv) {
             "fixture manifest SHA-256");
         const json manifest = json::parse(manifest_bytes);
         require(manifest.at("packet_id").get<std::string>() == kPacketId, "packet ID");
-        require(manifest.at("schema_version").get<uint64_t>() == 2, "fixture schema version");
+        require(manifest.at("schema_version").get<uint64_t>() == 3, "fixture schema version");
         const auto fixture_root = arguments.fixtures.parent_path();
 
         const auto expected = expected_operations(manifest);
@@ -650,6 +660,22 @@ int main(int argc, char ** argv) {
         for (const auto & fixture : manifest.at("retrieval_fixtures")) {
             retrieval.emplace(fixture.at("fixture_id").get<std::string>(), &fixture);
         }
+        uint32_t required_decoded_tokens = 0;
+        for (const auto & fixture : manifest.at("natural_fixtures")) {
+            required_decoded_tokens = std::max(
+                required_decoded_tokens,
+                fixture.at("prompt_token_count").get<uint32_t>() +
+                    fixture.at("continuation_token_count").get<uint32_t>());
+        }
+        for (const auto & fixture : manifest.at("retrieval_fixtures")) {
+            required_decoded_tokens = std::max(
+                required_decoded_tokens,
+                fixture.at("tokens").at("token_count").get<uint32_t>() +
+                    fixture.at("answer_token_count").get<uint32_t>());
+        }
+        require(
+            required_decoded_tokens == kRequiredDecodedTokens,
+            "fixture required decoded-token capacity");
         for (size_t index = 0; index < expected.size(); ++index) {
             const auto & operation = plan.at(78 + index);
             require(operation.at("ordinal").get<size_t>() == 78 + index, "D ordinal");
@@ -691,20 +717,33 @@ int main(int argc, char ** argv) {
         require(llama_vocab_is_eog(vocab, 248046), "producer stop token is not EOG");
 
         auto context_params = llama_context_default_params();
-        context_params.n_ctx = kContextTokens;
+        context_params.n_ctx = kRequestedContextTokens;
         context_params.n_batch = kBatchTokens;
         context_params.n_ubatch = kBatchTokens;
         context_params.n_seq_max = 1;
         context_params.n_outputs_max = 1;
         context_params.n_outputs_max_per_seq = 1;
+        context_params.type_k = GGML_TYPE_F16;
+        context_params.type_v = GGML_TYPE_F16;
+        context_params.kv_unified = false;
         context_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
         context_params.offload_kqv = true;
         context_params.op_offload = true;
         context_params.no_perf = false;
         Context context(llama_init_from_model(model.get(), context_params));
         require(context != nullptr, "cannot create context");
-        require(llama_n_ctx(context.get()) >= 4195, "context capacity");
-        require(llama_n_batch(context.get()) >= kBatchTokens, "logical batch capacity");
+        require(
+            llama_n_ctx(context.get()) == kEffectiveContextTokens,
+            "effective global context capacity");
+        require(
+            llama_n_ctx_seq(context.get()) == kEffectiveContextTokens,
+            "effective per-sequence context capacity");
+        require(
+            llama_n_ctx(context.get()) >= kRequiredDecodedTokens,
+            "required decoded-token capacity");
+        require(llama_n_batch(context.get()) == kBatchTokens, "logical batch capacity");
+        require(llama_n_ubatch(context.get()) == kBatchTokens, "physical batch capacity");
+        require(llama_n_seq_max(context.get()) == 1, "sequence capacity");
 
         json operations = json::array();
         for (size_t index = 0; index < expected.size(); ++index) {
@@ -741,7 +780,7 @@ int main(int argc, char ** argv) {
             "model description");
         json report = {
             { "schema", "qwen4exp-selected-quality-llama-core" },
-            { "schema_version", 1 },
+            { "schema_version", 2 },
             { "packet_id", std::string(kPacketId) },
             { "fixture_manifest_sha256", std::string(kManifestSha256) },
             { "runner_build", {
@@ -777,10 +816,17 @@ int main(int argc, char ** argv) {
                 { "ftype", static_cast<int>(llama_model_ftype(model.get())) },
             } },
             { "context", {
-                { "n_ctx", llama_n_ctx(context.get()) },
+                { "requested_n_ctx", kRequestedContextTokens },
+                { "effective_n_ctx", llama_n_ctx(context.get()) },
+                { "effective_n_ctx_seq", llama_n_ctx_seq(context.get()) },
+                { "required_decoded_tokens", kRequiredDecodedTokens },
+                { "context_padding_multiple", kContextPaddingMultiple },
                 { "n_batch", llama_n_batch(context.get()) },
                 { "n_ubatch", llama_n_ubatch(context.get()) },
                 { "n_seq_max", llama_n_seq_max(context.get()) },
+                { "kv_unified", false },
+                { "kv_type_k", ggml_type_name(context_params.type_k) },
+                { "kv_type_v", ggml_type_name(context_params.type_v) },
                 { "flash_attention", "enabled" },
                 { "gpu_layers", "all" },
                 { "memory_cleared_with_data_before_each_operation", true },

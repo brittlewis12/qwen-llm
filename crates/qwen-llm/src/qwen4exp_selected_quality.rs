@@ -10,12 +10,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-const FIXTURE_MANIFEST_BYTES: &[u8] =
+const FIXTURE_MANIFEST_BYTES: &[u8] = include_bytes!(
+    "../../../docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg/fixtures.json"
+);
+const PREDECESSOR_MANIFEST_BYTES: &[u8] =
     include_bytes!("../../../docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json");
 const SCORER_SOURCE_BYTES: &[u8] = include_bytes!("qwen4exp_selected_quality.rs");
 const FIXTURE_MANIFEST_SHA256: &str =
+    "b3e649e99ecd069022e577d09efb6f6a968a508050257b3a34b9c204354079c5";
+const PREDECESSOR_MANIFEST_SHA256: &str =
     "689e94bf135eac09f50cbf88de046004301f7937d4ded2d5cd4434ef7e45ced1";
-const PACKET_ID: &str = "2026-08-28-qwen4exp-selected-quality-v2";
+const PACKET_ID: &str = "2026-08-28-qwen4exp-selected-quality-v3";
 const FIXTURE_SCHEMA: &str = "qwen4exp-selected-quality-fixtures";
 const SELECTED_START: usize = 2_051;
 const CONTINUATION_TOKENS: usize = 96;
@@ -34,6 +39,7 @@ struct FixtureManifest {
     schema_version: u64,
     packet_id: String,
     status: String,
+    lineage: Value,
     preregistration: SourceIdentity,
     generator: GeneratorIdentity,
     acquisition_model_lock: ModelLock,
@@ -533,23 +539,81 @@ fn validate_execution_contract(manifest: &FixtureManifest) {
     validate_operation_plan(manifest);
 }
 
+fn validate_packet_lineage(current: &Value, predecessor: &Value) {
+    assert_eq!(
+        current["lineage"],
+        json!({
+            "schema": "qwen4exp-selected-quality-packet-lineage-v1",
+            "predecessor": {
+                "packet_id": "2026-08-28-qwen4exp-selected-quality-v2",
+                "fixture_manifest_path": "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json",
+                "fixture_manifest_sha256": PREDECESSOR_MANIFEST_SHA256,
+            },
+            "transition_reason": "blind acquisition-schema repair after pinned llama.cpp reported its padded effective context capacity",
+            "semantic_outputs_inspected_before_freeze": false,
+            "fixture_equivalence": "all corpus, tokenizer, model, execution, operation, and token records are exact predecessor copies",
+            "reacquisition": "exclude predecessor evidence and reacquire every local and llama.cpp operation from one new clean source commit",
+            "quarantined_local_evidence": {
+                "source_commit": "5ac0346069186ab22fa2ba2d6f16a28120c9132b",
+                "bytes": 2_309_643,
+                "sha256": "69d76acca9f3ca5c2919c99e73a7748ff484782ab7354fc116e606104e6644fd",
+                "status": "non_authoritative_uninspected",
+            },
+            "failed_llama_core": {
+                "operations_completed": 20,
+                "bytes": 1_141_883,
+                "sha256": "134d0db8f58ca632be60fd9ded559dad11943f0953f849de8796ffb070b40e63",
+                "status": "deleted_after_outer_context_validation_failure",
+            },
+        })
+    );
+    for field in [
+        "schema",
+        "generator",
+        "acquisition_model_lock",
+        "tokenizer",
+        "corpus",
+        "execution",
+        "natural_fixtures",
+        "scope_control",
+        "retrieval_fixtures",
+    ] {
+        assert_eq!(
+            current[field], predecessor[field],
+            "v3 changed frozen predecessor field {field}"
+        );
+    }
+}
+
 fn validate_fixture_set() -> ValidatedFixtures {
     assert_eq!(
         sha256_bytes(FIXTURE_MANIFEST_BYTES),
         FIXTURE_MANIFEST_SHA256,
         "embedded fixture manifest identity"
     );
+    assert_eq!(
+        sha256_bytes(PREDECESSOR_MANIFEST_BYTES),
+        PREDECESSOR_MANIFEST_SHA256,
+        "embedded predecessor manifest identity"
+    );
     let root = repository_root();
-    let fixture_root = root.join("docs/bench/2026-08-28-qwen4exp-selected-quality-prereg");
+    let fixture_root = root.join("docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg");
     assert_eq!(
         std::fs::read(fixture_root.join("fixtures.json")).unwrap(),
         FIXTURE_MANIFEST_BYTES
     );
-    let manifest: FixtureManifest = serde_json::from_slice(FIXTURE_MANIFEST_BYTES).unwrap();
+    let manifest_value: Value = serde_json::from_slice(FIXTURE_MANIFEST_BYTES).unwrap();
+    let predecessor_value: Value = serde_json::from_slice(PREDECESSOR_MANIFEST_BYTES).unwrap();
+    validate_packet_lineage(&manifest_value, &predecessor_value);
+    let manifest: FixtureManifest = serde_json::from_value(manifest_value).unwrap();
     assert_eq!(manifest.schema, FIXTURE_SCHEMA);
-    assert_eq!(manifest.schema_version, 2);
+    assert_eq!(manifest.schema_version, 3);
     assert_eq!(manifest.packet_id, PACKET_ID);
     assert_eq!(manifest.status, "fixtures_frozen_not_acquired");
+    assert_eq!(
+        manifest.lineage["predecessor"]["fixture_manifest_sha256"],
+        PREDECESSOR_MANIFEST_SHA256
+    );
     validate_source_identity(&root, &manifest.preregistration);
     validate_source_identity(
         &root,
@@ -840,7 +904,7 @@ fn selected_quality_fixture_manifest_contract_is_frozen() {
     assert!(
         fixtures
             .root
-            .ends_with("2026-08-28-qwen4exp-selected-quality-prereg")
+            .ends_with("2026-08-28-qwen4exp-selected-quality-v3-prereg")
     );
 }
 
@@ -1883,7 +1947,9 @@ fn validate_source_provenance(root: &Path, fixtures: &ValidatedFixtures) -> Valu
     });
     let path_dependencies_compact = serde_json::to_vec(&path_dependencies).unwrap();
     let path_dependencies_sha256 = sha256_bytes(&path_dependencies_compact);
-    let packet_dir = "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg";
+    let packet_dir = "docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg";
+    let predecessor_manifest =
+        "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json";
     let mut required_paths = vec![
         "Cargo.toml".to_string(),
         "Cargo.lock".to_string(),
@@ -1894,6 +1960,7 @@ fn validate_source_provenance(root: &Path, fixtures: &ValidatedFixtures) -> Valu
         "scripts/bench/qwen4exp_selected_quality_prepare.py".to_string(),
         "scripts/bench/qwen4exp_selected_quality_analyze.py".to_string(),
         "scripts/bench/qwen4exp_selected_quality_llama.py".to_string(),
+        predecessor_manifest.to_string(),
         format!("{packet_dir}/README.md"),
         format!("{packet_dir}/fixtures.json"),
     ];
@@ -1942,6 +2009,7 @@ fn validate_source_provenance(root: &Path, fixtures: &ValidatedFixtures) -> Valu
             "scripts/bench/qwen4exp_selected_quality_prepare.py",
             "scripts/bench/qwen4exp_selected_quality_analyze.py",
             "scripts/bench/qwen4exp_selected_quality_llama.py",
+            predecessor_manifest,
             packet_dir,
         ],
     );
@@ -2429,7 +2497,7 @@ fn released_selected_quality_local_abc_acquisition() {
         "status": "local_abc_acquired_unanalyzed",
         "disposition": Value::Null,
         "fixture_manifest": {
-            "path": "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json",
+            "path": "docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg/fixtures.json",
             "bytes": FIXTURE_MANIFEST_BYTES.len(),
             "sha256": FIXTURE_MANIFEST_SHA256,
         },

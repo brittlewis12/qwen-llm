@@ -84,6 +84,14 @@ def git_blob(repository: Path, commit: str, relative_path: str) -> bytes:
     return completed.stdout
 
 
+def require_common_source_commit(local_commit: object, llama_commit: object) -> str:
+    local = require_string(local_commit, "local source commit")
+    llama = require_string(llama_commit, "llama source commit")
+    if local != llama or not is_lower_hex(local, 40):
+        raise RuntimeError("local and llama evidence do not share one source commit")
+    return local
+
+
 def validate_common_sources(
     repository: Path,
     local: dict[str, object],
@@ -92,12 +100,9 @@ def validate_common_sources(
 ) -> dict[str, object]:
     local_source = local["report"]["implementation"]["source"]
     llama_source = llama["report"]["source"]
-    local_commit = require_string(local_source["source_commit"], "local source commit")
-    llama_commit = require_string(
-        llama_source["qwen_source_commit"], "llama source commit"
+    local_commit = require_common_source_commit(
+        local_source["source_commit"], llama_source["qwen_source_commit"]
     )
-    if local_commit != llama_commit or not is_lower_hex(local_commit, 40):
-        raise RuntimeError("local and llama evidence do not share one source commit")
     paths = {
         "analyzer": "scripts/bench/qwen4exp_selected_quality_analyze.py",
         "llama_wrapper": "scripts/bench/qwen4exp_selected_quality_llama.py",
@@ -1491,7 +1496,7 @@ def validate_local_report(
     )
     if (
         fixture_manifest["path"]
-        != "docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json"
+        != "docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg/fixtures.json"
         or require_int(fixture_manifest["bytes"], "local fixture bytes") <= 0
         or fixture_manifest["sha256"] != MANIFEST_SHA256
     ):
@@ -1942,7 +1947,7 @@ def validate_llama_evidence(
     )
     if (
         not require_string(fixture_manifest["path"], "llama fixture path").endswith(
-            "/docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/fixtures.json"
+            "/docs/bench/2026-08-28-qwen4exp-selected-quality-v3-prereg/fixtures.json"
         )
         or require_int(fixture_manifest["bytes"], "llama fixture bytes") <= 0
         or fixture_manifest["sha256"] != MANIFEST_SHA256

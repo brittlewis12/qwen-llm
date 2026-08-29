@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Natural N=512 Strict Router GO
+
+Status: enable strict E8P32 at exact N=512 by default. The exact admitted token
+set is now `{512, 2048}`; roll back both with
+`QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0`.
+
+- Candidate checkpoint `0b0c468` reused the unchanged strict-order kernel behind
+  an N=512-only opt-in. Synthetic projection and complete route metadata stayed
+  bit-exact, and the released natural N=512 replay retained endpoint and scalar
+  continuation logits, every persistent state tensor, QSA lengths, PLE history,
+  and exact 48-router substitution topology.
+- Separate-process A-B-A measured generic router projection at
+  `3.959917/3.951000 ms/layer` and strict at `0.690375 ms/layer`. The candidate
+  saves `3.265084 ms/layer`, or 82.55%, and clears the `3.564675 ms` component
+  gate.
+- Generic warm command GPU averaged `1149.058875 ms`; strict measured
+  `990.813875 ms`, saving `158.245000 ms` or 13.77% and clearing the
+  `1137.542876 ms` command gate. GPU-equivalent throughput rises
+  `445.58 -> 516.75 tok/s`.
+- The 48-layer leaf predicts `156.724008 ms`; 100.97% reaches the warm command.
+  All observer and raw-coverage gates passed, and all three generated outputs
+  share one digest.
+- Promotion `0f576b0` removes the temporary N=512 opt-in while preserving the
+  N=2,048 default, generic fallback at every other width, and global rollback.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-packed-router-e8p32-n512/`.
+Adversarial review: `01a04e8e-057f-76b0-9fb6-3997494018dd`.
+
 ## 2026-08-29 - Flash-Next Natural N=512 Attribution
 
 Status: qualify the existing strict E8P32 router at exact N=512 before inventing

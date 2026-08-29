@@ -255,25 +255,27 @@ MTPLX-style singleton middle is also closed: its 36-layer release leaf moved
 In contrast, selected-expert IQ4_NL row reuse is promoted after reducing clean
 decode command GPU `46.716405 -> 45.402361 ms/transition`. Natural N=512 now
 measures the generic F32 router at `3.960750 ms/layer`, or 14.81% of command GPU;
-the existing strict E8P32 kernel is shape-general but host qualification remains
-hard-coded to N=2,048. The force-ranked lane is now:
+strict E8P32 is now promoted there after reducing the leaf to
+`0.690375 ms/layer` and warm command GPU `1149.058875 -> 990.813875 ms`.
+GPU-equivalent N=512 throughput rises `445.58 -> 516.75 tok/s`; exact N=2,048
+remains qualified and every other width remains generic. The force-ranked lane
+is now:
 
-1. Extend strict E8P32 qualification only to exact N=512. Require bitwise router
-   logits, top-k IDs/weights, shared scale, counts, slots, endpoint logits, and
-   persistent state with unchanged non-router topology. KEEP only at component
-   median `<=3.564675 ms/layer` and warm command GPU `<=1137.543 ms`; otherwise
-   close N=512 without changing the N=2,048 default.
-2. Run an internal-SSD cold first-touch control. Keep storage/residency work
+1. Run an internal-SSD cold first-touch control. Keep storage/residency work
    separate from warm kernel claims; warm packed execution is already >99% GPU.
    Require at least 20% and 5 seconds of cold-wall improvement while retaining
    warm observer acceptance before attributing work to storage.
-3. Consider IQ3 gate/up only with a materially new same-work mechanism. Natural
+2. Consider IQ3 gate/up only with a materially new same-work mechanism. Natural
    N=512 gives it a 20.18% command ceiling, but the compact active-panel proposal
    remains closed. Any new candidate must name reuse or work removal first, then
    save at least 10% of the component and 1% of the command.
-4. Consider packed IQ4_NL down only as a same-work retile. Its N=512 ceiling is
+3. Consider packed IQ4_NL down only as a same-work retile. Its N=512 ceiling is
    13.14%; singleton row reuse and down-plus-sum do not transfer to the existing
    grouped packed body without new evidence.
+4. Split bridge ownership only if existing labels can identify at least
+   `11.491 ms` of actually removable N=512 work. The 7.79% coarse bucket includes
+   HC injection/combine and carries 1.51% representative overassignment; it is
+   not a copy-only estimate.
 5. Keep selected packed QSA default-off and use only focused quant-native
    semantic checks that can change its disposition. Do not recreate a broad
    quality harness or wait on a roughly 360 GB BF16 checkpoint.

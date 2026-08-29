@@ -244,32 +244,38 @@ and the first sampled-stage difference is the composite layer-0 attention HC
 output (`8.331e-5` relative RMS), before QSA receives a different activation.
 Generic packed selection first changes one cutoff pair at position 2,056/layer
 31 with a `4.344e-4` default-safe margin. This is ordinary E1 packed arithmetic
-propagation, not evidence of a block-boundary defect. The force-ranked lane is
-now:
+propagation, not evidence of a block-boundary defect.
 
-1. Resume short-loop optimization with selected-packed prefill default-off.
-   Qualify changed arithmetic with the smallest component equivalence,
-   state/replay, and representative natural-command checks that exercise it;
-   reject any candidate whose correctness or performance answer takes hours.
-   Use the shared commit-keyed llama.cpp bench infrastructure only when an
-   external comparator can change a decision.
-2. Run an internal-SSD cold first-touch control. Keep storage/residency work
-   separate from warm kernel claims; warm packed execution is already >99% GPU.
-3. Add one natural N=512 attribution point before interactive-shape or MTP
+The local implementation resurvey and two short falsifiers reshape the queue.
+Rapid/OMLX-style blocked packed recurrence is closed after an exact candidate
+regressed `5.967417 -> 6.117709 ms` at N=2,048. In contrast, selected-expert
+IQ4_NL row reuse is promoted after reducing clean decode command GPU
+`46.716405 -> 45.402361 ms/transition`. The force-ranked lane is now:
+
+1. Prototype MTPLX's complete singleton GDN middle as one target-native unit:
+   convolution/SiLU, paired Q/K norm, decay, recurrence, and gated RMS output.
+   Preserve modulo-16 Q/K ownership and current F32 arithmetic. Before a model
+   run, require exact N=1 and two-step output/conv/delta state plus at least
+   `0.75 ms/token` saving in a 36-layer-equivalent balanced leaf packet. Do not
+   reopen a standalone recurrence tile if the complete middle fails.
+2. Add one natural N=512 attribution point before interactive-shape or MTP
    decisions. N=18 and N=2,048 do not identify where fixed bridge/setup costs
    yield to projection and mixer work.
-4. Price materially different full-chunk kernel-efficiency mechanisms for IQ3
-   gate/up and packed GDN. The direct-grid active-panel screen is closed; do not
-   repackage launch compaction as a weight-stationary candidate. Require at
-   least 1% projected whole-command leverage before implementing either path.
-5. For interactive TTFT only, consider a routed-down path that avoids material
-   output traffic while preserving slot order if the mid-N point supports it.
-   N=18 down owns 11.08%; N=2,048 down is parked at 6.78%.
-6. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
-   sum analogue of the existing Q8 fused path. Require at least `0.5 ms/token`
-   median command-GPU saving with a positive paired direction.
-7. Then test Q8 HC down plus low-SiLU; consider shared-MoE down plus gated
-   accumulation only if that result supports epilogue fusion.
+3. Run an internal-SSD cold first-touch control. Keep storage/residency work
+   separate from warm kernel claims; warm packed execution is already >99% GPU.
+4. Keep selected packed QSA default-off and use only focused quant-native
+   semantic checks that can change its disposition. Do not recreate a broad
+   quality harness or wait on a roughly 360 GB BF16 checkpoint.
+5. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
+   the 31 omitted speculative tensors and atomic QSA/GDN/PLE state. Do not pursue
+   K=2/K=3.
+
+The simple IQ4_NL down-plus-sum follow-up is parked despite the down-kernel win:
+it removes only about 8.8 MB/token of materialized output traffic and 43
+dispatches while retaining all selected weight traffic, and the analogous
+IQ4_XS fusion regressed. Reopen only with new evidence above the existing
+`0.5 ms/token` gate. QSA gather, dense masking, launch-only fusion, HC private
+repacking, and additional blocked recurrence tiles remain closed.
 
 Packed-prefill S1 is closed at released `16/48/128` GDN geometry. For one and
 two token rows, the existing packed convolution/SiLU prep, paired L2 norm,

@@ -160,7 +160,7 @@ crate::env_flag!(
     "QWEN4EXP_MOE_IQ3_FAST"
 );
 crate::env_flag!(
-    default_off qwen4exp_moe_iq4_down_fast_enabled,
+    default_on qwen4exp_moe_iq4_down_fast_enabled,
     "QWEN4EXP_MOE_IQ4_DOWN_FAST"
 );
 crate::env_flag!(

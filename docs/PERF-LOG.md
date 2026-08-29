@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Fast IQ4_NL Routed Down GO
+
+Status: promote selected-expert IQ4_NL row reuse by default. Roll back with
+`QWEN4EXP_MOE_IQ4_DOWN_FAST=0`.
+
+- Checkpoint `de3d547` adapts the proven dense `NR0=2`, `NSG=2` IQ4_NL body to
+  singleton selected-expert addressing. It reuses each activation load across
+  two output rows while retaining materialized expert output and the separate
+  slot-ordered weighted reduction.
+- Production-width and 512-expert odd-tail component gates match the CPU oracle
+  at cosine `1.0` and relative maximum error at most `7.15e-7`. Invalid experts
+  zero their rows, tail SIMDgroups cross the common barrier, and the fast public
+  wrapper rejects valid-length inputs that are not 16-byte aligned.
+- A model-free 43-dispatch leaf screen measured `3.414917 -> 1.437750 ms`, a
+  `1.977167 ms` saving. Every candidate sample beat every baseline sample.
+- The committed-source `B-C-C-B x3` packet measured median command GPU
+  `46.716405 -> 45.402361 ms/transition`, saving `1.314044 ms` or `2.81%`.
+  Balanced-block savings were `1.379781`, `1.317696`, and `1.340435 ms`; every
+  run supplied 31/31 GPU intervals.
+- All 12 generated outputs share SHA-256
+  `a43ab8b653ea3e75ed0933b22495869eccd123b3897b80b8a626cb7064d600d9`.
+  Packed multi-token MoE remains unchanged; this is a singleton decode win.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-iq4-down-fast/`.
+
+## 2026-08-29 - Flash-Next Local Implementation Resurvey
+
+Status: close blocked packed-GDN staging and rank complete singleton GDN-middle
+fusion next. Do not infer transferable wins from weaker donor baselines.
+
+- Clean local checkouts were fast-forwarded and reviewed source-only: llama.cpp
+  `17252c769`; SGLang `cdbfe90b4a` plus Qwen refs `99c9362e66` and
+  `599d740312`; vLLM `fd5d3aea` plus refs `02f2b4c15d` and `f561eca6ca`;
+  OMLX `e0f6eaa9`; MLX `052e77d`; MLX-LM `77c33b1`; and MTPLX `4ce9690`.
+- Rapid-MLX `57818d31` was reviewed with Qwen refs `f7e74f69fa`,
+  `795ccac05c`, `689313dcd0`, `aa01c629e`, and `a209367037`; vLLM-Metal was
+  pinned at `a9184aa` and TurboQuant at `df7f54729`. No web fetch, model
+  execution, or broad test suite was used for the survey.
+- The target already has physically sparse direct-cache QSA, GPU-resident route
+  construction, register-resident packed GDN recurrence, and CPU-addressed PLE.
+  llama.cpp's dense masked QSA and donor QSA gathers are regressions in work-unit
+  shape, not ports to pursue.
+- An exact Rapid/OMLX-style `DB32/TB16` recurrence falsifier preserved the
+  incumbent 32-lane reduction and passed bitwise N=64/65 state and output gates.
+  At N=2,048 it regressed `5.967417 -> 6.117709 ms` (`0.9754x`), so the kernel,
+  flag, tests, and probe were removed before any model run.
+- MTPLX's complete singleton GDN middle is the next bounded decode experiment.
+  K=1 MTP remains the larger later lever, but the current GGUF deliberately omits
+  its 31 optional tensors. K=2/K=3, QSA gather, launch-only fusion, and another
+  blocked recurrence tile remain closed.
+
+Adversarial leverage session: `01a04de7-d66e-73f1-b3de-14ba60527c89`.
+
 ## 2026-08-28 - Flash-Next N=4,099 Divergence Is Packed HC Arithmetic
 
 Status: no QSA boundary defect found. Keep selected packed prefill default-off;

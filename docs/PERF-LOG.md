@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next IQ3 Block-Local Dequantization KILL
+
+Status: remove the exact block-local IQ3_XXS packed gate/up rewrite. Advance to
+the IQ4_NL route-histogram screen without reviving the long IQ3 range harness.
+
+- The candidate hoisted block scale, auxiliary, grid, and sign decoding out of
+  the 16-value helper loop without changing dispatch, TGM, MMA, or weight work.
+- A temporary compiled probe covered six hostile and six released blocks at all
+  16 residues. All 3,072 candidate/scalar half values matched bit-for-bit; the
+  focused packed MoE correctness gates also passed.
+- Natural N=512 A1/B1 measured representative gate/up
+  `5.425000 -> 5.306417 ms/layer`, saving only `0.118583 ms` or 2.19% against the
+  fixed `4.857600 ms` ceiling and 10% gate.
+- Warm/profiled command GPU moved only
+  `991.498750 -> 987.057042 ms` / `992.866333 -> 988.515208 ms`, about
+  0.45%/0.44% and below the 1% command gate. Observer, coverage, topology, and
+  output gates passed.
+- The preregistered worst-case candidate value can never fall below B1, so B2
+  and A2 cannot rescue the leaf gate and did not run. This is a valid futility
+  KILL, not a completed drift bracket or precise effect estimate.
+- Candidate and diagnostic code are removed. The rebuilt release metallib again
+  matches the baseline SHA-256
+  `0f3c521ee202872694171c4e8c5859609163cfcf98f379174b0013cf780c8097`.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-iq3-block-dequant-kill/`.
+Adversarial review: `01a04de7-d66e-73f1-b3de-14ba60527c89`.
+
 ## 2026-08-29 - Flash-Next Full-Shard Prefetch KEEP
 
 Status: retain `QWEN4EXP_FULL_SHARD_PREFETCH=1` as an explicit default-off

@@ -268,18 +268,22 @@ packet charges the whole 89,986,353,824-byte read, including CPU PLE, and reduce
 explicit default-off three-shard option. Default-on policy, range warming, and
 further storage source work are closed.
 
-1. Source-screen block-local IQ3_XXS vector dequantization for packed routed
-   gate/up. The current packed helper invokes the scalar decoder 16 times where
-   an existing matrix helper demonstrates one block-local decode. Require exact
-   half-tile and grouped output, `<=4.857600 ms/layer`, and at least 1% command
-   improvement. If compiler output already performs the reuse, skip code and
-   advance directly to item 2; compact active panels and indirect IQ3 remain
-   closed.
-2. Consider packed IQ4_NL down only as an `M128xN16xK32` same-work retile. First
+The block-local IQ3_XXS source screen is now closed. Its compiled candidate is
+bit-exact over 3,072 hostile/released half values, but natural N=512 moves the
+representative leaf only `5.425000 -> 5.306417 ms/layer` (2.19%) and command GPU
+about 0.45%. B1 alone exceeds the fixed `4.857600 ms` leaf ceiling, so the
+worst-case gate cannot recover and the candidate is removed. Compact active
+panels, indirect IQ3, donor ports, and further decode reshaping remain closed.
+
+1. Consider packed IQ4_NL down only as an `M128xN16xK32` same-work retile. First
    require the natural-route histogram to satisfy
    `sum(ceil(count/16)) / (2 * sum(ceil(count/32))) <= 0.75`; then require exact
    output, `<=3.164099 ms/layer`, and at least 1% command improvement. Singleton
    row reuse and down-plus-sum do not transfer without new evidence.
+2. If the retile is blocked or misses, source-screen block-local IQ4_NL packed
+   nibble decoding as an isolated leaf change. Require exact half output and at
+   least 10% leaf improvement before any command run; do not combine it with the
+   retile during attribution.
 3. Split bridge ownership only if existing labels can identify at least
    `11.491 ms` of actually removable N=512 work. The 7.79% coarse bucket includes
    HC injection/combine and carries 1.51% representative overassignment; it is

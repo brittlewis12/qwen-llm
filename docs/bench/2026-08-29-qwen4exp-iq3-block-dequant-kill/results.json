@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "decision": "KILL_PREREGISTERED_FUTILITY",
+  "candidate_base_commit": "4e8fcc0670e49b11f8b334cf7f8111902b044e05",
+  "baseline_executable_commit": "e938a250fada78bd8b071619c521ec66547747a8",
+  "model": {
+    "revision": "8bdc666649440e9bdc97e16f3f75782c98478ff5",
+    "quant": "UD-Q3_K_XL",
+    "root": "/Users/tito/models/Qwen3.8-Flash-Next-UD-Q3_K_XL"
+  },
+  "prompt": {
+    "tokens": 512,
+    "add_special_tokens": false,
+    "bytes": 2365,
+    "sha256": "9ea0ba6ce8218c9a2bc6129e8865dc1c0f562fb0ad6e01903b58912f8b8a8fc7"
+  },
+  "correctness": {
+    "compiled_half_bit_probe": true,
+    "hostile_blocks": 6,
+    "released_blocks": 6,
+    "residues_per_block": 16,
+    "values_per_residue": 16,
+    "half_values_compared": 3072,
+    "half_bit_mismatches": 0,
+    "focused_tests": [
+      "packed_common_moe_motor_matches_serial_rows_and_routes",
+      "iq3_xxs_iq4_nl_and_q8_paths_match_nonzero_cpu_dequant"
+    ]
+  },
+  "artifacts": {
+    "baseline_executable_sha256": "e12f590be8030ea032dec99723412e000be47040850b82242906f731175aa818",
+    "baseline_metallib_sha256": "0f3c521ee202872694171c4e8c5859609163cfcf98f379174b0013cf780c8097",
+    "candidate_executable_sha256": "170e32e4a84afc22574e01101fa8e5c0edc6b5e463b972a5bde24222614254f6",
+    "candidate_metallib_sha256": "4ce2816683104ecde78a95c92ed5aa7bd687473756d3acc0baeb078aeea3e3eb",
+    "restored_metallib_sha256": "0f3c521ee202872694171c4e8c5859609163cfcf98f379174b0013cf780c8097"
+  },
+  "planned_order": ["A1_BASELINE", "B1_CANDIDATE", "B2_CANDIDATE", "A2_BASELINE"],
+  "executed_order": ["A1_BASELINE", "B1_CANDIDATE"],
+  "rows": [
+    {
+      "arm": "A1_BASELINE",
+      "gate_up_ticks": 5425000,
+      "gate_up_ms": 5.425,
+      "warm_command_gpu_ms": 991.4987499359995,
+      "warm_command_wall_ms": 994.052,
+      "profiled_command_gpu_ms": 992.866333341226,
+      "profiled_command_wall_ms": 996.059,
+      "observer_gpu_ratio": 1.0013793092581456,
+      "observer_wall_ratio": 1.002018,
+      "raw_sample_count": 128,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "eef066ab5d567337a7e6ae02cc662a4b5a1f718fd2ff7045c60b78e04d32d4f1"
+    },
+    {
+      "arm": "B1_CANDIDATE",
+      "gate_up_ticks": 5306417,
+      "gate_up_ms": 5.306417,
+      "warm_command_gpu_ms": 987.0570416096598,
+      "warm_command_wall_ms": 990.071,
+      "profiled_command_gpu_ms": 988.5152082424611,
+      "profiled_command_wall_ms": 991.668,
+      "observer_gpu_ratio": 1.0014772870982445,
+      "observer_wall_ratio": 1.001613,
+      "raw_sample_count": 128,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "6ff5f43bffab48bdb2b3a19439861392e4ec981312bb914b0afbcf809e8ea836"
+    }
+  ],
+  "effect": {
+    "gate_up_saving_ms": 0.1185830000000001,
+    "gate_up_saving_fraction": 0.02185861751152074,
+    "candidate_over_ceiling_ms": 0.448817,
+    "warm_command_saving_ms": 4.441708326339722,
+    "warm_command_saving_fraction": 0.004479792159724272,
+    "profiled_command_saving_ms": 4.351125098764896,
+    "profiled_command_saving_fraction": 0.0043823875910087295
+  },
+  "gates": {
+    "maximum_gate_up_ms": 4.8576,
+    "minimum_gate_up_saving_fraction": 0.1,
+    "minimum_command_saving_fraction": 0.01,
+    "all_executed_observers_accepted": true,
+    "all_executed_raw_coverage_accepted": true,
+    "one_stdout_digest": true
+  },
+  "early_stop": {
+    "valid": true,
+    "reason": "max(B1,B2) cannot fall below observed B1, which already exceeds the fixed leaf ceiling",
+    "precise_effect_authority": false
+  }
+}

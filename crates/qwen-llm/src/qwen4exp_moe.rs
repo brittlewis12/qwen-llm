@@ -175,10 +175,6 @@ crate::env_flag!(
     default_on configured_qwen4exp_packed_router_e8p32_strict_enabled,
     "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"
 );
-crate::env_flag!(
-    default_off configured_qwen4exp_packed_router_e8p32_strict_n512_enabled,
-    "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_N512"
-);
 
 #[cfg(test)]
 thread_local! {
@@ -251,14 +247,6 @@ fn qwen4exp_packed_router_e8p32_strict_enabled() -> bool {
         return enabled;
     }
     configured_qwen4exp_packed_router_e8p32_strict_enabled()
-}
-
-fn qwen4exp_packed_router_e8p32_strict_n512_enabled() -> bool {
-    #[cfg(test)]
-    if let Some(enabled) = QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE.with(|slot| slot.get()) {
-        return enabled;
-    }
-    configured_qwen4exp_packed_router_e8p32_strict_n512_enabled()
 }
 
 #[cfg(test)]
@@ -450,8 +438,6 @@ fn packed_router_e8p32_strict_qualified(
     tokens: usize,
 ) -> bool {
     qwen4exp_packed_router_e8p32_strict_enabled()
-        && (tokens != PACKED_ROUTER_E8P32_STRICT_N512_TOKENS
-            || qwen4exp_packed_router_e8p32_strict_n512_enabled())
         && packed_router_e8p32_strict_scope_qualified(
             &ctx.device.name().to_string(),
             geometry.hidden_size,

@@ -261,10 +261,13 @@ GPU-equivalent N=512 throughput rises `445.58 -> 516.75 tok/s`; exact N=2,048
 remains qualified and every other width remains generic. The force-ranked lane
 is now:
 
-1. Run an internal-SSD cold first-touch control. Keep storage/residency work
-   separate from warm kernel claims; warm packed execution is already >99% GPU.
-   Require at least 20% and 5 seconds of cold-wall improvement while retaining
-   warm observer acceptance before attributing work to storage.
+1. Run one default-off full-shard prefetch falsifier on the internal asset.
+   Targeted per-shard eviction plus external/internal/external established
+   `43.869198 -> 23.224459 s` first-pass wall while warm GPU stayed unchanged.
+   Bracket internal demand-page / forced-prefetch / internal demand-page, charge
+   prefetch inside first-pass wall, and require at least 20% plus 5 seconds of
+   improvement with warm observer acceptance. Kill storage source work on a
+   miss; do not build a range-specific warmer.
 2. Consider IQ3 gate/up only with a materially new same-work mechanism. Natural
    N=512 gives it a 20.18% command ceiling, but the compact active-panel proposal
    remains closed. Any new candidate must name reuse or work removal first, then

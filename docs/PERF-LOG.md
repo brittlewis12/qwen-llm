@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Internal SSD Cold Placement GO
+
+Status: retain the checksum-identical UD-Q3_K_XL asset on the internal SSD for
+process-cold work. Warm-kernel claims remain storage-independent.
+
+- Reap-k216 was copied to the external weights archive and passed a full
+  `rsync --checksum` comparison before its internal source was removed. The
+  Flash-Next three-shard quant then moved into that slot, passed the same
+  comparison, and left `160 GiB` free internally.
+- Current source `f719640` ran external/internal/external. Before each process,
+  the repository's targeted `msync(MS_SYNC|MS_INVALIDATE)` path evicted all
+  three shard mappings and verified zero resident pages without a global purge.
+- External first-pass wall averaged `43.869198 s`; internal measured
+  `23.224459 s`, saving `20.644739 s` or 47.06%. Both individual comparisons
+  pass, and the external A-A spread is only 2.45% of the bracket mean.
+- Outside-GPU time accounts for `20.643825 s` of the saving. First-pass GPU
+  differs by only 0.09%; warm/profiled GPU differs by only 0.08%/0.05%.
+- All observer and raw-coverage gates passed and every output digest matched.
+  Internal placement therefore clears the predeclared 20% plus 5-second gate.
+- Internal first touch still spends `22.220332 s` outside GPU. One charged,
+  default-off full-shard prefetch experiment remains before storage work closes;
+  a failure does not authorize bespoke range warming.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-internal-ssd-cold-control/`.
+Adversarial leverage session: `01a04de7-d66e-73f1-b3de-14ba60527c89`.
+
 ## 2026-08-29 - Flash-Next Natural N=512 Strict Router GO
 
 Status: enable strict E8P32 at exact N=512 by default. The exact admitted token

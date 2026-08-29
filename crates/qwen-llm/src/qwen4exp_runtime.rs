@@ -2,7 +2,8 @@
 
 use crate::gguf::GgufFile;
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTimestampSampleBuffer,
+    KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTensor,
+    MetalTimestampSampleBuffer,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_ple::PleIq4NlTable;
@@ -16,15 +17,18 @@ use crate::qwen4exp_residency::{
     Qwen4ExpMetalWeightPlan, Qwen4ExpMetalWeights, Qwen4ExpResidencyError,
 };
 use crate::qwen4exp_text_session::{
-    Qwen4ExpCompletedLogits, Qwen4ExpPackedEncodeCpuTiming, Qwen4ExpTextSessionError,
-    Qwen4ExpTextSessionMetalWeights, Qwen4ExpTextSessionMetalWorkspace, Qwen4ExpTextSessionPending,
-    Qwen4ExpTextSessionPlan, Qwen4ExpTextSessionReleaseTiming, encode_qwen4exp_text_packed,
+    Qwen4ExpCompletedLogits, Qwen4ExpFixedHyperAddTensor, Qwen4ExpPackedEncodeCpuTiming,
+    Qwen4ExpPostLayerHyperProbe, Qwen4ExpTextSessionError, Qwen4ExpTextSessionMetalWeights,
+    Qwen4ExpTextSessionMetalWorkspace, Qwen4ExpTextSessionPending, Qwen4ExpTextSessionPlan,
+    Qwen4ExpTextSessionReleaseTiming, encode_qwen4exp_text_packed,
     encode_qwen4exp_text_packed_layer_sampled, encode_qwen4exp_text_packed_profiled,
     encode_qwen4exp_text_token, encode_qwen4exp_text_token_layer_sampled,
+    encode_qwen4exp_text_token_with_post_layer_hyper_probe,
 };
+use crate::tensor::GgmlType;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDevice};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::ops::Range;
 use std::time::Instant;
 
@@ -173,6 +177,33 @@ pub struct Qwen4ExpTokenTiming {
     pub completion_wait_ms: f64,
     pub gpu_ms: Option<f64>,
     pub total_wall_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Qwen4ExpFixedHyperAdd<'a> {
+    /// Exactly `branch_count * hidden_size` F32 values in the same native
+    /// flattened order returned by [`Qwen4ExpPostLayerHyperCapture`].
+    pub direction: &'a [f32],
+    pub coefficient: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Qwen4ExpPostLayerHyperRequest<'a> {
+    /// Zero-based completed decoder layer. Flash-Next accepts layers 1..=47;
+    /// layer zero is unavailable because PLE is inside the fused 0->1 stage.
+    pub layer: u32,
+    /// Applied before capture; the next decoder layer consumes the modified
+    /// state. `None` performs a passive capture.
+    pub fixed_add: Option<Qwen4ExpFixedHyperAdd<'a>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Qwen4ExpPostLayerHyperCapture {
+    pub layer: u32,
+    pub position: usize,
+    /// Persistent post-layer hyper state in the model's native flattened
+    /// `[branch_count * hidden_size]` order, after any requested fixed add.
+    pub values: Vec<f32>,
 }
 
 impl Qwen4ExpTokenTiming {
@@ -655,6 +686,63 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         )?;
         self.last_token_timing = Some(timing);
         Ok(self.workspace.logits()?)
+    }
+
+    /// Run one serial token step and capture the persistent hyper-residual
+    /// after a completed decoder layer. Flash-Next layer zero is excluded
+    /// because PLE sits inside the fused layers-zero-one transition.
+    pub fn forward_token_with_post_layer_hyper_capture(
+        &mut self,
+        token_id: u32,
+        request: Qwen4ExpPostLayerHyperRequest<'_>,
+    ) -> Result<Qwen4ExpPostLayerHyperCapture, Qwen4ExpRuntimeError> {
+        self.validate_token_id(token_id)?;
+        if self.next_position() >= self.capacity.forward_limit {
+            return invalid(format!(
+                "logical forward limit {} is exhausted",
+                self.capacity.forward_limit
+            ));
+        }
+        let width = self.workspace.geometry().hyper_width();
+        validate_post_layer_hyper_request(request, self.workspace.geometry().layer_count(), width)?;
+        let capture = MetalTensor::zeros_f32(self.ctx, vec![width as u64])?;
+        let direction = request
+            .fixed_add
+            .map(|fixed_add| {
+                MetalTensor::from_bytes(
+                    self.ctx,
+                    bytemuck::cast_slice(fixed_add.direction),
+                    vec![fixed_add.direction.len() as u64],
+                    GgmlType::F32,
+                )
+            })
+            .transpose()?;
+        let fixed_add = request
+            .fixed_add
+            .zip(direction.as_ref())
+            .map(|(fixed_add, direction)| Qwen4ExpFixedHyperAddTensor {
+                direction,
+                coefficient: fixed_add.coefficient,
+            });
+        let probe = Qwen4ExpPostLayerHyperProbe {
+            layer: request.layer,
+            capture: &capture,
+            fixed_add,
+        };
+        let timing = execute_qwen4exp_text_token_with_post_layer_hyper_probe_sync(
+            self.ctx,
+            token_id,
+            self.ple_table,
+            &self.weights,
+            &mut self.workspace,
+            &probe,
+        )?;
+        self.last_token_timing = Some(timing);
+        Ok(Qwen4ExpPostLayerHyperCapture {
+            layer: request.layer,
+            position: timing.position,
+            values: read_f32_tensor(&capture),
+        })
     }
 
     pub fn forward_token_layer_profiled(
@@ -1261,6 +1349,99 @@ fn execute_qwen4exp_text_token_sync(
     })
 }
 
+fn execute_qwen4exp_text_token_with_post_layer_hyper_probe_sync(
+    ctx: &MetalContext,
+    token_id: u32,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+    probe: &Qwen4ExpPostLayerHyperProbe<'_>,
+) -> Result<Qwen4ExpTokenTiming, Qwen4ExpRuntimeError> {
+    let position = workspace.committed_length();
+    let wall_started = Instant::now();
+    let command = ctx.queue.commandBuffer().ok_or_else(|| {
+        Qwen4ExpRuntimeError::Invalid("Metal command queue returned no command buffer".into())
+    })?;
+    let encoder = KernelEncoder::begin(&command);
+    let pending = match encode_qwen4exp_text_token_with_post_layer_hyper_probe(
+        ctx, &encoder, token_id, position, table, weights, workspace, probe,
+    ) {
+        Ok(pending) => pending,
+        Err(error) => {
+            encoder.end();
+            let abandon = unsafe { workspace.abandon_uncommitted() };
+            drop(command);
+            if let Err(abandon_error) = abandon {
+                return invalid(format!(
+                    "post-layer hyper token encode failed ({error}); abandoning its command also failed ({abandon_error})"
+                ));
+            }
+            return Err(error.into());
+        }
+    };
+    drop(pending);
+    encoder.end();
+    let encode_cpu_ms = wall_started.elapsed().as_secs_f64() * 1e3;
+    let wait_started = Instant::now();
+    command.commit();
+    workspace.release_after()?;
+    let completion_wait_ms = wait_started.elapsed().as_secs_f64() * 1e3;
+    let gpu_start = command.GPUStartTime();
+    let gpu_end = command.GPUEndTime();
+    let gpu_ms =
+        (gpu_start.is_finite() && gpu_end.is_finite() && gpu_start > 0.0 && gpu_end > gpu_start)
+            .then_some((gpu_end - gpu_start) * 1e3);
+    Ok(Qwen4ExpTokenTiming {
+        position,
+        encode_cpu_ms,
+        completion_wait_ms,
+        gpu_ms,
+        total_wall_ms: wall_started.elapsed().as_secs_f64() * 1e3,
+    })
+}
+
+fn read_f32_tensor(tensor: &MetalTensor) -> Vec<f32> {
+    debug_assert_eq!(tensor.dtype, GgmlType::F32);
+    let offset = tensor.offset as usize / std::mem::size_of::<f32>();
+    // SAFETY: the probe tensor is an owned F32 allocation, its command has
+    // completed, and the logical tensor range was validated before encoding.
+    unsafe {
+        std::slice::from_raw_parts(
+            tensor.buffer.contents().as_ptr().cast::<f32>().add(offset),
+            tensor.n_elements() as usize,
+        )
+        .to_vec()
+    }
+}
+
+fn validate_post_layer_hyper_request(
+    request: Qwen4ExpPostLayerHyperRequest<'_>,
+    layer_count: usize,
+    hyper_width: usize,
+) -> Result<(), Qwen4ExpRuntimeError> {
+    if request.layer == 0 || request.layer as usize >= layer_count {
+        return invalid(format!(
+            "post-layer hyper request layer {} is outside 1..{}",
+            request.layer, layer_count
+        ));
+    }
+    if let Some(fixed_add) = request.fixed_add {
+        if fixed_add.direction.len() != hyper_width {
+            return invalid(format!(
+                "post-layer hyper fixed-add direction has {} values, expected {hyper_width}",
+                fixed_add.direction.len()
+            ));
+        }
+        if !fixed_add.coefficient.is_finite() || fixed_add.coefficient == 0.0 {
+            return invalid(format!(
+                "post-layer hyper fixed-add coefficient must be finite and nonzero, got {}",
+                fixed_add.coefficient
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn execute_qwen4exp_text_token_layer_profiled_sync(
     ctx: &MetalContext,
     token_id: u32,
@@ -1581,6 +1762,70 @@ mod tests {
             })
             .map(|(index, _)| index)
             .unwrap()
+    }
+
+    #[test]
+    fn post_layer_hyper_request_rejects_invalid_inputs_before_allocation() {
+        const LAYERS: usize = 48;
+        const WIDTH: usize = 10_240;
+        let direction = vec![0.0_f32; WIDTH];
+        for layer in [1, 47] {
+            validate_post_layer_hyper_request(
+                Qwen4ExpPostLayerHyperRequest {
+                    layer,
+                    fixed_add: Some(Qwen4ExpFixedHyperAdd {
+                        direction: &direction,
+                        coefficient: 0.25,
+                    }),
+                },
+                LAYERS,
+                WIDTH,
+            )
+            .unwrap();
+        }
+        for layer in [0, 48] {
+            let error = validate_post_layer_hyper_request(
+                Qwen4ExpPostLayerHyperRequest {
+                    layer,
+                    fixed_add: None,
+                },
+                LAYERS,
+                WIDTH,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("outside 1..48"), "{error}");
+        }
+        let error = validate_post_layer_hyper_request(
+            Qwen4ExpPostLayerHyperRequest {
+                layer: 23,
+                fixed_add: Some(Qwen4ExpFixedHyperAdd {
+                    direction: &direction[..WIDTH - 1],
+                    coefficient: 0.25,
+                }),
+            },
+            LAYERS,
+            WIDTH,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("10239 values, expected 10240"), "{error}");
+        for coefficient in [0.0, f32::NAN, f32::INFINITY] {
+            let error = validate_post_layer_hyper_request(
+                Qwen4ExpPostLayerHyperRequest {
+                    layer: 23,
+                    fixed_add: Some(Qwen4ExpFixedHyperAdd {
+                        direction: &direction,
+                        coefficient,
+                    }),
+                },
+                LAYERS,
+                WIDTH,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("finite and nonzero"), "{error}");
+        }
     }
 
     fn report_logit_arms(
@@ -3179,6 +3424,105 @@ mod tests {
         assert!((profile.stages[2].gpu_ms - 1.0).abs() < 1e-12);
         assert!((profile.encoder_boundary_ms - 1.0).abs() < 1e-12);
         assert!(resolve_qwen4exp_layer_profile(token, &stages, &[10, 9]).is_err());
+    }
+
+    #[test]
+    #[ignore = "set QWEN4EXP_Q3_K_XL_RUNTIME_GGUF to the pinned full release"]
+    fn released_runner_captures_and_intervenes_on_post_layer_hyper_state() {
+        const LAYER: u32 = 23;
+        const DIRECTION_INDEX: usize = 17;
+        const COEFFICIENT: f32 = 0.25;
+
+        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
+            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
+        let tokenizer = Tokenizer::from_gguf(&gguf).expect("load released tokenizer");
+        let marker = tokenizer.encode("<|im_start|>", false).unwrap();
+        assert_eq!(marker.len(), 1);
+        let marker = u32::try_from(marker[0]).unwrap();
+        let ctx = MetalContext::new().expect("initialize Metal");
+        let capacity =
+            Qwen4ExpSessionCapacity::for_forward_limit(&Qwen4ExpConfig::flash_next_reference(), 1)
+                .unwrap();
+        let mut loaded = Qwen4ExpLoadedModel::load(&ctx, &gguf, capacity).unwrap();
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+
+        let short_direction = vec![0.0_f32; 10_239];
+        let error = runner
+            .forward_token_with_post_layer_hyper_capture(
+                marker,
+                Qwen4ExpPostLayerHyperRequest {
+                    layer: LAYER,
+                    fixed_add: Some(Qwen4ExpFixedHyperAdd {
+                        direction: &short_direction,
+                        coefficient: COEFFICIENT,
+                    }),
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("10239 values, expected 10240"), "{error}");
+        assert_eq!(runner.next_position(), 0);
+
+        let baseline_logits = runner.forward_token(marker).unwrap().to_vec();
+        runner.reset().unwrap();
+        let capture = runner
+            .forward_token_with_post_layer_hyper_capture(
+                marker,
+                Qwen4ExpPostLayerHyperRequest {
+                    layer: LAYER,
+                    fixed_add: None,
+                },
+            )
+            .unwrap();
+        let capture_logits = runner.logits().unwrap().to_vec();
+        assert_f32_bits_eq(
+            "empty hyper probe logits",
+            &baseline_logits,
+            &capture_logits,
+        );
+        assert_eq!(capture.layer, LAYER);
+        assert_eq!(capture.position, 0);
+        assert_eq!(capture.values.len(), 10_240);
+        assert!(capture.values.iter().all(|value| value.is_finite()));
+
+        runner.reset().unwrap();
+        let mut direction = vec![0.0_f32; capture.values.len()];
+        direction[DIRECTION_INDEX] = 1.0;
+        let intervened = runner
+            .forward_token_with_post_layer_hyper_capture(
+                marker,
+                Qwen4ExpPostLayerHyperRequest {
+                    layer: LAYER,
+                    fixed_add: Some(Qwen4ExpFixedHyperAdd {
+                        direction: &direction,
+                        coefficient: COEFFICIENT,
+                    }),
+                },
+            )
+            .unwrap();
+        let intervened_logits = runner.logits().unwrap().to_vec();
+        assert_eq!(intervened.layer, LAYER);
+        assert_eq!(intervened.position, 0);
+        for (index, (&baseline, &actual)) in
+            capture.values.iter().zip(&intervened.values).enumerate()
+        {
+            let expected = baseline + COEFFICIENT * direction[index];
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "post-layer hyper delta differs at index {index}"
+            );
+        }
+        let max_logit_delta = capture_logits
+            .iter()
+            .zip(&intervened_logits)
+            .map(|(&baseline, &actual)| (actual - baseline).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_logit_delta.is_finite() && max_logit_delta > 0.0,
+            "intervention did not affect downstream logits: {max_logit_delta}"
+        );
     }
 
     #[test]

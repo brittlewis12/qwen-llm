@@ -182,3 +182,17 @@ speculative decode, prefix caching, and Flash-Next/qwen4exp are not selected
 silently. `trace-full` separately uses packed prefill for passive full-J prompt
 traces; live `run` consumes completed native selected-token J/R rows and
 workspace-template rows.
+
+## Flash-Next Library Seam
+
+Flash-Next/qwen4exp is not yet selected by `qwen-lens run`. Its serial runtime
+can now capture the persistent native hyper state after completed decoder layers
+1 through 47 and optionally apply one fixed F32 addition at that site. The
+direction is exactly `branch_count * hidden_size` values (10,240 for the current
+model) in the same flattened order as the capture. Execution order is fixed:
+add, capture, then let the next layer consume the modified state. Layer zero is
+excluded because PLE occurs inside the fused layers-zero-one transition.
+
+This is an architecture-specific foundation, not J/R-lens support: ordinary
+5,120-wide Qwen directions are incompatible, packed prefill is not instrumented,
+and no residual-relative metric or branch-lifting policy is implied.

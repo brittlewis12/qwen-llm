@@ -19,6 +19,7 @@ not compensating abstraction.
 - [x] The minimal CLI runs with real lens directions.
 - [x] Packed full-J traces cover layer x position top-k and occurrence counts.
 - [x] Explicit layer:position masks can export transported J-space vectors.
+- [x] Flash-Next exposes serial native hyper-state capture and fixed addition.
 
 ## Model Support
 
@@ -26,19 +27,21 @@ not compensating abstraction.
 | --- | --- | --- | --- | --- |
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
-| Flash-Next/qwen4exp | adapter deferred | adapter deferred | existing runtime | coordinate spike |
+| Flash-Next/qwen4exp | native hyper capture; lenses deferred | serial fixed add passed | probe is serial-only | CLI/lens adapter |
 
 ## Current Status
 
 The CLI handoff is verified on real dense, ordinary MoE, native J/R, and
-workspace-template assets. Selected-mask vector export is separately complete
-and verified for dense published full-J traces.
+workspace-template assets. Selected-mask vector export is complete for dense
+published full-J traces. Flash-Next now has a separately verified library seam
+for its persistent 10,240-wide post-layer hyper state.
 
 ## Next Gate
 
-Timebox the Flash-Next post-PLE coordinate/intervention spike to two hours.
-Establish the narrow capture/mutation seam or stop with concrete integration
-options; do not broaden into fitting, optimization, REST, UI, or experiments.
+Choose the smallest Flash-Next CLI/lens adapter built on the verified native
+hyper-state seam. Do not coerce ordinary 5,120-wide residual directions into
+the 10,240-wide hyper coordinate or broaden into optimization, REST, UI, or
+experiments.
 
 ## Hard Exclusions
 
@@ -52,8 +55,8 @@ hardening.
 
 ## Fast Follows
 
-1. Full-transport adapters for additional real J/R assets.
-2. Flash-Next adapter implementation if the spike passes.
+1. Flash-Next CLI support for explicit native hyper directions.
+2. Rectangular Flash-Next transport/readout support when a real asset exists.
 3. Sparse position filtering and traces beyond 128 positions.
 4. Corpus batching only after measured throughput requires it.
 

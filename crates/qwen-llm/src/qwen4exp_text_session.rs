@@ -3,7 +3,8 @@
 use crate::metal::{
     KernelEncoder, MetalBufferSizeAndAlign, MetalContext, MetalError, MetalMemoryAdmission,
     MetalMemorySignals, MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer,
-    encode_get_rows_f32, evaluate_metal_memory_admission, host_page_size_bytes,
+    encode_axpy_f32, encode_copy_offset_f32, encode_get_rows_f32, evaluate_metal_memory_admission,
+    host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::qwen4exp::{MixerKind, PleHistory, Qwen4ExpConfig, Qwen4ExpError};
@@ -976,6 +977,19 @@ pub struct Qwen4ExpTextSessionMetalWorkspace {
     logits_ready: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Qwen4ExpFixedHyperAddTensor<'a> {
+    pub direction: &'a MetalTensor,
+    pub coefficient: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Qwen4ExpPostLayerHyperProbe<'a> {
+    pub layer: u32,
+    pub capture: &'a MetalTensor,
+    pub fixed_add: Option<Qwen4ExpFixedHyperAddTensor<'a>>,
+}
+
 impl Qwen4ExpTextSessionMetalWorkspace {
     pub fn from_admitted(
         ctx: &MetalContext,
@@ -1466,6 +1480,53 @@ pub fn encode_qwen4exp_text_token<'a>(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    encode_qwen4exp_text_token_inner(
+        ctx, enc, token_id, position, table, weights, workspace, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_qwen4exp_text_token_with_post_layer_hyper_probe<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    probe: &Qwen4ExpPostLayerHyperProbe<'_>,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    encode_qwen4exp_text_token_inner(
+        ctx,
+        enc,
+        token_id,
+        position,
+        table,
+        weights,
+        workspace,
+        Some(probe),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_qwen4exp_text_token_inner<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    probe: Option<&Qwen4ExpPostLayerHyperProbe<'_>>,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    if let Some(probe) = probe {
+        validate_post_layer_hyper_probe(
+            ctx,
+            &workspace.geometry,
+            &workspace.hyper_residual,
+            probe,
+        )?;
+    }
     let next_history =
         prepare_qwen4exp_text_token(ctx, enc, token_id, position, table, weights, workspace)?;
     if let Err(error) = encode_step(
@@ -1476,6 +1537,7 @@ pub fn encode_qwen4exp_text_token<'a>(
         next_history,
         weights,
         workspace,
+        probe,
     ) {
         workspace.encode_failed = true;
         workspace.state_poisoned = true;
@@ -2526,6 +2588,7 @@ fn encode_step(
     next_history: PleHistory,
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+    probe: Option<&Qwen4ExpPostLayerHyperProbe<'_>>,
 ) -> Result<(), Qwen4ExpTextSessionError> {
     encode_zero_one_stage(
         ctx,
@@ -2536,11 +2599,104 @@ fn encode_step(
         weights,
         workspace,
     )?;
+    encode_post_layer_hyper_probe(ctx, enc, 1, &workspace.hyper_residual, probe)?;
     for index in 0..weights.post_ple.len() {
         encode_post_ple_stage(ctx, enc, position, index, weights, workspace)?;
+        encode_post_layer_hyper_probe(
+            ctx,
+            enc,
+            index as u32 + 2,
+            &workspace.hyper_residual,
+            probe,
+        )?;
     }
     let hyper_residual = workspace.hyper_residual.clone();
     encode_tail_stage(ctx, enc, &hyper_residual, weights, workspace)
+}
+
+fn validate_post_layer_hyper_probe(
+    ctx: &MetalContext,
+    geometry: &Qwen4ExpTextSessionMetalGeometry,
+    hyper_residual: &MetalTensor,
+    probe: &Qwen4ExpPostLayerHyperProbe<'_>,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let layer_count = geometry.layer_count();
+    if probe.layer == 0 || probe.layer as usize >= layer_count {
+        return invalid(format!(
+            "post-layer hyper probe layer {} is outside 1..{}",
+            probe.layer, layer_count
+        ));
+    }
+    let shape = [geometry.hyper_width() as u64];
+    require_tensor(
+        "session hyper residual",
+        hyper_residual,
+        GgmlType::F32,
+        &shape,
+        true,
+    )?;
+    require_tensor(
+        "post-layer hyper capture",
+        probe.capture,
+        GgmlType::F32,
+        &shape,
+        true,
+    )?;
+    let mut tensors = vec![
+        ("session hyper residual", hyper_residual),
+        ("post-layer hyper capture", probe.capture),
+    ];
+    if let Some(fixed_add) = probe.fixed_add {
+        if !fixed_add.coefficient.is_finite() || fixed_add.coefficient == 0.0 {
+            return invalid(format!(
+                "post-layer hyper fixed-add coefficient must be finite and nonzero, got {}",
+                fixed_add.coefficient
+            ));
+        }
+        require_tensor(
+            "post-layer hyper fixed-add direction",
+            fixed_add.direction,
+            GgmlType::F32,
+            &shape,
+            false,
+        )?;
+        tensors.push(("post-layer hyper fixed-add direction", fixed_add.direction));
+        ctx.pipeline("kernel_axpy_f32")?;
+    }
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)?;
+    ctx.pipeline("kernel_copy_offset_f32")?;
+    Ok(())
+}
+
+fn encode_post_layer_hyper_probe(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    layer: u32,
+    hyper_residual: &MetalTensor,
+    probe: Option<&Qwen4ExpPostLayerHyperProbe<'_>>,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let Some(probe) = probe.filter(|probe| probe.layer == layer) else {
+        return Ok(());
+    };
+    if let Some(fixed_add) = probe.fixed_add {
+        encode_axpy_f32(
+            ctx,
+            enc,
+            fixed_add.direction,
+            hyper_residual,
+            fixed_add.coefficient,
+        )?;
+    }
+    encode_copy_offset_f32(
+        ctx,
+        enc,
+        hyper_residual,
+        0,
+        probe.capture,
+        hyper_residual.n_elements() as usize,
+    )?;
+    Ok(())
 }
 
 fn encode_zero_one_stage(
@@ -3360,7 +3516,7 @@ mod tests {
     use crate::qwen4exp_moe::Qwen4ExpMoeMetalWeights;
     use crate::qwen4exp_post_ple_block::Qwen4ExpPostPleMixerMetalWeights;
     use crate::qwen4exp_residency::Qwen4ExpMetalWeightPlan;
-    use crate::qwen4exp_runtime::forward_qwen4exp_text_token_sync;
+    use crate::qwen4exp_runtime::{Qwen4ExpSessionCapacity, forward_qwen4exp_text_token_sync};
     use objc2_metal::MTLCommandQueue;
 
     fn context() -> Option<MetalContext> {
@@ -3432,6 +3588,154 @@ mod tests {
                 .cast::<f32>();
             std::slice::from_raw_parts(source, tensor.n_elements() as usize).to_vec()
         }
+    }
+
+    #[test]
+    fn post_layer_hyper_probe_validates_native_contract() {
+        let Some(ctx) = context() else {
+            return;
+        };
+        let config = Qwen4ExpConfig::flash_next_reference();
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, 1)
+            .unwrap()
+            .qsa_physical_capacity();
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, capacity).unwrap();
+        let width = geometry.hyper_width();
+        let hyper = MetalTensor::zeros_f32(&ctx, vec![width as u64]).unwrap();
+        let capture = MetalTensor::zeros_f32(&ctx, vec![width as u64]).unwrap();
+        let direction = MetalTensor::zeros_f32(&ctx, vec![width as u64]).unwrap();
+        let valid = Qwen4ExpPostLayerHyperProbe {
+            layer: 1,
+            capture: &capture,
+            fixed_add: Some(Qwen4ExpFixedHyperAddTensor {
+                direction: &direction,
+                coefficient: 0.25,
+            }),
+        };
+        validate_post_layer_hyper_probe(&ctx, &geometry, &hyper, &valid).unwrap();
+
+        for layer in [0, geometry.layer_count() as u32] {
+            let invalid = Qwen4ExpPostLayerHyperProbe { layer, ..valid };
+            let error = validate_post_layer_hyper_probe(&ctx, &geometry, &hyper, &invalid)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("outside 1.."), "{error}");
+        }
+        for coefficient in [0.0, f32::NAN, f32::INFINITY] {
+            let invalid = Qwen4ExpPostLayerHyperProbe {
+                fixed_add: Some(Qwen4ExpFixedHyperAddTensor {
+                    direction: &direction,
+                    coefficient,
+                }),
+                ..valid
+            };
+            let error = validate_post_layer_hyper_probe(&ctx, &geometry, &hyper, &invalid)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("finite and nonzero"), "{error}");
+        }
+
+        let short_direction = MetalTensor::zeros_f32(&ctx, vec![(width - 1) as u64]).unwrap();
+        let invalid = Qwen4ExpPostLayerHyperProbe {
+            fixed_add: Some(Qwen4ExpFixedHyperAddTensor {
+                direction: &short_direction,
+                coefficient: 0.25,
+            }),
+            ..valid
+        };
+        let error = validate_post_layer_hyper_probe(&ctx, &geometry, &hyper, &invalid)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("direction must be F32"), "{error}");
+
+        let i32_direction = MetalTensor::zeros_i32(&ctx, vec![width as u64]).unwrap();
+        let invalid = Qwen4ExpPostLayerHyperProbe {
+            fixed_add: Some(Qwen4ExpFixedHyperAddTensor {
+                direction: &i32_direction,
+                coefficient: 0.25,
+            }),
+            ..valid
+        };
+        let error = validate_post_layer_hyper_probe(&ctx, &geometry, &hyper, &invalid)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("direction must be F32"), "{error}");
+
+        let short_capture = MetalTensor::zeros_f32(&ctx, vec![(width - 1) as u64]).unwrap();
+        let invalid = Qwen4ExpPostLayerHyperProbe {
+            capture: &short_capture,
+            ..valid
+        };
+        let error = validate_post_layer_hyper_probe(&ctx, &geometry, &hyper, &invalid)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("capture must be F32"), "{error}");
+
+        let aliased = Qwen4ExpPostLayerHyperProbe {
+            capture: &hyper,
+            ..valid
+        };
+        let error = validate_post_layer_hyper_probe(&ctx, &geometry, &hyper, &aliased)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlaps"), "{error}");
+    }
+
+    #[test]
+    fn post_layer_hyper_probe_applies_fixed_add_before_capture() {
+        let Some(ctx) = context() else {
+            return;
+        };
+        let config = Qwen4ExpConfig::flash_next_reference();
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, 1)
+            .unwrap()
+            .qsa_physical_capacity();
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, capacity).unwrap();
+        let width = geometry.hyper_width();
+        let initial = vec![1.0_f32; width];
+        let mut direction_values = vec![0.0_f32; width];
+        direction_values[17] = 1.0;
+        let hyper = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&initial),
+            vec![width as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let direction = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&direction_values),
+            vec![width as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let capture = MetalTensor::zeros_f32(&ctx, vec![width as u64]).unwrap();
+        let probe = Qwen4ExpPostLayerHyperProbe {
+            layer: 23,
+            capture: &capture,
+            fixed_add: Some(Qwen4ExpFixedHyperAddTensor {
+                direction: &direction,
+                coefficient: 0.25,
+            }),
+        };
+        validate_post_layer_hyper_probe(&ctx, &geometry, &hyper, &probe).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_post_layer_hyper_probe(&ctx, &encoder, 23, &hyper, Some(&probe)).unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+
+        let mut expected = initial;
+        expected[17] = 1.25;
+        assert_close("fixed-add hyper state", &read_f32(&hyper), &expected, 0.0);
+        assert_close(
+            "post-add hyper capture",
+            &read_f32(&capture),
+            &expected,
+            0.0,
+        );
     }
 
     fn assert_close(label: &str, actual: &[f32], expected: &[f32], tolerance: f32) {

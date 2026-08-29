@@ -186,6 +186,58 @@ kernel void kernel_axpy_f32(
     accum[tid] += args.alpha * x[tid];
 }
 
+// One threadgroup computes the reduction needed by a post-block residual
+// intervention, then the same threadgroup applies the update in place.
+// kind: 0 = residual-L2-relative, 1 = projection, 2 = source-to-target.
+struct post_block_intervention_args {
+    uint n;
+    uint kind;
+    float coefficient;
+};
+
+kernel void kernel_post_block_intervention_f32(
+        constant post_block_intervention_args & args [[buffer(0)]],
+        device       float * x       [[buffer(1)]],
+        device const float * v       [[buffer(2)]],
+        device const float * source  [[buffer(3)]],
+        device const float * target  [[buffer(4)]],
+        threadgroup float * partial  [[threadgroup(0)]],
+        uint tid [[thread_position_in_threadgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    float local = 0.0f;
+    for (uint i = tid; i < args.n; i += ntg) {
+        if (args.kind == 0) {
+            local += x[i] * x[i];
+        } else if (args.kind == 1) {
+            local += x[i] * v[i];
+        } else {
+            local += x[i] * source[i];
+        }
+    }
+    partial[tid] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0) {
+        float reduced = 0.0f;
+        for (uint i = 0; i < ntg; ++i) {
+            reduced += partial[i];
+        }
+        partial[0] = args.kind == 0 ? sqrt(reduced) : reduced;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float reduced = partial[0];
+    for (uint i = tid; i < args.n; i += ntg) {
+        if (args.kind == 0) {
+            x[i] += args.coefficient * reduced * v[i];
+        } else if (args.kind == 1) {
+            x[i] -= args.coefficient * reduced * v[i];
+        } else {
+            x[i] += args.coefficient * reduced * (target[i] - source[i]);
+        }
+    }
+}
+
 struct topk_args {
     uint n;
     uint k;

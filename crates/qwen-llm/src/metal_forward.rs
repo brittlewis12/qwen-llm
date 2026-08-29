@@ -30,6 +30,7 @@
 
 use crate::gguf::GgufFile;
 use crate::loader::{Block, Model, MoeFfn};
+pub use crate::metal::PostBlockIntervention;
 use crate::metal::{
     Buffer, GgufBackingEligibility, KernelEncoder, MetalContext, MetalError, MetalGgufBacking,
     MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer, RetainedStorageDisposition,
@@ -52,15 +53,16 @@ use crate::metal::{
     encode_moe_swiglu_iq3_s_f32_fast, encode_moe_swiglu_iq3_xxs_f32,
     encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq4_xs_f32, encode_moe_swiglu_q4_K_f32,
     encode_moe_swiglu_q6_K_f32, encode_moe_swiglu_q8_0_f32, encode_moe_weighted_sum_f32,
-    encode_mul_f32, encode_qk_rms_norm_rope_f32_packed_consecutive,
-    encode_residual_rms_norm_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_rope_neox_pair_f32, encode_scatter_offset_f32_to_f16_kv,
-    encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
-    encode_sigmoid_mul_gate_strided_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
-    encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
-    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_parallel_f32,
-    evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
+    encode_mul_f32, encode_post_block_intervention_f32,
+    encode_qk_rms_norm_rope_f32_packed_consecutive, encode_residual_rms_norm_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
+    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_pair_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv,
+    encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32, encode_sigmoid_mul_gate_strided_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
+    encode_topk_logits_softmax_parallel_f32, evaluate_metal_memory_admission, host_page_size_bytes,
+    plan_retained_storage,
 };
 use crate::model::{Arch, ArchKind};
 use crate::sampling::{BoundedTopKEvidence, GreedySelection, SampledToken, Sampler, SamplingError};
@@ -10352,6 +10354,8 @@ impl<'a> MetalForward<'a> {
             target_layer_ids,
             Some(hidden_dst),
             None,
+            &[],
+            false,
             true,
         )
     }
@@ -10379,6 +10383,92 @@ impl<'a> MetalForward<'a> {
             target_layer_ids,
             Some(post_block_dst),
             Some(pre_ffn_dst),
+            &[],
+            false,
+            true,
+        )
+    }
+
+    /// Capture both sides of selected dense FFN residual updates while
+    /// applying caller-ordered interventions to `session.x` after the
+    /// corresponding block and before the post-block capture.
+    ///
+    /// Each direction/source/target tensor must be a separate, aligned F32
+    /// tensor of shape `[H]`, and must not alias mutable session storage.
+    /// Operations at one layer are encoded in the order supplied by
+    /// `interventions`. An empty slice is exactly the ordinary capture path.
+    pub fn single_token_with_dense_ffn_capture_and_interventions(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        pre_ffn_dst: &MetalTensor,
+        post_block_dst: &MetalTensor,
+        interventions: &[PostBlockIntervention<'_>],
+    ) -> Result<Vec<f32>, MfError> {
+        self.single_token_with_hidden_sites(
+            token_id,
+            position,
+            session,
+            target_layer_ids,
+            Some(post_block_dst),
+            Some(pre_ffn_dst),
+            interventions,
+            false,
+            true,
+        )
+    }
+
+    /// Serial full-logit forward for ordinary dense and ordinary MoE models
+    /// with caller-ordered interventions after selected blocks. Captured
+    /// post-block residuals are written to `hidden_dst[k * H .. (k + 1) * H]`
+    /// for `target_layer_ids[k]`, in caller order.
+    ///
+    /// This deliberately uses the serial block encoders, including for MoE;
+    /// it does not route through concurrent, packed-prefill, or argmax-only
+    /// paths. An empty `interventions` slice is the serial post-block capture
+    /// path without intervention.
+    pub fn single_token_with_post_block_interventions(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        hidden_dst: &MetalTensor,
+        interventions: &[PostBlockIntervention<'_>],
+    ) -> Result<Vec<f32>, MfError> {
+        self.single_token_with_hidden_sites(
+            token_id,
+            position,
+            session,
+            target_layer_ids,
+            Some(hidden_dst),
+            None,
+            interventions,
+            true,
+            true,
+        )
+    }
+
+    /// Serial full-logit forward for ordinary dense and ordinary MoE models
+    /// with post-block interventions but no capture destination.
+    pub fn single_token_with_post_block_interventions_no_capture(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        interventions: &[PostBlockIntervention<'_>],
+    ) -> Result<Vec<f32>, MfError> {
+        self.single_token_with_hidden_sites(
+            token_id,
+            position,
+            session,
+            &[],
+            None,
+            None,
+            interventions,
+            true,
             true,
         )
     }
@@ -10403,6 +10493,8 @@ impl<'a> MetalForward<'a> {
             target_layer_ids,
             Some(post_block_dst),
             Some(pre_ffn_dst),
+            &[],
+            false,
             false,
         )?;
         Ok(())
@@ -10417,10 +10509,12 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         post_block_dst: Option<&MetalTensor>,
         pre_ffn_dst: Option<&MetalTensor>,
+        interventions: &[PostBlockIntervention<'_>],
+        allow_moe: bool,
         run_tail: bool,
     ) -> Result<Vec<f32>, MfError> {
         session.ensure_usable()?;
-        if self.model.arch.kind == ArchKind::Moe {
+        if self.model.arch.kind == ArchKind::Moe && !allow_moe {
             return Err(MfError::UnsupportedMoe);
         }
         let arch = &self.model.arch;
@@ -10496,6 +10590,60 @@ impl<'a> MetalForward<'a> {
                 }));
             }
         }
+        for (op_index, intervention) in interventions.iter().enumerate() {
+            let (layer, coefficient) = match intervention {
+                PostBlockIntervention::Fixed {
+                    layer, coefficient, ..
+                }
+                | PostBlockIntervention::ResidualL2Relative {
+                    layer, coefficient, ..
+                }
+                | PostBlockIntervention::Projection {
+                    layer, coefficient, ..
+                }
+                | PostBlockIntervention::SourceToTarget {
+                    layer, coefficient, ..
+                } => (*layer, *coefficient),
+            };
+            if (layer as usize) >= self.model.blocks.len() {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "single_token_with_post_block_interventions",
+                    detail: format!(
+                        "intervention {op_index} layer {layer} >= n_layer {}",
+                        self.model.blocks.len()
+                    ),
+                }));
+            }
+            if !coefficient.is_finite() || coefficient == 0.0 {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "single_token_with_post_block_interventions",
+                    detail: format!(
+                        "intervention {op_index} coefficient must be finite and nonzero, got {coefficient}"
+                    ),
+                }));
+            }
+            match intervention {
+                PostBlockIntervention::Fixed { direction, .. }
+                | PostBlockIntervention::ResidualL2Relative { direction, .. }
+                | PostBlockIntervention::Projection { direction, .. } => {
+                    validate_post_block_intervention_tensor(
+                        session,
+                        direction,
+                        h,
+                        op_index,
+                        "direction",
+                    )?;
+                }
+                PostBlockIntervention::SourceToTarget { source, target, .. } => {
+                    validate_post_block_intervention_tensor(
+                        session, source, h, op_index, "source",
+                    )?;
+                    validate_post_block_intervention_tensor(
+                        session, target, h, op_index, "target",
+                    )?;
+                }
+            }
+        }
 
         // Stage token id.
         unsafe {
@@ -10542,16 +10690,43 @@ impl<'a> MetalForward<'a> {
             let pre_ffn_capture = pre_ffn_dst
                 .filter(|_| !pre_ffn_offsets.is_empty())
                 .map(|destination| (destination, pre_ffn_offsets.as_slice()));
-            self.encode_block_impl(
-                &enc,
-                il,
-                block,
-                &mut gdn_idx,
-                &mut attn_idx,
-                position,
-                session,
-                pre_ffn_capture,
-            )?;
+            if self.model.arch.kind == ArchKind::Moe {
+                let slot = match block {
+                    MetalBlock::Gdn(_) => {
+                        let slot = MixerSlot::Gdn(gdn_idx);
+                        gdn_idx += 1;
+                        slot
+                    }
+                    MetalBlock::Attn(_) => {
+                        let slot = MixerSlot::Attn(attn_idx);
+                        attn_idx += 1;
+                        slot
+                    }
+                };
+                self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
+            } else {
+                self.encode_block_impl(
+                    &enc,
+                    il,
+                    block,
+                    &mut gdn_idx,
+                    &mut attn_idx,
+                    position,
+                    session,
+                    pre_ffn_capture,
+                )?;
+            }
+            for intervention in interventions.iter().filter(|intervention| {
+                let layer = match intervention {
+                    PostBlockIntervention::Fixed { layer, .. }
+                    | PostBlockIntervention::ResidualL2Relative { layer, .. }
+                    | PostBlockIntervention::Projection { layer, .. }
+                    | PostBlockIntervention::SourceToTarget { layer, .. } => *layer,
+                };
+                layer as usize == il
+            }) {
+                encode_post_block_intervention_f32(self.ctx, &enc, &session.x, intervention)?;
+            }
             // Capture at any (possibly multiple) target_layer_ids slot
             // matching this block. Scatters run inline with the rest of
             // the command buffer; reads s.x BEFORE the next block writes
@@ -13441,6 +13616,55 @@ impl<'a> MetalForward<'a> {
         encode_mat_vec_dispatch(self.ctx, enc, &ab.o, &s.attn_o, &s.mixer_out, q_dim, h)?;
         Ok(())
     }
+}
+
+fn validate_post_block_intervention_tensor(
+    session: &MetalSession,
+    tensor: &MetalTensor,
+    hidden_size: usize,
+    op_index: usize,
+    role: &str,
+) -> Result<(), MfError> {
+    let bytes = hidden_size
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_with_post_block_interventions",
+                detail: format!("intervention {op_index} {role} byte count overflow"),
+            })
+        })?;
+    let end = tensor.offset.checked_add(bytes as u64).ok_or_else(|| {
+        MfError::Metal(MetalError::BadShape {
+            kernel: "single_token_with_post_block_interventions",
+            detail: format!("intervention {op_index} {role} endpoint overflow"),
+        })
+    })?;
+    if tensor.dtype != GgmlType::F32
+        || tensor.shape != [hidden_size as u64]
+        || tensor.n_elements() as usize != hidden_size
+        || !tensor
+            .offset
+            .is_multiple_of(std::mem::align_of::<f32>() as u64)
+        || end > tensor.buffer.length() as u64
+    {
+        return Err(MfError::Metal(MetalError::BadShape {
+            kernel: "single_token_with_post_block_interventions",
+            detail: format!(
+                "intervention {op_index} {role} must be aligned F32 [{hidden_size}], got {:?} {:?} offset={} buffer_bytes={}",
+                tensor.dtype,
+                tensor.shape,
+                tensor.offset,
+                tensor.buffer.length()
+            ),
+        }));
+    }
+    if session.aliases_mutable_buffer(tensor) {
+        return Err(MfError::Metal(MetalError::BadShape {
+            kernel: "single_token_with_post_block_interventions",
+            detail: format!("intervention {op_index} {role} aliases mutable session storage"),
+        }));
+    }
+    Ok(())
 }
 
 fn validate_hidden_capture_destination(
@@ -19308,6 +19532,369 @@ mod tests {
                 "layer {layer} slot {slot}: captured FFN boundary error {max_abs}"
             );
         }
+    }
+
+    #[test]
+    fn dense_fixed_add_seam_is_bounded_and_ordered() {
+        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[dense-fixed-add] skipped - fixture missing");
+            return;
+        }
+        let Some(context) = metal_test_context() else {
+            return;
+        };
+        let gguf = GgufFile::open(model_path).expect("open");
+        let model = Model::from_gguf(&gguf).expect("load");
+        let metal_model = MetalModel::load(&context, &gguf, &model).expect("metal load");
+        let forward = MetalForward::new(&context, &metal_model);
+        let hidden_size = model.arch.hidden_size as usize;
+        let target_layer = 5u32;
+        let coefficient = 0.25f32;
+        let direction_values: Vec<f32> = (0..hidden_size)
+            .map(|i| ((i * 13 + 7) % 29) as f32 / 14.0 - 1.0)
+            .collect();
+        let direction = MetalTensor::from_bytes(
+            &context,
+            bytemuck::cast_slice(&direction_values),
+            vec![hidden_size as u64],
+            GgmlType::F32,
+        )
+        .expect("direction");
+
+        let read_capture = |tensor: &MetalTensor| {
+            let mut values = vec![0.0f32; hidden_size];
+            unsafe {
+                let source = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize)
+                    .cast::<f32>();
+                std::ptr::copy_nonoverlapping(source, values.as_mut_ptr(), values.len());
+            }
+            values
+        };
+        let capture = || {
+            (
+                MetalTensor::zeros_f32(&context, vec![hidden_size as u64, 1]).unwrap(),
+                MetalTensor::zeros_f32(&context, vec![hidden_size as u64, 1]).unwrap(),
+            )
+        };
+        let assert_close = |label: &str, actual: &[f32], expected: &[f32], tolerance: f32| {
+            let max_abs = actual
+                .iter()
+                .zip(expected)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs <= tolerance,
+                "{label}: max|delta|={max_abs} > tolerance={tolerance}"
+            );
+        };
+
+        let mut baseline_session = MetalSession::fresh(&context, &metal_model, 16).unwrap();
+        let (baseline_pre_dst, baseline_post_dst) = capture();
+        let baseline_logits = forward
+            .single_token_with_dense_ffn_capture(
+                9419,
+                0,
+                &mut baseline_session,
+                &[target_layer],
+                &baseline_pre_dst,
+                &baseline_post_dst,
+            )
+            .expect("baseline forward");
+        let baseline_pre = read_capture(&baseline_pre_dst);
+        let baseline_post = read_capture(&baseline_post_dst);
+
+        let mut empty_session = MetalSession::fresh(&context, &metal_model, 16).unwrap();
+        let (empty_pre_dst, empty_post_dst) = capture();
+        let empty_logits = forward
+            .single_token_with_dense_ffn_capture_and_interventions(
+                9419,
+                0,
+                &mut empty_session,
+                &[target_layer],
+                &empty_pre_dst,
+                &empty_post_dst,
+                &[],
+            )
+            .expect("empty fixed-add forward");
+        let empty_pre = read_capture(&empty_pre_dst);
+        let empty_post = read_capture(&empty_post_dst);
+        assert_close("empty logits", &empty_logits, &baseline_logits, 1e-6);
+        assert_close("empty pre-target capture", &empty_pre, &baseline_pre, 1e-6);
+        assert_close(
+            "empty post-target capture",
+            &empty_post,
+            &baseline_post,
+            1e-6,
+        );
+
+        let fixed_then_projection = [
+            PostBlockIntervention::Fixed {
+                layer: target_layer,
+                direction: &direction,
+                coefficient,
+            },
+            PostBlockIntervention::Projection {
+                layer: target_layer,
+                direction: &direction,
+                coefficient: 0.5,
+            },
+        ];
+        let projection_then_fixed = [
+            PostBlockIntervention::Projection {
+                layer: target_layer,
+                direction: &direction,
+                coefficient: 0.5,
+            },
+            PostBlockIntervention::Fixed {
+                layer: target_layer,
+                direction: &direction,
+                coefficient,
+            },
+        ];
+        let mut ordered_session = MetalSession::fresh(&context, &metal_model, 16).unwrap();
+        let (ordered_pre_dst, ordered_post_dst) = capture();
+        let ordered_logits = forward
+            .single_token_with_dense_ffn_capture_and_interventions(
+                9419,
+                0,
+                &mut ordered_session,
+                &[target_layer],
+                &ordered_pre_dst,
+                &ordered_post_dst,
+                &fixed_then_projection,
+            )
+            .expect("fixed-then-projection forward");
+        let ordered_pre = read_capture(&ordered_pre_dst);
+        let ordered_post = read_capture(&ordered_post_dst);
+
+        let mut reversed_session = MetalSession::fresh(&context, &metal_model, 16).unwrap();
+        let (reversed_pre_dst, reversed_post_dst) = capture();
+        let reversed_logits = forward
+            .single_token_with_dense_ffn_capture_and_interventions(
+                9419,
+                0,
+                &mut reversed_session,
+                &[target_layer],
+                &reversed_pre_dst,
+                &reversed_post_dst,
+                &projection_then_fixed,
+            )
+            .expect("projection-then-fixed forward");
+        let reversed_pre = read_capture(&reversed_pre_dst);
+        let reversed_post = read_capture(&reversed_post_dst);
+        let baseline_dot: f32 = baseline_post
+            .iter()
+            .zip(&direction_values)
+            .map(|(x, direction)| x * direction)
+            .sum();
+        let projected_baseline: Vec<f32> = baseline_post
+            .iter()
+            .zip(&direction_values)
+            .map(|(x, direction)| *x - 0.5 * baseline_dot * direction)
+            .collect();
+        let fixed_baseline: Vec<f32> = baseline_post
+            .iter()
+            .zip(&direction_values)
+            .map(|(x, direction)| *x + coefficient * direction)
+            .collect();
+        let fixed_dot: f32 = fixed_baseline
+            .iter()
+            .zip(&direction_values)
+            .map(|(x, direction)| x * direction)
+            .sum();
+        let expected_ordered: Vec<f32> = fixed_baseline
+            .iter()
+            .zip(&direction_values)
+            .map(|(x, direction)| *x - 0.5 * fixed_dot * direction)
+            .collect();
+        let expected_reversed: Vec<f32> = projected_baseline
+            .iter()
+            .zip(&direction_values)
+            .map(|(x, direction)| *x + coefficient * direction)
+            .collect();
+
+        assert_close(
+            "ordered pre-target capture",
+            &ordered_pre,
+            &baseline_pre,
+            2e-6,
+        );
+        assert_close(
+            "reversed pre-target capture",
+            &reversed_pre,
+            &baseline_pre,
+            2e-6,
+        );
+        assert_close(
+            "fixed-then-projection target capture",
+            &ordered_post,
+            &expected_ordered,
+            2e-5,
+        );
+        assert_close(
+            "projection-then-fixed target capture",
+            &reversed_post,
+            &expected_reversed,
+            2e-5,
+        );
+        let max_order_delta = ordered_post
+            .iter()
+            .zip(&reversed_post)
+            .map(|(ordered, reversed)| (ordered - reversed).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_order_delta > 1e-5,
+            "intervention caller order was not observable: max|delta|={max_order_delta}"
+        );
+        assert!(
+            ordered_logits
+                .iter()
+                .chain(reversed_logits.iter())
+                .all(|value| value.is_finite()),
+            "ordered intervention logits contain NaN/Inf"
+        );
+        let max_logit_delta = ordered_logits
+            .iter()
+            .zip(&reversed_logits)
+            .map(|(ordered, reversed)| (ordered - reversed).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_logit_delta > 1e-4,
+            "intervention caller order did not change downstream logits: max|delta|={max_logit_delta}"
+        );
+    }
+
+    #[test]
+    fn ordinary_moe_serial_post_block_fixed_add_seam() {
+        let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[moe-fixed-add] skipped - fixture missing");
+            return;
+        }
+        let Some(context) = metal_test_context() else {
+            return;
+        };
+        let gguf = GgufFile::open(model_path).expect("open");
+        let model = Model::from_gguf(&gguf).expect("load");
+        assert_eq!(model.arch.kind, ArchKind::Moe);
+        let metal_model = MetalModel::load(&context, &gguf, &model).expect("metal load");
+        let forward = MetalForward::new(&context, &metal_model);
+        let hidden_size = model.arch.hidden_size as usize;
+        let target_layer = 5u32;
+        let target_layers = [target_layer - 1, target_layer];
+        let coefficient = 0.25f32;
+        let direction_values: Vec<f32> = (0..hidden_size)
+            .map(|i| ((i * 17 + 3) % 31) as f32 / 15.0 - 1.0)
+            .collect();
+        let direction = MetalTensor::from_bytes(
+            &context,
+            bytemuck::cast_slice(&direction_values),
+            vec![hidden_size as u64],
+            GgmlType::F32,
+        )
+        .expect("direction");
+        let read_capture = |tensor: &MetalTensor| {
+            let mut values = vec![0.0f32; hidden_size * target_layers.len()];
+            unsafe {
+                let source = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize)
+                    .cast::<f32>();
+                std::ptr::copy_nonoverlapping(source, values.as_mut_ptr(), values.len());
+            }
+            values
+        };
+        let assert_close = |label: &str, actual: &[f32], expected: &[f32], tolerance: f32| {
+            let max_abs = actual
+                .iter()
+                .zip(expected)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs <= tolerance,
+                "{label}: max|delta|={max_abs} > tolerance={tolerance}"
+            );
+        };
+
+        let mut baseline_session = MetalSession::fresh(&context, &metal_model, 4).unwrap();
+        let baseline_dst =
+            MetalTensor::zeros_f32(&context, vec![(hidden_size * target_layers.len()) as u64])
+                .unwrap();
+        let baseline_logits = forward
+            .single_token_with_post_block_interventions(
+                9419,
+                0,
+                &mut baseline_session,
+                &target_layers,
+                &baseline_dst,
+                &[],
+            )
+            .expect("ordinary MoE baseline forward");
+        let baseline_hidden = read_capture(&baseline_dst);
+
+        let mut intervention_session = MetalSession::fresh(&context, &metal_model, 4).unwrap();
+        let intervention_dst =
+            MetalTensor::zeros_f32(&context, vec![(hidden_size * target_layers.len()) as u64])
+                .unwrap();
+        let interventions = [PostBlockIntervention::Fixed {
+            layer: target_layer,
+            direction: &direction,
+            coefficient,
+        }];
+        let intervention_logits = forward
+            .single_token_with_post_block_interventions(
+                9419,
+                0,
+                &mut intervention_session,
+                &target_layers,
+                &intervention_dst,
+                &interventions,
+            )
+            .expect("ordinary MoE fixed-add forward");
+        let intervention_hidden = read_capture(&intervention_dst);
+        let expected_target: Vec<f32> = baseline_hidden[hidden_size..2 * hidden_size]
+            .iter()
+            .zip(&direction_values)
+            .map(|(baseline, direction)| *baseline + coefficient * direction)
+            .collect();
+
+        assert_close(
+            "MoE pre-target row",
+            &intervention_hidden[..hidden_size],
+            &baseline_hidden[..hidden_size],
+            2e-5,
+        );
+        assert_close(
+            "MoE fixed-add target row",
+            &intervention_hidden[hidden_size..2 * hidden_size],
+            &expected_target,
+            2e-5,
+        );
+        assert!(
+            baseline_logits
+                .iter()
+                .chain(intervention_logits.iter())
+                .all(|value| value.is_finite()),
+            "ordinary MoE logits contain NaN/Inf"
+        );
+        let max_logit_delta = intervention_logits
+            .iter()
+            .zip(&baseline_logits)
+            .map(|(intervention, baseline)| (intervention - baseline).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_logit_delta > 1e-4,
+            "MoE fixed addition did not change downstream logits: max|delta|={max_logit_delta}"
+        );
     }
 
     /// Same as `metal_gdn_block_matches_cpu` but for 27B-Q4_K_M block 0.

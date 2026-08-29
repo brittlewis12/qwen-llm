@@ -15452,6 +15452,167 @@ pub fn encode_axpy_f32(
     Ok(())
 }
 
+/// One post-block F32 residual intervention. The fixed variant uses the
+/// existing AXPY kernel; the remaining variants use one reduction/update
+/// dispatch and keep the residual entirely GPU-resident.
+#[derive(Clone, Copy)]
+pub enum PostBlockIntervention<'a> {
+    Fixed {
+        layer: u32,
+        direction: &'a MetalTensor,
+        coefficient: f32,
+    },
+    ResidualL2Relative {
+        layer: u32,
+        direction: &'a MetalTensor,
+        coefficient: f32,
+    },
+    Projection {
+        layer: u32,
+        direction: &'a MetalTensor,
+        coefficient: f32,
+    },
+    SourceToTarget {
+        layer: u32,
+        source: &'a MetalTensor,
+        target: &'a MetalTensor,
+        coefficient: f32,
+    },
+}
+
+/// Encode one post-block residual intervention without a CPU reduction or
+/// readback. The caller validates session aliasing and operation bounds;
+/// this low-level seam checks the F32 vector geometry needed by the kernel.
+pub fn encode_post_block_intervention_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    intervention: &PostBlockIntervention<'_>,
+) -> Result<(), MetalError> {
+    let n = x.n_elements() as usize;
+    if x.dtype != GgmlType::F32 || !x.is_writable() || n == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "post_block_intervention",
+            detail: format!(
+                "x must be nonempty writable F32, got {:?}/{}",
+                x.dtype,
+                x.n_elements()
+            ),
+        });
+    }
+    let vector_bytes =
+        n.checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "post_block_intervention",
+                detail: "vector byte count overflow".into(),
+            })?;
+    let check_vector = |name: &str, tensor: &MetalTensor| -> Result<(), MetalError> {
+        let end = tensor
+            .offset
+            .checked_add(vector_bytes as u64)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "post_block_intervention",
+                detail: format!("{name} endpoint overflow"),
+            })?;
+        if tensor.dtype != GgmlType::F32
+            || tensor.n_elements() as usize != n
+            || !tensor
+                .offset
+                .is_multiple_of(std::mem::align_of::<f32>() as u64)
+            || end > tensor.buffer.length() as u64
+        {
+            return Err(MetalError::BadShape {
+                kernel: "post_block_intervention",
+                detail: format!("{name} must be aligned F32 with {n} elements"),
+            });
+        }
+        Ok(())
+    };
+
+    let (kind, direction, source, target, coefficient) = match intervention {
+        PostBlockIntervention::Fixed {
+            direction,
+            coefficient,
+            ..
+        } => {
+            if !coefficient.is_finite() || *coefficient == 0.0 {
+                return Err(MetalError::BadShape {
+                    kernel: "post_block_intervention",
+                    detail: format!("coefficient must be finite and nonzero, got {coefficient}"),
+                });
+            }
+            check_vector("direction", direction)?;
+            return encode_axpy_f32(ctx, enc, direction, x, *coefficient);
+        }
+        PostBlockIntervention::ResidualL2Relative {
+            direction,
+            coefficient,
+            ..
+        } => (0u32, *direction, *direction, *direction, *coefficient),
+        PostBlockIntervention::Projection {
+            direction,
+            coefficient,
+            ..
+        } => (1u32, *direction, *direction, *direction, *coefficient),
+        PostBlockIntervention::SourceToTarget {
+            source,
+            target,
+            coefficient,
+            ..
+        } => (2u32, *source, *source, *target, *coefficient),
+    };
+    if !coefficient.is_finite() || coefficient == 0.0 {
+        return Err(MetalError::BadShape {
+            kernel: "post_block_intervention",
+            detail: format!("coefficient must be finite and nonzero, got {coefficient}"),
+        });
+    }
+    check_vector("direction/source", direction)?;
+    check_vector("source", source)?;
+    check_vector("target", target)?;
+    let n_u32 = u32::try_from(n).map_err(|_| MetalError::BadShape {
+        kernel: "post_block_intervention",
+        detail: format!("n={n} does not fit kernel arguments"),
+    })?;
+
+    let pso = ctx.pipeline("kernel_post_block_intervention_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        kind: u32,
+        coefficient: f32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n_u32,
+            kind,
+            coefficient,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, direction);
+    enc.set_tensor(3, source);
+    enc.set_tensor(4, target);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.set_threadgroup_memory(0, tg_threads * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_axpy_rowwise_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -29470,6 +29631,136 @@ mod tests {
                 None
             }
             Err(error) => panic!("Metal context: {error}"),
+        }
+    }
+
+    #[test]
+    fn post_block_interventions_match_f32_cpu_oracles_at_realistic_hidden_size() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const H: usize = 2_048;
+        let x_values: Vec<f32> = (0..H)
+            .map(|i| ((i * 19 + 5) % 257) as f32 / 128.0 - 1.0)
+            .collect();
+        let direction_values: Vec<f32> = (0..H)
+            .map(|i| ((i * 23 + 7) % 251) as f32 / 125.0 - 1.0)
+            .collect();
+        let source_values: Vec<f32> = (0..H)
+            .map(|i| ((i * 29 + 11) % 241) as f32 / 120.0 - 1.0)
+            .collect();
+        let target_values: Vec<f32> = (0..H)
+            .map(|i| ((i * 31 + 13) % 239) as f32 / 119.0 - 1.0)
+            .collect();
+        let direction = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&direction_values),
+            vec![H as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let source = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&source_values),
+            vec![H as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let target = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&target_values),
+            vec![H as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let run = |intervention: PostBlockIntervention<'_>| {
+            let x = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x_values),
+                vec![H as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_post_block_intervention_f32(&ctx, enc, &x, &intervention)
+            })
+            .unwrap();
+            tensor_f32_at_offset(&x)
+        };
+        let coefficient = 0.375f32;
+        let fixed = run(PostBlockIntervention::Fixed {
+            layer: 0,
+            direction: &direction,
+            coefficient,
+        });
+        let residual_l2 = run(PostBlockIntervention::ResidualL2Relative {
+            layer: 0,
+            direction: &direction,
+            coefficient,
+        });
+        let projection = run(PostBlockIntervention::Projection {
+            layer: 0,
+            direction: &direction,
+            coefficient,
+        });
+        let source_to_target = run(PostBlockIntervention::SourceToTarget {
+            layer: 0,
+            source: &source,
+            target: &target,
+            coefficient,
+        });
+        let x_l2 = x_values
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        let x_dot_direction: f32 = x_values
+            .iter()
+            .zip(&direction_values)
+            .map(|(x, direction)| x * direction)
+            .sum();
+        let x_dot_source: f32 = x_values
+            .iter()
+            .zip(&source_values)
+            .map(|(x, source)| x * source)
+            .sum();
+        let expected = [
+            x_values
+                .iter()
+                .zip(&direction_values)
+                .map(|(x, direction)| *x + coefficient * direction)
+                .collect::<Vec<_>>(),
+            x_values
+                .iter()
+                .zip(&direction_values)
+                .map(|(x, direction)| *x + coefficient * x_l2 * direction)
+                .collect::<Vec<_>>(),
+            x_values
+                .iter()
+                .zip(&direction_values)
+                .map(|(x, direction)| *x - coefficient * x_dot_direction * direction)
+                .collect::<Vec<_>>(),
+            x_values
+                .iter()
+                .zip(source_values.iter().zip(&target_values))
+                .map(|(x, (source, target))| *x + coefficient * x_dot_source * (target - source))
+                .collect::<Vec<_>>(),
+        ];
+        for (name, actual, expected) in [
+            ("fixed", fixed, &expected[0]),
+            ("residual-l2", residual_l2, &expected[1]),
+            ("projection", projection, &expected[2]),
+            ("source-to-target", source_to_target, &expected[3]),
+        ] {
+            let max_abs = actual
+                .iter()
+                .zip(expected)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs <= 2e-5,
+                "{name}: max|delta|={max_abs} exceeds F32 tolerance"
+            );
         }
     }
 

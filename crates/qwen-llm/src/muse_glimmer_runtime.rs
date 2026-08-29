@@ -4,9 +4,10 @@ use crate::gguf::GgufFile;
 use crate::metal::{MetalContext, MetalMemoryAdmission, evaluate_metal_memory_admission};
 use crate::muse_glimmer::MuseGlimmerConfig;
 use crate::muse_glimmer_lens::{
-    MuseGlimmerLensCapture, MuseGlimmerLensError, MuseGlimmerSelectedTokenCovectors,
-    muse_glimmer_selected_token_covectors,
+    MuseGlimmerLensCapture, MuseGlimmerLensError, MuseGlimmerLensRule,
+    MuseGlimmerSelectedTokenCovectors, muse_glimmer_selected_token_covectors,
 };
+use crate::muse_glimmer_lens_fit::MuseGlimmerOneBlockVjp;
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
 };
@@ -194,6 +195,21 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self
             .forward
             .capture_fresh_lens_prompt(tokens, target_block, &mut self.session)?)
+    }
+
+    /// Reverse one `[T,H]` cotangent through the selected full-attention block's
+    /// smooth F32 model-level replay. Capture diagnostics report drift from
+    /// production's F16 KV path; the VJP is intentionally not an STE through
+    /// that conversion.
+    pub fn lens_one_full_attention_block_vjp(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        target_cotangent: &[f32],
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerOneBlockVjp, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .lens_one_full_attention_block_vjp(capture, target_cotangent, rule)?)
     }
 
     pub fn prefill_with_command_checkpoint<F>(

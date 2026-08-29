@@ -15,7 +15,12 @@ use crate::metal::{
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
-use crate::muse_glimmer_lens::{MuseGlimmerLensCapture, validate_capture_request};
+use crate::muse_glimmer_lens::{
+    MuseGlimmerLensCapture, MuseGlimmerLensError, validate_capture_request,
+};
+use crate::muse_glimmer_lens_fit::{
+    MuseGlimmerOneBlockVjp, muse_glimmer_one_full_attention_block_vjp,
+};
 use crate::muse_glimmer_metal::{
     encode_muse_glimmer_logit_softcap_f32, encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
 };
@@ -626,6 +631,21 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             read_f32(&post_attention),
             read_f32(&post_block),
         ))
+    }
+
+    pub(crate) fn lens_one_full_attention_block_vjp(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        target_cotangent: &[f32],
+        rule: crate::muse_glimmer_lens::MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerOneBlockVjp, MuseGlimmerLensError> {
+        muse_glimmer_one_full_attention_block_vjp(
+            self.ctx,
+            &self.weights,
+            capture,
+            target_cotangent,
+            rule,
+        )
     }
 
     fn validate_token_and_session(

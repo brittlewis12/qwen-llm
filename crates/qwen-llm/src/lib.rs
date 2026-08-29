@@ -52,6 +52,7 @@ pub mod model_family;
 pub mod moe_batch16;
 pub mod muse_glimmer;
 pub mod muse_glimmer_lens;
+pub mod muse_glimmer_lens_fit;
 pub mod muse_glimmer_metal;
 pub mod muse_glimmer_prompt;
 pub mod muse_glimmer_residency;

@@ -194,7 +194,11 @@ impl MuseGlimmerSelectedTokenCovectors {
 #[derive(Debug, thiserror::Error)]
 pub enum MuseGlimmerLensError {
     #[error(transparent)]
+    Model(#[from] crate::muse_glimmer::MuseGlimmerError),
+    #[error(transparent)]
     Metal(#[from] MetalError),
+    #[error(transparent)]
+    Forward(#[from] crate::metal_forward::MfError),
     #[error(transparent)]
     Residency(#[from] MuseGlimmerResidencyError),
     #[error("invalid Muse Glimmer lens contract: {0}")]

@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Full-Shard Prefetch KEEP
+
+Status: retain `QWEN4EXP_FULL_SHARD_PREFETCH=1` as an explicit default-off
+whole-file option for the released three-shard asset. Do not enable it by
+default or infer a range warmer.
+
+- Source `e938a25` ran internal demand/prefetch/demand after targeted eviction
+  proved zero resident pages for every shard before every process.
+- Demand-paged first-pass wall averaged `22.731643 s`. Charging the complete
+  `13.241761 s` prefetch plus first-pass runtime gives `14.656168 s`, saving
+  `8.075475 s` or 35.53% and clearing both predeclared gates.
+- All `89,986,353,824` mapped bytes returned across 3/3 shards with zero skips;
+  the operation intentionally includes the 28.8 GB CPU PLE region. Process
+  telemetry attributes `89,975,398,400` physical-read bytes.
+- First/warm/profile GPU differs from the demand bracket by only
+  `-0.147%/+0.101%/+0.100%`. Complete timing, observer, raw-coverage, admission,
+  and output-digest gates pass.
+- Post-experiment cleanup removes the N=512/profile-only harness and charged
+  metric while retaining exact read validation and per-shard telemetry. The
+  option stays before load so admission sees page-cache pressure and fallback
+  cannot repeat it.
+- Already-warm files, larger sessions, smaller-memory systems, alternate
+  sharding, and default-on policy remain unqualified. Storage work closes here;
+  do not build a PLE-excluding or range-specific successor.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-full-shard-prefetch-n512/`.
+Adversarial review: `01a04de7-d66e-73f1-b3de-14ba60527c89`.
+
 ## 2026-08-29 - Flash-Next Internal SSD Cold Placement GO
 
 Status: retain the checksum-identical UD-Q3_K_XL asset on the internal SSD for

@@ -246,8 +246,8 @@ Generic packed selection first changes one cutoff pair at position 2,056/layer
 31 with a `4.344e-4` default-safe margin. This is ordinary E1 packed arithmetic
 propagation, not evidence of a block-boundary defect.
 
-The local implementation resurvey, bounded screens, and natural N=512 profile
-reshape the queue.
+The local implementation resurvey, bounded screens, natural N=512 profile, and
+closed cold-storage packet reshape the queue.
 Rapid/OMLX-style blocked packed recurrence is closed after an exact candidate
 regressed `5.967417 -> 6.117709 ms` at N=2,048. The exact two-dispatch
 MTPLX-style singleton middle is also closed: its 36-layer release leaf moved
@@ -261,28 +261,33 @@ GPU-equivalent N=512 throughput rises `445.58 -> 516.75 tok/s`; exact N=2,048
 remains qualified and every other width remains generic. The force-ranked lane
 is now:
 
-1. Run one default-off full-shard prefetch falsifier on the internal asset.
-   Targeted per-shard eviction plus external/internal/external established
-   `43.869198 -> 23.224459 s` first-pass wall while warm GPU stayed unchanged.
-   Bracket internal demand-page / forced-prefetch / internal demand-page, charge
-   prefetch inside first-pass wall, and require at least 20% plus 5 seconds of
-   improvement with warm observer acceptance. Kill storage source work on a
-   miss; do not build a range-specific warmer.
-2. Consider IQ3 gate/up only with a materially new same-work mechanism. Natural
-   N=512 gives it a 20.18% command ceiling, but the compact active-panel proposal
-   remains closed. Any new candidate must name reuse or work removal first, then
-   save at least 10% of the component and 1% of the command.
-3. Consider packed IQ4_NL down only as a same-work retile. Its N=512 ceiling is
-   13.14%; singleton row reuse and down-plus-sum do not transfer to the existing
-   grouped packed body without new evidence.
-4. Split bridge ownership only if existing labels can identify at least
+Internal placement first reduced cold first-pass wall
+`43.869198 -> 23.224459 s`. The subsequent internal demand/prefetch/demand
+packet charges the whole 89,986,353,824-byte read, including CPU PLE, and reduces
+`22.731643 -> 14.656168 s` while warm GPU remains unchanged. Retain only the
+explicit default-off three-shard option. Default-on policy, range warming, and
+further storage source work are closed.
+
+1. Source-screen block-local IQ3_XXS vector dequantization for packed routed
+   gate/up. The current packed helper invokes the scalar decoder 16 times where
+   an existing matrix helper demonstrates one block-local decode. Require exact
+   half-tile and grouped output, `<=4.857600 ms/layer`, and at least 1% command
+   improvement. If compiler output already performs the reuse, skip code and
+   advance directly to item 2; compact active panels and indirect IQ3 remain
+   closed.
+2. Consider packed IQ4_NL down only as an `M128xN16xK32` same-work retile. First
+   require the natural-route histogram to satisfy
+   `sum(ceil(count/16)) / (2 * sum(ceil(count/32))) <= 0.75`; then require exact
+   output, `<=3.164099 ms/layer`, and at least 1% command improvement. Singleton
+   row reuse and down-plus-sum do not transfer without new evidence.
+3. Split bridge ownership only if existing labels can identify at least
    `11.491 ms` of actually removable N=512 work. The 7.79% coarse bucket includes
    HC injection/combine and carries 1.51% representative overassignment; it is
    not a copy-only estimate.
-5. Keep selected packed QSA default-off and use only focused quant-native
+4. Keep selected packed QSA default-off and use only focused quant-native
    semantic checks that can change its disposition. Do not recreate a broad
    quality harness or wait on a roughly 360 GB BF16 checkpoint.
-6. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
+5. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
    the 31 omitted speculative tensors and atomic QSA/GDN/PLE state. Do not pursue
    K=2/K=3.
 

@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
+use qwen_llm::gguf::GgufFile;
+use qwen_llm::model_family::ModelFamily;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -62,6 +65,26 @@ const DEEPSEEK_V4_THINK_START: &str = "<think>";
 const DEEPSEEK_V4_THINK_END: &str = "</think>";
 const QWEN38_REASONING_EFFORT_XHIGH: &str = "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.";
 const QWEN38_REASONING_EFFORT_LOW: &str = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.";
+#[allow(dead_code)]
+const QWEN4EXP_CHAT_TEMPLATE_SHA256: [u8; 32] = [
+    0x12, 0x82, 0x7f, 0x24, 0xb7, 0x42, 0xea, 0x4e, 0x80, 0xcd, 0xc1, 0x2d, 0xbc, 0xf9, 0x62, 0x22,
+    0x27, 0x05, 0x6b, 0x9f, 0x79, 0x72, 0x52, 0xa3, 0x14, 0x92, 0x63, 0xd4, 0xf9, 0xaa, 0xad, 0xce,
+];
+
+#[allow(dead_code)]
+pub(crate) fn qwen4exp_chat_template_matches(template: &str) -> bool {
+    Sha256::digest(template.as_bytes()).as_slice() == QWEN4EXP_CHAT_TEMPLATE_SHA256
+}
+
+#[allow(dead_code)]
+pub(crate) fn supports_qwen4exp_prompt_protocol(family: ModelFamily, gguf: &GgufFile) -> bool {
+    family == ModelFamily::Qwen4Exp
+        && gguf.get_str("tokenizer.ggml.model") == Some("gpt2")
+        && gguf.get_str("tokenizer.ggml.pre") == Some("qwen35")
+        && gguf
+            .get_str("tokenizer.chat_template")
+            .is_some_and(qwen4exp_chat_template_matches)
+}
 /// Byte-exact "high" effort instruction from the 0731 release contract
 /// (vLLM `REASONING_EFFORT_PROMPTS["high"]` at `77434861`; identical bytes
 /// appeared as the max-tier text in the earlier two-tier encoders, e.g. the

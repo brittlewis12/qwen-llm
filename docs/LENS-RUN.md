@@ -151,6 +151,41 @@ an exact unique template `label`. `unit_l2` is required for residual-relative
 addition, projection, and source-to-target displacement. Fixed addition also
 accepts `as_stored`.
 
+### Flash-Next Native Hyper Direction
+
+Flash-Next uses an explicit raw direction source rather than pretending an
+ordinary J/R or template row has compatible coordinates:
+
+```json
+{
+  "version": 1,
+  "lenses": [],
+  "directions": [{
+    "id": "hyper",
+    "source": {
+      "kind": "native_hyper_f32",
+      "path": "direction.f32le",
+      "layer": 23
+    }
+  }],
+  "operations": [{
+    "id": "add",
+    "scope": {
+      "layers": {"kind": "values", "values": [23]},
+      "prefill": {"kind": "values", "values": [0]}
+    },
+    "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": 0.25}
+  }],
+  "readouts": []
+}
+```
+
+The file is exactly 10,240 little-endian F32 values in native
+`[branch, hidden] = [4, 2560]` flattened order. Values must be finite with
+nonzero norm; they are applied as stored with no normalization, lifting,
+padding, or branch replication. The direction is bound to one layer, and the
+operation must select exactly that layer.
+
 ## Coordinates
 
 - Layers are zero-based block indices at the post-block residual.
@@ -172,27 +207,30 @@ source_to_target:      x <- x + coefficient * dot(x, source) * (target - source)
 
 The output is one JSON object containing prompt and generated token IDs,
 decoded text, stop reason, reached operation sites, and requested live scores.
-A sampled stop token is reported but never fed back through a decode step.
+Flash runs also include bounded `native_hyper_captures`; each record identifies
+the native coordinate, `after_fixed_add` capture stage, shape, flattening,
+direction normalization, coefficient, token position, and 10,240 values. A
+sampled stop token is reported but never fed back through a decode step.
 
 ## Current Runtime
 
-`run` intentionally uses fresh serial token-major execution for ordinary Qwen
-dense and MoE runtimes so intervention schedules remain exact. Concurrent or
-speculative decode, prefix caching, and Flash-Next/qwen4exp are not selected
-silently. `trace-full` separately uses packed prefill for passive full-J prompt
-traces; live `run` consumes completed native selected-token J/R rows and
-workspace-template rows.
+`run` intentionally uses fresh serial token-major execution so intervention
+schedules remain exact. Ordinary dense and MoE runs consume completed native
+selected-token J/R rows and workspace-template rows. Flash-Next runs use only
+explicit native hyper directions. Concurrent or speculative decode and prefix
+caching are not selected silently. `trace-full` separately uses packed prefill
+for passive full-J prompt traces.
 
-## Flash-Next Library Seam
+## Flash-Next Capability Boundary
 
-Flash-Next/qwen4exp is not yet selected by `qwen-lens run`. Its serial runtime
-can now capture the persistent native hyper state after completed decoder layers
-1 through 47 and optionally apply one fixed F32 addition at that site. The
-direction is exactly `branch_count * hidden_size` values (10,240 for the current
-model) in the same flattened order as the capture. Execution order is fixed:
-add, capture, then let the next layer consume the modified state. Layer zero is
-excluded because PLE occurs inside the fused layers-zero-one transition.
+Flash-Next `run` supports one native fixed add and post-add capture per serial
+token event at completed decoder layers 1 through 47. Execution order is fixed:
+add, capture, then let the next layer consume the modified state. Plans fail if
+operations overlap at one token event or can emit more than 32 captures. Layer
+zero is excluded because PLE occurs inside the fused layers-zero-one transition.
 
-This is an architecture-specific foundation, not J/R-lens support: ordinary
-5,120-wide Qwen directions are incompatible, packed prefill is not instrumented,
-and no residual-relative metric or branch-lifting policy is implied.
+This is raw native-coordinate control, not Flash J/R/template-lens support.
+Ordinary 5,120-wide directions are incompatible; readouts, residual-relative
+addition, projection, source-to-target displacement, operation stacking, and
+packed prefill instrumentation remain unavailable for Flash. No residual metric
+or branch-lifting policy is implied.

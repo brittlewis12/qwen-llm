@@ -1,15 +1,21 @@
 use crate::messages::{
     Qwen38GenerationMode, Qwen38ReasoningEffort, QwenGenerationMode, parse_strict_messages_input,
     render_qwen_messages_prompt_with_generation, render_qwen38_messages_prompt_with_generation,
+    supports_qwen4exp_prompt_protocol,
 };
 use crate::template_lens::{TemplateLens, TemplateScore, TemplateVocabulary};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args};
 use objc2_metal::MTLBuffer;
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::metal::{MetalTensor, PostBlockIntervention};
+use qwen_llm::metal::{MetalContext, MetalTensor, PostBlockIntervention};
 use qwen_llm::model::ArchKind;
 use qwen_llm::model_family::ModelFamily;
+use qwen_llm::qwen4exp::Qwen4ExpConfig;
+use qwen_llm::qwen4exp_runtime::{
+    Qwen4ExpFixedHyperAdd, Qwen4ExpLoadedModel, Qwen4ExpPostLayerHyperRequest,
+    Qwen4ExpSessionCapacity, Qwen4ExpTextRunner,
+};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use qwen_llm::tensor::GgmlType;
@@ -26,6 +32,7 @@ const MAX_READOUTS: usize = 1024;
 const MAX_SELECTOR_VALUES: usize = 4096;
 const MAX_TOP_K: usize = 1024;
 const MAX_NEW_TOKENS: usize = 4096;
+const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 
 #[derive(Debug, Args)]
 #[command(group(
@@ -35,7 +42,7 @@ const MAX_NEW_TOKENS: usize = 4096;
         .args(["prompt", "token_ids", "messages"])
 ))]
 pub(crate) struct LensRunArgs {
-    /// Ordinary Qwen GGUF model using the dense or MoE runtime.
+    /// Ordinary Qwen or Qwen3.8-Flash-Next GGUF model.
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 
@@ -118,12 +125,67 @@ impl LensDefinition {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
+pub(crate) enum DirectionDefinition {
+    LensRow(LensRowDirectionDefinition),
+    NativeHyper(NativeHyperDirectionDefinition),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DirectionDefinition {
+pub(crate) struct LensRowDirectionDefinition {
     pub(crate) id: String,
     pub(crate) lens: String,
     pub(crate) row: DirectionRow,
     pub(crate) normalization: Normalization,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeHyperDirectionDefinition {
+    pub(crate) id: String,
+    pub(crate) source: NativeHyperDirectionSource,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum NativeHyperDirectionSource {
+    NativeHyperF32 { path: PathBuf, layer: u32 },
+}
+
+impl DirectionDefinition {
+    fn id(&self) -> &str {
+        match self {
+            Self::LensRow(direction) => &direction.id,
+            Self::NativeHyper(direction) => &direction.id,
+        }
+    }
+
+    fn lens_row(&self) -> Option<&LensRowDirectionDefinition> {
+        match self {
+            Self::LensRow(direction) => Some(direction),
+            Self::NativeHyper(_) => None,
+        }
+    }
+
+    fn native_hyper(&self) -> Option<&NativeHyperDirectionDefinition> {
+        match self {
+            Self::LensRow(_) => None,
+            Self::NativeHyper(direction) => Some(direction),
+        }
+    }
+
+    fn normalization(&self) -> Option<Normalization> {
+        self.lens_row().map(|direction| direction.normalization)
+    }
+}
+
+impl NativeHyperDirectionSource {
+    fn path_and_layer(&self) -> (&Path, u32) {
+        match self {
+            Self::NativeHyperF32 { path, layer } => (path, *layer),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -308,6 +370,8 @@ struct RunOutput {
     stop_reason: String,
     operation_applications: Vec<OperationApplication>,
     live_readouts: Vec<LiveReadout>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    native_hyper_captures: Vec<NativeHyperCapture>,
 }
 
 #[derive(Debug, Serialize)]
@@ -316,6 +380,22 @@ struct OperationApplication {
     layer: u32,
     phase: &'static str,
     index: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeHyperCapture {
+    operation_id: String,
+    layer: u32,
+    phase: &'static str,
+    index: usize,
+    position: usize,
+    coordinate: &'static str,
+    capture_stage: &'static str,
+    shape: [usize; 2],
+    flattening: &'static str,
+    direction_normalization: &'static str,
+    coefficient: f32,
+    values: Vec<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -376,6 +456,19 @@ struct ExecutionPlan {
     capture: Option<MetalTensor>,
 }
 
+struct PreparedNativeHyperDirection {
+    layer: u32,
+    values: Vec<f32>,
+}
+
+struct Qwen4ExpExecutionPlan {
+    plan: LensPlan,
+    directions: HashMap<String, PreparedNativeHyperDirection>,
+    operation_layers: HashMap<String, u32>,
+    branch_count: usize,
+    hidden_size: usize,
+}
+
 pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     ensure!(
         args.max_new_tokens > 0 && args.max_new_tokens <= MAX_NEW_TOKENS,
@@ -400,13 +493,21 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     validate_plan(&plan)?;
     let plan_dir = plan_path.parent().unwrap_or_else(|| Path::new("."));
 
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
+    if family == ModelFamily::Qwen4Exp {
+        return run_qwen4exp(&args, plan, plan_dir, gguf);
+    }
+    validate_ordinary_plan(&plan)?;
+
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
-        .load_model(&args.model)
+        .load_opened_gguf(gguf, args.model.clone())
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_runtime(&loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
     let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
-    let prompt_token_ids = input_token_ids(&args, &loaded.gguf(), &tokenizer)?;
+    let prompt_token_ids = input_token_ids(&args, family, &loaded.gguf(), &tokenizer)?;
     ensure!(
         !prompt_token_ids.is_empty(),
         "prompt must encode to at least one token"
@@ -486,9 +587,353 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         stop_reason,
         operation_applications,
         live_readouts,
+        native_hyper_captures: Vec::new(),
     };
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
+}
+
+fn run_qwen4exp(args: &LensRunArgs, plan: LensPlan, plan_dir: &Path, gguf: GgufFile) -> Result<()> {
+    let config = Qwen4ExpConfig::from_gguf(&gguf).context("bind Flash-Next model geometry")?;
+    ensure!(
+        config == Qwen4ExpConfig::flash_next_reference(),
+        "qwen-lens run requires the released Flash-Next architecture contract"
+    );
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load Flash-Next tokenizer")?;
+    ensure!(
+        tokenizer.n_vocab() == config.vocab_size,
+        "Flash-Next tokenizer vocabulary {} differs from model {}",
+        tokenizer.n_vocab(),
+        config.vocab_size
+    );
+    let prompt_token_ids = input_token_ids(args, ModelFamily::Qwen4Exp, &gguf, &tokenizer)?;
+    ensure!(
+        !prompt_token_ids.is_empty(),
+        "prompt must encode to at least one token"
+    );
+    ensure!(
+        prompt_token_ids.len() <= MAX_NEW_TOKENS * 16,
+        "prompt is too long for the bounded Lens runner"
+    );
+    ensure!(
+        prompt_token_ids
+            .iter()
+            .all(|&token| token >= 0 && (token as u32) < config.vocab_size),
+        "prompt contains a token outside the Flash-Next vocabulary"
+    );
+    validate_reachable_scopes(&plan, prompt_token_ids.len(), args.max_new_tokens)?;
+    let execution = prepare_qwen4exp_execution_plan(plan, plan_dir, &config)?;
+    validate_qwen4exp_event_schedule(&execution, prompt_token_ids.len(), args.max_new_tokens)?;
+
+    let required_forwards = prompt_token_ids
+        .len()
+        .checked_add(args.max_new_tokens.saturating_sub(1))
+        .context("Flash-Next forward count overflow")?;
+    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, required_forwards)
+        .context("derive Flash-Next serial session capacity")?;
+    let stop_tokens = gguf
+        .stop_token_ids()
+        .context("load Flash-Next stop tokens")?;
+    ensure!(
+        stop_tokens
+            .iter()
+            .all(|&token| token >= 0 && (token as u32) < config.vocab_size),
+        "Flash-Next stop-token metadata contains an invalid token"
+    );
+    let stop_tokens = stop_tokens.into_iter().collect::<HashSet<_>>();
+
+    let context = MetalContext::new().context("initialize Metal for Flash-Next Lens run")?;
+    let mut loaded = Qwen4ExpLoadedModel::load(&context, &gguf, capacity)
+        .context("load Flash-Next serial Lens session")?;
+    let mut runner = loaded
+        .create_runner(&context)
+        .context("bind Flash-Next serial Lens runner")?;
+    let mut sampler = Sampler::new(SamplingConfig {
+        temperature: args.temperature,
+        top_k: args.top_k,
+        top_p: args.top_p,
+        min_p: args.min_p,
+        seed: args.seed,
+    })?;
+    let mut operation_applications = Vec::new();
+    let mut native_hyper_captures = Vec::new();
+    let mut logits = Vec::new();
+    for (index, &token) in prompt_token_ids.iter().enumerate() {
+        logits = qwen4exp_forward_event(
+            &execution,
+            &mut runner,
+            u32::try_from(token).context("Flash-Next prompt token is negative")?,
+            Phase::Prefill(index),
+            &mut operation_applications,
+            &mut native_hyper_captures,
+        )?;
+    }
+
+    let mut generated_token_ids = Vec::new();
+    let mut stop_reason = String::from("max_new_tokens");
+    for generated_index in 0..args.max_new_tokens {
+        let sampled = sampler.sample(&logits)?.token;
+        generated_token_ids.push(sampled);
+        if stop_tokens.contains(&sampled) {
+            stop_reason = String::from("stop_token");
+            break;
+        }
+        if generated_index + 1 == args.max_new_tokens {
+            break;
+        }
+        logits = qwen4exp_forward_event(
+            &execution,
+            &mut runner,
+            u32::try_from(sampled).context("Flash-Next sampled a negative token")?,
+            Phase::Decode(generated_index),
+            &mut operation_applications,
+            &mut native_hyper_captures,
+        )?;
+    }
+
+    let output = RunOutput {
+        prompt_token_ids,
+        decoded_text: tokenizer.decode(&generated_token_ids),
+        generated_token_ids,
+        stop_reason,
+        operation_applications,
+        live_readouts: Vec::new(),
+        native_hyper_captures,
+    };
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+fn prepare_qwen4exp_execution_plan(
+    plan: LensPlan,
+    plan_dir: &Path,
+    config: &Qwen4ExpConfig,
+) -> Result<Qwen4ExpExecutionPlan> {
+    ensure!(
+        plan.lenses.is_empty(),
+        "Flash-Next Lens plans cannot use ordinary J/R or template lenses"
+    );
+    ensure!(
+        plan.readouts.is_empty(),
+        "Flash-Next live readouts require a real hyper-space lens and are not yet supported"
+    );
+    ensure!(
+        !plan.operations.is_empty(),
+        "Flash-Next Lens plans must declare at least one fixed-add operation"
+    );
+    ensure!(
+        plan.directions
+            .iter()
+            .all(|direction| direction.native_hyper().is_some()),
+        "Flash-Next Lens plans require native_hyper_f32 directions"
+    );
+    let branch_count = config.hyper_connection.count as usize;
+    let hidden_size = config.hidden_size as usize;
+    let hyper_width = branch_count
+        .checked_mul(hidden_size)
+        .context("Flash-Next hyper width overflow")?;
+    let mut directions = HashMap::new();
+    for definition in &plan.directions {
+        let definition = definition
+            .native_hyper()
+            .context("Flash-Next direction is not native hyper")?;
+        let (path, layer) = definition.source.path_and_layer();
+        ensure!(
+            layer > 0 && layer < config.layer_count,
+            "native hyper direction {} layer {} is outside 1..{}",
+            definition.id,
+            layer,
+            config.layer_count
+        );
+        let values = load_native_hyper_direction(
+            &resolve_plan_path(plan_dir, path),
+            hyper_width,
+            &definition.id,
+        )?;
+        ensure!(
+            directions
+                .insert(
+                    definition.id.clone(),
+                    PreparedNativeHyperDirection { layer, values }
+                )
+                .is_none()
+        );
+    }
+
+    let mut operation_layers = HashMap::new();
+    for operation in &plan.operations {
+        let (direction_id, coefficient) = match &operation.action {
+            Action::FixedAdd {
+                direction,
+                coefficient,
+            } => (direction.as_str(), *coefficient),
+            _ => bail!(
+                "Flash-Next operation {} supports fixed_add only",
+                operation.id
+            ),
+        };
+        let direction = directions.get(direction_id).with_context(|| {
+            format!(
+                "Flash-Next operation {} has no native hyper direction {}",
+                operation.id, direction_id
+            )
+        })?;
+        let layers = operation.scope.layers.expand(
+            config.layer_count,
+            &format!("operation {} layers", operation.id),
+        )?;
+        ensure!(
+            layers.len() == 1 && layers[0] == direction.layer,
+            "Flash-Next operation {} must select only direction {} layer {}",
+            operation.id,
+            direction_id,
+            direction.layer
+        );
+        ensure!(
+            direction
+                .values
+                .iter()
+                .all(|value| (*value * coefficient).is_finite()),
+            "Flash-Next operation {} coefficient overflows its direction",
+            operation.id
+        );
+        operation_layers.insert(operation.id.clone(), direction.layer);
+    }
+    Ok(Qwen4ExpExecutionPlan {
+        plan,
+        directions,
+        operation_layers,
+        branch_count,
+        hidden_size,
+    })
+}
+
+fn load_native_hyper_direction(path: &Path, width: usize, id: &str) -> Result<Vec<f32>> {
+    let expected_bytes = width
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("native hyper direction byte count overflow")?;
+    let bytes = super::read_regular_file_exact(path, expected_bytes)
+        .with_context(|| format!("read native hyper direction {id} from {}", path.display()))?;
+    let values = bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    normalize_direction(values, Normalization::AsStored, id)
+}
+
+fn validate_qwen4exp_event_schedule(
+    execution: &Qwen4ExpExecutionPlan,
+    prompt_len: usize,
+    max_new_tokens: usize,
+) -> Result<()> {
+    let mut capture_count = 0usize;
+    for index in 0..prompt_len {
+        if qwen4exp_matching_operation(execution, Phase::Prefill(index))?.is_some() {
+            capture_count += 1;
+        }
+    }
+    for index in 0..max_new_tokens.saturating_sub(1) {
+        if qwen4exp_matching_operation(execution, Phase::Decode(index))?.is_some() {
+            capture_count += 1;
+        }
+    }
+    ensure!(
+        capture_count <= MAX_NATIVE_HYPER_CAPTURES,
+        "Flash-Next plan can emit {capture_count} native hyper captures, maximum is {MAX_NATIVE_HYPER_CAPTURES}"
+    );
+    Ok(())
+}
+
+fn qwen4exp_matching_operation<'a>(
+    execution: &'a Qwen4ExpExecutionPlan,
+    phase: Phase,
+) -> Result<Option<(&'a OperationDefinition, u32)>> {
+    let mut matched = None;
+    for operation in &execution.plan.operations {
+        let layer = execution.operation_layers[&operation.id];
+        if !scope_matches(&operation.scope, phase, layer)? {
+            continue;
+        }
+        ensure!(
+            matched.is_none(),
+            "Flash-Next operations overlap at {} index {}; one native hyper probe is supported per token event",
+            phase.label(),
+            phase.index()
+        );
+        matched = Some((operation, layer));
+    }
+    Ok(matched)
+}
+
+fn qwen4exp_forward_event(
+    execution: &Qwen4ExpExecutionPlan,
+    runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+    token: u32,
+    phase: Phase,
+    operation_applications: &mut Vec<OperationApplication>,
+    native_hyper_captures: &mut Vec<NativeHyperCapture>,
+) -> Result<Vec<f32>> {
+    let Some((operation, layer)) = qwen4exp_matching_operation(execution, phase)? else {
+        return Ok(runner
+            .forward_token(token)
+            .with_context(|| {
+                format!(
+                    "forward Flash-Next {} token {}",
+                    phase.label(),
+                    phase.index()
+                )
+            })?
+            .to_vec());
+    };
+    let (direction_id, coefficient) = match &operation.action {
+        Action::FixedAdd {
+            direction,
+            coefficient,
+        } => (direction, *coefficient),
+        _ => unreachable!("Flash-Next plan validation admits fixed_add only"),
+    };
+    let direction = &execution.directions[direction_id];
+    let capture = runner
+        .forward_token_with_post_layer_hyper_capture(
+            token,
+            Qwen4ExpPostLayerHyperRequest {
+                layer,
+                fixed_add: Some(Qwen4ExpFixedHyperAdd {
+                    direction: &direction.values,
+                    coefficient,
+                }),
+            },
+        )
+        .with_context(|| {
+            format!(
+                "apply Flash-Next operation {} at {} index {}",
+                operation.id,
+                phase.label(),
+                phase.index()
+            )
+        })?;
+    let logits = runner.logits()?.to_vec();
+    operation_applications.push(OperationApplication {
+        id: operation.id.clone(),
+        layer,
+        phase: phase.label(),
+        index: phase.index(),
+    });
+    native_hyper_captures.push(NativeHyperCapture {
+        operation_id: operation.id.clone(),
+        layer,
+        phase: phase.label(),
+        index: phase.index(),
+        position: capture.position,
+        coordinate: "qwen4exp_persistent_post_layer_hyper_state",
+        capture_stage: "after_fixed_add",
+        shape: [execution.branch_count, execution.hidden_size],
+        flattening: "branch_major_hidden_minor",
+        direction_normalization: "as_stored",
+        coefficient,
+        values: capture.values,
+    });
+    Ok(logits)
 }
 
 fn parse_plan_bytes(bytes: &[u8]) -> Result<LensPlan> {
@@ -501,8 +946,12 @@ fn parse_plan_bytes(bytes: &[u8]) -> Result<LensPlan> {
 fn validate_plan(plan: &LensPlan) -> Result<()> {
     ensure!(plan.version == 1, "Lens plan version must be 1");
     ensure!(
-        !plan.lenses.is_empty(),
-        "Lens plan must declare at least one lens"
+        !plan.lenses.is_empty()
+            || plan
+                .directions
+                .iter()
+                .any(|direction| direction.native_hyper().is_some()),
+        "Lens plan must declare at least one lens or native hyper direction"
     );
     ensure!(plan.lenses.len() <= MAX_LENSES, "too many lenses");
     ensure!(
@@ -516,7 +965,7 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
     ensure!(plan.readouts.len() <= MAX_READOUTS, "too many readouts");
     unique_ids(plan.lenses.iter().map(LensDefinition::id), "lens")?;
     unique_ids(
-        plan.directions.iter().map(|item| item.id.as_str()),
+        plan.directions.iter().map(DirectionDefinition::id),
         "direction",
     )?;
     unique_ids(
@@ -528,26 +977,30 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
     let direction_ids: HashSet<&str> = plan
         .directions
         .iter()
-        .map(|item| item.id.as_str())
+        .map(DirectionDefinition::id)
         .collect();
-    let direction_normalization: HashMap<&str, Normalization> = plan
+    let direction_normalization: HashMap<&str, Option<Normalization>> = plan
         .directions
         .iter()
-        .map(|direction| (direction.id.as_str(), direction.normalization))
+        .map(|direction| (direction.id(), direction.normalization()))
         .collect();
     for direction in &plan.directions {
-        ensure!(
-            lens_ids.contains(direction.lens.as_str()),
-            "direction {} references unknown lens {}",
-            direction.id,
-            direction.lens
-        );
-        ensure!(
-            direction.normalization == Normalization::AsStored
-                || direction.normalization == Normalization::UnitL2,
-            "direction {} has unsupported normalization",
-            direction.id
-        );
+        match direction {
+            DirectionDefinition::LensRow(direction) => ensure!(
+                lens_ids.contains(direction.lens.as_str()),
+                "direction {} references unknown lens {}",
+                direction.id,
+                direction.lens
+            ),
+            DirectionDefinition::NativeHyper(direction) => {
+                let (path, _) = direction.source.path_and_layer();
+                ensure!(
+                    !path.as_os_str().is_empty(),
+                    "native hyper direction {} path must not be empty",
+                    direction.id
+                );
+            }
+        }
     }
     for operation in &plan.operations {
         operation
@@ -568,12 +1021,16 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
         }
         if action_requires_unit_l2(&operation.action) {
             for direction in operation.action.direction_ids() {
-                ensure!(
-                    direction_normalization[direction] == Normalization::UnitL2,
-                    "operation {} requires unit_l2 direction {}",
-                    operation.id,
-                    direction
-                );
+                if let Some(normalization) =
+                    direction_normalization.get(direction).copied().flatten()
+                {
+                    ensure!(
+                        normalization == Normalization::UnitL2,
+                        "operation {} requires unit_l2 direction {}",
+                        operation.id,
+                        direction
+                    );
+                }
             }
         }
     }
@@ -605,6 +1062,20 @@ fn unique_ids<'a>(ids: impl Iterator<Item = &'a str>, kind: &str) -> Result<()> 
     Ok(())
 }
 
+fn validate_ordinary_plan(plan: &LensPlan) -> Result<()> {
+    ensure!(
+        !plan.lenses.is_empty(),
+        "ordinary Qwen Lens plans must declare at least one lens"
+    );
+    ensure!(
+        plan.directions
+            .iter()
+            .all(|direction| direction.lens_row().is_some()),
+        "native hyper directions are supported only by Flash-Next"
+    );
+    Ok(())
+}
+
 fn validate_runtime(gguf: &GgufFile, kind: ArchKind, n_layer: u32) -> Result<()> {
     let family = ModelFamily::detect(gguf).context("model has no supported Qwen architecture")?;
     ensure!(
@@ -619,7 +1090,12 @@ fn validate_runtime(gguf: &GgufFile, kind: ArchKind, n_layer: u32) -> Result<()>
     Ok(())
 }
 
-fn input_token_ids(args: &LensRunArgs, gguf: &GgufFile, tokenizer: &Tokenizer) -> Result<Vec<i32>> {
+fn input_token_ids(
+    args: &LensRunArgs,
+    family: ModelFamily,
+    gguf: &GgufFile,
+    tokenizer: &Tokenizer,
+) -> Result<Vec<i32>> {
     match (&args.prompt, &args.token_ids, &args.messages) {
         (Some(prompt), None, None) => Ok(tokenizer.encode(prompt, !args.no_special_tokens)?),
         (None, Some(token_ids), None) => {
@@ -636,7 +1112,16 @@ fn input_token_ids(args: &LensRunArgs, gguf: &GgufFile, tokenizer: &Tokenizer) -
             let raw = std::fs::read_to_string(path)
                 .with_context(|| format!("read messages {}", path.display()))?;
             let messages = parse_strict_messages_input(&raw, &path.display().to_string())?;
-            let rendered = if qwen38_prompt_protocol(gguf) {
+            let qwen38 = if family == ModelFamily::Qwen4Exp {
+                supports_qwen4exp_prompt_protocol(family, gguf)
+            } else {
+                qwen38_prompt_protocol(gguf)
+            };
+            ensure!(
+                family != ModelFamily::Qwen4Exp || qwen38,
+                "Flash-Next --messages requires the released qwen35 prompt protocol"
+            );
+            let rendered = if qwen38 {
                 render_qwen38_messages_prompt_with_generation(
                     &messages,
                     true,
@@ -760,11 +1245,14 @@ fn prepare_execution_plan(
     let direction_defs = plan
         .directions
         .iter()
-        .map(|direction| (direction.id.as_str(), direction))
+        .map(|direction| (direction.id(), direction))
         .collect::<HashMap<_, _>>();
     let mut directions = HashMap::new();
     for (direction_id, layers) in direction_layers {
         let definition = direction_defs[direction_id];
+        let definition = definition.lens_row().with_context(|| {
+            format!("ordinary runtime cannot load native hyper direction {direction_id}")
+        })?;
         let prepared_lens = &lenses[&definition.lens];
         let mut rows = BTreeMap::new();
         for layer in layers {
@@ -1327,6 +1815,34 @@ fn score_readout(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn temporary_direction_path() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "qwen-lens-native-hyper-{}-{}.f32le",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn native_hyper_plan(path: &Path, operations: serde_json::Value) -> LensPlan {
+        serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [],
+            "directions": [{
+                "id": "hyper",
+                "source": {
+                    "kind": "native_hyper_f32",
+                    "path": path,
+                    "layer": 23
+                }
+            }],
+            "operations": operations,
+            "readouts": []
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn plan_selectors_expand_sorted_unique_and_inclusive() {
@@ -1437,5 +1953,227 @@ mod tests {
         let values = (0..2 * 3 * 4).map(|value| value as f32).collect::<Vec<_>>();
         let offset = native_payload_offset(1, 2, 3, 4);
         assert_eq!(&values[offset..offset + 4], &[20.0, 21.0, 22.0, 23.0]);
+    }
+
+    #[test]
+    fn native_hyper_direction_syntax_is_additive_and_fail_closed() {
+        let native = native_hyper_plan(
+            Path::new("direction.f32le"),
+            json!([{
+                "id": "add",
+                "scope": {
+                    "layers": {"kind": "values", "values": [23]},
+                    "prefill": {"kind": "values", "values": [0]}
+                },
+                "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": 0.25}
+            }]),
+        );
+        validate_plan(&native).unwrap();
+        assert!(native.directions[0].native_hyper().is_some());
+        assert!(validate_ordinary_plan(&native).is_err());
+
+        let legacy: LensPlan = serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{"kind":"workspace_template","id":"t","weights":"w","labels":"l"}],
+            "directions": [{"id":"d","lens":"t","row":{"kind":"template_row_id","template_row_id":0},"normalization":"as_stored"}],
+            "operations": [],
+            "readouts": []
+        }))
+        .unwrap();
+        validate_plan(&legacy).unwrap();
+        validate_ordinary_plan(&legacy).unwrap();
+        assert!(legacy.directions[0].lens_row().is_some());
+
+        let mixed = serde_json::from_value::<LensPlan>(json!({
+            "version": 1,
+            "lenses": [],
+            "directions": [{
+                "id": "bad",
+                "lens": "x",
+                "row": {"kind": "token_id", "token_id": 1},
+                "normalization": "as_stored",
+                "source": {"kind": "native_hyper_f32", "path": "x", "layer": 23}
+            }],
+            "operations": [],
+            "readouts": []
+        }));
+        assert!(mixed.is_err());
+    }
+
+    #[test]
+    fn native_hyper_payload_requires_exact_finite_nonzero_f32() {
+        const WIDTH: usize = 10_240;
+        let path = temporary_direction_path();
+        let mut values = vec![0.0_f32; WIDTH];
+        values[17] = 1.0;
+        std::fs::write(&path, bytemuck::cast_slice(&values)).unwrap();
+        let loaded = load_native_hyper_direction(&path, WIDTH, "hyper").unwrap();
+        assert_eq!(loaded, values);
+
+        std::fs::write(&path, bytemuck::cast_slice(&values[..WIDTH - 1])).unwrap();
+        assert!(load_native_hyper_direction(&path, WIDTH, "hyper").is_err());
+
+        values.fill(0.0);
+        std::fs::write(&path, bytemuck::cast_slice(&values)).unwrap();
+        assert!(load_native_hyper_direction(&path, WIDTH, "hyper").is_err());
+
+        values[0] = f32::NAN;
+        std::fs::write(&path, bytemuck::cast_slice(&values)).unwrap();
+        assert!(load_native_hyper_direction(&path, WIDTH, "hyper").is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn flash_plan_rejects_wrong_actions_layers_overlap_and_capture_excess() {
+        const WIDTH: usize = 10_240;
+        let path = temporary_direction_path();
+        let mut values = vec![0.0_f32; WIDTH];
+        values[0] = 1.0;
+        std::fs::write(&path, bytemuck::cast_slice(&values)).unwrap();
+        let config = Qwen4ExpConfig::flash_next_reference();
+
+        let valid = native_hyper_plan(
+            &path,
+            json!([{
+                "id": "add",
+                "scope": {
+                    "layers": {"kind": "values", "values": [23]},
+                    "prefill": {"kind": "values", "values": [0]}
+                },
+                "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": 0.25}
+            }]),
+        );
+        validate_plan(&valid).unwrap();
+        let execution = prepare_qwen4exp_execution_plan(valid, Path::new("/"), &config).unwrap();
+        validate_qwen4exp_event_schedule(&execution, 1, 1).unwrap();
+        assert_eq!(execution.directions["hyper"].layer, 23);
+
+        let wrong_layer = native_hyper_plan(
+            &path,
+            json!([{
+                "id": "add",
+                "scope": {
+                    "layers": {"kind": "values", "values": [22]},
+                    "prefill": {"kind": "values", "values": [0]}
+                },
+                "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": 0.25}
+            }]),
+        );
+        assert!(prepare_qwen4exp_execution_plan(wrong_layer, Path::new("/"), &config).is_err());
+
+        let wrong_action = native_hyper_plan(
+            &path,
+            json!([{
+                "id": "project",
+                "scope": {
+                    "layers": {"kind": "values", "values": [23]},
+                    "prefill": {"kind": "values", "values": [0]}
+                },
+                "action": {"kind": "projection_ablate", "direction": "hyper", "coefficient": 1.0}
+            }]),
+        );
+        validate_plan(&wrong_action).unwrap();
+        assert!(prepare_qwen4exp_execution_plan(wrong_action, Path::new("/"), &config).is_err());
+
+        let overlapping = native_hyper_plan(
+            &path,
+            json!([
+                {
+                    "id": "first",
+                    "scope": {
+                        "layers": {"kind": "values", "values": [23]},
+                        "prefill": {"kind": "values", "values": [0]}
+                    },
+                    "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": 0.25}
+                },
+                {
+                    "id": "second",
+                    "scope": {
+                        "layers": {"kind": "values", "values": [23]},
+                        "prefill": {"kind": "values", "values": [0]}
+                    },
+                    "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": 0.5}
+                }
+            ]),
+        );
+        let execution =
+            prepare_qwen4exp_execution_plan(overlapping, Path::new("/"), &config).unwrap();
+        assert!(validate_qwen4exp_event_schedule(&execution, 1, 1).is_err());
+
+        let excessive = native_hyper_plan(
+            &path,
+            json!([{
+                "id": "many",
+                "scope": {
+                    "layers": {"kind": "values", "values": [23]},
+                    "prefill": {"kind": "all"}
+                },
+                "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": 0.25}
+            }]),
+        );
+        let execution =
+            prepare_qwen4exp_execution_plan(excessive, Path::new("/"), &config).unwrap();
+        validate_qwen4exp_event_schedule(&execution, 32, 1).unwrap();
+        assert!(validate_qwen4exp_event_schedule(&execution, 33, 1).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn flash_decode_schedule_and_capture_metadata_are_explicit() {
+        const WIDTH: usize = 10_240;
+        let path = temporary_direction_path();
+        let mut values = vec![0.0_f32; WIDTH];
+        values[0] = 1.0;
+        std::fs::write(&path, bytemuck::cast_slice(&values)).unwrap();
+        let plan = native_hyper_plan(
+            &path,
+            json!([{
+                "id": "decode-add",
+                "scope": {
+                    "layers": {"kind": "values", "values": [23]},
+                    "decode": {"kind": "values", "values": [0]}
+                },
+                "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": 0.25}
+            }]),
+        );
+        validate_reachable_scopes(&plan, 1, 2).unwrap();
+        let execution = prepare_qwen4exp_execution_plan(
+            plan,
+            Path::new("/"),
+            &Qwen4ExpConfig::flash_next_reference(),
+        )
+        .unwrap();
+        validate_qwen4exp_event_schedule(&execution, 1, 2).unwrap();
+        assert!(
+            qwen4exp_matching_operation(&execution, Phase::Prefill(0))
+                .unwrap()
+                .is_none()
+        );
+        let (operation, layer) = qwen4exp_matching_operation(&execution, Phase::Decode(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.id, "decode-add");
+        assert_eq!(layer, 23);
+
+        let capture = NativeHyperCapture {
+            operation_id: "decode-add".into(),
+            layer: 23,
+            phase: "decode",
+            index: 0,
+            position: 1,
+            coordinate: "qwen4exp_persistent_post_layer_hyper_state",
+            capture_stage: "after_fixed_add",
+            shape: [4, 2_560],
+            flattening: "branch_major_hidden_minor",
+            direction_normalization: "as_stored",
+            coefficient: 0.25,
+            values: vec![1.0, 2.0],
+        };
+        let encoded = serde_json::to_value(capture).unwrap();
+        assert_eq!(encoded["capture_stage"], "after_fixed_add");
+        assert_eq!(encoded["direction_normalization"], "as_stored");
+        assert!(encoded.get("normalization").is_none());
+        assert_eq!(encoded["shape"], json!([4, 2560]));
+        std::fs::remove_file(path).unwrap();
     }
 }

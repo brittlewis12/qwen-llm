@@ -28628,7 +28628,7 @@ mod tests {
         );
         encoder.end();
 
-        for n_query in [1usize, 32, 128, 2048, 4096] {
+        for n_query in [1usize, 32, 128, 512, 2048, 4096] {
             let x = (0..n_in * n_query).map(|_| sample()).collect::<Vec<_>>();
             let x_t = MetalTensor::from_bytes(
                 &ctx,

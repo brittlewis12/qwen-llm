@@ -1554,7 +1554,8 @@ mod tests {
         Qwen4ExpHcPackedProjectionArm, with_qwen4exp_hc_packed_projection_override,
     };
     use crate::qwen4exp_moe::{
-        Qwen4ExpIq3GateUpCaptureBanks, Qwen4ExpIq3GateUpCaptureRecord, Qwen4ExpIq3GateUpProbeArm,
+        PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS, Qwen4ExpIq3GateUpCaptureBanks,
+        Qwen4ExpIq3GateUpCaptureRecord, Qwen4ExpIq3GateUpProbeArm,
         encode_qwen4exp_iq3_gate_up_captured_arm, with_qwen4exp_iq3_gate_up_capture,
         with_qwen4exp_moe_iq3_fast_override, with_qwen4exp_moe_route_count_capture,
         with_qwen4exp_packed_router_e8p32_strict_override,
@@ -4145,6 +4146,18 @@ mod tests {
         let marker = tokenizer.encode("<|im_start|>", false).unwrap();
         assert_eq!(marker.len(), 1);
         let marker = u32::try_from(marker[0]).unwrap();
+        let natural_tokens = tokenizer
+            .encode(
+                include_str!(
+                    "../../../docs/bench/2026-08-29-qwen4exp-packed-natural-n512/prompt.txt"
+                ),
+                false,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|token| u32::try_from(token).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(natural_tokens.len(), 512);
         let long_tokens = vec![marker; 2_048];
         let ctx = MetalContext::new().expect("initialize Metal");
         assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
@@ -4160,6 +4173,7 @@ mod tests {
 
         for (label, tokens) in [
             ("N=18", short_tokens.as_slice()),
+            ("N=512 natural", natural_tokens.as_slice()),
             ("N=2048", long_tokens.as_slice()),
         ] {
             runner.reset().unwrap();
@@ -4254,7 +4268,11 @@ mod tests {
             assert_router_candidate_census(
                 label,
                 tokens.len(),
-                if tokens.len() == 2_048 { 48 } else { 0 },
+                if PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens.len()) {
+                    48
+                } else {
+                    0
+                },
                 &baseline.census,
                 &candidate.census,
             );

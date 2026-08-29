@@ -42,7 +42,15 @@ const MAX_PACKED_TOKENS: usize = 2_048;
 const PACKED_ROUTER_E8P32_STRICT_DEVICE: &str = "Apple M4 Max";
 const PACKED_ROUTER_E8P32_STRICT_HIDDEN: usize = 2_560;
 const PACKED_ROUTER_E8P32_STRICT_EXPERTS: usize = 512;
+const PACKED_ROUTER_E8P32_STRICT_N512_TOKENS: usize = 512;
 const PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS: usize = 2_048;
+pub(crate) const PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS: [usize; 2] = [
+    PACKED_ROUTER_E8P32_STRICT_N512_TOKENS,
+    PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
+];
+
+#[cfg(test)]
+const QWEN4EXP_IQ3_GATE_UP_CAPTURE_TOKENS: usize = 2_048;
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -167,6 +175,10 @@ crate::env_flag!(
     default_on configured_qwen4exp_packed_router_e8p32_strict_enabled,
     "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"
 );
+crate::env_flag!(
+    default_off configured_qwen4exp_packed_router_e8p32_strict_n512_enabled,
+    "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_N512"
+);
 
 #[cfg(test)]
 thread_local! {
@@ -241,6 +253,14 @@ fn qwen4exp_packed_router_e8p32_strict_enabled() -> bool {
     configured_qwen4exp_packed_router_e8p32_strict_enabled()
 }
 
+fn qwen4exp_packed_router_e8p32_strict_n512_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
+    configured_qwen4exp_packed_router_e8p32_strict_n512_enabled()
+}
+
 #[cfg(test)]
 pub(crate) fn with_qwen4exp_moe_route_count_capture<R>(
     output: &MetalTensor,
@@ -292,7 +312,7 @@ pub(crate) fn with_qwen4exp_iq3_gate_up_capture<R>(
     banks: &Qwen4ExpIq3GateUpCaptureBanks,
     f: impl FnOnce() -> R,
 ) -> (R, Vec<Qwen4ExpIq3GateUpCaptureRecord>) {
-    assert_eq!(banks.tokens, PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS);
+    assert_eq!(banks.tokens, QWEN4EXP_IQ3_GATE_UP_CAPTURE_TOKENS);
     assert_eq!(banks.inputs.dtype, GgmlType::F32);
     assert_eq!(banks.counts.dtype, GgmlType::I32);
     assert_eq!(banks.slots.dtype, GgmlType::I32);
@@ -420,7 +440,7 @@ fn packed_router_e8p32_strict_scope_qualified(
         && hidden_size == PACKED_ROUTER_E8P32_STRICT_HIDDEN
         && expert_count == PACKED_ROUTER_E8P32_STRICT_EXPERTS
         && router_dtype == GgmlType::F32
-        && tokens == PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS
+        && PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens)
 }
 
 fn packed_router_e8p32_strict_qualified(
@@ -430,6 +450,8 @@ fn packed_router_e8p32_strict_qualified(
     tokens: usize,
 ) -> bool {
     qwen4exp_packed_router_e8p32_strict_enabled()
+        && (tokens != PACKED_ROUTER_E8P32_STRICT_N512_TOKENS
+            || qwen4exp_packed_router_e8p32_strict_n512_enabled())
         && packed_router_e8p32_strict_scope_qualified(
             &ctx.device.name().to_string(),
             geometry.hidden_size,
@@ -2172,7 +2194,7 @@ pub(crate) fn encode_qwen4exp_iq3_gate_up_captured_arm(
         "captured IQ3 gate/up output",
         output,
         GgmlType::F32,
-        &[640, 10, PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS as u64],
+        &[640, 10, QWEN4EXP_IQ3_GATE_UP_CAPTURE_TOKENS as u64],
         true,
     )?;
     let (min_count, max_count) = arm.bounds();
@@ -3261,14 +3283,22 @@ mod tests {
         let qualified = |device, hidden, experts, dtype, tokens| {
             packed_router_e8p32_strict_scope_qualified(device, hidden, experts, dtype, tokens)
         };
-        assert!(PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS <= MAX_PACKED_TOKENS);
-        assert!(qualified(
-            PACKED_ROUTER_E8P32_STRICT_DEVICE,
-            PACKED_ROUTER_E8P32_STRICT_HIDDEN,
-            PACKED_ROUTER_E8P32_STRICT_EXPERTS,
-            GgmlType::F32,
-            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
-        ));
+        for &tokens in &PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS {
+            assert!(tokens <= MAX_PACKED_TOKENS);
+        }
+        for tokens in 1..=MAX_PACKED_TOKENS + 1 {
+            assert_eq!(
+                qualified(
+                    PACKED_ROUTER_E8P32_STRICT_DEVICE,
+                    PACKED_ROUTER_E8P32_STRICT_HIDDEN,
+                    PACKED_ROUTER_E8P32_STRICT_EXPERTS,
+                    GgmlType::F32,
+                    tokens,
+                ),
+                PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens),
+                "strict E8P32 token scope at N={tokens}",
+            );
+        }
         assert!(!qualified(
             "Apple M3 Max",
             PACKED_ROUTER_E8P32_STRICT_HIDDEN,
@@ -3297,22 +3327,6 @@ mod tests {
             GgmlType::F16,
             PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
         ));
-        for tokens in [
-            1,
-            17,
-            18,
-            19,
-            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS - 1,
-            PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS + 1,
-        ] {
-            assert!(!qualified(
-                PACKED_ROUTER_E8P32_STRICT_DEVICE,
-                PACKED_ROUTER_E8P32_STRICT_HIDDEN,
-                PACKED_ROUTER_E8P32_STRICT_EXPERTS,
-                GgmlType::F32,
-                tokens,
-            ));
-        }
     }
 
     #[test]
@@ -3354,7 +3368,7 @@ mod tests {
             vec![geometry.hidden_size as u64],
         );
 
-        for tokens in [PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS] {
+        for tokens in PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS {
             let input_values = (0..tokens * geometry.hidden_size)
                 .map(|index| {
                     let token = index / geometry.hidden_size;

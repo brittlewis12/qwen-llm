@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "decision": "go_exact_n512_strict_router_falsifier",
+  "source_commit": "d3fbfe7d2fabc956cf9ce7fdc00e9f1924e94cc0",
+  "device": "Apple M4 Max",
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "8bdc666649440e9bdc97e16f3f75782c98478ff5",
+    "quant": "UD-Q3_K_XL"
+  },
+  "prompt": {
+    "tokens": 512,
+    "add_special_tokens": false,
+    "bytes": 2365,
+    "sha256": "9ea0ba6ce8218c9a2bc6129e8865dc1c0f562fb0ad6e01903b58912f8b8a8fc7"
+  },
+  "sampling": {
+    "mode": "encoder_stage",
+    "fallback": "dispatch-boundary counters unsupported",
+    "sample_count": 128,
+    "sampled_span_ticks": 1150073375,
+    "raw_coverage": 1.0
+  },
+  "passes": {
+    "first": {
+      "wall_ms": 42828.182,
+      "gpu_ms": 1160.6368334032595,
+      "outside_gpu_ms": 41667.54491659674
+    },
+    "warm": {
+      "wall_ms": 1151.697,
+      "gpu_ms": 1149.0332083776593,
+      "outside_gpu_ms": 2.664125622340862
+    },
+    "profiled": {
+      "wall_ms": 1154.128,
+      "gpu_ms": 1150.0733748544008,
+      "outside_gpu_ms": 4.054792145599322,
+      "gpu_observer_ratio": 1.0009052536246625,
+      "wall_observer_ratio": 1.002111,
+      "throughput_tokens_per_second": 443.52
+    }
+  },
+  "representative_ticks": {
+    "gdn_layer_5": {
+      "coarse": 24254708,
+      "attention_hc": 853000,
+      "mixer": 6632000,
+      "mixer_bridge_combine": 975750,
+      "ffn_hc": 851041,
+      "moe": 13968041,
+      "moe_bridge_combine": 972583
+    },
+    "qsa_layer_7": {
+      "coarse": 23984291,
+      "attention_hc": 850291,
+      "mixer": 6455708,
+      "mixer_bridge_combine": 974042,
+      "ffn_hc": 848750,
+      "moe": 13881209,
+      "moe_bridge_combine": 972166
+    },
+    "moe_layer_5": {
+      "routing": 4449916,
+      "router": 3960750,
+      "topk": 78250,
+      "bucket": 410125,
+      "gate_up": 5397333,
+      "down": 3515666,
+      "reduce": 91167,
+      "shared_tail": 511958
+    }
+  },
+  "estimated_command_share": {
+    "coarse": {
+      "moe": 0.5577799781687842,
+      "gdn_mixer": 0.19606401200271242,
+      "qsa_mixer": 0.0673596117291212,
+      "hc": 0.06810512068414765,
+      "bridge_combine": 0.0779061753342477,
+      "bootstrap": 0.046911934640691946,
+      "tail": 0.0009655905650367743,
+      "representative_overassignment": 0.015092423124741794
+    },
+    "standard_moe_43_layers": {
+      "routing": 0.16637754786732628,
+      "router": 0.14808816002718087,
+      "topk": 0.002925682893928398,
+      "bucket": 0.01533413031146817,
+      "gate_up": 0.20180044512377307,
+      "down": 0.13144695050435368,
+      "reduce": 0.0034086355577095245,
+      "shared_tail": 0.019141556076802492
+    }
+  },
+  "strict_router_projection": {
+    "generic_baseline_ms_per_layer": 3.96075,
+    "projected_strict_ms_per_layer": 0.6500653756423301,
+    "projected_command_saving_ms": 142.3594388473798,
+    "component_keep_max_ms_per_layer": 3.564675,
+    "command_keep_max_gpu_ms": 1137.5428762938827
+  }
+}

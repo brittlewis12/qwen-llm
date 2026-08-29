@@ -1,0 +1,50 @@
+# Performance Roadmap
+
+Living cross-session performance plan for qwen-llm. Keep this file concise and
+current: update the ranking when new measurements change expected value, risk,
+or dependencies. Treat `docs/PLAN.md` as the architecture/history plan; this
+file is the active optimization queue.
+
+Working rule: optimize from causal performance hypotheses, not from measurement
+novelty. Every measurement task in this file should exist only to kill or
+confirm a concrete engine hypothesis.
+
+For append-only checkpoint history and exact current handoff state, see
+`docs/PERF-LOG.md`.
+
+## Current North Star
+
+Make one fresh process and one loaded model answer one fresh prompt as quickly,
+efficiently, lightly, and accurately as possible on the local M4 Max. Repeated
+process-cold CLI invocation is the primary deployment shape today. The inference
+contract remains serial batch size one, not aggregate serving throughput.
+
+The three co-primary latency objectives are:
+
+1. Process-cold first byte: process launch through first token delivery with an
+   explicit filesystem-cache contract.
+2. Model-ready fresh TTFT: prompt arrival through first token delivery.
+3. Warm serial inter-token latency: one live sequence with no request batching.
+
+Track peak session memory and quality beside all three objectives. Report
+process-cold first byte separately. For loaded-model balance, retain
+`sqrt(TTFT speedup * decode speedup)`, but never hide either phase in that
+scalar. Also report total request wall for named prompt/output lengths.
+
+Named request archetypes carry decision authority:
+
+- **Interactive short**: up to 512 prompt tokens and 128 output tokens.
+- **Agentic long-prompt**: 8K-32K prompt tokens and 256 output tokens.
+- **Generation-heavy**: up to 2K prompt tokens and 1024 output tokens.
+
+Use canonical real fixtures inside those shapes. Report phase gains, balanced
+gain, and total wall for every applicable archetype.
+
+Scope rules:
+
+- Internal prompt-token matmul width is part of BS=1 prefill and remains in scope.
+- Speculative future-token verification is intra-request width and remains in
+  scope. Greedy equivalence is not distribution exactness; stochastic exactness
+  requires correct target/drafter rejection sampling.
+- Multi-request batching, independent-stream concurrency, shared-prefix
+  multi-query execution, and asynchronous serving form

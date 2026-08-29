@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Natural N=512 Attribution
+
+Status: qualify the existing strict E8P32 router at exact N=512 before inventing
+another packed kernel. Keep cold first-touch separate from warm leverage.
+
+- Clean source `d3fbfe7` profiled the first 512 no-special-token IDs of the
+  roadmap as one first/warm/profile process. Warm/profile command GPU measured
+  `1149.033/1150.073 ms`; GPU/wall observer ratios were
+  `1.000905/1.002111`, raw timestamp coverage was `1.000000`, and endpoint
+  logits remained bit-exact across all three passes.
+- Profiled wall was `1154.128 ms`, or `443.52 tok/s`, with only `4.055 ms`
+  outside GPU. The natural mid-shape point therefore closes the N=18/N=2,048
+  attribution gap without identifying a host-side warm bottleneck.
+- Crediting the established 43 standard MoE layers assigns `14.81%` of command
+  GPU to the F32 router projection, `20.18%` to IQ3 gate/up, and `13.14%` to
+  IQ4_NL down. Top-k, bucket publication, ordered reduction, and the shared tail
+  remain `0.29%/1.53%/0.34%/1.91%` respectively.
+- The strict router is already bit-exact and its generic N=512 baseline scales
+  almost exactly one quarter of N=2,048. Applying the measured full-chunk
+  residual ratio projects `3.960750 -> 0.650065 ms/layer`, or about
+  `142.36 ms` and `12.38%` command-GPU saving.
+- First prefill took `42.828 s` wall with only `1.161 s` on GPU. That remains a
+  cold storage/paging observation pending the separate internal-SSD control; it
+  receives no warm-kernel credit.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-packed-natural-n512/`.
+Adversarial leverage session: `01a04de7-d66e-73f1-b3de-14ba60527c89`.
+
 ## 2026-08-29 - Flash-Next Complete GDN Middle KILL
 
 Status: close the MTPLX-style singleton GDN middle. No candidate kernel, flag,

@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "decision": "KILL_BELOW_IMPLEMENTATION_GATE",
+  "source": {
+    "base_commit": "cd6f4f068606cf649a280cf1628795d0e5c65bae",
+    "temporary_diff_sha256": "86c86a0286240dff5824820cab437cb74259ce5f7c785ca185f0e27fd38be1ba",
+    "control_executable_sha256": "b3b2cf67255a18ac46fcc4111f3fcb27edc8569a9654a1252b231e0c6c32cc02",
+    "split_executable_sha256": "1c259392e97c1157ce578206801540d5cea17178fd78da33b3312dc8963d017b",
+    "shared_metallib_sha256": "e5f9f5a4d9b3f4d67d184f6db4ed1ef90336a5fd7e3fb863df5032c2e6c5dcf7"
+  },
+  "protocol": {
+    "commit": "cd6f4f068606cf649a280cf1628795d0e5c65bae",
+    "path": "docs/PERF-ROADMAP.md",
+    "blob": "a36269e2f45aa89a53ba8a9954176c5cf33c3bf1",
+    "content_sha256": "a6f0046c41adebb019b6eabc7cfd317b3a5b003a4f3373bba1083e75aa1f7061",
+    "implementation_gate_ms": 9.671346,
+    "recorded_before_temporary_instrumentation": true
+  },
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "8bdc666649440e9bdc97e16f3f75782c98478ff5",
+    "quant": "UD-Q3_K_XL",
+    "storage": "internal SSD"
+  },
+  "prompt": {
+    "path": "docs/bench/2026-08-29-qwen4exp-packed-natural-n512/prompt.txt",
+    "tokens": 512,
+    "bytes": 2365,
+    "sha256": "9ea0ba6ce8218c9a2bc6129e8865dc1c0f562fb0ad6e01903b58912f8b8a8fc7",
+    "add_special_tokens": false
+  },
+  "geometry": {
+    "hidden": 2560,
+    "tokens": 512,
+    "bytes_per_copy": 5242880,
+    "aggregate_read_write_bytes_per_copy": 10485760,
+    "gdn_layers": 34,
+    "qsa_layers": 12,
+    "copies_per_layer": 2,
+    "projected_copy_count": 92,
+    "projected_payload_bytes": 482344960,
+    "projected_aggregate_read_write_bytes": 964689920
+  },
+  "zero_change_composite_upper_bound_ms": {
+    "source": "target/profiles/qwen4exp-iq4-down-m128-n16-screen-20260829",
+    "a1": 89.682338,
+    "b1": 89.802068,
+    "b2": 89.868012,
+    "a2": 89.303644,
+    "decision": "SURVIVES_TO_SPLIT"
+  },
+  "temporary_profile_plan": {
+    "control_block_stages": 6,
+    "split_block_stages": 8,
+    "control_sample_count": 128,
+    "split_sample_count": 136,
+    "control_span_count": 68,
+    "split_span_count": 72,
+    "ordinary_execution_changed": false,
+    "kernel_library_changed": false
+  },
+  "order": [
+    "A1_SIX_STAGE",
+    "B1_COPY_SPLIT",
+    "B2_COPY_SPLIT",
+    "A2_SIX_STAGE"
+  ],
+  "rows": [
+    {
+      "arm": "A1_SIX_STAGE",
+      "warm_command_gpu_ms": 966.8021250981838,
+      "profiled_command_gpu_ms": 968.0415831971914,
+      "sample_count": 128,
+      "span_count": 68,
+      "weighted_copy_combine_ms": 89.794776,
+      "observer_gpu_ratio": 1.0012820183849738,
+      "observer_wall_ratio": 1.002034,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "5907e8f978b89ae49929e06c5a64428a619e5360e9495cd552ad31d7507f3c9e"
+    },
+    {
+      "arm": "B1_COPY_SPLIT",
+      "warm_command_gpu_ms": 967.3131250310689,
+      "profiled_command_gpu_ms": 968.6791249550879,
+      "sample_count": 136,
+      "span_count": 72,
+      "copy_ms": {
+        "gdn_mixer": 0.0185,
+        "gdn_moe": 0.018541,
+        "qsa_mixer": 0.018625,
+        "qsa_moe": 0.018375
+      },
+      "raw_projected_copy_ms": 1.703394,
+      "weighted_split_composite_ms": 89.912186,
+      "interpolated_control_composite_ms": 89.902602,
+      "positive_topology_debit_ms": 0.009584,
+      "adjusted_projected_copy_ms": 1.69381,
+      "observer_gpu_ratio": 1.001412158988306,
+      "observer_wall_ratio": 1.002209,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "6657a45ac97220a0a8900efa66c45921c09e8d74f66bac817214dba53cc297af"
+    },
+    {
+      "arm": "B2_COPY_SPLIT",
+      "warm_command_gpu_ms": 966.833374928683,
+      "profiled_command_gpu_ms": 968.4583749622107,
+      "sample_count": 136,
+      "span_count": 72,
+      "copy_ms": {
+        "gdn_mixer": 0.018583,
+        "gdn_moe": 0.018375,
+        "qsa_mixer": 0.01825,
+        "qsa_moe": 0.0185
+      },
+      "raw_projected_copy_ms": 1.697572,
+      "weighted_split_composite_ms": 89.817712,
+      "interpolated_control_composite_ms": 90.010428,
+      "positive_topology_debit_ms": 0.0,
+      "adjusted_projected_copy_ms": 1.697572,
+      "observer_gpu_ratio": 1.001680744661558,
+      "observer_wall_ratio": 1.001726,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "2fca674aefb536aedd1ccaa05c834a942f3ebb24aa98c8ba80eded13d9d10fd4"
+    },
+    {
+      "arm": "A2_SIX_STAGE",
+      "warm_command_gpu_ms": 967.7991250064224,
+      "profiled_command_gpu_ms": 969.0515000838786,
+      "sample_count": 128,
+      "span_count": 68,
+      "weighted_copy_combine_ms": 90.118254,
+      "observer_gpu_ratio": 1.0012940444407283,
+      "observer_wall_ratio": 1.002012,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "dbf6a17a264153a63dd42f52b60b2de91fe20566fddb8f9f69e9bc604a291c1a"
+    }
+  ],
+  "gates": {
+    "b1_adjusted_projected_copy_ms": 1.69381,
+    "b2_adjusted_projected_copy_ms": 1.697572,
+    "required_each_ms": 9.671346,
+    "b1_gate_fraction": 0.17513694577776456,
+    "b2_gate_fraction": 0.17552592989641774,
+    "b1_pass": false,
+    "b2_pass": false,
+    "warm_control_drift_fraction": 0.00103123470910596,
+    "profiled_control_drift_fraction": 0.0010432577527834952,
+    "all_observers_accepted": true,
+    "all_raw_coverage_accepted": true,
+    "one_stdout_digest": true
+  },
+  "authority_limits": {
+    "stage_boundary_includes_split_topology": true,
+    "representative_layer_projection": true,
+    "external_semantic_oracle": false,
+    "implementation_savings_claimed": false
+  },
+  "disposition": {
+    "ownership_implementation_authorized": false,
+    "temporary_instrumentation_removed": true,
+    "temporary_executables_removed": true,
+    "cleanup_manifest": "cleanup.json"
+  },
+  "adversarial_review": {
+    "session": "01a04f60-7ce3-74f2-bc55-8378091e6d8f",
+    "disposition": "PASS"
+  }
+}

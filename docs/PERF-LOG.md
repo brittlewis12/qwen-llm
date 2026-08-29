@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Packed Bridge Copy Ceiling KILL
+
+Status: close packed bridge ownership work and advance to named GDN/QSA stage
+pricing. The ordinary six-stage profiler and execution topology are restored.
+
+- Existing copy-plus-combine spans projected an `89.30-89.87 ms` upper bound,
+  so a temporary profile-only split was needed to price the copies themselves.
+- Natural N=512 A1-B1-B2-A2 separated four representative copies while moving
+  only selected profiling plans from 128/68 to 136/72 samples/spans. All
+  observers, raw coverage, and generated-output equivalence gates passed.
+- Every 5 MiB copy measured `0.018250-0.018625 ms`. Weighting two copies across
+  34 GDN and 12 QSA layers projected `1.703394/1.697572 ms` in B1/B2.
+- Debiting positive split-topology inflation leaves `1.693810/1.697572 ms`,
+  only 17.5% of the preregistered `9.671346 ms` implementation gate and about
+  0.175% of profiled command GPU.
+- Six-stage warm/profiled control drift was 0.103%/0.104%. The temporary split
+  and binaries are removed, and the release profiler is rebuilt at six stages.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-bridge-copy-ceiling-kill/`.
+Adversarial review: `01a04f60-7ce3-74f2-bc55-8378091e6d8f`.
+
 ## 2026-08-29 - Flash-Next Paired IQ4_NL Decode KILL
 
 Status: remove the retile-private paired decoder and advance to the copy-only

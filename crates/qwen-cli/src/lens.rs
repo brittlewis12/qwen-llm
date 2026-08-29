@@ -19,6 +19,9 @@ mod full_lens;
 mod lens_run;
 #[allow(dead_code)]
 mod messages;
+mod muse_lens_artifact;
+mod muse_lens_fit;
+mod muse_lens_run;
 #[allow(dead_code)]
 mod template_lens;
 use full_lens::{
@@ -161,7 +164,7 @@ struct FitRowsArgs {
 
 #[derive(Debug, Args)]
 struct FitTokensArgs {
-    /// Dense Qwen3.8 GGUF model (the first shard is sufficient).
+    /// Dense Qwen3.8 or Muse Glimmer GGUF model (the first shard is sufficient).
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -169,7 +172,7 @@ struct FitTokensArgs {
     #[arg(long)]
     prompts: PathBuf,
 
-    /// New readout directory, or an incomplete directory with --resume.
+    /// New readout directory; ordinary Qwen also permits --resume.
     #[arg(long)]
     output: PathBuf,
 
@@ -184,7 +187,7 @@ struct FitTokensArgs {
     #[arg(long)]
     target_layer: u32,
 
-    /// Strictly increasing post-block source layers.
+    /// Post-block sources; Muse requires exactly target_layer-1.
     #[arg(long, value_delimiter = ',', required = true)]
     source_layers: Vec<u32>,
 
@@ -192,7 +195,7 @@ struct FitTokensArgs {
     #[arg(long, value_delimiter = ',', required = true)]
     token_ids: Vec<u32>,
 
-    /// Number of selected-token covectors propagated in one query-major batch.
+    /// Selected-token query batch (ordinary default 8; Muse requires explicit 1).
     #[arg(long, default_value_t = 8)]
     dim_batch: usize,
 
@@ -212,7 +215,7 @@ struct FitTokensArgs {
     #[arg(long)]
     no_special_tokens: bool,
 
-    /// Resume an incomplete, configuration-identical output directory.
+    /// Resume an incomplete ordinary-Qwen artifact; Muse rejects --resume.
     #[arg(long)]
     resume: bool,
 }
@@ -769,6 +772,11 @@ fn fit_rows(mut args: FitRowsArgs) -> Result<()> {
 }
 
 fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
+    let gguf = qwen_llm::gguf::GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    if muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
+        return muse_lens_fit::fit_tokens(args, gguf);
+    }
     validate_token_args(&args)?;
     validate_token_build_identity(
         env!("QWEN_BUILD_SOURCE_STATE"),
@@ -1343,7 +1351,7 @@ fn read_bounded_jsonl_record<R: BufRead>(
 
 fn prepare_prompts(
     requests: Vec<(usize, PromptRequest)>,
-    tokenizer: &qwen_llm::tokenizer::Tokenizer,
+    tokenizer: &impl qwen_llm::tokenizer::Tokenize,
     add_special_tokens: bool,
     max_tokens: usize,
     vocab_size: u32,

@@ -42,13 +42,17 @@ const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
         .args(["prompt", "token_ids", "messages"])
 ))]
 pub(crate) struct LensRunArgs {
-    /// Ordinary Qwen or Qwen3.8-Flash-Next GGUF model.
+    /// Ordinary Qwen, Qwen3.8-Flash-Next, or Muse Glimmer GGUF model.
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 
     /// Strict Lens plan JSON file.
     #[arg(long)]
     pub(crate) plan: PathBuf,
+
+    /// Private model-content identity cache (required for Muse Glimmer).
+    #[arg(long)]
+    pub(crate) identity_cache: Option<PathBuf>,
 
     /// Raw text prompt; tokenizer-configured specials are enabled by default.
     #[arg(long)]
@@ -495,6 +499,9 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
 
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
+    if crate::muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
+        return crate::muse_lens_run::run(&args, plan, plan_dir, gguf);
+    }
     let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
     if family == ModelFamily::Qwen4Exp {
         return run_qwen4exp(&args, plan, plan_dir, gguf);

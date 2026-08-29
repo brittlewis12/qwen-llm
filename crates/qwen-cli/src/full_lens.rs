@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, ensure};
 use blake3::Hasher as Blake3Hasher;
-use clap::Args;
+use clap::{ArgGroup, Args};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
+use qwen_llm::gguf::GgufFile;
+use qwen_llm::research::MAX_RESEARCH_PACKED_READOUT_POSITIONS;
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,6 +14,11 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::{CompressionMethod, ZipArchive};
+
+use crate::messages::{
+    Qwen38GenerationMode, Qwen38ReasoningEffort, parse_strict_messages_input,
+    render_qwen38_messages_prompt_with_generation,
+};
 
 use super::{
     FitMethod, ORIENTATION, SCHEMA_VERSION, TOKEN_ARTIFACT_MAX_BYTES, TOKEN_ID_ARGUMENT_MAX_COUNT,
@@ -139,6 +146,55 @@ pub(crate) struct ReadFullArgs {
     /// Optional immutable deterministic JSON result.
     #[arg(long)]
     output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("trace_full_input")
+        .required(true)
+        .multiple(false)
+        .args(["prompt", "token_ids", "messages"])
+))]
+pub(crate) struct TraceFullArgs {
+    /// Dense Qwen3.8 GGUF model used for packed capture, final norm, and LM head.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+
+    /// Directory produced by `qwen-lens import-full`.
+    #[arg(long)]
+    full_lens: PathBuf,
+
+    /// Raw text prompt; tokenizer-configured specials are enabled by default.
+    #[arg(long, allow_hyphen_values = true)]
+    prompt: Option<String>,
+
+    /// Literal comma-separated token IDs; no specials are added.
+    #[arg(long, value_delimiter = ',')]
+    token_ids: Option<Vec<i32>>,
+
+    /// Strict Qwen3.8 system/user/assistant message array or wrapper JSON.
+    #[arg(long)]
+    messages: Option<PathBuf>,
+
+    /// Disable tokenizer-configured special insertion for --prompt.
+    #[arg(
+        long,
+        requires = "prompt",
+        conflicts_with_all = ["token_ids", "messages"]
+    )]
+    no_special_tokens: bool,
+
+    /// Unique source layers in caller output order; defaults to every artifact layer.
+    #[arg(long, value_delimiter = ',')]
+    layers: Vec<u32>,
+
+    /// Full-vocabulary results per layer and position.
+    #[arg(long, default_value_t = 8)]
+    top_k: usize,
+
+    /// Reject inputs above this bound without truncating them.
+    #[arg(long, default_value_t = MAX_RESEARCH_PACKED_READOUT_POSITIONS)]
+    max_tokens: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -426,6 +482,104 @@ struct FullTokenScore {
     token_display_lossy: String,
     token_piece_hex: String,
     logit: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullDocument {
+    schema: &'static str,
+    schema_version: u32,
+    lens: TraceFullLens,
+    input_source: &'static str,
+    add_special_tokens: Option<bool>,
+    input_token_ids: Vec<i32>,
+    input_tokens: Vec<TraceFullInputToken>,
+    coordinates: TraceFullCoordinates,
+    selected_layers: Vec<u32>,
+    top_k: usize,
+    occurrence_definition: &'static str,
+    cells: Vec<TraceFullCell>,
+    timing: TraceFullTiming,
+    occurrences: TraceFullOccurrences,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullLens {
+    kind: &'static str,
+    method: String,
+    target_layer: u32,
+    source_site: String,
+    scoring: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullInputToken {
+    position: usize,
+    token_id: i32,
+    token_display_lossy: String,
+    token_piece_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullCoordinates {
+    source_layer: &'static str,
+    source_position: &'static str,
+    predicts_position: &'static str,
+    rank: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullCell {
+    source_layer: u32,
+    source_position: usize,
+    source_token_id: i32,
+    predicts_position: usize,
+    top_k: Vec<TraceFullTokenScore>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullTokenScore {
+    rank: usize,
+    token_id: u32,
+    token_display_lossy: String,
+    token_piece_hex: String,
+    logit: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullTiming {
+    packed_prefill_gpu_ms: f64,
+    packed_prefill_wall_ms: f64,
+    matrix_read_wall_ms: f64,
+    readout_gpu_ms: f64,
+    readout_command_wall_ms: f64,
+    trace_execution_wall_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullOccurrences {
+    global: Vec<TraceFullOccurrence>,
+    per_layer: Vec<TraceFullLayerOccurrences>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct TraceFullOccurrence {
+    token_id: u32,
+    count: usize,
+    top1_count: usize,
+    best_rank: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullLayerOccurrences {
+    source_layer: u32,
+    tokens: Vec<TraceFullOccurrence>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OccurrenceAccumulator {
+    count: usize,
+    top1_count: usize,
+    best_rank: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -1045,6 +1199,409 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     }
     println!("{}", String::from_utf8(bytes).unwrap());
     Ok(())
+}
+
+pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
+    validate_trace_full_args(&args)?;
+    let manifest_path = args.full_lens.join(FULL_MANIFEST_NAME);
+    let manifest: FullLensManifest = read_json_file(&manifest_path)?;
+    validate_trace_full_manifest(&manifest)?;
+    let layers = if args.layers.is_empty() {
+        manifest.transport.source_layers.clone()
+    } else {
+        args.layers.clone()
+    };
+    let mut unique_layers = BTreeSet::new();
+    ensure!(
+        !layers.is_empty()
+            && layers.iter().all(|layer| unique_layers.insert(*layer)
+                && manifest.transport.source_layers.contains(layer)),
+        "--layers must be unique source layers present in the full lens"
+    );
+
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let loaded = runtime
+        .load_model(&args.model)
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    let arch = loaded.arch();
+    ensure!(
+        arch.n_layer == manifest.model.n_layers
+            && arch.hidden_size == manifest.model.hidden_size
+            && arch.vocab_size == manifest.model.vocab_size,
+        "deployed model geometry does not match the published full lens"
+    );
+    ensure!(
+        arch == qwen_llm::model::QWEN3_27B,
+        "deployed model does not match the exact dense Qwen3 27B architecture contract"
+    );
+    let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
+    let (input_source, add_special_tokens, token_ids) =
+        match (&args.prompt, &args.token_ids, &args.messages) {
+            (Some(prompt), None, None) => (
+                "prompt",
+                Some(!args.no_special_tokens),
+                tokenizer
+                    .encode(prompt, !args.no_special_tokens)
+                    .context("tokenize trace-full prompt")?,
+            ),
+            (None, Some(token_ids), None) => {
+                ensure!(!token_ids.is_empty(), "--token-ids must not be empty");
+                ensure!(
+                    token_ids
+                        .iter()
+                        .all(|&token_id| token_id >= 0 && (token_id as u32) < arch.vocab_size),
+                    "--token-ids contains an ID outside vocabulary {}",
+                    arch.vocab_size
+                );
+                ("token_ids", None, token_ids.clone())
+            }
+            (None, None, Some(path)) => {
+                ensure!(
+                    qwen38_trace_prompt_protocol(&loaded.gguf()),
+                    "--messages requires Qwen3.8 tokenizer metadata"
+                );
+                let raw = std::fs::read_to_string(path)
+                    .with_context(|| format!("read messages {}", path.display()))?;
+                let messages = parse_strict_messages_input(&raw, &path.display().to_string())?;
+                let rendered = render_qwen38_messages_prompt_with_generation(
+                    &messages,
+                    true,
+                    Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
+                );
+                (
+                    "messages",
+                    Some(false),
+                    tokenizer
+                        .encode(&rendered, false)
+                        .context("tokenize exact Qwen3.8 messages prompt")?,
+                )
+            }
+            _ => anyhow::bail!("specify exactly one of --prompt, --token-ids, or --messages"),
+        };
+    ensure!(
+        !token_ids.is_empty(),
+        "trace-full input tokenized to no tokens"
+    );
+    ensure!(
+        token_ids.len() <= args.max_tokens,
+        "trace-full input has {} tokens, exceeding --max-tokens {}; input is not truncated",
+        token_ids.len(),
+        args.max_tokens
+    );
+    let input_tokens = token_ids
+        .iter()
+        .enumerate()
+        .map(|(position, &token_id)| {
+            let piece = tokenizer
+                .try_decode_piece_bytes_exact(token_id)
+                .with_context(|| format!("decode trace-full input token {token_id}"))?;
+            Ok(TraceFullInputToken {
+                position,
+                token_id,
+                token_display_lossy: String::from_utf8_lossy(piece).into_owned(),
+                token_piece_hex: hex(piece),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let payload_path = args.full_lens.join(&manifest.payload.path);
+    let (mut payload_file, payload_length) = open_regular_file(&payload_path)?;
+    ensure!(
+        payload_length as u64 == manifest.payload.byte_length,
+        "full lens payload length does not match its manifest"
+    );
+    let matrix_len = usize::try_from(MATRIX_BYTES).context("full-lens matrix byte count")?;
+    let mut matrix = Vec::new();
+    matrix
+        .try_reserve_exact(matrix_len)
+        .context("allocate reusable full-lens transport matrix")?;
+    matrix.resize(matrix_len, 0);
+
+    let trace_started = Instant::now();
+    let mut sequence = loaded
+        .create_sequence(SequenceConfig::new(token_ids.len()))
+        .context("create trace-full prompt sequence")?;
+    let mut research = loaded
+        .research_session(&mut sequence)
+        .context("open trace-full research session")?;
+    let capture = research
+        .forward_packed_post_block_capture(&token_ids, &layers)
+        .context("capture packed trace-full post-block residuals")?;
+    ensure!(
+        capture.start_position() == 0
+            && capture.token_ids() == token_ids.as_slice()
+            && capture.layer_ids() == layers.as_slice()
+            && capture.hidden_size() == arch.hidden_size as usize,
+        "packed trace-full capture metadata is inconsistent"
+    );
+
+    let mut cells = Vec::new();
+    cells
+        .try_reserve_exact(
+            layers
+                .len()
+                .checked_mul(token_ids.len())
+                .context("trace-full cell count overflow")?,
+        )
+        .context("allocate trace-full cells")?;
+    let mut matrix_read_wall_ms = 0.0f64;
+    let mut readout_gpu_ms = 0.0f64;
+    let mut readout_wall_ms = 0.0f64;
+    for &layer in &layers {
+        let layer_slot = manifest
+            .transport
+            .source_layers
+            .iter()
+            .position(|&candidate| candidate == layer)
+            .with_context(|| format!("full lens has no payload slot for layer {layer}"))?;
+        let matrix_offset = (layer_slot as u64)
+            .checked_mul(MATRIX_BYTES)
+            .context("full-lens matrix offset overflow")?;
+        let read_started = Instant::now();
+        payload_file
+            .seek(SeekFrom::Start(matrix_offset))
+            .with_context(|| format!("seek full-lens source layer {layer}"))?;
+        payload_file
+            .read_exact(&mut matrix)
+            .with_context(|| format!("read full-lens source layer {layer}"))?;
+        matrix_read_wall_ms += read_started.elapsed().as_secs_f64() * 1e3;
+
+        let readout = research
+            .apply_packed_capture_f16_transport_topk(&capture, layer, &matrix, args.top_k)
+            .with_context(|| format!("apply packed full-lens source layer {layer}"))?;
+        ensure!(
+            readout.source_layer == layer
+                && readout.start_position == 0
+                && readout.position_count == token_ids.len()
+                && readout.top_k == args.top_k,
+            "packed trace-full readout metadata is inconsistent for layer {layer}"
+        );
+        readout_gpu_ms += readout.readout_gpu_ms;
+        readout_wall_ms += readout.readout_wall_ms;
+        for position in readout.positions {
+            let mut top_k = Vec::new();
+            top_k
+                .try_reserve_exact(position.scores.len())
+                .context("allocate decoded trace-full top-k")?;
+            for (rank, score) in position.scores.into_iter().enumerate() {
+                let token_id = i32::try_from(score.token_id)
+                    .context("decode trace-full vocabulary token ID")?;
+                let piece = tokenizer
+                    .try_decode_piece_bytes_exact(token_id)
+                    .with_context(|| format!("decode trace-full token {}", score.token_id))?;
+                top_k.push(TraceFullTokenScore {
+                    rank,
+                    token_id: score.token_id,
+                    token_display_lossy: String::from_utf8_lossy(piece).into_owned(),
+                    token_piece_hex: hex(piece),
+                    logit: score.logit,
+                });
+            }
+            cells.push(TraceFullCell {
+                source_layer: layer,
+                source_position: position.source_position,
+                source_token_id: position.source_token_id,
+                predicts_position: position.predicts_position,
+                top_k,
+            });
+        }
+    }
+    let occurrences = aggregate_trace_full_occurrences(&cells, &layers);
+    let document = TraceFullDocument {
+        schema: "qwen.lens.trace",
+        schema_version: 1,
+        lens: TraceFullLens {
+            kind: "published_full_j",
+            method: manifest.transport.method,
+            target_layer: manifest.transport.target_layer,
+            source_site: manifest.transport.capture_site,
+            scoring: "deployed_output_rmsnorm_and_lm_head_full_vocabulary_logits_no_softmax",
+        },
+        input_source,
+        add_special_tokens,
+        input_token_ids: token_ids,
+        input_tokens,
+        coordinates: TraceFullCoordinates {
+            source_layer: "zero_based_transformer_block_index_at_post_block_residual",
+            source_position: "zero_based_input_token_position",
+            predicts_position: "source_position_plus_one",
+            rank: "zero_based_full_vocabulary_logit_rank",
+        },
+        selected_layers: layers,
+        top_k: args.top_k,
+        occurrence_definition: "one_token_id_appearing_in_one_returned_top_k_list",
+        cells,
+        timing: TraceFullTiming {
+            packed_prefill_gpu_ms: capture.packed_prefill_gpu_ms(),
+            packed_prefill_wall_ms: capture.packed_prefill_wall_ms(),
+            matrix_read_wall_ms,
+            readout_gpu_ms,
+            readout_command_wall_ms: readout_wall_ms,
+            trace_execution_wall_ms: trace_started.elapsed().as_secs_f64() * 1e3,
+        },
+        occurrences,
+    };
+    println!("{}", serde_json::to_string(&document)?);
+    Ok(())
+}
+
+fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
+    ensure!(
+        (1..=MAX_FULL_READOUT_TOP_K).contains(&args.top_k),
+        "--top-k must be in 1..={MAX_FULL_READOUT_TOP_K}"
+    );
+    ensure!(
+        (1..=MAX_RESEARCH_PACKED_READOUT_POSITIONS).contains(&args.max_tokens),
+        "--max-tokens must be in 1..={MAX_RESEARCH_PACKED_READOUT_POSITIONS}"
+    );
+    let input_count = usize::from(args.prompt.is_some())
+        + usize::from(args.token_ids.is_some())
+        + usize::from(args.messages.is_some());
+    ensure!(
+        input_count == 1,
+        "specify exactly one of --prompt, --token-ids, or --messages"
+    );
+    ensure!(
+        args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
+        "--prompt must not be empty"
+    );
+    ensure!(
+        args.token_ids
+            .as_ref()
+            .is_none_or(|token_ids| !token_ids.is_empty() && token_ids.len() <= args.max_tokens),
+        "--token-ids must be nonempty and contain at most --max-tokens entries"
+    );
+    ensure!(
+        args.prompt.is_some() || !args.no_special_tokens,
+        "--no-special-tokens only applies to --prompt"
+    );
+    Ok(())
+}
+
+fn validate_trace_full_manifest(manifest: &FullLensManifest) -> Result<()> {
+    ensure!(manifest.schema == FULL_SCHEMA, "unknown full lens schema");
+    ensure!(
+        manifest.schema_version == FULL_SCHEMA_VERSION,
+        "unsupported full lens schema version"
+    );
+    ensure!(manifest.status == "complete", "full lens is not complete");
+    ensure!(
+        manifest.transport
+            == (FullTransport {
+                method: "j".into(),
+                target_layer: TARGET_LAYER,
+                source_layers: (0..SOURCE_LAYER_COUNT as u32).collect(),
+                capture_site: "post_block_residual".into(),
+                orientation: ORIENTATION.into(),
+                hidden_size: HIDDEN_SIZE as u32,
+                bias: "none".into(),
+                storage_dtype: "f16_le".into(),
+            }),
+        "full lens transport contract is not canonical"
+    );
+    ensure!(
+        manifest.model.n_layers == N_LAYERS
+            && manifest.model.hidden_size == HIDDEN_SIZE as u32
+            && manifest.model.vocab_size == VOCAB_SIZE,
+        "full lens model geometry is not canonical"
+    );
+    ensure!(
+        manifest.payload.path == FULL_PAYLOAD_NAME
+            && manifest.payload.dtype == "f16_le"
+            && manifest.payload.shape == [SOURCE_LAYER_COUNT, HIDDEN_SIZE, HIDDEN_SIZE]
+            && manifest.payload.byte_length == PAYLOAD_BYTES,
+        "full lens payload descriptor is not canonical"
+    );
+    Ok(())
+}
+
+fn qwen38_trace_prompt_protocol(gguf: &GgufFile) -> bool {
+    let named = [
+        gguf.get_str("general.name"),
+        gguf.get_str("general.base_model.0.name"),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_ascii_lowercase().contains("qwen3.8"));
+    named
+        && gguf.get_str("tokenizer.ggml.model") == Some("gpt2")
+        && gguf.get_str("tokenizer.ggml.pre") == Some("qwen35")
+}
+
+fn aggregate_trace_full_occurrences(
+    cells: &[TraceFullCell],
+    selected_layers: &[u32],
+) -> TraceFullOccurrences {
+    let mut global = BTreeMap::<u32, OccurrenceAccumulator>::new();
+    let mut per_layer = BTreeMap::<u32, BTreeMap<u32, OccurrenceAccumulator>>::new();
+    for cell in cells {
+        let mut cell_ranks = BTreeMap::<u32, usize>::new();
+        for score in &cell.top_k {
+            cell_ranks
+                .entry(score.token_id)
+                .and_modify(|rank| *rank = (*rank).min(score.rank))
+                .or_insert(score.rank);
+        }
+        for (token_id, rank) in cell_ranks {
+            update_occurrence(&mut global, token_id, rank);
+            update_occurrence(
+                per_layer.entry(cell.source_layer).or_default(),
+                token_id,
+                rank,
+            );
+        }
+    }
+    TraceFullOccurrences {
+        global: sorted_occurrences(global),
+        per_layer: selected_layers
+            .iter()
+            .map(|&source_layer| TraceFullLayerOccurrences {
+                source_layer,
+                tokens: sorted_occurrences(per_layer.remove(&source_layer).unwrap_or_default()),
+            })
+            .collect(),
+    }
+}
+
+fn update_occurrence(
+    occurrences: &mut BTreeMap<u32, OccurrenceAccumulator>,
+    token_id: u32,
+    rank: usize,
+) {
+    occurrences
+        .entry(token_id)
+        .and_modify(|occurrence| {
+            occurrence.count += 1;
+            occurrence.top1_count += usize::from(rank == 0);
+            occurrence.best_rank = occurrence.best_rank.min(rank);
+        })
+        .or_insert(OccurrenceAccumulator {
+            count: 1,
+            top1_count: usize::from(rank == 0),
+            best_rank: rank,
+        });
+}
+
+fn sorted_occurrences(
+    occurrences: BTreeMap<u32, OccurrenceAccumulator>,
+) -> Vec<TraceFullOccurrence> {
+    let mut occurrences = occurrences
+        .into_iter()
+        .map(|(token_id, occurrence)| TraceFullOccurrence {
+            token_id,
+            count: occurrence.count,
+            top1_count: occurrence.top1_count,
+            best_rank: occurrence.best_rank,
+        })
+        .collect::<Vec<_>>();
+    occurrences.sort_unstable_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| right.top1_count.cmp(&left.top1_count))
+            .then_with(|| left.best_rank.cmp(&right.best_rank))
+            .then_with(|| left.token_id.cmp(&right.token_id))
+    });
+    occurrences
 }
 
 fn validate_read_full_args(args: &ReadFullArgs) -> Result<()> {
@@ -1907,6 +2464,30 @@ mod tests {
         }
     }
 
+    fn test_trace_full_args() -> TraceFullArgs {
+        TraceFullArgs {
+            model: "model.gguf".into(),
+            full_lens: "full-lens".into(),
+            prompt: Some("hello".into()),
+            token_ids: None,
+            messages: None,
+            no_special_tokens: false,
+            layers: vec![0, 31, 62],
+            top_k: 8,
+            max_tokens: MAX_RESEARCH_PACKED_READOUT_POSITIONS,
+        }
+    }
+
+    fn trace_score(rank: usize, token_id: u32) -> TraceFullTokenScore {
+        TraceFullTokenScore {
+            rank,
+            token_id,
+            token_display_lossy: format!("token-{token_id}"),
+            token_piece_hex: format!("{token_id:02x}"),
+            logit: -(rank as f32),
+        }
+    }
+
     #[test]
     fn extracts_pinned_inventory_without_executing_pickle() {
         let matrix = [0x00, 0x3c, 0x00, 0xc0];
@@ -1959,6 +2540,17 @@ mod tests {
         let mut wrong_payload = published_manifest(canonical_payload());
         wrong_payload.payload.blake3 = "00".repeat(32);
         assert!(validate_manifest(&wrong_payload).is_err());
+    }
+
+    #[test]
+    fn trace_manifest_validates_geometry_without_binding_hash_metadata() {
+        let mut manifest = published_manifest(canonical_payload());
+        manifest.payload.blake3 = "not-used-by-trace-full".into();
+        manifest.provenance.build_source_state = "not-used-by-trace-full".into();
+        validate_trace_full_manifest(&manifest).unwrap();
+
+        manifest.payload.byte_length -= 2;
+        assert!(validate_trace_full_manifest(&manifest).is_err());
     }
 
     #[test]
@@ -2046,5 +2638,102 @@ mod tests {
         args.token_ids = vec![1, 2];
         args.position = Some(2);
         assert!(validate_read_full_args(&args).is_err());
+    }
+
+    #[test]
+    fn trace_full_arguments_enforce_the_bounded_exact_input_contract() {
+        let mut args = test_trace_full_args();
+        validate_trace_full_args(&args).unwrap();
+
+        args.top_k = 17;
+        assert!(validate_trace_full_args(&args).is_err());
+        args.top_k = 8;
+        args.max_tokens = MAX_RESEARCH_PACKED_READOUT_POSITIONS + 1;
+        assert!(validate_trace_full_args(&args).is_err());
+        args.max_tokens = MAX_RESEARCH_PACKED_READOUT_POSITIONS;
+
+        args.prompt = None;
+        args.messages = Some("messages.json".into());
+        args.no_special_tokens = true;
+        assert!(validate_trace_full_args(&args).is_err());
+        args.no_special_tokens = false;
+        validate_trace_full_args(&args).unwrap();
+
+        args.messages = None;
+        args.token_ids = Some(Vec::new());
+        assert!(validate_trace_full_args(&args).is_err());
+        args.token_ids = Some(vec![1, 2]);
+        validate_trace_full_args(&args).unwrap();
+        args.prompt = Some("also set".into());
+        assert!(validate_trace_full_args(&args).is_err());
+    }
+
+    #[test]
+    fn trace_occurrences_count_each_token_once_per_cell_and_sort_deterministically() {
+        let cells = vec![
+            TraceFullCell {
+                source_layer: 2,
+                source_position: 0,
+                source_token_id: 10,
+                predicts_position: 1,
+                top_k: vec![trace_score(0, 7), trace_score(1, 5)],
+            },
+            TraceFullCell {
+                source_layer: 2,
+                source_position: 1,
+                source_token_id: 11,
+                predicts_position: 2,
+                top_k: vec![trace_score(0, 5), trace_score(1, 7), trace_score(2, 7)],
+            },
+            TraceFullCell {
+                source_layer: 0,
+                source_position: 0,
+                source_token_id: 10,
+                predicts_position: 1,
+                top_k: vec![trace_score(0, 7), trace_score(1, 9)],
+            },
+        ];
+        let occurrences = aggregate_trace_full_occurrences(&cells, &[2, 0]);
+        assert_eq!(
+            occurrences.global,
+            [
+                TraceFullOccurrence {
+                    token_id: 7,
+                    count: 3,
+                    top1_count: 2,
+                    best_rank: 0,
+                },
+                TraceFullOccurrence {
+                    token_id: 5,
+                    count: 2,
+                    top1_count: 1,
+                    best_rank: 0,
+                },
+                TraceFullOccurrence {
+                    token_id: 9,
+                    count: 1,
+                    top1_count: 0,
+                    best_rank: 1,
+                },
+            ]
+        );
+        assert_eq!(occurrences.per_layer[0].source_layer, 2);
+        assert_eq!(
+            occurrences.per_layer[0]
+                .tokens
+                .iter()
+                .map(|occurrence| occurrence.token_id)
+                .collect::<Vec<_>>(),
+            [5, 7]
+        );
+        assert_eq!(occurrences.per_layer[1].source_layer, 0);
+        assert_eq!(
+            occurrences.per_layer[1]
+                .tokens
+                .iter()
+                .map(|occurrence| occurrence.token_id)
+                .collect::<Vec<_>>(),
+            [7, 9]
+        );
     }
 }

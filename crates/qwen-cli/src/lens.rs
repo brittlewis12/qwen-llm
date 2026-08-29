@@ -16,8 +16,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod full_lens;
+mod lens_run;
+#[allow(dead_code)]
+mod messages;
+#[allow(dead_code)]
+mod template_lens;
 use full_lens::{
-    CompareTransferArgs, ImportFullArgs, ReadFullArgs, compare_transfer, import_full, read_full,
+    CompareTransferArgs, ImportFullArgs, ReadFullArgs, TraceFullArgs, compare_transfer,
+    import_full, read_full, trace_full,
 };
 
 const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
@@ -56,6 +62,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run one bounded serial Lens plan and emit compact JSON.
+    #[command(name = "run")]
+    LensRun(lens_run::LensRunArgs),
     /// Fit a resumable contiguous shard of J-lens or R-lens transport rows.
     FitRows(FitRowsArgs),
     /// Fit resumable projected J-lens or R-lens selected-token readouts.
@@ -67,6 +76,9 @@ enum Command {
     CompareTransfer(CompareTransferArgs),
     /// Read full-vocabulary logits through an imported published J-lens.
     ReadFull(ReadFullArgs),
+    /// Trace packed full-vocabulary published J-lens top-k across layers and positions.
+    #[command(name = "trace-full")]
+    TraceFull(TraceFullArgs),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -477,11 +489,13 @@ struct TokenReadoutManifest {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::LensRun(args) => lens_run::run(args),
         Command::FitRows(args) => fit_rows(args),
         Command::FitTokens(args) => fit_tokens(args),
         Command::ImportFull(args) => import_full(args),
         Command::CompareTransfer(args) => compare_transfer(args),
         Command::ReadFull(args) => read_full(args),
+        Command::TraceFull(args) => trace_full(args),
     }
 }
 
@@ -2939,6 +2953,83 @@ mod tests {
         assert!(validate_token_args(&invalid).is_err());
         validate_prompt_id(&"x".repeat(MAX_PROMPT_ID_BYTES), 1).unwrap();
         assert!(validate_prompt_id(&"x".repeat(MAX_PROMPT_ID_BYTES + 1), 1).is_err());
+    }
+
+    #[test]
+    fn trace_full_cli_accepts_each_exact_input_form_and_rejects_mixing() {
+        let prompt = Cli::try_parse_from([
+            "qwen-lens",
+            "trace-full",
+            "--model",
+            "model.gguf",
+            "--full-lens",
+            "full-lens",
+            "--prompt",
+            "--help",
+            "--no-special-tokens",
+            "--layers",
+            "62,0",
+        ])
+        .unwrap();
+        assert!(matches!(prompt.command, Command::TraceFull(_)));
+
+        let token_ids = Cli::try_parse_from([
+            "qwen-lens",
+            "trace-full",
+            "--model",
+            "model.gguf",
+            "--full-lens",
+            "full-lens",
+            "--token-ids",
+            "1,2,3",
+            "--top-k",
+            "16",
+        ])
+        .unwrap();
+        assert!(matches!(token_ids.command, Command::TraceFull(_)));
+
+        let messages = Cli::try_parse_from([
+            "qwen-lens",
+            "trace-full",
+            "--model",
+            "model.gguf",
+            "--full-lens",
+            "full-lens",
+            "--messages",
+            "messages.json",
+        ])
+        .unwrap();
+        assert!(matches!(messages.command, Command::TraceFull(_)));
+
+        assert!(
+            Cli::try_parse_from([
+                "qwen-lens",
+                "trace-full",
+                "--model",
+                "model.gguf",
+                "--full-lens",
+                "full-lens",
+                "--prompt",
+                "hello",
+                "--messages",
+                "messages.json",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "qwen-lens",
+                "trace-full",
+                "--model",
+                "model.gguf",
+                "--full-lens",
+                "full-lens",
+                "--token-ids",
+                "1,2",
+                "--no-special-tokens",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

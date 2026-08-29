@@ -6,24 +6,30 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, RmsNormVjpRule, SwiGluVjpRule,
-    encode_add_f32, encode_fill_f32, encode_frozen_linear_vjp_f32,
+    encode_add_f32, encode_copy_offset_f32, encode_fill_f32, encode_frozen_linear_vjp_f32,
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_vjp_f32,
     encode_gdn_prep_packed_ckpt_f32, encode_gdn_step_decay_packed_ckpt_f32,
     encode_gdn_step_decay_packed_vjp_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_l2_norm_vjp_batched_f32, encode_mat_vec_f16_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_broadcast_f32,
-    encode_rms_norm_mul_vjp_rows_f32, encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32,
-    encode_sigmoid_f32, encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32,
-    encode_silu_mul_vjp_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_split_packed_vjp_f32,
-    encode_topk16_f32,
+    encode_l2_norm_vjp_batched_f32, encode_mat_mat_f16_f32, encode_mat_vec_f16_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32,
+    encode_rms_norm_mul_vjp_broadcast_f32, encode_rms_norm_mul_vjp_rows_f32,
+    encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32, encode_sigmoid_f32,
+    encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32, encode_silu_mul_vjp_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_split_packed_vjp_f32, encode_topk16_f32,
+};
+use crate::metal_dflash::{
+    DFlashError, MetalDFlashLayerMajorScratch,
+    prefill_tokens_with_multi_hidden_prompt_only_profiled,
 };
 use crate::metal_forward::{
-    MetalAttnBlock, MetalBlock, MetalGdnBlock, MfError, RMS_EPS, encode_mat_vec_dispatch,
+    MetalAttnBlock, MetalBlock, MetalGdnBlock, MfError, RMS_EPS, encode_mat_mat_dispatch,
+    encode_mat_vec_dispatch,
 };
 use crate::model::{Arch, ArchKind};
 use crate::runtime::{LoadedModel, RuntimeError, Sequence};
 use crate::tensor::GgmlType;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
+use std::time::Instant;
 
 /// Lightweight locator identity derived from model metadata, shard paths, and
 /// file stamps. It is useful within one machine, but is not a content digest.
@@ -32,6 +38,9 @@ pub const MAX_RESEARCH_GDN_TOKENS: usize = 16;
 pub const MAX_RESEARCH_ATTN_TOKENS: usize = 16;
 pub const MAX_RESEARCH_WORKSPACE_TOKENS: usize = 16;
 pub const MAX_RESEARCH_WORKSPACE_DIM_BATCH: usize = 32;
+pub const MAX_RESEARCH_PACKED_READOUT_POSITIONS: usize = 128;
+const PACKED_FULL_READOUT_CHUNK_SIZE: usize = 16;
+const MAX_FULL_READOUT_TOP_K: usize = 16;
 /// Maximum peak host bytes attributable to a newly materialized research
 /// result and its immediate fitting/readout workspaces. 256 MiB keeps selected
 /// experimental banks practical while preventing accidental multi-GiB jobs.
@@ -569,6 +578,116 @@ pub struct ResearchFullVocabularyReadout {
     pub scores: Vec<ResearchVocabularyScore>,
 }
 
+/// Opaque packed post-block residual capture owned by one loaded model.
+/// The resident `[T,K,H]` Metal tensor is intentionally private.
+pub struct ResearchPackedPostBlockCapture<'model> {
+    model: &'model LoadedModel,
+    start_position: usize,
+    token_ids: Vec<i32>,
+    layer_ids: Vec<u32>,
+    hidden_size: usize,
+    packed_prefill_gpu_ms: f64,
+    packed_prefill_wall_ms: f64,
+    values: MetalTensor,
+}
+
+impl ResearchPackedPostBlockCapture<'_> {
+    pub fn start_position(&self) -> usize {
+        self.start_position
+    }
+
+    pub fn position_count(&self) -> usize {
+        self.token_ids.len()
+    }
+
+    pub fn end_position(&self) -> usize {
+        self.start_position + self.token_ids.len()
+    }
+
+    pub fn token_ids(&self) -> &[i32] {
+        &self.token_ids
+    }
+
+    /// Unique zero-based block indices in the caller's requested order.
+    pub fn layer_ids(&self) -> &[u32] {
+        &self.layer_ids
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    pub fn packed_prefill_wall_ms(&self) -> f64 {
+        self.packed_prefill_wall_ms
+    }
+
+    pub fn packed_prefill_gpu_ms(&self) -> f64 {
+        self.packed_prefill_gpu_ms
+    }
+
+    #[cfg(test)]
+    fn row_for_test(
+        &self,
+        position_row: usize,
+        source_layer: u32,
+    ) -> Result<Vec<f32>, ResearchError> {
+        let layer_slot = self.layer_slot(source_layer)?;
+        if position_row >= self.position_count() {
+            return Err(ResearchError::ActivationSize {
+                name: "packed diagnostic capture row",
+                got: position_row,
+                expected: self.position_count(),
+            });
+        }
+        let offset = checked_product(
+            checked_product(position_row, self.layer_ids.len())?
+                .checked_add(layer_slot)
+                .ok_or(ResearchError::SizeOverflow)?,
+            self.hidden_size,
+        )?;
+        let row = self.values.view_subrange(
+            u64::try_from(offset).map_err(|_| ResearchError::SizeOverflow)?,
+            vec![self.hidden_size as u64],
+        );
+        read_f32_fallible(&row, self.hidden_size, "packed diagnostic capture row")
+    }
+
+    fn layer_slot(&self, source_layer: u32) -> Result<usize, ResearchError> {
+        self.layer_ids
+            .iter()
+            .position(|&layer| layer == source_layer)
+            .ok_or(ResearchError::PackedCaptureLayerNotFound { source_layer })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchPackedVocabularyPosition {
+    /// Zero-based absolute position of the captured prompt token.
+    pub source_position: usize,
+    pub source_token_id: i32,
+    /// The transported residual at `source_position` predicts this position.
+    pub predicts_position: usize,
+    pub scores: Vec<ResearchVocabularyScore>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchPackedFullVocabularyReadout {
+    /// Zero-based block index captured after its second residual update.
+    pub source_layer: u32,
+    pub start_position: usize,
+    pub position_count: usize,
+    pub top_k: usize,
+    /// GPU intervals accumulated across packed prompt chunks.
+    pub packed_prefill_gpu_ms: f64,
+    /// Wall time spent in the packed prompt forward, including its required wait.
+    pub packed_prefill_wall_ms: f64,
+    /// GPU interval for transport, output norm, LM head, and top-k.
+    pub readout_gpu_ms: f64,
+    /// Wall time through completion of the readout command buffer.
+    pub readout_wall_ms: f64,
+    pub positions: Vec<ResearchPackedVocabularyPosition>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResearchError {
     #[error("runtime: {0}")]
@@ -577,6 +696,8 @@ pub enum ResearchError {
     Forward(#[from] MfError),
     #[error("metal: {0}")]
     Metal(#[from] MetalError),
+    #[error("packed prefill: {0}")]
+    PackedPrefill(#[from] DFlashError),
     #[error("workspace-lens research currently requires a dense model, got {0:?}")]
     UnsupportedArchitecture(ArchKind),
     #[error("layer {layer} is out of range for {n_layers} layers")]
@@ -743,6 +864,16 @@ pub enum ResearchError {
     NonFiniteTokenReadoutData { name: &'static str, index: usize },
     #[error("full-vocabulary lens readout requires at least one prompt token")]
     EmptyFullReadoutPrompt,
+    #[error("packed full-vocabulary readout position count {got} exceeds the limit {max}")]
+    PackedFullReadoutTooLong { got: usize, max: usize },
+    #[error("F16 transport has {got} bytes, expected exactly {expected}")]
+    InvalidFullReadoutTransportSize { got: usize, expected: usize },
+    #[error("packed capture layer {layer} occurs more than once")]
+    DuplicatePackedCaptureLayer { layer: u32 },
+    #[error("packed capture belongs to a different loaded model")]
+    PackedCaptureModelMismatch,
+    #[error("source layer {source_layer} is not present in the packed capture")]
+    PackedCaptureLayerNotFound { source_layer: u32 },
     #[error("full-vocabulary prompt capture requires a fresh sequence at position zero, got {0}")]
     FullReadoutRequiresFreshSequence(usize),
     #[error("full-vocabulary lens top-k {got} is outside the supported range 1..={max}")]
@@ -816,7 +947,7 @@ impl LoadedModel {
     }
 }
 
-impl ResearchSession<'_, '_> {
+impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     pub fn arch(&self) -> Arch {
         self.model.arch()
     }
@@ -1134,6 +1265,282 @@ impl ResearchSession<'_, '_> {
                     "full readout post-block residuals",
                 )?,
             },
+        })
+    }
+
+    /// Advance through a bounded contiguous prompt once and capture one
+    /// or more unique, caller-ordered zero-based post-block residual layers.
+    pub fn forward_packed_post_block_capture(
+        &mut self,
+        token_ids: &[i32],
+        capture_layers: &[u32],
+    ) -> Result<ResearchPackedPostBlockCapture<'model>, ResearchError> {
+        let position_count = token_ids.len();
+        if position_count == 0 {
+            return Err(ResearchError::EmptyFullReadoutPrompt);
+        }
+        if position_count > MAX_RESEARCH_PACKED_READOUT_POSITIONS {
+            return Err(ResearchError::PackedFullReadoutTooLong {
+                got: position_count,
+                max: MAX_RESEARCH_PACKED_READOUT_POSITIONS,
+            });
+        }
+        let arch = self.arch();
+        validate_packed_capture_layers(arch.n_layer, capture_layers)?;
+        for &token_id in token_ids {
+            if token_id < 0 || token_id as u32 >= arch.vocab_size {
+                return Err(MfError::BadToken(token_id, arch.vocab_size).into());
+            }
+        }
+        self.sequence.ensure_can_append(position_count)?;
+        let start_position = self.sequence.position();
+        let end_position = start_position
+            .checked_add(position_count)
+            .ok_or(ResearchError::PositionOverflow(start_position))?;
+        let start_position_u32 = u32::try_from(start_position)
+            .map_err(|_| ResearchError::PositionOverflow(start_position))?;
+        u32::try_from(end_position).map_err(|_| ResearchError::PositionOverflow(end_position))?;
+
+        let hidden_size = arch.hidden_size as usize;
+        let model = self.model.metal_model();
+        let capture_elements = checked_product(
+            checked_product(position_count, capture_layers.len())?,
+            hidden_size,
+        )?;
+        enforce_research_byte_budget(
+            "packed post-block capture",
+            checked_product(capture_elements, std::mem::size_of::<f32>())?,
+        )?;
+        let token_ids_owned = try_clone_slice(token_ids, "packed capture token IDs")?;
+        let layer_ids_owned = try_clone_slice(capture_layers, "packed capture layer IDs")?;
+
+        let context = self.model.context();
+        let values = MetalTensor::zeros_f32(
+            context,
+            vec![
+                position_count as u64,
+                capture_layers.len() as u64,
+                hidden_size as u64,
+            ],
+        )?;
+        let mut prefill_scratch = MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+            context,
+            model,
+            PACKED_FULL_READOUT_CHUNK_SIZE as u32,
+            end_position,
+        )?;
+
+        let forward = self.model.forward();
+        let prefill_started = Instant::now();
+        let prefill_result = {
+            let state = unsafe { self.sequence.metal_session_mut() };
+            state.ensure_usable()?;
+            prefill_tokens_with_multi_hidden_prompt_only_profiled(
+                &forward,
+                token_ids,
+                start_position_u32,
+                state,
+                &mut prefill_scratch,
+                capture_layers,
+                &values,
+            )
+        };
+        let packed_prefill_gpu_ms = match prefill_result {
+            Ok(gpu_ms) => gpu_ms,
+            Err(error) => {
+                let state = unsafe { self.sequence.metal_session_mut() };
+                state.poison("packed full-vocabulary prompt capture failed");
+                return Err(error.into());
+            }
+        };
+        let packed_prefill_wall_ms = prefill_started.elapsed().as_secs_f64() * 1e3;
+
+        // The Metal session has consumed every token. Advance the safe runtime
+        // position immediately, before any diagnostic or readout work can fail.
+        if let Err(error) = self.sequence.advance_by(position_count) {
+            let state = unsafe { self.sequence.metal_session_mut() };
+            state.poison("packed full-vocabulary sequence advancement failed");
+            return Err(error.into());
+        }
+
+        Ok(ResearchPackedPostBlockCapture {
+            model: self.model,
+            start_position,
+            token_ids: token_ids_owned,
+            layer_ids: layer_ids_owned,
+            hidden_size,
+            packed_prefill_gpu_ms,
+            packed_prefill_wall_ms,
+            values,
+        })
+    }
+
+    /// Apply one row-major F16 transport to one layer in an opaque packed
+    /// capture, followed by the deployed output norm, resident LM head, and
+    /// compact GPU top-k. Capture position `p` predicts `p + 1`.
+    pub fn apply_packed_capture_f16_transport_topk(
+        &self,
+        capture: &ResearchPackedPostBlockCapture<'_>,
+        source_layer: u32,
+        transport_bytes: &[u8],
+        top_k: usize,
+    ) -> Result<ResearchPackedFullVocabularyReadout, ResearchError> {
+        if !std::ptr::eq(self.model, capture.model) {
+            return Err(ResearchError::PackedCaptureModelMismatch);
+        }
+        if top_k == 0 || top_k > MAX_FULL_READOUT_TOP_K {
+            return Err(ResearchError::InvalidFullReadoutTopK {
+                got: top_k,
+                max: MAX_FULL_READOUT_TOP_K,
+            });
+        }
+        let layer_slot = capture.layer_slot(source_layer)?;
+        let arch = self.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let vocab_size = arch.vocab_size as usize;
+        validate_full_readout_transport_size(transport_bytes, hidden_size)?;
+        let model = self.model.metal_model();
+        validate_full_readout_tail(model, hidden_size, vocab_size)?;
+
+        let position_count = capture.position_count();
+        let hidden_elements = checked_product(position_count, hidden_size)?;
+        let logits_elements = checked_product(position_count, vocab_size)?;
+        let compact_elements = checked_product(position_count, MAX_FULL_READOUT_TOP_K)?;
+        let hidden_bytes = checked_product(hidden_elements, std::mem::size_of::<f32>())?;
+        let logits_bytes = checked_product(logits_elements, std::mem::size_of::<f32>())?;
+        let compact_bytes = checked_product(compact_elements, 2 * std::mem::size_of::<u32>())?;
+        let peak_bytes = transport_bytes
+            .len()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(3)?))
+            .and_then(|bytes| bytes.checked_add(logits_bytes))
+            .and_then(|bytes| bytes.checked_add(compact_bytes))
+            .ok_or(ResearchError::SizeOverflow)?;
+        enforce_research_byte_budget("packed full-vocabulary F16 transport readout", peak_bytes)?;
+
+        let context = self.model.context();
+        let selected =
+            MetalTensor::zeros_f32(context, vec![position_count as u64, hidden_size as u64])?;
+        let transport = MetalTensor::from_bytes(
+            context,
+            transport_bytes,
+            vec![hidden_size as u64, hidden_size as u64],
+            GgmlType::F16,
+        )?;
+        let transported =
+            MetalTensor::zeros_f32(context, vec![position_count as u64, hidden_size as u64])?;
+        let normalized =
+            MetalTensor::zeros_f32(context, vec![position_count as u64, hidden_size as u64])?;
+        let logits =
+            MetalTensor::zeros_f32(context, vec![position_count as u64, vocab_size as u64])?;
+        let top_ids = MetalTensor::zeros_i32(
+            context,
+            vec![position_count as u64, MAX_FULL_READOUT_TOP_K as u64],
+        )?;
+        let top_values = MetalTensor::zeros_f32(
+            context,
+            vec![position_count as u64, MAX_FULL_READOUT_TOP_K as u64],
+        )?;
+
+        let readout_started = Instant::now();
+        let command = context
+            .queue
+            .commandBuffer()
+            .ok_or(ResearchError::MissingCommandBuffer)?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = (|| -> Result<(), ResearchError> {
+            for position_row in 0..position_count {
+                let source_offset = checked_product(
+                    checked_product(position_row, capture.layer_ids.len())?
+                        .checked_add(layer_slot)
+                        .ok_or(ResearchError::SizeOverflow)?,
+                    hidden_size,
+                )?;
+                let destination = selected.view_subrange(
+                    u64::try_from(checked_product(position_row, hidden_size)?)
+                        .map_err(|_| ResearchError::SizeOverflow)?,
+                    vec![hidden_size as u64],
+                );
+                encode_copy_offset_f32(
+                    context,
+                    &encoder,
+                    &capture.values,
+                    source_offset,
+                    &destination,
+                    hidden_size,
+                )?;
+            }
+            encode_mat_mat_f16_f32(
+                context,
+                &encoder,
+                &transport,
+                &selected,
+                &transported,
+                hidden_size,
+                hidden_size,
+                position_count,
+            )?;
+            encode_rms_norm_mul_rows_f32(
+                context,
+                &encoder,
+                &transported,
+                &model.output_norm,
+                &normalized,
+                position_count,
+                hidden_size,
+                RMS_EPS,
+            )?;
+            encode_mat_mat_dispatch(
+                context,
+                &encoder,
+                &model.lm_head,
+                &normalized,
+                &logits,
+                hidden_size,
+                vocab_size,
+                position_count,
+            )?;
+            encode_topk16_f32(
+                context,
+                &encoder,
+                &logits,
+                &top_ids,
+                &top_values,
+                position_count,
+                vocab_size,
+            )?;
+            Ok(())
+        })();
+        encoder.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        validate_completed_command(&command)?;
+        let readout_wall_ms = readout_started.elapsed().as_secs_f64() * 1e3;
+        let readout_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+
+        let ids = read_i32_fallible(&top_ids, compact_elements, "packed readout top-k IDs")?;
+        let values =
+            read_f32_fallible(&top_values, compact_elements, "packed readout top-k logits")?;
+        let positions = build_packed_vocabulary_positions(
+            capture.token_ids(),
+            capture.start_position(),
+            top_k,
+            arch.vocab_size,
+            &ids,
+            &values,
+        )?;
+
+        Ok(ResearchPackedFullVocabularyReadout {
+            source_layer,
+            start_position: capture.start_position(),
+            position_count,
+            top_k,
+            packed_prefill_gpu_ms: capture.packed_prefill_gpu_ms(),
+            packed_prefill_wall_ms: capture.packed_prefill_wall_ms(),
+            readout_gpu_ms,
+            readout_wall_ms,
+            positions,
         })
     }
 
@@ -5940,6 +6347,134 @@ fn validate_selected_token_ids(token_ids: &[u32], vocab_size: u32) -> Result<(),
     Ok(())
 }
 
+fn validate_full_readout_transport_size(
+    transport_bytes: &[u8],
+    hidden_size: usize,
+) -> Result<(), ResearchError> {
+    let expected = checked_product(checked_product(hidden_size, hidden_size)?, 2)?;
+    if transport_bytes.len() != expected {
+        return Err(ResearchError::InvalidFullReadoutTransportSize {
+            got: transport_bytes.len(),
+            expected,
+        });
+    }
+    Ok(())
+}
+
+fn validate_full_readout_tail(
+    model: &crate::metal_forward::MetalModel,
+    hidden_size: usize,
+    vocab_size: usize,
+) -> Result<(), ResearchError> {
+    let expected_lm_head_shape = [hidden_size, vocab_size];
+    if linear_shape(ResearchLinear::LmHead, &model.lm_head).ok() != Some(expected_lm_head_shape) {
+        return Err(ResearchError::InvalidTokenReadoutLmHeadShape {
+            got: model.lm_head.shape.clone(),
+            expected: expected_lm_head_shape,
+        });
+    }
+    if !matches!(
+        model.lm_head.dtype,
+        GgmlType::F32
+            | GgmlType::F16
+            | GgmlType::BF16
+            | GgmlType::Q4_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_0
+            | GgmlType::IQ4_NL
+    ) {
+        return Err(ResearchError::UnsupportedTokenReadoutLmHeadDtype {
+            dtype: model.lm_head.dtype,
+        });
+    }
+    if model.output_norm.dtype != GgmlType::F32
+        || model.output_norm.shape.as_slice() != [hidden_size as u64]
+    {
+        return Err(ResearchError::InvalidTokenReadoutOutputNorm {
+            dtype: model.output_norm.dtype,
+            shape: model.output_norm.shape.clone(),
+            expected: hidden_size,
+        });
+    }
+    Ok(())
+}
+
+fn build_packed_vocabulary_positions(
+    token_ids: &[i32],
+    start_position: usize,
+    top_k: usize,
+    vocab_size: u32,
+    ids: &[i32],
+    values: &[f32],
+) -> Result<Vec<ResearchPackedVocabularyPosition>, ResearchError> {
+    let compact_elements = checked_product(token_ids.len(), MAX_FULL_READOUT_TOP_K)?;
+    for (name, got) in [
+        ("packed readout top-k IDs", ids.len()),
+        ("packed readout top-k logits", values.len()),
+    ] {
+        if got != compact_elements {
+            return Err(ResearchError::ActivationSize {
+                name,
+                got,
+                expected: compact_elements,
+            });
+        }
+    }
+    let mut positions = Vec::new();
+    positions.try_reserve_exact(token_ids.len()).map_err(|_| {
+        ResearchError::ResearchHostAllocationFailed {
+            name: "packed full-vocabulary positions",
+            elements: token_ids.len(),
+        }
+    })?;
+    for (row, &source_token_id) in token_ids.iter().enumerate() {
+        let source_position = start_position
+            .checked_add(row)
+            .ok_or(ResearchError::SizeOverflow)?;
+        let predicts_position = source_position
+            .checked_add(1)
+            .ok_or(ResearchError::SizeOverflow)?;
+        let row_base = checked_product(row, MAX_FULL_READOUT_TOP_K)?;
+        let mut scores = Vec::new();
+        scores.try_reserve_exact(top_k).map_err(|_| {
+            ResearchError::ResearchHostAllocationFailed {
+                name: "packed full-vocabulary top-k scores",
+                elements: top_k,
+            }
+        })?;
+        for rank in 0..top_k {
+            let index = row_base
+                .checked_add(rank)
+                .ok_or(ResearchError::SizeOverflow)?;
+            let token_id = ids[index];
+            let logit = values[index];
+            if token_id < 0 || token_id as u32 >= vocab_size {
+                return Err(ResearchError::InvalidFullReadoutToken {
+                    token_id,
+                    vocab_size,
+                });
+            }
+            if !logit.is_finite() {
+                return Err(ResearchError::NonFiniteTokenReadoutData {
+                    name: "packed full-vocabulary top-k logits",
+                    index,
+                });
+            }
+            scores.push(ResearchVocabularyScore {
+                token_id: token_id as u32,
+                logit,
+            });
+        }
+        positions.push(ResearchPackedVocabularyPosition {
+            source_position,
+            source_token_id,
+            predicts_position,
+            scores,
+        });
+    }
+    Ok(positions)
+}
+
 fn read_f32_fallible(
     tensor: &MetalTensor,
     len: usize,
@@ -6946,6 +7481,22 @@ fn validate_capture_layers(n_layers: u32, capture_layers: &[u32]) -> Result<(), 
     Ok(())
 }
 
+fn validate_packed_capture_layers(
+    n_layers: u32,
+    capture_layers: &[u32],
+) -> Result<(), ResearchError> {
+    if capture_layers.is_empty() {
+        return Err(ResearchError::EmptyWorkspaceSourceLayers);
+    }
+    validate_capture_layers(n_layers, capture_layers)?;
+    for (index, &layer) in capture_layers.iter().enumerate() {
+        if capture_layers[..index].contains(&layer) {
+            return Err(ResearchError::DuplicatePackedCaptureLayer { layer });
+        }
+    }
+    Ok(())
+}
+
 fn read_f32(tensor: &MetalTensor, len: usize) -> Vec<f32> {
     let mut output = vec![0.0f32; len];
     unsafe {
@@ -6964,6 +7515,160 @@ fn read_f32(tensor: &MetalTensor, len: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_readout_transport_validation_requires_exact_matrix_size() {
+        let finite_word = half::f16::from_f32(0.5).to_bits().to_le_bytes();
+        let transport = finite_word.repeat(4);
+        validate_full_readout_transport_size(&transport, 2).unwrap();
+
+        assert!(matches!(
+            validate_full_readout_transport_size(&transport[..6], 2).unwrap_err(),
+            ResearchError::InvalidFullReadoutTransportSize {
+                got: 6,
+                expected: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn packed_capture_layers_require_nonempty_unique_caller_order() {
+        validate_packed_capture_layers(8, &[5, 1, 7]).unwrap();
+        assert!(matches!(
+            validate_packed_capture_layers(8, &[]).unwrap_err(),
+            ResearchError::EmptyWorkspaceSourceLayers
+        ));
+        assert!(matches!(
+            validate_packed_capture_layers(8, &[5, 1, 5]).unwrap_err(),
+            ResearchError::DuplicatePackedCaptureLayer { layer: 5 }
+        ));
+    }
+
+    #[test]
+    fn packed_vocabulary_positions_preserve_absolute_next_position_semantics() {
+        let mut ids = vec![0i32; 2 * MAX_FULL_READOUT_TOP_K];
+        let mut values = vec![0.0f32; 2 * MAX_FULL_READOUT_TOP_K];
+        ids[0] = 9;
+        ids[1] = 4;
+        values[0] = 3.5;
+        values[1] = 2.25;
+        ids[MAX_FULL_READOUT_TOP_K] = 7;
+        ids[MAX_FULL_READOUT_TOP_K + 1] = 3;
+        values[MAX_FULL_READOUT_TOP_K] = 4.0;
+        values[MAX_FULL_READOUT_TOP_K + 1] = 1.5;
+
+        let positions =
+            build_packed_vocabulary_positions(&[101, 102], 41, 2, 128, &ids, &values).unwrap();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].source_position, 41);
+        assert_eq!(positions[0].source_token_id, 101);
+        assert_eq!(positions[0].predicts_position, 42);
+        assert_eq!(positions[0].scores[0].token_id, 9);
+        assert_eq!(positions[0].scores[1].logit, 2.25);
+        assert_eq!(positions[1].source_position, 42);
+        assert_eq!(positions[1].source_token_id, 102);
+        assert_eq!(positions[1].predicts_position, 43);
+        assert_eq!(positions[1].scores[0].token_id, 7);
+        assert_eq!(positions[1].scores[1].logit, 1.5);
+    }
+
+    #[test]
+    #[ignore = "requires a real dense model, Metal, and the full F16 transport payload"]
+    fn packed_full_readout_matches_serial_row_real_model() {
+        use crate::runtime::{Runtime, SequenceConfig};
+        use std::io::{Read, Seek, SeekFrom};
+
+        let model_path = std::env::var("QWEN_RESEARCH_MODEL").expect("QWEN_RESEARCH_MODEL");
+        let payload_path = std::env::var("QWEN_RESEARCH_TRANSPORT_PAYLOAD")
+            .expect("QWEN_RESEARCH_TRANSPORT_PAYLOAD");
+        let source_layer: u32 = std::env::var("QWEN_RESEARCH_SOURCE_LAYER")
+            .expect("QWEN_RESEARCH_SOURCE_LAYER")
+            .parse()
+            .expect("numeric source layer");
+
+        let runtime = Runtime::metal().expect("initialize Metal runtime");
+        let loaded = runtime.load_model(model_path).expect("load real model");
+        let arch = loaded.arch();
+        let matrix_bytes = checked_product(
+            checked_product(arch.hidden_size as usize, arch.hidden_size as usize).unwrap(),
+            2,
+        )
+        .unwrap();
+        let mut transport = vec![0u8; matrix_bytes];
+        let mut payload = std::fs::File::open(payload_path).expect("open transport payload");
+        payload
+            .seek(SeekFrom::Start(source_layer as u64 * matrix_bytes as u64))
+            .expect("seek source-layer matrix");
+        payload
+            .read_exact(&mut transport)
+            .expect("read source-layer matrix");
+
+        let token_ids = (1..=MAX_RESEARCH_PACKED_READOUT_POSITIONS as i32).collect::<Vec<_>>();
+        let mut sequence = loaded
+            .create_sequence(SequenceConfig::new(token_ids.len()))
+            .expect("create sequence");
+        let mut research = loaded
+            .research_session(&mut sequence)
+            .expect("open research session");
+        let other_layer = if source_layer == 0 { 1 } else { 0 };
+        let capture = research
+            .forward_packed_post_block_capture(&token_ids, &[other_layer, source_layer])
+            .expect("packed post-block capture");
+        let packed = research
+            .apply_packed_capture_f16_transport_topk(
+                &capture,
+                source_layer,
+                &transport,
+                MAX_FULL_READOUT_TOP_K,
+            )
+            .expect("packed full-vocabulary readout");
+        for capture_row in [0, 15, 16, 17, 127] {
+            let captured_residual = capture
+                .row_for_test(capture_row, source_layer)
+                .expect("read exact packed capture row");
+            let serial = research
+                .apply_f16_transport_topk(&transport, &captured_residual, MAX_FULL_READOUT_TOP_K)
+                .expect("serial full-vocabulary readout");
+            let packed_row = &packed.positions[capture_row];
+            assert_eq!(packed_row.source_position, capture_row);
+            assert_eq!(packed_row.predicts_position, capture_row + 1);
+            let packed_ids = packed_row
+                .scores
+                .iter()
+                .map(|score| score.token_id)
+                .collect::<Vec<_>>();
+            let serial_ids = serial
+                .scores
+                .iter()
+                .map(|score| score.token_id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                packed_ids, serial_ids,
+                "ordered top-16 IDs differ at row {capture_row}"
+            );
+            let max_abs_logit = packed_row
+                .scores
+                .iter()
+                .zip(&serial.scores)
+                .map(|(packed, serial)| (packed.logit - serial.logit).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs_logit <= 0.01,
+                "packed-vs-serial max logit delta {max_abs_logit} exceeds 0.01 at row {capture_row}"
+            );
+            eprintln!(
+                "packed-vs-serial source_layer={source_layer} row={capture_row} max_abs_logit={max_abs_logit:.6}"
+            );
+        }
+        eprintln!(
+            "packed timings positions={} prefill_gpu_ms={:.3} prefill_wall_ms={:.3} readout_gpu_ms={:.3} readout_wall_ms={:.3}",
+            packed.position_count,
+            packed.packed_prefill_gpu_ms,
+            packed.packed_prefill_wall_ms,
+            packed.readout_gpu_ms,
+            packed.readout_wall_ms,
+        );
+    }
 
     fn f32_tensor(context: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
         MetalTensor::from_bytes(context, bytemuck::cast_slice(values), shape, GgmlType::F32)

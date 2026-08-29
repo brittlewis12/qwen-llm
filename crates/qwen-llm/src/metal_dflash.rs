@@ -10510,6 +10510,31 @@ pub fn prefill_tokens_prompt_only_profiled(
     Ok(gpu_ms)
 }
 
+/// Packed prompt prefill with post-block capture and no final norm, LM head,
+/// logits readback, or decode-tail work.
+pub fn prefill_tokens_with_multi_hidden_prompt_only_profiled(
+    base: &MetalForward<'_>,
+    token_ids: &[i32],
+    start_position: u32,
+    target_session: &mut MetalSession,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    target_layer_ids: &[u32],
+    hidden_dst: &MetalTensor,
+) -> Result<f64, DFlashError> {
+    let (_, gpu_ms, _) = prefill_tokens_with_multi_hidden_profiled_inner(
+        base,
+        token_ids,
+        start_position,
+        target_session,
+        layer_scratch,
+        target_layer_ids,
+        Some(hidden_dst),
+        PrefillTailMode::SkipTail,
+        None,
+    )?;
+    Ok(gpu_ms)
+}
+
 #[doc(hidden)]
 pub fn prefill_tokens_profiled_with_tail(
     base: &MetalForward<'_>,

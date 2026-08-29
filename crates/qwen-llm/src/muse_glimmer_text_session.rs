@@ -8,13 +8,14 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTensor,
-    encode_add_inplace_f32, encode_attn_decode_f16kv_f32, encode_get_rows_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16_kv,
-    encode_sigmoid_mul_f32, encode_silu_mul_f32, evaluate_metal_memory_admission,
-    host_page_size_bytes,
+    encode_add_inplace_f32, encode_attn_decode_f16kv_f32, encode_copy_offset_f32,
+    encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32, encode_silu_mul_f32,
+    evaluate_metal_memory_admission, host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
+use crate::muse_glimmer_lens::{MuseGlimmerLensCapture, validate_capture_request};
 use crate::muse_glimmer_metal::{
     encode_muse_glimmer_logit_softcap_f32, encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
 };
@@ -580,6 +581,53 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         })
     }
 
+    pub(crate) fn capture_fresh_lens_prompt(
+        &self,
+        tokens: &[u32],
+        target_block: u32,
+        session: &mut MuseGlimmerTextSession,
+    ) -> Result<MuseGlimmerLensCapture, MuseGlimmerTextSessionError> {
+        session.ensure_usable()?;
+        validate_capture_request(
+            tokens.len(),
+            target_block,
+            self.weights.layers.len(),
+            session.next_position,
+            session.geometry.capacity,
+        )
+        .map_err(|error| MuseGlimmerTextSessionError::Invalid(error.to_string()))?;
+        for &token in tokens {
+            self.validate_token_and_session(token, session)?;
+        }
+
+        let hidden_size = session.geometry.hidden_size;
+        let bank_shape = vec![hidden_size as u64, tokens.len() as u64];
+        let input = MetalTensor::zeros_f32(self.ctx, bank_shape.clone())?;
+        let post_attention = MetalTensor::zeros_f32(self.ctx, bank_shape.clone())?;
+        let post_block = MetalTensor::zeros_f32(self.ctx, bank_shape)?;
+        for (token_slot, &token) in tokens.iter().enumerate() {
+            let destination = MuseGlimmerLensCaptureDestination {
+                target_block: target_block as usize,
+                input: input
+                    .view_subrange((token_slot * hidden_size) as u64, vec![hidden_size as u64]),
+                post_attention: post_attention
+                    .view_subrange((token_slot * hidden_size) as u64, vec![hidden_size as u64]),
+                post_block: post_block
+                    .view_subrange((token_slot * hidden_size) as u64, vec![hidden_size as u64]),
+            };
+            self.execute_token_with_capture(token, session, &destination)?;
+        }
+
+        Ok(MuseGlimmerLensCapture::new(
+            target_block,
+            tokens.to_vec(),
+            hidden_size,
+            read_f32(&input),
+            read_f32(&post_attention),
+            read_f32(&post_block),
+        ))
+    }
+
     fn validate_token_and_session(
         &self,
         token: u32,
@@ -653,6 +701,44 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         Ok(produce_logits.then(|| session.read_logits()))
     }
 
+    fn execute_token_with_capture(
+        &self,
+        token: u32,
+        session: &mut MuseGlimmerTextSession,
+        capture: &MuseGlimmerLensCaptureDestination,
+    ) -> Result<(), MuseGlimmerTextSessionError> {
+        let position = session.next_position;
+        let position_u32 = u32::try_from(position).map_err(|_| {
+            MuseGlimmerTextSessionError::Invalid("session position exceeds u32".into())
+        })?;
+        session.write_token(token as i32);
+        let command = self.ctx.queue.commandBuffer().ok_or_else(|| {
+            MuseGlimmerTextSessionError::CommandBuffer("allocation failed".into())
+        })?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = self.encode_token_graph_inner(
+            &encoder,
+            position,
+            position_u32,
+            session,
+            false,
+            Some(capture),
+        );
+        encoder.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        let status = command.status();
+        let command_error = command.error().map(|error| error.to_string());
+        if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
+            let reason = format!("status={status:?}, error={command_error:?}");
+            session.poison_reason = Some(reason.clone());
+            return Err(MuseGlimmerTextSessionError::CommandBuffer(reason));
+        }
+        session.next_position += 1;
+        Ok(())
+    }
+
     fn encode_token_graph(
         &self,
         encoder: &KernelEncoder,
@@ -660,6 +746,25 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         position_u32: u32,
         session: &MuseGlimmerTextSession,
         produce_logits: bool,
+    ) -> Result<(), MuseGlimmerTextSessionError> {
+        self.encode_token_graph_inner(
+            encoder,
+            position,
+            position_u32,
+            session,
+            produce_logits,
+            None,
+        )
+    }
+
+    fn encode_token_graph_inner(
+        &self,
+        encoder: &KernelEncoder,
+        position: usize,
+        position_u32: u32,
+        session: &MuseGlimmerTextSession,
+        produce_logits: bool,
+        capture: Option<&MuseGlimmerLensCaptureDestination>,
     ) -> Result<(), MuseGlimmerTextSessionError> {
         let geometry = &session.geometry;
         encode_get_rows_f32(
@@ -681,6 +786,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         )?;
 
         for (layer_index, layer) in self.weights.layers.iter().enumerate() {
+            if let Some(capture) = capture.filter(|capture| capture.target_block == layer_index) {
+                encode_copy_offset_f32(
+                    self.ctx,
+                    encoder,
+                    &session.residual,
+                    0,
+                    &capture.input,
+                    geometry.hidden_size,
+                )?;
+            }
             encode_rms_norm_mul_f32(
                 self.ctx,
                 encoder,
@@ -808,6 +923,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.post_norm_epsilon,
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &session.residual, &session.branch_normed)?;
+            if let Some(capture) = capture.filter(|capture| capture.target_block == layer_index) {
+                encode_copy_offset_f32(
+                    self.ctx,
+                    encoder,
+                    &session.residual,
+                    0,
+                    &capture.post_attention,
+                    geometry.hidden_size,
+                )?;
+            }
             encode_rms_norm_mul_f32(
                 self.ctx,
                 encoder,
@@ -859,6 +984,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.post_norm_epsilon,
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &session.residual, &session.branch_normed)?;
+            if let Some(capture) = capture.filter(|capture| capture.target_block == layer_index) {
+                encode_copy_offset_f32(
+                    self.ctx,
+                    encoder,
+                    &session.residual,
+                    0,
+                    &capture.post_block,
+                    geometry.hidden_size,
+                )?;
+            }
         }
 
         if produce_logits {
@@ -890,6 +1025,31 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         }
         Ok(())
     }
+}
+
+struct MuseGlimmerLensCaptureDestination {
+    target_block: usize,
+    input: MetalTensor,
+    post_attention: MetalTensor,
+    post_block: MetalTensor,
+}
+
+fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
+    let mut values = vec![0.0_f32; tensor.n_elements() as usize];
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<f32>(),
+            values.as_mut_ptr(),
+            values.len(),
+        );
+    }
+    values
 }
 
 fn session_allocation_specs(

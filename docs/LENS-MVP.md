@@ -29,19 +29,24 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
+| Muse Glimmer 30B | fitting not yet wired | text runtime oracle passed | scalar only | adjacent-layer selected-token fit |
 
 ## Current Status
 
 The CLI handoff is verified on real dense, ordinary MoE, native J/R, and
 workspace-template assets. Selected-mask vector export is complete for dense
-published full-J traces. Flash-Next now has a separately verified library seam
-and restricted CLI path for its persistent 10,240-wide post-layer hyper state.
+published full-J traces. Muse Glimmer scalar text generation matches the local
+Q8 llama.cpp logits oracle and is ready for a bounded fitting vertical slice.
+Flash-Next remains available as a raw hyper-state path, but lens work is frozen
+until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Timebox the concrete path to a real rectangular Flash-Next transport/readout.
-Do not invent a 5,120-to-10,240 lift, treat raw hyper control as a J/R lens, or
-broaden into optimization, REST, UI, or experiments.
+Fit and read one Muse selected-token transport across one adjacent full-attention
+block. The slice must include production residual capture, replay agreement,
+J-VJP finite-difference validation, an explicit Muse R rule, a model-bound
+artifact, and fresh-run score agreement. Do not broaden to full rows, generic
+backends, REST, UI, or experiments before this passes.
 
 ## Hard Exclusions
 
@@ -55,10 +60,11 @@ hardening.
 
 ## Fast Follows
 
-1. Rectangular Flash-Next transport/readout support when a real asset exists.
-2. Multiple Flash operations per token only when a real workflow requires it.
-3. Sparse position filtering and traces beyond 128 positions.
-4. Corpus batching only after measured throughput requires it.
+1. Compose Muse transport across multiple blocks after the adjacent-block slice.
+2. Cover Muse sliding-attention adjacent-pair RoPE after full attention passes.
+3. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
+4. Sparse position filtering and traces beyond 128 positions.
+5. Corpus batching only after measured throughput requires it.
 
 This file is updated in place. It is not a work log or design document. Keep
 one active gate, at most three blockers, and at most five fast follows.

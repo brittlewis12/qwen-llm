@@ -3,6 +3,10 @@
 use crate::gguf::GgufFile;
 use crate::metal::{MetalContext, MetalMemoryAdmission, evaluate_metal_memory_admission};
 use crate::muse_glimmer::MuseGlimmerConfig;
+use crate::muse_glimmer_lens::{
+    MuseGlimmerLensCapture, MuseGlimmerLensError, MuseGlimmerSelectedTokenCovectors,
+    muse_glimmer_selected_token_covectors,
+};
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
 };
@@ -18,6 +22,8 @@ pub enum MuseGlimmerRuntimeError {
     Residency(#[from] MuseGlimmerResidencyError),
     #[error(transparent)]
     Session(#[from] MuseGlimmerTextSessionError),
+    #[error(transparent)]
+    Lens(#[from] MuseGlimmerLensError),
     #[error("invalid Muse Glimmer runtime contract: {0}")]
     Invalid(String),
 }
@@ -121,6 +127,18 @@ impl MuseGlimmerLoadedModel {
             .map_or(0, MuseGlimmerTextSession::observed_allocation_delta)
     }
 
+    pub fn selected_token_lens_covectors(
+        &self,
+        ctx: &MetalContext,
+        token_ids: &[u32],
+    ) -> Result<MuseGlimmerSelectedTokenCovectors, MuseGlimmerRuntimeError> {
+        Ok(muse_glimmer_selected_token_covectors(
+            ctx,
+            &self.weights,
+            token_ids,
+        )?)
+    }
+
     pub fn create_runner<'ctx, 'model>(
         &'model mut self,
         ctx: &'ctx MetalContext,
@@ -164,6 +182,18 @@ impl MuseGlimmerTextRunner<'_, '_> {
 
     pub fn prefill(&mut self, tokens: &[u32]) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
         Ok(self.forward.prefill(tokens, &mut self.session)?)
+    }
+
+    /// Run a bounded scalar prompt from a fresh session and capture one
+    /// nonzero block's three residual coordinates for every prompt token.
+    pub fn capture_fresh_lens_prompt(
+        &mut self,
+        tokens: &[u32],
+        target_block: u32,
+    ) -> Result<MuseGlimmerLensCapture, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .capture_fresh_lens_prompt(tokens, target_block, &mut self.session)?)
     }
 
     pub fn prefill_with_command_checkpoint<F>(

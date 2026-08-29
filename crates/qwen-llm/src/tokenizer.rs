@@ -45,6 +45,11 @@ pub const QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256: [u8; 32] = [
     0x90, 0x4a, 0xdd, 0xb3, 0xbb, 0xa6, 0xdc, 0xd5, 0x0b, 0x50, 0xbe, 0xf0, 0x76, 0xe5, 0xe8, 0x9f,
 ];
 
+pub const MUSE_GLIMMER_RELEASE_TOKENIZER_IDENTITY_SHA256: [u8; 32] = [
+    0x90, 0xb2, 0x69, 0x1f, 0xf0, 0xd7, 0x6a, 0x0e, 0x6e, 0xd6, 0xc1, 0x2a, 0x14, 0xac, 0xcb, 0xea,
+    0x5c, 0x9b, 0x34, 0x5d, 0xa5, 0x49, 0x85, 0x8f, 0xcf, 0x75, 0xad, 0x97, 0x9a, 0x56, 0x54, 0x7d,
+];
+
 /// SHA-256 over the raw concatenation of signed token IDs in little-endian
 /// order. This is the production prompt-token identity contract.
 pub fn token_ids_sha256_i32le(tokens: &[i32]) -> String {
@@ -60,8 +65,16 @@ pub fn token_ids_sha256_i32le(tokens: &[i32]) -> String {
 /// This scans the complete vocabulary and merge table and is intentionally a
 /// qualification tool rather than a production request-admission check.
 pub fn qwen4exp_tokenizer_identity_sha256(g: &GgufFile) -> Result<[u8; 32], TokError> {
+    bpe_tokenizer_identity_sha256(g, b"qwen4exp-tokenizer-identity-v2\0")
+}
+
+pub fn muse_glimmer_tokenizer_identity_sha256(g: &GgufFile) -> Result<[u8; 32], TokError> {
+    bpe_tokenizer_identity_sha256(g, b"muse-glimmer-tokenizer-identity-v1\0")
+}
+
+fn bpe_tokenizer_identity_sha256(g: &GgufFile, domain: &[u8]) -> Result<[u8; 32], TokError> {
     let mut digest = Sha256::new();
-    digest.update(b"qwen4exp-tokenizer-identity-v2\0");
+    digest.update(domain);
     hash_identity_str(
         &mut digest,
         "general.architecture",
@@ -452,7 +465,7 @@ impl LlamaCppTokenizer {
         Ok(buf)
     }
 
-    pub fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
+    pub fn try_decode_piece_bytes_exact(&self, token: i32) -> Result<Vec<u8>, TokError> {
         let token = self.checked_token(token)?;
         let mut cap = 32usize;
         loop {
@@ -472,7 +485,7 @@ impl LlamaCppTokenizer {
                 )
             };
             if n == 0 {
-                return Ok(String::new());
+                return Ok(Vec::new());
             }
             if n > 0 {
                 let n = usize::try_from(n).map_err(|_| TokError::DecodePieceFailed {
@@ -490,7 +503,7 @@ impl LlamaCppTokenizer {
                 unsafe {
                     buf.set_len(n);
                 }
-                return Ok(String::from_utf8_lossy(&buf).into_owned());
+                return Ok(buf);
             }
             if n == i32::MIN {
                 return Err(TokError::DecodePieceFailed {
@@ -502,7 +515,11 @@ impl LlamaCppTokenizer {
         }
     }
 
-    pub fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError> {
+    pub fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
+        Ok(String::from_utf8_lossy(&self.try_decode_piece_bytes_exact(token)?).into_owned())
+    }
+
+    pub fn try_decode_bytes_exact(&self, tokens: &[i32]) -> Result<Vec<u8>, TokError> {
         for &token in tokens {
             self.checked_token(token)?;
         }
@@ -538,7 +555,7 @@ impl LlamaCppTokenizer {
                 unsafe {
                     buf.set_len(n);
                 }
-                return Ok(String::from_utf8_lossy(&buf).into_owned());
+                return Ok(buf);
             }
             if n == i32::MIN {
                 return Err(TokError::DetokenizeFailed(
@@ -547,6 +564,10 @@ impl LlamaCppTokenizer {
             }
             cap = needed_count_or_overflow(n)?;
         }
+    }
+
+    pub fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError> {
+        Ok(String::from_utf8_lossy(&self.try_decode_bytes_exact(tokens)?).into_owned())
     }
 
     /// Decode one token to its UTF-8 piece. Special tokens are rendered
@@ -2413,6 +2434,14 @@ mod tests {
         };
         assert_eq!(native.n_vocab(), ffi.n_vocab());
         for id in 0..ffi.n_vocab() as i32 {
+            assert_eq!(
+                native
+                    .try_decode_piece_bytes_exact(id)
+                    .expect("native exact piece"),
+                ffi.try_decode_piece_bytes_exact(id)
+                    .expect("ffi exact piece"),
+                "exact decode_piece mismatch at token {id}"
+            );
             assert_eq!(
                 native.try_decode_piece(id).expect("native piece"),
                 ffi.try_decode_piece(id).expect("ffi piece"),

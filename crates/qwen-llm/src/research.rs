@@ -671,6 +671,17 @@ pub struct ResearchPackedVocabularyPosition {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ResearchPackedTransportedVector {
+    /// Zero-based absolute position of the captured prompt token.
+    pub source_position: usize,
+    pub source_token_id: i32,
+    /// The transported residual at `source_position` predicts this position.
+    pub predicts_position: usize,
+    /// Target-coordinate F32 values before the deployed output RMSNorm and LM head.
+    pub values: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResearchPackedFullVocabularyReadout {
     /// Zero-based block index captured after its second residual update.
     pub source_layer: u32,
@@ -686,6 +697,8 @@ pub struct ResearchPackedFullVocabularyReadout {
     /// Wall time through completion of the readout command buffer.
     pub readout_wall_ms: f64,
     pub positions: Vec<ResearchPackedVocabularyPosition>,
+    /// Caller-selected transported rows in caller request order.
+    pub transported_vectors: Vec<ResearchPackedTransportedVector>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -860,7 +873,7 @@ pub enum ResearchError {
         shape: Vec<u64>,
         expected: usize,
     },
-    #[error("selected-token readout {name} contains a non-finite value at flat index {index}")]
+    #[error("research readout {name} contains a non-finite value at flat index {index}")]
     NonFiniteTokenReadoutData { name: &'static str, index: usize },
     #[error("full-vocabulary lens readout requires at least one prompt token")]
     EmptyFullReadoutPrompt,
@@ -874,6 +887,16 @@ pub enum ResearchError {
     PackedCaptureModelMismatch,
     #[error("source layer {source_layer} is not present in the packed capture")]
     PackedCaptureLayerNotFound { source_layer: u32 },
+    #[error(
+        "packed transported-vector source position {source_position} is outside capture range {start_position}..{end_position}"
+    )]
+    PackedTransportedVectorPositionOutOfRange {
+        source_position: usize,
+        start_position: usize,
+        end_position: usize,
+    },
+    #[error("packed transported-vector source position {source_position} occurs more than once")]
+    DuplicatePackedTransportedVectorPosition { source_position: usize },
     #[error("full-vocabulary prompt capture requires a fresh sequence at position zero, got {0}")]
     FullReadoutRequiresFreshSequence(usize),
     #[error("full-vocabulary lens top-k {got} is outside the supported range 1..={max}")]
@@ -1385,6 +1408,26 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         transport_bytes: &[u8],
         top_k: usize,
     ) -> Result<ResearchPackedFullVocabularyReadout, ResearchError> {
+        self.apply_packed_capture_f16_transport_topk_with_vectors(
+            capture,
+            source_layer,
+            transport_bytes,
+            top_k,
+            &[],
+        )
+    }
+
+    /// Apply one row-major F16 transport and full-vocabulary readout while
+    /// returning only the caller-selected transported rows. Source positions
+    /// are zero-based absolute positions and preserve caller request order.
+    pub fn apply_packed_capture_f16_transport_topk_with_vectors(
+        &self,
+        capture: &ResearchPackedPostBlockCapture<'_>,
+        source_layer: u32,
+        transport_bytes: &[u8],
+        top_k: usize,
+        transported_source_positions: &[usize],
+    ) -> Result<ResearchPackedFullVocabularyReadout, ResearchError> {
         if !std::ptr::eq(self.model, capture.model) {
             return Err(ResearchError::PackedCaptureModelMismatch);
         }
@@ -1403,18 +1446,28 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         validate_full_readout_tail(model, hidden_size, vocab_size)?;
 
         let position_count = capture.position_count();
+        let transported_position_rows = validate_packed_transported_vector_positions(
+            capture.start_position(),
+            position_count,
+            transported_source_positions,
+        )?;
         let hidden_elements = checked_product(position_count, hidden_size)?;
         let logits_elements = checked_product(position_count, vocab_size)?;
         let compact_elements = checked_product(position_count, MAX_FULL_READOUT_TOP_K)?;
         let hidden_bytes = checked_product(hidden_elements, std::mem::size_of::<f32>())?;
         let logits_bytes = checked_product(logits_elements, std::mem::size_of::<f32>())?;
         let compact_bytes = checked_product(compact_elements, 2 * std::mem::size_of::<u32>())?;
+        let transported_vector_bytes = checked_product(
+            checked_product(transported_position_rows.len(), hidden_size)?,
+            std::mem::size_of::<f32>(),
+        )?;
         let peak_bytes = transport_bytes
             .len()
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(3)?))
             .and_then(|bytes| bytes.checked_add(logits_bytes))
             .and_then(|bytes| bytes.checked_add(compact_bytes))
+            .and_then(|bytes| bytes.checked_add(transported_vector_bytes))
             .ok_or(ResearchError::SizeOverflow)?;
         enforce_research_byte_budget("packed full-vocabulary F16 transport readout", peak_bytes)?;
 
@@ -1530,6 +1583,13 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             &ids,
             &values,
         )?;
+        let transported_vectors = read_packed_transported_vectors(
+            &transported,
+            capture,
+            transported_source_positions,
+            &transported_position_rows,
+            hidden_size,
+        )?;
 
         Ok(ResearchPackedFullVocabularyReadout {
             source_layer,
@@ -1541,6 +1601,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             readout_gpu_ms,
             readout_wall_ms,
             positions,
+            transported_vectors,
         })
     }
 
@@ -6399,6 +6460,90 @@ fn validate_full_readout_tail(
     Ok(())
 }
 
+fn validate_packed_transported_vector_positions(
+    start_position: usize,
+    position_count: usize,
+    source_positions: &[usize],
+) -> Result<Vec<usize>, ResearchError> {
+    let end_position = start_position
+        .checked_add(position_count)
+        .ok_or(ResearchError::PositionOverflow(start_position))?;
+    let mut position_rows = Vec::new();
+    position_rows
+        .try_reserve_exact(source_positions.len())
+        .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+            name: "packed transported-vector position rows",
+            elements: source_positions.len(),
+        })?;
+    for (index, &source_position) in source_positions.iter().enumerate() {
+        if source_position < start_position || source_position >= end_position {
+            return Err(ResearchError::PackedTransportedVectorPositionOutOfRange {
+                source_position,
+                start_position,
+                end_position,
+            });
+        }
+        if source_positions[..index].contains(&source_position) {
+            return Err(ResearchError::DuplicatePackedTransportedVectorPosition {
+                source_position,
+            });
+        }
+        position_rows.push(source_position - start_position);
+    }
+    Ok(position_rows)
+}
+
+fn read_packed_transported_vectors(
+    transported: &MetalTensor,
+    capture: &ResearchPackedPostBlockCapture<'_>,
+    source_positions: &[usize],
+    position_rows: &[usize],
+    hidden_size: usize,
+) -> Result<Vec<ResearchPackedTransportedVector>, ResearchError> {
+    if source_positions.len() != position_rows.len() {
+        return Err(ResearchError::ActivationSize {
+            name: "packed transported-vector position rows",
+            got: position_rows.len(),
+            expected: source_positions.len(),
+        });
+    }
+    let mut vectors = Vec::new();
+    vectors
+        .try_reserve_exact(source_positions.len())
+        .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+            name: "packed transported vectors",
+            elements: source_positions.len(),
+        })?;
+    for (vector_index, (&source_position, &position_row)) in
+        source_positions.iter().zip(position_rows).enumerate()
+    {
+        let row_offset = checked_product(position_row, hidden_size)?;
+        let row = transported.view_subrange(
+            u64::try_from(row_offset).map_err(|_| ResearchError::SizeOverflow)?,
+            vec![hidden_size as u64],
+        );
+        let values = read_f32_fallible(&row, hidden_size, "packed transported-vector values")?;
+        if let Some(component) = values.iter().position(|value| !value.is_finite()) {
+            return Err(ResearchError::NonFiniteTokenReadoutData {
+                name: "packed transported-vector values",
+                index: checked_product(vector_index, hidden_size)?
+                    .checked_add(component)
+                    .ok_or(ResearchError::SizeOverflow)?,
+            });
+        }
+        let predicts_position = source_position
+            .checked_add(1)
+            .ok_or(ResearchError::PositionOverflow(source_position))?;
+        vectors.push(ResearchPackedTransportedVector {
+            source_position,
+            source_token_id: capture.token_ids()[position_row],
+            predicts_position,
+            values,
+        });
+    }
+    Ok(vectors)
+}
+
 fn build_packed_vocabulary_positions(
     token_ids: &[i32],
     start_position: usize,
@@ -7545,6 +7690,48 @@ mod tests {
     }
 
     #[test]
+    fn packed_transported_vector_positions_preserve_caller_order() {
+        assert_eq!(
+            validate_packed_transported_vector_positions(41, 3, &[43, 41, 42]).unwrap(),
+            vec![2, 0, 1]
+        );
+        assert_eq!(
+            validate_packed_transported_vector_positions(41, 3, &[]).unwrap(),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn packed_transported_vector_positions_reject_out_of_range_values() {
+        assert!(matches!(
+            validate_packed_transported_vector_positions(41, 3, &[40]).unwrap_err(),
+            ResearchError::PackedTransportedVectorPositionOutOfRange {
+                source_position: 40,
+                start_position: 41,
+                end_position: 44,
+            }
+        ));
+        assert!(matches!(
+            validate_packed_transported_vector_positions(41, 3, &[44]).unwrap_err(),
+            ResearchError::PackedTransportedVectorPositionOutOfRange {
+                source_position: 44,
+                start_position: 41,
+                end_position: 44,
+            }
+        ));
+    }
+
+    #[test]
+    fn packed_transported_vector_positions_reject_duplicates() {
+        assert!(matches!(
+            validate_packed_transported_vector_positions(41, 3, &[42, 41, 42]).unwrap_err(),
+            ResearchError::DuplicatePackedTransportedVectorPosition {
+                source_position: 42
+            }
+        ));
+    }
+
+    #[test]
     fn packed_vocabulary_positions_preserve_absolute_next_position_semantics() {
         let mut ids = vec![0i32; 2 * MAX_FULL_READOUT_TOP_K];
         let mut values = vec![0.0f32; 2 * MAX_FULL_READOUT_TOP_K];
@@ -7615,13 +7802,22 @@ mod tests {
             .forward_packed_post_block_capture(&token_ids, &[other_layer, source_layer])
             .expect("packed post-block capture");
         let packed = research
-            .apply_packed_capture_f16_transport_topk(
+            .apply_packed_capture_f16_transport_topk_with_vectors(
                 &capture,
                 source_layer,
                 &transport,
                 MAX_FULL_READOUT_TOP_K,
+                &[0, 16, 127],
             )
             .expect("packed full-vocabulary readout");
+        assert_eq!(packed.transported_vectors.len(), 3);
+        for (&source_position, vector) in [0, 16, 127].iter().zip(&packed.transported_vectors) {
+            assert_eq!(vector.source_position, source_position);
+            assert_eq!(vector.source_token_id, token_ids[source_position]);
+            assert_eq!(vector.predicts_position, source_position + 1);
+            assert_eq!(vector.values.len(), arch.hidden_size as usize);
+            assert!(vector.values.iter().all(|value| value.is_finite()));
+        }
         for capture_row in [0, 15, 16, 17, 127] {
             let captured_residual = capture
                 .row_for_test(capture_row, source_layer)

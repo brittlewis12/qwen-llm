@@ -31,6 +31,7 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- trace-full \
   --full-lens /path/to/Qwen3.8-27B-jlens-native-v1 \
   --messages /path/to/messages.json \
   --layers 0,31,62 \
+  --vectors 31:5,62:5 \
   --top-k 8
 ```
 
@@ -45,6 +46,14 @@ input token pieces, compact layer-position top-k cells, timings, and token
 occurrence counts globally and per layer. One occurrence means one token ID in
 one returned top-k list. Runtime tracing checks artifact geometry and byte
 length, but does not hash the model or rescan the 3.3 GiB payload.
+
+`--vectors LAYER:POSITION,...` optionally includes up to 32 selected transported
+J-space rows inline in the same JSON. It may be repeated; cells must be unique,
+must use selected layers, and use zero-based tokenized-input positions. Each
+F32 vector is `J_layer * post_block_residual` in target coordinates before the
+deployed output RMSNorm and LM head. It is not the source activation, logits,
+or an observed target-layer activation. The JSON reports shape, coordinate
+semantics, and deterministic cell order alongside the values.
 
 ## Plan
 

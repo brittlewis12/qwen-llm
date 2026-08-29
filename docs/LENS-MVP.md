@@ -18,19 +18,21 @@ not compensating abstraction.
 - [x] Matching operations execute in file order.
 - [x] The minimal CLI runs with real lens directions.
 - [x] Packed full-J traces cover layer x position top-k and occurrence counts.
+- [x] Explicit layer:position masks can export transported J-space vectors.
 
 ## Model Support
 
 | Runtime | Readout/Fit | Intervention | Packed | Next Gate |
 | --- | --- | --- | --- | --- |
-| ordinary dense | native J/R + full-J trace | live CLI passed | full-J trace | vector export |
+| ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | adapter deferred | adapter deferred | existing runtime | coordinate spike |
 
 ## Current Status
 
-The first CLI handoff is complete and verified on real dense, ordinary MoE,
-published full-J, native J/R, and workspace-template assets.
+The CLI handoff is verified on real dense, ordinary MoE, native J/R, and
+workspace-template assets. Selected-mask vector export is separately complete
+and verified for dense published full-J traces.
 
 ## Next Gate
 
@@ -50,11 +52,10 @@ hardening.
 
 ## Fast Follows
 
-1. Selected-mask transported-vector export.
-2. Full-transport adapters for additional real J/R assets.
-3. Flash-Next adapter implementation if the spike passes.
-4. Sparse position filtering and traces beyond 128 positions.
-5. Corpus batching only after measured throughput requires it.
+1. Full-transport adapters for additional real J/R assets.
+2. Flash-Next adapter implementation if the spike passes.
+3. Sparse position filtering and traces beyond 128 positions.
+4. Corpus batching only after measured throughput requires it.
 
 This file is updated in place. It is not a work log or design document. Keep
 one active gate, at most three blockers, and at most five fast follows.

@@ -12,6 +12,7 @@ use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::{CompressionMethod, ZipArchive};
 
@@ -52,6 +53,7 @@ const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TRANSFER_COMPARISON_TOKENS: usize = 32;
 const MAX_FULL_READOUT_PROMPT_TOKENS: usize = 4_096;
 const MAX_FULL_READOUT_TOP_K: usize = 16;
+const MAX_TRACE_FULL_VECTOR_CELLS: usize = 32;
 
 #[derive(Debug, Args)]
 pub(crate) struct ImportFullArgs {
@@ -195,6 +197,44 @@ pub(crate) struct TraceFullArgs {
     /// Reject inputs above this bound without truncating them.
     #[arg(long, default_value_t = MAX_RESEARCH_PACKED_READOUT_POSITIONS)]
     max_tokens: usize,
+
+    /// Transported J-space vectors to include as layer:position cells.
+    #[arg(long = "vectors", value_delimiter = ',')]
+    vectors: Vec<TraceFullVectorCell>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct TraceFullVectorCell {
+    source_layer: u32,
+    source_position: usize,
+}
+
+impl FromStr for TraceFullVectorCell {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let mut parts = value.split(':');
+        let layer = parts.next().unwrap_or_default();
+        let position = parts.next().unwrap_or_default();
+        if parts.next().is_some()
+            || layer.is_empty()
+            || position.is_empty()
+            || !layer.bytes().all(|byte| byte.is_ascii_digit())
+            || !position.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(format!(
+                "vector cell {value:?} must be exactly LAYER:POSITION using unsigned decimal integers"
+            ));
+        }
+        Ok(Self {
+            source_layer: layer
+                .parse()
+                .map_err(|_| format!("vector layer {layer:?} does not fit u32"))?,
+            source_position: position
+                .parse()
+                .map_err(|_| format!("vector position {position:?} does not fit usize"))?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -498,6 +538,8 @@ struct TraceFullDocument {
     top_k: usize,
     occurrence_definition: &'static str,
     cells: Vec<TraceFullCell>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vectors: Option<TraceFullVectors>,
     timing: TraceFullTiming,
     occurrences: TraceFullOccurrences,
 }
@@ -543,6 +585,27 @@ struct TraceFullTokenScore {
     token_display_lossy: String,
     token_piece_hex: String,
     logit: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullVectors {
+    operation: &'static str,
+    stage: &'static str,
+    value_dtype: &'static str,
+    hidden_coordinate: &'static str,
+    hidden_size: usize,
+    shape: [usize; 2],
+    cell_order: &'static str,
+    cells: Vec<TraceFullVector>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullVector {
+    source_layer: u32,
+    source_position: usize,
+    source_token_id: i32,
+    predicts_position: usize,
+    values: Vec<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1288,6 +1351,8 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         token_ids.len(),
         args.max_tokens
     );
+    let vector_positions_by_layer =
+        group_trace_full_vector_cells(&args.vectors, &layers, token_ids.len())?;
     let input_tokens = token_ids
         .iter()
         .enumerate()
@@ -1346,6 +1411,10 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let mut matrix_read_wall_ms = 0.0f64;
     let mut readout_gpu_ms = 0.0f64;
     let mut readout_wall_ms = 0.0f64;
+    let mut transported_vectors = Vec::new();
+    transported_vectors
+        .try_reserve_exact(args.vectors.len())
+        .context("allocate selected transported-vector results")?;
     for &layer in &layers {
         let layer_slot = manifest
             .transport
@@ -1365,8 +1434,18 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             .with_context(|| format!("read full-lens source layer {layer}"))?;
         matrix_read_wall_ms += read_started.elapsed().as_secs_f64() * 1e3;
 
+        let vector_positions = vector_positions_by_layer
+            .get(&layer)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let readout = research
-            .apply_packed_capture_f16_transport_topk(&capture, layer, &matrix, args.top_k)
+            .apply_packed_capture_f16_transport_topk_with_vectors(
+                &capture,
+                layer,
+                &matrix,
+                args.top_k,
+                vector_positions,
+            )
             .with_context(|| format!("apply packed full-lens source layer {layer}"))?;
         ensure!(
             readout.source_layer == layer
@@ -1377,6 +1456,15 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         );
         readout_gpu_ms += readout.readout_gpu_ms;
         readout_wall_ms += readout.readout_wall_ms;
+        for vector in readout.transported_vectors {
+            transported_vectors.push(TraceFullVector {
+                source_layer: layer,
+                source_position: vector.source_position,
+                source_token_id: vector.source_token_id,
+                predicts_position: vector.predicts_position,
+                values: vector.values,
+            });
+        }
         for position in readout.positions {
             let mut top_k = Vec::new();
             top_k
@@ -1406,9 +1494,19 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         }
     }
     let occurrences = aggregate_trace_full_occurrences(&cells, &layers);
+    let vectors = (!args.vectors.is_empty()).then(|| TraceFullVectors {
+        operation: "row_major_f16_j_transport_times_f32_post_block_residual",
+        stage: "transported_target_coordinate_before_output_rmsnorm_and_lm_head",
+        value_dtype: "f32",
+        hidden_coordinate: "zero_based_target_layer_residual_coordinate",
+        hidden_size: arch.hidden_size as usize,
+        shape: [transported_vectors.len(), arch.hidden_size as usize],
+        cell_order: "selected_layers_order_then_source_position_ascending",
+        cells: transported_vectors,
+    });
     let document = TraceFullDocument {
         schema: "qwen.lens.trace",
-        schema_version: 1,
+        schema_version: 2,
         lens: TraceFullLens {
             kind: "published_full_j",
             method: manifest.transport.method,
@@ -1430,6 +1528,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         top_k: args.top_k,
         occurrence_definition: "one_token_id_appearing_in_one_returned_top_k_list",
         cells,
+        vectors,
         timing: TraceFullTiming {
             packed_prefill_gpu_ms: capture.packed_prefill_gpu_ms(),
             packed_prefill_wall_ms: capture.packed_prefill_wall_ms(),
@@ -1474,7 +1573,45 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
         args.prompt.is_some() || !args.no_special_tokens,
         "--no-special-tokens only applies to --prompt"
     );
+    ensure!(
+        args.vectors.len() <= MAX_TRACE_FULL_VECTOR_CELLS,
+        "--vectors selects {} cells, exceeding the limit {MAX_TRACE_FULL_VECTOR_CELLS}",
+        args.vectors.len()
+    );
+    let mut vector_cells = BTreeSet::new();
+    ensure!(
+        args.vectors.iter().all(|cell| vector_cells.insert(*cell)),
+        "--vectors cells must be unique"
+    );
     Ok(())
+}
+
+fn group_trace_full_vector_cells(
+    cells: &[TraceFullVectorCell],
+    selected_layers: &[u32],
+    position_count: usize,
+) -> Result<BTreeMap<u32, Vec<usize>>> {
+    let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
+    for cell in cells {
+        ensure!(
+            selected_layers.contains(&cell.source_layer),
+            "--vectors layer {} is not present in the effective --layers selection",
+            cell.source_layer
+        );
+        ensure!(
+            cell.source_position < position_count,
+            "--vectors position {} is outside the tokenized input length {position_count}",
+            cell.source_position
+        );
+        grouped
+            .entry(cell.source_layer)
+            .or_default()
+            .push(cell.source_position);
+    }
+    for positions in grouped.values_mut() {
+        positions.sort_unstable();
+    }
+    Ok(grouped)
 }
 
 fn validate_trace_full_manifest(manifest: &FullLensManifest) -> Result<()> {
@@ -2475,6 +2612,7 @@ mod tests {
             layers: vec![0, 31, 62],
             top_k: 8,
             max_tokens: MAX_RESEARCH_PACKED_READOUT_POSITIONS,
+            vectors: Vec::new(),
         }
     }
 
@@ -2665,6 +2803,68 @@ mod tests {
         args.token_ids = Some(vec![1, 2]);
         validate_trace_full_args(&args).unwrap();
         args.prompt = Some("also set".into());
+        assert!(validate_trace_full_args(&args).is_err());
+    }
+
+    #[test]
+    fn trace_vector_cells_parse_strict_unsigned_coordinates() {
+        assert_eq!(
+            "31:127".parse::<TraceFullVectorCell>().unwrap(),
+            TraceFullVectorCell {
+                source_layer: 31,
+                source_position: 127,
+            }
+        );
+        for invalid in ["", "31", "31:", ":1", "31:1:2", "-1:2", "1:+2", "a:2"] {
+            assert!(
+                invalid.parse::<TraceFullVectorCell>().is_err(),
+                "unexpectedly accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_vector_cells_require_selected_layers_and_valid_positions() {
+        let cells = [
+            TraceFullVectorCell {
+                source_layer: 31,
+                source_position: 4,
+            },
+            TraceFullVectorCell {
+                source_layer: 0,
+                source_position: 2,
+            },
+            TraceFullVectorCell {
+                source_layer: 31,
+                source_position: 1,
+            },
+        ];
+        let grouped = group_trace_full_vector_cells(&cells, &[0, 31], 5).unwrap();
+        assert_eq!(grouped[&0], [2]);
+        assert_eq!(grouped[&31], [1, 4]);
+
+        assert!(group_trace_full_vector_cells(&cells, &[0], 5).is_err());
+        assert!(group_trace_full_vector_cells(&cells, &[0, 31], 4).is_err());
+    }
+
+    #[test]
+    fn trace_vector_cells_are_bounded_and_unique() {
+        let mut args = test_trace_full_args();
+        args.vectors = vec![
+            TraceFullVectorCell {
+                source_layer: 31,
+                source_position: 2,
+            };
+            2
+        ];
+        assert!(validate_trace_full_args(&args).is_err());
+
+        args.vectors = (0..=MAX_TRACE_FULL_VECTOR_CELLS)
+            .map(|source_position| TraceFullVectorCell {
+                source_layer: 31,
+                source_position,
+            })
+            .collect();
         assert!(validate_trace_full_args(&args).is_err());
     }
 

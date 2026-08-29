@@ -1,4 +1,4 @@
-//! Bounded one-block replay and VJP for full-attention Muse blocks.
+//! Bounded one-block replay and VJP for Muse attention blocks.
 //!
 //! Production capture uses the scalar text path's F16 KV cache. This module
 //! intentionally replays and differentiates the smooth F32 model-level graph,
@@ -220,6 +220,7 @@ struct MuseAttentionGeometry {
     head_dim: usize,
     query: usize,
     kv: usize,
+    rope_theta: f32,
 }
 
 impl MuseAttentionGeometry {
@@ -237,6 +238,7 @@ impl MuseAttentionGeometry {
                 .map_err(|_| MuseGlimmerLensError::Invalid("query width exceeds usize".into()))?,
             kv: usize::try_from(config.kv_width()?)
                 .map_err(|_| MuseGlimmerLensError::Invalid("KV width exceeds usize".into()))?,
+            rope_theta: config.rope_theta,
         };
         if geometry.hidden == 0
             || geometry.feed_forward == 0
@@ -245,6 +247,8 @@ impl MuseAttentionGeometry {
             || !geometry.q_heads.is_multiple_of(geometry.kv_heads)
             || geometry.query != geometry.q_heads * geometry.head_dim
             || geometry.kv != geometry.kv_heads * geometry.head_dim
+            || !geometry.rope_theta.is_finite()
+            || geometry.rope_theta <= 0.0
         {
             return invalid("inconsistent Muse attention geometry");
         }
@@ -262,6 +266,54 @@ struct MuseAttentionVjp {
     grad_k: Vec<f32>,
     grad_v: Vec<f32>,
     grad_gate: Vec<f32>,
+}
+
+fn adjacent_pair_rope_rows_in_place(
+    values: &mut [f32],
+    n_tokens: usize,
+    n_heads: usize,
+    head_dim: usize,
+    theta: f32,
+    inverse: bool,
+) -> Result<(), MuseGlimmerLensError> {
+    if n_tokens == 0
+        || n_heads == 0
+        || head_dim == 0
+        || !head_dim.is_multiple_of(2)
+        || !theta.is_finite()
+        || theta <= 0.0
+    {
+        return invalid(
+            "adjacent-pair RoPE requires nonzero rows/heads, even head_dim, and positive finite theta",
+        );
+    }
+    validate_len(
+        "adjacent-pair RoPE rows",
+        values,
+        checked_mul(
+            checked_mul(n_tokens, n_heads, "RoPE token-head count")?,
+            head_dim,
+            "RoPE element count",
+        )?,
+    )?;
+    for token in 0..n_tokens {
+        for head in 0..n_heads {
+            let base = (token * n_heads + head) * head_dim;
+            for pair in 0..head_dim / 2 {
+                let relative = 2 * pair;
+                let angle = token as f32 * theta.powf(-(relative as f32) / head_dim as f32);
+                let (mut sine, cosine) = angle.sin_cos();
+                if inverse {
+                    sine = -sine;
+                }
+                let first = values[base + relative];
+                let second = values[base + relative + 1];
+                values[base + relative] = first * cosine - second * sine;
+                values[base + relative + 1] = first * sine + second * cosine;
+            }
+        }
+    }
+    require_finite("adjacent-pair RoPE output", values)
 }
 
 #[allow(clippy::needless_range_loop)]
@@ -489,6 +541,18 @@ pub(crate) fn muse_glimmer_replay_one_full_attention_block(
     input: &[f32],
     n_tokens: usize,
 ) -> Result<MuseGlimmerOneBlockReplay, MuseGlimmerLensError> {
+    require_full_attention_block(weights, target_block)?;
+    muse_glimmer_replay_one_attention_block(ctx, weights, target_block, input, n_tokens)
+}
+
+#[cfg(test)]
+pub(crate) fn muse_glimmer_replay_one_attention_block(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    target_block: u32,
+    input: &[f32],
+    n_tokens: usize,
+) -> Result<MuseGlimmerOneBlockReplay, MuseGlimmerLensError> {
     let geometry = MuseAttentionGeometry::from_weights(weights)?;
     let layer = validate_replay_request(weights, target_block, input, n_tokens, geometry)?;
     let state = replay_state(ctx, weights, layer, input, n_tokens, geometry)?;
@@ -575,10 +639,28 @@ fn replay_state(
         Ok(())
     })?;
 
-    let q = read_f32(&tensors.q);
-    let k = read_f32(&tensors.k);
+    let mut q = read_f32(&tensors.q);
+    let mut k = read_f32(&tensors.k);
     let v = read_f32(&tensors.v);
     let attention_gate = read_f32(&tensors.attention_gate);
+    if layer.sliding_attention {
+        adjacent_pair_rope_rows_in_place(
+            &mut q,
+            n_tokens,
+            geometry.q_heads,
+            geometry.head_dim,
+            geometry.rope_theta,
+            false,
+        )?;
+        adjacent_pair_rope_rows_in_place(
+            &mut k,
+            n_tokens,
+            geometry.kv_heads,
+            geometry.head_dim,
+            geometry.rope_theta,
+            false,
+        )?;
+    }
     let attention = cpu_causal_gqa_forward(&q, &k, &v, &attention_gate, n_tokens, geometry)?;
     write_f32(&tensors.gated_attention, &attention.gated_output)?;
 
@@ -692,6 +774,17 @@ pub(crate) fn muse_glimmer_one_full_attention_block_vjp(
     target_cotangent: &[f32],
     rule: MuseGlimmerLensRule,
 ) -> Result<MuseGlimmerOneBlockVjp, MuseGlimmerLensError> {
+    require_full_attention_block(weights, capture.target_block())?;
+    muse_glimmer_one_attention_block_vjp(ctx, weights, capture, target_cotangent, rule)
+}
+
+pub(crate) fn muse_glimmer_one_attention_block_vjp(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    capture: &MuseGlimmerLensCapture,
+    target_cotangent: &[f32],
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerOneBlockVjp, MuseGlimmerLensError> {
     let geometry = MuseAttentionGeometry::from_weights(weights)?;
     let target_block = capture.target_block();
     let layer = validate_replay_request(
@@ -701,12 +794,7 @@ pub(crate) fn muse_glimmer_one_full_attention_block_vjp(
         capture.n_tokens(),
         geometry,
     )?;
-    validate_request(
-        capture,
-        target_cotangent,
-        layer.sliding_attention,
-        geometry.hidden,
-    )?;
+    validate_request(capture, target_cotangent, geometry.hidden)?;
     let n_tokens = capture.n_tokens();
     let state = replay_state(
         ctx,
@@ -857,7 +945,7 @@ pub(crate) fn muse_glimmer_one_full_attention_block_vjp(
         )?;
         Ok(())
     })?;
-    let attention_vjp = cpu_causal_gqa_vjp(
+    let mut attention_vjp = cpu_causal_gqa_vjp(
         &q,
         &k,
         &v,
@@ -867,6 +955,24 @@ pub(crate) fn muse_glimmer_one_full_attention_block_vjp(
         geometry,
         &attention,
     )?;
+    if layer.sliding_attention {
+        adjacent_pair_rope_rows_in_place(
+            &mut attention_vjp.grad_q,
+            n_tokens,
+            geometry.q_heads,
+            geometry.head_dim,
+            geometry.rope_theta,
+            true,
+        )?;
+        adjacent_pair_rope_rows_in_place(
+            &mut attention_vjp.grad_k,
+            n_tokens,
+            geometry.kv_heads,
+            geometry.head_dim,
+            geometry.rope_theta,
+            true,
+        )?;
+    }
 
     let grad_q = from_f32(ctx, &attention_vjp.grad_q, query_shape.clone())?;
     let grad_k = from_f32(ctx, &attention_vjp.grad_k, kv_shape.clone())?;
@@ -1009,11 +1115,6 @@ fn validate_replay_request<'a>(
     let layer = weights.layers.get(target_block as usize).ok_or_else(|| {
         MuseGlimmerLensError::Invalid(format!("target block {target_block} is out of range"))
     })?;
-    if layer.sliding_attention {
-        return invalid(format!(
-            "target block {target_block} uses sliding attention; bounded replay currently supports full attention only"
-        ));
-    }
     if n_tokens == 0 || n_tokens > MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS {
         return invalid(format!(
             "replay token count must be in 1..={MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS}, got {n_tokens}"
@@ -1032,17 +1133,10 @@ fn validate_replay_request<'a>(
 fn validate_request(
     capture: &MuseGlimmerLensCapture,
     target_cotangent: &[f32],
-    sliding_attention: bool,
     hidden_size: usize,
 ) -> Result<(), MuseGlimmerLensError> {
     if capture.target_block() == 0 {
         return invalid("one-block VJP requires a nonzero target block");
-    }
-    if sliding_attention {
-        return invalid(format!(
-            "target block {} uses sliding attention; bounded replay currently supports full attention only",
-            capture.target_block()
-        ));
     }
     if capture.n_tokens() == 0 || capture.n_tokens() > MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS {
         return invalid(format!(
@@ -1068,6 +1162,21 @@ fn validate_request(
     ] {
         validate_len(name, values, expected)?;
         require_finite(name, values)?;
+    }
+    Ok(())
+}
+
+fn require_full_attention_block(
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    target_block: u32,
+) -> Result<(), MuseGlimmerLensError> {
+    let layer = weights.layers.get(target_block as usize).ok_or_else(|| {
+        MuseGlimmerLensError::Invalid(format!("target block {target_block} is out of range"))
+    })?;
+    if layer.sliding_attention {
+        return invalid(format!(
+            "target block {target_block} uses sliding attention; this API requires full attention"
+        ));
     }
     Ok(())
 }
@@ -1275,6 +1384,7 @@ mod tests {
         rms_norm_mul_vjp_rows_f32_readback_for_test, silu_mul_vjp_f32_readback_for_test,
     };
     use crate::muse_glimmer_lens::muse_glimmer_selected_token_covectors;
+    use crate::muse_glimmer_metal::encode_muse_glimmer_rope_adjacent_pair_in_place_f32;
     use crate::muse_glimmer_residency::{MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights};
     use crate::muse_glimmer_text_session::{MuseGlimmerTextForward, MuseGlimmerTextSession};
 
@@ -1287,6 +1397,7 @@ mod tests {
             head_dim: 2,
             query: 4,
             kv: 2,
+            rope_theta: 500_000.0,
         }
     }
 
@@ -1361,6 +1472,74 @@ mod tests {
                 (finite_difference - reverse).abs() < 3e-4,
                 "{label}: finite difference {finite_difference}, reverse {reverse}"
             );
+        }
+    }
+
+    #[test]
+    fn adjacent_pair_rope_matches_production_kernel_and_inverse() {
+        const TOKENS: usize = 3;
+        const Q_HEADS: usize = 2;
+        const KV_HEADS: usize = 1;
+        const HEAD_DIM: usize = 4;
+        const THETA: f32 = 10_000.0;
+        let q_original = (0..TOKENS * Q_HEADS * HEAD_DIM)
+            .map(|index| index as f32 * 0.07 - 0.5)
+            .collect::<Vec<_>>();
+        let k_original = (0..TOKENS * KV_HEADS * HEAD_DIM)
+            .map(|index| index as f32 * -0.09 + 0.4)
+            .collect::<Vec<_>>();
+        let mut q_cpu = q_original.clone();
+        let mut k_cpu = k_original.clone();
+        adjacent_pair_rope_rows_in_place(&mut q_cpu, TOKENS, Q_HEADS, HEAD_DIM, THETA, false)
+            .unwrap();
+        adjacent_pair_rope_rows_in_place(&mut k_cpu, TOKENS, KV_HEADS, HEAD_DIM, THETA, false)
+            .unwrap();
+
+        let ctx = MetalContext::new().unwrap();
+        let q_gpu = from_f32(
+            &ctx,
+            &q_original,
+            row_shape(Q_HEADS * HEAD_DIM, TOKENS).unwrap(),
+        )
+        .unwrap();
+        let k_gpu = from_f32(
+            &ctx,
+            &k_original,
+            row_shape(KV_HEADS * HEAD_DIM, TOKENS).unwrap(),
+        )
+        .unwrap();
+        run_command(&ctx, |encoder| {
+            for token in 0..TOKENS {
+                encode_muse_glimmer_rope_adjacent_pair_in_place_f32(
+                    &ctx,
+                    encoder,
+                    &row_view(&q_gpu, token, Q_HEADS * HEAD_DIM),
+                    &row_view(&k_gpu, token, KV_HEADS * HEAD_DIM),
+                    Q_HEADS,
+                    KV_HEADS,
+                    HEAD_DIM,
+                    token as u32,
+                    THETA,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        for (&cpu, gpu) in q_cpu.iter().zip(read_f32(&q_gpu)) {
+            assert!((cpu - gpu).abs() < 2e-6);
+        }
+        for (&cpu, gpu) in k_cpu.iter().zip(read_f32(&k_gpu)) {
+            assert!((cpu - gpu).abs() < 2e-6);
+        }
+        adjacent_pair_rope_rows_in_place(&mut q_cpu, TOKENS, Q_HEADS, HEAD_DIM, THETA, true)
+            .unwrap();
+        adjacent_pair_rope_rows_in_place(&mut k_cpu, TOKENS, KV_HEADS, HEAD_DIM, THETA, true)
+            .unwrap();
+        for (&actual, &expected) in q_cpu.iter().zip(&q_original) {
+            assert!((actual - expected).abs() < 2e-6);
+        }
+        for (&actual, &expected) in k_cpu.iter().zip(&k_original) {
+            assert!((actual - expected).abs() < 2e-6);
         }
     }
 
@@ -1466,15 +1645,15 @@ mod tests {
     }
 
     #[test]
-    fn request_validation_rejects_sliding_bad_shapes_and_non_finite_values() {
+    fn request_validation_rejects_bad_shapes_and_non_finite_values() {
         let capture =
             MuseGlimmerLensCapture::new(3, vec![1], 2, vec![0.0; 2], vec![0.0; 2], vec![0.0; 2]);
-        assert!(validate_request(&capture, &[1.0, 2.0], true, 2).is_err());
-        assert!(validate_request(&capture, &[1.0], false, 2).is_err());
-        assert!(validate_request(&capture, &[1.0, f32::NAN], false, 2).is_err());
+        validate_request(&capture, &[1.0, 2.0], 2).unwrap();
+        assert!(validate_request(&capture, &[1.0], 2).is_err());
+        assert!(validate_request(&capture, &[1.0, f32::NAN], 2).is_err());
         let block_zero =
             MuseGlimmerLensCapture::new(0, vec![1], 2, vec![0.0; 2], vec![0.0; 2], vec![0.0; 2]);
-        assert!(validate_request(&block_zero, &[1.0, 2.0], false, 2).is_err());
+        assert!(validate_request(&block_zero, &[1.0, 2.0], 2).is_err());
     }
 
     #[test]
@@ -1629,6 +1808,124 @@ mod tests {
         assert!(j.post_attention_replay_max_abs_error < 0.022);
         assert!(j.post_block_replay_max_abs_error < 0.022);
         assert!(relative_error < 0.005);
+        assert!(jr_max_abs_difference > 1e-4);
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn real_q8_sliding_block_50_replay_and_vjp_smoke() {
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let plan =
+            MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).expect("qualify Muse Q8 target");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit Muse Q8 weights");
+        let realized = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .expect("realize Muse Q8 weights");
+        let weights = realized.into_weights();
+        let tokens = [weights.config().bos_token_id, 19_873, 24];
+        let mut session = MuseGlimmerTextSession::new(&ctx, weights.config(), tokens.len())
+            .expect("allocate bounded Muse session");
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).expect("bind Muse forward");
+        let capture = forward
+            .capture_fresh_lens_prompt(&tokens, 50, &mut session)
+            .expect("capture sliding block 50");
+        assert_eq!(capture.target_block(), 50);
+        let covectors =
+            muse_glimmer_selected_token_covectors(&ctx, &weights, &[weights.config().eos_token_id])
+                .expect("extract EOS covector");
+        let target_cotangent = muse_glimmer_positioned_target_cotangent(
+            covectors.token_values(0).unwrap(),
+            tokens.len(),
+            weights.config().hidden_size as usize,
+            &[2],
+        )
+        .expect("place EOS covector on final prompt row");
+        let bound = MuseGlimmerMetalModelWeights::bind(&weights).expect("bind resident weights");
+        assert!(
+            muse_glimmer_one_full_attention_block_vjp(
+                &ctx,
+                &bound,
+                &capture,
+                &target_cotangent,
+                MuseGlimmerLensRule::J,
+            )
+            .is_err()
+        );
+        let j = muse_glimmer_one_attention_block_vjp(
+            &ctx,
+            &bound,
+            &capture,
+            &target_cotangent,
+            MuseGlimmerLensRule::J,
+        )
+        .expect("J replay and reverse sliding block 50");
+        let r = muse_glimmer_one_attention_block_vjp(
+            &ctx,
+            &bound,
+            &capture,
+            &target_cotangent,
+            MuseGlimmerLensRule::R,
+        )
+        .expect("R replay and reverse sliding block 50");
+        let direction = (0..capture.input_residuals().len())
+            .map(|index| (index as f32 * 0.017_11 + 0.29).cos())
+            .collect::<Vec<_>>();
+        let epsilon = 0.04_f32;
+        let plus = capture
+            .input_residuals()
+            .iter()
+            .zip(&direction)
+            .map(|(&value, &direction)| value + epsilon * direction)
+            .collect::<Vec<_>>();
+        let minus = capture
+            .input_residuals()
+            .iter()
+            .zip(&direction)
+            .map(|(&value, &direction)| value - epsilon * direction)
+            .collect::<Vec<_>>();
+        let plus_replay =
+            muse_glimmer_replay_one_attention_block(&ctx, &bound, 50, &plus, tokens.len())
+                .expect("positive sliding directional replay");
+        let minus_replay =
+            muse_glimmer_replay_one_attention_block(&ctx, &bound, 50, &minus, tokens.len())
+                .expect("negative sliding directional replay");
+        let finite_difference = (dot(&plus_replay.post_block_residuals, &target_cotangent)
+            - dot(&minus_replay.post_block_residuals, &target_cotangent))
+            / (2.0 * epsilon);
+        let reverse_directional = dot(&j.input_cotangent, &direction);
+        let absolute_error = (finite_difference - reverse_directional).abs();
+        let relative_error = absolute_error
+            / finite_difference
+                .abs()
+                .max(reverse_directional.abs())
+                .max(1e-6);
+        let jr_max_abs_difference = j
+            .input_cotangent
+            .iter()
+            .zip(&r.input_cotangent)
+            .map(|(&j, &r)| (j - r).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!(
+            "Muse Q8 sliding block 50/source 49 T=3: post_attention_max_abs={} post_block_max_abs={} epsilon={} finite_difference={} reverse={} absolute_error={} relative_error={} jr_grad_max_abs_difference={}",
+            j.post_attention_replay_max_abs_error,
+            j.post_block_replay_max_abs_error,
+            epsilon,
+            finite_difference,
+            reverse_directional,
+            absolute_error,
+            relative_error,
+            jr_max_abs_difference,
+        );
+        assert!(j.input_cotangent.iter().all(|value| value.is_finite()));
+        assert!(r.input_cotangent.iter().all(|value| value.is_finite()));
+        assert!(j.post_attention_replay_max_abs_error < 0.015);
+        assert!(j.post_block_replay_max_abs_error < 0.015);
+        assert!(relative_error < 0.002);
         assert!(jr_max_abs_difference > 1e-4);
     }
 }

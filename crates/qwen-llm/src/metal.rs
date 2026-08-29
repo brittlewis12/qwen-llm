@@ -10558,6 +10558,33 @@ pub fn encode_moe_down_q8_0_f32_grouped_slots(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct MoeDownIq4NlGroupedSlotsKernel {
+    validation_name: &'static str,
+    pipeline_name: &'static str,
+    tile_m: usize,
+    tile_n: usize,
+    threadgroup_memory: usize,
+}
+
+const MOE_DOWN_IQ4_NL_GROUPED_SLOTS_M64_N32: MoeDownIq4NlGroupedSlotsKernel =
+    MoeDownIq4NlGroupedSlotsKernel {
+        validation_name: "moe_down_iq4_nl_grouped_slots",
+        pipeline_name: "kernel_moe_down_iq4_nl_f32_grouped_slots",
+        tile_m: 64,
+        tile_n: 32,
+        threadgroup_memory: 8_192,
+    };
+
+const MOE_DOWN_IQ4_NL_GROUPED_SLOTS_M128_N16: MoeDownIq4NlGroupedSlotsKernel =
+    MoeDownIq4NlGroupedSlotsKernel {
+        validation_name: "moe_down_iq4_nl_grouped_slots_m128_n16",
+        pipeline_name: "kernel_moe_down_iq4_nl_f32_grouped_slots_m128_n16",
+        tile_m: 128,
+        tile_n: 16,
+        threadgroup_memory: 9_216,
+    };
+
 pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -10571,10 +10598,69 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     n_expert: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    const KERNEL: &str = "moe_down_iq4_nl_grouped_slots";
+    encode_moe_down_iq4_nl_f32_grouped_slots_kernel(
+        ctx,
+        enc,
+        weight,
+        inner,
+        counts,
+        ids,
+        out,
+        n_in,
+        n_out,
+        n_expert,
+        n_tokens,
+        MOE_DOWN_IQ4_NL_GROUPED_SLOTS_M64_N32,
+    )
+}
+
+pub fn encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    encode_moe_down_iq4_nl_f32_grouped_slots_kernel(
+        ctx,
+        enc,
+        weight,
+        inner,
+        counts,
+        ids,
+        out,
+        n_in,
+        n_out,
+        n_expert,
+        n_tokens,
+        MOE_DOWN_IQ4_NL_GROUPED_SLOTS_M128_N16,
+    )
+}
+
+fn encode_moe_down_iq4_nl_f32_grouped_slots_kernel(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+    config: MoeDownIq4NlGroupedSlotsKernel,
+) -> Result<(), MetalError> {
+    let kernel = config.validation_name;
     if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
-            kernel: KERNEL,
+            kernel,
             detail: format!("n_in={n_in} not divisible by 32"),
         });
     }
@@ -10585,7 +10671,7 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
         || !matches!(ids.dtype, GgmlType::I32 | GgmlType::F32)
     {
         return Err(MetalError::BadShape {
-            kernel: KERNEL,
+            kernel,
             detail: format!(
                 "expected IQ4_NL/F32/I32-or-F32 metadata/F32, got {:?}/{:?}/{:?}/{:?}/{:?}",
                 weight.dtype, inner.dtype, counts.dtype, ids.dtype, out.dtype
@@ -10594,7 +10680,7 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     }
     if n_in == 0 || n_out == 0 || n_expert == 0 || n_tokens == 0 {
         return Err(MetalError::BadShape {
-            kernel: KERNEL,
+            kernel,
             detail: format!(
                 "n_in={n_in}, n_out={n_out}, n_expert={n_expert}, and n_tokens={n_tokens} must be nonzero"
             ),
@@ -10608,7 +10694,7 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     ] {
         if u32::try_from(value).is_err() {
             return Err(MetalError::BadShape {
-                kernel: KERNEL,
+                kernel,
                 detail: format!("{name}={value} exceeds u32"),
             });
         }
@@ -10616,7 +10702,7 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     for (name, value) in [("n_out", n_out), ("n_expert", n_expert)] {
         if i32::try_from(value).is_err() {
             return Err(MetalError::BadShape {
-                kernel: KERNEL,
+                kernel,
                 detail: format!("{name}={value} exceeds signed shader indexing"),
             });
         }
@@ -10626,7 +10712,7 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
             value
                 .checked_mul(factor)
                 .ok_or_else(|| MetalError::BadShape {
-                    kernel: KERNEL,
+                    kernel,
                     detail: format!("{name} element count overflow"),
                 })
         })
@@ -10635,7 +10721,7 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     let bucket_elements = product("expert buckets", &[n_expert, n_tokens])?;
     if !(out.n_elements() as usize).is_multiple_of(n_out) {
         return Err(MetalError::BadShape {
-            kernel: KERNEL,
+            kernel,
             detail: format!(
                 "output elements {} are not divisible by n_out={n_out}",
                 out.n_elements()
@@ -10645,14 +10731,14 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     let slot_count = out.n_elements() as usize / n_out;
     if !slot_count.is_multiple_of(n_tokens) {
         return Err(MetalError::BadShape {
-            kernel: KERNEL,
+            kernel,
             detail: format!("slot count {slot_count} is not divisible by n_tokens={n_tokens}"),
         });
     }
     let topk = slot_count / n_tokens;
     if topk == 0 || topk > 16 || topk > n_expert || i32::try_from(slot_count).is_err() {
         return Err(MetalError::BadShape {
-            kernel: KERNEL,
+            kernel,
             detail: format!(
                 "expected 1 <= slots/tokens={topk} <= min(16, n_expert={n_expert}) and slot count {slot_count} to fit i32"
             ),
@@ -10667,7 +10753,7 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
         || out.n_elements() as usize != output_elements
     {
         return Err(MetalError::BadShape {
-            kernel: KERNEL,
+            kernel,
             detail: format!(
                 "shape mismatch weight={} inner={} counts={} ids={} out={} expected {bank_elements}/{inner_elements}/{n_expert}/{bucket_elements}/{output_elements}",
                 weight.n_elements(),
@@ -10680,7 +10766,7 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     }
 
     let blocks_per_row = n_in / 32;
-    let pso = ctx.pipeline("kernel_moe_down_iq4_nl_f32_grouped_slots")?;
+    let pso = ctx.pipeline(config.pipeline_name)?;
     enc.set_pipeline(&pso);
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -10706,11 +10792,11 @@ pub fn encode_moe_down_iq4_nl_f32_grouped_slots(
     enc.set_tensor(3, counts);
     enc.set_tensor(4, ids);
     enc.set_tensor(5, out);
-    enc.set_threadgroup_memory(0, 8192);
+    enc.set_threadgroup_memory(0, config.threadgroup_memory);
     enc.dispatch(
         MTLSize {
-            width: n_tokens.div_ceil(32),
-            height: n_out.div_ceil(64),
+            width: n_tokens.div_ceil(config.tile_n),
+            height: n_out.div_ceil(config.tile_m),
             depth: n_expert,
         },
         MTLSize {

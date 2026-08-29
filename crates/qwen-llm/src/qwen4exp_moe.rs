@@ -5,13 +5,14 @@ use crate::metal::{
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
     encode_copy_offset_f32, encode_dot_sigmoid_f32, encode_mat_mat_f32_router_e8p32_strict,
     encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_nl_f32_fast,
-    encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_q8_0_f32_grouped_slots,
-    encode_moe_down_weighted_sum_q8_0_f32, encode_moe_route_bucket_slots_f32,
-    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
-    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
-    encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
-    encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
-    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk_logits_softmax_f32,
+    encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16,
+    encode_moe_down_q8_0_f32_grouped_slots, encode_moe_down_weighted_sum_q8_0_f32,
+    encode_moe_route_bucket_slots_f32, encode_moe_swiglu_iq3_xxs_f32,
+    encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16,
+    encode_moe_swiglu_iq4_xs_f32, encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16,
+    encode_moe_weighted_sum_f32, encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32,
+    encode_silu_mul_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
+    encode_topk_logits_softmax_f32,
 };
 #[cfg(test)]
 use crate::metal::{
@@ -48,6 +49,12 @@ pub(crate) const PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS: [usize; 2] = [
     PACKED_ROUTER_E8P32_STRICT_N512_TOKENS,
     PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
 ];
+const PACKED_IQ4_DOWN_M128_N16_DEVICE: &str = "Apple M4 Max";
+const PACKED_IQ4_DOWN_M128_N16_HIDDEN: usize = 2_560;
+const PACKED_IQ4_DOWN_M128_N16_ROUTED: usize = 640;
+const PACKED_IQ4_DOWN_M128_N16_EXPERTS: usize = 512;
+const PACKED_IQ4_DOWN_M128_N16_TOP_K: usize = 10;
+const PACKED_IQ4_DOWN_M128_N16_TOKENS: usize = 512;
 
 #[cfg(test)]
 const QWEN4EXP_IQ3_GATE_UP_CAPTURE_TOKENS: usize = 2_048;
@@ -175,6 +182,10 @@ crate::env_flag!(
     default_on configured_qwen4exp_packed_router_e8p32_strict_enabled,
     "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"
 );
+crate::env_flag!(
+    default_on configured_qwen4exp_moe_iq4_down_m128_n16_enabled,
+    "QWEN4EXP_MOE_IQ4_DOWN_M128_N16"
+);
 
 #[cfg(test)]
 thread_local! {
@@ -182,6 +193,9 @@ thread_local! {
         std::cell::Cell::new(None)
     };
     static QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+    static QWEN4EXP_MOE_IQ4_DOWN_M128_N16_OVERRIDE: std::cell::Cell<Option<bool>> = const {
         std::cell::Cell::new(None)
     };
     static QWEN4EXP_MOE_ROUTE_COUNT_CAPTURE: std::cell::RefCell<Option<Qwen4ExpMoeRouteCountCaptureBinding>> = const {
@@ -217,6 +231,33 @@ fn qwen4exp_moe_iq3_fast_enabled() -> bool {
         return enabled;
     }
     configured_qwen4exp_moe_iq3_fast_enabled()
+}
+
+#[cfg(test)]
+fn with_qwen4exp_moe_iq4_down_m128_n16_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct RestoreOverride(Option<bool>);
+
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            QWEN4EXP_MOE_IQ4_DOWN_M128_N16_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let previous = QWEN4EXP_MOE_IQ4_DOWN_M128_N16_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    let _restore = RestoreOverride(previous);
+    f()
+}
+
+fn qwen4exp_moe_iq4_down_m128_n16_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = QWEN4EXP_MOE_IQ4_DOWN_M128_N16_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
+    configured_qwen4exp_moe_iq4_down_m128_n16_enabled()
 }
 
 #[cfg(test)]
@@ -443,6 +484,36 @@ fn packed_router_e8p32_strict_qualified(
             geometry.hidden_size,
             geometry.expert_count,
             router_dtype,
+            tokens,
+        )
+}
+
+fn packed_iq4_down_m128_n16_scope_qualified(
+    device_name: &str,
+    geometry: Qwen4ExpMoeMetalGeometry,
+    dtype: GgmlType,
+    tokens: usize,
+) -> bool {
+    device_name == PACKED_IQ4_DOWN_M128_N16_DEVICE
+        && geometry.hidden_size == PACKED_IQ4_DOWN_M128_N16_HIDDEN
+        && geometry.routed_intermediate_size == PACKED_IQ4_DOWN_M128_N16_ROUTED
+        && geometry.expert_count == PACKED_IQ4_DOWN_M128_N16_EXPERTS
+        && geometry.experts_per_token == PACKED_IQ4_DOWN_M128_N16_TOP_K
+        && dtype == GgmlType::IQ4_NL
+        && tokens == PACKED_IQ4_DOWN_M128_N16_TOKENS
+}
+
+fn packed_iq4_down_m128_n16_qualified(
+    ctx: &MetalContext,
+    geometry: Qwen4ExpMoeMetalGeometry,
+    dtype: GgmlType,
+    tokens: usize,
+) -> bool {
+    qwen4exp_moe_iq4_down_m128_n16_enabled()
+        && packed_iq4_down_m128_n16_scope_qualified(
+            &ctx.device.name().to_string(),
+            geometry,
+            dtype,
             tokens,
         )
 }
@@ -1687,19 +1758,48 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             Qwen4ExpPackedProfileLabel::detail("moe.routed_down", layer, mixer),
         )?;
         match self.weights.routed_down.dtype {
-            GgmlType::IQ4_NL => encode_moe_down_iq4_nl_f32_grouped_slots(
-                ctx,
-                enc,
-                self.weights.routed_down,
-                &self.views.routed_inner,
-                &self.views.route_counts,
-                &self.views.route_slots,
-                &self.views.routed_expert_output,
-                g.routed_intermediate_size,
-                g.hidden_size,
-                g.expert_count,
-                self.tokens,
-            )?,
+            GgmlType::IQ4_NL => {
+                if packed_iq4_down_m128_n16_qualified(
+                    ctx,
+                    g,
+                    self.weights.routed_down.dtype,
+                    self.tokens,
+                ) {
+                    encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16(
+                        ctx,
+                        enc,
+                        self.weights.routed_down,
+                        &self.views.routed_inner,
+                        &self.views.route_counts,
+                        &self.views.route_slots,
+                        &self.views.routed_expert_output,
+                        g.routed_intermediate_size,
+                        g.hidden_size,
+                        g.expert_count,
+                        self.tokens,
+                    )?;
+                    static REPORTED: std::sync::Once = std::sync::Once::new();
+                    REPORTED.call_once(|| {
+                        eprintln!(
+                            "qwen4exp: IQ4_NL packed-down M128xN16 active; rollback=QWEN4EXP_MOE_IQ4_DOWN_M128_N16=0"
+                        );
+                    });
+                } else {
+                    encode_moe_down_iq4_nl_f32_grouped_slots(
+                        ctx,
+                        enc,
+                        self.weights.routed_down,
+                        &self.views.routed_inner,
+                        &self.views.route_counts,
+                        &self.views.route_slots,
+                        &self.views.routed_expert_output,
+                        g.routed_intermediate_size,
+                        g.hidden_size,
+                        g.expert_count,
+                        self.tokens,
+                    )?;
+                }
+            }
             GgmlType::Q8_0 => encode_moe_down_q8_0_f32_grouped_slots(
                 ctx,
                 enc,
@@ -2724,7 +2824,26 @@ pub(crate) fn preflight_packed(
     require_pipeline_capacity(ctx, routed_gate_kernel, 128, 16_384)?;
     match weights.routed_down.dtype {
         GgmlType::IQ4_NL => {
-            require_pipeline_capacity(ctx, "kernel_moe_down_iq4_nl_f32_grouped_slots", 128, 8_192)?
+            if packed_iq4_down_m128_n16_qualified(
+                ctx,
+                weights.geometry,
+                weights.routed_down.dtype,
+                tokens,
+            ) {
+                require_pipeline_capacity(
+                    ctx,
+                    "kernel_moe_down_iq4_nl_f32_grouped_slots_m128_n16",
+                    128,
+                    9_216,
+                )?;
+            } else {
+                require_pipeline_capacity(
+                    ctx,
+                    "kernel_moe_down_iq4_nl_f32_grouped_slots",
+                    128,
+                    8_192,
+                )?;
+            }
         }
         GgmlType::Q8_0 => {
             require_pipeline_capacity(ctx, "kernel_moe_down_q8_0_f32_grouped_slots", 128, 8_192)?
@@ -3264,6 +3383,18 @@ mod tests {
         }
     }
 
+    fn read_tensor_bytes(tensor: &MetalTensor) -> Vec<u8> {
+        unsafe {
+            let source = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize);
+            std::slice::from_raw_parts(source, tensor.n_bytes() as usize).to_vec()
+        }
+    }
+
     #[test]
     fn packed_router_e8p32_strict_scope_is_exact() {
         let qualified = |device, hidden, experts, dtype, tokens| {
@@ -3313,6 +3444,133 @@ mod tests {
             GgmlType::F16,
             PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
         ));
+    }
+
+    #[test]
+    fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
+        let exact =
+            Qwen4ExpMoeMetalGeometry::from_config(&Qwen4ExpConfig::flash_next_reference()).unwrap();
+        assert_eq!(exact.hidden_size, PACKED_IQ4_DOWN_M128_N16_HIDDEN);
+        assert_eq!(
+            exact.routed_intermediate_size,
+            PACKED_IQ4_DOWN_M128_N16_ROUTED
+        );
+        assert_eq!(exact.expert_count, PACKED_IQ4_DOWN_M128_N16_EXPERTS);
+        assert_eq!(exact.experts_per_token, PACKED_IQ4_DOWN_M128_N16_TOP_K);
+        let qualified = |device, geometry, dtype, tokens| {
+            packed_iq4_down_m128_n16_scope_qualified(device, geometry, dtype, tokens)
+        };
+        assert!(qualified(
+            PACKED_IQ4_DOWN_M128_N16_DEVICE,
+            exact,
+            GgmlType::IQ4_NL,
+            PACKED_IQ4_DOWN_M128_N16_TOKENS,
+        ));
+
+        for (label, device, geometry, dtype, tokens) in [
+            (
+                "device",
+                "Apple M3 Max",
+                exact,
+                GgmlType::IQ4_NL,
+                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+            ),
+            (
+                "hidden",
+                PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                Qwen4ExpMoeMetalGeometry::new(
+                    2_304,
+                    exact.expert_count,
+                    exact.experts_per_token,
+                    exact.routed_intermediate_size,
+                    exact.shared_intermediate_size,
+                )
+                .unwrap(),
+                GgmlType::IQ4_NL,
+                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+            ),
+            (
+                "routed",
+                PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                Qwen4ExpMoeMetalGeometry::new(
+                    exact.hidden_size,
+                    exact.expert_count,
+                    exact.experts_per_token,
+                    608,
+                    exact.shared_intermediate_size,
+                )
+                .unwrap(),
+                GgmlType::IQ4_NL,
+                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+            ),
+            (
+                "experts",
+                PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                Qwen4ExpMoeMetalGeometry::new(
+                    exact.hidden_size,
+                    511,
+                    exact.experts_per_token,
+                    exact.routed_intermediate_size,
+                    exact.shared_intermediate_size,
+                )
+                .unwrap(),
+                GgmlType::IQ4_NL,
+                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+            ),
+            (
+                "top-k",
+                PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                Qwen4ExpMoeMetalGeometry::new(
+                    exact.hidden_size,
+                    exact.expert_count,
+                    9,
+                    exact.routed_intermediate_size,
+                    exact.shared_intermediate_size,
+                )
+                .unwrap(),
+                GgmlType::IQ4_NL,
+                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+            ),
+            (
+                "dtype",
+                PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                exact,
+                GgmlType::Q8_0,
+                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+            ),
+            (
+                "tokens",
+                PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                exact,
+                GgmlType::IQ4_NL,
+                PACKED_IQ4_DOWN_M128_N16_TOKENS - 1,
+            ),
+        ] {
+            assert!(!qualified(device, geometry, dtype, tokens), "{label}");
+        }
+
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        with_qwen4exp_moe_iq4_down_m128_n16_override(false, || {
+            assert!(!packed_iq4_down_m128_n16_qualified(
+                &ctx,
+                exact,
+                GgmlType::IQ4_NL,
+                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+            ));
+        });
+        with_qwen4exp_moe_iq4_down_m128_n16_override(true, || {
+            assert_eq!(
+                packed_iq4_down_m128_n16_qualified(
+                    &ctx,
+                    exact,
+                    GgmlType::IQ4_NL,
+                    PACKED_IQ4_DOWN_M128_N16_TOKENS,
+                ),
+                ctx.device.name().to_string() == PACKED_IQ4_DOWN_M128_N16_DEVICE,
+            );
+        });
     }
 
     #[test]
@@ -4340,6 +4598,172 @@ mod tests {
                 1e-5,
                 0.999_999_9,
             );
+        }
+    }
+
+    #[test]
+    fn grouped_iq4_nl_down_m128_n16_is_bit_exact_and_guarded() {
+        let Some(ctx) = packed_test_context() else {
+            return;
+        };
+        require_pipeline_capacity(
+            &ctx,
+            "kernel_moe_down_iq4_nl_f32_grouped_slots_m128_n16",
+            128,
+            9_216,
+        )
+        .unwrap();
+
+        fn run_case(
+            ctx: &MetalContext,
+            label: &str,
+            n_in: usize,
+            n_out: usize,
+            n_expert: usize,
+            assignments: &[usize],
+        ) {
+            const GUARD_ELEMENTS: usize = 257;
+            const BASELINE_ACTIVE: u32 = 0x7fc0_4111;
+            const CANDIDATE_ACTIVE: u32 = 0x7fc0_4222;
+            let n_tokens = assignments.len();
+            assert!(n_in.is_multiple_of(32));
+            assert!(n_tokens > 0);
+            assert!(assignments.iter().all(|&expert| expert < n_expert));
+
+            let mut counts = vec![0_i32; n_expert];
+            let mut slots = vec![GUARD_I32_SENTINEL; n_expert * n_tokens];
+            for (slot, &expert) in assignments.iter().enumerate() {
+                let count = counts[expert] as usize;
+                slots[expert * n_tokens + count] = slot as i32;
+                counts[expert] += 1;
+            }
+            assert_eq!(counts.iter().sum::<i32>(), n_tokens as i32);
+
+            let weight = weight_bytes(
+                ctx,
+                &synthetic_iq4_nl_bank(n_in, n_out, n_expert, n_in ^ n_out ^ n_expert ^ n_tokens),
+                vec![n_in as u64, n_out as u64, n_expert as u64],
+                GgmlType::IQ4_NL,
+            );
+            let inner_values = (0..n_tokens * n_in)
+                .map(|index| ((index * 43 + 17) % 257) as f32 * 0.000_5 - 0.064)
+                .collect::<Vec<_>>();
+            let inner = tensor_f32(ctx, &inner_values, vec![n_in as u64, n_tokens as u64]);
+            let counts = tensor_i32(ctx, &counts, vec![n_expert as u64]);
+            let slots = tensor_i32(ctx, &slots, vec![n_tokens as u64, n_expert as u64]);
+
+            let active_elements = n_tokens * n_out;
+            let guarded_output = |active_sentinel| {
+                let storage =
+                    MetalTensor::zeros_f32(ctx, vec![(active_elements + GUARD_ELEMENTS) as u64])
+                        .unwrap();
+                fill_f32_bits(&storage, GUARD_F32_SENTINEL);
+                let view = storage.view_subrange(0, vec![n_out as u64, n_tokens as u64]);
+                fill_f32_bits(&view, active_sentinel);
+                (storage, view)
+            };
+            let (baseline_storage, baseline) = guarded_output(BASELINE_ACTIVE);
+            let (candidate_storage, candidate) = guarded_output(CANDIDATE_ACTIVE);
+            let input_snapshots = [
+                ("weight", &weight, read_tensor_bytes(&weight)),
+                ("inner", &inner, read_tensor_bytes(&inner)),
+                ("counts", &counts, read_tensor_bytes(&counts)),
+                ("slots", &slots, read_tensor_bytes(&slots)),
+            ];
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            crate::metal::encode_moe_down_iq4_nl_f32_grouped_slots(
+                ctx, &encoder, &weight, &inner, &counts, &slots, &baseline, n_in, n_out, n_expert,
+                n_tokens,
+            )
+            .unwrap();
+            crate::metal::encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16(
+                ctx, &encoder, &weight, &inner, &counts, &slots, &candidate, n_in, n_out, n_expert,
+                n_tokens,
+            )
+            .unwrap();
+            let census = crate::metal::dispatch_census_take();
+            assert_eq!(census.len(), 2, "{label} census: {census:#?}");
+            for (row, kernel, tile_m, tile_n) in [
+                (
+                    &census[0],
+                    "kernel_moe_down_iq4_nl_f32_grouped_slots",
+                    64,
+                    32,
+                ),
+                (
+                    &census[1],
+                    "kernel_moe_down_iq4_nl_f32_grouped_slots_m128_n16",
+                    128,
+                    16,
+                ),
+            ] {
+                assert_eq!(row.kernel, kernel, "{label}");
+                assert_eq!(row.grid_width, n_tokens.div_ceil(tile_n) as u64, "{label}");
+                assert_eq!(row.grid_height, n_out.div_ceil(tile_m) as u64, "{label}");
+                assert_eq!(row.grid_depth, n_expert as u64, "{label}");
+                assert_eq!(
+                    (row.threads_width, row.threads_height, row.threads_depth),
+                    (128, 1, 1),
+                    "{label}",
+                );
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(
+                command.status(),
+                MTLCommandBufferStatus::Completed,
+                "{label}"
+            );
+            assert!(command.error().is_none(), "{label}: {:?}", command.error());
+
+            for (name, tensor, before) in input_snapshots {
+                assert_eq!(read_tensor_bytes(tensor), before, "{label} mutated {name}");
+            }
+            let baseline_values = read_f32(&baseline);
+            let candidate_values = read_f32(&candidate);
+            assert_bits_eq(label, &candidate_values, &baseline_values);
+            assert!(
+                baseline_values.iter().all(|value| {
+                    value.is_finite()
+                        && value.to_bits() != BASELINE_ACTIVE
+                        && value.to_bits() != CANDIDATE_ACTIVE
+                }),
+                "{label} left an output slot unwritten",
+            );
+            for (name, storage) in [
+                ("baseline", &baseline_storage),
+                ("candidate", &candidate_storage),
+            ] {
+                assert!(
+                    read_f32(storage)[active_elements..]
+                        .iter()
+                        .all(|value| value.to_bits() == GUARD_F32_SENTINEL),
+                    "{label} overwrote the {name} guard",
+                );
+            }
+        }
+
+        let residue_counts = [1_usize, 15, 16, 17, 31, 32, 33, 511, 512];
+        let residue_assignments = residue_counts
+            .iter()
+            .enumerate()
+            .flat_map(|(expert, &count)| std::iter::repeat_n(expert, count))
+            .collect::<Vec<_>>();
+        run_case(&ctx, "count residues", 32, 129, 10, &residue_assignments);
+
+        let dispersed = (0..512).collect::<Vec<_>>();
+        run_case(&ctx, "dispersed experts 0..511", 32, 64, 512, &dispersed);
+
+        let alternating = (0..33).map(|token| token % 2).collect::<Vec<_>>();
+        for n_out in [64_usize, 65, 127, 128, 129, 2_560] {
+            run_case(&ctx, &format!("M={n_out}"), 32, n_out, 2, &alternating);
+        }
+        for n_in in [64_usize, 640] {
+            run_case(&ctx, &format!("K={n_in}"), n_in, 129, 2, &alternating);
         }
     }
 

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "build_source_commit": "be2d79a3a1dd8699e88e241139c3988e2f5668ac",
+  "manifest_recorded_at_head": "28b63a0b678a47e936d03eec79f5e130e2e3fc16",
+  "verification": {
+    "kernels_moe_metal_diff_exit_code": 0,
+    "kernels_moe_metal_clean": true,
+    "temporary_baseline_path": "target/profiles/qwen4exp-iq4-paired-decode-screen-20260829/qwen-baseline",
+    "temporary_baseline_exists": false,
+    "metallib_matches_promoted": true,
+    "moe_air_matches_promoted": true
+  },
+  "sha256": {
+    "release_executable": "7ad6de36dc14d909d2f11c1fbb560a362f7b8e8e881dd492923a7ed412501853",
+    "metallib": "d65856754594b3a0b9ee708e3aa0e4a2f6101f5c85ec9c30aa7617cf58a7dace",
+    "moe_air": "79c594e12bf0220b6531dd785c6dfa52d8451b7b4439aaf765220e2d76e98b81"
+  },
+  "promoted_reference": {
+    "metallib_sha256": "d65856754594b3a0b9ee708e3aa0e4a2f6101f5c85ec9c30aa7617cf58a7dace",
+    "moe_air_sha256": "79c594e12bf0220b6531dd785c6dfa52d8451b7b4439aaf765220e2d76e98b81"
+  }
+}

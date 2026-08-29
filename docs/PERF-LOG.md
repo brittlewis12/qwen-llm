@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Paired IQ4_NL Decode KILL
+
+Status: remove the retile-private paired decoder and advance to the copy-only
+bridge ceiling. The promoted M128xN16 kernel remains unchanged.
+
+- Optimized incumbent AIR retained two 16-iteration byte-load loops over each
+  IQ4_NL block. The paired helper compiled to one traversal with eight 16-bit
+  loads while retaining one scale load and the same F32-to-half arithmetic.
+- The focused M128xN16 differential reported raw-F32-bit equality, but its raw
+  transcript was not preserved and is not durable packet authority. Both model
+  arms passed internal deterministic replay, observer, raw-coverage, and
+  generated-output equivalence gates.
+- Natural N=512 A1/B1 moved the representative routed-down leaf
+  `2.800708 -> 2.686791 ms/layer`, saving 4.07% but missing the fixed
+  `2.520169 ms` futility ceiling by `0.166622 ms`.
+- Warm/profiled command GPU moved `969.474125 -> 962.015000 ms` /
+  `970.360875 -> 963.504167 ms`, saving only 0.77%/0.71% and failing both 1%
+  command gates.
+- B2/A2 cannot repair the worst-case B1 leaf gate and did not run. The helper
+  and temporary executable are removed; the rebuilt metallib and MoE AIR match
+  the promoted hashes recorded in the cleanup manifest.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-iq4-paired-decode-kill/`.
+Adversarial review: `01a04f52-ae71-7740-9714-01a6fc467bcd`.
+
 ## 2026-08-29 - Flash-Next Packed IQ4_NL Retile KEEP
 
 Status: enable M128xN16 packed IQ4_NL routed down only for exact N=512 on

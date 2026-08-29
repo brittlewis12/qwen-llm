@@ -284,26 +284,26 @@ N=512 released geometry on Apple M4 Max, with
 give `R=0.857718`, and every individual layer fails the same `0.75` entry gate;
 do not widen the scope there.
 
-1. Source-screen a retile-private paired IQ4_NL decoder that loads each packed
-   quant word once and emits both nibble residues. Stop before code if the
-   compiled incumbent already coalesces the two literal helper calls into one
-   scale/quant load and branchless extraction. If coded, require raw-half
-   equality over every nibble pair and hostile/released scales, then reuse the
-   complete F32-bit tail matrix. B1 above `2.520169 ms/layer` is an immediate
-   KILL; a survivor must also beat `957.463279/958.767129 ms` warm/profiled GPU.
-2. Measure a copy-only bridge ceiling before changing ownership. Split only the
+The retile-private paired IQ4_NL decoder is closed. Optimized AIR proved the
+incumbent still traversed each packed payload twice, and the candidate reduced
+that to one IR-visible traversal. Natural N=512 B1 moved the
+representative leaf `2.800708 -> 2.686791 ms/layer`, only 4.07%, and exceeded
+the fixed `2.520169 ms` futility ceiling. Warm/profiled command savings were
+0.77%/0.71%, also below gate. The helper was removed without running B2/A2.
+
+1. Measure a copy-only bridge ceiling before changing ownership. Split only the
    four representative mixer/MoE copies from their combines, extrapolate the
    34-GDN/12-QSA total, and require at least `9.671346 ms` in both accepted
    captures before implementation. The coarse bridge bucket is not copy-only.
-3. Use one temporary named-stage split to price packed GDN and dense QSA before
+2. Use one temporary named-stage split to price packed GDN and dense QSA before
    another tile. A mechanism must project at least `0.663200 ms/GDN layer` or
    `0.805946 ms/QSA layer`; blocked recurrence, launch-only fusion, and singleton
    attention shortcuts remain closed.
-4. Keep selected packed QSA default-off. Bound its semantic disposition to two
+3. Keep selected packed QSA default-off. Bound its semantic disposition to two
    held-out natural selected contexts plus one known-answer long-context case,
    with `NLL_selected - NLL_safe <= ln(1.01)` and both known-answer predicates
    passing. Do not rebuild a broad quality harness or wait on BF16 authority.
-5. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
+4. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
    all 31 omitted speculative tensors, full admission metadata, and atomic
    QSA/GDN/PLE state. Do not pursue K=2/K=3.
 

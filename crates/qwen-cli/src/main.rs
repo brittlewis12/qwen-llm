@@ -64,6 +64,13 @@ use qwen_llm::metal_forward::{
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::moe_batch16::MOE_BATCH16_WIDTH;
+use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, MuseGlimmerConfig};
+use qwen_llm::muse_glimmer_prompt::{
+    MuseGlimmerMessage, MuseGlimmerPromptOptions, MuseGlimmerReasoningStrength,
+    render_muse_glimmer_atem_prompt, render_muse_glimmer_single_turn,
+};
+use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
+use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY;
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
@@ -83,7 +90,7 @@ use qwen_llm::sampling::{
     SamplingConfig, SamplingError, SamplingPhaseProfile, SpeculativeSamplingDecision,
 };
 use qwen_llm::tensor::GgmlType;
-use qwen_llm::tokenizer::{Tokenizer, token_ids_sha256_i32le};
+use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenizer, token_ids_sha256_i32le};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -1069,6 +1076,13 @@ struct PreparedPrompt {
     text: String,
     source: PromptSource,
     completed_checkpoint_eligible: bool,
+}
+
+#[derive(Clone, Debug)]
+struct MuseGlimmerPreparedPrompt {
+    text: String,
+    source: PromptSource,
+    add_special_tokens: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -2464,6 +2478,15 @@ fn run() -> Result<()> {
     validate_request_before_model_open(&args)?;
     let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
+    if gguf.architecture().as_deref() == Some(MUSE_GLIMMER_ARCHITECTURE) {
+        return run_muse_glimmer_single_turn(
+            &model_path,
+            &gguf,
+            &args,
+            explicit_options,
+            invocation,
+        );
+    }
     let model_family = ModelFamily::detect(&gguf);
     fixed_cohort_jsonl::validate_model_family(args.batch_size, model_family)?;
     concurrent_jsonl::validate_model_family(&args, model_family)?;
@@ -2872,6 +2895,86 @@ fn prepare_modern_run_prompt(
     })
 }
 
+fn prepare_muse_glimmer_prompt(
+    invocation: cli::Invocation,
+    config: &MuseGlimmerConfig,
+    args: &Args,
+) -> Result<MuseGlimmerPreparedPrompt> {
+    match invocation {
+        cli::Invocation::Run(run) => {
+            ensure!(
+                !run.no_thinking,
+                "Muse Glimmer does not declare a no-thinking ATEM profile; use --reasoning-effort low for the lightest supported reasoning mode"
+            );
+            let reasoning_strength = match run.reasoning_effort {
+                Some(cli::RunReasoningEffort::Low) => MuseGlimmerReasoningStrength::Low,
+                Some(cli::RunReasoningEffort::Medium) => MuseGlimmerReasoningStrength::Medium,
+                Some(cli::RunReasoningEffort::Xhigh) | None => MuseGlimmerReasoningStrength::High,
+            };
+            let options = MuseGlimmerPromptOptions {
+                profile: config.chat_template_profile,
+                reasoning_strength,
+                ..MuseGlimmerPromptOptions::default()
+            };
+            match run.acquire_input()? {
+                cli::AcquiredRunInput::RawPrompt(text) => Ok(MuseGlimmerPreparedPrompt {
+                    text,
+                    source: PromptSource::Inline,
+                    add_special_tokens: !args.no_special_tokens,
+                }),
+                cli::AcquiredRunInput::User { system, user } => {
+                    let text = render_muse_glimmer_single_turn(&user, system.as_deref(), &options)
+                        .context("render Muse Glimmer ATEM user request")?;
+                    Ok(MuseGlimmerPreparedPrompt {
+                        text,
+                        source: PromptSource::Messages,
+                        add_special_tokens: false,
+                    })
+                }
+                cli::AcquiredRunInput::Messages { document, source } => {
+                    let messages = parse_strict_messages_input(&document, &source)?;
+                    let messages = convert_muse_glimmer_messages(messages)?;
+                    let text = render_muse_glimmer_atem_prompt(&messages, &options)
+                        .context("render strict Muse Glimmer ATEM messages")?;
+                    Ok(MuseGlimmerPreparedPrompt {
+                        text,
+                        source: PromptSource::Messages,
+                        add_special_tokens: false,
+                    })
+                }
+            }
+        }
+        cli::Invocation::Legacy => {
+            ensure!(
+                args.messages.is_none(),
+                "Muse Glimmer legacy --messages rendering is not supported; use `qwen run --messages`"
+            );
+            let (text, source, _) = prompt_text(args)?;
+            Ok(MuseGlimmerPreparedPrompt {
+                text,
+                source,
+                add_special_tokens: prompt_add_special_tokens(args, source),
+            })
+        }
+        cli::Invocation::Serve(_) => bail!("Muse Glimmer serve routing is not implemented"),
+    }
+}
+
+fn convert_muse_glimmer_messages(
+    messages: Vec<messages::ChatMessage>,
+) -> Result<Vec<MuseGlimmerMessage>> {
+    messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| match message.role.as_str() {
+            "system" => Ok(MuseGlimmerMessage::system(message.content)),
+            "user" => Ok(MuseGlimmerMessage::user(message.content)),
+            "assistant" => Ok(MuseGlimmerMessage::assistant(message.content)),
+            role => bail!("Muse Glimmer message {index} has unsupported role {role:?}"),
+        })
+        .collect()
+}
+
 fn resolve_qwen38_generation_mode(
     qwen38: bool,
     no_thinking: bool,
@@ -3223,6 +3326,104 @@ fn deepseek_v4_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Res
         DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
     );
     Ok(required)
+}
+
+fn muse_glimmer_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Result<usize> {
+    ensure!(
+        prompt_tokens > 0,
+        "Muse Glimmer prompt tokenized to zero tokens"
+    );
+    ensure!(max_tokens > 0, "--tokens must be >= 1");
+    let required = prompt_tokens
+        .checked_add(max_tokens - 1)
+        .context("Muse Glimmer forward budget overflow")?;
+    ensure!(
+        required <= MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
+        "Muse Glimmer request requires {required} token forwards ({prompt_tokens} prompt + {} maximum decode transitions), but the initial reference attention lane supports at most {MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY}; shorten the prompt or reduce --tokens",
+        max_tokens - 1
+    );
+    Ok(required)
+}
+
+fn validate_muse_glimmer_generation_mode(
+    args: &Args,
+    explicit: ExplicitCliOptions,
+    invocation: &cli::Invocation,
+) -> Result<()> {
+    let mut unsupported = deepseek_v4_shared_unsupported_options(args, explicit);
+    if args.requests_jsonl.is_some() {
+        unsupported.push("--requests-jsonl");
+    }
+    if args.batch_size.is_some() {
+        unsupported.push("--batch-size");
+    }
+    if args.concurrency.is_some() {
+        unsupported.push("--concurrency");
+    }
+    if args.execution_mode.is_some() {
+        unsupported.push("--execution-mode");
+    }
+    if args.drafter.is_some() {
+        unsupported.push("--drafter (Muse DFlash2 integration is not active yet)");
+    }
+    if args.durable_prefix_cache.is_some() {
+        unsupported.push("--durable-prefix-cache");
+    }
+    if explicit.durable_prefix_cache_max_mib {
+        unsupported.push("--durable-prefix-cache-max-mib");
+    }
+    if explicit.durable_prefix_cache_max_entry_mib {
+        unsupported.push("--durable-prefix-cache-max-entry-mib");
+    }
+    if explicit.durable_prefix_cache_min_tokens {
+        unsupported.push("--durable-prefix-cache-min-tokens");
+    }
+    if args.request_stats_jsonl.is_some() {
+        unsupported.push("--request-stats-jsonl");
+    }
+    if args.sampling_attribution {
+        unsupported.push("--sampling-attribution");
+    }
+    if args.sampled_structural {
+        unsupported.push("--sampled-structural");
+    }
+    if args.trace_request.is_some() {
+        unsupported.push("--trace-request");
+    }
+    if args.messages_preserve_thinking || args.messages_strip_thinking {
+        unsupported.push("legacy message thinking controls");
+    }
+    if args.reasoning.is_some() || args.preserve_reasoning {
+        unsupported.push("DeepSeek V4 reasoning controls");
+    }
+    if args.deepseek_v4_snapshot.is_some() {
+        unsupported.push("--deepseek-v4-snapshot");
+    }
+    ensure!(
+        !explicit.deepseek_v4_multigroup_selector
+            && args.deepseek_v4_multigroup_selector == DeepSeekV4MultigroupSelectorArg::Auto,
+        "--deepseek-v4-multigroup-selector applies only to DeepSeek V4"
+    );
+    ensure!(
+        unsupported.is_empty(),
+        "Muse Glimmer currently supports request-shaped serial text generation only; unsupported options: {}",
+        unsupported.join(", ")
+    );
+    ensure!(
+        matches!(invocation, cli::Invocation::Run(_)) || has_single_turn_input(args),
+        "Muse Glimmer generation requires --prompt, --prompt-file, or `qwen run --user|--messages|--raw-prompt`"
+    );
+    Ok(())
+}
+
+fn checked_muse_glimmer_token_id(token: i32, vocab_size: u32, purpose: &str) -> Result<u32> {
+    let token =
+        u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
+    ensure!(
+        token < vocab_size,
+        "{purpose} token ID {token} is outside Muse Glimmer vocabulary {vocab_size}"
+    );
+    Ok(token)
 }
 
 fn qwen4exp_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Result<usize> {
@@ -4023,6 +4224,162 @@ fn validate_qwen4exp_full_shard_prefetch_report(
     ensure!(
         bytes_returned == mapped_bytes,
         "Flash-Next full-shard prefetch returned {bytes_returned} bytes for {mapped_bytes} mapped bytes"
+    );
+    Ok(())
+}
+
+fn run_muse_glimmer_single_turn(
+    model_path: &Path,
+    gguf: &GgufFile,
+    args: &Args,
+    explicit: ExplicitCliOptions,
+    invocation: cli::Invocation,
+) -> Result<()> {
+    validate_muse_glimmer_generation_mode(args, explicit, &invocation)?;
+    let request_t0 = Instant::now();
+    let sampling = cli_sampling_config(args)?;
+    let config =
+        MuseGlimmerConfig::from_gguf(gguf).context("bind Muse Glimmer release contract")?;
+    let prepared = prepare_muse_glimmer_prompt(invocation, &config, args)?;
+
+    let tokenizer_t0 = Instant::now();
+    let tokenizer = LlamaCppTokenizer::open(model_path).context("load Muse Glimmer tokenizer")?;
+    ensure!(
+        tokenizer.n_vocab() == config.vocab_size,
+        "Muse Glimmer tokenizer vocabulary {} differs from model vocabulary {}",
+        tokenizer.n_vocab(),
+        config.vocab_size
+    );
+    ensure!(
+        tokenizer.bos() == Some(config.bos_token_id as i32),
+        "Muse Glimmer tokenizer BOS {:?} differs from model BOS {}",
+        tokenizer.bos(),
+        config.bos_token_id
+    );
+    ensure!(
+        tokenizer.eos() == Some(config.eos_token_id as i32),
+        "Muse Glimmer tokenizer EOS {:?} differs from model EOS {}",
+        tokenizer.eos(),
+        config.eos_token_id
+    );
+    let prompt_ids = tokenizer
+        .encode(&prepared.text, prepared.add_special_tokens)
+        .context("tokenize Muse Glimmer prompt")?;
+    let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
+    let prompt_tokens = prompt_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, token)| {
+            checked_muse_glimmer_token_id(token, config.vocab_size, &format!("prompt[{index}]"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let required_forwards = muse_glimmer_required_forwards(prompt_tokens.len(), args.tokens)?;
+    let capacity = args.max_context_tokens.unwrap_or(required_forwards);
+    ensure!(
+        capacity >= required_forwards,
+        "Muse Glimmer request requires {required_forwards} forwards, beyond --max-context-tokens {capacity}"
+    );
+    ensure!(
+        capacity <= MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
+        "Muse Glimmer initial text lane supports --max-context-tokens at most {MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY}, got {capacity}"
+    );
+    let stop_tokens = gguf
+        .stop_token_ids()
+        .context("load producer-declared Muse Glimmer stop tokens")?;
+    let expected_stop_tokens = vec![config.eos_token_id as i32, config.eot_token_id as i32];
+    ensure!(
+        stop_tokens == expected_stop_tokens,
+        "Muse Glimmer release stop tokens must be EOS/EOT {expected_stop_tokens:?}, got {stop_tokens:?}"
+    );
+
+    eprintln!(
+        "muse_glimmer: loading {} for text generation; prompt_source={:?} prompt_tokens={} max_generated_tokens={} forward_capacity={} prefill=scalar",
+        model_path.display(),
+        prepared.source,
+        prompt_tokens.len(),
+        args.tokens,
+        capacity,
+    );
+    let load_t0 = Instant::now();
+    let ctx = MetalContext::new().context("initialize Metal for Muse Glimmer")?;
+    let mut loaded = MuseGlimmerLoadedModel::load(&ctx, gguf, capacity)
+        .context("load admitted Muse Glimmer weights and text session")?;
+    let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    let admission = loaded.admission();
+    eprintln!(
+        "muse_glimmer: resident on {} in {:.1} ms; aggregate_required={:?} weight_required={:?} weight_observed={} session_required={:?} session_observed={}",
+        ctx.describe(),
+        load_ms,
+        admission.aggregate.required_bytes,
+        admission.weights.required_bytes,
+        loaded.observed_weight_bytes(),
+        admission.session.required_bytes,
+        loaded.observed_session_bytes(),
+    );
+    let mut runner = loaded
+        .create_runner(&ctx)
+        .context("bind Muse Glimmer execution graph")?;
+
+    let prefill_t0 = Instant::now();
+    let logits = runner
+        .prefill_with_command_checkpoint(&prompt_tokens, || {
+            shutdown::checkpoint().map_err(|error| error.to_string())
+        })
+        .context("prefill Muse Glimmer prompt")?;
+    let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+
+    let mut sampler = Sampler::new(sampling).context("initialize Muse Glimmer sampler")?;
+    let stdout_handle = std::io::stdout();
+    let mut stdout = stdout_handle.lock();
+    let generation = generate_serial(
+        logits,
+        args.tokens,
+        &stop_tokens,
+        &mut sampler,
+        |token| {
+            let piece = tokenizer
+                .try_decode_piece_bytes_exact(token)
+                .with_context(|| format!("decode Muse Glimmer token {token}"))?;
+            stdout
+                .write_all(&piece)
+                .with_context(|| format!("write Muse Glimmer token {token}"))?;
+            stdout.flush().context("flush Muse Glimmer token")?;
+            Ok(())
+        },
+        |token| {
+            let token = checked_muse_glimmer_token_id(token, config.vocab_size, "generated")?;
+            runner
+                .forward_token(token)
+                .context("forward generated Muse Glimmer token")
+        },
+    )?;
+    if !generation.tokens.is_empty() {
+        writeln!(stdout)?;
+        stdout.flush().context("flush Muse Glimmer final newline")?;
+    }
+    let prefill_tps = if prefill_ms > 0.0 {
+        prompt_tokens.len() as f64 / (prefill_ms / 1e3)
+    } else {
+        0.0
+    };
+    let decode_tps = if generation.wall_ms > 0.0 {
+        generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
+    } else {
+        0.0
+    };
+    eprintln!(
+        "muse_glimmer stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} generation_ms={:.1} decode_tps={:.2} total_ms={:.1}",
+        prompt_tokens.len(),
+        generation.tokens.len(),
+        generation.transitions,
+        generation.stop_reason.as_str(),
+        tokenizer_ms,
+        load_ms,
+        prefill_ms,
+        prefill_tps,
+        generation.wall_ms,
+        decode_tps,
+        request_t0.elapsed().as_secs_f64() * 1e3,
     );
     Ok(())
 }
@@ -11882,6 +12239,49 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn muse_glimmer_forward_budget_counts_only_required_transitions() {
+        assert_eq!(muse_glimmer_required_forwards(2, 1).unwrap(), 2);
+        assert_eq!(muse_glimmer_required_forwards(2, 3).unwrap(), 4);
+        assert!(
+            muse_glimmer_required_forwards(MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY, 2).is_err()
+        );
+    }
+
+    #[test]
+    fn muse_glimmer_modern_user_input_renders_atem_without_tokenizer_bos() {
+        let mut args = Args::try_parse_from([
+            "qwen",
+            "run",
+            "-m",
+            "model.gguf",
+            "--system",
+            "Be exact.",
+            "--user",
+            "Hello",
+            "--reasoning-effort",
+            "low",
+        ])
+        .unwrap();
+        let invocation = cli::normalize(&mut args);
+        invocation.apply_option_overrides(&mut args);
+        let prepared = prepare_muse_glimmer_prompt(
+            invocation,
+            &MuseGlimmerConfig::unsloth_release_reference(),
+            &args,
+        )
+        .unwrap();
+        assert_eq!(prepared.source, PromptSource::Messages);
+        assert!(!prepared.add_special_tokens);
+        assert!(
+            prepared
+                .text
+                .starts_with("<|begin_of_text|><|start|>system")
+        );
+        assert!(prepared.text.contains("Reasoning strength: low."));
+        assert!(prepared.text.ends_with("<|start|>assistant"));
+    }
 
     #[test]
     fn qwen4exp_full_shard_prefetch_scope_is_default_off_and_release_scoped() {

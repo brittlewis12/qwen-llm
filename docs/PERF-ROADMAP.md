@@ -299,15 +299,19 @@ debiting positive split-topology inflation projects only
 `9.671346 ms` gate. The split is removed; do not build destination-aware motors
 or bridge aliases without a new source of leverage.
 
-1. Use one temporary named-stage split to price packed GDN and dense QSA before
-   another tile. A mechanism must project at least `0.663200 ms/GDN layer` or
-   `0.805946 ms/QSA layer`; blocked recurrence, launch-only fusion, and singleton
-   attention shortcuts remain closed.
-2. Keep selected packed QSA default-off. Bound its semantic disposition to two
+The preregistered GDN/QSA named-stage screen is invalid and makes no performance
+decision. Both split arms completed with accepted whole-command observers and
+identical generated output, but their 156-sample timestamp streams were not
+globally monotonic. No child timing was emitted or persisted. The temporary
+profiler is removed. Do not call this a mechanism KILL or GO, and do not rerun
+adaptively. Reopen only under a new preregistered observer that preserves raw
+timestamp availability and first-inversion evidence.
+
+1. Keep selected packed QSA default-off. Bound its semantic disposition to two
    held-out natural selected contexts plus one known-answer long-context case,
    with `NLL_selected - NLL_safe <= ln(1.01)` and both known-answer predicates
    passing. Do not rebuild a broad quality harness or wait on BF16 authority.
-3. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
+2. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
    all 31 omitted speculative tensors, full admission metadata, and atomic
    QSA/GDN/PLE state. Do not pursue K=2/K=3.
 

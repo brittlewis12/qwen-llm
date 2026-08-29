@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next GDN/QSA Named-Stage INVALID
+
+Status: no performance decision. Remove the temporary named-stage profiler and
+advance to selected-QSA semantic disposition rather than adaptively retrying.
+
+- A preregistered sampled-only path split layer-5 GDN into seven labels and
+  dense layer-7 QSA into nine while preserving ordinary kernels and dispatch
+  order. Source review passed before acquisition.
+- Natural N=512 A1-B1-B2-A2 completed with accepted whole-command observers and
+  one generated-output digest. Six-stage command and mixer control drift was
+  0.053-0.648%, below every 2% limit.
+- Both 156-sample split arms failed identically at profile resolution:
+  `packed profile resolved timestamps are not globally monotonic`. No named
+  child row was emitted and raw timestamp values were not persisted.
+- The committed protocol makes any acquisition/layout failure
+  `INVALID_SCREEN / NO_DECISION`. Whole-command success cannot substitute for
+  missing child timings; no GDN/QSA mechanism is kept or killed.
+- No adaptive retry or resolver relaxation ran. The sampled siblings and
+  binaries are removed, and the committed six-stage release is rebuilt.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-gdn-qsa-stage-screen/`.
+Adversarial review: `01a04f90-c9dd-76f3-b063-8d1d01e266ae`.
+
 ## 2026-08-29 - Flash-Next Packed Bridge Copy Ceiling KILL
 
 Status: close packed bridge ownership work and advance to named GDN/QSA stage

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "source_commit": "16205e20c6d797fa73574ce7179d4b7464d21603",
+  "verification": {
+    "qwen4exp_gdn_diff_clean": true,
+    "qwen4exp_qsa_diff_clean": true,
+    "qwen4exp_post_ple_block_diff_clean": true,
+    "qwen4exp_profile_diff_clean": true,
+    "control_executable_exists": false,
+    "split_executable_exists": false,
+    "release_rebuilt_after_cleanup": true
+  },
+  "restored_sha256": {
+    "release_executable": "50caa45a2863ac700366d97184a13e4fd7a30b5c37fdeb94ea446441e1eb2be6",
+    "metallib": "e5f9f5a4d9b3f4d67d184f6db4ed1ef90336a5fd7e3fb863df5032c2e6c5dcf7"
+  }
+}

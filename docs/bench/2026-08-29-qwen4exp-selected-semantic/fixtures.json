@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "8bdc666649440e9bdc97e16f3f75782c98478ff5",
+    "quant": "UD-Q3_K_XL",
+    "shard_manifest_sha256": "9ca7937ed9b7b60961f1894d691e2c5a6879c950afee87a5bbf0ebd3db512cd9",
+    "shards": [
+      {
+        "file": "Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+        "bytes": 10946624,
+        "sha256": "f2ef4328929d8b8c8930e2856eef52128dd4ce3425302f04bc3c657431cc4c49"
+      },
+      {
+        "file": "Qwen3.8-Flash-Next-UD-Q3_K_XL-00002-of-00003.gguf",
+        "bytes": 49983253824,
+        "sha256": "7d230e7c9421d868b89eebaf23033af0ea1a4e046956df00fb156814fb62346e"
+      },
+      {
+        "file": "Qwen3.8-Flash-Next-UD-Q3_K_XL-00003-of-00003.gguf",
+        "bytes": 39992153376,
+        "sha256": "21d4f90f9cd7b7c3a1582667c20cb22f7b03de895b88a23bb20aaeaa44f2c199"
+      }
+    ]
+  },
+  "tokenizer": {
+    "identity_sha256": "86a6193d6a6c9b43a71a207765f85fb3904addb3bba6dcd50b50bef076e5e89f",
+    "vocabulary": 248320,
+    "bos": 248044,
+    "eos": 248046,
+    "stop_tokens": [248046],
+    "add_special_tokens": false
+  },
+  "natural": [
+    {
+      "id": "ssh-manpage",
+      "source": "/usr/share/man/man1/ssh.1",
+      "source_sha256": "26feea6fe1f1963bb3e4c34e335fe8d6c9752e81dcbecd1a2d27e3f34de85275",
+      "complete_source_tokens": 12829,
+      "fixture": "natural-ssh.u32le",
+      "fixture_tokens": 2211,
+      "fixture_sha256_u32le": "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
+      "prompt_range": [0, 2179],
+      "target_range": [2179, 2211]
+    },
+    {
+      "id": "zsh-manpage",
+      "source": "/usr/share/man/man1/zsh.1",
+      "source_sha256": "f7354fd8e2b3801a2543f2d7354cc6f85eb6c543522d396117157d00abd63081",
+      "complete_source_tokens": 6939,
+      "fixture": "natural-zsh.u32le",
+      "fixture_tokens": 2211,
+      "fixture_sha256_u32le": "78e336b294f1a386e1990a976751d71f81125327567524b49a4ee64fb9f25410",
+      "prompt_range": [0, 2179],
+      "target_range": [2179, 2211]
+    }
+  ],
+  "known_answer": {
+    "text": "known-answer.txt",
+    "text_bytes": 10196,
+    "text_sha256": "63645b0c1139debd045ad5d426ecb167bcbdb439d8bfdad78a8dc5ab3f53d7be",
+    "fixture": "known-answer.u32le",
+    "fixture_tokens": 2578,
+    "fixture_sha256_u32le": "94305afe3a2a668e2095b31db79598950498ce4867c9f164c985d3c311902ada",
+    "maximum_generated_tokens": 64,
+    "expected_code": "amber-lattice-2049",
+    "expected_record": "K-17"
+  },
+  "natural_gate": {
+    "predicted_tokens": 64,
+    "maximum_pooled_nll_delta": 0.009950330853168092
+  },
+  "held_out_attestation": {
+    "removed_quality_harness_sources": "WikiText documents",
+    "current_natural_sources_external_to_repository": true,
+    "current_slices_used_by_removed_harness": false,
+    "safe_or_selected_outputs_inspected_before_freeze": false
+  }
+}

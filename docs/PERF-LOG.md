@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Packed IQ4_NL Retile KEEP
+
+Status: enable M128xN16 packed IQ4_NL routed down only for exact N=512 on
+Apple M4 Max. Roll back with `QWEN4EXP_MOE_IQ4_DOWN_M128_N16=0`.
+
+- The natural route screen selected 43 IQ4_NL layers and measured
+  `R=S16/(2*S32)=0.692398`, clearing the preregistered `0.75` code-entry gate.
+  The candidate retains K=32 and the incumbent MMA order while trading fewer
+  active compute tiles and less activation staging for 1.3848x weight decode.
+- Candidate and incumbent outputs match as raw F32 bits across count, M, K, and
+  expert tails. Input immutability, output guards, exact dispatch geometry,
+  9,216-byte preflight, default scope, and rollback gates pass.
+- Natural N=512 A1-B1-B2-A2 moves the representative routed-down leaf
+  `3.512855 -> 2.800188 ms/layer`, saving 20.29% and clearing both the fixed
+  `3.164099 ms` ceiling and 10% relative gate.
+- Warm/profiled command GPU moves `992.155458 -> 967.134625 ms` /
+  `993.655188 -> 968.451646 ms`, saving 2.52%/2.54%. Maximum pair drift is
+  0.2723%; every observer and raw-coverage gate passes, with one stdout digest.
+- Crediting 43 layers predicts `30.644681 ms`; warm command realizes
+  `25.020833 ms`, or 81.65%. GPU-equivalent throughput rises
+  `516.05 -> 529.40 tok/s`.
+- Existing natural N=2,048 route counts give `R=0.857718`, with every layer over
+  the entry gate. Keep that width on M64xN32 without writing another kernel.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-iq4-down-m128-n16/`.
+Adversarial review: `01a04de7-d66e-73f1-b3de-14ba60527c89`.
+
 ## 2026-08-29 - Flash-Next IQ3 Block-Local Dequantization KILL
 
 Status: remove the exact block-local IQ3_XXS packed gate/up rewrite. Advance to

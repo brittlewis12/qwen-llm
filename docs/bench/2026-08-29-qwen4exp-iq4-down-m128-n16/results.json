@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "decision": "KEEP_PROMOTE_EXACT_N512",
+  "source": {
+    "measured_base_commit": "799e773ba92f8de6ee61b0a91821611eebaf060e",
+    "measured_diff_sha256": "a46f8856f2bc5eec7f34be68f329fceaa39f699cf3d9e4dbc285386de53f68bd",
+    "measured_executable_sha256": "34af8cdfce128afcdd1659e5004cd6b0afd276a895bc4a61074e58ca3749de8d",
+    "measured_metallib_sha256": "d65856754594b3a0b9ee708e3aa0e4a2f6101f5c85ec9c30aa7617cf58a7dace",
+    "measured_moe_air_sha256": "79c594e12bf0220b6531dd785c6dfa52d8451b7b4439aaf765220e2d76e98b81",
+    "promotion_commit": "a2bfeec4804c37176e12f3bea77e8b123f5aa054"
+  },
+  "model": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "8bdc666649440e9bdc97e16f3f75782c98478ff5",
+    "quant": "UD-Q3_K_XL",
+    "storage": "internal SSD"
+  },
+  "prompt": {
+    "path": "docs/bench/2026-08-29-qwen4exp-packed-natural-n512/prompt.txt",
+    "tokens": 512,
+    "bytes": 2365,
+    "sha256": "9ea0ba6ce8218c9a2bc6129e8865dc1c0f562fb0ad6e01903b58912f8b8a8fc7",
+    "add_special_tokens": false
+  },
+  "route_screen_n512": {
+    "selected_iq4_nl_layers": 43,
+    "route_sum": 220160,
+    "s16": 21294,
+    "s32": 15377,
+    "active_tile_ratio": 0.692397736880,
+    "weight_dequant_traversal_ratio": 1.384795473760,
+    "activation_staging_ratio": 0.346198868440,
+    "maximum_code_entry_ratio": 0.75,
+    "decision": "GO_TO_CODE"
+  },
+  "correctness": {
+    "candidate_incumbent_f32_bit_equal": true,
+    "count_residues": [0, 1, 15, 16, 17, 31, 32, 33, 511, 512],
+    "m_boundaries": [64, 65, 127, 128, 129, 2560],
+    "k_boundaries": [32, 64, 640],
+    "expert_boundaries": [0, 511],
+    "input_buffers_unchanged": true,
+    "output_ownership_complete": true,
+    "output_guards_intact": true,
+    "focused_tests": [
+      "packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable",
+      "grouped_iq4_nl_down_m128_n16_is_bit_exact_and_guarded",
+      "grouped_iq4_nl_down_matches_slotwise_512_expert_execution",
+      "packed_common_moe_motor_matches_serial_rows_and_routes"
+    ]
+  },
+  "order": [
+    "A1_BASELINE",
+    "B1_CANDIDATE",
+    "B2_CANDIDATE",
+    "A2_BASELINE"
+  ],
+  "rows": [
+    {
+      "arm": "A1_BASELINE",
+      "candidate_enabled": false,
+      "candidate_marker": false,
+      "warm_command_gpu_ms": 992.264291504398,
+      "profiled_command_gpu_ms": 993.6208750586957,
+      "routed_down_ticks": 3510209,
+      "routed_down_ms": 3.510209,
+      "observer_gpu_ratio": 1.0013671595016695,
+      "observer_wall_ratio": 1.001979,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "15e984fd2960450540c73d074055c7dda750dc4ae01b0e3a15770202b4199272"
+    },
+    {
+      "arm": "B1_CANDIDATE",
+      "candidate_enabled": true,
+      "candidate_marker": true,
+      "warm_command_gpu_ms": 967.1232500113547,
+      "profiled_command_gpu_ms": 968.566375086084,
+      "routed_down_ticks": 2804000,
+      "routed_down_ms": 2.804,
+      "observer_gpu_ratio": 1.0014921832090298,
+      "observer_wall_ratio": 1.002154,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "71967c981cd2e99006d1fd3aec76b58597a68748d646af8cd568d5ca9d1596e1"
+    },
+    {
+      "arm": "B2_CANDIDATE",
+      "candidate_enabled": true,
+      "candidate_marker": true,
+      "warm_command_gpu_ms": 967.1460001263767,
+      "profiled_command_gpu_ms": 968.3369167614728,
+      "routed_down_ticks": 2796375,
+      "routed_down_ms": 2.796375,
+      "observer_gpu_ratio": 1.0012313721350659,
+      "observer_wall_ratio": 1.001762,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "ad8402309685bf1ee999353e5ba24bb0675b3b4f09d8464b76acaecc0120d2e3"
+    },
+    {
+      "arm": "A2_BASELINE",
+      "candidate_enabled": false,
+      "candidate_marker": false,
+      "warm_command_gpu_ms": 992.0466251205653,
+      "profiled_command_gpu_ms": 993.6895000282675,
+      "routed_down_ticks": 3515500,
+      "routed_down_ms": 3.5155,
+      "observer_gpu_ratio": 1.0016560460628576,
+      "observer_wall_ratio": 1.002312,
+      "raw_coverage": 1.0,
+      "stdout_sha256": "e530152ea80c3012dbfdb19a69e554de54aed4511184ae225fcec380233a46e9",
+      "stderr_sha256": "7917c52fa8a36a0d2420cc44ac823465898defede01f3f6f2436d90ec4725ff9"
+    }
+  ],
+  "gates": {
+    "leaf": {
+      "baseline_min_ms": 3.510209,
+      "candidate_max_ms": 2.804,
+      "baseline_mean_ms": 3.5128545,
+      "candidate_mean_ms": 2.8001875,
+      "mean_saving_ms": 0.712667,
+      "mean_saving_fraction": 0.2028740444558692,
+      "fixed_ceiling_ms": 3.164099,
+      "minimum_saving_fraction": 0.1,
+      "pass": true
+    },
+    "warm_command": {
+      "baseline_min_ms": 992.0466251205653,
+      "candidate_max_ms": 967.1460001263767,
+      "baseline_mean_ms": 992.1554583124816,
+      "candidate_mean_ms": 967.1346250688657,
+      "mean_saving_ms": 25.020833243615925,
+      "mean_saving_fraction": 0.025218662089681872,
+      "minimum_saving_fraction": 0.01,
+      "pass": true
+    },
+    "profiled_command": {
+      "baseline_min_ms": 993.6208750586957,
+      "candidate_max_ms": 968.566375086084,
+      "baseline_mean_ms": 993.6551875434816,
+      "candidate_mean_ms": 968.4516459237784,
+      "mean_saving_ms": 25.203541619703174,
+      "mean_saving_fraction": 0.02536447445316667,
+      "minimum_saving_fraction": 0.01,
+      "pass": true
+    },
+    "maximum_pair_drift": 0.0027230319398254556,
+    "pair_drift_limit": 0.02,
+    "all_observers_accepted": true,
+    "all_raw_coverage_accepted": true,
+    "one_stdout_digest": true
+  },
+  "effect": {
+    "credited_iq4_layers": 43,
+    "leaf_predicted_command_saving_ms": 30.644681,
+    "warm_observed_command_saving_ms": 25.020833243615925,
+    "leaf_to_warm_conversion": 0.8164820917410078,
+    "baseline_gpu_equivalent_tps": 516.0481613141964,
+    "candidate_gpu_equivalent_tps": 529.398893110194
+  },
+  "topology_evidence": {
+    "candidate_marker_only_on_candidate_arms": true,
+    "iq4_layer_count_source": "released dtype cohort plus exact host qualification",
+    "runtime_43_dispatch_census_claimed": false
+  },
+  "n2048_scope_screen": {
+    "source": "docs/bench/2026-08-27-qwen4exp-iq3-gate-up-census/route-count-census.json",
+    "natural": {
+      "s16": 63924,
+      "s32": 37264,
+      "active_tile_ratio": 0.857717904680,
+      "minimum_layer_ratio": 0.840425531915,
+      "maximum_layer_ratio": 0.879081015719
+    },
+    "repeated_token_control_ratio": 0.961875,
+    "maximum_code_entry_ratio": 0.75,
+    "decision": "KILL_BEFORE_CODE"
+  },
+  "promotion": {
+    "scope": {
+      "device": "Apple M4 Max",
+      "tokens": 512,
+      "hidden": 2560,
+      "routed_intermediate": 640,
+      "experts": 512,
+      "top_k": 10,
+      "dtype": "IQ4_NL"
+    },
+    "default_on": true,
+    "rollback": "QWEN4EXP_MOE_IQ4_DOWN_M128_N16=0"
+  },
+  "adversarial_review": "01a04de7-d66e-73f1-b3de-14ba60527c89"
+}

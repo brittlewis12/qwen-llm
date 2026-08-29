@@ -275,25 +275,37 @@ about 0.45%. B1 alone exceeds the fixed `4.857600 ms` leaf ceiling, so the
 worst-case gate cannot recover and the candidate is removed. Compact active
 panels, indirect IQ3, donor ports, and further decode reshaping remain closed.
 
-1. Consider packed IQ4_NL down only as an `M128xN16xK32` same-work retile. First
-   require the natural-route histogram to satisfy
-   `sum(ceil(count/16)) / (2 * sum(ceil(count/32))) <= 0.75`; then require exact
-   output, `<=3.164099 ms/layer`, and at least 1% command improvement. Singleton
-   row reuse and down-plus-sum do not transfer without new evidence.
-2. If the retile is blocked or misses, source-screen block-local IQ4_NL packed
-   nibble decoding as an isolated leaf change. Require exact half output and at
-   least 10% leaf improvement before any command run; do not combine it with the
-   retile during attribution.
-3. Split bridge ownership only if existing labels can identify at least
-   `11.491 ms` of actually removable N=512 work. The 7.79% coarse bucket includes
-   HC injection/combine and carries 1.51% representative overassignment; it is
-   not a copy-only estimate.
-4. Keep selected packed QSA default-off and use only focused quant-native
-   semantic checks that can change its disposition. Do not recreate a broad
-   quality harness or wait on a roughly 360 GB BF16 checkpoint.
+Natural N=512 clears the retile gate with `S16=21,294`, `S32=15,377`, and
+`R=0.692398`. The promoted M128xN16xK32 kernel remains bit-exact and moves the
+representative IQ4_NL down leaf `3.512855 -> 2.800188 ms/layer`; warm command GPU
+moves `992.155458 -> 967.134625 ms`, saving 2.52%. It is default only for exact
+N=512 released geometry on Apple M4 Max, with
+`QWEN4EXP_MOE_IQ4_DOWN_M128_N16=0` as rollback. Existing natural N=2,048 counts
+give `R=0.857718`, and every individual layer fails the same `0.75` entry gate;
+do not widen the scope there.
+
+1. Source-screen a retile-private paired IQ4_NL decoder that loads each packed
+   quant word once and emits both nibble residues. Stop before code if the
+   compiled incumbent already coalesces the two literal helper calls into one
+   scale/quant load and branchless extraction. If coded, require raw-half
+   equality over every nibble pair and hostile/released scales, then reuse the
+   complete F32-bit tail matrix. B1 above `2.520169 ms/layer` is an immediate
+   KILL; a survivor must also beat `957.463279/958.767129 ms` warm/profiled GPU.
+2. Measure a copy-only bridge ceiling before changing ownership. Split only the
+   four representative mixer/MoE copies from their combines, extrapolate the
+   34-GDN/12-QSA total, and require at least `9.671346 ms` in both accepted
+   captures before implementation. The coarse bridge bucket is not copy-only.
+3. Use one temporary named-stage split to price packed GDN and dense QSA before
+   another tile. A mechanism must project at least `0.663200 ms/GDN layer` or
+   `0.805946 ms/QSA layer`; blocked recurrence, launch-only fusion, and singleton
+   attention shortcuts remain closed.
+4. Keep selected packed QSA default-off. Bound its semantic disposition to two
+   held-out natural selected contexts plus one known-answer long-context case,
+   with `NLL_selected - NLL_safe <= ln(1.01)` and both known-answer predicates
+   passing. Do not rebuild a broad quality harness or wait on BF16 authority.
 5. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
-   the 31 omitted speculative tensors and atomic QSA/GDN/PLE state. Do not pursue
-   K=2/K=3.
+   all 31 omitted speculative tensors, full admission metadata, and atomic
+   QSA/GDN/PLE state. Do not pursue K=2/K=3.
 
 The simple IQ4_NL down-plus-sum follow-up is parked despite the down-kernel win:
 it removes only about 8.8 MB/token of materialized output traffic and 43

@@ -110,6 +110,7 @@ const QWEN4EXP_CHAT_TEMPLATE_SHA256: [u8; 32] = [
 const QWEN4EXP_LAYER_PROFILE_ENV: &str = "QWEN4EXP_LAYER_PROFILE";
 const QWEN4EXP_PACKED_PREFILL_PROFILE_ENV: &str = "QWEN4EXP_PACKED_PREFILL_PROFILE";
 const QWEN4EXP_PACKED_SELECTED_QSA_ENV: &str = "QWEN4EXP_PACKED_SELECTED_QSA";
+const QWEN4EXP_FULL_SHARD_PREFETCH_ENV: &str = "QWEN4EXP_FULL_SHARD_PREFETCH";
 const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 #[cfg(feature = "dsv4-diagnostics")]
 const DEEPSEEK_V4_TEMPORAL_WINDOW_ENV: &str = "QWEN_DSV4_TEMPORAL_WINDOW";
@@ -3996,6 +3997,67 @@ fn qwen4exp_prefill_execution_mode(
     }
 }
 
+fn validate_qwen4exp_full_shard_prefetch_scope(
+    enabled: bool,
+    packed_profile_enabled: bool,
+    prompt_tokens: usize,
+    generated_tokens: usize,
+    forward_limit: usize,
+    shard_count: usize,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    ensure!(
+        packed_profile_enabled,
+        "{QWEN4EXP_FULL_SHARD_PREFETCH_ENV} requires {QWEN4EXP_PACKED_PREFILL_PROFILE_ENV}=1"
+    );
+    ensure!(
+        prompt_tokens == 512,
+        "{QWEN4EXP_FULL_SHARD_PREFETCH_ENV} requires exactly 512 prompt tokens, got {prompt_tokens}"
+    );
+    ensure!(
+        generated_tokens == 1,
+        "{QWEN4EXP_FULL_SHARD_PREFETCH_ENV} requires --tokens 1, got {generated_tokens}"
+    );
+    ensure!(
+        forward_limit == 512,
+        "{QWEN4EXP_FULL_SHARD_PREFETCH_ENV} requires a 512-token forward limit, got {forward_limit}"
+    );
+    ensure!(
+        shard_count == 3,
+        "{QWEN4EXP_FULL_SHARD_PREFETCH_ENV} requires the released three-shard asset, got {shard_count} shards"
+    );
+    Ok(())
+}
+
+fn validate_qwen4exp_full_shard_prefetch_report(
+    expected_shards: usize,
+    reported_shards: usize,
+    prefetched_shards: usize,
+    skipped_shards: usize,
+    mapped_bytes: u64,
+    bytes_returned: u64,
+) -> Result<()> {
+    ensure!(
+        reported_shards == expected_shards,
+        "Flash-Next full-shard prefetch reported {reported_shards} shards, expected {expected_shards}"
+    );
+    ensure!(
+        prefetched_shards == expected_shards && skipped_shards == 0,
+        "Flash-Next full-shard prefetch completed {prefetched_shards} of {expected_shards} shards and skipped {skipped_shards}"
+    );
+    ensure!(
+        bytes_returned == mapped_bytes,
+        "Flash-Next full-shard prefetch returned {bytes_returned} bytes for {mapped_bytes} mapped bytes"
+    );
+    Ok(())
+}
+
+fn qwen4exp_charged_cold_wall_ms(prefetch_feature_wall_ms: f64, first_runtime_wall_ms: f64) -> f64 {
+    prefetch_feature_wall_ms + first_runtime_wall_ms
+}
+
 fn run_qwen4exp_single_turn(
     model_path: &Path,
     gguf: &GgufFile,
@@ -4047,6 +4109,8 @@ fn run_qwen4exp_single_turn(
     let layer_profile_enabled = qwen_llm::env_flag::read_default_off(QWEN4EXP_LAYER_PROFILE_ENV);
     let packed_profile_enabled =
         qwen_llm::env_flag::read_default_off(QWEN4EXP_PACKED_PREFILL_PROFILE_ENV);
+    let full_shard_prefetch_enabled =
+        qwen_llm::env_flag::read_default_off(QWEN4EXP_FULL_SHARD_PREFETCH_ENV);
     ensure!(
         !layer_profile_enabled || !packed_profile_enabled,
         "{QWEN4EXP_LAYER_PROFILE_ENV} and {QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} are mutually exclusive"
@@ -4055,6 +4119,14 @@ fn run_qwen4exp_single_turn(
         !packed_profile_enabled || prompt_tokens.len() >= 2,
         "{QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} requires at least two prompt tokens"
     );
+    validate_qwen4exp_full_shard_prefetch_scope(
+        full_shard_prefetch_enabled,
+        packed_profile_enabled,
+        prompt_tokens.len(),
+        args.tokens,
+        logical_forward_limit,
+        gguf.shard_count(),
+    )?;
     let packed_prefill_requested =
         !layer_profile_enabled && (packed_profile_enabled || prompt_tokens.len() > 1);
     let prefill_request = if packed_profile_enabled {
@@ -4075,6 +4147,52 @@ fn run_qwen4exp_single_turn(
         capacity.forward_limit(),
         capacity.qsa_physical_capacity(),
     );
+    let full_shard_prefetch_feature_wall_ms = if full_shard_prefetch_enabled {
+        let feature_t0 = Instant::now();
+        let process_before = PidSnapshot::now().ok();
+        let prefetch_config = LoadedModelConfig {
+            prefetch_policy: PrefetchPolicy::Always,
+            ..LoadedModelConfig::default()
+        };
+        let report = prefetch_opened_gguf(gguf, &prefetch_config);
+        let process_delta = process_before
+            .zip(PidSnapshot::now().ok())
+            .map(|(before, after)| PidDelta::between(before, after));
+        let mapped_bytes = u64::try_from(gguf.total_mapped_len())
+            .context("Flash-Next mapped byte count exceeds u64")?;
+        let bytes_returned = report.bytes_returned_total();
+        validate_qwen4exp_full_shard_prefetch_report(
+            gguf.shard_count(),
+            report.shards.len(),
+            report.shards_prefetched(),
+            report.shards_skipped(),
+            mapped_bytes,
+            bytes_returned,
+        )?;
+        let feature_wall_ms = feature_t0.elapsed().as_secs_f64() * 1e3;
+        for (index, shard) in report.shards.iter().enumerate() {
+            eprintln!(
+                "qwen4exp full_shard_prefetch_shard: schema=1 index={index} path={:?} bytes_returned={} wall_ms={:.3} skipped={} reason={:?}",
+                shard.path,
+                shard.bytes_returned,
+                shard.wall.as_secs_f64() * 1e3,
+                shard.skipped,
+                shard.skipped_reason.as_deref(),
+            );
+        }
+        eprintln!(
+            "qwen4exp full_shard_prefetch: schema=1 policy=always shards_prefetched={} shards_skipped={} mapped_bytes={mapped_bytes} bytes_returned={bytes_returned} report_wall_ms={:.3} feature_wall_ms={feature_wall_ms:.3} physical_read_bytes={}",
+            report.shards_prefetched(),
+            report.shards_skipped(),
+            report.total_wall.as_secs_f64() * 1e3,
+            process_delta
+                .map(|delta| delta.diskio_bytesread.to_string())
+                .unwrap_or_else(|| "unavailable".to_string()),
+        );
+        Some(feature_wall_ms)
+    } else {
+        None
+    };
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for Qwen3.8-Flash-Next")?;
     let (mut loaded, packed_fallback) = if packed_prefill_requested {
@@ -4192,6 +4310,13 @@ fn run_qwen4exp_single_turn(
         let first_timing = runner
             .last_prefill_timing()
             .expect("successful first packed prefill records timing");
+        if let Some(prefetch_feature_wall_ms) = full_shard_prefetch_feature_wall_ms {
+            eprintln!(
+                "qwen4exp cold_charge: schema=1 prefetch_feature_wall_ms={prefetch_feature_wall_ms:.3} first_runtime_wall_ms={:.3} charged_wall_ms={:.3}",
+                first_timing.total_wall_ms,
+                qwen4exp_charged_cold_wall_ms(prefetch_feature_wall_ms, first_timing.total_wall_ms,),
+            );
+        }
         let reset_t0 = Instant::now();
         runner
             .reset()
@@ -11802,6 +11927,44 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn qwen4exp_full_shard_prefetch_scope_is_default_off_and_bounded() {
+        assert!(validate_qwen4exp_full_shard_prefetch_scope(false, false, 1, 99, 1, 0).is_ok());
+        assert!(validate_qwen4exp_full_shard_prefetch_scope(true, true, 512, 1, 512, 3).is_ok());
+        for invalid in [
+            (false, 512, 1, 512, 3),
+            (true, 511, 1, 512, 3),
+            (true, 512, 2, 512, 3),
+            (true, 512, 1, 513, 3),
+            (true, 512, 1, 512, 2),
+        ] {
+            assert!(
+                validate_qwen4exp_full_shard_prefetch_scope(
+                    true, invalid.0, invalid.1, invalid.2, invalid.3, invalid.4,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn qwen4exp_full_shard_prefetch_report_requires_complete_exact_read() {
+        assert!(validate_qwen4exp_full_shard_prefetch_report(3, 3, 3, 0, 90_000, 90_000).is_ok());
+        for invalid in [(2, 3, 0, 90_000), (3, 2, 1, 90_000), (3, 3, 0, 89_999)] {
+            assert!(
+                validate_qwen4exp_full_shard_prefetch_report(
+                    3, invalid.0, invalid.1, invalid.2, 90_000, invalid.3,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn qwen4exp_full_shard_prefetch_charge_includes_feature_and_first_pass() {
+        assert_eq!(qwen4exp_charged_cold_wall_ms(12_500.25, 1_004.75), 13_505.0);
+    }
 
     #[test]
     fn qwen4exp_prefill_mode_reports_execution_not_selected_authority() {

@@ -7,13 +7,14 @@ use crate::muse_glimmer_lens::{
     MuseGlimmerLensCapture, MuseGlimmerLensError, MuseGlimmerLensRule,
     MuseGlimmerSelectedTokenCovectors, muse_glimmer_selected_token_covectors,
 };
-use crate::muse_glimmer_lens_fit::MuseGlimmerOneBlockVjp;
+use crate::muse_glimmer_lens_fit::{MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerOneBlockVjp};
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
 };
 use crate::muse_glimmer_text_session::{
-    MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES, MuseGlimmerTextForward, MuseGlimmerTextGeometry,
-    MuseGlimmerTextSession, MuseGlimmerTextSessionError, MuseGlimmerTextSessionMemoryPlan,
+    MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES, MuseGlimmerPostBlockForward, MuseGlimmerTextForward,
+    MuseGlimmerTextGeometry, MuseGlimmerTextSession, MuseGlimmerTextSessionError,
+    MuseGlimmerTextSessionMemoryPlan,
 };
 use objc2_metal::MTLDevice;
 
@@ -181,6 +182,18 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self.forward.forward_token(token, &mut self.session)?)
     }
 
+    /// Forward one scalar token normally while copying selected post-block
+    /// residuals from the same command buffer. Layer IDs must be sorted unique.
+    pub fn forward_token_capture_post_blocks(
+        &mut self,
+        token: u32,
+        layer_ids: &[u32],
+    ) -> Result<MuseGlimmerPostBlockForward, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .forward_token_capture_post_blocks(token, layer_ids, &mut self.session)?)
+    }
+
     pub fn prefill(&mut self, tokens: &[u32]) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
         Ok(self.forward.prefill(tokens, &mut self.session)?)
     }
@@ -210,6 +223,21 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self
             .forward
             .lens_one_full_attention_block_vjp(capture, target_cotangent, rule)?)
+    }
+
+    /// Fit one direction per selected token from `target_block` to exactly
+    /// `target_block - 1`. Positions are `skip_first..T-1`; each VJP places
+    /// one covector on every valid target row and means the matching source rows.
+    pub fn fit_adjacent_full_attention_selected_tokens(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        covectors: &MuseGlimmerSelectedTokenCovectors,
+        skip_first: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .fit_adjacent_full_attention_selected_tokens(capture, covectors, skip_first, rule)?)
     }
 
     pub fn prefill_with_command_checkpoint<F>(

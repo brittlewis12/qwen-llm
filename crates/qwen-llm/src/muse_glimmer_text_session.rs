@@ -16,10 +16,13 @@ use crate::metal::{
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
 use crate::muse_glimmer_lens::{
-    MuseGlimmerLensCapture, MuseGlimmerLensError, validate_capture_request,
+    MuseGlimmerLensCapture, MuseGlimmerLensError, MuseGlimmerSelectedTokenCovectors,
+    validate_capture_request,
 };
 use crate::muse_glimmer_lens_fit::{
-    MuseGlimmerOneBlockVjp, muse_glimmer_one_full_attention_block_vjp,
+    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerOneBlockVjp,
+    muse_glimmer_fit_adjacent_full_attention_selected_tokens,
+    muse_glimmer_one_full_attention_block_vjp,
 };
 use crate::muse_glimmer_metal::{
     encode_muse_glimmer_logit_softcap_f32, encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
@@ -34,6 +37,26 @@ use objc2_metal::{
 
 pub const MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY: usize = 7_168;
 pub const MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerPostBlockForward {
+    pub position: usize,
+    pub token_id: u32,
+    pub layer_ids: Vec<u32>,
+    pub hidden_size: usize,
+    pub logits: Vec<f32>,
+    /// Layer-major post-block residuals, flattened `[L,H]`.
+    pub post_block_residuals: Vec<f32>,
+}
+
+impl MuseGlimmerPostBlockForward {
+    pub fn layer_values(&self, slot: usize) -> Option<&[f32]> {
+        let start = slot.checked_mul(self.hidden_size)?;
+        self.post_block_residuals
+            .get(start..start.checked_add(self.hidden_size)?)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MuseGlimmerTextSessionError {
@@ -544,6 +567,44 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             .ok_or_else(|| MuseGlimmerTextSessionError::Invalid("logits were not produced".into()))
     }
 
+    pub fn forward_token_capture_post_blocks(
+        &self,
+        token: u32,
+        layer_ids: &[u32],
+        session: &mut MuseGlimmerTextSession,
+    ) -> Result<MuseGlimmerPostBlockForward, MuseGlimmerTextSessionError> {
+        self.validate_token_and_session(token, session)?;
+        validate_live_capture_layers(layer_ids, self.weights.layers.len())?;
+        let position = session.next_position;
+        let hidden_size = session.geometry.hidden_size;
+        let captured =
+            MetalTensor::zeros_f32(self.ctx, vec![hidden_size as u64, layer_ids.len() as u64])?;
+        let destination = MuseGlimmerPostBlockCaptureDestination {
+            layer_ids,
+            captured: &captured,
+        };
+        let logits = self
+            .execute_token_with_sink(
+                token,
+                session,
+                true,
+                Some(MuseGlimmerProductionCaptureSink::PostBlock(&destination)),
+            )?
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid(
+                    "capture forward did not produce logits".into(),
+                )
+            })?;
+        Ok(MuseGlimmerPostBlockForward {
+            position,
+            token_id: token,
+            layer_ids: layer_ids.to_vec(),
+            hidden_size,
+            logits,
+            post_block_residuals: read_f32(&captured),
+        })
+    }
+
     pub fn prefill(
         &self,
         tokens: &[u32],
@@ -648,6 +709,23 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         )
     }
 
+    pub(crate) fn fit_adjacent_full_attention_selected_tokens(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        covectors: &MuseGlimmerSelectedTokenCovectors,
+        skip_first: usize,
+        rule: crate::muse_glimmer_lens::MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerLensError> {
+        muse_glimmer_fit_adjacent_full_attention_selected_tokens(
+            self.ctx,
+            &self.weights,
+            capture,
+            covectors,
+            skip_first,
+            rule,
+        )
+    }
+
     fn validate_token_and_session(
         &self,
         token: u32,
@@ -689,6 +767,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         session: &mut MuseGlimmerTextSession,
         produce_logits: bool,
     ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
+        self.execute_token_with_sink(token, session, produce_logits, None)
+    }
+
+    fn execute_token_with_sink(
+        &self,
+        token: u32,
+        session: &mut MuseGlimmerTextSession,
+        produce_logits: bool,
+        capture: Option<MuseGlimmerProductionCaptureSink<'_>>,
+    ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
         let position = session.next_position;
         let position_u32 = u32::try_from(position).map_err(|_| {
             MuseGlimmerTextSessionError::Invalid("session position exceeds u32".into())
@@ -700,7 +788,14 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
 
         let encode_result = (|| {
             let encoder = KernelEncoder::begin(&command);
-            self.encode_token_graph(&encoder, position, position_u32, session, produce_logits)?;
+            self.encode_token_graph_inner(
+                &encoder,
+                position,
+                position_u32,
+                session,
+                produce_logits,
+                capture,
+            )?;
             encoder.end();
             Ok::<(), MuseGlimmerTextSessionError>(())
         })();
@@ -727,54 +822,13 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         session: &mut MuseGlimmerTextSession,
         capture: &MuseGlimmerLensCaptureDestination,
     ) -> Result<(), MuseGlimmerTextSessionError> {
-        let position = session.next_position;
-        let position_u32 = u32::try_from(position).map_err(|_| {
-            MuseGlimmerTextSessionError::Invalid("session position exceeds u32".into())
-        })?;
-        session.write_token(token as i32);
-        let command = self.ctx.queue.commandBuffer().ok_or_else(|| {
-            MuseGlimmerTextSessionError::CommandBuffer("allocation failed".into())
-        })?;
-        let encoder = KernelEncoder::begin(&command);
-        let encode_result = self.encode_token_graph_inner(
-            &encoder,
-            position,
-            position_u32,
+        self.execute_token_with_sink(
+            token,
             session,
             false,
-            Some(capture),
-        );
-        encoder.end();
-        encode_result?;
-        command.commit();
-        command.waitUntilCompleted();
-        let status = command.status();
-        let command_error = command.error().map(|error| error.to_string());
-        if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
-            let reason = format!("status={status:?}, error={command_error:?}");
-            session.poison_reason = Some(reason.clone());
-            return Err(MuseGlimmerTextSessionError::CommandBuffer(reason));
-        }
-        session.next_position += 1;
+            Some(MuseGlimmerProductionCaptureSink::Lens(capture)),
+        )?;
         Ok(())
-    }
-
-    fn encode_token_graph(
-        &self,
-        encoder: &KernelEncoder,
-        position: usize,
-        position_u32: u32,
-        session: &MuseGlimmerTextSession,
-        produce_logits: bool,
-    ) -> Result<(), MuseGlimmerTextSessionError> {
-        self.encode_token_graph_inner(
-            encoder,
-            position,
-            position_u32,
-            session,
-            produce_logits,
-            None,
-        )
     }
 
     fn encode_token_graph_inner(
@@ -784,7 +838,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         position_u32: u32,
         session: &MuseGlimmerTextSession,
         produce_logits: bool,
-        capture: Option<&MuseGlimmerLensCaptureDestination>,
+        capture: Option<MuseGlimmerProductionCaptureSink<'_>>,
     ) -> Result<(), MuseGlimmerTextSessionError> {
         let geometry = &session.geometry;
         encode_get_rows_f32(
@@ -806,7 +860,9 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         )?;
 
         for (layer_index, layer) in self.weights.layers.iter().enumerate() {
-            if let Some(capture) = capture.filter(|capture| capture.target_block == layer_index) {
+            if let Some(MuseGlimmerProductionCaptureSink::Lens(capture)) = capture
+                && capture.target_block == layer_index
+            {
                 encode_copy_offset_f32(
                     self.ctx,
                     encoder,
@@ -943,7 +999,9 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.post_norm_epsilon,
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &session.residual, &session.branch_normed)?;
-            if let Some(capture) = capture.filter(|capture| capture.target_block == layer_index) {
+            if let Some(MuseGlimmerProductionCaptureSink::Lens(capture)) = capture
+                && capture.target_block == layer_index
+            {
                 encode_copy_offset_f32(
                     self.ctx,
                     encoder,
@@ -1004,13 +1062,30 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.post_norm_epsilon,
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &session.residual, &session.branch_normed)?;
-            if let Some(capture) = capture.filter(|capture| capture.target_block == layer_index) {
+            if let Some(MuseGlimmerProductionCaptureSink::Lens(capture)) = capture
+                && capture.target_block == layer_index
+            {
                 encode_copy_offset_f32(
                     self.ctx,
                     encoder,
                     &session.residual,
                     0,
                     &capture.post_block,
+                    geometry.hidden_size,
+                )?;
+            }
+            if let Some(MuseGlimmerProductionCaptureSink::PostBlock(capture)) = capture
+                && let Ok(slot) = capture.layer_ids.binary_search(&(layer_index as u32))
+            {
+                encode_copy_offset_f32(
+                    self.ctx,
+                    encoder,
+                    &session.residual,
+                    0,
+                    &capture.captured.view_subrange(
+                        (slot * geometry.hidden_size) as u64,
+                        vec![geometry.hidden_size as u64],
+                    ),
                     geometry.hidden_size,
                 )?;
             }
@@ -1052,6 +1127,40 @@ struct MuseGlimmerLensCaptureDestination {
     input: MetalTensor,
     post_attention: MetalTensor,
     post_block: MetalTensor,
+}
+
+struct MuseGlimmerPostBlockCaptureDestination<'a> {
+    layer_ids: &'a [u32],
+    captured: &'a MetalTensor,
+}
+
+#[derive(Clone, Copy)]
+enum MuseGlimmerProductionCaptureSink<'a> {
+    Lens(&'a MuseGlimmerLensCaptureDestination),
+    PostBlock(&'a MuseGlimmerPostBlockCaptureDestination<'a>),
+}
+
+fn validate_live_capture_layers(
+    layer_ids: &[u32],
+    layer_count: usize,
+) -> Result<(), MuseGlimmerTextSessionError> {
+    if layer_ids.is_empty() || layer_ids.len() > MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS {
+        return invalid(format!(
+            "live capture layer count must be in 1..={MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS}, got {}",
+            layer_ids.len()
+        ));
+    }
+    for (slot, &layer) in layer_ids.iter().enumerate() {
+        if layer as usize >= layer_count {
+            return invalid(format!(
+                "live capture layer {layer} is outside layer count {layer_count}"
+            ));
+        }
+        if slot > 0 && layer_ids[slot - 1] >= layer {
+            return invalid("live capture layers must be sorted and unique");
+        }
+    }
+    Ok(())
 }
 
 fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
@@ -1197,6 +1306,86 @@ mod tests {
         assert_eq!(session.memory_plan().allocations().len(), 18);
         assert!(session.admission().admitted);
         session.reset().unwrap();
+    }
+
+    #[test]
+    fn live_capture_layers_require_nonempty_sorted_unique_in_range_selection() {
+        validate_live_capture_layers(&[0, 3, 51], 52).unwrap();
+        assert!(validate_live_capture_layers(&[], 52).is_err());
+        assert!(validate_live_capture_layers(&[3, 3], 52).is_err());
+        assert!(validate_live_capture_layers(&[4, 3], 52).is_err());
+        assert!(validate_live_capture_layers(&[52], 52).is_err());
+        assert!(validate_live_capture_layers(&vec![0; 65], 52).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn capture_enabled_prefill_and_decode_logits_match_ordinary_forward_bitwise() {
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
+            .expect("qualify and plan Muse Q8 target");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit Muse Q8 residency");
+        let realized = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .expect("realize Muse Q8 weights");
+        let weights = realized.into_weights();
+        let mut session = MuseGlimmerTextSession::new(&ctx, weights.config(), 2)
+            .expect("allocate Muse text session");
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).expect("bind Muse forward");
+        let tokens = [weights.config().bos_token_id, 19_873];
+        let ordinary_prefill = forward
+            .forward_token(tokens[0], &mut session)
+            .expect("ordinary prefill token");
+        let ordinary_decode = forward
+            .forward_token(tokens[1], &mut session)
+            .expect("ordinary decode token");
+        session.reset().expect("reset identical state");
+        let captured_prefill = forward
+            .forward_token_capture_post_blocks(tokens[0], &[0, 3, 51], &mut session)
+            .expect("capture prefill token");
+        let captured_decode = forward
+            .forward_token_capture_post_blocks(tokens[1], &[0, 3, 51], &mut session)
+            .expect("capture decode token");
+        assert_eq!(
+            ordinary_prefill
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            captured_prefill
+                .logits
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ordinary_decode
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            captured_decode
+                .logits
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        for capture in [&captured_prefill, &captured_decode] {
+            assert_eq!(capture.layer_ids, [0, 3, 51]);
+            assert_eq!(capture.post_block_residuals.len(), 3 * 6_656);
+            assert!(
+                capture
+                    .post_block_residuals
+                    .iter()
+                    .all(|value| value.is_finite())
+            );
+        }
+        assert_eq!(captured_prefill.position, 0);
+        assert_eq!(captured_decode.position, 1);
+        assert_eq!(session.next_position(), 2);
     }
 
     #[test]

@@ -13,8 +13,9 @@ use crate::metal::{
 };
 use crate::metal_forward::encode_mat_vec_dispatch;
 use crate::muse_glimmer_lens::{
-    MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS, MuseGlimmerLensCapture, MuseGlimmerLensError,
-    MuseGlimmerLensRule, MuseGlimmerRmsNormSite,
+    MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS, MUSE_GLIMMER_LENS_MAX_SELECTED_TOKENS,
+    MuseGlimmerLensCapture, MuseGlimmerLensError, MuseGlimmerLensRule, MuseGlimmerRmsNormSite,
+    MuseGlimmerSelectedTokenCovectors,
 };
 use crate::muse_glimmer_residency::{MuseGlimmerMetalLayerWeights, MuseGlimmerMetalModelWeights};
 use crate::tensor::GgmlType;
@@ -32,6 +33,147 @@ pub struct MuseGlimmerOneBlockVjp {
     pub post_attention_replay_max_abs_error: f32,
     /// F32 replay versus production capture after the complete block.
     pub post_block_replay_max_abs_error: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerAdjacentSelectedTokenFit {
+    pub source_block: u32,
+    pub target_block: u32,
+    pub rule: MuseGlimmerLensRule,
+    pub token_ids: Vec<u32>,
+    pub n_valid_positions: usize,
+    pub hidden_size: usize,
+    /// Token-major fitted directions, flattened `[K,H]`.
+    pub values: Vec<f32>,
+    pub post_attention_replay_max_abs_error: f32,
+    pub post_block_replay_max_abs_error: f32,
+}
+
+impl MuseGlimmerAdjacentSelectedTokenFit {
+    pub fn token_values(&self, slot: usize) -> Option<&[f32]> {
+        let start = slot.checked_mul(self.hidden_size)?;
+        self.values.get(start..start.checked_add(self.hidden_size)?)
+    }
+}
+
+pub(crate) fn muse_glimmer_fit_adjacent_full_attention_selected_tokens(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    capture: &MuseGlimmerLensCapture,
+    covectors: &MuseGlimmerSelectedTokenCovectors,
+    skip_first: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerLensError> {
+    let target_block = capture.target_block();
+    let source_block = target_block.checked_sub(1).ok_or_else(|| {
+        MuseGlimmerLensError::Invalid("adjacent fit requires a nonzero target block".into())
+    })?;
+    if covectors.token_ids().is_empty()
+        || covectors.token_ids().len() > MUSE_GLIMMER_LENS_MAX_SELECTED_TOKENS
+    {
+        return invalid(format!(
+            "adjacent fit selected-token count must be in 1..={MUSE_GLIMMER_LENS_MAX_SELECTED_TOKENS}, got {}",
+            covectors.token_ids().len()
+        ));
+    }
+    if covectors.hidden_size() != capture.hidden_size() {
+        return invalid(format!(
+            "covector hidden size {} differs from capture hidden size {}",
+            covectors.hidden_size(),
+            capture.hidden_size()
+        ));
+    }
+    let valid_positions = adjacent_fit_position_range(capture.n_tokens(), skip_first)?;
+    let n_valid_positions = valid_positions.len();
+    let positions = valid_positions.clone().collect::<Vec<_>>();
+    let mut values = Vec::with_capacity(covectors.token_ids().len() * capture.hidden_size());
+    let mut post_attention_replay_max_abs_error = 0.0_f32;
+    let mut post_block_replay_max_abs_error = 0.0_f32;
+    for slot in 0..covectors.token_ids().len() {
+        let covector = covectors.token_values(slot).ok_or_else(|| {
+            MuseGlimmerLensError::Invalid(format!("selected-token covector slot {slot} is missing"))
+        })?;
+        let target_cotangent = muse_glimmer_positioned_target_cotangent(
+            covector,
+            capture.n_tokens(),
+            capture.hidden_size(),
+            &positions,
+        )?;
+        let vjp = muse_glimmer_one_full_attention_block_vjp(
+            ctx,
+            weights,
+            capture,
+            &target_cotangent,
+            rule,
+        )?;
+        values.extend(mean_reduce_position_rows(
+            &vjp.input_cotangent,
+            capture.n_tokens(),
+            capture.hidden_size(),
+            valid_positions.clone(),
+        )?);
+        post_attention_replay_max_abs_error =
+            post_attention_replay_max_abs_error.max(vjp.post_attention_replay_max_abs_error);
+        post_block_replay_max_abs_error =
+            post_block_replay_max_abs_error.max(vjp.post_block_replay_max_abs_error);
+    }
+    require_finite("adjacent selected-token fit", &values)?;
+    Ok(MuseGlimmerAdjacentSelectedTokenFit {
+        source_block,
+        target_block,
+        rule,
+        token_ids: covectors.token_ids().to_vec(),
+        n_valid_positions,
+        hidden_size: capture.hidden_size(),
+        values,
+        post_attention_replay_max_abs_error,
+        post_block_replay_max_abs_error,
+    })
+}
+
+fn adjacent_fit_position_range(
+    n_tokens: usize,
+    skip_first: usize,
+) -> Result<std::ops::Range<usize>, MuseGlimmerLensError> {
+    let final_position = n_tokens.checked_sub(1).ok_or_else(|| {
+        MuseGlimmerLensError::Invalid("adjacent fit requires at least two prompt tokens".into())
+    })?;
+    if skip_first >= final_position {
+        return invalid(format!(
+            "skip_first {skip_first} leaves no positions before final prompt position {final_position}"
+        ));
+    }
+    Ok(skip_first..final_position)
+}
+
+fn mean_reduce_position_rows(
+    values: &[f32],
+    n_tokens: usize,
+    hidden_size: usize,
+    positions: std::ops::Range<usize>,
+) -> Result<Vec<f32>, MuseGlimmerLensError> {
+    validate_len(
+        "source cotangent bank",
+        values,
+        checked_mul(n_tokens, hidden_size, "source cotangent elements")?,
+    )?;
+    if positions.is_empty() || positions.end > n_tokens {
+        return invalid("source reduction positions are empty or out of range");
+    }
+    let count = positions.len();
+    let mut reduced = vec![0.0_f32; hidden_size];
+    for position in positions {
+        let row = &values[position * hidden_size..(position + 1) * hidden_size];
+        for (destination, &value) in reduced.iter_mut().zip(row) {
+            *destination += value;
+        }
+    }
+    let scale = (count as f32).recip();
+    for value in &mut reduced {
+        *value *= scale;
+    }
+    require_finite("mean-reduced source cotangent", &reduced)?;
+    Ok(reduced)
 }
 
 /// Place one `[H]` score covector at selected rows of a zeroed `[T,H]` bank.
@@ -1346,6 +1488,25 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_fit_positions_exclude_final_and_honor_skip_first() {
+        assert_eq!(adjacent_fit_position_range(5, 0).unwrap(), 0..4);
+        assert_eq!(adjacent_fit_position_range(5, 2).unwrap(), 2..4);
+        assert!(adjacent_fit_position_range(1, 0).is_err());
+        assert!(adjacent_fit_position_range(5, 4).is_err());
+    }
+
+    #[test]
+    fn adjacent_fit_reduction_means_only_valid_source_rows() {
+        let rows = [1.0, 10.0, 3.0, 30.0, 5.0, 50.0, 100.0, 1000.0];
+        assert_eq!(
+            mean_reduce_position_rows(&rows, 4, 2, 1..3).unwrap(),
+            [4.0, 40.0]
+        );
+        assert!(mean_reduce_position_rows(&rows, 4, 2, 3..3).is_err());
+        assert!(mean_reduce_position_rows(&rows[..6], 4, 2, 1..3).is_err());
+    }
+
+    #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn real_q8_block_51_replay_and_vjp_smoke() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
@@ -1379,6 +1540,21 @@ mod tests {
         )
         .expect("place EOS covector on final prompt row");
         let bound = MuseGlimmerMetalModelWeights::bind(&weights).expect("bind resident weights");
+        let fit = muse_glimmer_fit_adjacent_full_attention_selected_tokens(
+            &ctx,
+            &bound,
+            &capture,
+            &covectors,
+            0,
+            MuseGlimmerLensRule::J,
+        )
+        .expect("fit adjacent selected-token direction");
+        assert_eq!(fit.source_block, 50);
+        assert_eq!(fit.target_block, 51);
+        assert_eq!(fit.n_valid_positions, 2);
+        assert_eq!(fit.token_ids, [weights.config().eos_token_id]);
+        assert_eq!(fit.values.len(), weights.config().hidden_size as usize);
+        assert!(fit.values.iter().all(|value| value.is_finite()));
         let j = muse_glimmer_one_full_attention_block_vjp(
             &ctx,
             &bound,
@@ -1434,7 +1610,7 @@ mod tests {
             .map(|(&j, &r)| (j - r).abs())
             .fold(0.0_f32, f32::max);
         eprintln!(
-            "Muse Q8 block 51 T=3: post_attention_max_abs={} post_block_max_abs={} epsilon={} finite_difference={} reverse={} absolute_error={} relative_error={} jr_grad_max_abs_difference={}",
+            "Muse Q8 block 51 T=3: post_attention_max_abs={} post_block_max_abs={} epsilon={} finite_difference={} reverse={} absolute_error={} relative_error={} jr_grad_max_abs_difference={} fit_max_abs={}",
             j.post_attention_replay_max_abs_error,
             j.post_block_replay_max_abs_error,
             epsilon,
@@ -1443,6 +1619,10 @@ mod tests {
             absolute_error,
             relative_error,
             jr_max_abs_difference,
+            fit.values
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f32, f32::max),
         );
         assert!(j.input_cotangent.iter().all(|value| value.is_finite()));
         assert!(r.input_cotangent.iter().all(|value| value.is_finite()));

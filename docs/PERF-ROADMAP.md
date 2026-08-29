@@ -246,27 +246,24 @@ Generic packed selection first changes one cutoff pair at position 2,056/layer
 31 with a `4.344e-4` default-safe margin. This is ordinary E1 packed arithmetic
 propagation, not evidence of a block-boundary defect.
 
-The local implementation resurvey and two short falsifiers reshape the queue.
+The local implementation resurvey and bounded screens reshape the queue.
 Rapid/OMLX-style blocked packed recurrence is closed after an exact candidate
-regressed `5.967417 -> 6.117709 ms` at N=2,048. In contrast, selected-expert
-IQ4_NL row reuse is promoted after reducing clean decode command GPU
-`46.716405 -> 45.402361 ms/transition`. The force-ranked lane is now:
+regressed `5.967417 -> 6.117709 ms` at N=2,048. The exact two-dispatch
+MTPLX-style singleton middle is also closed: its 36-layer release leaf moved
+`1.118938 -> 0.962312 ms/token`, saving `0.156625 ms` against a `0.75 ms` gate.
+In contrast, selected-expert IQ4_NL row reuse is promoted after reducing clean
+decode command GPU `46.716405 -> 45.402361 ms/transition`. The force-ranked lane
+is now:
 
-1. Prototype MTPLX's complete singleton GDN middle as one target-native unit:
-   convolution/SiLU, paired Q/K norm, decay, recurrence, and gated RMS output.
-   Preserve modulo-16 Q/K ownership and current F32 arithmetic. Before a model
-   run, require exact N=1 and two-step output/conv/delta state plus at least
-   `0.75 ms/token` saving in a 36-layer-equivalent balanced leaf packet. Do not
-   reopen a standalone recurrence tile if the complete middle fails.
-2. Add one natural N=512 attribution point before interactive-shape or MTP
+1. Add one natural N=512 attribution point before interactive-shape or MTP
    decisions. N=18 and N=2,048 do not identify where fixed bridge/setup costs
    yield to projection and mixer work.
-3. Run an internal-SSD cold first-touch control. Keep storage/residency work
+2. Run an internal-SSD cold first-touch control. Keep storage/residency work
    separate from warm kernel claims; warm packed execution is already >99% GPU.
-4. Keep selected packed QSA default-off and use only focused quant-native
+3. Keep selected packed QSA default-off and use only focused quant-native
    semantic checks that can change its disposition. Do not recreate a broad
    quality harness or wait on a roughly 360 GB BF16 checkpoint.
-5. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
+4. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
    the 31 omitted speculative tensors and atomic QSA/GDN/PLE state. Do not pursue
    K=2/K=3.
 
@@ -275,7 +272,8 @@ it removes only about 8.8 MB/token of materialized output traffic and 43
 dispatches while retaining all selected weight traffic, and the analogous
 IQ4_XS fusion regressed. Reopen only with new evidence above the existing
 `0.5 ms/token` gate. QSA gather, dense masking, launch-only fusion, HC private
-repacking, and additional blocked recurrence tiles remain closed.
+repacking, complete singleton GDN-middle fusion, and additional blocked
+recurrence tiles remain closed.
 
 Packed-prefill S1 is closed at released `16/48/128` GDN geometry. For one and
 two token rows, the existing packed convolution/SiLU prep, paired L2 norm,

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "source_commit": "393f9fb",
+  "device": "Apple M4 Max",
+  "layers_per_command": 36,
+  "order": ["B", "C", "C", "B", "B", "C", "C", "B", "B", "C", "C", "B"],
+  "rows": [
+    {"run": 1, "block": 1, "arm": "B", "gpu_ms_per_token": 2.6975832879543304},
+    {"run": 2, "block": 1, "arm": "C", "gpu_ms_per_token": 2.069458132609725},
+    {"run": 3, "block": 1, "arm": "C", "gpu_ms_per_token": 2.064625034108758},
+    {"run": 4, "block": 1, "arm": "B", "gpu_ms_per_token": 1.7752500716596842},
+    {"run": 5, "block": 2, "arm": "B", "gpu_ms_per_token": 1.1549165938049555},
+    {"run": 6, "block": 2, "arm": "C", "gpu_ms_per_token": 0.9712500032037497},
+    {"run": 7, "block": 2, "arm": "C", "gpu_ms_per_token": 0.9476249106228352},
+    {"run": 8, "block": 2, "arm": "B", "gpu_ms_per_token": 1.05554168112576},
+    {"run": 9, "block": 3, "arm": "B", "gpu_ms_per_token": 1.0522501543164253},
+    {"run": 10, "block": 3, "arm": "C", "gpu_ms_per_token": 0.909874914214015},
+    {"run": 11, "block": 3, "arm": "C", "gpu_ms_per_token": 0.9533748961985111},
+    {"run": 12, "block": 3, "arm": "B", "gpu_ms_per_token": 1.0829584207385778}
+  ],
+  "baseline_median_ms_per_token": 1.1189375072717666,
+  "candidate_median_ms_per_token": 0.9623124497011304,
+  "median_saving_ms_per_token": 0.15662505757063616,
+  "block_mean_savings_ms_per_token": [
+    0.16937509644776583,
+    0.14579168055206537,
+    0.13597938232123852
+  ],
+  "keep_floor_ms_per_token": 0.75,
+  "all_blocks_positive": true,
+  "decision": "KILL"
+}

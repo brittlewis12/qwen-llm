@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Complete GDN Middle KILL
+
+Status: close the MTPLX-style singleton GDN middle. No candidate kernel, flag,
+test, or timing probe remains, and no model run was warranted.
+
+- The target-native candidate preserved F32 arithmetic and modulo-16 Q/K
+  ownership while replacing decay, convolution/SiLU, paired Q/K normalization,
+  recurrence, and gated RMS output with one fused kernel plus a race-free Q/K
+  history roll. The complete singleton route moved from 10 to 7 dispatches.
+- Dedicated ownership gates proved that the fused dispatch advanced only V
+  convolution history and that the roll advanced only Q/K history. Hostile N=1
+  and two-step rows were bit-exact for normalized output, convolution state, and
+  delta state; the unchanged Q8 output projection was also bit-exact.
+- A release, model-free `B-C-C-B x3` packet encoded 36 independent
+  production-shape middles per command. Median GPU time moved
+  `1.118938 -> 0.962312 ms/token`, saving only `0.156625 ms` against the
+  predeclared `0.75 ms` KEEP floor.
+- Balanced-block savings were `0.169375`, `0.145792`, and `0.135979 ms`. Their
+  consistency establishes a small real effect, but the candidate reached only
+  20.9% of the required saving and stayed below the gate by `0.593375 ms`.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-gdn-middle-fused/`.
+Adversarial design and disposition session:
+`01a04e59-3a82-7de1-ac63-1f7c0b5763fe`.
+
 ## 2026-08-29 - Flash-Next Fast IQ4_NL Routed Down GO
 
 Status: promote selected-expert IQ4_NL row reuse by default. Roll back with

@@ -4512,6 +4512,101 @@ kernel void kernel_moe_down_iq4_nl_f32(
     }
 }
 
+kernel void kernel_moe_down_iq4_nl_f32_fast(
+        constant moe_iq4xs_args & args           [[buffer(0)]],
+        device const block_iq4_nl_local * weight [[buffer(1)]],
+        device const float              * inner  [[buffer(2)]],
+        device const int                * top_idx [[buffer(3)]],
+        device       float              * out    [[buffer(4)]],
+        threadgroup float               * lut    [[threadgroup(0)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    constexpr short NR0 = 2;
+    constexpr short NSG = 2;
+    const uint first_row = (tgpig.x * NSG + uint(sgitg)) * NR0;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) {
+        if (tiisg == 0) {
+            for (short row = 0; row < NR0 && first_row + uint(row) < args.n_out; ++row) {
+                out[(ulong)slot * args.n_out + first_row + uint(row)] = 0.0f;
+            }
+        }
+        return;
+    }
+
+    if (sgitg == 0) {
+        lut[tiisg] = moe_iq4nl_values[tiisg & 15];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (first_row >= args.n_out) return;
+
+    const uint nb = args.n_in / 32u;
+    const ulong expert_stride = (ulong)args.n_out * nb;
+    const ulong expert_base = (ulong)expert_i * expert_stride;
+    const short ix = tiisg / 2;
+    const short it = tiisg % 2;
+    device const float * yb = inner + (ulong)slot * args.n_in
+                                    + uint(ix) * 32u
+                                    + uint(it) * 8u;
+
+    float sumf[NR0] = {0.0f, 0.0f};
+    uint aux32[2];
+    thread const uchar * q8 = (thread const uchar *)aux32;
+
+    for (uint ib = uint(ix); ib < nb; ib += 16u) {
+        device const float4 * y4 = (device const float4 *)yb;
+        const float4 yl0 = y4[0];
+        const float4 yl1 = y4[4];
+        const float4 yl2 = y4[1];
+        const float4 yl3 = y4[5];
+
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+            device const block_iq4_nl_local & b =
+                weight[expert_base + (ulong)out_row * nb + ib];
+            device const ushort * q4 = (device const ushort *)(b.qs + 8 * it);
+
+            float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
+            float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+
+            aux32[0] = uint(q4[0]) | (uint(q4[1]) << 16);
+            aux32[1] = (aux32[0] >> 4) & 0x0f0f0f0fu;
+            aux32[0] &= 0x0f0f0f0fu;
+            const float4 qf10 = {lut[q8[0]], lut[q8[1]], lut[q8[2]], lut[q8[3]]};
+            const float4 qf20 = {lut[q8[4]], lut[q8[5]], lut[q8[6]], lut[q8[7]]};
+            acc1 += yl0 * qf10;
+            acc2 += yl1 * qf20;
+
+            aux32[0] = uint(q4[2]) | (uint(q4[3]) << 16);
+            aux32[1] = (aux32[0] >> 4) & 0x0f0f0f0fu;
+            aux32[0] &= 0x0f0f0f0fu;
+            const float4 qf11 = {lut[q8[0]], lut[q8[1]], lut[q8[2]], lut[q8[3]]};
+            const float4 qf21 = {lut[q8[4]], lut[q8[5]], lut[q8[6]], lut[q8[7]]};
+            acc1 += yl2 * qf11;
+            acc2 += yl3 * qf21;
+            acc1 += acc2;
+
+            sumf[row] += float(b.d) * (acc1[0] + acc1[1] + acc1[2] + acc1[3]);
+        }
+        yb += 16u * 32u;
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0) {
+            out[(ulong)slot * args.n_out + out_row] = total;
+        }
+    }
+}
+
 kernel void kernel_moe_down_iq4_xs_f32_fast(
         constant moe_iq4xs_args & args           [[buffer(0)]],
         device const block_iq4_xs_local * weight [[buffer(1)]],

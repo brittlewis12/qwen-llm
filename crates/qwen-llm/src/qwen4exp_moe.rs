@@ -4,14 +4,14 @@ use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
     encode_copy_offset_f32, encode_dot_sigmoid_f32, encode_mat_mat_f32_router_e8p32_strict,
-    encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_nl_f32_grouped_slots,
-    encode_moe_down_q8_0_f32_grouped_slots, encode_moe_down_weighted_sum_q8_0_f32,
-    encode_moe_route_bucket_slots_f32, encode_moe_swiglu_iq3_xxs_f32,
-    encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16,
-    encode_moe_swiglu_iq4_xs_f32, encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16,
-    encode_moe_weighted_sum_f32, encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32,
-    encode_silu_mul_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
-    encode_topk_logits_softmax_f32,
+    encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_nl_f32_fast,
+    encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_q8_0_f32_grouped_slots,
+    encode_moe_down_weighted_sum_q8_0_f32, encode_moe_route_bucket_slots_f32,
+    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
+    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
+    encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
+    encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk_logits_softmax_f32,
 };
 #[cfg(test)]
 use crate::metal::{
@@ -158,6 +158,10 @@ struct Qwen4ExpIq3GateUpCaptureBinding {
 crate::env_flag!(
     default_on configured_qwen4exp_moe_iq3_fast_enabled,
     "QWEN4EXP_MOE_IQ3_FAST"
+);
+crate::env_flag!(
+    default_off qwen4exp_moe_iq4_down_fast_enabled,
+    "QWEN4EXP_MOE_IQ4_DOWN_FAST"
 );
 crate::env_flag!(
     default_on configured_qwen4exp_packed_router_e8p32_strict_enabled,
@@ -1321,7 +1325,12 @@ fn encode_singleton_step(
 
     match weights.routed_down.dtype {
         GgmlType::IQ4_NL => {
-            encode_moe_down_iq4_nl_f32(
+            let encode = if qwen4exp_moe_iq4_down_fast_enabled() {
+                encode_moe_down_iq4_nl_f32_fast
+            } else {
+                encode_moe_down_iq4_nl_f32
+            };
+            encode(
                 ctx,
                 enc,
                 weights.routed_down,
@@ -2636,7 +2645,16 @@ pub(crate) fn preflight(
     require_pipeline_capacity(ctx, routed_gate_kernel, routed_gate_threads, 0)?;
     match weights.routed_down.dtype {
         GgmlType::IQ4_NL => {
-            require_pipeline_capacity(ctx, "kernel_moe_down_iq4_nl_f32", 128, 0)?;
+            if qwen4exp_moe_iq4_down_fast_enabled() {
+                require_pipeline_capacity(
+                    ctx,
+                    "kernel_moe_down_iq4_nl_f32_fast",
+                    64,
+                    32 * size_of::<f32>(),
+                )?;
+            } else {
+                require_pipeline_capacity(ctx, "kernel_moe_down_iq4_nl_f32", 128, 0)?;
+            }
             ctx.pipeline("kernel_moe_weighted_sum_f32")?;
         }
         GgmlType::Q8_0 => require_pipeline_capacity(
@@ -4521,6 +4539,11 @@ mod tests {
             } else {
                 "kernel_moe_swiglu_iq3_xxs_f32"
             };
+            let iq4_down_singleton = if qwen4exp_moe_iq4_down_fast_enabled() {
+                "kernel_moe_down_iq4_nl_f32_fast"
+            } else {
+                "kernel_moe_down_iq4_nl_f32"
+            };
             let q8_matmat = |n_in: usize, n_out: usize| {
                 if tokens == 8
                     && crate::metal_forward::matmat_smalln_table_enabled_for_test()
@@ -4540,7 +4563,7 @@ mod tests {
                     "kernel_topk_logits_softmax_f32",
                     "kernel_dot_sigmoid_f32",
                     iq3_singleton,
-                    "kernel_moe_down_iq4_nl_f32",
+                    iq4_down_singleton,
                     "kernel_moe_weighted_sum_f32",
                     "kernel_shared_swiglu_q8_0_f32_lcpp",
                     q8_matvec,

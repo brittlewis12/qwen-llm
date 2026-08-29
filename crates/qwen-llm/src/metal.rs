@@ -12476,19 +12476,60 @@ pub fn encode_moe_down_iq4_nl_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    const KERNEL: &str = "moe_down_iq4_nl";
-    let args = checked_moe_decode_args(KERNEL, n_in, n_out, n_expert, topk)?;
+    encode_moe_down_iq4_nl_f32_inner(
+        ctx, enc, weight, inner, topk_idx, expert_out, n_in, n_out, n_expert, topk, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_down_iq4_nl_f32_fast(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    expert_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    encode_moe_down_iq4_nl_f32_inner(
+        ctx, enc, weight, inner, topk_idx, expert_out, n_in, n_out, n_expert, topk, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_moe_down_iq4_nl_f32_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    expert_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+    fast: bool,
+) -> Result<(), MetalError> {
+    let kernel = if fast {
+        "moe_down_iq4_nl_fast"
+    } else {
+        "moe_down_iq4_nl"
+    };
+    let args = checked_moe_decode_args(kernel, n_in, n_out, n_expert, topk)?;
     if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
-            kernel: KERNEL,
+            kernel,
             detail: format!("n_in={n_in} not divisible by 32"),
         });
     }
-    let bank_elements = checked_moe_product(KERNEL, "expert bank", &[n_in, n_out, n_expert])?;
-    let inner_elements = checked_moe_product(KERNEL, "inner input", &[topk, n_in])?;
-    let output_elements = checked_moe_product(KERNEL, "expert output", &[topk, n_out])?;
+    let bank_elements = checked_moe_product(kernel, "expert bank", &[n_in, n_out, n_expert])?;
+    let inner_elements = checked_moe_product(kernel, "inner input", &[topk, n_in])?;
+    let output_elements = checked_moe_product(kernel, "expert output", &[topk, n_out])?;
     validate_moe_decode_tensor(
-        KERNEL,
+        kernel,
         "down expert bank",
         weight,
         bank_elements,
@@ -12497,16 +12538,16 @@ pub fn encode_moe_down_iq4_nl_f32(
         2,
     )?;
     validate_moe_decode_tensor(
-        KERNEL,
+        kernel,
         "inner input",
         inner,
         inner_elements,
         &[GgmlType::F32],
         false,
-        4,
+        if fast { 16 } else { 4 },
     )?;
     validate_moe_decode_tensor(
-        KERNEL,
+        kernel,
         "top-k indices",
         topk_idx,
         topk,
@@ -12515,7 +12556,7 @@ pub fn encode_moe_down_iq4_nl_f32(
         4,
     )?;
     validate_moe_decode_tensor(
-        KERNEL,
+        kernel,
         "expert output",
         expert_out,
         output_elements,
@@ -12524,23 +12565,30 @@ pub fn encode_moe_down_iq4_nl_f32(
         4,
     )?;
 
-    let pso = ctx.pipeline("kernel_moe_down_iq4_nl_f32")?;
+    let pso = ctx.pipeline(if fast {
+        "kernel_moe_down_iq4_nl_f32_fast"
+    } else {
+        "kernel_moe_down_iq4_nl_f32"
+    })?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &args);
     enc.set_tensor(1, weight);
     enc.set_tensor(2, inner);
     enc.set_tensor(3, topk_idx);
     enc.set_tensor(4, expert_out);
+    if fast {
+        enc.set_threadgroup_memory(0, 32 * std::mem::size_of::<f32>());
+    }
 
-    const NSG: usize = 4;
+    let (rows_per_simdgroup, simdgroups) = if fast { (2, 2) } else { (1, 4) };
     enc.dispatch(
         MTLSize {
-            width: n_out.div_ceil(NSG),
+            width: n_out.div_ceil(rows_per_simdgroup * simdgroups),
             height: topk,
             depth: 1,
         },
         MTLSize {
-            width: NSG * 32,
+            width: simdgroups * 32,
             height: 1,
             depth: 1,
         },
@@ -26060,6 +26108,24 @@ mod tests {
         .unwrap();
         let actual_down = read_back_f32(&expert_out.buffer, topk * n_hidden);
         assert_moe_oracle_close("moe-iq4-nl-down", &actual_down, &expected_down);
+        let fast_expert_out = MetalTensor::zeros_f32(ctx, vec![(topk * n_hidden) as u64]).unwrap();
+        one_shot(ctx, |encoder| {
+            encode_moe_down_iq4_nl_f32_fast(
+                ctx,
+                encoder,
+                &down,
+                &inner_gpu,
+                &top_idx_gpu,
+                &fast_expert_out,
+                n_ffn,
+                n_hidden,
+                n_expert,
+                topk,
+            )
+        })
+        .unwrap();
+        let actual_fast_down = read_back_f32(&fast_expert_out.buffer, topk * n_hidden);
+        assert_moe_oracle_close("moe-iq4-nl-down-fast", &actual_fast_down, &expected_down);
 
         let invalid_idx = [-1i32, n_expert as i32];
         let invalid_idx_gpu = MetalTensor::from_bytes(
@@ -26124,6 +26190,33 @@ mod tests {
         .unwrap();
         assert!(
             read_back_f32(&invalid_down.buffer, invalid_down_values.len())
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+        let invalid_fast_down = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&invalid_down_values),
+            vec![invalid_down_values.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(ctx, |encoder| {
+            encode_moe_down_iq4_nl_f32_fast(
+                ctx,
+                encoder,
+                &down,
+                &invalid_inner,
+                &invalid_idx_gpu,
+                &invalid_fast_down,
+                n_ffn,
+                n_hidden,
+                n_expert,
+                invalid_idx.len(),
+            )
+        })
+        .unwrap();
+        assert!(
+            read_back_f32(&invalid_fast_down.buffer, invalid_down_values.len())
                 .iter()
                 .all(|&value| value == 0.0)
         );
@@ -28898,6 +28991,23 @@ mod tests {
                 &inner,
                 &indices,
                 &read_only_output,
+                N_FFN,
+                N_HIDDEN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let padded_inner = MetalTensor::zeros_f32(&ctx, vec![(N_FFN + 1) as u64]).unwrap();
+        let misaligned_inner = padded_inner.view_subrange(1, vec![N_FFN as u64]);
+        assert!(
+            encode_moe_down_iq4_nl_f32_fast(
+                &ctx,
+                &encoder,
+                &down,
+                &misaligned_inner,
+                &indices,
+                &output,
                 N_FFN,
                 N_HIDDEN,
                 N_EXPERT,

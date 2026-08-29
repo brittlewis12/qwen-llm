@@ -247,56 +247,28 @@ Generic packed selection first changes one cutoff pair at position 2,056/layer
 propagation, not evidence of a block-boundary defect. The force-ranked lane is
 now:
 
-1. Run the preregistered quant-native quality packet. Freeze source, model and
-   shard hashes, tokenizer and token manifests, llama.cpp lock, scoring code,
-   bootstrap seed, and thresholds before observing arm output. Use three
-   document-disjoint natural prompts at each context `2179/2563/3075/4099`, whose
-   selected suffixes are exactly `128/512/1024/2048`, and teacher-force 96
-   held-out tokens per prompt. Exclude repository text, benchmark prompts, prior
-   tuning prompts, and near-duplicates. Add one N=2,051 no-selection scope
-   control and eight frozen N=4,099 nonce retrieval tasks with answer-sequence
-   probability plus at most eight greedy answer tokens. Compare A default-safe,
-   B generic selected-packed, C test-only F32-HC-down, and D same-token llama.cpp;
-   B is primary and C is a hierarchical challenger. Balance all six local arm
-   permutations twice across the 12 natural prompts; run D separately.
-
-   Primary deltas are `NLL(B)-NLL(A)` and `NLL(C)-NLL(A)` using F64 logsumexp.
-   Require each paired document-cluster bootstrap one-sided 97.5% percentile
-   upper bound to be at most `+0.010 nats/token`, every shape point estimate at
-   most `+0.020`, and no document above `+0.050`. A confidence miss is `HOLD`
-   and extends the frozen cohort, not a retune. Candidate total exact retrieval
-   passes may not be lower than A; failure where both A and D pass is a hard
-   kill, and answer-token NLL may worsen by at most `0.050 nats/token`. Nonfinite
-   logits, invalid state, selector failure, or topology mismatch are hard kills.
-   Top-1, greedy divergence, local RMS, top-512 overlap, and margins are
-   descriptive sentinels, not promotion gates.
-
-   Protocol: `docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/`.
-2. Use that packet to decide the arithmetic policy. F32 HC down is `HOLD`: it
-   improves default-safe-relative endpoint/teacher-forced-continuation RMS, but
-   slightly increases default-safe-relative top-512 decision mismatches. If B
-   and C both pass, choose C only if its 95% upper bound versus B is below
-   `-0.005 nats/token` under the same paired percentile document bootstrap, it
-   passes every retrieval task B passes, and a separate performance gate pays
-   for its cost; otherwise choose the simpler B. Promote neither merely for
-   closeness to incumbent arithmetic. Treat upstream BF16 rows as later
-   external calibration when practical, not a gate expected to arrive first.
-3. Run an internal-SSD cold first-touch control. Keep storage/residency work
+1. Resume short-loop optimization with selected-packed prefill default-off.
+   Qualify changed arithmetic with the smallest component equivalence,
+   state/replay, and representative natural-command checks that exercise it;
+   reject any candidate whose correctness or performance answer takes hours.
+   Use the shared commit-keyed llama.cpp bench infrastructure only when an
+   external comparator can change a decision.
+2. Run an internal-SSD cold first-touch control. Keep storage/residency work
    separate from warm kernel claims; warm packed execution is already >99% GPU.
-4. Add one natural N=512 attribution point before interactive-shape or MTP
+3. Add one natural N=512 attribution point before interactive-shape or MTP
    decisions. N=18 and N=2,048 do not identify where fixed bridge/setup costs
    yield to projection and mixer work.
-5. Price materially different full-chunk kernel-efficiency mechanisms for IQ3
+4. Price materially different full-chunk kernel-efficiency mechanisms for IQ3
    gate/up and packed GDN. The direct-grid active-panel screen is closed; do not
    repackage launch compaction as a weight-stationary candidate. Require at
    least 1% projected whole-command leverage before implementing either path.
-6. For interactive TTFT only, consider a routed-down path that avoids material
+5. For interactive TTFT only, consider a routed-down path that avoids material
    output traffic while preserving slot order if the mid-N point supports it.
    N=18 down owns 11.08%; N=2,048 down is parked at 6.78%.
-7. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
+6. For the next decode falsifier, add the IQ4_NL routed-down plus ordered weighted
    sum analogue of the existing Q8 fused path. Require at least `0.5 ms/token`
    median command-GPU saving with a positive paired direction.
-8. Then test Q8 HC down plus low-SiLU; consider shared-MoE down plus gated
+7. Then test Q8 HC down plus low-SiLU; consider shared-MoE down plus gated
    accumulation only if that result supports epilogue fusion.
 
 Packed-prefill S1 is closed at released `16/48/128` GDN geometry. For one and

@@ -46,14 +46,10 @@ the broader F32 down-plus-up arm.
   diagnostics, not performance rows. Focused lifecycle tests and source-only
   adversarial review passed.
 - Upstream BF16 logits remain desirable future calibration, not an imminent
-  blocker for a roughly 360 GB checkpoint. This supersedes the immediately prior
-  entry's BF16 prerequisite. The next authority hierarchy is held-out
-  teacher-forced NLL, known-answer long-context safety, observed-token top-1 and
-  greedy sentinels, same-quant llama.cpp triangulation, then component/margin
-  evidence for localization.
+  blocker for a roughly 360 GB checkpoint. Continue with focused component,
+  state/replay, and command-level performance checks.
 
 Evidence: `docs/bench/2026-08-28-qwen4exp-n4099-decision-trace/`.
-Next gate: `docs/bench/2026-08-28-qwen4exp-selected-quality-prereg/`.
 
 ## 2026-08-28 - Flash-Next Selected Runtime: Residues GO, Full Chunk NO-GO
 

@@ -7,15 +7,14 @@ use qwen_llm::research::{MAX_RESEARCH_PACKED_READOUT_POSITIONS, RESEARCH_IDENTIT
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{DirBuilder, File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::fs::{DirBuilder, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use zip::{CompressionMethod, ZipArchive};
+use zip::ZipArchive;
 
 use crate::messages::{
     AnnotatedMessageRender, MessageRenderSpanKind, Qwen38GenerationMode, Qwen38ReasoningEffort,
@@ -24,6 +23,7 @@ use crate::messages::{
     render_qwen38_messages_prompt_with_generation_annotated,
 };
 
+use super::published_pt::{ArchiveSpec, ensure_finite_f16, hash_sha256, validate_archive};
 use super::{
     FitMethod, ORIENTATION, SCHEMA_VERSION, TOKEN_ARTIFACT_MAX_BYTES, TOKEN_ID_ARGUMENT_MAX_COUNT,
     TOKEN_MANIFEST_NAME, TOKEN_ORIENTATION, TOKEN_PAYLOAD_NAME, TOKEN_READOUT_SCHEMA,
@@ -896,16 +896,6 @@ struct OccurrenceAccumulator {
     best_rank: usize,
 }
 
-#[derive(Clone, Copy)]
-struct ArchiveSpec<'a> {
-    root: &'a str,
-    layer_count: usize,
-    hidden_size: usize,
-    matrix_bytes: u64,
-    data_pickle_sha256: &'a str,
-    identity_storage_index: Option<usize>,
-}
-
 pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
     validate_token_build_identity(
         env!("QWEN_BUILD_SOURCE_STATE"),
@@ -959,6 +949,7 @@ pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
         hidden_size: HIDDEN_SIZE,
         matrix_bytes: MATRIX_BYTES,
         data_pickle_sha256: profile.data_pickle_sha256,
+        serialization_id: None,
         identity_storage_index: profile
             .identity_anchor_layer
             .and_then(|layer| usize::try_from(layer).ok()),
@@ -2924,259 +2915,19 @@ fn validate_manifest(manifest: &FullLensManifest) -> Result<()> {
     Ok(())
 }
 
-fn validate_archive<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-    spec: ArchiveSpec<'_>,
-) -> Result<()> {
-    let expected_matrix_bytes = (spec.hidden_size as u64)
-        .checked_mul(spec.hidden_size as u64)
-        .and_then(|words| words.checked_mul(2))
-        .context("pinned matrix byte count overflow")?;
-    ensure!(
-        spec.matrix_bytes == expected_matrix_bytes,
-        "pinned matrix byte count does not match hidden size"
-    );
-    ensure!(
-        spec.identity_storage_index
-            .is_none_or(|index| index < spec.layer_count),
-        "identity storage index is outside the archive layer inventory"
-    );
-    let expected_names = expected_archive_names(spec);
-    ensure!(
-        archive.len() == expected_names.len(),
-        "pinned torch ZIP has {} entries; expected {}",
-        archive.len(),
-        expected_names.len()
-    );
-    let mut actual_names = BTreeSet::new();
-    for index in 0..archive.len() {
-        let entry = archive
-            .by_index(index)
-            .with_context(|| format!("inspect pinned torch ZIP entry {index}"))?;
-        ensure!(
-            !entry.is_dir(),
-            "pinned torch ZIP contains a directory entry"
-        );
-        let name = entry.name().to_owned();
-        ensure!(
-            entry
-                .enclosed_name()
-                .is_some_and(|path| path == Path::new(&name)),
-            "pinned torch ZIP contains unsafe path {name:?}"
-        );
-        ensure!(
-            actual_names.insert(name.clone()),
-            "pinned torch ZIP contains duplicate entry {name:?}"
-        );
-        ensure!(
-            entry.compression() == CompressionMethod::Stored
-                && entry.compressed_size() == entry.size(),
-            "pinned torch ZIP entry {name:?} is not stored verbatim"
-        );
-    }
-    ensure!(
-        actual_names == expected_names,
-        "pinned torch ZIP entry inventory is not canonical"
-    );
-    let pickle_name = format!("{}/data.pkl", spec.root);
-    let mut pickle = archive
-        .by_name(&pickle_name)
-        .context("open pinned data.pkl")?;
-    ensure!(pickle.size() <= 16 * 1024, "pinned data.pkl exceeds limit");
-    let mut pickle_bytes = Vec::new();
-    pickle
-        .read_to_end(&mut pickle_bytes)
-        .context("read pinned data.pkl")?;
-    let pickle_digest = hex(&Sha256::digest(&pickle_bytes));
-    ensure!(
-        pickle_digest == spec.data_pickle_sha256,
-        "pinned data.pkl SHA-256 mismatch"
-    );
-    drop(pickle);
-    for (name, expected) in [
-        (format!("{}/.format_version", spec.root), "1"),
-        (format!("{}/.storage_alignment", spec.root), "64"),
-        (format!("{}/byteorder", spec.root), "little"),
-    ] {
-        let mut entry = archive
-            .by_name(&name)
-            .with_context(|| format!("open pinned metadata {name}"))?;
-        ensure!(entry.size() <= 64, "pinned metadata {name} exceeds limit");
-        let mut value = String::new();
-        entry
-            .read_to_string(&mut value)
-            .with_context(|| format!("read pinned metadata {name}"))?;
-        ensure!(value.trim() == expected, "pinned metadata {name} mismatch");
-    }
-    for layer in 0..spec.layer_count {
-        let name = format!("{}/data/{layer}", spec.root);
-        let entry = archive
-            .by_name(&name)
-            .with_context(|| format!("open pinned storage layer {layer}"))?;
-        ensure!(
-            entry.size() == spec.matrix_bytes,
-            "pinned storage layer {layer} length {} != expected {}",
-            entry.size(),
-            spec.matrix_bytes
-        );
-    }
-    Ok(())
-}
-
-fn expected_archive_names(spec: ArchiveSpec<'_>) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for suffix in [
-        "data.pkl",
-        ".format_version",
-        ".storage_alignment",
-        "byteorder",
-        "version",
-        ".data/serialization_id",
-    ] {
-        names.insert(format!("{}/{suffix}", spec.root));
-    }
-    for layer in 0..spec.layer_count {
-        names.insert(format!("{}/data/{layer}", spec.root));
-    }
-    names
-}
-
 fn extract_payload<R: Read + Seek, W: Write>(
     archive: &mut ZipArchive<R>,
     spec: ArchiveSpec<'_>,
     output: &mut W,
 ) -> Result<FullPayload> {
-    let mut hasher = Blake3Hasher::new();
-    let mut buffer = vec![0u8; COPY_BUFFER_BYTES.min(spec.matrix_bytes as usize)];
-    ensure!(
-        buffer.len().is_multiple_of(2),
-        "copy buffer must preserve F16 words"
-    );
-    let mut byte_length = 0u64;
-    for layer in 0..spec.layer_count {
-        let name = format!("{}/data/{layer}", spec.root);
-        let mut entry = archive
-            .by_name(&name)
-            .with_context(|| format!("open pinned storage layer {layer}"))?;
-        let mut remaining = spec.matrix_bytes;
-        while remaining > 0 {
-            let matrix_byte_offset = spec.matrix_bytes - remaining;
-            let chunk_length = usize::try_from(remaining.min(buffer.len() as u64))
-                .context("F16 copy chunk length")?;
-            entry
-                .read_exact(&mut buffer[..chunk_length])
-                .with_context(|| format!("read pinned storage layer {layer}"))?;
-            ensure_finite_f16(
-                &buffer[..chunk_length],
-                layer,
-                matrix_byte_offset as usize / 2,
-            )?;
-            if spec.identity_storage_index == Some(layer) {
-                ensure_identity_f16(
-                    &buffer[..chunk_length],
-                    matrix_byte_offset as usize / 2,
-                    spec.hidden_size,
-                    layer,
-                )?;
-            }
-            output
-                .write_all(&buffer[..chunk_length])
-                .with_context(|| format!("write imported storage layer {layer}"))?;
-            hasher.update(&buffer[..chunk_length]);
-            remaining -= chunk_length as u64;
-            byte_length = byte_length
-                .checked_add(chunk_length as u64)
-                .context("imported payload length overflow")?;
-        }
-        let mut extra = [0u8; 1];
-        ensure!(
-            entry
-                .read(&mut extra)
-                .with_context(|| format!("check pinned storage layer {layer} end"))?
-                == 0,
-            "pinned storage layer {layer} contains trailing bytes"
-        );
-    }
-    let expected_bytes = spec
-        .matrix_bytes
-        .checked_mul(spec.layer_count as u64)
-        .context("expected payload byte length overflow")?;
-    ensure!(
-        byte_length == expected_bytes,
-        "imported payload length {byte_length} != expected {expected_bytes}"
-    );
+    let extracted = super::published_pt::extract_payload(archive, spec, output)?;
     Ok(FullPayload {
         path: FULL_PAYLOAD_NAME.into(),
         dtype: "f16_le".into(),
         shape: [spec.layer_count, spec.hidden_size, spec.hidden_size],
-        byte_length,
-        blake3: hasher.finalize().to_hex().to_string(),
+        byte_length: extracted.byte_length,
+        blake3: extracted.blake3,
     })
-}
-
-fn ensure_identity_f16(
-    bytes: &[u8],
-    word_offset: usize,
-    hidden_size: usize,
-    layer: usize,
-) -> Result<()> {
-    ensure!(hidden_size > 0, "identity matrix hidden size is zero");
-    let (words, remainder) = bytes.as_chunks::<2>();
-    ensure!(remainder.is_empty(), "identity F16 chunk has trailing byte");
-    for (index, chunk) in words.iter().enumerate() {
-        let coordinate = word_offset
-            .checked_add(index)
-            .context("identity matrix coordinate overflow")?;
-        let row = coordinate / hidden_size;
-        let column = coordinate % hidden_size;
-        let bits = u16::from_le_bytes(*chunk);
-        let valid = if row == column {
-            bits == 0x3c00
-        } else {
-            bits & 0x7fff == 0
-        };
-        ensure!(
-            valid,
-            "pinned storage layer {layer} is not the claimed F16 identity at row {row}, column {column}"
-        );
-    }
-    Ok(())
-}
-
-fn ensure_finite_f16(bytes: &[u8], layer: usize, word_offset: usize) -> Result<()> {
-    ensure!(
-        bytes.len().is_multiple_of(2),
-        "F16 chunk has odd byte length"
-    );
-    let (words, remainder) = bytes.as_chunks::<2>();
-    ensure!(remainder.is_empty(), "F16 chunk has trailing byte");
-    for (index, chunk) in words.iter().enumerate() {
-        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-        ensure!(
-            bits & 0x7c00 != 0x7c00,
-            "pinned storage layer {layer} contains non-finite F16 at matrix word {}",
-            word_offset + index
-        );
-    }
-    Ok(())
-}
-
-fn hash_sha256(file: &mut File, path: &Path) -> Result<String> {
-    file.seek(SeekFrom::Start(0))
-        .with_context(|| format!("rewind {} for SHA-256", path.display()))?;
-    let mut reader = BufReader::with_capacity(COPY_BUFFER_BYTES, file);
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .with_context(|| format!("hash {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex(&hasher.finalize()))
 }
 
 fn prepare_output_directory(output: &Path) -> Result<()> {
@@ -3364,7 +3115,9 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::io::Cursor;
+    use zip::CompressionMethod;
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
@@ -3529,6 +3282,7 @@ mod tests {
             hidden_size: 2,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
+            serialization_id: None,
             identity_storage_index: Some(0),
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
@@ -3551,6 +3305,7 @@ mod tests {
             hidden_size: 1,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
+            serialization_id: None,
             identity_storage_index: None,
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
@@ -3629,6 +3384,7 @@ mod tests {
             hidden_size: 1,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
+            serialization_id: None,
             identity_storage_index: None,
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();

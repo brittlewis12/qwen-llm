@@ -28,6 +28,9 @@ mod muse_lens_fit;
 mod muse_lens_rows_artifact;
 mod muse_lens_rows_fit;
 mod muse_lens_run;
+mod muse_published_full_lens;
+mod muse_published_full_lens_artifact;
+mod published_pt;
 #[allow(dead_code)]
 mod template_lens;
 use full_lens::{
@@ -85,6 +88,9 @@ enum Command {
     /// Assemble complete Muse row shards into one self-contained F16 transport.
     #[command(name = "assemble-muse-full")]
     AssembleMuseFull(muse_full_lens::AssembleMuseFullArgs),
+    /// Import one exact pinned published Muse full transport without executing pickle.
+    #[command(name = "import-muse-full")]
+    ImportMuseFull(muse_published_full_lens::ImportMuseFullArgs),
     /// Import one pinned published Qwen3.6/Qwen3.8 full J/R transport safely.
     ImportFull(ImportFullArgs),
     /// Compare the published J-lens with native deployed-checkpoint J directions.
@@ -516,6 +522,7 @@ fn main() -> Result<()> {
         Command::FitRows(args) => fit_rows(args),
         Command::FitTokens(args) => fit_tokens(args),
         Command::AssembleMuseFull(args) => muse_full_lens::assemble(args),
+        Command::ImportMuseFull(args) => muse_published_full_lens::import_full(args),
         Command::ImportFull(args) => import_full(args),
         Command::CompareTransfer(args) => compare_transfer(args),
         Command::ReadFull(args) => read_full(args),

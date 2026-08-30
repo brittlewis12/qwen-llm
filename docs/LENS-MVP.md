@@ -67,6 +67,9 @@ UI, generic plugin systems, and production hardening are out of scope.
   its separate real template asset.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
+- Muse's best T16 R256 engine projects to roughly `4.93h` for 6,656 rows and 25
+  prompts; merely linear T128 scaling is about `39.5h`, before its required
+  tiled-attention redesign. A paper-comparable full Muse fit is deadline-closed.
 - Native Qwen3.8 full-R fitting is correct at T128 but not currently economical:
   a measured B8/all-source prompt takes `167.65s` of VJP, projecting the matched
   25-prompt, 5,120-row asset to roughly 31 days.
@@ -77,14 +80,15 @@ UI, generic plugin systems, and production hardening are out of scope.
 ## Active Gate
 
 The shortest honest full-R and intervention-parity path is complete through the
-released Qwen3.6 pair plus canonical coordinate swap. Checkpoint and reintegrate
-the swap lane. Muse T128 requires a distinct tiled-attention redesign; do not
-silently turn it into the next deadline-critical implementation lane.
+released Qwen3.6 pair plus canonical coordinate swap. No native full-fitting
+lane remains credible for this deadline. Further implementation should follow
+concrete CLI use or an explicit REST decision, not speculative fitting work.
 
 ## Deferred
 
 REST, UI, corpus-scale batching, Flash-Next lens fitting, Muse T128, and native
-full-Qwen block-operator optimization wait until an active lane requires them.
+full-Qwen block-operator optimization remain post-deadline unless requirements
+or available mechanisms materially change.
 
 Keep this file concise and update it in place. It is a capability and scope
 ledger, not a work log.

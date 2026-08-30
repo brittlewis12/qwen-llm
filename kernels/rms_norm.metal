@@ -36,7 +36,7 @@ struct rms_norm_vjp_args {
     uint  row_count;
     float eps;
     uint  detach_scale;
-    uint  broadcast_primal;
+    uint  primal_row_count;
 };
 
 struct ds4_prepare_norm_pair_args {
@@ -133,7 +133,7 @@ kernel void kernel_rms_norm_mul_vjp_rows_f32(
         uint ntg [[threads_per_threadgroup]]) {
     if (row >= args.row_count) return;
     const ulong base = (ulong)row * args.n_dim;
-    const ulong primal_base = args.broadcast_primal != 0u ? 0u : base;
+    const ulong primal_base = (ulong)(row % args.primal_row_count) * args.n_dim;
     const uint nsg = (ntg + 31) / 32;
 
     float sumsq = 0.0f;

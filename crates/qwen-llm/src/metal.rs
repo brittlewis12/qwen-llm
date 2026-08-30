@@ -3644,6 +3644,7 @@ pub fn encode_rms_norm_mul_vjp_rows_f32(
         n_dim,
         eps,
         rule,
+        row_count,
         false,
     )
 }
@@ -3677,7 +3678,42 @@ pub fn encode_rms_norm_mul_vjp_broadcast_f32(
         n_dim,
         eps,
         rule,
+        1,
         true,
+    )
+}
+
+/// Activation VJP for a query bank periodically reusing weighted RMSNorm rows.
+///
+/// `x` has compact-row shape `[n_dim, primal_row_count]`; cotangent row `r`
+/// uses primal row `r % primal_row_count`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_rms_norm_mul_vjp_periodic_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    weight: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_input: &MetalTensor,
+    row_count: usize,
+    primal_row_count: usize,
+    n_dim: usize,
+    eps: f32,
+    rule: RmsNormVjpRule,
+) -> Result<(), MetalError> {
+    encode_rms_norm_mul_vjp_impl_f32(
+        ctx,
+        enc,
+        x,
+        weight,
+        grad_output,
+        grad_input,
+        row_count,
+        n_dim,
+        eps,
+        rule,
+        primal_row_count,
+        false,
     )
 }
 
@@ -3693,14 +3729,23 @@ fn encode_rms_norm_mul_vjp_impl_f32(
     n_dim: usize,
     eps: f32,
     rule: RmsNormVjpRule,
-    broadcast_primal: bool,
+    primal_row_count: usize,
+    rank_one_primal: bool,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "rms_norm_mul_vjp_rows";
-    if row_count == 0 || n_dim == 0 || !eps.is_finite() || eps < 0.0 {
+    if row_count == 0
+        || primal_row_count == 0
+        || primal_row_count > row_count
+        || !row_count.is_multiple_of(primal_row_count)
+        || (rank_one_primal && primal_row_count != 1)
+        || n_dim == 0
+        || !eps.is_finite()
+        || eps < 0.0
+    {
         return Err(MetalError::BadShape {
             kernel: KERNEL,
             detail: format!(
-                "expected nonzero rows/width and finite nonnegative eps, got rows={row_count} width={n_dim} eps={eps}"
+                "expected periodic nonzero primal rows, nonzero width, and finite nonnegative eps; got rows={row_count} primal_rows={primal_row_count} width={n_dim} eps={eps}"
             ),
         });
     }
@@ -3712,11 +3757,16 @@ fn encode_rms_norm_mul_vjp_impl_f32(
         kernel: KERNEL,
         detail: "row width exceeds u32".into(),
     })?;
+    let primal_row_count_u32 =
+        u32::try_from(primal_row_count).map_err(|_| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "primal row count exceeds u32".into(),
+        })?;
     let row_shape = vec![u64::from(n_dim_u32), u64::from(row_count_u32)];
-    let primal_shape = if broadcast_primal {
+    let primal_shape = if rank_one_primal {
         vec![u64::from(n_dim_u32)]
     } else {
-        row_shape.clone()
+        vec![u64::from(n_dim_u32), u64::from(primal_row_count_u32)]
     };
     let weight_shape = vec![u64::from(n_dim_u32)];
     if x.dtype != GgmlType::F32
@@ -3767,7 +3817,7 @@ fn encode_rms_norm_mul_vjp_impl_f32(
         row_count: u32,
         eps: f32,
         detach_scale: u32,
-        broadcast_primal: u32,
+        primal_row_count: u32,
     }
     let pso = ctx.pipeline("kernel_rms_norm_mul_vjp_rows_f32")?;
     enc.set_pipeline(&pso);
@@ -3778,7 +3828,7 @@ fn encode_rms_norm_mul_vjp_impl_f32(
             row_count: row_count_u32,
             eps,
             detach_scale: u32::from(rule == RmsNormVjpRule::RelpDetachedScale),
-            broadcast_primal: u32::from(broadcast_primal),
+            primal_row_count: primal_row_count_u32,
         },
     );
     enc.set_tensor(1, x);
@@ -15006,6 +15056,7 @@ pub fn encode_silu_mul_vjp_f32(
         row_count,
         n_dim,
         rule,
+        row_count,
         false,
     )
 }
@@ -15037,7 +15088,42 @@ pub fn encode_silu_mul_vjp_broadcast_f32(
         row_count,
         n_dim,
         rule,
+        1,
         true,
+    )
+}
+
+/// Activation VJP for a query bank periodically reusing SwiGLU primal rows.
+///
+/// `gate` and `up` have compact-row shape `[n_dim, primal_row_count]`;
+/// cotangent row `r` uses primal row `r % primal_row_count`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_silu_mul_vjp_periodic_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    grad_output: &MetalTensor,
+    grad_gate: &MetalTensor,
+    grad_up: &MetalTensor,
+    row_count: usize,
+    primal_row_count: usize,
+    n_dim: usize,
+    rule: SwiGluVjpRule,
+) -> Result<(), MetalError> {
+    encode_silu_mul_vjp_impl_f32(
+        ctx,
+        enc,
+        gate,
+        up,
+        grad_output,
+        grad_gate,
+        grad_up,
+        row_count,
+        n_dim,
+        rule,
+        primal_row_count,
+        false,
     )
 }
 
@@ -15053,13 +15139,22 @@ fn encode_silu_mul_vjp_impl_f32(
     row_count: usize,
     n_dim: usize,
     rule: SwiGluVjpRule,
-    broadcast_primal: bool,
+    primal_row_count: usize,
+    rank_one_primal: bool,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "silu_mul_vjp";
-    if row_count == 0 || n_dim == 0 {
+    if row_count == 0
+        || primal_row_count == 0
+        || primal_row_count > row_count
+        || !row_count.is_multiple_of(primal_row_count)
+        || (rank_one_primal && primal_row_count != 1)
+        || n_dim == 0
+    {
         return Err(MetalError::BadShape {
             kernel: KERNEL,
-            detail: format!("expected nonzero rows and width, got {row_count}x{n_dim}"),
+            detail: format!(
+                "expected periodic nonzero primal rows and width, got rows={row_count} primal_rows={primal_row_count} width={n_dim}"
+            ),
         });
     }
     let row_count_u32 = u32::try_from(row_count).map_err(|_| MetalError::BadShape {
@@ -15070,6 +15165,11 @@ fn encode_silu_mul_vjp_impl_f32(
         kernel: KERNEL,
         detail: "row width exceeds u32".into(),
     })?;
+    let primal_row_count_u32 =
+        u32::try_from(primal_row_count).map_err(|_| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "primal row count exceeds u32".into(),
+        })?;
     let element_count = row_count
         .checked_mul(n_dim)
         .ok_or_else(|| MetalError::BadShape {
@@ -15081,10 +15181,10 @@ fn encode_silu_mul_vjp_impl_f32(
         detail: "element count exceeds u32".into(),
     })?;
     let shape = vec![u64::from(n_dim_u32), u64::from(row_count_u32)];
-    let primal_shape = if broadcast_primal {
+    let primal_shape = if rank_one_primal {
         vec![u64::from(n_dim_u32)]
     } else {
-        shape.clone()
+        vec![u64::from(n_dim_u32), u64::from(primal_row_count_u32)]
     };
     let primals = [gate, up];
     let outputs = [grad_gate, grad_up];
@@ -15141,7 +15241,7 @@ fn encode_silu_mul_vjp_impl_f32(
         n: u32,
         n_dim: u32,
         relp_identity_half: u32,
-        broadcast_primal: u32,
+        primal_row_count: u32,
     }
     let pso = ctx.pipeline("kernel_silu_mul_vjp_f32")?;
     enc.set_pipeline(&pso);
@@ -15151,7 +15251,7 @@ fn encode_silu_mul_vjp_impl_f32(
             n: element_count_u32,
             n_dim: n_dim_u32,
             relp_identity_half: u32::from(rule == SwiGluVjpRule::RelpIdentityHalf),
-            broadcast_primal: u32::from(broadcast_primal),
+            primal_row_count: primal_row_count_u32,
         },
     );
     enc.set_tensor(1, gate);
@@ -31524,6 +31624,171 @@ mod tests {
             let up_fd = (objective(0.0, epsilon) - objective(0.0, -epsilon)) / (2.0 * epsilon);
             assert!((gate_fd - f64::from(actual_j_gate[index])).abs() < 1e-5);
             assert!((up_fd - f64::from(actual_j_up[index])).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn periodic_vjps_match_per_row_controls_bits() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const PRIMAL_ROWS: usize = 3;
+        const ROWS: usize = 9;
+        const N_DIM: usize = 67;
+        const EPS: f32 = 1.0e-6;
+        let primal_len = PRIMAL_ROWS * N_DIM;
+        let bank_len = ROWS * N_DIM;
+        let x_values = (0..primal_len)
+            .map(|index| ((index * 17 + 3) % 43) as f32 * 0.021 - 0.39)
+            .collect::<Vec<_>>();
+        let gate_values = (0..primal_len)
+            .map(|index| ((index * 19 + 5) % 101) as f32 * 0.11 - 5.5)
+            .collect::<Vec<_>>();
+        let up_values = (0..primal_len)
+            .map(|index| ((index * 13 + 2) % 47) as f32 * 0.031 - 0.67)
+            .collect::<Vec<_>>();
+        let weight_values = (0..N_DIM)
+            .map(|index| 0.45 + (index % 11) as f32 * 0.07)
+            .collect::<Vec<_>>();
+        let grad_values = (0..bank_len)
+            .map(|index| ((index * 7 + 1) % 31) as f32 * 0.013 - 0.18)
+            .collect::<Vec<_>>();
+        let primal_shape = vec![N_DIM as u64, PRIMAL_ROWS as u64];
+        let bank_shape = vec![N_DIM as u64, ROWS as u64];
+        let x = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x_values),
+            primal_shape.clone(),
+            GgmlType::F32,
+        )
+        .unwrap();
+        let gate = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&gate_values),
+            primal_shape.clone(),
+            GgmlType::F32,
+        )
+        .unwrap();
+        let up = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&up_values),
+            primal_shape,
+            GgmlType::F32,
+        )
+        .unwrap();
+        let weight = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&weight_values),
+            vec![N_DIM as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let grad_output = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&grad_values),
+            bank_shape.clone(),
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        for (rms_rule, swiglu_rule) in [
+            (RmsNormVjpRule::Jacobian, SwiGluVjpRule::Jacobian),
+            (
+                RmsNormVjpRule::RelpDetachedScale,
+                SwiGluVjpRule::RelpIdentityHalf,
+            ),
+        ] {
+            let rms_candidate = MetalTensor::zeros_f32(&ctx, bank_shape.clone()).unwrap();
+            let rms_control = MetalTensor::zeros_f32(&ctx, bank_shape.clone()).unwrap();
+            let gate_candidate = MetalTensor::zeros_f32(&ctx, bank_shape.clone()).unwrap();
+            let gate_control = MetalTensor::zeros_f32(&ctx, bank_shape.clone()).unwrap();
+            let up_candidate = MetalTensor::zeros_f32(&ctx, bank_shape.clone()).unwrap();
+            let up_control = MetalTensor::zeros_f32(&ctx, bank_shape.clone()).unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_rms_norm_mul_vjp_periodic_f32(
+                &ctx,
+                &encoder,
+                &x,
+                &weight,
+                &grad_output,
+                &rms_candidate,
+                ROWS,
+                PRIMAL_ROWS,
+                N_DIM,
+                EPS,
+                rms_rule,
+            )
+            .unwrap();
+            encode_silu_mul_vjp_periodic_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &grad_output,
+                &gate_candidate,
+                &up_candidate,
+                ROWS,
+                PRIMAL_ROWS,
+                N_DIM,
+                swiglu_rule,
+            )
+            .unwrap();
+            for row in 0..ROWS {
+                let primal_row = row % PRIMAL_ROWS;
+                let one_row_shape = vec![N_DIM as u64, 1];
+                let x_row = x.view_subrange((primal_row * N_DIM) as u64, one_row_shape.clone());
+                let gate_row =
+                    gate.view_subrange((primal_row * N_DIM) as u64, one_row_shape.clone());
+                let up_row = up.view_subrange((primal_row * N_DIM) as u64, one_row_shape.clone());
+                let grad_row =
+                    grad_output.view_subrange((row * N_DIM) as u64, one_row_shape.clone());
+                let rms_row =
+                    rms_control.view_subrange((row * N_DIM) as u64, one_row_shape.clone());
+                let gate_out_row =
+                    gate_control.view_subrange((row * N_DIM) as u64, one_row_shape.clone());
+                let up_out_row = up_control.view_subrange((row * N_DIM) as u64, one_row_shape);
+                encode_rms_norm_mul_vjp_rows_f32(
+                    &ctx, &encoder, &x_row, &weight, &grad_row, &rms_row, 1, N_DIM, EPS, rms_rule,
+                )
+                .unwrap();
+                encode_silu_mul_vjp_f32(
+                    &ctx,
+                    &encoder,
+                    &gate_row,
+                    &up_row,
+                    &grad_row,
+                    &gate_out_row,
+                    &up_out_row,
+                    1,
+                    N_DIM,
+                    swiglu_rule,
+                )
+                .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{:?}", command.error());
+            for (name, candidate, control) in [
+                ("RMSNorm", &rms_candidate, &rms_control),
+                ("SwiGLU gate", &gate_candidate, &gate_control),
+                ("SwiGLU up", &up_candidate, &up_control),
+            ] {
+                assert_eq!(
+                    read_back_f32(&candidate.buffer, bank_len)
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    read_back_f32(&control.buffer, bank_len)
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{name} {rms_rule:?}/{swiglu_rule:?}"
+                );
+            }
         }
     }
 

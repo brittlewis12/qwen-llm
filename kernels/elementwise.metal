@@ -20,7 +20,7 @@ struct silu_mul_vjp_args {
     uint n;
     uint n_dim;
     uint relp_identity_half;
-    uint broadcast_primal;
+    uint primal_row_count;
 };
 
 // y[i] = x[i] / (1 + exp(-x[i]))
@@ -317,7 +317,7 @@ kernel void kernel_silu_mul_vjp_f32(
         device       float * grad_up      [[buffer(5)]],
     uint tid [[thread_position_in_grid]]) {
     if (tid >= args.n) return;
-    const uint primal_index = args.broadcast_primal != 0u ? tid % args.n_dim : tid;
+    const uint primal_index = tid % (args.primal_row_count * args.n_dim);
     const float g = gate[primal_index];
     const float sigmoid_g = 1.0f / (1.0f + exp(-g));
     const float silu_g = g * sigmoid_g;

@@ -207,6 +207,94 @@ kernel void kernel_frozen_linear_q8_0_vjp_f32(
     grad_input[(ulong)query * args.n_in + (ulong)ib * QK8_0 + tiisg] = sumf;
 }
 
+// Banked matrix VJP. Four SIMDgroups retain query parallelism while sharing one
+// dequantized 16-input by 64-output weight tile through threadgroup memory.
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_frozen_linear_q8_0_vjp_r2c16k64_f32(
+        constant mat_vec_q8_0_args & args        [[buffer(0)]],
+        device const uchar         * weight      [[buffer(1)]],
+        device const float         * grad_output [[buffer(2)]],
+        device       float         * grad_input  [[buffer(3)]],
+        threadgroup  float         * shmem       [[threadgroup(0)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const uint input0 = tgpig.y * 16u;
+    const uint query0 = tgpig.x * 128u + (uint)sgitg * 32u;
+    const uint blocks_per_row = args.n_in / QK8_0;
+    const ulong row_stride_bytes = (ulong)blocks_per_row * Q8_0_BYTES;
+    const uint block_index = input0 / QK8_0;
+    const uint quant_offset = input0 % QK8_0;
+
+    simdgroup_float8x8 acc[2][4];
+    for (short input_tile = 0; input_tile < 2; ++input_tile) {
+        for (short query_tile = 0; query_tile < 4; ++query_tile) {
+            acc[input_tile][query_tile] =
+                make_filled_simdgroup_matrix<float, 8>(0.0f);
+        }
+    }
+
+    for (uint output0 = 0; output0 < args.n_out; output0 += 64u) {
+        if (tiitg < 64u) {
+            device const uchar * block = weight
+                + (ulong)(output0 + (uint)tiitg) * row_stride_bytes
+                + (ulong)block_index * Q8_0_BYTES;
+            const float scale = (float)((device const half *)block)[0];
+            device const int8_t * quants =
+                (device const int8_t *)(block + 2) + quant_offset;
+            for (short input = 0; input < 16; ++input) {
+                shmem[(uint)input * 64u + (uint)tiitg] =
+                    scale * (float)quants[input];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (short output_tile = 0; output_tile < 8; ++output_tile) {
+            simdgroup_float8x8 cotangent[4];
+            for (short query_tile = 0; query_tile < 4; ++query_tile) {
+                simdgroup_load(
+                    cotangent[query_tile],
+                    grad_output
+                        + (ulong)(query0 + (uint)query_tile * 8u) * args.n_out
+                        + output0 + (uint)output_tile * 8u,
+                    args.n_out,
+                    ulong2(0, 0),
+                    true);
+            }
+            for (short input_tile = 0; input_tile < 2; ++input_tile) {
+                simdgroup_float8x8 weight_tile;
+                simdgroup_load(
+                    weight_tile,
+                    shmem + (uint)input_tile * 8u * 64u
+                        + (uint)output_tile * 8u,
+                    64);
+                for (short query_tile = 0; query_tile < 4; ++query_tile) {
+                    simdgroup_multiply_accumulate(
+                        acc[input_tile][query_tile],
+                        weight_tile,
+                        cotangent[query_tile],
+                        acc[input_tile][query_tile]);
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (short input_tile = 0; input_tile < 2; ++input_tile) {
+        for (short query_tile = 0; query_tile < 4; ++query_tile) {
+            const uint query = query0 + (uint)query_tile * 8u;
+            simdgroup_store(
+                acc[input_tile][query_tile],
+                grad_input + (ulong)query * args.n_in
+                    + input0 + (uint)input_tile * 8u,
+                args.n_in,
+                ulong2(0, 0),
+                true);
+        }
+    }
+}
+
 // Group-axis variant of the `_lcpp` kernel above. Grid depth indexes
 // `n_groups` consecutive weight blocks of `n_out` rows, consecutive
 // `n_in`-element input slices, and consecutive `n_out`-element output

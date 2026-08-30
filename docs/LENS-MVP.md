@@ -48,16 +48,18 @@ The genuine compact full-R asset is hidden-to-hidden
 `[51,6656,6656]` F16 (4.21 GiB), not a vocabulary-row tensor. The scalar
 selected-token fitter remains its correctness oracle; extrapolating that path
 to the default 25-prompt corpus takes roughly nine days and must not be launched.
+The bank-specific native-Q8 transpose VJP is qualified at `25.36-26.69x` on
+all dominant Muse FFN shapes without changing the scalar dispatcher.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
 until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Build batched, resumable Muse full-R production plus full-vocabulary and
-arbitrary-vector consumption. Production must batch hidden basis rows, preserve
-the scalar estimator exactly, checkpoint bounded row slabs, and stream the final
-F16 asset. Do not run a long fit until a short component packet projects the
-complete 25-prompt build into an agreed hours-scale envelope.
+Build a shared-primal Muse one-block VJP bank with Metal causal-GQA backward and
+fixed scratch, then compose it into resumable full-R row slabs. Production must
+preserve the scalar estimator exactly. Do not run a long fit until a short
+component packet projects the complete 25-prompt build into an agreed
+hours-scale envelope.
 
 ## Hard Exclusions
 
@@ -66,9 +68,9 @@ plugins, unrelated test repair, cross-device support, and production hardening.
 
 ## Blockers
 
-- The first query-serial Q8 weight-reuse kernel regressed 17.99%; the next
-  transpose mechanism must retain query parallelism.
-- Batched Metal attention VJP and fixed scratch ownership do not exist yet.
+- Batched Metal causal-GQA VJP does not exist yet.
+- Shared-primal periodic RMS/SwiGLU VJPs and fixed scratch ownership do not
+  exist yet.
 
 ## Fast Follows
 

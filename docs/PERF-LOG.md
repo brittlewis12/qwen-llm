@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Muse Full-R Q8 Transpose VJP KEEP
+
+Status: expose the R2C16K64 transpose through a bank-specific frozen-linear VJP
+dispatcher. Keep the scalar dispatcher unchanged as the exact oracle path.
+
+- The kernel shares each dequantized `[16,64]` Q8 tile across 128 parallel
+  cotangent rows; aligned prefixes use the matrix path and tails stay scalar.
+- Gate/up and down at Q in `{128,512}` improve by `25.364-26.689x`; geometric
+  mean is `26.059x`, and every balanced comparison is positive.
+- Production relative L2 versus the incumbent is at most `4.27e-7`. Offset,
+  Q=257 matrix-plus-tail, and whole-call fallback gates pass.
+- The focused model-free packets take `0.04 s` and `2.92 s` after compilation.
+  No model asset or broad suite ran.
+
+Evidence: `docs/bench/2026-08-29-muse-full-r-q8-vjp-r2c16-keep/`.
+Adversarial review: `01a05072-6951-7782-978a-2f274d90f474`.
+
 ## 2026-08-29 - Muse Full-R Q8 Multi-Query VJP KILL
 
 Status: remove the query-serial eight-query Q8 activation-VJP kernel. Keep the

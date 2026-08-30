@@ -36,6 +36,323 @@ pub const MUSE_GLIMMER_FULL_R_MAX_DIM_BATCH: usize = 32;
 pub const MUSE_GLIMMER_FULL_TRANSPORT_MAX_ROWS_PER_SHARD: usize = 256;
 pub const MUSE_GLIMMER_QUERY_BATCH_MAX: usize = 32;
 
+#[allow(clippy::too_many_arguments)]
+fn encode_muse_glimmer_one_attention_block_vjp_bank_feed_forward(
+    ctx: &MetalContext,
+    encoder: &KernelEncoder,
+    config: &MuseGlimmerConfig,
+    layer: &MuseGlimmerMetalLayerWeights<'_>,
+    tensors: &ReplayTensors,
+    geometry: MuseAttentionGeometry,
+    n_tokens: usize,
+    bank_rows: usize,
+    grad_post_block: &MetalTensor,
+    scratch: &MuseGlimmerOneBlockVjpBankScratch,
+    rule: MuseGlimmerLensRule,
+) -> Result<(), MuseGlimmerLensError> {
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.ffn_branch_raw,
+        layer.post_feed_forward_norm,
+        grad_post_block,
+        &scratch.hidden[0],
+        bank_rows,
+        n_tokens,
+        geometry.hidden,
+        config.post_norm_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::FeedForwardBranchPostNorm),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.feed_forward_down,
+        &scratch.hidden[0],
+        &scratch.feed_forward[0],
+        geometry.feed_forward,
+        geometry.hidden,
+        bank_rows,
+    )?;
+    encode_silu_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.ffn_gate_raw,
+        &tensors.ffn_up,
+        &scratch.feed_forward[0],
+        &scratch.feed_forward[1],
+        &scratch.feed_forward[2],
+        bank_rows,
+        n_tokens,
+        geometry.feed_forward,
+        rule.swiglu_rule(),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.feed_forward_gate,
+        &scratch.feed_forward[1],
+        &scratch.hidden[1],
+        geometry.hidden,
+        geometry.feed_forward,
+        bank_rows,
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.feed_forward_up,
+        &scratch.feed_forward[2],
+        &scratch.hidden[2],
+        geometry.hidden,
+        geometry.feed_forward,
+        bank_rows,
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[1],
+        &scratch.hidden[2],
+        &scratch.hidden[3],
+    )?;
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.post_attention,
+        layer.feed_forward_norm,
+        &scratch.hidden[3],
+        &scratch.hidden[1],
+        bank_rows,
+        n_tokens,
+        geometry.hidden,
+        config.rms_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreFeedForward),
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        grad_post_block,
+        &scratch.hidden[1],
+        &scratch.hidden[2],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_muse_glimmer_one_attention_block_vjp_bank_attention_output(
+    ctx: &MetalContext,
+    encoder: &KernelEncoder,
+    config: &MuseGlimmerConfig,
+    layer: &MuseGlimmerMetalLayerWeights<'_>,
+    tensors: &ReplayTensors,
+    geometry: MuseAttentionGeometry,
+    n_tokens: usize,
+    bank_rows: usize,
+    scratch: &MuseGlimmerOneBlockVjpBankScratch,
+    rule: MuseGlimmerLensRule,
+) -> Result<(), MuseGlimmerLensError> {
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.attention_branch_raw,
+        layer.post_attention_norm,
+        &scratch.hidden[2],
+        &scratch.hidden[0],
+        bank_rows,
+        n_tokens,
+        geometry.hidden,
+        config.post_norm_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionBranchPostNorm),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_output,
+        &scratch.hidden[0],
+        &scratch.query[0],
+        geometry.query,
+        geometry.hidden,
+        bank_rows,
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_muse_glimmer_one_attention_block_vjp_bank_causal_gqa(
+    ctx: &MetalContext,
+    encoder: &KernelEncoder,
+    layer: &MuseGlimmerMetalLayerWeights<'_>,
+    tensors: &ReplayTensors,
+    geometry: MuseAttentionGeometry,
+    basis_count: usize,
+    n_tokens: usize,
+    bank_rows: usize,
+    scratch: &MuseGlimmerOneBlockVjpBankScratch,
+) -> Result<(), MuseGlimmerLensError> {
+    encode_muse_glimmer_causal_gqa_vjp_bank_f32(
+        ctx,
+        encoder,
+        &tensors.q,
+        &tensors.k,
+        &tensors.v,
+        &tensors.attention_gate,
+        &tensors.attention_output,
+        &tensors.attention_probabilities,
+        &scratch.query[0],
+        &scratch.query[1],
+        &scratch.partial_grad_key,
+        &scratch.partial_grad_value,
+        &scratch.kv[0],
+        &scratch.kv[1],
+        &scratch.query[2],
+        basis_count,
+        n_tokens,
+        geometry.q_heads,
+        geometry.kv_heads,
+        geometry.head_dim,
+    )?;
+    if layer.sliding_attention {
+        encode_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32(
+            ctx,
+            encoder,
+            &scratch.query[1],
+            &scratch.kv[0],
+            geometry.q_heads,
+            geometry.kv_heads,
+            geometry.head_dim,
+            bank_rows,
+            n_tokens,
+            geometry.rope_theta,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_muse_glimmer_one_attention_block_vjp_bank_attention_input(
+    ctx: &MetalContext,
+    encoder: &KernelEncoder,
+    config: &MuseGlimmerConfig,
+    layer: &MuseGlimmerMetalLayerWeights<'_>,
+    tensors: &ReplayTensors,
+    geometry: MuseAttentionGeometry,
+    n_tokens: usize,
+    bank_rows: usize,
+    grad_input: &MetalTensor,
+    scratch: &MuseGlimmerOneBlockVjpBankScratch,
+    rule: MuseGlimmerLensRule,
+) -> Result<(), MuseGlimmerLensError> {
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_value,
+        &scratch.kv[1],
+        &scratch.hidden[0],
+        geometry.hidden,
+        geometry.kv,
+        bank_rows,
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_gate,
+        &scratch.query[2],
+        &scratch.hidden[1],
+        geometry.hidden,
+        geometry.query,
+        bank_rows,
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[0],
+        &scratch.hidden[1],
+        &scratch.hidden[3],
+    )?;
+
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.q_raw_heads,
+        layer.query_norm,
+        &scratch.query_heads[1],
+        &scratch.query_heads[0],
+        checked_mul(bank_rows, geometry.q_heads, "query cotangent head rows")?,
+        checked_mul(n_tokens, geometry.q_heads, "query primal head rows")?,
+        geometry.head_dim,
+        config.rms_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionQuery),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_query,
+        &scratch.query[0],
+        &scratch.hidden[0],
+        geometry.hidden,
+        geometry.query,
+        bank_rows,
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[3],
+        &scratch.hidden[0],
+        &scratch.hidden[1],
+    )?;
+
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.k_raw_heads,
+        layer.key_norm,
+        &scratch.kv_heads[0],
+        &scratch.kv_heads[1],
+        checked_mul(bank_rows, geometry.kv_heads, "key cotangent head rows")?,
+        checked_mul(n_tokens, geometry.kv_heads, "key primal head rows")?,
+        geometry.head_dim,
+        config.rms_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionKey),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_key,
+        &scratch.kv[1],
+        &scratch.hidden[0],
+        geometry.hidden,
+        geometry.kv,
+        bank_rows,
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[1],
+        &scratch.hidden[0],
+        &scratch.hidden[3],
+    )?;
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.input,
+        layer.attention_norm,
+        &scratch.hidden[3],
+        &scratch.hidden[0],
+        bank_rows,
+        n_tokens,
+        geometry.hidden,
+        config.rms_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreAttention),
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[2],
+        &scratch.hidden[0],
+        grad_input,
+    )?;
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerOneBlockVjp {
     pub target_block: u32,
@@ -1911,260 +2228,38 @@ fn encode_muse_glimmer_one_attention_block_vjp_bank(
     }
     let tensors = &prepared.tensors;
 
-    encode_rms_norm_mul_vjp_periodic_f32(
+    encode_muse_glimmer_one_attention_block_vjp_bank_feed_forward(
         ctx,
         encoder,
-        &tensors.ffn_branch_raw,
-        layer.post_feed_forward_norm,
+        config,
+        layer,
+        tensors,
+        geometry,
+        n_tokens,
+        bank_rows,
         grad_post_block,
-        &scratch.hidden[0],
-        bank_rows,
-        n_tokens,
-        geometry.hidden,
-        config.post_norm_epsilon,
-        rule.rms_norm_rule(MuseGlimmerRmsNormSite::FeedForwardBranchPostNorm),
+        scratch,
+        rule,
     )?;
-    encode_frozen_linear_vjp_bank_f32(
+    encode_muse_glimmer_one_attention_block_vjp_bank_attention_output(
+        ctx, encoder, config, layer, tensors, geometry, n_tokens, bank_rows, scratch, rule,
+    )?;
+    encode_muse_glimmer_one_attention_block_vjp_bank_causal_gqa(
         ctx,
         encoder,
-        layer.feed_forward_down,
-        &scratch.hidden[0],
-        &scratch.feed_forward[0],
-        geometry.feed_forward,
-        geometry.hidden,
-        bank_rows,
-    )?;
-    encode_silu_mul_vjp_periodic_f32(
-        ctx,
-        encoder,
-        &tensors.ffn_gate_raw,
-        &tensors.ffn_up,
-        &scratch.feed_forward[0],
-        &scratch.feed_forward[1],
-        &scratch.feed_forward[2],
-        bank_rows,
-        n_tokens,
-        geometry.feed_forward,
-        rule.swiglu_rule(),
-    )?;
-    encode_frozen_linear_vjp_bank_f32(
-        ctx,
-        encoder,
-        layer.feed_forward_gate,
-        &scratch.feed_forward[1],
-        &scratch.hidden[1],
-        geometry.hidden,
-        geometry.feed_forward,
-        bank_rows,
-    )?;
-    encode_frozen_linear_vjp_bank_f32(
-        ctx,
-        encoder,
-        layer.feed_forward_up,
-        &scratch.feed_forward[2],
-        &scratch.hidden[2],
-        geometry.hidden,
-        geometry.feed_forward,
-        bank_rows,
-    )?;
-    encode_add_f32(
-        ctx,
-        encoder,
-        &scratch.hidden[1],
-        &scratch.hidden[2],
-        &scratch.hidden[3],
-    )?;
-    encode_rms_norm_mul_vjp_periodic_f32(
-        ctx,
-        encoder,
-        &tensors.post_attention,
-        layer.feed_forward_norm,
-        &scratch.hidden[3],
-        &scratch.hidden[1],
-        bank_rows,
-        n_tokens,
-        geometry.hidden,
-        config.rms_epsilon,
-        rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreFeedForward),
-    )?;
-    encode_add_f32(
-        ctx,
-        encoder,
-        grad_post_block,
-        &scratch.hidden[1],
-        &scratch.hidden[2],
-    )?;
-
-    encode_rms_norm_mul_vjp_periodic_f32(
-        ctx,
-        encoder,
-        &tensors.attention_branch_raw,
-        layer.post_attention_norm,
-        &scratch.hidden[2],
-        &scratch.hidden[0],
-        bank_rows,
-        n_tokens,
-        geometry.hidden,
-        config.post_norm_epsilon,
-        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionBranchPostNorm),
-    )?;
-    encode_frozen_linear_vjp_bank_f32(
-        ctx,
-        encoder,
-        layer.attention_output,
-        &scratch.hidden[0],
-        &scratch.query[0],
-        geometry.query,
-        geometry.hidden,
-        bank_rows,
-    )?;
-    encode_muse_glimmer_causal_gqa_vjp_bank_f32(
-        ctx,
-        encoder,
-        &tensors.q,
-        &tensors.k,
-        &tensors.v,
-        &tensors.attention_gate,
-        &tensors.attention_output,
-        &tensors.attention_probabilities,
-        &scratch.query[0],
-        &scratch.query[1],
-        &scratch.partial_grad_key,
-        &scratch.partial_grad_value,
-        &scratch.kv[0],
-        &scratch.kv[1],
-        &scratch.query[2],
+        layer,
+        tensors,
+        geometry,
         basis_count,
         n_tokens,
-        geometry.q_heads,
-        geometry.kv_heads,
-        geometry.head_dim,
-    )?;
-    if layer.sliding_attention {
-        encode_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32(
-            ctx,
-            encoder,
-            &scratch.query[1],
-            &scratch.kv[0],
-            geometry.q_heads,
-            geometry.kv_heads,
-            geometry.head_dim,
-            bank_rows,
-            n_tokens,
-            geometry.rope_theta,
-            true,
-        )?;
-    }
-
-    encode_frozen_linear_vjp_bank_f32(
-        ctx,
-        encoder,
-        layer.attention_value,
-        &scratch.kv[1],
-        &scratch.hidden[0],
-        geometry.hidden,
-        geometry.kv,
         bank_rows,
+        scratch,
     )?;
-    encode_frozen_linear_vjp_bank_f32(
-        ctx,
-        encoder,
-        layer.attention_gate,
-        &scratch.query[2],
-        &scratch.hidden[1],
-        geometry.hidden,
-        geometry.query,
-        bank_rows,
-    )?;
-    encode_add_f32(
-        ctx,
-        encoder,
-        &scratch.hidden[0],
-        &scratch.hidden[1],
-        &scratch.hidden[3],
+    encode_muse_glimmer_one_attention_block_vjp_bank_attention_input(
+        ctx, encoder, config, layer, tensors, geometry, n_tokens, bank_rows, grad_input, scratch,
+        rule,
     )?;
 
-    encode_rms_norm_mul_vjp_periodic_f32(
-        ctx,
-        encoder,
-        &tensors.q_raw_heads,
-        layer.query_norm,
-        &scratch.query_heads[1],
-        &scratch.query_heads[0],
-        checked_mul(bank_rows, geometry.q_heads, "query cotangent head rows")?,
-        checked_mul(n_tokens, geometry.q_heads, "query primal head rows")?,
-        geometry.head_dim,
-        config.rms_epsilon,
-        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionQuery),
-    )?;
-    encode_frozen_linear_vjp_bank_f32(
-        ctx,
-        encoder,
-        layer.attention_query,
-        &scratch.query[0],
-        &scratch.hidden[0],
-        geometry.hidden,
-        geometry.query,
-        bank_rows,
-    )?;
-    encode_add_f32(
-        ctx,
-        encoder,
-        &scratch.hidden[3],
-        &scratch.hidden[0],
-        &scratch.hidden[1],
-    )?;
-
-    encode_rms_norm_mul_vjp_periodic_f32(
-        ctx,
-        encoder,
-        &tensors.k_raw_heads,
-        layer.key_norm,
-        &scratch.kv_heads[0],
-        &scratch.kv_heads[1],
-        checked_mul(bank_rows, geometry.kv_heads, "key cotangent head rows")?,
-        checked_mul(n_tokens, geometry.kv_heads, "key primal head rows")?,
-        geometry.head_dim,
-        config.rms_epsilon,
-        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionKey),
-    )?;
-    encode_frozen_linear_vjp_bank_f32(
-        ctx,
-        encoder,
-        layer.attention_key,
-        &scratch.kv[1],
-        &scratch.hidden[0],
-        geometry.hidden,
-        geometry.kv,
-        bank_rows,
-    )?;
-    encode_add_f32(
-        ctx,
-        encoder,
-        &scratch.hidden[1],
-        &scratch.hidden[0],
-        &scratch.hidden[3],
-    )?;
-    encode_rms_norm_mul_vjp_periodic_f32(
-        ctx,
-        encoder,
-        &tensors.input,
-        layer.attention_norm,
-        &scratch.hidden[3],
-        &scratch.hidden[0],
-        bank_rows,
-        n_tokens,
-        geometry.hidden,
-        config.rms_epsilon,
-        rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreAttention),
-    )?;
-    encode_add_f32(
-        ctx,
-        encoder,
-        &scratch.hidden[2],
-        &scratch.hidden[0],
-        grad_input,
-    )?;
     Ok(())
 }
 
@@ -4934,11 +5029,229 @@ mod tests {
         assert!(test_started.elapsed() < Duration::from_secs(180));
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct MuseBankDispatchShape {
+        kernel: String,
+        grid: [u64; 3],
+        threads: [u64; 3],
+    }
+
+    #[derive(Clone, Debug)]
+    struct MuseBankStageProfile {
+        stage_ms: [f64; 4],
+        raw_coverage: f64,
+        transition_ambiguity: f64,
+        gap_ms: f64,
+        overlap_ms: f64,
+    }
+
+    #[derive(Debug)]
+    struct MuseBankProfileArm {
+        gpu_ms: f64,
+        output_bits: Vec<u32>,
+        trace: crate::metal::KernelTraceCounters,
+        dispatches: Vec<MuseBankDispatchShape>,
+        stages: Option<MuseBankStageProfile>,
+    }
+
+    fn resolve_muse_bank_stage_profile(
+        ctx: &MetalContext,
+        samples: &crate::metal::MetalTimestampSampleBuffer,
+        command_gpu_ms: f64,
+    ) -> MuseBankStageProfile {
+        let timestamps = ctx.resolve_timestamp_samples(samples, 8).unwrap();
+        let first = timestamps[0];
+        let last = timestamps[7];
+        let span_ticks = last.checked_sub(first).expect("ordered sampled span");
+        assert!(span_ticks > 0);
+
+        let mut stage_ticks = 0u64;
+        let mut gap_ticks = 0u64;
+        let mut overlap_ticks = 0u64;
+        let mut previous_start = None;
+        let mut previous_end = None;
+        let mut durations = [0u64; 4];
+        for stage in 0..4 {
+            let start = timestamps[stage * 2];
+            let end = timestamps[stage * 2 + 1];
+            assert!(end >= start, "stage {stage} has inverted timestamps");
+            assert!(previous_start.is_none_or(|previous| start >= previous));
+            assert!(previous_end.is_none_or(|previous| end >= previous));
+            if let Some(previous) = previous_end {
+                if start >= previous {
+                    gap_ticks += start - previous;
+                } else {
+                    overlap_ticks += previous - start;
+                }
+            }
+            durations[stage] = end - start;
+            stage_ticks += durations[stage];
+            previous_start = Some(start);
+            previous_end = Some(end);
+        }
+        assert_eq!(
+            stage_ticks as i128 + gap_ticks as i128 - overlap_ticks as i128,
+            span_ticks as i128,
+        );
+
+        let scale_ms_per_tick = command_gpu_ms / span_ticks as f64;
+        MuseBankStageProfile {
+            stage_ms: durations.map(|ticks| ticks as f64 * scale_ms_per_tick),
+            raw_coverage: span_ticks as f64 * 1.0e-6 / command_gpu_ms,
+            transition_ambiguity: (gap_ticks + overlap_ticks) as f64 / span_ticks as f64,
+            gap_ms: gap_ticks as f64 * scale_ms_per_tick,
+            overlap_ms: overlap_ticks as f64 * scale_ms_per_tick,
+        }
+    }
+
+    fn run_zero_q8_muse_bank_profile_arm(
+        ctx: &MetalContext,
+        prepared: &MuseGlimmerPreparedMetalAttentionBlock<'_>,
+        current: &MetalTensor,
+        next: &MetalTensor,
+        workspace: &mut MuseGlimmerMetalAttentionBankWorkspace,
+        sampled: bool,
+    ) -> MuseBankProfileArm {
+        let samples = sampled.then(|| {
+            ctx.timestamp_sample_buffer(8)
+                .expect("stage-boundary sample buffer")
+        });
+        crate::metal::dispatch_census_begin();
+        let trace_guard = crate::metal::kernel_trace_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        if let Some(samples) = &samples {
+            let geometry = prepared.replay.geometry;
+            let n_tokens = prepared.replay.n_tokens;
+            let basis_count = workspace.scratch.basis_count;
+            let bank_rows = checked_mul(basis_count, n_tokens, "profile bank rows").unwrap();
+            let tensors = &prepared.replay.tensors;
+
+            let encoder = KernelEncoder::try_begin_sampled(&command, samples, 0, 1, false).unwrap();
+            encode_muse_glimmer_one_attention_block_vjp_bank_feed_forward(
+                ctx,
+                &encoder,
+                prepared.config,
+                &prepared.layer,
+                tensors,
+                geometry,
+                n_tokens,
+                bank_rows,
+                current,
+                &workspace.scratch,
+                MuseGlimmerLensRule::R,
+            )
+            .unwrap();
+            encoder.end();
+
+            let encoder = KernelEncoder::try_begin_sampled(&command, samples, 2, 3, false).unwrap();
+            encode_muse_glimmer_one_attention_block_vjp_bank_attention_output(
+                ctx,
+                &encoder,
+                prepared.config,
+                &prepared.layer,
+                tensors,
+                geometry,
+                n_tokens,
+                bank_rows,
+                &workspace.scratch,
+                MuseGlimmerLensRule::R,
+            )
+            .unwrap();
+            encoder.end();
+
+            let encoder = KernelEncoder::try_begin_sampled(&command, samples, 4, 5, false).unwrap();
+            encode_muse_glimmer_one_attention_block_vjp_bank_causal_gqa(
+                ctx,
+                &encoder,
+                &prepared.layer,
+                tensors,
+                geometry,
+                basis_count,
+                n_tokens,
+                bank_rows,
+                &workspace.scratch,
+            )
+            .unwrap();
+            encoder.end();
+
+            let encoder = KernelEncoder::try_begin_sampled(&command, samples, 6, 7, false).unwrap();
+            encode_muse_glimmer_one_attention_block_vjp_bank_attention_input(
+                ctx,
+                &encoder,
+                prepared.config,
+                &prepared.layer,
+                tensors,
+                geometry,
+                n_tokens,
+                bank_rows,
+                next,
+                &workspace.scratch,
+                MuseGlimmerLensRule::R,
+            )
+            .unwrap();
+            encoder.end();
+        } else {
+            let encoder = KernelEncoder::begin(&command);
+            prepared
+                .encode_bank(
+                    ctx,
+                    &encoder,
+                    current,
+                    next,
+                    workspace,
+                    MuseGlimmerLensRule::R,
+                )
+                .unwrap();
+            encoder.end();
+        }
+        let trace = crate::metal::kernel_trace_snapshot();
+        let dispatches = crate::metal::dispatch_census_take()
+            .into_iter()
+            .map(|row| MuseBankDispatchShape {
+                kernel: row.kernel,
+                grid: [row.grid_width, row.grid_height, row.grid_depth],
+                threads: [row.threads_width, row.threads_height, row.threads_depth],
+            })
+            .collect::<Vec<_>>();
+        drop(trace_guard);
+
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none(), "{:?}", command.error());
+        let start = command.GPUStartTime();
+        let end = command.GPUEndTime();
+        assert!(start.is_finite() && end.is_finite() && start > 0.0 && end > start);
+        let gpu_ms = (end - start) * 1.0e3;
+        let stages = samples
+            .as_ref()
+            .map(|samples| resolve_muse_bank_stage_profile(ctx, samples, gpu_ms));
+        MuseBankProfileArm {
+            gpu_ms,
+            output_bits: read_f32(next).into_iter().map(f32::to_bits).collect(),
+            trace,
+            dispatches,
+            stages,
+        }
+    }
+
     #[test]
-    #[ignore = "bounded zero-Q8 Muse full-block B8/B32 timing gate"]
+    #[ignore = "bounded zero-Q8 Muse full-block B8/B32 timing and attribution gate"]
     fn profile_one_full_attention_block_vjp_bank_zero_q8() {
         use std::time::Instant;
 
+        fn drift(values: &[f64]) -> f64 {
+            let minimum = values.iter().copied().reduce(f64::min).unwrap();
+            let maximum = values.iter().copied().reduce(f64::max).unwrap();
+            2.0 * (maximum - minimum) / (maximum + minimum)
+        }
+
+        fn median(values: impl IntoIterator<Item = f64>) -> f64 {
+            let mut values = values.into_iter().collect::<Vec<_>>();
+            values.sort_by(f64::total_cmp);
+            values[values.len() / 2]
+        }
+
+        let test_started = Instant::now();
         let ctx = MetalContext::new().unwrap();
         let model_prepare_start = Instant::now();
         let owned = ZeroQ8MuseModel::new(&ctx);
@@ -4967,6 +5280,11 @@ mod tests {
         let mut results = Vec::new();
         for (basis_count, hard_stop_ms) in [(8usize, 100.0f64), (32, 300.0)] {
             let current_values = attention_values(basis_count * N_TOKENS * hidden, 37, 131, 0.002);
+            let current_bits = current_values
+                .iter()
+                .copied()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
             let current = from_f32(
                 &ctx,
                 &current_values,
@@ -4978,50 +5296,160 @@ mod tests {
                     .unwrap();
             let mut workspace =
                 MuseGlimmerMetalAttentionBankWorkspace::new(&ctx, &prepared, basis_count).unwrap();
-            let mut run = || {
-                let command = ctx.queue.commandBuffer().unwrap();
-                let encoder = KernelEncoder::begin(&command);
-                prepared
-                    .encode_bank(
-                        &ctx,
-                        &encoder,
-                        &current,
-                        &next,
-                        &mut workspace,
-                        MuseGlimmerLensRule::R,
-                    )
-                    .unwrap();
-                encoder.end();
-                command.commit();
-                command.waitUntilCompleted();
-                assert!(command.error().is_none(), "{:?}", command.error());
-                let start = command.GPUStartTime();
-                let end = command.GPUEndTime();
-                assert!(start.is_finite() && end.is_finite() && start > 0.0 && end > start);
-                (end - start) * 1.0e3
-            };
-            run();
-            let first = run();
-            assert!(
-                first <= hard_stop_ms,
-                "B={basis_count} first command {first:.3} ms exceeds {hard_stop_ms:.0} ms"
+
+            let warm_control = run_zero_q8_muse_bank_profile_arm(
+                &ctx,
+                &prepared,
+                &current,
+                &next,
+                &mut workspace,
+                false,
             );
-            let samples = [first, run(), run()];
-            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            assert_eq!(warm_control.output_bits, current_bits);
+            assert_eq!(warm_control.trace.encoders, 1);
+            assert_eq!(warm_control.trace.concurrent_encoders, 0);
             assert_eq!(
-                read_f32(&next)
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                current_values
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                "zero-Q8 block VJP must be residual identity"
+                warm_control.trace.dispatches as usize,
+                warm_control.dispatches.len()
             );
+            assert!(warm_control.stages.is_none());
+
+            let mut run = |sampled| {
+                let arm = run_zero_q8_muse_bank_profile_arm(
+                    &ctx,
+                    &prepared,
+                    &current,
+                    &next,
+                    &mut workspace,
+                    sampled,
+                );
+                assert_eq!(arm.output_bits, current_bits);
+                assert_eq!(arm.dispatches, warm_control.dispatches);
+                assert_eq!(arm.trace.dispatches, warm_control.trace.dispatches);
+                assert_eq!(arm.trace.encoders, if sampled { 4 } else { 1 });
+                assert_eq!(arm.trace.concurrent_encoders, 0);
+                assert_eq!(arm.trace.dispatches as usize, arm.dispatches.len());
+                assert_eq!(arm.stages.is_some(), sampled);
+                arm
+            };
+
+            if basis_count == 8 {
+                let controls = [run(false), run(false), run(false)];
+                let first = controls[0].gpu_ms;
+                assert!(
+                    first <= hard_stop_ms,
+                    "B={basis_count} first command {first:.3} ms exceeds {hard_stop_ms:.0} ms"
+                );
+                let samples = controls.map(|arm| arm.gpu_ms);
+                let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+                eprintln!(
+                    "[muse-block-vjp-zero-q8] B={basis_count} samples_ms={samples:?} mean_ms={mean:.6}"
+                );
+                results.push((basis_count, mean));
+                continue;
+            }
+
+            let warm_sampled = run(true);
+            assert_eq!(warm_sampled.output_bits, warm_control.output_bits);
+            let mut controls = Vec::with_capacity(4);
+            let mut sampled = Vec::with_capacity(3);
+            for sampled_arm in [false, true, false, true, false, true, false] {
+                let arm = run(sampled_arm);
+                if sampled_arm {
+                    sampled.push(arm);
+                } else {
+                    controls.push(arm);
+                }
+            }
+
+            let control_gpu_ms = controls.iter().map(|arm| arm.gpu_ms).collect::<Vec<_>>();
+            let sampled_gpu_ms = sampled.iter().map(|arm| arm.gpu_ms).collect::<Vec<_>>();
+            assert!(
+                control_gpu_ms[0] <= hard_stop_ms,
+                "B={basis_count} first command {:.3} ms exceeds {hard_stop_ms:.0} ms",
+                control_gpu_ms[0],
+            );
+            assert!(
+                drift(&control_gpu_ms) <= 0.05,
+                "control drift {control_gpu_ms:?}"
+            );
+            assert!(
+                drift(&sampled_gpu_ms) <= 0.05,
+                "sampled drift {sampled_gpu_ms:?}"
+            );
+
+            let interpolated = control_gpu_ms
+                .windows(2)
+                .map(|pair| (pair[0] + pair[1]) * 0.5)
+                .collect::<Vec<_>>();
+            let perturbation = sampled_gpu_ms
+                .iter()
+                .zip(&interpolated)
+                .map(|(sampled, control)| sampled / control - 1.0)
+                .collect::<Vec<_>>();
+            let sample_is_valid = sampled
+                .iter()
+                .zip(&perturbation)
+                .map(|(arm, perturbation)| {
+                    let profile = arm.stages.as_ref().unwrap();
+                    (profile.raw_coverage - 1.0).abs() <= 0.005
+                        && profile.transition_ambiguity <= 0.025
+                        && perturbation.abs() <= 0.10
+                })
+                .collect::<Vec<_>>();
+            let accepted = sample_is_valid
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &valid)| valid.then_some(index))
+                .collect::<Vec<_>>();
+            assert!(accepted.len() >= 2, "sample validity {sample_is_valid:?}");
+
+            let stage_shares = sampled
+                .iter()
+                .map(|arm| {
+                    let profile = arm.stages.as_ref().unwrap();
+                    profile.stage_ms.map(|stage| stage / arm.gpu_ms)
+                })
+                .collect::<Vec<_>>();
+            let stage_repeat_delta: [f64; 4] = std::array::from_fn(|stage| {
+                let values = accepted.iter().map(|&index| stage_shares[index][stage]);
+                let minimum = values.clone().reduce(f64::min).unwrap();
+                let maximum = values.reduce(f64::max).unwrap();
+                maximum - minimum
+            });
+            assert!(
+                stage_repeat_delta.iter().all(|&delta| delta <= 0.02),
+                "stage-share repeat deltas {stage_repeat_delta:?}"
+            );
+
+            let stage_median_ms: [f64; 4] = std::array::from_fn(|stage| {
+                median(
+                    accepted
+                        .iter()
+                        .map(|&index| sampled[index].stages.as_ref().unwrap().stage_ms[stage]),
+                )
+            });
+            let raw_coverage = sampled
+                .iter()
+                .map(|arm| arm.stages.as_ref().unwrap().raw_coverage)
+                .collect::<Vec<_>>();
+            let ambiguity = sampled
+                .iter()
+                .map(|arm| arm.stages.as_ref().unwrap().transition_ambiguity)
+                .collect::<Vec<_>>();
+            let gap_ms = sampled
+                .iter()
+                .map(|arm| arm.stages.as_ref().unwrap().gap_ms)
+                .collect::<Vec<_>>();
+            let overlap_ms = sampled
+                .iter()
+                .map(|arm| arm.stages.as_ref().unwrap().overlap_ms)
+                .collect::<Vec<_>>();
             eprintln!(
-                "[muse-block-vjp-zero-q8] B={basis_count} samples_ms={samples:?} mean_ms={mean:.6}"
+                "[muse-block-vjp-attribution] control_ms={control_gpu_ms:?} sampled_ms={sampled_gpu_ms:?} perturbation={perturbation:?} coverage={raw_coverage:?} ambiguity={ambiguity:?} gap_ms={gap_ms:?} overlap_ms={overlap_ms:?} valid={sample_is_valid:?} stage_median_ms={stage_median_ms:?} stage_repeat_delta={stage_repeat_delta:?}"
             );
+
+            let mean = control_gpu_ms.iter().sum::<f64>() / control_gpu_ms.len() as f64;
             results.push((basis_count, mean));
         }
         let throughput_ratio = results[1].1 / results[0].1;
@@ -5029,6 +5457,7 @@ mod tests {
         eprintln!(
             "[muse-block-vjp-zero-q8] model_prepare_s={model_prepare_seconds:.3} B32/B8={throughput_ratio:.3} selected_B={selected_basis}"
         );
+        assert!(test_started.elapsed() <= Duration::from_secs(180));
     }
 
     #[test]

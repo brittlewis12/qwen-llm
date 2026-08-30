@@ -34,7 +34,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | four-pass bank attribution |
+| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | transposed-F16 FF sidecar gate |
 
 ## Current Status
 
@@ -87,6 +87,10 @@ Q8 records.
 A mixed-half operand VJP meets the released gate/up numerical envelope but is
 30.431% slower. The immediate common-Q8 microkernel search now pivots from
 unpriced retiles to owned bank-stage attribution.
+The legal four-pass B32/T16 observer attributes 40.414 of 50.609 ms, or
+79.8554%, to feed-forward reverse with exact output and dispatch topology. All
+three sampled arms pass coverage, ambiguity, perturbation, and repeatability
+gates.
 Muse identity resolution accepts only an existing cache root or fresh Hugging
 Face declarations and fails rather than hashing weights.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
@@ -94,24 +98,23 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Attribute the incumbent model-free target-51 B32/T16 R bank with four
-descriptor-backed serial encoders inside one command buffer. Bind feed-forward
-reverse to `scratch.hidden[2]`, attention-output reverse to `scratch.query[0]`,
-causal-GQA reverse to `scratch.query[1]`, `scratch.kv[0]`, `scratch.kv[1]`, and
-`scratch.query[2]`, and attention-input reverse to `grad_input`. Mechanically
-extract helpers while the ordinary path retains one serial encoder and exact
-dispatch order. Never call `sampleCountersInBuffer`, request dispatch-boundary
-samples, or use rotating or cumulative-prefix subtraction. Check command error
-before resolving timestamps. Warm ordinary and sampled arms once, then run
-`O/S/O/S/O/S/O`. Require residual-identity output bits and matching
-kernel/order/grid/thread topology; only encoder count may differ. Require raw
-span coverage within 0.5% of command-GPU time, signed transition ambiguity at
-or below 2.5%, sampled perturbation against interpolated ordinary controls at
-or below 10%, within-arm drift at or below 5%, and at least two valid sampled
-arms whose stage shares repeat within two percentage points. Assert
-retrospective elapsed time at or below 180 seconds and apply an external
-180-second cap. Load no model asset and authorize no optimization without a
-measured material stage ceiling.
+Qualify one private model-free transposed-F16 FF sidecar train at released
+`H=6656`, `F=19968`, and `n_query=512`. Use deterministic nonzero Q8 down,
+gate, and up matrices. Pack all three once per candidate sample with a tiled
+Q8-dequantizing transpose into preallocated F16 sidecars: down `[H,F]` and
+gate/up `[F,H]`, totaling exactly 797,442,048 bytes. The `cfg(test)` candidate
+must call `encode_mat_mat_f16_half_act_f32` directly; production remains Q8.
+Use one serial command per arm. Candidate commands contain three packs followed
+by eight complete FF reverse stages; controls contain eight incumbent Q8 FF
+stages over identical Q8-derived primals. Compare each command's
+`GPUEndTime-GPUStartTime`; allocation and differential readback remain outside
+both intervals. Compare the complete down intermediate, both gate/up outputs,
+and final FF output; require finite values, relative L2 at or below `5e-5`,
+scaled max `max_abs(candidate-control) / max(max_abs(control), 1)` at or below
+`2e-4`, and cosine at or above `0.9999999` for every comparison. Warm each arm
+once, take five order-alternating pairs, and require at least 15% median whole-FF
+saving. Assert retrospective elapsed time at or below 180 seconds and apply an
+external 180-second cap. Load no model asset or launch a corpus fit.
 
 ## Hard Exclusions
 
@@ -121,12 +124,14 @@ integrity.
 
 ## Blockers
 
-- The common Metal bank command train owns 24.069 of 27.326 R256 seconds.
+- FF reverse owns 79.8554% of the B32/T16 bank; common banks own 24.069 of
+  27.326 R256 seconds.
 - The production fitting corpus and prompt count are not yet selected.
 
 ## Fast Follows
 
-1. Design one bounded candidate only after attribution exposes a material stage.
+1. Qualify bounded per-block sidecar reuse only if the model-free FF gate clears;
+   partial banks remain Q8 until separately measured.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

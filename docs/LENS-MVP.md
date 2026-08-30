@@ -66,19 +66,22 @@ CLI proof. Self-contained F16 assembly, exact deployed output-tail replay, and
 F16 hidden-transport application are implemented. `read-full` now dispatches
 Muse assets with exact GGUF binding, selected-matrix verification, deployed
 post-softcap full-vocabulary logits, and optional target vectors.
-One real Q8 T=16 R row shard spanning all 51 sources completes in 15.61 seconds
-for one prompt (1.53 seconds capture, 14.08 seconds VJP) on the pre-integration
-CPU-attention path. Muse identity resolution now accepts only an existing cache
-root or fresh Hugging Face declarations and fails rather than hashing weights.
+One real Q8 T=16 R row shard spanning all 51 sources completed with 14.08
+seconds of VJP wall on the pre-integration CPU-attention path. The integrated
+hybrid completes the same B32 VJP in 5.016 seconds (`2.8068x`) and matches all
+10,862,592 prior F32 outputs within `1.863e-7` max absolute error. At 208 B32
+batches, the default 25-prompt job now projects to a 7.246-hour VJP-only floor.
+Muse identity resolution accepts only an existing cache root or fresh Hugging
+Face declarations and fails rather than hashing weights.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
 until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Run one bounded one-prompt, 32-row, all-source Q8 shard to replace the
-15.61-second baseline and project the complete fit. The model-free hybrid J/R
-composition gate already passes. Do not launch a corpus fit as part of this
-gate.
+Build a model-free 256-row block-major engine that reuses each prompt/layer
+replay across eight B32 reverse banks. Preserve B32 kernel execution and require
+full scalar-equivalent output before one bounded, no-publication R256 A/B. Do
+not launch a corpus fit as part of this gate.
 
 ## Hard Exclusions
 
@@ -88,12 +91,12 @@ integrity.
 
 ## Blockers
 
-- The hybrid full-bank/sliding-fallback scheduler has no real-Q8 timing yet.
+- The measured B32 schedule repeats row-independent replay 208 times per prompt.
 - The production fitting corpus and prompt count are not yet selected.
 
 ## Fast Follows
 
-1. Bank the sliding inverse-RoPE path only if the hybrid shard prices it.
+1. Bank sliding inverse-RoPE only after block-major replay reuse is qualified.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

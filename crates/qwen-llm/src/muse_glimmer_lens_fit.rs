@@ -430,6 +430,7 @@ impl MuseAttentionGeometry {
             || geometry.feed_forward == 0
             || geometry.q_heads == 0
             || geometry.kv_heads == 0
+            || geometry.head_dim == 0
             || !geometry.q_heads.is_multiple_of(geometry.kv_heads)
             || geometry.query != geometry.q_heads * geometry.head_dim
             || geometry.kv != geometry.kv_heads * geometry.head_dim
@@ -445,6 +446,7 @@ impl MuseAttentionGeometry {
 struct MuseAttentionForward {
     attention_output: Vec<f32>,
     gated_output: Vec<f32>,
+    probabilities: Vec<f32>,
 }
 
 struct MuseAttentionVjp {
@@ -525,6 +527,9 @@ fn cpu_causal_gqa_forward(
     let group = geometry.q_heads / geometry.kv_heads;
     let scale = (geometry.head_dim as f32).sqrt().recip();
     let mut attention_output = vec![0.0_f32; q_total];
+    let probability_rows = checked_mul(n_tokens, geometry.q_heads, "probability rows")?;
+    let mut probability_bank =
+        vec![0.0_f32; checked_mul(probability_rows, n_tokens, "probability elements")?];
     for token in 0..n_tokens {
         for q_head in 0..geometry.q_heads {
             let kv_head = q_head / group;
@@ -539,6 +544,9 @@ fn cpu_causal_gqa_forward(
                 probabilities[key_token] = score * scale;
             }
             softmax_in_place(&mut probabilities);
+            let probability_base = (token * geometry.q_heads + q_head) * n_tokens;
+            probability_bank[probability_base..probability_base + probabilities.len()]
+                .copy_from_slice(&probabilities);
             for key_token in 0..=token {
                 let v_base = (key_token * geometry.kv_heads + kv_head) * geometry.head_dim;
                 for dim in 0..geometry.head_dim {
@@ -554,9 +562,11 @@ fn cpu_causal_gqa_forward(
         .collect::<Vec<_>>();
     require_finite("attention output", &attention_output)?;
     require_finite("gated attention output", &gated_output)?;
+    require_finite("attention probabilities", &probability_bank)?;
     Ok(MuseAttentionForward {
         attention_output,
         gated_output,
+        probabilities: probability_bank,
     })
 }
 
@@ -653,6 +663,8 @@ struct ReplayTensors {
     k: MetalTensor,
     v: MetalTensor,
     attention_gate: MetalTensor,
+    attention_output: MetalTensor,
+    attention_probabilities: MetalTensor,
     gated_attention: MetalTensor,
     attention_branch_raw: MetalTensor,
     attention_branch: MetalTensor,
@@ -677,6 +689,7 @@ impl ReplayTensors {
         let query_shape = row_shape(geometry.query, n_tokens)?;
         let kv_shape = row_shape(geometry.kv, n_tokens)?;
         let ffn_shape = row_shape(geometry.feed_forward, n_tokens)?;
+        let probability_shape = vec![n_tokens as u64, geometry.q_heads as u64, n_tokens as u64];
         Ok(Self {
             input: from_f32(ctx, input, hidden_shape.clone())?,
             attention_normed: MetalTensor::zeros_f32(ctx, hidden_shape.clone())?,
@@ -686,6 +699,8 @@ impl ReplayTensors {
             k: MetalTensor::zeros_f32(ctx, kv_shape.clone())?,
             v: MetalTensor::zeros_f32(ctx, kv_shape)?,
             attention_gate: MetalTensor::zeros_f32(ctx, query_shape.clone())?,
+            attention_output: MetalTensor::zeros_f32(ctx, query_shape.clone())?,
+            attention_probabilities: MetalTensor::zeros_f32(ctx, probability_shape)?,
             gated_attention: MetalTensor::zeros_f32(ctx, query_shape)?,
             attention_branch_raw: MetalTensor::zeros_f32(ctx, hidden_shape.clone())?,
             attention_branch: MetalTensor::zeros_f32(ctx, hidden_shape.clone())?,
@@ -848,6 +863,8 @@ fn replay_state(
         )?;
     }
     let attention = cpu_causal_gqa_forward(&q, &k, &v, &attention_gate, n_tokens, geometry)?;
+    write_f32(&tensors.attention_output, &attention.attention_output)?;
+    write_f32(&tensors.attention_probabilities, &attention.probabilities)?;
     write_f32(&tensors.gated_attention, &attention.gated_output)?;
 
     run_command(ctx, |encoder| {
@@ -1570,9 +1587,13 @@ mod tests {
         rms_norm_mul_vjp_rows_f32_readback_for_test, silu_mul_vjp_f32_readback_for_test,
     };
     use crate::muse_glimmer_lens::muse_glimmer_selected_token_covectors;
-    use crate::muse_glimmer_metal::encode_muse_glimmer_rope_adjacent_pair_in_place_f32;
+    use crate::muse_glimmer_metal::{
+        encode_muse_glimmer_causal_gqa_vjp_bank_f32,
+        encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
+    };
     use crate::muse_glimmer_residency::{MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights};
     use crate::muse_glimmer_text_session::{MuseGlimmerTextForward, MuseGlimmerTextSession};
+    use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 
     fn tiny_geometry() -> MuseAttentionGeometry {
         MuseAttentionGeometry {
@@ -1592,6 +1613,280 @@ mod tests {
             .zip(right)
             .map(|(&left, &right)| left * right)
             .sum()
+    }
+
+    fn attention_geometry(
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> MuseAttentionGeometry {
+        MuseAttentionGeometry {
+            hidden: 6_656,
+            feed_forward: 19_968,
+            q_heads,
+            kv_heads,
+            head_dim,
+            query: q_heads * head_dim,
+            kv: kv_heads * head_dim,
+            rope_theta: 500_000.0,
+        }
+    }
+
+    fn attention_values(count: usize, multiplier: usize, modulus: usize, scale: f32) -> Vec<f32> {
+        (0..count)
+            .map(|index| {
+                ((index * multiplier + 3) % modulus) as f32 * scale - (modulus / 2) as f32 * scale
+            })
+            .collect()
+    }
+
+    fn attention_differential(actual: &[f32], expected: &[f32]) -> (f64, f64, f64) {
+        assert_eq!(actual.len(), expected.len());
+        let mut difference_sq = 0.0f64;
+        let mut actual_sq = 0.0f64;
+        let mut expected_sq = 0.0f64;
+        let mut dot = 0.0f64;
+        let mut max_difference = 0.0f64;
+        let mut max_expected = 0.0f64;
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            let actual = f64::from(actual);
+            let expected = f64::from(expected);
+            let difference = actual - expected;
+            difference_sq += difference * difference;
+            actual_sq += actual * actual;
+            expected_sq += expected * expected;
+            dot += actual * expected;
+            max_difference = max_difference.max(difference.abs());
+            max_expected = max_expected.max(expected.abs());
+        }
+        (
+            (difference_sq / expected_sq.max(f64::MIN_POSITIVE)).sqrt(),
+            max_difference / max_expected.max(1.0),
+            dot / (actual_sq * expected_sq).sqrt(),
+        )
+    }
+
+    struct AttentionBankBuffers {
+        query: MetalTensor,
+        key: MetalTensor,
+        value: MetalTensor,
+        gate: MetalTensor,
+        attention_output: MetalTensor,
+        probabilities: MetalTensor,
+        grad_gated: MetalTensor,
+        grad_query: MetalTensor,
+        partial_grad_key: MetalTensor,
+        partial_grad_value: MetalTensor,
+        grad_key: MetalTensor,
+        grad_value: MetalTensor,
+        grad_gate: MetalTensor,
+        basis_count: usize,
+        n_tokens: usize,
+        geometry: MuseAttentionGeometry,
+    }
+
+    impl AttentionBankBuffers {
+        #[allow(clippy::too_many_arguments)]
+        fn new(
+            ctx: &MetalContext,
+            q: &[f32],
+            k: &[f32],
+            v: &[f32],
+            gate: &[f32],
+            forward: &MuseAttentionForward,
+            grad_gated: &[f32],
+            basis_count: usize,
+            n_tokens: usize,
+            geometry: MuseAttentionGeometry,
+        ) -> Self {
+            let bank_rows = basis_count * n_tokens;
+            let partial_shape = vec![
+                geometry.head_dim as u64,
+                n_tokens as u64,
+                geometry.q_heads as u64,
+                basis_count as u64,
+            ];
+            Self {
+                query: from_f32(ctx, q, row_shape(geometry.query, n_tokens).unwrap()).unwrap(),
+                key: from_f32(ctx, k, row_shape(geometry.kv, n_tokens).unwrap()).unwrap(),
+                value: from_f32(ctx, v, row_shape(geometry.kv, n_tokens).unwrap()).unwrap(),
+                gate: from_f32(ctx, gate, row_shape(geometry.query, n_tokens).unwrap()).unwrap(),
+                attention_output: from_f32(
+                    ctx,
+                    &forward.attention_output,
+                    row_shape(geometry.query, n_tokens).unwrap(),
+                )
+                .unwrap(),
+                probabilities: from_f32(
+                    ctx,
+                    &forward.probabilities,
+                    vec![n_tokens as u64, geometry.q_heads as u64, n_tokens as u64],
+                )
+                .unwrap(),
+                grad_gated: from_f32(
+                    ctx,
+                    grad_gated,
+                    row_shape(geometry.query, bank_rows).unwrap(),
+                )
+                .unwrap(),
+                grad_query: MetalTensor::zeros_f32(
+                    ctx,
+                    row_shape(geometry.query, bank_rows).unwrap(),
+                )
+                .unwrap(),
+                partial_grad_key: MetalTensor::zeros_f32(ctx, partial_shape.clone()).unwrap(),
+                partial_grad_value: MetalTensor::zeros_f32(ctx, partial_shape).unwrap(),
+                grad_key: MetalTensor::zeros_f32(ctx, row_shape(geometry.kv, bank_rows).unwrap())
+                    .unwrap(),
+                grad_value: MetalTensor::zeros_f32(ctx, row_shape(geometry.kv, bank_rows).unwrap())
+                    .unwrap(),
+                grad_gate: MetalTensor::zeros_f32(
+                    ctx,
+                    row_shape(geometry.query, bank_rows).unwrap(),
+                )
+                .unwrap(),
+                basis_count,
+                n_tokens,
+                geometry,
+            }
+        }
+
+        fn run(&self, ctx: &MetalContext) -> f64 {
+            let command = ctx.queue.commandBuffer().expect("attention VJP command");
+            let encoder = KernelEncoder::begin(&command);
+            encode_muse_glimmer_causal_gqa_vjp_bank_f32(
+                ctx,
+                &encoder,
+                &self.query,
+                &self.key,
+                &self.value,
+                &self.gate,
+                &self.attention_output,
+                &self.probabilities,
+                &self.grad_gated,
+                &self.grad_query,
+                &self.partial_grad_key,
+                &self.partial_grad_value,
+                &self.grad_key,
+                &self.grad_value,
+                &self.grad_gate,
+                self.basis_count,
+                self.n_tokens,
+                self.geometry.q_heads,
+                self.geometry.kv_heads,
+                self.geometry.head_dim,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{:?}", command.error());
+            let start = command.GPUStartTime();
+            let end = command.GPUEndTime();
+            assert!(start.is_finite() && end.is_finite() && start > 0.0 && end > start);
+            (end - start) * 1.0e3
+        }
+    }
+
+    #[test]
+    fn metal_causal_gqa_vjp_bank_matches_cpu() {
+        let ctx = MetalContext::new().unwrap();
+        for (geometry, n_tokens, basis_count) in [
+            (attention_geometry(4, 2, 32), 3usize, 1usize),
+            (attention_geometry(32, 2, 128), 16, 32),
+        ] {
+            let q = attention_values(n_tokens * geometry.query, 17, 101, 0.002);
+            let k = attention_values(n_tokens * geometry.kv, 13, 89, 0.0025);
+            let v = attention_values(n_tokens * geometry.kv, 19, 97, 0.003);
+            let gate = attention_values(n_tokens * geometry.query, 11, 83, 0.02);
+            let grad_gated =
+                attention_values(basis_count * n_tokens * geometry.query, 23, 107, 0.004);
+            let forward = cpu_causal_gqa_forward(&q, &k, &v, &gate, n_tokens, geometry).unwrap();
+            let buffers = AttentionBankBuffers::new(
+                &ctx,
+                &q,
+                &k,
+                &v,
+                &gate,
+                &forward,
+                &grad_gated,
+                basis_count,
+                n_tokens,
+                geometry,
+            );
+            let gpu_ms = buffers.run(&ctx);
+
+            let mut expected_q = Vec::with_capacity(grad_gated.len());
+            let mut expected_k = Vec::with_capacity(basis_count * n_tokens * geometry.kv);
+            let mut expected_v = Vec::with_capacity(basis_count * n_tokens * geometry.kv);
+            let mut expected_gate = Vec::with_capacity(grad_gated.len());
+            for basis in 0..basis_count {
+                let start = basis * n_tokens * geometry.query;
+                let vjp = cpu_causal_gqa_vjp(
+                    &q,
+                    &k,
+                    &v,
+                    &gate,
+                    &grad_gated[start..start + n_tokens * geometry.query],
+                    n_tokens,
+                    geometry,
+                    &forward,
+                )
+                .unwrap();
+                expected_q.extend_from_slice(&vjp.grad_q);
+                expected_k.extend_from_slice(&vjp.grad_k);
+                expected_v.extend_from_slice(&vjp.grad_v);
+                expected_gate.extend_from_slice(&vjp.grad_gate);
+            }
+            for (name, actual, expected) in [
+                ("Q", read_f32(&buffers.grad_query), expected_q),
+                ("K", read_f32(&buffers.grad_key), expected_k),
+                ("V", read_f32(&buffers.grad_value), expected_v),
+                ("gate", read_f32(&buffers.grad_gate), expected_gate),
+            ] {
+                let differential = attention_differential(&actual, &expected);
+                eprintln!(
+                    "[muse-attn-vjp] B={basis_count} T={n_tokens} {name} differential={differential:?} gpu_ms={gpu_ms:.6}"
+                );
+                assert!(actual.iter().all(|value| value.is_finite()));
+                assert!(differential.0 <= 5.0e-5, "{name}: {differential:?}");
+                assert!(differential.1 <= 2.0e-4, "{name}: {differential:?}");
+                assert!(differential.2 >= 0.999_999_9, "{name}: {differential:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded model-free B32/T16 Muse attention VJP gate"]
+    fn profile_metal_causal_gqa_vjp_bank_b32_t16() {
+        let ctx = MetalContext::new().unwrap();
+        let geometry = attention_geometry(32, 2, 128);
+        let n_tokens = 16;
+        let basis_count = 32;
+        let q = attention_values(n_tokens * geometry.query, 17, 101, 0.002);
+        let k = attention_values(n_tokens * geometry.kv, 13, 89, 0.0025);
+        let v = attention_values(n_tokens * geometry.kv, 19, 97, 0.003);
+        let gate = attention_values(n_tokens * geometry.query, 11, 83, 0.02);
+        let grad_gated = attention_values(basis_count * n_tokens * geometry.query, 23, 107, 0.004);
+        let forward = cpu_causal_gqa_forward(&q, &k, &v, &gate, n_tokens, geometry).unwrap();
+        let buffers = AttentionBankBuffers::new(
+            &ctx,
+            &q,
+            &k,
+            &v,
+            &gate,
+            &forward,
+            &grad_gated,
+            basis_count,
+            n_tokens,
+            geometry,
+        );
+        buffers.run(&ctx);
+        let samples = (0..4).map(|_| buffers.run(&ctx)).collect::<Vec<_>>();
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let max = samples.iter().copied().fold(0.0f64, f64::max);
+        eprintln!("[muse-attn-vjp] B32/T16 gpu_ms={samples:?} mean={mean:.6} max={max:.6}");
+        assert!(max <= 5.0, "attention VJP exceeds 5 ms gate");
     }
 
     #[test]

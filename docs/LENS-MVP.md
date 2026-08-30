@@ -50,15 +50,17 @@ selected-token fitter remains its correctness oracle; extrapolating that path
 to the default 25-prompt corpus takes roughly nine days and must not be launched.
 The bank-specific native-Q8 transpose VJP is qualified at `25.36-26.69x` on
 all dominant Muse FFN shapes without changing the scalar dispatcher.
+The banked Metal causal-GQA VJP is CPU-oracle qualified and clears its B32/T16
+5 ms gate without a backward CPU boundary.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
 until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Build a shared-primal Muse one-block VJP bank with Metal causal-GQA backward and
-fixed scratch, then compose it into resumable full-R row slabs. Production must
-preserve the scalar estimator exactly. Do not run a long fit until a short
-component packet projects the complete 25-prompt build into an agreed
+Build a fixed-scratch full-attention Muse one-block VJP bank using periodic
+shared-primal nonlinear VJPs, then compose it into resumable full-R row slabs.
+Production must preserve the scalar estimator. Do not run a long fit until a
+short component packet projects the complete 25-prompt build into an agreed
 hours-scale envelope.
 
 ## Hard Exclusions
@@ -68,9 +70,9 @@ plugins, unrelated test repair, cross-device support, and production hardening.
 
 ## Blockers
 
-- Batched Metal causal-GQA VJP does not exist yet.
-- Shared-primal periodic RMS/SwiGLU VJPs and fixed scratch ownership do not
+- Shared-primal periodic RMS/SwiGLU VJPs and fixed one-block scratch do not
   exist yet.
+- Sliding-block bank integration still needs inverse RoPE over Q/K cotangents.
 
 ## Fast Follows
 

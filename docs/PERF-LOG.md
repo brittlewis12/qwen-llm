@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Muse Full-R Banked Attention VJP KEEP
+
+Status: keep the two-dispatch Metal causal-GQA VJP for the Muse `T<=16`
+fitting envelope. Integrate it into the fixed-scratch full-attention block bank.
+
+- B1/T3 and release B32/T16 match the independent CPU VJP; worst relative L2
+  is `3.92e-7`, and the scalar path still recomputes its own softmax.
+- A first-use B32/T16 command is `4.964 ms`. After one warmup, four commands are
+  `4.016/1.824/1.764/1.587 ms`, all below the preregistered 5 ms kill line.
+- The caller owns command custody and all scratch. The encoder performs two
+  serial dispatches with no allocation, wait, or readback.
+- Physical layouts, zero width, overlap, and concurrent custody are rejected.
+  No model asset or broad suite ran.
+
+Evidence: `docs/bench/2026-08-29-muse-full-r-attention-vjp-bank/`.
+Adversarial review: `01a05072-6951-7782-978a-2f274d90f474`.
+
 ## 2026-08-29 - Muse Full-R Q8 Transpose VJP KEEP
 
 Status: expose the R2C16K64 transpose through a bank-specific frozen-linear VJP

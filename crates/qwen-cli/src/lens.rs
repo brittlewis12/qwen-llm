@@ -187,7 +187,7 @@ struct FitTokensArgs {
     #[arg(long)]
     target_layer: u32,
 
-    /// Post-block sources; Muse requires exactly target_layer-1.
+    /// Strictly increasing post-block sources below the target layer.
     #[arg(long, value_delimiter = ',', required = true)]
     source_layers: Vec<u32>,
 

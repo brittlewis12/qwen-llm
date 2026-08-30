@@ -31,10 +31,6 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
         args.target_layer < config.layer_count,
         "--target-layer is outside Muse layer geometry"
     );
-    ensure!(
-        !config.sliding_layers[args.target_layer as usize],
-        "--target-layer must be a Muse full-attention layer"
-    );
     if let Some(&id) = args.token_ids.iter().find(|&&id| id >= config.vocab_size) {
         bail!(
             "--token-ids entry {id} is outside Muse vocab {}",
@@ -87,9 +83,10 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
         .context("create Muse lens runner")?;
     let hidden = config.hidden_size as usize;
     let count = args
-        .token_ids
+        .source_layers
         .len()
-        .checked_mul(hidden)
+        .checked_mul(args.token_ids.len())
+        .and_then(|count| count.checked_mul(hidden))
         .context("Muse accumulator size overflow")?;
     let mut sums = vec![0.0f32; count];
     let mut used_prompts = 0u64;
@@ -101,6 +98,7 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
         FitMethod::J => MuseGlimmerLensRule::J,
         FitMethod::R => MuseGlimmerLensRule::R,
     };
+    let traversed_blocks = ((args.source_layers[0] + 1)..=args.target_layer).collect::<Vec<_>>();
 
     for (index, prompt) in prompts.iter().enumerate() {
         if let Some(skipped) = super::skipped_prompt(prompt, args.skip_first) {
@@ -108,12 +106,13 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
             continue;
         }
         eprintln!(
-            "fit Muse prompt {}/{} id={} tokens={} selected_tokens={}",
+            "fit Muse prompt {}/{} id={} tokens={} selected_tokens={} sources={:?}",
             index + 1,
             prompts.len(),
             prompt.id,
             prompt.token_ids.len(),
-            args.token_ids.len()
+            args.token_ids.len(),
+            args.source_layers
         );
         runner
             .reset()
@@ -123,20 +122,23 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
             .iter()
             .map(|&id| id as u32)
             .collect::<Vec<_>>();
-        let capture = runner
-            .capture_fresh_lens_prompt(&tokens, args.target_layer)
+        let captures = runner
+            .capture_fresh_lens_prompt_blocks(&tokens, &traversed_blocks)
             .with_context(|| format!("capture Muse prompt {}", prompt.id))?;
         let fit = runner
-            .fit_adjacent_full_attention_selected_tokens(
-                &capture,
+            .fit_selected_tokens_to_sources(
+                &captures,
+                args.target_layer,
+                &args.source_layers,
                 &covectors,
                 args.skip_first,
                 rule,
             )
             .with_context(|| format!("fit Muse prompt {}", prompt.id))?;
         ensure!(
-            fit.source_block == args.source_layers[0]
+            fit.source_layers == args.source_layers
                 && fit.target_block == args.target_layer
+                && fit.method == rule
                 && fit.token_ids == args.token_ids
                 && fit.hidden_size == hidden
                 && fit.values.len() == sums.len(),
@@ -149,8 +151,10 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
             sums.iter().all(|v| v.is_finite()),
             "Muse fit accumulator became non-finite"
         );
-        attention_drift = attention_drift.max(fit.post_attention_replay_max_abs_error);
-        block_drift = block_drift.max(fit.post_block_replay_max_abs_error);
+        for diagnostic in fit.diagnostics {
+            attention_drift = attention_drift.max(diagnostic.post_attention_replay_max_abs_error);
+            block_drift = block_drift.max(diagnostic.post_block_replay_max_abs_error);
+        }
         used_prompts += 1;
         truncated_prompts += u64::from(prompt.truncated);
     }
@@ -168,7 +172,7 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
     let payload = artifact::Payload {
         path: artifact::PAYLOAD_NAME.into(),
         dtype: "f32_le".into(),
-        shape: [1, args.token_ids.len(), hidden],
+        shape: [args.source_layers.len(), args.token_ids.len(), hidden],
         byte_length: payload_bytes.len() as u64,
         blake3: blake3::hash(&payload_bytes).to_hex().to_string(),
     };
@@ -181,11 +185,11 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
         geometry: artifact::geometry(&config),
         transport: artifact::Transport {
             method: rule.as_str().into(),
-            rule_contract: artifact::RULE_CONTRACT.into(),
+            rule_contract: artifact::RULE_CONTRACT_V2.into(),
             target_layer: args.target_layer,
             source_layers: args.source_layers.clone(),
             coordinate: artifact::COORDINATE.into(),
-            estimator: artifact::ESTIMATOR.into(),
+            estimator: artifact::ESTIMATOR_V2.into(),
             reduction: artifact::REDUCTION.into(),
             replay_semantics: artifact::REPLAY_SEMANTICS.into(),
             production_semantics: artifact::PRODUCTION_SEMANTICS.into(),
@@ -297,8 +301,13 @@ fn validate_args(args: &FitTokensArgs) -> Result<()> {
         "Muse fitting requires a nonzero --target-layer"
     );
     ensure!(
-        args.source_layers == [args.target_layer - 1],
-        "Muse fitting requires exactly --source-layers target_layer-1"
+        !args.source_layers.is_empty()
+            && args.source_layers.windows(2).all(|pair| pair[0] < pair[1])
+            && args
+                .source_layers
+                .iter()
+                .all(|&source| source < args.target_layer),
+        "Muse --source-layers must be nonempty, strictly increasing, and below --target-layer"
     );
     ensure!(
         args.max_tokens > 0 && args.max_tokens <= MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS,
@@ -355,12 +364,16 @@ mod tests {
     }
 
     #[test]
-    fn first_contract_rejects_non_adjacent_or_batched_fit() {
+    fn multi_source_contract_accepts_arbitrary_sorted_sources_and_rejects_bad_bounds() {
         let mut value = args();
         value.dim_batch = 2;
         assert!(validate_args(&value).is_err());
         let mut value = args();
-        value.source_layers = vec![49];
+        value.source_layers = vec![49, 50];
+        validate_args(&value).unwrap();
+        value.source_layers = vec![50, 49];
+        assert!(validate_args(&value).is_err());
+        value.source_layers = vec![50, 51];
         assert!(validate_args(&value).is_err());
         let mut value = args();
         value.resume = true;

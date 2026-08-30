@@ -7,10 +7,13 @@ use std::collections::HashSet;
 
 pub(crate) const SCHEMA: &str = "muse_glimmer.selected_token_transport";
 pub(crate) const SCHEMA_VERSION: u32 = 1;
-pub(crate) const RULE_CONTRACT: &str = "muse_glimmer_one_full_attention_block_v1";
+pub(crate) const RULE_CONTRACT_V1: &str = "muse_glimmer_one_full_attention_block_v1";
+pub(crate) const RULE_CONTRACT_V2: &str = "muse_glimmer_composed_attention_blocks_v2";
 pub(crate) const COORDINATE: &str = "post_block_residual_hugging_face_block_output";
-pub(crate) const ESTIMATOR: &str =
+pub(crate) const ESTIMATOR_V1: &str =
     "selected_score_covector_vjp_through_one_adjacent_full_attention_block";
+pub(crate) const ESTIMATOR_V2: &str =
+    "selected_score_covector_composed_vjp_to_arbitrary_post_block_sources_v2";
 pub(crate) const REDUCTION: &str =
     "place_covector_at_each_position_skip_first..T-1; mean_matching_source_rows; mean_used_prompts";
 pub(crate) const REPLAY_SEMANTICS: &str = "smooth_f32_model_level_block_replay_and_vjp";
@@ -211,9 +214,13 @@ pub(crate) fn validate(
             && manifest.geometry.sliding_layers == expected.sliding_layers,
         "Muse artifact geometry differs from running model"
     );
+    let adjacent_v1 = manifest.transport.rule_contract == RULE_CONTRACT_V1
+        && manifest.transport.estimator == ESTIMATOR_V1;
+    let composed_v2 = manifest.transport.rule_contract == RULE_CONTRACT_V2
+        && manifest.transport.estimator == ESTIMATOR_V2;
     ensure!(
-        manifest.transport.rule_contract == RULE_CONTRACT,
-        "unsupported Muse lens rule contract"
+        adjacent_v1 || composed_v2,
+        "unsupported or mixed Muse lens rule/estimator contract"
     );
     ensure!(
         matches!(manifest.transport.method.as_str(), "J" | "R"),
@@ -224,8 +231,7 @@ pub(crate) fn validate(
         "unsupported Muse readout coordinate"
     );
     ensure!(
-        manifest.transport.estimator == ESTIMATOR
-            && manifest.transport.reduction == REDUCTION
+        manifest.transport.reduction == REDUCTION
             && manifest.transport.replay_semantics == REPLAY_SEMANTICS
             && manifest.transport.production_semantics == PRODUCTION_SEMANTICS,
         "unsupported Muse estimator or replay semantics"
@@ -235,13 +241,27 @@ pub(crate) fn validate(
         "Muse target layer is out of range"
     );
     ensure!(
-        !config.sliding_layers[manifest.transport.target_layer as usize],
-        "Muse target must be a full-attention layer"
+        !manifest.transport.source_layers.is_empty()
+            && manifest
+                .transport
+                .source_layers
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && manifest
+                .transport
+                .source_layers
+                .iter()
+                .all(|&source| source < manifest.transport.target_layer
+                    && source < config.layer_count),
+        "Muse artifact source layers must be nonempty, strictly increasing, and below target"
     );
-    ensure!(
-        manifest.transport.source_layers == [manifest.transport.target_layer - 1],
-        "Muse artifact must contain exactly the adjacent source layer"
-    );
+    if adjacent_v1 {
+        ensure!(
+            manifest.transport.source_layers == [manifest.transport.target_layer - 1]
+                && !config.sliding_layers[manifest.transport.target_layer as usize],
+            "Muse v1 artifact requires one adjacent source and a full-attention target"
+        );
+    }
     ensure!(
         !manifest.selected.token_ids.is_empty()
             && manifest.selected.token_ids.len() <= MUSE_GLIMMER_LENS_MAX_SELECTED_TOKENS,
@@ -274,7 +294,7 @@ pub(crate) fn validate(
         "unsupported Muse payload encoding"
     );
     let shape = [
-        1,
+        manifest.transport.source_layers.len(),
         manifest.selected.token_ids.len(),
         config.hidden_size as usize,
     ];
@@ -347,11 +367,11 @@ mod tests {
             geometry: geometry(config),
             transport: Transport {
                 method: "J".into(),
-                rule_contract: RULE_CONTRACT.into(),
+                rule_contract: RULE_CONTRACT_V1.into(),
                 target_layer: 51,
                 source_layers: vec![50],
                 coordinate: COORDINATE.into(),
-                estimator: ESTIMATOR.into(),
+                estimator: ESTIMATOR_V1.into(),
                 reduction: REDUCTION.into(),
                 replay_semantics: REPLAY_SEMANTICS.into(),
                 production_semantics: PRODUCTION_SEMANTICS.into(),
@@ -447,12 +467,80 @@ mod tests {
     }
 
     #[test]
+    fn manifest_validation_accepts_v1_and_v2_but_not_mixed_contracts() {
+        let config = MuseGlimmerConfig::unsloth_release_reference();
+        let content = "00".repeat(32);
+        let mut manifest = valid_manifest(&config);
+        validate(
+            &manifest,
+            &config,
+            MuseGlimmerArtifactProfile::UnslothQ8_0,
+            &content,
+        )
+        .unwrap();
+
+        manifest.transport.rule_contract = RULE_CONTRACT_V2.into();
+        manifest.transport.estimator = ESTIMATOR_V2.into();
+        manifest.transport.source_layers = vec![49, 50];
+        manifest.payload.shape[0] = 2;
+        manifest.payload.byte_length *= 2;
+        validate(
+            &manifest,
+            &config,
+            MuseGlimmerArtifactProfile::UnslothQ8_0,
+            &content,
+        )
+        .unwrap();
+
+        let sliding_target = config
+            .sliding_layers
+            .iter()
+            .enumerate()
+            .find_map(|(layer, &sliding)| (layer > 0 && sliding).then_some(layer as u32))
+            .unwrap();
+        manifest.transport.target_layer = sliding_target;
+        manifest.transport.source_layers = vec![sliding_target - 1];
+        manifest.payload.shape[0] = 1;
+        manifest.payload.byte_length /= 2;
+        validate(
+            &manifest,
+            &config,
+            MuseGlimmerArtifactProfile::UnslothQ8_0,
+            &content,
+        )
+        .unwrap();
+        manifest.transport.rule_contract = RULE_CONTRACT_V1.into();
+        manifest.transport.estimator = ESTIMATOR_V1.into();
+        assert!(
+            validate(
+                &manifest,
+                &config,
+                MuseGlimmerArtifactProfile::UnslothQ8_0,
+                &content
+            )
+            .is_err()
+        );
+
+        manifest.transport.rule_contract = RULE_CONTRACT_V2.into();
+        manifest.transport.estimator = ESTIMATOR_V1.into();
+        assert!(
+            validate(
+                &manifest,
+                &config,
+                MuseGlimmerArtifactProfile::UnslothQ8_0,
+                &content
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn payload_indexing_is_source_token_hidden() {
         let hidden = 3;
         let tokens = 2;
-        let values = [0., 1., 2., 3., 4., 5.];
-        let offset = (0 * tokens + 1) * hidden;
-        assert_eq!(&values[offset..offset + hidden], &[3., 4., 5.]);
+        let values = [0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11.];
+        let offset = (1 * tokens + 1) * hidden;
+        assert_eq!(&values[offset..offset + hidden], &[9., 10., 11.]);
     }
 
     #[test]
@@ -466,7 +554,7 @@ mod tests {
             geometry: geometry(&MuseGlimmerConfig::unsloth_release_reference()),
             transport: Transport {
                 method: "J".into(),
-                rule_contract: RULE_CONTRACT.into(),
+                rule_contract: RULE_CONTRACT_V1.into(),
                 target_layer: 51,
                 source_layers: vec![50],
                 coordinate: COORDINATE.into(),

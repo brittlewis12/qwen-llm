@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 struct LoadedMuseLens {
     method: String,
     target_layer: u32,
-    source_layer: u32,
+    source_layers: Vec<u32>,
     token_ids: Vec<u32>,
     hidden_size: usize,
     values: Vec<f32>,
@@ -133,7 +133,7 @@ pub(crate) fn run(
     }
     let capture_layers = lenses
         .values()
-        .map(|lens| lens.source_layer)
+        .flat_map(|lens| lens.source_layers.iter().copied())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -144,13 +144,7 @@ pub(crate) fn run(
         .collect::<HashMap<_, _>>();
     for readout in &plan.readouts {
         let lens = &lenses[&readout.lens];
-        ensure!(
-            selector_values(&readout.scope.layers, config.layer_count)?.as_slice()
-                == [lens.source_layer],
-            "Muse readout {} must select exactly artifact source layer {}",
-            readout.id,
-            lens.source_layer
-        );
+        validate_readout_source_subset(readout, lens, config.layer_count)?;
     }
 
     let forward_count = prompt_ids
@@ -251,11 +245,30 @@ fn load_muse_artifact(
     Ok(LoadedMuseLens {
         method: manifest.transport.method,
         target_layer: manifest.transport.target_layer,
-        source_layer: manifest.transport.source_layers[0],
+        source_layers: manifest.transport.source_layers,
         token_ids: manifest.selected.token_ids,
         hidden_size: config.hidden_size as usize,
         values,
     })
+}
+
+fn validate_readout_source_subset(
+    readout: &super::lens_run::ReadoutDefinition,
+    lens: &LoadedMuseLens,
+    layer_count: u32,
+) -> Result<Vec<u32>> {
+    let selected = selector_values(&readout.scope.layers, layer_count)?;
+    ensure!(
+        !selected.is_empty()
+            && selected
+                .iter()
+                .all(|layer| lens.source_layers.binary_search(layer).is_ok()),
+        "Muse readout {} layers must be a nonempty subset of lens {} source layers {:?}",
+        readout.id,
+        readout.lens,
+        lens.source_layers
+    );
+    Ok(selected)
 }
 
 fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
@@ -370,13 +383,18 @@ fn matches(scope: &Scope, event: Event, layer: u32) -> bool {
         }
 }
 
-fn score(lens: &LoadedMuseLens, row: &[f32], top_k: usize) -> Vec<LiveScore> {
+fn score(lens: &LoadedMuseLens, layer: u32, row: &[f32], top_k: usize) -> Result<Vec<LiveScore>> {
+    let source_slot = lens
+        .source_layers
+        .binary_search(&layer)
+        .map_err(|_| anyhow::anyhow!("Muse lens has no fitted source layer {layer}"))?;
+    let source_offset = source_slot * lens.token_ids.len() * lens.hidden_size;
     let mut scores = lens
         .token_ids
         .iter()
         .enumerate()
         .map(|(slot, &token)| {
-            let offset = slot * lens.hidden_size;
+            let offset = source_offset + slot * lens.hidden_size;
             let value = row
                 .iter()
                 .zip(&lens.values[offset..offset + lens.hidden_size])
@@ -387,7 +405,7 @@ fn score(lens: &LoadedMuseLens, row: &[f32], top_k: usize) -> Vec<LiveScore> {
         .collect::<Vec<_>>();
     scores.sort_unstable_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
     scores.truncate(top_k.min(scores.len()));
-    scores
+    Ok(scores
         .into_iter()
         .map(|(row_id, token, value)| LiveScore {
             token_id: Some(token as i32),
@@ -396,7 +414,7 @@ fn score(lens: &LoadedMuseLens, row: &[f32], top_k: usize) -> Vec<LiveScore> {
             label: None,
             score: value as f32,
         })
-        .collect()
+        .collect())
 }
 
 fn forward_event(
@@ -412,26 +430,40 @@ fn forward_event(
     let captured = runner
         .forward_token_capture_post_blocks(token, capture_layers)
         .with_context(|| format!("forward Muse {} event {}", event.label(), event.index()))?;
+    append_live_readouts(plan, lenses, layer_slots, &captured, event, output)?;
+    Ok(captured.logits)
+}
+
+fn append_live_readouts(
+    plan: &LensPlan,
+    lenses: &HashMap<String, LoadedMuseLens>,
+    layer_slots: &HashMap<u32, usize>,
+    captured: &qwen_llm::muse_glimmer_text_session::MuseGlimmerPostBlockForward,
+    event: Event,
+    output: &mut Vec<LiveReadout>,
+) -> Result<()> {
     for readout in &plan.readouts {
         let lens = &lenses[&readout.lens];
-        if !matches(&readout.scope, event, lens.source_layer) {
-            continue;
+        for &layer in &lens.source_layers {
+            if !matches(&readout.scope, event, layer) {
+                continue;
+            }
+            let row = captured
+                .layer_values(layer_slots[&layer])
+                .context("Muse captured source layer is missing")?;
+            output.push(LiveReadout {
+                id: readout.id.clone(),
+                lens: readout.lens.clone(),
+                method: lens.method.clone(),
+                source_layer: layer,
+                target_layer: Some(lens.target_layer),
+                phase: event.label(),
+                index: event.index(),
+                scores: score(lens, layer, row, readout.top_k)?,
+            });
         }
-        let row = captured
-            .layer_values(layer_slots[&lens.source_layer])
-            .context("Muse captured source layer is missing")?;
-        output.push(LiveReadout {
-            id: readout.id.clone(),
-            lens: readout.lens.clone(),
-            method: lens.method.clone(),
-            source_layer: lens.source_layer,
-            target_layer: Some(lens.target_layer),
-            phase: event.label(),
-            index: event.index(),
-            scores: score(lens, row, readout.top_k),
-        });
     }
-    Ok(captured.logits)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -444,17 +476,55 @@ mod tests {
         let lens = LoadedMuseLens {
             method: "J".into(),
             target_layer: 51,
-            source_layer: 50,
+            source_layers: vec![49, 50],
             token_ids: vec![9, 3],
             hidden_size: 2,
-            values: vec![1.0, 2.0, 1.0, 2.0],
+            values: vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0, 2.0],
         };
-        let scores = score(&lens, &[3.0, 4.0], 2);
+        let scores = score(&lens, 50, &[3.0, 4.0], 2).unwrap();
         assert_eq!(
             scores.iter().map(|s| s.token_id).collect::<Vec<_>>(),
             vec![Some(3), Some(9)]
         );
         assert_eq!(scores[0].score, 11.0);
+    }
+
+    #[test]
+    fn source_selector_must_be_a_nonempty_artifact_subset() {
+        let lens = LoadedMuseLens {
+            method: "J".into(),
+            target_layer: 51,
+            source_layers: vec![49, 50],
+            token_ids: vec![1],
+            hidden_size: 1,
+            values: vec![1.0, 2.0],
+        };
+        let plan: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"native_selected","id":"x","artifact":"a"}],"directions":[],"operations":[],"readouts":[{"id":"r","lens":"x","scope":{"layers":{"kind":"values","values":[49,50]},"prefill":{"kind":"values","values":[0]}},"top_k":1}]})).unwrap();
+        assert_eq!(
+            validate_readout_source_subset(&plan.readouts[0], &lens, 52).unwrap(),
+            vec![49, 50]
+        );
+        let bad: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"native_selected","id":"x","artifact":"a"}],"directions":[],"operations":[],"readouts":[{"id":"r","lens":"x","scope":{"layers":{"kind":"values","values":[48,50]},"prefill":{"kind":"values","values":[0]}},"top_k":1}]})).unwrap();
+        assert!(validate_readout_source_subset(&bad.readouts[0], &lens, 52).is_err());
+    }
+
+    #[test]
+    fn event_layer_matching_scores_each_selected_source_offset() {
+        let lens = LoadedMuseLens {
+            method: "R".into(),
+            target_layer: 51,
+            source_layers: vec![49, 50],
+            token_ids: vec![7],
+            hidden_size: 2,
+            values: vec![1.0, 0.0, 0.0, 2.0],
+        };
+        let plan: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"native_selected","id":"x","artifact":"a"}],"directions":[],"operations":[],"readouts":[{"id":"r","lens":"x","scope":{"layers":{"kind":"values","values":[49,50]},"prefill":{"kind":"values","values":[1]}},"top_k":1}]})).unwrap();
+        let scope = &plan.readouts[0].scope;
+        assert!(matches(scope, Event::Prefill(1), 49));
+        assert!(matches(scope, Event::Prefill(1), 50));
+        assert!(!matches(scope, Event::Prefill(0), 49));
+        assert_eq!(score(&lens, 49, &[3.0, 4.0], 1).unwrap()[0].score, 3.0);
+        assert_eq!(score(&lens, 50, &[3.0, 4.0], 1).unwrap()[0].score, 8.0);
     }
 
     #[test]
@@ -487,7 +557,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires MUSE_GLIMMER_Q8_GGUF and loads the real 30B Q8 model twice"]
-    fn real_q8_fit_payload_fresh_runner_score_matches_direct_f64_layer_50_dot() -> Result<()> {
+    fn real_q8_multi_source_scores_match_direct_f64_dots() -> Result<()> {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
             .expect("set MUSE_GLIMMER_Q8_GGUF to the authenticated Unsloth Q8 GGUF");
         let root = std::env::temp_dir().join(format!(
@@ -523,14 +593,21 @@ mod tests {
         let mut model = MuseGlimmerLoadedModel::load(&context, &gguf, prompt.len())?;
         let covectors = model.selected_token_lens_covectors(&context, &[selected_id])?;
         let mut runner = model.create_runner(&context)?;
-        let capture = runner.capture_fresh_lens_prompt(&prompt, 51)?;
-        let mut artifacts = Vec::new();
+        let captures = runner.capture_fresh_lens_prompt_blocks(&prompt, &[50, 51])?;
+        let source_layers = [49, 50];
+        let mut artifacts = HashMap::new();
         for rule in [
             qwen_llm::muse_glimmer_lens::MuseGlimmerLensRule::J,
             qwen_llm::muse_glimmer_lens::MuseGlimmerLensRule::R,
         ] {
-            let fit = runner
-                .fit_adjacent_full_attention_selected_tokens(&capture, &covectors, 0, rule)?;
+            let fit = runner.fit_selected_tokens_to_sources(
+                &captures,
+                51,
+                &source_layers,
+                &covectors,
+                0,
+                rule,
+            )?;
             let directory = root.join(rule.as_str().to_ascii_lowercase());
             std::fs::create_dir(&directory)?;
             let payload = fit
@@ -558,12 +635,10 @@ mod tests {
             } else {
                 directory.join(artifact::MANIFEST_NAME)
             };
-            artifacts.push(load_muse_artifact(
-                &load_path,
-                &config,
-                profile,
-                &content_id,
-            )?);
+            artifacts.insert(
+                rule.as_str().to_string(),
+                load_muse_artifact(&load_path, &config, profile, &content_id)?,
+            );
         }
         drop(runner);
         drop(model);
@@ -572,25 +647,64 @@ mod tests {
         let context = MetalContext::new()?;
         let mut model = MuseGlimmerLoadedModel::load(&context, &gguf, 1)?;
         let mut runner = model.create_runner(&context)?;
-        let live = runner.forward_token_capture_post_blocks(config.bos_token_id, &[50])?;
-        let residual = live
-            .layer_values(0)
-            .context("missing layer-50 proof capture")?;
-        for lens in artifacts {
-            let emitted = score(&lens, residual, 1)[0].score;
+        let live = runner.forward_token_capture_post_blocks(config.bos_token_id, &source_layers)?;
+        let plan: LensPlan = serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [
+                {"kind":"native_selected","id":"J","artifact":"j"},
+                {"kind":"native_selected","id":"R","artifact":"r"}
+            ],
+            "directions": [],
+            "operations": [],
+            "readouts": [
+                {"id":"j","lens":"J","scope":{"layers":{"kind":"values","values":[49,50]},"prefill":{"kind":"values","values":[0]}},"top_k":1},
+                {"id":"r","lens":"R","scope":{"layers":{"kind":"values","values":[49,50]},"prefill":{"kind":"values","values":[0]}},"top_k":1}
+            ]
+        }))?;
+        let layer_slots = source_layers
+            .iter()
+            .enumerate()
+            .map(|(slot, &layer)| (layer, slot))
+            .collect::<HashMap<_, _>>();
+        let mut emitted = Vec::new();
+        append_live_readouts(
+            &plan,
+            &artifacts,
+            &layer_slots,
+            &live,
+            Event::Prefill(0),
+            &mut emitted,
+        )?;
+        ensure!(
+            emitted.len() == 4,
+            "real proof did not emit four source scores"
+        );
+        for readout in emitted {
+            let lens = &artifacts[&readout.lens];
+            let source_slot = lens
+                .source_layers
+                .binary_search(&readout.source_layer)
+                .unwrap();
+            let residual = live
+                .layer_values(layer_slots[&readout.source_layer])
+                .with_context(|| format!("missing layer-{} proof capture", readout.source_layer))?;
+            let offset = source_slot * lens.token_ids.len() * lens.hidden_size;
+            let row = &lens.values[offset..offset + lens.hidden_size];
             let manual = residual
                 .iter()
-                .zip(&lens.values)
+                .zip(row)
                 .map(|(&left, &right)| f64::from(left) * f64::from(right))
                 .sum::<f64>();
+            let score = readout.scores[0].score;
             eprintln!(
-                "muse_method={} layer50_emitted={emitted:.9e} manual_f64={manual:.17e}",
-                lens.method
+                "muse_method={} source_layer={} emitted={score:.9e} manual_f64={manual:.17e}",
+                lens.method, readout.source_layer
             );
             ensure!(
-                emitted.to_bits() == (manual as f32).to_bits(),
-                "{} emitted score differs from direct F64 dot",
-                lens.method
+                score.to_bits() == (manual as f32).to_bits(),
+                "{} layer {} emitted score differs from direct F64 dot",
+                lens.method,
+                readout.source_layer
             );
         }
         Ok(())
@@ -602,7 +716,7 @@ mod tests {
         content_id: &str,
         selected_id: u32,
         rule: qwen_llm::muse_glimmer_lens::MuseGlimmerLensRule,
-        fit: &qwen_llm::muse_glimmer_lens_fit::MuseGlimmerAdjacentSelectedTokenFit,
+        fit: &qwen_llm::muse_glimmer_lens_fit::MuseGlimmerMultiSourceSelectedTokenFit,
         payload: &[u8],
     ) -> artifact::Manifest {
         artifact::Manifest {
@@ -614,11 +728,11 @@ mod tests {
             geometry: artifact::geometry(config),
             transport: artifact::Transport {
                 method: rule.as_str().into(),
-                rule_contract: artifact::RULE_CONTRACT.into(),
+                rule_contract: artifact::RULE_CONTRACT_V2.into(),
                 target_layer: 51,
-                source_layers: vec![50],
+                source_layers: fit.source_layers.clone(),
                 coordinate: artifact::COORDINATE.into(),
-                estimator: artifact::ESTIMATOR.into(),
+                estimator: artifact::ESTIMATOR_V2.into(),
                 reduction: artifact::REDUCTION.into(),
                 replay_semantics: artifact::REPLAY_SEMANTICS.into(),
                 production_semantics: artifact::PRODUCTION_SEMANTICS.into(),
@@ -634,7 +748,7 @@ mod tests {
             payload: artifact::Payload {
                 path: artifact::PAYLOAD_NAME.into(),
                 dtype: "f32_le".into(),
-                shape: [1, 1, config.hidden_size as usize],
+                shape: [fit.source_layers.len(), 1, config.hidden_size as usize],
                 byte_length: payload.len() as u64,
                 blake3: blake3::hash(payload).to_hex().to_string(),
             },
@@ -650,8 +764,15 @@ mod tests {
             },
             replay: artifact::Replay {
                 f32_vs_production_f16_kv_post_attention_max_abs: fit
-                    .post_attention_replay_max_abs_error,
-                f32_vs_production_f16_kv_post_block_max_abs: fit.post_block_replay_max_abs_error,
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.post_attention_replay_max_abs_error)
+                    .fold(0.0, f32::max),
+                f32_vs_production_f16_kv_post_block_max_abs: fit
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.post_block_replay_max_abs_error)
+                    .fold(0.0, f32::max),
             },
             provenance: artifact::Provenance {
                 build_commit: env!("QWEN_BUILD_COMMIT").into(),

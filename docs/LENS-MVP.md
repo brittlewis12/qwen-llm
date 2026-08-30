@@ -34,7 +34,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | measure one hybrid shard |
+| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | packed-Q8 sidecar gate |
 
 ## Current Status
 
@@ -79,6 +79,8 @@ bank now replaces the CPU fallback for all 38 sliding blocks: block 50 improves
 from 77.520 to 57.232 ms, while promoted R256 engine wall falls to 27.326
 seconds. Full and sliding commands are at parity, and the engine projection is
 now 4.934 hours.
+Bounded probes reject B64 outer banks, Q256 query tiles, and C32 input tiles;
+the Q256 and C32 gates were model-free, and production remains B32/C16/Q128.
 Muse identity resolution accepts only an existing cache root or fresh Hugging
 Face declarations and fails rather than hashing weights.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
@@ -86,11 +88,16 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Qualify one private model-free Q8 C32/Q128 kernel against incumbent C16/Q128 at
-released `6656x19968` FFN gate/up and transposed down shapes with `n_query=512`.
-Warm once, take five alternating GPU-time samples, require bitwise equality and
-25% on both directions, and hard-stop at 180 seconds. Do not load a model asset
-or launch a corpus fit.
+Qualify one private model-free block-major Q8 sidecar against the incumbent
+row-major C16/Q128/K64 kernel at released `6656x19968` FFN gate/up and
+transposed down shapes with `n_query=512`. Use deterministic nonzero,
+block-varying Q8 records and separate outputs. Warm each arm, then take five
+alternating paired trains under the same command-GPU timing scope. Candidate
+trains pack into a preallocated reusable sidecar and execute eight dependent
+dispatches; controls execute eight incumbent dispatches. Require complete
+bitwise equality and candidate median at or below `0.75x` control median on
+both directions. Hard-stop at 180 seconds. Do not load a model asset or launch
+a corpus fit.
 
 ## Hard Exclusions
 
@@ -105,7 +112,7 @@ integrity.
 
 ## Fast Follows
 
-1. Integrate C32/Q128 only if both released FFN shapes clear the gate.
+1. Integrate bounded-residency packed-Q8 sidecars only if both FFN shapes clear.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

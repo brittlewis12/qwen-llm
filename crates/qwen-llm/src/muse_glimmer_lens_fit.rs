@@ -8,8 +8,9 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalTensor, encode_add_f32, encode_frozen_linear_vjp_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_rows_f32,
-    encode_silu_mul_f32, encode_silu_mul_vjp_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_rows_f32,
+    encode_rms_norm_mul_vjp_broadcast_f32, encode_rms_norm_mul_vjp_rows_f32, encode_silu_mul_f32,
+    encode_silu_mul_vjp_broadcast_f32, encode_silu_mul_vjp_f32,
 };
 use crate::metal_forward::encode_mat_vec_dispatch;
 use crate::muse_glimmer_lens::{
@@ -20,8 +21,10 @@ use crate::muse_glimmer_lens::{
 use crate::muse_glimmer_residency::{MuseGlimmerMetalLayerWeights, MuseGlimmerMetalModelWeights};
 use crate::tensor::GgmlType;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
+use std::time::{Duration, Instant};
 
-pub const MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS: usize = 32;
+pub const MUSE_GLIMMER_FULL_TRANSPORT_MAX_ROWS_PER_SHARD: usize = 32;
+pub const MUSE_GLIMMER_QUERY_BATCH_MAX: usize = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerOneBlockVjp {
@@ -35,6 +38,78 @@ pub struct MuseGlimmerOneBlockVjp {
     pub post_attention_replay_max_abs_error: f32,
     /// F32 replay versus production capture after the complete block.
     pub post_block_replay_max_abs_error: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MuseGlimmerQueryBatchVjpTimings {
+    pub replay: Duration,
+    pub feed_forward_reverse: Duration,
+    pub attention_output_reverse: Duration,
+    pub attention_cpu_reverse: Duration,
+    pub attention_input_reverse: Duration,
+    pub total: Duration,
+}
+
+impl MuseGlimmerQueryBatchVjpTimings {
+    fn add_assign(&mut self, other: Self) {
+        self.replay += other.replay;
+        self.feed_forward_reverse += other.feed_forward_reverse;
+        self.attention_output_reverse += other.attention_output_reverse;
+        self.attention_cpu_reverse += other.attention_cpu_reverse;
+        self.attention_input_reverse += other.attention_input_reverse;
+        self.total += other.total;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerQueryBatchOneBlockVjp {
+    pub target_block: u32,
+    pub rule: MuseGlimmerLensRule,
+    pub query_count: usize,
+    pub n_tokens: usize,
+    pub hidden_size: usize,
+    /// Query-major cotangents at the selected block input, flattened `[Q,T,H]`.
+    pub input_cotangents: Vec<f32>,
+    pub post_attention_replay_max_abs_error: f32,
+    pub post_block_replay_max_abs_error: f32,
+    pub timings: MuseGlimmerQueryBatchVjpTimings,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerQueryBatchComposedVjp {
+    pub source_layers: Vec<u32>,
+    pub target_block: u32,
+    pub method: MuseGlimmerLensRule,
+    pub query_count: usize,
+    pub n_tokens: usize,
+    pub hidden_size: usize,
+    /// Source-major, query-major cotangents, flattened `[S,Q,T,H]`.
+    pub values: Vec<f32>,
+    pub diagnostics: Vec<MuseGlimmerBlockReplayDiagnostic>,
+    pub timings: MuseGlimmerQueryBatchVjpTimings,
+}
+
+impl MuseGlimmerQueryBatchComposedVjp {
+    pub fn source_values(&self, source_slot: usize) -> Option<&[f32]> {
+        let elements = self
+            .query_count
+            .checked_mul(self.n_tokens)?
+            .checked_mul(self.hidden_size)?;
+        let start = source_slot.checked_mul(elements)?;
+        self.values.get(start..start.checked_add(elements)?)
+    }
+
+    pub fn source_query_values(&self, source_slot: usize, query_slot: usize) -> Option<&[f32]> {
+        if query_slot >= self.query_count {
+            return None;
+        }
+        let query_elements = self.n_tokens.checked_mul(self.hidden_size)?;
+        let source_elements = self.query_count.checked_mul(query_elements)?;
+        let start = source_slot
+            .checked_mul(source_elements)?
+            .checked_add(query_slot.checked_mul(query_elements)?)?;
+        self.values.get(start..start.checked_add(query_elements)?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,7 +175,41 @@ pub struct MuseGlimmerFullTransportRowFit {
     pub diagnostics: Vec<MuseGlimmerBlockReplayDiagnostic>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerBatchedFullTransportRowFit {
+    pub source_layers: Vec<u32>,
+    pub target_block: u32,
+    pub method: MuseGlimmerLensRule,
+    pub output_row_ids: Vec<u32>,
+    pub n_valid_positions: usize,
+    pub hidden_size: usize,
+    pub query_batch_size: usize,
+    /// Source-major, output-row-major fitted rows, flattened `[S,R,H]`.
+    pub values: Vec<f32>,
+    pub diagnostics: Vec<MuseGlimmerBlockReplayDiagnostic>,
+    pub timings: MuseGlimmerQueryBatchVjpTimings,
+}
+
 impl MuseGlimmerFullTransportRowFit {
+    pub fn source_values(&self, source_slot: usize) -> Option<&[f32]> {
+        let elements = self.output_row_ids.len().checked_mul(self.hidden_size)?;
+        let start = source_slot.checked_mul(elements)?;
+        self.values.get(start..start.checked_add(elements)?)
+    }
+
+    pub fn source_row_values(&self, source_slot: usize, row_slot: usize) -> Option<&[f32]> {
+        if row_slot >= self.output_row_ids.len() {
+            return None;
+        }
+        let source_elements = self.output_row_ids.len().checked_mul(self.hidden_size)?;
+        let start = source_slot
+            .checked_mul(source_elements)?
+            .checked_add(row_slot.checked_mul(self.hidden_size)?)?;
+        self.values.get(start..start.checked_add(self.hidden_size)?)
+    }
+}
+
+impl MuseGlimmerBatchedFullTransportRowFit {
     pub fn source_values(&self, source_slot: usize) -> Option<&[f32]> {
         let elements = self.output_row_ids.len().checked_mul(self.hidden_size)?;
         let start = source_slot.checked_mul(elements)?;
@@ -251,6 +360,182 @@ pub(crate) fn muse_glimmer_fit_full_transport_rows_to_sources(
     })
 }
 
+pub(crate) fn muse_glimmer_composed_vjp_query_batch(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    captures: &MuseGlimmerLensCaptureBank,
+    target_block: u32,
+    source_layers: &[u32],
+    target_cotangents: &[f32],
+    query_count: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerQueryBatchComposedVjp, MuseGlimmerLensError> {
+    let hidden_size = captures.hidden_size();
+    let traversal = validate_composition_request(
+        weights,
+        captures,
+        target_block,
+        source_layers,
+        hidden_size,
+        query_count,
+        Some(MUSE_GLIMMER_QUERY_BATCH_MAX),
+    )?;
+    let query_elements = checked_mul(captures.n_tokens(), hidden_size, "composed query elements")?;
+    validate_len(
+        "composed query-major target cotangents",
+        target_cotangents,
+        checked_mul(query_count, query_elements, "composed target elements")?,
+    )?;
+    require_finite("composed query-major target cotangents", target_cotangents)?;
+    let source_elements = checked_mul(query_count, query_elements, "composed source elements")?;
+    let mut values = vec![
+        0.0_f32;
+        checked_mul(
+            source_layers.len(),
+            source_elements,
+            "composed output elements"
+        )?
+    ];
+    let mut diagnostics = composition_diagnostics(weights, &traversal);
+    let mut timings = MuseGlimmerQueryBatchVjpTimings::default();
+    let mut current = target_cotangents.to_vec();
+    for (diagnostic_slot, &block) in traversal.iter().enumerate() {
+        let capture = captures.block_capture(block).ok_or_else(|| {
+            MuseGlimmerLensError::Invalid(format!(
+                "capture bank is missing traversed block {block}"
+            ))
+        })?;
+        let vjp = muse_glimmer_one_attention_block_vjp_query_batch(
+            ctx,
+            weights,
+            &capture,
+            &current,
+            query_count,
+            rule,
+        )?;
+        current = vjp.input_cotangents;
+        timings.add_assign(vjp.timings);
+        let diagnostic = &mut diagnostics[diagnostic_slot];
+        diagnostic.post_attention_replay_max_abs_error = vjp.post_attention_replay_max_abs_error;
+        diagnostic.post_block_replay_max_abs_error = vjp.post_block_replay_max_abs_error;
+        if let Ok(source_slot) = source_layers.binary_search(&(block - 1)) {
+            let destination = source_slot * source_elements;
+            values[destination..destination + source_elements].copy_from_slice(&current);
+        }
+    }
+    require_finite("composed query-batch source cotangents", &values)?;
+    Ok(MuseGlimmerQueryBatchComposedVjp {
+        source_layers: source_layers.to_vec(),
+        target_block,
+        method: rule,
+        query_count,
+        n_tokens: captures.n_tokens(),
+        hidden_size,
+        values,
+        diagnostics,
+        timings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn muse_glimmer_fit_full_transport_rows_to_sources_batched(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    captures: &MuseGlimmerLensCaptureBank,
+    target_block: u32,
+    source_layers: &[u32],
+    output_row_ids: &[u32],
+    skip_first: usize,
+    query_batch_size: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerBatchedFullTransportRowFit, MuseGlimmerLensError> {
+    let hidden_size = captures.hidden_size();
+    validate_output_row_ids(output_row_ids, hidden_size)?;
+    if query_batch_size == 0 || query_batch_size > MUSE_GLIMMER_QUERY_BATCH_MAX {
+        return invalid(format!(
+            "full-transport query batch size must be in 1..={MUSE_GLIMMER_QUERY_BATCH_MAX}, got {query_batch_size}"
+        ));
+    }
+    let traversal = validate_composition_request(
+        weights,
+        captures,
+        target_block,
+        source_layers,
+        hidden_size,
+        output_row_ids.len(),
+        None,
+    )?;
+    let valid_positions = adjacent_fit_position_range(captures.n_tokens(), skip_first)?;
+    let n_valid_positions = valid_positions.len();
+    let source_elements = checked_mul(output_row_ids.len(), hidden_size, "batched fit source")?;
+    let mut values =
+        vec![0.0_f32; checked_mul(source_layers.len(), source_elements, "batched fit output")?];
+    let mut diagnostics = composition_diagnostics(weights, &traversal);
+    let mut timings = MuseGlimmerQueryBatchVjpTimings::default();
+    let query_elements = checked_mul(captures.n_tokens(), hidden_size, "fit query elements")?;
+    for (chunk_slot, rows) in output_row_ids.chunks(query_batch_size).enumerate() {
+        let mut targets = vec![0.0_f32; checked_mul(rows.len(), query_elements, "fit targets")?];
+        for (query, &row) in rows.iter().enumerate() {
+            for position in valid_positions.clone() {
+                targets[query * query_elements + position * hidden_size + row as usize] = 1.0;
+            }
+        }
+        let composed = muse_glimmer_composed_vjp_query_batch(
+            ctx,
+            weights,
+            captures,
+            target_block,
+            source_layers,
+            &targets,
+            rows.len(),
+            rule,
+        )?;
+        timings.add_assign(composed.timings);
+        for (destination, observed) in diagnostics.iter_mut().zip(&composed.diagnostics) {
+            destination.post_attention_replay_max_abs_error = destination
+                .post_attention_replay_max_abs_error
+                .max(observed.post_attention_replay_max_abs_error);
+            destination.post_block_replay_max_abs_error = destination
+                .post_block_replay_max_abs_error
+                .max(observed.post_block_replay_max_abs_error);
+        }
+        let first_row_slot = chunk_slot * query_batch_size;
+        for source_slot in 0..source_layers.len() {
+            for query in 0..rows.len() {
+                let source_query = composed
+                    .source_query_values(source_slot, query)
+                    .ok_or_else(|| {
+                        MuseGlimmerLensError::Invalid(
+                            "batched composition omitted a source query".into(),
+                        )
+                    })?;
+                let reduced = mean_reduce_position_rows(
+                    source_query,
+                    captures.n_tokens(),
+                    hidden_size,
+                    valid_positions.clone(),
+                )?;
+                let row_slot = first_row_slot + query;
+                let destination = source_slot * source_elements + row_slot * hidden_size;
+                values[destination..destination + hidden_size].copy_from_slice(&reduced);
+            }
+        }
+    }
+    require_finite("batched full-transport row fit", &values)?;
+    Ok(MuseGlimmerBatchedFullTransportRowFit {
+        source_layers: source_layers.to_vec(),
+        target_block,
+        method: rule,
+        output_row_ids: output_row_ids.to_vec(),
+        n_valid_positions,
+        hidden_size,
+        query_batch_size,
+        values,
+        diagnostics,
+        timings,
+    })
+}
+
 fn validate_composition_request(
     weights: &MuseGlimmerMetalModelWeights<'_>,
     captures: &MuseGlimmerLensCaptureBank,
@@ -290,9 +575,9 @@ fn validate_output_row_ids(
     if output_row_ids.is_empty() {
         return invalid("full-transport fit requires at least one output row");
     }
-    if output_row_ids.len() > MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS {
+    if output_row_ids.len() > MUSE_GLIMMER_FULL_TRANSPORT_MAX_ROWS_PER_SHARD {
         return invalid(format!(
-            "scalar full-transport fit supports at most {MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS} rows per shard, got {}",
+            "full-transport fit supports at most {MUSE_GLIMMER_FULL_TRANSPORT_MAX_ROWS_PER_SHARD} rows per shard, got {}",
             output_row_ids.len()
         ));
     }
@@ -619,6 +904,17 @@ struct MuseAttentionVjp {
     grad_gate: Vec<f32>,
 }
 
+struct MuseAttentionQueryBatchVjp {
+    /// Primal-head-major/query-minor rows `[T,QH,Q,D]`.
+    grad_q_head_query: Vec<f32>,
+    /// Primal-head-major/query-minor rows `[T,KVH,Q,D]`.
+    grad_k_head_query: Vec<f32>,
+    /// Token-major/query-minor rows `[T,Q,KV]`.
+    grad_v_token_query: Vec<f32>,
+    /// Token-major/query-minor rows `[T,Q,QW]`.
+    grad_gate_token_query: Vec<f32>,
+}
+
 fn adjacent_pair_rope_rows_in_place(
     values: &mut [f32],
     n_tokens: usize,
@@ -807,6 +1103,191 @@ fn cpu_causal_gqa_vjp(
         grad_v,
         grad_gate,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cpu_causal_gqa_vjp_query_batch(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    gate: &[f32],
+    grad_gated_token_query: &[f32],
+    query_count: usize,
+    n_tokens: usize,
+    geometry: MuseAttentionGeometry,
+    forward: &MuseAttentionForward,
+    inverse_rope: bool,
+) -> Result<MuseAttentionQueryBatchVjp, MuseGlimmerLensError> {
+    let tq = checked_mul(n_tokens, query_count, "attention batch rows")?;
+    validate_len(
+        "batched attention cotangent",
+        grad_gated_token_query,
+        checked_mul(tq, geometry.query, "batched attention cotangent elements")?,
+    )?;
+    let q_head_rows = checked_mul(
+        checked_mul(n_tokens, geometry.q_heads, "Q primal head rows")?,
+        query_count,
+        "Q query head rows",
+    )?;
+    let k_head_rows = checked_mul(
+        checked_mul(n_tokens, geometry.kv_heads, "K primal head rows")?,
+        query_count,
+        "K query head rows",
+    )?;
+    let mut output = MuseAttentionQueryBatchVjp {
+        grad_q_head_query: vec![0.0; checked_mul(q_head_rows, geometry.head_dim, "Q batch")?],
+        grad_k_head_query: vec![0.0; checked_mul(k_head_rows, geometry.head_dim, "K batch")?],
+        grad_v_token_query: vec![0.0; checked_mul(tq, geometry.kv, "V batch")?],
+        grad_gate_token_query: vec![0.0; checked_mul(tq, geometry.query, "gate batch")?],
+    };
+    let mut one_grad_gated = vec![0.0_f32; n_tokens * geometry.query];
+    for query_slot in 0..query_count {
+        for token in 0..n_tokens {
+            let source = (token * query_count + query_slot) * geometry.query;
+            let destination = token * geometry.query;
+            one_grad_gated[destination..destination + geometry.query]
+                .copy_from_slice(&grad_gated_token_query[source..source + geometry.query]);
+        }
+        let mut one =
+            cpu_causal_gqa_vjp(q, k, v, gate, &one_grad_gated, n_tokens, geometry, forward)?;
+        if inverse_rope {
+            adjacent_pair_rope_rows_in_place(
+                &mut one.grad_q,
+                n_tokens,
+                geometry.q_heads,
+                geometry.head_dim,
+                geometry.rope_theta,
+                true,
+            )?;
+            adjacent_pair_rope_rows_in_place(
+                &mut one.grad_k,
+                n_tokens,
+                geometry.kv_heads,
+                geometry.head_dim,
+                geometry.rope_theta,
+                true,
+            )?;
+        }
+        for token in 0..n_tokens {
+            for head in 0..geometry.q_heads {
+                let source = (token * geometry.q_heads + head) * geometry.head_dim;
+                let destination = ((token * geometry.q_heads + head) * query_count + query_slot)
+                    * geometry.head_dim;
+                output.grad_q_head_query[destination..destination + geometry.head_dim]
+                    .copy_from_slice(&one.grad_q[source..source + geometry.head_dim]);
+            }
+            for head in 0..geometry.kv_heads {
+                let source = (token * geometry.kv_heads + head) * geometry.head_dim;
+                let destination = ((token * geometry.kv_heads + head) * query_count + query_slot)
+                    * geometry.head_dim;
+                output.grad_k_head_query[destination..destination + geometry.head_dim]
+                    .copy_from_slice(&one.grad_k[source..source + geometry.head_dim]);
+            }
+            for (width, source_values, destination_values) in [
+                (
+                    geometry.kv,
+                    one.grad_v.as_slice(),
+                    &mut output.grad_v_token_query,
+                ),
+                (
+                    geometry.query,
+                    one.grad_gate.as_slice(),
+                    &mut output.grad_gate_token_query,
+                ),
+            ] {
+                let source = token * width;
+                let destination = (token * query_count + query_slot) * width;
+                destination_values[destination..destination + width]
+                    .copy_from_slice(&source_values[source..source + width]);
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn query_major_to_token_query(
+    values: &[f32],
+    query_count: usize,
+    n_tokens: usize,
+    width: usize,
+) -> Result<Vec<f32>, MuseGlimmerLensError> {
+    validate_len(
+        "query-major row bank",
+        values,
+        checked_mul(
+            checked_mul(query_count, n_tokens, "query-major row count")?,
+            width,
+            "query-major row elements",
+        )?,
+    )?;
+    let mut output = vec![0.0_f32; values.len()];
+    for query in 0..query_count {
+        for token in 0..n_tokens {
+            let source = (query * n_tokens + token) * width;
+            let destination = (token * query_count + query) * width;
+            output[destination..destination + width]
+                .copy_from_slice(&values[source..source + width]);
+        }
+    }
+    Ok(output)
+}
+
+fn token_query_to_query_major(
+    values: &[f32],
+    query_count: usize,
+    n_tokens: usize,
+    width: usize,
+) -> Result<Vec<f32>, MuseGlimmerLensError> {
+    validate_len(
+        "token-query row bank",
+        values,
+        checked_mul(
+            checked_mul(query_count, n_tokens, "token-query row count")?,
+            width,
+            "token-query row elements",
+        )?,
+    )?;
+    let mut output = vec![0.0_f32; values.len()];
+    for token in 0..n_tokens {
+        for query in 0..query_count {
+            let source = (token * query_count + query) * width;
+            let destination = (query * n_tokens + token) * width;
+            output[destination..destination + width]
+                .copy_from_slice(&values[source..source + width]);
+        }
+    }
+    Ok(output)
+}
+
+fn head_query_to_token_query(
+    values: &[f32],
+    query_count: usize,
+    n_tokens: usize,
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<Vec<f32>, MuseGlimmerLensError> {
+    let width = checked_mul(n_heads, head_dim, "head-query width")?;
+    validate_len(
+        "head-query row bank",
+        values,
+        checked_mul(
+            checked_mul(query_count, n_tokens, "head-query token rows")?,
+            width,
+            "head-query elements",
+        )?,
+    )?;
+    let mut output = vec![0.0_f32; values.len()];
+    for token in 0..n_tokens {
+        for head in 0..n_heads {
+            for query in 0..query_count {
+                let source = ((token * n_heads + head) * query_count + query) * head_dim;
+                let destination = (token * query_count + query) * width + head * head_dim;
+                output[destination..destination + head_dim]
+                    .copy_from_slice(&values[source..source + head_dim]);
+            }
+        }
+    }
+    Ok(output)
 }
 
 struct ReplayTensors {
@@ -1453,6 +1934,412 @@ pub(crate) fn muse_glimmer_one_attention_block_vjp(
     })
 }
 
+pub(crate) fn muse_glimmer_one_full_attention_block_vjp_query_batch(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    capture: &MuseGlimmerLensCapture,
+    target_cotangents: &[f32],
+    query_count: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerLensError> {
+    require_full_attention_block(weights, capture.target_block())?;
+    muse_glimmer_one_attention_block_vjp_query_batch(
+        ctx,
+        weights,
+        capture,
+        target_cotangents,
+        query_count,
+        rule,
+    )
+}
+
+pub(crate) fn muse_glimmer_one_attention_block_vjp_query_batch(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    capture: &MuseGlimmerLensCapture,
+    target_cotangents: &[f32],
+    query_count: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerLensError> {
+    let total_started = Instant::now();
+    let geometry = MuseAttentionGeometry::from_weights(weights)?;
+    validate_query_batch_request(capture, target_cotangents, query_count, geometry.hidden)?;
+    let target_block = capture.target_block();
+    let layer = validate_replay_request(
+        weights,
+        target_block,
+        capture.input_residuals(),
+        capture.n_tokens(),
+        geometry,
+    )?;
+    let n_tokens = capture.n_tokens();
+    let batch_rows = checked_mul(n_tokens, query_count, "query-batch reverse rows")?;
+
+    let replay_started = Instant::now();
+    let state = replay_state(
+        ctx,
+        weights,
+        layer,
+        capture.input_residuals(),
+        n_tokens,
+        geometry,
+    )?;
+    let replay = replay_readback(&state)?;
+    let post_attention_replay_max_abs_error = max_abs_difference(
+        &replay.post_attention_residuals,
+        capture.post_attention_residuals(),
+    )?;
+    let post_block_replay_max_abs_error =
+        max_abs_difference(&replay.post_block_residuals, capture.post_block_residuals())?;
+    let replay_elapsed = replay_started.elapsed();
+    let ReplayState {
+        tensors,
+        q,
+        k,
+        v,
+        attention_gate,
+        attention,
+    } = state;
+
+    // Public banks are query-major. Reverse-linear kernels consume the same
+    // independent rows in token-major/query-minor order so one primal token
+    // row can be broadcast across its compact Q-row group.
+    let target_token_query =
+        query_major_to_token_query(target_cotangents, query_count, n_tokens, geometry.hidden)?;
+    let hidden_batch_shape = row_shape(geometry.hidden, batch_rows)?;
+    let ffn_batch_shape = row_shape(geometry.feed_forward, batch_rows)?;
+    let query_batch_shape = row_shape(geometry.query, batch_rows)?;
+    let kv_batch_shape = row_shape(geometry.kv, batch_rows)?;
+
+    let feed_forward_started = Instant::now();
+    let grad_post_block = from_f32(ctx, &target_token_query, hidden_batch_shape.clone())?;
+    let grad_ffn_raw = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_ffn_inner = MetalTensor::zeros_f32(ctx, ffn_batch_shape.clone())?;
+    let grad_ffn_gate = MetalTensor::zeros_f32(ctx, ffn_batch_shape.clone())?;
+    let grad_ffn_up = MetalTensor::zeros_f32(ctx, ffn_batch_shape)?;
+    let grad_ffn_norm_gate = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_ffn_norm_up = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_ffn_norm = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_post_attention_branch = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_post_attention = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    run_command(ctx, |encoder| {
+        for token in 0..n_tokens {
+            encode_rms_norm_mul_vjp_broadcast_f32(
+                ctx,
+                encoder,
+                &row_view(&tensors.ffn_branch_raw, token, geometry.hidden),
+                layer.post_feed_forward_norm,
+                &batch_token_view(&grad_post_block, token, query_count, geometry.hidden),
+                &batch_token_view(&grad_ffn_raw, token, query_count, geometry.hidden),
+                query_count,
+                geometry.hidden,
+                weights.config.post_norm_epsilon,
+                rule.rms_norm_rule(MuseGlimmerRmsNormSite::FeedForwardBranchPostNorm),
+            )?;
+        }
+        encode_frozen_linear_vjp_f32(
+            ctx,
+            encoder,
+            layer.feed_forward_down,
+            &grad_ffn_raw,
+            &grad_ffn_inner,
+            geometry.feed_forward,
+            geometry.hidden,
+            batch_rows,
+        )?;
+        for token in 0..n_tokens {
+            encode_silu_mul_vjp_broadcast_f32(
+                ctx,
+                encoder,
+                &row_view(&tensors.ffn_gate_raw, token, geometry.feed_forward),
+                &row_view(&tensors.ffn_up, token, geometry.feed_forward),
+                &batch_token_view(&grad_ffn_inner, token, query_count, geometry.feed_forward),
+                &batch_token_view(&grad_ffn_gate, token, query_count, geometry.feed_forward),
+                &batch_token_view(&grad_ffn_up, token, query_count, geometry.feed_forward),
+                query_count,
+                geometry.feed_forward,
+                rule.swiglu_rule(),
+            )?;
+        }
+        encode_frozen_linear_vjp_f32(
+            ctx,
+            encoder,
+            layer.feed_forward_gate,
+            &grad_ffn_gate,
+            &grad_ffn_norm_gate,
+            geometry.hidden,
+            geometry.feed_forward,
+            batch_rows,
+        )?;
+        encode_frozen_linear_vjp_f32(
+            ctx,
+            encoder,
+            layer.feed_forward_up,
+            &grad_ffn_up,
+            &grad_ffn_norm_up,
+            geometry.hidden,
+            geometry.feed_forward,
+            batch_rows,
+        )?;
+        encode_add_f32(
+            ctx,
+            encoder,
+            &grad_ffn_norm_gate,
+            &grad_ffn_norm_up,
+            &grad_ffn_norm,
+        )?;
+        for token in 0..n_tokens {
+            encode_rms_norm_mul_vjp_broadcast_f32(
+                ctx,
+                encoder,
+                &row_view(&tensors.post_attention, token, geometry.hidden),
+                layer.feed_forward_norm,
+                &batch_token_view(&grad_ffn_norm, token, query_count, geometry.hidden),
+                &batch_token_view(
+                    &grad_post_attention_branch,
+                    token,
+                    query_count,
+                    geometry.hidden,
+                ),
+                query_count,
+                geometry.hidden,
+                weights.config.rms_epsilon,
+                rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreFeedForward),
+            )?;
+        }
+        encode_add_f32(
+            ctx,
+            encoder,
+            &grad_post_block,
+            &grad_post_attention_branch,
+            &grad_post_attention,
+        )?;
+        Ok(())
+    })?;
+    let feed_forward_elapsed = feed_forward_started.elapsed();
+
+    let attention_output_started = Instant::now();
+    let grad_attention_raw = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_gated = MetalTensor::zeros_f32(ctx, query_batch_shape.clone())?;
+    run_command(ctx, |encoder| {
+        for token in 0..n_tokens {
+            encode_rms_norm_mul_vjp_broadcast_f32(
+                ctx,
+                encoder,
+                &row_view(&tensors.attention_branch_raw, token, geometry.hidden),
+                layer.post_attention_norm,
+                &batch_token_view(&grad_post_attention, token, query_count, geometry.hidden),
+                &batch_token_view(&grad_attention_raw, token, query_count, geometry.hidden),
+                query_count,
+                geometry.hidden,
+                weights.config.post_norm_epsilon,
+                rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionBranchPostNorm),
+            )?;
+        }
+        encode_frozen_linear_vjp_f32(
+            ctx,
+            encoder,
+            layer.attention_output,
+            &grad_attention_raw,
+            &grad_gated,
+            geometry.query,
+            geometry.hidden,
+            batch_rows,
+        )?;
+        Ok(())
+    })?;
+    let attention_output_elapsed = attention_output_started.elapsed();
+
+    let attention_cpu_started = Instant::now();
+    let attention_vjp = cpu_causal_gqa_vjp_query_batch(
+        &q,
+        &k,
+        &v,
+        &attention_gate,
+        &read_f32(&grad_gated),
+        query_count,
+        n_tokens,
+        geometry,
+        &attention,
+        layer.sliding_attention,
+    )?;
+    let attention_cpu_elapsed = attention_cpu_started.elapsed();
+
+    let attention_input_started = Instant::now();
+    let q_primal_head_rows = checked_mul(n_tokens, geometry.q_heads, "Q primal head rows")?;
+    let k_primal_head_rows = checked_mul(n_tokens, geometry.kv_heads, "K primal head rows")?;
+    let q_head_rows = checked_mul(q_primal_head_rows, query_count, "Q head rows")?;
+    let k_head_rows = checked_mul(k_primal_head_rows, query_count, "K head rows")?;
+    let grad_q_heads = from_f32(
+        ctx,
+        &attention_vjp.grad_q_head_query,
+        row_shape(geometry.head_dim, q_head_rows)?,
+    )?;
+    let grad_k_heads = from_f32(
+        ctx,
+        &attention_vjp.grad_k_head_query,
+        row_shape(geometry.head_dim, k_head_rows)?,
+    )?;
+    let grad_q_raw_heads = MetalTensor::zeros_f32(ctx, row_shape(geometry.head_dim, q_head_rows)?)?;
+    let grad_k_raw_heads = MetalTensor::zeros_f32(ctx, row_shape(geometry.head_dim, k_head_rows)?)?;
+    run_command(ctx, |encoder| {
+        for primal_head in 0..q_primal_head_rows {
+            encode_rms_norm_mul_vjp_broadcast_f32(
+                ctx,
+                encoder,
+                &row_view(&tensors.q_raw, primal_head, geometry.head_dim),
+                layer.query_norm,
+                &batch_token_view(&grad_q_heads, primal_head, query_count, geometry.head_dim),
+                &batch_token_view(
+                    &grad_q_raw_heads,
+                    primal_head,
+                    query_count,
+                    geometry.head_dim,
+                ),
+                query_count,
+                geometry.head_dim,
+                weights.config.rms_epsilon,
+                rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionQuery),
+            )?;
+        }
+        for primal_head in 0..k_primal_head_rows {
+            encode_rms_norm_mul_vjp_broadcast_f32(
+                ctx,
+                encoder,
+                &row_view(&tensors.k_raw, primal_head, geometry.head_dim),
+                layer.key_norm,
+                &batch_token_view(&grad_k_heads, primal_head, query_count, geometry.head_dim),
+                &batch_token_view(
+                    &grad_k_raw_heads,
+                    primal_head,
+                    query_count,
+                    geometry.head_dim,
+                ),
+                query_count,
+                geometry.head_dim,
+                weights.config.rms_epsilon,
+                rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionKey),
+            )?;
+        }
+        Ok(())
+    })?;
+
+    // Q/K normalization needs `[primal_head,Q,D]`; projection VJPs need the
+    // ordinary flattened `[T,Q,H*D]` row bank. This bounded conversion is the
+    // only extra Q/K temporary required by the existing kernel contracts.
+    let grad_q_raw_token_query = head_query_to_token_query(
+        &read_f32(&grad_q_raw_heads),
+        query_count,
+        n_tokens,
+        geometry.q_heads,
+        geometry.head_dim,
+    )?;
+    let grad_k_raw_token_query = head_query_to_token_query(
+        &read_f32(&grad_k_raw_heads),
+        query_count,
+        n_tokens,
+        geometry.kv_heads,
+        geometry.head_dim,
+    )?;
+    let grad_q_raw = from_f32(ctx, &grad_q_raw_token_query, query_batch_shape)?;
+    let grad_k_raw = from_f32(ctx, &grad_k_raw_token_query, kv_batch_shape.clone())?;
+    let grad_v = from_f32(ctx, &attention_vjp.grad_v_token_query, kv_batch_shape)?;
+    let grad_gate = from_f32(
+        ctx,
+        &attention_vjp.grad_gate_token_query,
+        row_shape(geometry.query, batch_rows)?,
+    )?;
+    let grad_norm_q = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_norm_k = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_norm_v = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_norm_gate = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_norm_qk = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_norm_qkv = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_norm = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_input_branch = MetalTensor::zeros_f32(ctx, hidden_batch_shape.clone())?;
+    let grad_input = MetalTensor::zeros_f32(ctx, hidden_batch_shape)?;
+    run_command(ctx, |encoder| {
+        for (weight, grad_output, grad_hidden, n_out) in [
+            (
+                layer.attention_query,
+                &grad_q_raw,
+                &grad_norm_q,
+                geometry.query,
+            ),
+            (layer.attention_key, &grad_k_raw, &grad_norm_k, geometry.kv),
+            (layer.attention_value, &grad_v, &grad_norm_v, geometry.kv),
+            (
+                layer.attention_gate,
+                &grad_gate,
+                &grad_norm_gate,
+                geometry.query,
+            ),
+        ] {
+            encode_frozen_linear_vjp_f32(
+                ctx,
+                encoder,
+                weight,
+                grad_output,
+                grad_hidden,
+                geometry.hidden,
+                n_out,
+                batch_rows,
+            )?;
+        }
+        encode_add_f32(ctx, encoder, &grad_norm_q, &grad_norm_k, &grad_norm_qk)?;
+        encode_add_f32(ctx, encoder, &grad_norm_qk, &grad_norm_v, &grad_norm_qkv)?;
+        encode_add_f32(ctx, encoder, &grad_norm_qkv, &grad_norm_gate, &grad_norm)?;
+        for token in 0..n_tokens {
+            encode_rms_norm_mul_vjp_broadcast_f32(
+                ctx,
+                encoder,
+                &row_view(&tensors.input, token, geometry.hidden),
+                layer.attention_norm,
+                &batch_token_view(&grad_norm, token, query_count, geometry.hidden),
+                &batch_token_view(&grad_input_branch, token, query_count, geometry.hidden),
+                query_count,
+                geometry.hidden,
+                weights.config.rms_epsilon,
+                rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreAttention),
+            )?;
+        }
+        encode_add_f32(
+            ctx,
+            encoder,
+            &grad_post_attention,
+            &grad_input_branch,
+            &grad_input,
+        )?;
+        Ok(())
+    })?;
+    let input_cotangents = token_query_to_query_major(
+        &read_f32(&grad_input),
+        query_count,
+        n_tokens,
+        geometry.hidden,
+    )?;
+    require_finite("query-batch input cotangents", &input_cotangents)?;
+    let attention_input_elapsed = attention_input_started.elapsed();
+    Ok(MuseGlimmerQueryBatchOneBlockVjp {
+        target_block,
+        rule,
+        query_count,
+        n_tokens,
+        hidden_size: geometry.hidden,
+        input_cotangents,
+        post_attention_replay_max_abs_error,
+        post_block_replay_max_abs_error,
+        timings: MuseGlimmerQueryBatchVjpTimings {
+            replay: replay_elapsed,
+            feed_forward_reverse: feed_forward_elapsed,
+            attention_output_reverse: attention_output_elapsed,
+            attention_cpu_reverse: attention_cpu_elapsed,
+            attention_input_reverse: attention_input_elapsed,
+            total: total_started.elapsed(),
+        },
+    })
+}
+
 fn validate_replay_request<'a>(
     weights: &'a MuseGlimmerMetalModelWeights<'a>,
     target_block: u32,
@@ -1515,6 +2402,35 @@ fn validate_request(
         require_finite(name, values)?;
     }
     Ok(())
+}
+
+fn validate_query_batch_request(
+    capture: &MuseGlimmerLensCapture,
+    target_cotangents: &[f32],
+    query_count: usize,
+    hidden_size: usize,
+) -> Result<(), MuseGlimmerLensError> {
+    if query_count == 0 || query_count > MUSE_GLIMMER_QUERY_BATCH_MAX {
+        return invalid(format!(
+            "query count must be in 1..={MUSE_GLIMMER_QUERY_BATCH_MAX}, got {query_count}"
+        ));
+    }
+    let one_query_elements = checked_mul(capture.n_tokens(), hidden_size, "one query elements")?;
+    validate_len(
+        "query-major target cotangents",
+        target_cotangents,
+        checked_mul(
+            query_count,
+            one_query_elements,
+            "query-batch target elements",
+        )?,
+    )?;
+    validate_request(
+        capture,
+        &target_cotangents[..one_query_elements],
+        hidden_size,
+    )?;
+    require_finite("query-major target cotangents", target_cotangents)
 }
 
 fn require_full_attention_block(
@@ -1619,6 +2535,18 @@ fn row_shape(width: usize, rows: usize) -> Result<Vec<u64>, MuseGlimmerLensError
 
 fn row_view(tensor: &MetalTensor, row: usize, width: usize) -> MetalTensor {
     tensor.view_subrange((row * width) as u64, vec![width as u64])
+}
+
+fn batch_token_view(
+    tensor: &MetalTensor,
+    primal_row: usize,
+    query_count: usize,
+    width: usize,
+) -> MetalTensor {
+    tensor.view_subrange(
+        (primal_row * query_count * width) as u64,
+        vec![width as u64, query_count as u64],
+    )
 }
 
 fn from_f32(
@@ -2008,6 +2936,126 @@ mod tests {
     }
 
     #[test]
+    fn query_batch_layout_and_cpu_attention_preserve_isolation() {
+        let geometry = tiny_geometry();
+        let n_tokens = 3;
+        let query_count = 3;
+        let q = (0..n_tokens * geometry.query)
+            .map(|index| index as f32 * 0.07 - 0.3)
+            .collect::<Vec<_>>();
+        let k = (0..n_tokens * geometry.kv)
+            .map(|index| index as f32 * -0.09 + 0.2)
+            .collect::<Vec<_>>();
+        let v = (0..n_tokens * geometry.kv)
+            .map(|index| index as f32 * 0.11 - 0.1)
+            .collect::<Vec<_>>();
+        let gate = (0..n_tokens * geometry.query)
+            .map(|index| index as f32 * 0.05 - 0.2)
+            .collect::<Vec<_>>();
+        let query_major = (0..query_count * n_tokens * geometry.query)
+            .map(|index| (index as f32 * 0.173 + 0.4).sin())
+            .collect::<Vec<_>>();
+        let token_query =
+            query_major_to_token_query(&query_major, query_count, n_tokens, geometry.query)
+                .unwrap();
+        assert_eq!(
+            token_query_to_query_major(&token_query, query_count, n_tokens, geometry.query)
+                .unwrap(),
+            query_major
+        );
+        let forward = cpu_causal_gqa_forward(&q, &k, &v, &gate, n_tokens, geometry).unwrap();
+        let batch = cpu_causal_gqa_vjp_query_batch(
+            &q,
+            &k,
+            &v,
+            &gate,
+            &token_query,
+            query_count,
+            n_tokens,
+            geometry,
+            &forward,
+            false,
+        )
+        .unwrap();
+        for query_slot in 0..query_count {
+            let query_elements = n_tokens * geometry.query;
+            let scalar = cpu_causal_gqa_vjp(
+                &q,
+                &k,
+                &v,
+                &gate,
+                &query_major[query_slot * query_elements..(query_slot + 1) * query_elements],
+                n_tokens,
+                geometry,
+                &forward,
+            )
+            .unwrap();
+            for token in 0..n_tokens {
+                for head in 0..geometry.q_heads {
+                    let scalar_start = (token * geometry.q_heads + head) * geometry.head_dim;
+                    let batch_start = ((token * geometry.q_heads + head) * query_count
+                        + query_slot)
+                        * geometry.head_dim;
+                    assert_eq!(
+                        &batch.grad_q_head_query[batch_start..batch_start + geometry.head_dim],
+                        &scalar.grad_q[scalar_start..scalar_start + geometry.head_dim]
+                    );
+                }
+                for head in 0..geometry.kv_heads {
+                    let scalar_start = (token * geometry.kv_heads + head) * geometry.head_dim;
+                    let batch_start = ((token * geometry.kv_heads + head) * query_count
+                        + query_slot)
+                        * geometry.head_dim;
+                    assert_eq!(
+                        &batch.grad_k_head_query[batch_start..batch_start + geometry.head_dim],
+                        &scalar.grad_k[scalar_start..scalar_start + geometry.head_dim]
+                    );
+                }
+                for (width, scalar_values, batch_values) in [
+                    (
+                        geometry.kv,
+                        scalar.grad_v.as_slice(),
+                        batch.grad_v_token_query.as_slice(),
+                    ),
+                    (
+                        geometry.query,
+                        scalar.grad_gate.as_slice(),
+                        batch.grad_gate_token_query.as_slice(),
+                    ),
+                ] {
+                    let scalar_start = token * width;
+                    let batch_start = (token * query_count + query_slot) * width;
+                    assert_eq!(
+                        &batch_values[batch_start..batch_start + width],
+                        &scalar_values[scalar_start..scalar_start + width]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn query_batch_validation_rejects_malformed_shapes_counts_and_values() {
+        let capture =
+            MuseGlimmerLensCapture::new(3, vec![1, 2], 2, vec![0.0; 4], vec![0.0; 4], vec![0.0; 4]);
+        validate_query_batch_request(&capture, &[1.0; 8], 2, 2).unwrap();
+        assert!(validate_query_batch_request(&capture, &[], 0, 2).is_err());
+        assert!(
+            validate_query_batch_request(
+                &capture,
+                &[1.0; 4 * (MUSE_GLIMMER_QUERY_BATCH_MAX + 1)],
+                MUSE_GLIMMER_QUERY_BATCH_MAX + 1,
+                2,
+            )
+            .is_err()
+        );
+        assert!(validate_query_batch_request(&capture, &[1.0; 7], 2, 2).is_err());
+        let mut non_finite = [1.0; 8];
+        non_finite[7] = f32::NAN;
+        assert!(validate_query_batch_request(&capture, &non_finite, 2, 2).is_err());
+    }
+
+    #[test]
     fn positioned_target_cotangent_places_rows_and_rejects_bad_requests() {
         let values = muse_glimmer_positioned_target_cotangent(&[1.0, -2.0], 3, 2, &[1, 2]).unwrap();
         assert_eq!(values, [0.0, 0.0, 1.0, -2.0, 1.0, -2.0]);
@@ -2061,8 +3109,8 @@ mod tests {
         assert!(validate_output_row_ids(&[0, 3], 3).is_err());
         assert!(
             validate_output_row_ids(
-                &(0..=MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS as u32).collect::<Vec<_>>(),
-                MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS + 1,
+                &(0..=MUSE_GLIMMER_FULL_TRANSPORT_MAX_ROWS_PER_SHARD as u32).collect::<Vec<_>>(),
+                MUSE_GLIMMER_FULL_TRANSPORT_MAX_ROWS_PER_SHARD + 1,
             )
             .is_err()
         );
@@ -2654,5 +3702,226 @@ mod tests {
             diagnostic.post_attention_replay_max_abs_error < 0.025
                 && diagnostic.post_block_replay_max_abs_error < 0.025
         }));
+        run_real_q8_query_batch_proof(&ctx, &bound, &captures);
+    }
+
+    fn run_real_q8_query_batch_proof(
+        ctx: &MetalContext,
+        bound: &MuseGlimmerMetalModelWeights<'_>,
+        captures: &MuseGlimmerLensCaptureBank,
+    ) {
+        let capture_50 = captures.block_capture(50).unwrap();
+        let capture_51 = captures.block_capture(51).unwrap();
+        let hidden = captures.hidden_size();
+        let n_tokens = captures.n_tokens();
+        let query_elements = n_tokens * hidden;
+        let mut targets = vec![0.0_f32; MUSE_GLIMMER_QUERY_BATCH_MAX * query_elements];
+        for query in 0..MUSE_GLIMMER_QUERY_BATCH_MAX {
+            let position = query % n_tokens;
+            targets[query * query_elements + position * hidden + query] =
+                0.25 + query as f32 * 0.125;
+            targets[query * query_elements + ((position + 1) % n_tokens) * hidden + 31 - query] =
+                -0.5 + query as f32 * 0.03125;
+        }
+
+        let difference = |left: &[f32], right: &[f32]| {
+            max_abs_difference(left, right).expect("matching comparison shapes")
+        };
+        let mut prefix_results = Vec::new();
+        for query_count in [1, 2, 4, 8] {
+            let result = muse_glimmer_one_full_attention_block_vjp_query_batch(
+                &ctx,
+                &bound,
+                &capture_51,
+                &targets[..query_count * query_elements],
+                query_count,
+                MuseGlimmerLensRule::J,
+            )
+            .expect("full-block J query batch");
+            eprintln!(
+                "Muse Q8 query batch Q={query_count}: total={:?} replay={:?} ffn_reverse={:?} attention_output_reverse={:?} attention_cpu_reverse={:?} attention_input_reverse={:?}",
+                result.timings.total,
+                result.timings.replay,
+                result.timings.feed_forward_reverse,
+                result.timings.attention_output_reverse,
+                result.timings.attention_cpu_reverse,
+                result.timings.attention_input_reverse,
+            );
+            assert_eq!(result.query_count, query_count);
+            assert_eq!(result.input_cotangents.len(), query_count * query_elements);
+            prefix_results.push(result);
+        }
+        for window in prefix_results.windows(2) {
+            assert!(
+                difference(
+                    &window[0].input_cotangents,
+                    &window[1].input_cotangents[..window[0].input_cotangents.len()]
+                ) < 2e-6,
+                "query result changed with batch size"
+            );
+        }
+        for query in 0..2 {
+            let scalar = muse_glimmer_one_attention_block_vjp(
+                &ctx,
+                &bound,
+                &capture_51,
+                &targets[query * query_elements..(query + 1) * query_elements],
+                MuseGlimmerLensRule::J,
+            )
+            .expect("scalar full-block J reference");
+            assert!(
+                difference(
+                    &scalar.input_cotangent,
+                    &prefix_results[3].input_cotangents
+                        [query * query_elements..(query + 1) * query_elements]
+                ) < 2e-6,
+                "Q=8 query does not agree with isolated scalar query"
+            );
+        }
+
+        for (capture, kind) in [
+            (&capture_50, MuseGlimmerAttentionBlockKind::Sliding),
+            (&capture_51, MuseGlimmerAttentionBlockKind::Full),
+        ] {
+            for rule in [MuseGlimmerLensRule::J, MuseGlimmerLensRule::R] {
+                let batch = muse_glimmer_one_attention_block_vjp_query_batch(
+                    &ctx,
+                    &bound,
+                    capture,
+                    &targets[..2 * query_elements],
+                    2,
+                    rule,
+                )
+                .expect("J/R full/sliding query batch");
+                for query in 0..2 {
+                    let scalar = muse_glimmer_one_attention_block_vjp(
+                        &ctx,
+                        &bound,
+                        capture,
+                        &targets[query * query_elements..(query + 1) * query_elements],
+                        rule,
+                    )
+                    .expect("J/R full/sliding scalar reference");
+                    assert!(
+                        difference(
+                            &scalar.input_cotangent,
+                            &batch.input_cotangents
+                                [query * query_elements..(query + 1) * query_elements]
+                        ) < 2e-6,
+                        "{kind:?}/{rule:?} batch differs from scalar"
+                    );
+                }
+            }
+        }
+        assert!(
+            muse_glimmer_one_full_attention_block_vjp_query_batch(
+                &ctx,
+                &bound,
+                &capture_50,
+                &targets[..query_elements],
+                1,
+                MuseGlimmerLensRule::J,
+            )
+            .is_err()
+        );
+
+        let composed = muse_glimmer_composed_vjp_query_batch(
+            &ctx,
+            &bound,
+            &captures,
+            51,
+            &[49, 50],
+            &targets[..2 * query_elements],
+            2,
+            MuseGlimmerLensRule::J,
+        )
+        .expect("two-source composed query batch");
+        assert_eq!(composed.query_count, 2);
+        assert_eq!(composed.diagnostics.len(), 2);
+        assert_eq!(
+            composed.diagnostics[0].kind,
+            MuseGlimmerAttentionBlockKind::Full
+        );
+        assert_eq!(
+            composed.diagnostics[1].kind,
+            MuseGlimmerAttentionBlockKind::Sliding
+        );
+        for query in 0..2 {
+            let through_51 = muse_glimmer_one_attention_block_vjp(
+                &ctx,
+                &bound,
+                &capture_51,
+                &targets[query * query_elements..(query + 1) * query_elements],
+                MuseGlimmerLensRule::J,
+            )
+            .unwrap();
+            let through_50 = muse_glimmer_one_attention_block_vjp(
+                &ctx,
+                &bound,
+                &capture_50,
+                &through_51.input_cotangent,
+                MuseGlimmerLensRule::J,
+            )
+            .unwrap();
+            assert!(
+                difference(
+                    composed.source_query_values(1, query).unwrap(),
+                    &through_51.input_cotangent
+                ) < 2e-6
+            );
+            assert!(
+                difference(
+                    composed.source_query_values(0, query).unwrap(),
+                    &through_50.input_cotangent
+                ) < 2e-6
+            );
+        }
+
+        let row_ids = [0, 7, 31];
+        let scalar_rows = muse_glimmer_fit_full_transport_rows_to_sources(
+            &ctx,
+            &bound,
+            &captures,
+            51,
+            &[49, 50],
+            &row_ids,
+            0,
+            MuseGlimmerLensRule::J,
+        )
+        .expect("scalar full-row oracle");
+        let batched_rows = muse_glimmer_fit_full_transport_rows_to_sources_batched(
+            &ctx,
+            &bound,
+            &captures,
+            51,
+            &[49, 50],
+            &row_ids,
+            0,
+            2,
+            MuseGlimmerLensRule::J,
+        )
+        .expect("batched full-row fit");
+        assert_eq!(batched_rows.n_valid_positions, 2);
+        assert_eq!(batched_rows.output_row_ids, row_ids);
+        assert!(difference(&scalar_rows.values, &batched_rows.values) < 2e-6);
+        assert_eq!(scalar_rows.diagnostics, batched_rows.diagnostics);
+        assert!(
+            muse_glimmer_fit_full_transport_rows_to_sources_batched(
+                &ctx,
+                &bound,
+                &captures,
+                51,
+                &[49, 50],
+                &row_ids,
+                0,
+                MUSE_GLIMMER_QUERY_BATCH_MAX + 1,
+                MuseGlimmerLensRule::J,
+            )
+            .is_err()
+        );
+        eprintln!(
+            "Muse Q8 composed Q=2 total={:?}; full rows R=3/Q=2 total={:?}",
+            composed.timings.total, batched_rows.timings.total
+        );
     }
 }

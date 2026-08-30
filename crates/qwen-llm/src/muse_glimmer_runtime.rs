@@ -10,8 +10,9 @@ use crate::muse_glimmer_lens::{
     MuseGlimmerSelectedTokenCovectors, muse_glimmer_selected_token_covectors,
 };
 use crate::muse_glimmer_lens_fit::{
-    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerFullTransportRowFit,
-    MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerOneBlockVjp,
+    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerBatchedFullTransportRowFit,
+    MuseGlimmerFullTransportRowFit, MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerOneBlockVjp,
+    MuseGlimmerQueryBatchComposedVjp, MuseGlimmerQueryBatchOneBlockVjp,
 };
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
@@ -272,6 +273,58 @@ impl MuseGlimmerTextRunner<'_, '_> {
             .lens_one_full_attention_block_vjp(capture, target_cotangent, rule)?)
     }
 
+    /// Reverse a query-major `[Q,T,H]` cotangent bank through one attention
+    /// block. The primal replay is shared across Q; Q must be in the bounded
+    /// range advertised by `MUSE_GLIMMER_QUERY_BATCH_MAX`.
+    pub fn lens_one_attention_block_vjp_query_batch(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerRuntimeError> {
+        Ok(self.forward.lens_one_attention_block_vjp_query_batch(
+            capture,
+            target_cotangents,
+            query_count,
+            rule,
+        )?)
+    }
+
+    pub fn lens_one_full_attention_block_vjp_query_batch(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerRuntimeError> {
+        Ok(self.forward.lens_one_full_attention_block_vjp_query_batch(
+            capture,
+            target_cotangents,
+            query_count,
+            rule,
+        )?)
+    }
+
+    pub fn lens_composed_vjp_query_batch(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchComposedVjp, MuseGlimmerRuntimeError> {
+        Ok(self.forward.lens_composed_vjp_query_batch(
+            captures,
+            target_block,
+            source_layers,
+            target_cotangents,
+            query_count,
+            rule,
+        )?)
+    }
+
     /// Fit one direction per selected token from `target_block` to exactly
     /// `target_block - 1`. Positions are `skip_first..T-1`; each VJP places
     /// one covector on every valid target row and means the matching source rows.
@@ -325,6 +378,30 @@ impl MuseGlimmerTextRunner<'_, '_> {
             source_layers,
             output_row_ids,
             skip_first,
+            rule,
+        )?)
+    }
+
+    /// Fit full-transport rows with exact query batches, chunking the row IDs
+    /// by `query_batch_size` while retaining scalar source/row orientation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_full_transport_rows_to_sources_batched(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        output_row_ids: &[u32],
+        skip_first: usize,
+        query_batch_size: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerBatchedFullTransportRowFit, MuseGlimmerRuntimeError> {
+        Ok(self.forward.fit_full_transport_rows_to_sources_batched(
+            captures,
+            target_block,
+            source_layers,
+            output_row_ids,
+            skip_first,
+            query_batch_size,
             rule,
         )?)
     }

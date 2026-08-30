@@ -21,11 +21,16 @@ use crate::muse_glimmer_lens::{
     MuseGlimmerLensError, MuseGlimmerSelectedTokenCovectors,
 };
 use crate::muse_glimmer_lens_fit::{
-    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerFullTransportRowFit,
-    MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerOneBlockVjp,
+    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerBatchedFullTransportRowFit,
+    MuseGlimmerFullTransportRowFit, MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerOneBlockVjp,
+    MuseGlimmerQueryBatchComposedVjp, MuseGlimmerQueryBatchOneBlockVjp,
+    muse_glimmer_composed_vjp_query_batch,
     muse_glimmer_fit_adjacent_full_attention_selected_tokens,
-    muse_glimmer_fit_full_transport_rows_to_sources, muse_glimmer_fit_selected_tokens_to_sources,
+    muse_glimmer_fit_full_transport_rows_to_sources,
+    muse_glimmer_fit_full_transport_rows_to_sources_batched,
+    muse_glimmer_fit_selected_tokens_to_sources, muse_glimmer_one_attention_block_vjp_query_batch,
     muse_glimmer_one_full_attention_block_vjp,
+    muse_glimmer_one_full_attention_block_vjp_query_batch,
 };
 use crate::muse_glimmer_metal::{
     encode_muse_glimmer_logit_softcap_f32, encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
@@ -775,6 +780,61 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         )
     }
 
+    pub(crate) fn lens_one_attention_block_vjp_query_batch(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: crate::muse_glimmer_lens::MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerLensError> {
+        muse_glimmer_one_attention_block_vjp_query_batch(
+            self.ctx,
+            &self.weights,
+            capture,
+            target_cotangents,
+            query_count,
+            rule,
+        )
+    }
+
+    pub(crate) fn lens_one_full_attention_block_vjp_query_batch(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: crate::muse_glimmer_lens::MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerLensError> {
+        muse_glimmer_one_full_attention_block_vjp_query_batch(
+            self.ctx,
+            &self.weights,
+            capture,
+            target_cotangents,
+            query_count,
+            rule,
+        )
+    }
+
+    pub(crate) fn lens_composed_vjp_query_batch(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: crate::muse_glimmer_lens::MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchComposedVjp, MuseGlimmerLensError> {
+        muse_glimmer_composed_vjp_query_batch(
+            self.ctx,
+            &self.weights,
+            captures,
+            target_block,
+            source_layers,
+            target_cotangents,
+            query_count,
+            rule,
+        )
+    }
+
     pub(crate) fn fit_adjacent_full_attention_selected_tokens(
         &self,
         capture: &MuseGlimmerLensCapture,
@@ -830,6 +890,30 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             source_layers,
             output_row_ids,
             skip_first,
+            rule,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fit_full_transport_rows_to_sources_batched(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        output_row_ids: &[u32],
+        skip_first: usize,
+        query_batch_size: usize,
+        rule: crate::muse_glimmer_lens::MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerBatchedFullTransportRowFit, MuseGlimmerLensError> {
+        muse_glimmer_fit_full_transport_rows_to_sources_batched(
+            self.ctx,
+            &self.weights,
+            captures,
+            target_block,
+            source_layers,
+            output_row_ids,
+            skip_first,
+            query_batch_size,
             rule,
         )
     }

@@ -31,7 +31,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | composed multi-source J/R selected tokens | live CLI passed | scalar live readout | REST after CLI use |
+| Muse Glimmer 30B | scalar selected-token J/R oracle | live CLI implemented | scalar live readout | batched resumable full-R |
 
 ## Current Status
 
@@ -44,15 +44,20 @@ multiple selected source layers and prefill/decode readouts at the post-block
 residual coordinate. The same Muse runner now supports fixed, residual-relative,
 projection-ablation, and source-to-target actions with ordered stacking and
 exact layer/prefill/decode scopes.
+The genuine compact full-R asset is hidden-to-hidden
+`[51,6656,6656]` F16 (4.21 GiB), not a vocabulary-row tensor. The scalar
+selected-token fitter remains its correctness oracle; extrapolating that path
+to the default 25-prompt corpus takes roughly nine days and must not be launched.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
 until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Hold the verified CLI contract stable for immediate use. The next interface
-slice is a thin local REST adapter over the same plan, input, and output
-semantics; it must add no authentication, execution modes, batching, caching,
-or UI, and must not block CLI use.
+Build batched, resumable Muse full-R production plus full-vocabulary and
+arbitrary-vector consumption. Production must batch hidden basis rows, preserve
+the scalar estimator exactly, checkpoint bounded row slabs, and stream the final
+F16 asset. Do not run a long fit until a short component packet projects the
+complete 25-prompt build into an agreed hours-scale envelope.
 
 ## Hard Exclusions
 
@@ -61,13 +66,15 @@ plugins, unrelated test repair, cross-device support, and production hardening.
 
 ## Blockers
 
-- None.
+- The first query-serial Q8 weight-reuse kernel regressed 17.99%; the next
+  transpose mechanism must retain query parallelism.
+- Batched Metal attention VJP and fixed scratch ownership do not exist yet.
 
 ## Fast Follows
 
-1. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
-2. Sparse position filtering and traces beyond 128 positions.
-3. Corpus batching only after measured throughput requires it.
+1. Full-R F16 mmap consumption for full-vocabulary and vector readouts.
+2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
+3. Thin local REST only after full-R CLI production is qualified.
 4. Decide whether large operation schedules need an application-output cap.
 
 This file is updated in place. It is not a work log or design document. Keep

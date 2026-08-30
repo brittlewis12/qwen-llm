@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Muse Full-R Q8 Multi-Query VJP KILL
+
+Status: remove the query-serial eight-query Q8 activation-VJP kernel. Keep the
+singleton VJP unchanged and source-map a matrix or genuinely 2D successor.
+
+- The candidate shared each Q8 block across eight independent accumulators and
+  stayed raw-bit equal at Q in `{1, 4, 5, 8, 9, 128, 512}`, including an offset
+  Q=9 tail.
+- On Muse gate/up geometry at Q=128, B-C-C-B moved
+  `94.315313 -> 111.275563 ms`, regressing 17.99% (`0.848x`). Both balanced
+  comparisons were negative.
+- The first mandatory 4x shape gate is impossible after that result, so no
+  additional timing arms ran. The candidate and its tests are removed.
+- Do not adaptively tune query-serial tiles. A successor must preserve query
+  parallelism while reducing repeated weight traversal.
+
+Evidence: `docs/bench/2026-08-29-muse-full-r-q8-vjp-q8-kill/`.
+Adversarial review: `01a05072-6951-7782-978a-2f274d90f474`.
+
 ## 2026-08-29 - Flash-Next Selected N=527 IQ4_NL Retile KEEP
 
 Status: admit exact N=527 to the existing M128xN16 IQ4_NL routed-down kernel.

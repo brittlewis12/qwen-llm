@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod full_lens;
+mod lens_compare;
+mod lens_inspect;
 mod lens_run;
 #[allow(dead_code)]
 mod messages;
@@ -69,7 +71,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run one bounded serial Lens plan and emit compact JSON.
+    /// Compare two compatible trace or run artifacts by exact identities.
+    Compare(lens_compare::CompareArgs),
+    /// Inspect a bounded qwen.lens.trace artifact without loading a model.
+    Inspect(lens_inspect::InspectArgs),
+    /// Run one bounded serial Lens plan and emit a summary or versioned JSON.
     #[command(name = "run")]
     LensRun(lens_run::LensRunArgs),
     /// Fit a resumable contiguous shard of J-lens or R-lens transport rows.
@@ -504,6 +510,8 @@ struct TokenReadoutManifest {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Compare(args) => lens_compare::run(args),
+        Command::Inspect(args) => lens_inspect::run(args),
         Command::LensRun(args) => lens_run::run(args),
         Command::FitRows(args) => fit_rows(args),
         Command::FitTokens(args) => fit_tokens(args),
@@ -2637,6 +2645,18 @@ fn resolve_output_path(output: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+fn resolve_output_file_path(output: &Path) -> Result<PathBuf> {
+    let resolved = resolve_output_path(output)?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&resolved) {
+        ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "output {} must be a regular non-symlink file",
+            resolved.display()
+        );
+    }
+    Ok(resolved)
+}
+
 fn validate_output_leaf(output: &Path) -> Result<()> {
     ensure!(
         output.file_name().is_some() && output.parent().is_some(),
@@ -2730,25 +2750,31 @@ fn write_atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
         std::process::id(),
         nonce
     ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temporary)
-        .with_context(|| format!("create staging file {}", temporary.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("write staging file {}", temporary.display()))?;
-    file.sync_all()
-        .with_context(|| format!("sync staging file {}", temporary.display()))?;
-    drop(file);
-    std::fs::rename(&temporary, path).with_context(|| {
-        format!(
-            "publish staging file {} to {}",
-            temporary.display(),
-            path.display()
-        )
-    })?;
+    let publish_result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)
+            .with_context(|| format!("create staging file {}", temporary.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write staging file {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync staging file {}", temporary.display()))?;
+        drop(file);
+        std::fs::rename(&temporary, path).with_context(|| {
+            format!(
+                "publish staging file {} to {}",
+                temporary.display(),
+                path.display()
+            )
+        })
+    })();
+    if let Err(error) = publish_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     sync_directory(parent)
 }
 
@@ -3044,9 +3070,27 @@ mod tests {
             "full-lens",
             "--messages",
             "messages.json",
+            "--message-mode",
+            "no-thinking",
         ])
         .unwrap();
         assert!(matches!(messages.command, Command::TraceFull(_)));
+
+        assert!(
+            Cli::try_parse_from([
+                "qwen-lens",
+                "trace-full",
+                "--model",
+                "model.gguf",
+                "--full-lens",
+                "full-lens",
+                "--prompt",
+                "hello",
+                "--message-mode",
+                "thinking",
+            ])
+            .is_err()
+        );
 
         assert!(
             Cli::try_parse_from([
@@ -3702,6 +3746,35 @@ mod tests {
         assert!(resolve_output_path(&trailing_leaf).is_err());
         assert!(resolve_output_path(Path::new("/")).is_err());
         assert!(resolve_output_path(Path::new("")).is_err());
+
+        let directory_leaf = root.join("directory-output");
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&directory_leaf)
+            .unwrap();
+        assert!(resolve_output_file_path(&directory_leaf).is_err());
+        assert_eq!(
+            resolve_output_file_path(&root.join("result.json")).unwrap(),
+            root.join("result.json")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn atomic_replace_removes_staging_file_when_rename_fails() {
+        let root = test_directory("atomic-replace-cleanup-test");
+        DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let target = root.join("target");
+        DirBuilder::new().mode(0o700).create(&target).unwrap();
+
+        assert!(write_atomic_replace(&target, b"content").is_err());
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".target.tmp.")
+        }));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

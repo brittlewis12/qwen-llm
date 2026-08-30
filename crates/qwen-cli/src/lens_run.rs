@@ -5,7 +5,7 @@ use crate::messages::{
 };
 use crate::template_lens::{TemplateLens, TemplateScore, TemplateVocabulary};
 use anyhow::{Context, Result, bail, ensure};
-use clap::{ArgGroup, Args};
+use clap::{ArgGroup, Args, ValueEnum};
 use objc2_metal::MTLBuffer;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{MetalContext, MetalTensor, PostBlockIntervention};
@@ -22,6 +22,7 @@ use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const MAX_PLAN_BYTES: usize = 16 * 1024 * 1024;
@@ -34,6 +35,9 @@ const MAX_TOP_K: usize = 1024;
 const MAX_NEW_TOKENS: usize = 4096;
 const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
+const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
+const RUN_SCHEMA: &str = "qwen.lens.run";
+const RUN_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Args)]
 #[command(group(
@@ -94,9 +98,23 @@ pub(crate) struct LensRunArgs {
     /// Native sampler seed.
     #[arg(long, default_value_t = 0)]
     pub(crate) seed: u64,
+
+    /// Replace this JSON run artifact atomically after successful execution.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+
+    /// Compact summary or the complete JSON run artifact on stdout.
+    #[arg(long, value_enum)]
+    pub(crate) format: Option<RunStdoutFormat>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum RunStdoutFormat {
+    Summary,
+    Json,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LensPlan {
     pub(crate) version: u32,
@@ -107,7 +125,7 @@ pub(crate) struct LensPlan {
     pub(crate) readouts: Vec<ReadoutDefinition>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum LensDefinition {
     NativeSelected {
@@ -138,14 +156,14 @@ impl LensDefinition {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub(crate) enum DirectionDefinition {
     LensRow(LensRowDirectionDefinition),
     NativeHyper(NativeHyperDirectionDefinition),
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LensRowDirectionDefinition {
     pub(crate) id: String,
@@ -154,14 +172,14 @@ pub(crate) struct LensRowDirectionDefinition {
     pub(crate) normalization: Normalization,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeHyperDirectionDefinition {
     pub(crate) id: String,
     pub(crate) source: NativeHyperDirectionSource,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum NativeHyperDirectionSource {
     NativeHyperF32 { path: PathBuf, layer: u32 },
@@ -202,7 +220,7 @@ impl NativeHyperDirectionSource {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum DirectionRow {
     TokenId { token_id: i32 },
@@ -210,14 +228,14 @@ pub(crate) enum DirectionRow {
     Label { label: String },
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Normalization {
     AsStored,
     UnitL2,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OperationDefinition {
     pub(crate) id: String,
@@ -225,7 +243,7 @@ pub(crate) struct OperationDefinition {
     pub(crate) action: Action,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     FixedAdd {
@@ -294,7 +312,7 @@ impl<'a> Iterator for EitherDirectionIds<'a> {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadoutDefinition {
     pub(crate) id: String,
@@ -303,7 +321,7 @@ pub(crate) struct ReadoutDefinition {
     pub(crate) top_k: usize,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Scope {
     pub(crate) layers: Selector,
@@ -313,7 +331,7 @@ pub(crate) struct Scope {
     pub(crate) decode: Option<Selector>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Selector {
     All,
@@ -384,27 +402,46 @@ impl Scope {
 }
 
 #[derive(Debug, Serialize)]
-struct RunOutput {
+pub(crate) struct RunOutput {
+    schema: &'static str,
+    schema_version: u32,
+    runtime_kind: &'static str,
+    model_path: PathBuf,
+    canonical_plan_path: PathBuf,
+    plan: LensPlan,
+    input_source: &'static str,
     prompt_token_ids: Vec<i32>,
     generated_token_ids: Vec<i32>,
+    sampler: RunSampler,
+    max_new_tokens: usize,
     decoded_text: String,
     stop_reason: String,
     operation_applications: Vec<OperationApplication>,
+    requested_live_readouts: Vec<ReadoutDefinition>,
     live_readouts: Vec<LiveReadout>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     native_hyper_captures: Vec<NativeHyperCapture>,
 }
 
 #[derive(Debug, Serialize)]
-struct OperationApplication {
-    id: String,
-    layer: u32,
-    phase: &'static str,
-    index: usize,
+struct RunSampler {
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    min_p: f32,
+    seed: u64,
 }
 
 #[derive(Debug, Serialize)]
-struct NativeHyperCapture {
+pub(crate) struct OperationApplication {
+    pub(crate) id: String,
+    pub(crate) layer: u32,
+    pub(crate) phase: &'static str,
+    pub(crate) index: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct NativeHyperCapture {
     operation_id: String,
     layer: u32,
     phase: &'static str,
@@ -420,24 +457,139 @@ struct NativeHyperCapture {
 }
 
 #[derive(Debug, Serialize)]
-struct LiveReadout {
-    id: String,
-    lens: String,
-    method: String,
-    source_layer: u32,
-    target_layer: Option<u32>,
-    phase: &'static str,
-    index: usize,
-    scores: Vec<LiveScore>,
+pub(crate) struct LiveReadout {
+    pub(crate) id: String,
+    pub(crate) lens: String,
+    pub(crate) method: String,
+    pub(crate) score_kind: &'static str,
+    pub(crate) candidate_universe: &'static str,
+    pub(crate) source_layer: u32,
+    pub(crate) target_layer: Option<u32>,
+    pub(crate) phase: &'static str,
+    pub(crate) index: usize,
+    pub(crate) scores: Vec<LiveScore>,
 }
 
 #[derive(Debug, Serialize)]
-struct LiveScore {
-    token_id: Option<i32>,
-    row_id: usize,
-    word_id: Option<i64>,
-    label: Option<String>,
-    score: f32,
+pub(crate) struct LiveScore {
+    pub(crate) token_id: Option<i32>,
+    pub(crate) row_id: usize,
+    pub(crate) word_id: Option<i64>,
+    pub(crate) label: Option<String>,
+    pub(crate) score: f32,
+}
+
+pub(crate) struct RunResult {
+    pub(crate) prompt_token_ids: Vec<i32>,
+    pub(crate) generated_token_ids: Vec<i32>,
+    pub(crate) decoded_text: String,
+    pub(crate) stop_reason: String,
+    pub(crate) operation_applications: Vec<OperationApplication>,
+    pub(crate) live_readouts: Vec<LiveReadout>,
+    pub(crate) native_hyper_captures: Vec<NativeHyperCapture>,
+}
+
+pub(crate) fn emit_run_output(
+    args: &LensRunArgs,
+    runtime_kind: &'static str,
+    plan_path: &Path,
+    plan: LensPlan,
+    result: RunResult,
+    output_path: Option<&Path>,
+) -> Result<()> {
+    let artifact = RunOutput {
+        schema: RUN_SCHEMA,
+        schema_version: RUN_SCHEMA_VERSION,
+        runtime_kind,
+        model_path: args.model.clone(),
+        canonical_plan_path: plan_path.to_path_buf(),
+        requested_live_readouts: plan.readouts.clone(),
+        plan,
+        input_source: input_source(args),
+        prompt_token_ids: result.prompt_token_ids,
+        generated_token_ids: result.generated_token_ids,
+        sampler: RunSampler {
+            temperature: args.temperature,
+            top_k: args.top_k,
+            top_p: args.top_p,
+            min_p: args.min_p,
+            seed: args.seed,
+        },
+        max_new_tokens: args.max_new_tokens,
+        decoded_text: result.decoded_text,
+        stop_reason: result.stop_reason,
+        operation_applications: result.operation_applications,
+        live_readouts: result.live_readouts,
+        native_hyper_captures: result.native_hyper_captures,
+    };
+    let stdout_format = effective_run_stdout_format(args.format, output_path.is_some());
+    let bytes = if output_path.is_some() || stdout_format == RunStdoutFormat::Json {
+        let bytes = serde_json::to_vec(&artifact).context("serialize Lens run artifact")?;
+        ensure!(
+            bytes.len() <= MAX_RUN_ARTIFACT_BYTES,
+            "serialized Lens run artifact is {} bytes; limit is {MAX_RUN_ARTIFACT_BYTES}",
+            bytes.len()
+        );
+        Some(bytes)
+    } else {
+        None
+    };
+    if let (Some(path), Some(bytes)) = (output_path, &bytes) {
+        super::write_atomic_replace(path, bytes)?;
+    }
+    match stdout_format {
+        RunStdoutFormat::Summary => print_run_summary(&artifact, output_path),
+        RunStdoutFormat::Json => {
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            stdout
+                .write_all(bytes.as_deref().expect("JSON output was serialized"))
+                .context("write Lens run JSON")?;
+            stdout.write_all(b"\n").context("finish Lens run JSON")?;
+        }
+    }
+    Ok(())
+}
+
+fn effective_run_stdout_format(
+    explicit: Option<RunStdoutFormat>,
+    has_output: bool,
+) -> RunStdoutFormat {
+    explicit.unwrap_or(if has_output {
+        RunStdoutFormat::Summary
+    } else {
+        RunStdoutFormat::Json
+    })
+}
+
+fn input_source(args: &LensRunArgs) -> &'static str {
+    if args.prompt.is_some() {
+        "prompt"
+    } else if args.token_ids.is_some() {
+        "token_ids"
+    } else {
+        "messages"
+    }
+}
+
+fn print_run_summary(artifact: &RunOutput, output_path: Option<&Path>) {
+    print!("{}", run_summary(artifact, output_path));
+}
+
+fn run_summary(artifact: &RunOutput, output_path: Option<&Path>) -> String {
+    let mut summary = format!(
+        "runtime={} model={}\ngenerated_text={}\nstop_reason={}\noperation_applications={} live_readouts={}\n",
+        artifact.runtime_kind,
+        artifact.model_path.display(),
+        serde_json::to_string(&artifact.decoded_text).expect("string serialization cannot fail"),
+        artifact.stop_reason,
+        artifact.operation_applications.len(),
+        artifact.live_readouts.len()
+    );
+    if let Some(path) = output_path {
+        summary.push_str(&format!("artifact={}\n", path.display()));
+    }
+    summary
 }
 
 struct NativeLens {
@@ -504,6 +656,11 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         !args.no_special_tokens || args.prompt.is_some(),
         "--no-special-tokens is supported only with --prompt"
     );
+    let output_path = args
+        .output
+        .as_deref()
+        .map(super::resolve_output_file_path)
+        .transpose()?;
 
     let plan_path = std::fs::canonicalize(&args.plan)
         .with_context(|| format!("resolve plan {}", args.plan.display()))?;
@@ -518,11 +675,25 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
     if crate::muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
-        return crate::muse_lens_run::run(&args, plan, plan_dir, gguf);
+        return crate::muse_lens_run::run(
+            &args,
+            plan,
+            &plan_path,
+            plan_dir,
+            gguf,
+            output_path.as_deref(),
+        );
     }
     let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
     if family == ModelFamily::Qwen4Exp {
-        return run_qwen4exp(&args, plan, plan_dir, gguf);
+        return run_qwen4exp(
+            &args,
+            plan,
+            &plan_path,
+            plan_dir,
+            gguf,
+            output_path.as_deref(),
+        );
     }
     validate_ordinary_plan(&plan)?;
 
@@ -605,7 +776,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         )?;
     }
     let decoded_text = tokenizer.decode(&generated_token_ids);
-    let output = RunOutput {
+    let result = RunResult {
         prompt_token_ids,
         generated_token_ids,
         decoded_text,
@@ -614,11 +785,24 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         live_readouts,
         native_hyper_captures: Vec::new(),
     };
-    println!("{}", serde_json::to_string(&output)?);
-    Ok(())
+    emit_run_output(
+        &args,
+        "ordinary_qwen",
+        &plan_path,
+        plan,
+        result,
+        output_path.as_deref(),
+    )
 }
 
-fn run_qwen4exp(args: &LensRunArgs, plan: LensPlan, plan_dir: &Path, gguf: GgufFile) -> Result<()> {
+fn run_qwen4exp(
+    args: &LensRunArgs,
+    plan: LensPlan,
+    plan_path: &Path,
+    plan_dir: &Path,
+    gguf: GgufFile,
+    output_path: Option<&Path>,
+) -> Result<()> {
     let config = Qwen4ExpConfig::from_gguf(&gguf).context("bind Flash-Next model geometry")?;
     ensure!(
         config == Qwen4ExpConfig::flash_next_reference(),
@@ -716,7 +900,7 @@ fn run_qwen4exp(args: &LensRunArgs, plan: LensPlan, plan_dir: &Path, gguf: GgufF
         )?;
     }
 
-    let output = RunOutput {
+    let result = RunResult {
         prompt_token_ids,
         decoded_text: tokenizer.decode(&generated_token_ids),
         generated_token_ids,
@@ -725,8 +909,8 @@ fn run_qwen4exp(args: &LensRunArgs, plan: LensPlan, plan_dir: &Path, gguf: GgufF
         live_readouts: Vec::new(),
         native_hyper_captures,
     };
-    println!("{}", serde_json::to_string(&output)?);
-    Ok(())
+    let plan = execution.plan.clone();
+    emit_run_output(args, "flash_next", plan_path, plan, result, output_path)
 }
 
 fn prepare_qwen4exp_execution_plan(
@@ -1912,12 +2096,15 @@ fn forward_event(
                 }
                 let slot = execution.layer_slots[&layer];
                 let row = &values[slot * execution.hidden_size..(slot + 1) * execution.hidden_size];
-                let scores =
-                    score_readout(&execution.lenses[&readout.lens], layer, row, readout.top_k)?;
+                let prepared = &execution.lenses[&readout.lens];
+                let (score_kind, candidate_universe) = readout_score_semantics(prepared);
+                let scores = score_readout(prepared, layer, row, readout.top_k)?;
                 live_readouts.push(LiveReadout {
                     id: readout.id.clone(),
                     lens: readout.lens.clone(),
                     method: scores.0,
+                    score_kind,
+                    candidate_universe,
                     source_layer: layer,
                     target_layer: scores.1,
                     phase: phase.label(),
@@ -2029,6 +2216,16 @@ pub(crate) fn read_f32_tensor(tensor: &MetalTensor, length: usize) -> Vec<f32> {
     values
 }
 
+fn readout_score_semantics(prepared: &PreparedLens) -> (&'static str, &'static str) {
+    match &prepared.lens {
+        LoadedLens::Native(_) => (
+            "selected_row_projection_numerator",
+            "lens_artifact_selected_token_rows",
+        ),
+        LoadedLens::Template { .. } => ("cosine_similarity", "workspace_template_rows"),
+    }
+}
+
 fn score_readout(
     prepared: &PreparedLens,
     layer: u32,
@@ -2109,8 +2306,182 @@ fn score_readout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Parser)]
+    struct RunArgsParser {
+        #[command(flatten)]
+        args: LensRunArgs,
+    }
+
+    fn minimal_plan() -> LensPlan {
+        serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{"kind":"native_selected","id":"j","artifact":"relative/j"}],
+            "directions": [],
+            "operations": [],
+            "readouts": [{
+                "id":"live",
+                "lens":"j",
+                "scope":{"layers":{"kind":"values","values":[1]},"prefill":{"kind":"all"}},
+                "top_k":1
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn test_args() -> LensRunArgs {
+        RunArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--prompt",
+            "hello",
+        ])
+        .unwrap()
+        .args
+    }
+
+    #[test]
+    fn run_cli_uses_contextual_default_and_accepts_explicit_json_output() {
+        let defaults = test_args();
+        assert_eq!(defaults.format, None);
+        assert!(defaults.output.is_none());
+
+        let parsed = RunArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--token-ids",
+            "1,2",
+            "--output",
+            "run.json",
+            "--format",
+            "json",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(parsed.format, Some(RunStdoutFormat::Json));
+        assert_eq!(parsed.output.as_deref(), Some(Path::new("run.json")));
+        assert_eq!(
+            effective_run_stdout_format(None, false),
+            RunStdoutFormat::Json
+        );
+        assert_eq!(
+            effective_run_stdout_format(None, true),
+            RunStdoutFormat::Summary
+        );
+        assert_eq!(
+            effective_run_stdout_format(Some(RunStdoutFormat::Summary), false),
+            RunStdoutFormat::Summary
+        );
+    }
+
+    #[test]
+    fn run_artifact_serializes_envelope_exact_plan_and_score_semantics() {
+        let plan = minimal_plan();
+        let artifact = RunOutput {
+            schema: RUN_SCHEMA,
+            schema_version: RUN_SCHEMA_VERSION,
+            runtime_kind: "ordinary_qwen",
+            model_path: "model.gguf".into(),
+            canonical_plan_path: "/canonical/plan.json".into(),
+            requested_live_readouts: plan.readouts.clone(),
+            plan,
+            input_source: "prompt",
+            prompt_token_ids: vec![1, 2],
+            generated_token_ids: vec![3],
+            sampler: RunSampler {
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: 7,
+            },
+            max_new_tokens: 1,
+            decoded_text: "done".into(),
+            stop_reason: "max_new_tokens".into(),
+            operation_applications: Vec::new(),
+            live_readouts: vec![LiveReadout {
+                id: "live".into(),
+                lens: "j".into(),
+                method: "J".into(),
+                score_kind: "selected_row_projection_numerator",
+                candidate_universe: "lens_artifact_selected_token_rows",
+                source_layer: 1,
+                target_layer: Some(2),
+                phase: "prefill",
+                index: 0,
+                scores: Vec::new(),
+            }],
+            native_hyper_captures: Vec::new(),
+        };
+        let value = serde_json::to_value(&artifact).unwrap();
+        assert_eq!(value["schema"], RUN_SCHEMA);
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["plan"]["lenses"][0]["artifact"], "relative/j");
+        assert_eq!(value["requested_live_readouts"], value["plan"]["readouts"]);
+        assert_eq!(
+            value["live_readouts"][0]["score_kind"],
+            "selected_row_projection_numerator"
+        );
+        assert_eq!(
+            value["live_readouts"][0]["candidate_universe"],
+            "lens_artifact_selected_token_rows"
+        );
+        assert!(value["live_readouts"][0].get("probability").is_none());
+    }
+
+    #[test]
+    fn summary_contains_required_counts_text_and_artifact_path() {
+        let plan = minimal_plan();
+        let artifact = RunOutput {
+            schema: RUN_SCHEMA,
+            schema_version: RUN_SCHEMA_VERSION,
+            runtime_kind: "muse_glimmer",
+            model_path: "muse.gguf".into(),
+            canonical_plan_path: "/canonical/plan.json".into(),
+            requested_live_readouts: plan.readouts.clone(),
+            plan,
+            input_source: "token_ids",
+            prompt_token_ids: vec![1],
+            generated_token_ids: vec![2],
+            sampler: RunSampler {
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: 0,
+            },
+            max_new_tokens: 1,
+            decoded_text: "line\nbreak".into(),
+            stop_reason: "stop_token".into(),
+            operation_applications: vec![OperationApplication {
+                id: "op".into(),
+                layer: 1,
+                phase: "prefill",
+                index: 0,
+            }],
+            live_readouts: Vec::new(),
+            native_hyper_captures: Vec::new(),
+        };
+        assert_eq!(
+            run_summary(&artifact, Some(Path::new("/tmp/run.json"))),
+            concat!(
+                "runtime=muse_glimmer model=muse.gguf\n",
+                "generated_text=\"line\\nbreak\"\n",
+                "stop_reason=stop_token\n",
+                "operation_applications=1 live_readouts=0\n",
+                "artifact=/tmp/run.json\n"
+            )
+        );
+    }
 
     fn temporary_direction_path() -> PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);

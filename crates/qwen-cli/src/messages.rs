@@ -162,6 +162,104 @@ impl Default for Qwen38GenerationMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MessageRenderSpanKind {
+    MessageStartMarker,
+    Role,
+    MessageContent,
+    MessageEndMarker,
+    GeneratedAssistantStartMarker,
+    GeneratedAssistantRole,
+    ThinkingChannelStartMarker,
+    ThinkingChannelEndMarker,
+    ReasoningInstructionContent,
+    ContentSeparator,
+}
+
+impl MessageRenderSpanKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::MessageStartMarker => "message_start_marker",
+            Self::Role => "role",
+            Self::MessageContent => "message_content",
+            Self::MessageEndMarker => "message_end_marker",
+            Self::GeneratedAssistantStartMarker => "generated_assistant_start_marker",
+            Self::GeneratedAssistantRole => "generated_assistant_role",
+            Self::ThinkingChannelStartMarker => "thinking_channel_start_marker",
+            Self::ThinkingChannelEndMarker => "thinking_channel_end_marker",
+            Self::ReasoningInstructionContent => "reasoning_instruction_content",
+            Self::ContentSeparator => "content_separator",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MessageRenderChannel {
+    Thinking,
+}
+
+impl MessageRenderChannel {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Thinking => "thinking",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MessageRenderSpan {
+    pub(crate) kind: MessageRenderSpanKind,
+    pub(crate) message_index: Option<usize>,
+    pub(crate) role: Option<String>,
+    pub(crate) channel: Option<MessageRenderChannel>,
+    pub(crate) byte_start: usize,
+    pub(crate) byte_end: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AnnotatedMessageRender {
+    pub(crate) text: String,
+    pub(crate) spans: Vec<MessageRenderSpan>,
+}
+
+#[derive(Default)]
+struct AnnotatedMessageRenderBuilder {
+    text: String,
+    spans: Vec<MessageRenderSpan>,
+}
+
+impl AnnotatedMessageRenderBuilder {
+    fn push(
+        &mut self,
+        text: &str,
+        kind: MessageRenderSpanKind,
+        message_index: Option<usize>,
+        role: Option<&str>,
+        channel: Option<MessageRenderChannel>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let byte_start = self.text.len();
+        self.text.push_str(text);
+        self.spans.push(MessageRenderSpan {
+            kind,
+            message_index,
+            role: role.map(str::to_owned),
+            channel,
+            byte_start,
+            byte_end: self.text.len(),
+        });
+    }
+
+    fn finish(self) -> AnnotatedMessageRender {
+        AnnotatedMessageRender {
+            text: self.text,
+            spans: self.spans,
+        }
+    }
+}
+
 pub(crate) fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThinkingMode {
     if preserve {
         MessagesThinkingMode::Preserve
@@ -560,7 +658,16 @@ pub(crate) fn render_qwen_messages_prompt(
     preserve_thinking: bool,
     append_generation_prompt: bool,
 ) -> String {
-    render_qwen_messages_prompt_with_generation(
+    render_qwen_messages_prompt_annotated(messages, preserve_thinking, append_generation_prompt)
+        .text
+}
+
+pub(crate) fn render_qwen_messages_prompt_annotated(
+    messages: &[ChatMessage],
+    preserve_thinking: bool,
+    append_generation_prompt: bool,
+) -> AnnotatedMessageRender {
+    render_qwen_messages_prompt_with_generation_annotated(
         messages,
         preserve_thinking,
         append_generation_prompt,
@@ -574,27 +681,146 @@ pub(crate) fn render_qwen_messages_prompt_with_generation(
     append_generation_prompt: bool,
     generation_mode: QwenGenerationMode,
 ) -> String {
-    let mut output = String::new();
-    for message in messages {
-        output.push_str("<|im_start|>");
-        output.push_str(&message.role);
-        output.push('\n');
+    render_qwen_messages_prompt_with_generation_annotated(
+        messages,
+        preserve_thinking,
+        append_generation_prompt,
+        generation_mode,
+    )
+    .text
+}
+
+pub(crate) fn render_qwen_messages_prompt_with_generation_annotated(
+    messages: &[ChatMessage],
+    preserve_thinking: bool,
+    append_generation_prompt: bool,
+    generation_mode: QwenGenerationMode,
+) -> AnnotatedMessageRender {
+    let mut output = AnnotatedMessageRenderBuilder::default();
+    for (message_index, message) in messages.iter().enumerate() {
+        let index = Some(message_index);
+        output.push(
+            "<|im_start|>",
+            MessageRenderSpanKind::MessageStartMarker,
+            index,
+            Some(&message.role),
+            None,
+        );
+        output.push(
+            &message.role,
+            MessageRenderSpanKind::Role,
+            index,
+            Some(&message.role),
+            None,
+        );
+        output.push(
+            "\n",
+            MessageRenderSpanKind::ContentSeparator,
+            index,
+            Some(&message.role),
+            None,
+        );
+        let content;
         if message.role == "assistant" && !preserve_thinking {
-            output.push_str(&strip_think(&message.content));
+            content = strip_think(&message.content);
         } else {
-            output.push_str(&message.content);
+            content = message.content.clone();
         }
-        output.push_str("<|im_end|>\n");
+        output.push(
+            &content,
+            MessageRenderSpanKind::MessageContent,
+            index,
+            Some(&message.role),
+            None,
+        );
+        output.push(
+            "<|im_end|>",
+            MessageRenderSpanKind::MessageEndMarker,
+            index,
+            Some(&message.role),
+            None,
+        );
+        output.push(
+            "\n",
+            MessageRenderSpanKind::ContentSeparator,
+            index,
+            Some(&message.role),
+            None,
+        );
     }
     if append_generation_prompt {
-        output.push_str("<|im_start|>assistant\n");
+        output.push(
+            "<|im_start|>",
+            MessageRenderSpanKind::GeneratedAssistantStartMarker,
+            None,
+            Some("assistant"),
+            None,
+        );
+        output.push(
+            "assistant",
+            MessageRenderSpanKind::GeneratedAssistantRole,
+            None,
+            Some("assistant"),
+            None,
+        );
+        output.push(
+            "\n",
+            MessageRenderSpanKind::ContentSeparator,
+            None,
+            Some("assistant"),
+            None,
+        );
         match generation_mode {
             QwenGenerationMode::Auto => {}
-            QwenGenerationMode::Thinking => output.push_str("<think>\n"),
-            QwenGenerationMode::NoThinking => output.push_str("<think>\n\n</think>\n\n"),
+            QwenGenerationMode::Thinking => output.push(
+                "<think>",
+                MessageRenderSpanKind::ThinkingChannelStartMarker,
+                None,
+                Some("assistant"),
+                Some(MessageRenderChannel::Thinking),
+            ),
+            QwenGenerationMode::NoThinking => {
+                output.push(
+                    "<think>",
+                    MessageRenderSpanKind::ThinkingChannelStartMarker,
+                    None,
+                    Some("assistant"),
+                    Some(MessageRenderChannel::Thinking),
+                );
+                output.push(
+                    "\n\n",
+                    MessageRenderSpanKind::ContentSeparator,
+                    None,
+                    Some("assistant"),
+                    Some(MessageRenderChannel::Thinking),
+                );
+                output.push(
+                    "</think>",
+                    MessageRenderSpanKind::ThinkingChannelEndMarker,
+                    None,
+                    Some("assistant"),
+                    Some(MessageRenderChannel::Thinking),
+                );
+                output.push(
+                    "\n\n",
+                    MessageRenderSpanKind::ContentSeparator,
+                    None,
+                    Some("assistant"),
+                    None,
+                );
+            }
+        }
+        if generation_mode == QwenGenerationMode::Thinking {
+            output.push(
+                "\n",
+                MessageRenderSpanKind::ContentSeparator,
+                None,
+                Some("assistant"),
+                Some(MessageRenderChannel::Thinking),
+            );
         }
     }
-    output
+    output.finish()
 }
 
 #[allow(dead_code)]
@@ -603,50 +829,283 @@ pub(crate) fn render_qwen38_messages_prompt_with_generation(
     append_generation_prompt: bool,
     generation_mode: Qwen38GenerationMode,
 ) -> String {
+    render_qwen38_messages_prompt_with_generation_annotated(
+        messages,
+        append_generation_prompt,
+        generation_mode,
+    )
+    .text
+}
+
+#[allow(dead_code)]
+pub(crate) fn render_qwen38_messages_prompt_with_generation_annotated(
+    messages: &[ChatMessage],
+    append_generation_prompt: bool,
+    generation_mode: Qwen38GenerationMode,
+) -> AnnotatedMessageRender {
     let reasoning_instruction = match generation_mode {
         Qwen38GenerationMode::Thinking(effort) => effort.instruction(),
         Qwen38GenerationMode::NoThinking => None,
     };
-    let mut output = String::new();
+    let mut output = AnnotatedMessageRenderBuilder::default();
     let mut first_non_system = 0;
     if let Some(system) = messages.first().filter(|message| message.role == "system") {
         let content = system.content.trim();
         if reasoning_instruction.is_some() || !content.is_empty() {
-            output.push_str("<|im_start|>system\n");
+            output.push(
+                "<|im_start|>",
+                MessageRenderSpanKind::MessageStartMarker,
+                Some(0),
+                Some("system"),
+                None,
+            );
+            output.push(
+                "system",
+                MessageRenderSpanKind::Role,
+                Some(0),
+                Some("system"),
+                None,
+            );
+            output.push(
+                "\n",
+                MessageRenderSpanKind::ContentSeparator,
+                Some(0),
+                Some("system"),
+                None,
+            );
             if let Some(instruction) = reasoning_instruction {
-                output.push_str(instruction);
+                output.push(
+                    instruction,
+                    MessageRenderSpanKind::ReasoningInstructionContent,
+                    Some(0),
+                    Some("system"),
+                    Some(MessageRenderChannel::Thinking),
+                );
                 if !content.is_empty() {
-                    output.push_str("\n\n");
+                    output.push(
+                        "\n\n",
+                        MessageRenderSpanKind::ContentSeparator,
+                        Some(0),
+                        Some("system"),
+                        None,
+                    );
                 }
             }
-            output.push_str(content);
-            output.push_str("<|im_end|>\n");
+            output.push(
+                content,
+                MessageRenderSpanKind::MessageContent,
+                Some(0),
+                Some("system"),
+                None,
+            );
+            output.push(
+                "<|im_end|>",
+                MessageRenderSpanKind::MessageEndMarker,
+                Some(0),
+                Some("system"),
+                None,
+            );
+            output.push(
+                "\n",
+                MessageRenderSpanKind::ContentSeparator,
+                Some(0),
+                Some("system"),
+                None,
+            );
         }
         first_non_system = 1;
     } else if let Some(instruction) = reasoning_instruction {
-        output.push_str("<|im_start|>system\n");
-        output.push_str(instruction);
-        output.push_str("<|im_end|>\n");
+        output.push(
+            "<|im_start|>",
+            MessageRenderSpanKind::MessageStartMarker,
+            None,
+            Some("system"),
+            None,
+        );
+        output.push(
+            "system",
+            MessageRenderSpanKind::Role,
+            None,
+            Some("system"),
+            None,
+        );
+        output.push(
+            "\n",
+            MessageRenderSpanKind::ContentSeparator,
+            None,
+            Some("system"),
+            None,
+        );
+        output.push(
+            instruction,
+            MessageRenderSpanKind::ReasoningInstructionContent,
+            None,
+            Some("system"),
+            Some(MessageRenderChannel::Thinking),
+        );
+        output.push(
+            "<|im_end|>",
+            MessageRenderSpanKind::MessageEndMarker,
+            None,
+            Some("system"),
+            None,
+        );
+        output.push(
+            "\n",
+            MessageRenderSpanKind::ContentSeparator,
+            None,
+            Some("system"),
+            None,
+        );
     }
 
-    for message in &messages[first_non_system..] {
-        output.push_str("<|im_start|>");
-        output.push_str(&message.role);
-        output.push('\n');
+    for (message_index, message) in messages.iter().enumerate().skip(first_non_system) {
+        let index = Some(message_index);
+        output.push(
+            "<|im_start|>",
+            MessageRenderSpanKind::MessageStartMarker,
+            index,
+            Some(&message.role),
+            None,
+        );
+        output.push(
+            &message.role,
+            MessageRenderSpanKind::Role,
+            index,
+            Some(&message.role),
+            None,
+        );
+        output.push(
+            "\n",
+            MessageRenderSpanKind::ContentSeparator,
+            index,
+            Some(&message.role),
+            None,
+        );
         if message.role == "assistant" {
-            output.push_str("<think>\n\n</think>\n\n");
+            output.push(
+                "<think>",
+                MessageRenderSpanKind::ThinkingChannelStartMarker,
+                index,
+                Some("assistant"),
+                Some(MessageRenderChannel::Thinking),
+            );
+            output.push(
+                "\n\n",
+                MessageRenderSpanKind::ContentSeparator,
+                index,
+                Some("assistant"),
+                Some(MessageRenderChannel::Thinking),
+            );
+            output.push(
+                "</think>",
+                MessageRenderSpanKind::ThinkingChannelEndMarker,
+                index,
+                Some("assistant"),
+                Some(MessageRenderChannel::Thinking),
+            );
+            output.push(
+                "\n\n",
+                MessageRenderSpanKind::ContentSeparator,
+                index,
+                Some("assistant"),
+                None,
+            );
         }
-        output.push_str(message.content.trim());
-        output.push_str("<|im_end|>\n");
+        output.push(
+            message.content.trim(),
+            MessageRenderSpanKind::MessageContent,
+            index,
+            Some(&message.role),
+            None,
+        );
+        output.push(
+            "<|im_end|>",
+            MessageRenderSpanKind::MessageEndMarker,
+            index,
+            Some(&message.role),
+            None,
+        );
+        output.push(
+            "\n",
+            MessageRenderSpanKind::ContentSeparator,
+            index,
+            Some(&message.role),
+            None,
+        );
     }
     if append_generation_prompt {
-        output.push_str("<|im_start|>assistant\n");
+        output.push(
+            "<|im_start|>",
+            MessageRenderSpanKind::GeneratedAssistantStartMarker,
+            None,
+            Some("assistant"),
+            None,
+        );
+        output.push(
+            "assistant",
+            MessageRenderSpanKind::GeneratedAssistantRole,
+            None,
+            Some("assistant"),
+            None,
+        );
+        output.push(
+            "\n",
+            MessageRenderSpanKind::ContentSeparator,
+            None,
+            Some("assistant"),
+            None,
+        );
         match generation_mode {
-            Qwen38GenerationMode::Thinking(_) => output.push_str("<think>\n"),
-            Qwen38GenerationMode::NoThinking => output.push_str("<think>\n\n</think>\n\n"),
+            Qwen38GenerationMode::Thinking(_) => {
+                output.push(
+                    "<think>",
+                    MessageRenderSpanKind::ThinkingChannelStartMarker,
+                    None,
+                    Some("assistant"),
+                    Some(MessageRenderChannel::Thinking),
+                );
+                output.push(
+                    "\n",
+                    MessageRenderSpanKind::ContentSeparator,
+                    None,
+                    Some("assistant"),
+                    Some(MessageRenderChannel::Thinking),
+                );
+            }
+            Qwen38GenerationMode::NoThinking => {
+                output.push(
+                    "<think>",
+                    MessageRenderSpanKind::ThinkingChannelStartMarker,
+                    None,
+                    Some("assistant"),
+                    Some(MessageRenderChannel::Thinking),
+                );
+                output.push(
+                    "\n\n",
+                    MessageRenderSpanKind::ContentSeparator,
+                    None,
+                    Some("assistant"),
+                    Some(MessageRenderChannel::Thinking),
+                );
+                output.push(
+                    "</think>",
+                    MessageRenderSpanKind::ThinkingChannelEndMarker,
+                    None,
+                    Some("assistant"),
+                    Some(MessageRenderChannel::Thinking),
+                );
+                output.push(
+                    "\n\n",
+                    MessageRenderSpanKind::ContentSeparator,
+                    None,
+                    Some("assistant"),
+                    None,
+                );
+            }
         }
     }
-    output
+    output.finish()
 }
 
 #[allow(dead_code)]
@@ -882,6 +1341,95 @@ mod tests {
         }
     }
 
+    fn assert_authored_spans(render: &AnnotatedMessageRender) {
+        let mut cursor = 0;
+        for span in &render.spans {
+            assert_eq!(span.byte_start, cursor);
+            assert!(span.byte_start < span.byte_end);
+            assert!(span.byte_end <= render.text.len());
+            assert!(render.text.get(span.byte_start..span.byte_end).is_some());
+            assert!(span.role.is_some());
+            let text = &render.text[span.byte_start..span.byte_end];
+            match span.kind {
+                MessageRenderSpanKind::MessageStartMarker
+                | MessageRenderSpanKind::GeneratedAssistantStartMarker => {
+                    assert_eq!(text, "<|im_start|>");
+                }
+                MessageRenderSpanKind::Role => {
+                    assert_eq!(text, span.role.as_deref().unwrap());
+                }
+                MessageRenderSpanKind::GeneratedAssistantRole => {
+                    assert_eq!(text, "assistant");
+                }
+                MessageRenderSpanKind::MessageEndMarker => {
+                    assert_eq!(text, "<|im_end|>");
+                }
+                MessageRenderSpanKind::ThinkingChannelStartMarker => {
+                    assert_eq!(text, "<think>");
+                }
+                MessageRenderSpanKind::ThinkingChannelEndMarker => {
+                    assert_eq!(text, "</think>");
+                }
+                MessageRenderSpanKind::ContentSeparator => {
+                    assert!(text.bytes().all(|byte| byte == b'\n'));
+                }
+                MessageRenderSpanKind::MessageContent
+                | MessageRenderSpanKind::ReasoningInstructionContent => {}
+            }
+            if matches!(
+                span.kind,
+                MessageRenderSpanKind::ThinkingChannelStartMarker
+                    | MessageRenderSpanKind::ThinkingChannelEndMarker
+                    | MessageRenderSpanKind::ReasoningInstructionContent
+            ) {
+                assert_eq!(span.channel, Some(MessageRenderChannel::Thinking));
+            }
+            cursor = span.byte_end;
+        }
+        assert_eq!(cursor, render.text.len());
+    }
+
+    #[test]
+    fn annotated_span_labels_are_stable_snake_case() {
+        let labels = [
+            (
+                MessageRenderSpanKind::MessageStartMarker,
+                "message_start_marker",
+            ),
+            (MessageRenderSpanKind::Role, "role"),
+            (MessageRenderSpanKind::MessageContent, "message_content"),
+            (
+                MessageRenderSpanKind::MessageEndMarker,
+                "message_end_marker",
+            ),
+            (
+                MessageRenderSpanKind::GeneratedAssistantStartMarker,
+                "generated_assistant_start_marker",
+            ),
+            (
+                MessageRenderSpanKind::GeneratedAssistantRole,
+                "generated_assistant_role",
+            ),
+            (
+                MessageRenderSpanKind::ThinkingChannelStartMarker,
+                "thinking_channel_start_marker",
+            ),
+            (
+                MessageRenderSpanKind::ThinkingChannelEndMarker,
+                "thinking_channel_end_marker",
+            ),
+            (
+                MessageRenderSpanKind::ReasoningInstructionContent,
+                "reasoning_instruction_content",
+            ),
+            (MessageRenderSpanKind::ContentSeparator, "content_separator"),
+        ];
+        for (kind, label) in labels {
+            assert_eq!(kind.as_str(), label);
+        }
+        assert_eq!(MessageRenderChannel::Thinking.as_str(), "thinking");
+    }
+
     fn assistant_with_reasoning(content: &str, reasoning: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".into(),
@@ -986,6 +1534,96 @@ mod tests {
                 "<|im_start|>user\nHello<|im_end|>\n",
                 "<|im_start|>assistant\n<think>\n\n</think>\n\n",
             )
+        );
+    }
+
+    #[test]
+    fn qwen36_annotated_history_and_generation_modes_are_byte_exact() {
+        let messages = vec![
+            message("system", "Be exact."),
+            message("user", "one"),
+            message("assistant", "<think>hidden</think>done"),
+            message("user", "two"),
+        ];
+        let prefix = concat!(
+            "<|im_start|>system\nBe exact.<|im_end|>\n",
+            "<|im_start|>user\none<|im_end|>\n",
+            "<|im_start|>assistant\ndone<|im_end|>\n",
+            "<|im_start|>user\ntwo<|im_end|>\n",
+            "<|im_start|>assistant\n",
+        );
+        for (mode, suffix) in [
+            (QwenGenerationMode::Auto, ""),
+            (QwenGenerationMode::Thinking, "<think>\n"),
+            (QwenGenerationMode::NoThinking, "<think>\n\n</think>\n\n"),
+        ] {
+            let render =
+                render_qwen_messages_prompt_with_generation_annotated(&messages, false, true, mode);
+            assert_eq!(render.text, format!("{prefix}{suffix}"));
+            assert_eq!(
+                render.text,
+                render_qwen_messages_prompt_with_generation(&messages, false, true, mode)
+            );
+            assert_authored_spans(&render);
+            assert_eq!(
+                render
+                    .spans
+                    .iter()
+                    .filter(|span| span.kind == MessageRenderSpanKind::MessageStartMarker)
+                    .map(|span| span.message_index)
+                    .collect::<Vec<_>>(),
+                vec![Some(0), Some(1), Some(2), Some(3)]
+            );
+        }
+    }
+
+    #[test]
+    fn qwen38_annotated_history_and_generation_modes_are_byte_exact() {
+        let messages = vec![
+            message("system", " Be exact. "),
+            message("user", " one "),
+            message("assistant", " done "),
+            message("user", " two "),
+        ];
+        let prefix = concat!(
+            "<|im_start|>system\nBe exact.<|im_end|>\n",
+            "<|im_start|>user\none<|im_end|>\n",
+            "<|im_start|>assistant\n<think>\n\n</think>\n\ndone<|im_end|>\n",
+            "<|im_start|>user\ntwo<|im_end|>\n",
+            "<|im_start|>assistant\n",
+        );
+        for (mode, suffix) in [
+            (
+                Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
+                "<think>\n",
+            ),
+            (Qwen38GenerationMode::NoThinking, "<think>\n\n</think>\n\n"),
+        ] {
+            let render =
+                render_qwen38_messages_prompt_with_generation_annotated(&messages, true, mode);
+            assert_eq!(render.text, format!("{prefix}{suffix}"));
+            assert_eq!(
+                render.text,
+                render_qwen38_messages_prompt_with_generation(&messages, true, mode)
+            );
+            assert_authored_spans(&render);
+        }
+
+        let instructed = render_qwen38_messages_prompt_with_generation_annotated(
+            &[message("user", "hello")],
+            true,
+            Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low),
+        );
+        assert_authored_spans(&instructed);
+        let instruction = instructed
+            .spans
+            .iter()
+            .find(|span| span.kind == MessageRenderSpanKind::ReasoningInstructionContent)
+            .expect("reasoning instruction span");
+        assert_eq!(instruction.message_index, None);
+        assert_eq!(
+            &instructed.text[instruction.byte_start..instruction.byte_end],
+            QWEN38_REASONING_EFFORT_LOW
         );
     }
 

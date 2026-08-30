@@ -1,6 +1,6 @@
 use super::lens_run::{
-    Action, DirectionDefinition, DirectionRow, LensDefinition, LensPlan, LensRunArgs, Scope,
-    Selector,
+    Action, DirectionDefinition, DirectionRow, LensDefinition, LensPlan, LensRunArgs, LiveReadout,
+    LiveScore, OperationApplication, RunResult, Scope, Selector, emit_run_output,
 };
 use super::muse_lens_artifact as artifact;
 use anyhow::{Context, Result, bail, ensure};
@@ -14,7 +14,6 @@ use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenize};
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -61,50 +60,13 @@ impl Event {
     }
 }
 
-#[derive(Serialize)]
-struct Output {
-    prompt_token_ids: Vec<i32>,
-    generated_token_ids: Vec<i32>,
-    decoded_text: String,
-    stop_reason: String,
-    operation_applications: Vec<OperationApplication>,
-    live_readouts: Vec<LiveReadout>,
-}
-
-#[derive(Debug, Serialize, PartialEq)]
-struct OperationApplication {
-    id: String,
-    layer: u32,
-    phase: &'static str,
-    index: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct LiveReadout {
-    id: String,
-    lens: String,
-    method: String,
-    source_layer: u32,
-    target_layer: Option<u32>,
-    phase: &'static str,
-    index: usize,
-    scores: Vec<LiveScore>,
-}
-
-#[derive(Debug, Serialize, PartialEq)]
-struct LiveScore {
-    token_id: Option<i32>,
-    row_id: usize,
-    word_id: Option<i64>,
-    label: Option<String>,
-    score: f32,
-}
-
 pub(crate) fn run(
     args: &LensRunArgs,
     plan: LensPlan,
+    plan_path: &Path,
     plan_dir: &Path,
     gguf: GgufFile,
+    output_path: Option<&Path>,
 ) -> Result<()> {
     validate_plan(&plan, args)?;
     let cache = args
@@ -216,18 +178,23 @@ pub(crate) fn run(
             &mut live_readouts,
         )?;
     }
-    println!(
-        "{}",
-        serde_json::to_string(&Output {
+    let plan = execution.plan.clone();
+    emit_run_output(
+        args,
+        "muse_glimmer",
+        plan_path,
+        plan,
+        RunResult {
             prompt_token_ids: prompt_ids,
             generated_token_ids: generated.clone(),
             decoded_text: tokenizer.decode(&generated),
             stop_reason,
             operation_applications,
-            live_readouts
-        })?
-    );
-    Ok(())
+            live_readouts,
+            native_hyper_captures: Vec::new(),
+        },
+        output_path,
+    )
 }
 
 fn load_muse_artifact(
@@ -725,6 +692,8 @@ fn append_live_readouts(
                 id: readout.id.clone(),
                 lens: readout.lens.clone(),
                 method: lens.method.clone(),
+                score_kind: "selected_row_projection_numerator",
+                candidate_universe: "lens_artifact_selected_token_rows",
                 source_layer: layer,
                 target_layer: Some(lens.target_layer),
                 phase: event.label(),
@@ -813,6 +782,8 @@ mod tests {
             top_p: 1.0,
             min_p: 0.0,
             seed: 0,
+            output: None,
+            format: Some(super::super::lens_run::RunStdoutFormat::Summary),
         };
         let plan: LensPlan = serde_json::from_value(json!({
             "version": 1,

@@ -12,6 +12,14 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Imported Qwen3.6 matched full J/R and Qwen3.8 full J transports support packed
   layer x position top-k, selected transported vectors, and selected-token live
   directions.
+- Packed traces can be persisted as versioned, replaceable result artifacts and
+  inspected offline by summary, token/anchor map, aggregate frequency, semantic
+  or numeric position, exact token-ID trajectory, and strict paired comparison
+  without loading a model.
+- Message traces retain renderer-authored byte spans and exact token spans where
+  BPE boundaries permit them; structural selector markers remain exact. Trace
+  and run stdout remains JSON by default unless `--output` selects a compact
+  summary; either format can be requested explicitly.
 - Native selected-token J/R artifacts support live readout and intervention.
 - Ordinary dense Qwen native J/R fitting supports the published T128 sequence
   length for row shards and selected-token artifacts.
@@ -48,7 +56,7 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes with 99 tests and two model-bound
+- The active `qwen-lens` unit suite passes with 124 tests and two model-bound
   tests intentionally ignored.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
@@ -81,14 +89,19 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 The shortest honest full-R and intervention-parity path is complete through the
 released Qwen3.6 pair plus canonical coordinate swap. No native full-fitting
-lane remains credible for this deadline. Further implementation should follow
-concrete CLI use or an explicit REST decision, not speculative fitting work.
+lane remains credible for this deadline. The current output lane prioritizes
+artifact-first offline inspection and comparison over speculative fitting or a
+resident service.
 
 ## Deferred
 
-REST, UI, corpus-scale batching, Flash-Next lens fitting, Muse T128, and native
+REST, corpus-scale batching, Flash-Next lens fitting, Muse T128, and native
 full-Qwen block-operator optimization remain post-deadline unless requirements
-or available mechanisms materially change.
+or available mechanisms materially change. A bounded Neuronpedia extraction
+spike found its current J-lens components coupled to application providers and
+string/probability data contracts; browser work waits for a passive,
+token-ID/score-aware component seam rather than importing auth/database product
+infrastructure.
 
 Keep this file concise and update it in place. It is a capability and scope
 ledger, not a work log.

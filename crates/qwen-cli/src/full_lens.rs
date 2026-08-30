@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, ensure};
 use blake3::Hasher as Blake3Hasher;
-use clap::{ArgGroup, Args};
+use clap::{ArgGroup, Args, ValueEnum};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::research::MAX_RESEARCH_PACKED_READOUT_POSITIONS;
+use qwen_llm::research::{MAX_RESEARCH_PACKED_READOUT_POSITIONS, RESEARCH_IDENTITY_SCHEME};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
+use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,16 +18,19 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::{CompressionMethod, ZipArchive};
 
 use crate::messages::{
-    Qwen38GenerationMode, Qwen38ReasoningEffort, QwenGenerationMode, parse_strict_messages_input,
-    render_qwen_messages_prompt_with_generation, render_qwen38_messages_prompt_with_generation,
+    AnnotatedMessageRender, MessageRenderSpanKind, Qwen38GenerationMode, Qwen38ReasoningEffort,
+    QwenGenerationMode, parse_strict_messages_input,
+    render_qwen_messages_prompt_with_generation_annotated,
+    render_qwen38_messages_prompt_with_generation_annotated,
 };
 
 use super::{
     FitMethod, ORIENTATION, SCHEMA_VERSION, TOKEN_ARTIFACT_MAX_BYTES, TOKEN_ID_ARGUMENT_MAX_COUNT,
     TOKEN_MANIFEST_NAME, TOKEN_ORIENTATION, TOKEN_PAYLOAD_NAME, TOKEN_READOUT_SCHEMA,
     TokenReadoutManifest, decode_f32_le, digest_json, hex, open_regular_file, publish_immutable,
-    read_json_file, resolve_output_path, serialize_json_pretty_bounded, sync_directory,
-    token_covector_digest, validate_token_build_identity, validate_token_readout_spec,
+    read_json_file, resolve_output_file_path, resolve_output_path, serialize_json_pretty_bounded,
+    sync_directory, token_covector_digest, validate_token_build_identity,
+    validate_token_readout_spec, write_atomic_replace,
 };
 
 const FULL_SCHEMA: &str = "qwen.workspace_lens_full_transport";
@@ -45,6 +49,7 @@ const MAX_PROJECTED_FULL_TOKENS: usize = 32;
 const MAX_FULL_READOUT_PROMPT_TOKENS: usize = 4_096;
 const MAX_FULL_READOUT_TOP_K: usize = 16;
 const MAX_TRACE_FULL_VECTOR_CELLS: usize = 32;
+const MAX_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublishedProfileId {
@@ -261,6 +266,15 @@ pub(crate) struct TraceFullArgs {
     #[arg(long)]
     messages: Option<PathBuf>,
 
+    /// Generation transition for --messages; supported values depend on the lens model.
+    #[arg(
+        long,
+        value_enum,
+        requires = "messages",
+        conflicts_with_all = ["prompt", "token_ids"]
+    )]
+    message_mode: Option<TraceFullMessageMode>,
+
     /// Disable tokenizer-configured special insertion for --prompt.
     #[arg(
         long,
@@ -284,6 +298,56 @@ pub(crate) struct TraceFullArgs {
     /// Transported target-space vectors to include as layer:position cells.
     #[arg(long = "vectors", value_delimiter = ',')]
     vectors: Vec<TraceFullVectorCell>,
+
+    /// Replace this JSON result file atomically after a successful trace.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Human summary or the complete JSON document on stdout.
+    #[arg(long, value_enum)]
+    format: Option<TraceFullStdoutFormat>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum TraceFullStdoutFormat {
+    Summary,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum TraceFullMessageMode {
+    Auto,
+    Thinking,
+    NoThinking,
+    Low,
+    Medium,
+    Xhigh,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResolvedTraceFullMessageMode {
+    Qwen36(QwenGenerationMode),
+    Qwen38(Qwen38GenerationMode),
+}
+
+impl ResolvedTraceFullMessageMode {
+    const fn artifact_name(self) -> &'static str {
+        match self {
+            Self::Qwen36(QwenGenerationMode::Auto) => "auto",
+            Self::Qwen36(QwenGenerationMode::Thinking) => "thinking",
+            Self::Qwen36(QwenGenerationMode::NoThinking) => "no_thinking",
+            Self::Qwen38(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low)) => {
+                "thinking_low"
+            }
+            Self::Qwen38(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium)) => {
+                "thinking_medium"
+            }
+            Self::Qwen38(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh)) => {
+                "thinking_xhigh"
+            }
+            Self::Qwen38(Qwen38GenerationMode::NoThinking) => "no_thinking",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -647,11 +711,17 @@ struct FullTokenScore {
 struct TraceFullDocument {
     schema: &'static str,
     schema_version: u32,
+    producer: TraceFullProducer,
+    deployed_model: TraceFullModel,
+    tokenizer: TraceFullTokenizer,
     lens: TraceFullLens,
+    score_semantics: TraceFullScoreSemantics,
+    execution_mode: &'static str,
     input_source: &'static str,
     add_special_tokens: Option<bool>,
     input_token_ids: Vec<i32>,
     input_tokens: Vec<TraceFullInputToken>,
+    rendering: TraceFullRendering,
     coordinates: TraceFullCoordinates,
     selected_layers: Vec<u32>,
     top_k: usize,
@@ -661,6 +731,64 @@ struct TraceFullDocument {
     vectors: Option<TraceFullVectors>,
     timing: TraceFullTiming,
     occurrences: TraceFullOccurrences,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullProducer {
+    build_commit: &'static str,
+    build_dirty: &'static str,
+    build_source_state: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullModel {
+    path: PathBuf,
+    locator_scheme: &'static str,
+    locator_id: String,
+    content_authenticated: bool,
+    architecture: Option<String>,
+    name: Option<String>,
+    base_model_name: Option<String>,
+    n_layers: u32,
+    hidden_size: u32,
+    vocab_size: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullTokenizer {
+    metadata_id: String,
+    model: Option<String>,
+    pretokenizer: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullScoreSemantics {
+    kind: &'static str,
+    normalization: &'static str,
+    candidate_universe: &'static str,
+    softmax_applied: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullRendering {
+    renderer: &'static str,
+    generation_mode: Option<&'static str>,
+    spans: Vec<TraceFullRenderedSpan>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullRenderedSpan {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<&'static str>,
+    byte_start: usize,
+    byte_end: usize,
+    token_start: Option<usize>,
+    token_end: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1518,6 +1646,12 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
 
 pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     validate_trace_full_args(&args)?;
+    let output = args
+        .output
+        .as_deref()
+        .map(resolve_output_file_path)
+        .transpose()?;
+    let stdout_format = effective_trace_stdout_format(args.format, output.is_some());
     let manifest_path = args.full_lens.join(FULL_MANIFEST_NAME);
     let manifest: FullLensManifest = read_json_file(&manifest_path)?;
     validate_trace_full_manifest(&manifest)?;
@@ -1541,16 +1675,51 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_deployed_model(&manifest, &loaded)?;
     let arch = loaded.arch();
+    let runtime_identity = loaded.research_identity();
+    let deployed_model = TraceFullModel {
+        path: args.model.clone(),
+        locator_scheme: RESEARCH_IDENTITY_SCHEME,
+        locator_id: format!("{:016x}", runtime_identity.model_locator_id),
+        content_authenticated: runtime_identity.content_authenticated,
+        architecture: loaded.gguf().architecture(),
+        name: loaded.gguf().get_str("general.name").map(str::to_owned),
+        base_model_name: loaded
+            .gguf()
+            .get_str("general.base_model.0.name")
+            .map(str::to_owned),
+        n_layers: arch.n_layer,
+        hidden_size: arch.hidden_size,
+        vocab_size: arch.vocab_size,
+    };
+    let tokenizer_summary = TraceFullTokenizer {
+        metadata_id: format!("{:016x}", runtime_identity.tokenizer_metadata_id),
+        model: loaded
+            .gguf()
+            .get_str("tokenizer.ggml.model")
+            .map(str::to_owned),
+        pretokenizer: loaded
+            .gguf()
+            .get_str("tokenizer.ggml.pre")
+            .map(str::to_owned),
+    };
     let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
-    let (input_source, add_special_tokens, token_ids) =
+    let (input_source, add_special_tokens, token_ids, rendering) =
         match (&args.prompt, &args.token_ids, &args.messages) {
-            (Some(prompt), None, None) => (
-                "prompt",
-                Some(!args.no_special_tokens),
-                tokenizer
+            (Some(prompt), None, None) => {
+                let token_ids = tokenizer
                     .encode(prompt, !args.no_special_tokens)
-                    .context("tokenize trace-full prompt")?,
-            ),
+                    .context("tokenize trace-full prompt")?;
+                (
+                    "prompt",
+                    Some(!args.no_special_tokens),
+                    token_ids,
+                    TraceFullRendering {
+                        renderer: "tokenizer_text",
+                        generation_mode: None,
+                        spans: Vec::new(),
+                    },
+                )
+            }
             (None, Some(token_ids), None) => {
                 ensure!(!token_ids.is_empty(), "--token-ids must not be empty");
                 ensure!(
@@ -1560,33 +1729,49 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
                     "--token-ids contains an ID outside vocabulary {}",
                     arch.vocab_size
                 );
-                ("token_ids", None, token_ids.clone())
+                (
+                    "token_ids",
+                    None,
+                    token_ids.clone(),
+                    TraceFullRendering {
+                        renderer: "literal_token_ids",
+                        generation_mode: None,
+                        spans: Vec::new(),
+                    },
+                )
             }
             (None, None, Some(path)) => {
                 let raw = std::fs::read_to_string(path)
                     .with_context(|| format!("read messages {}", path.display()))?;
                 let messages = parse_strict_messages_input(&raw, &path.display().to_string())?;
-                let rendered = match profile.id {
-                    PublishedProfileId::Qwen38J => render_qwen38_messages_prompt_with_generation(
-                        &messages,
-                        true,
-                        Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
+                let resolved_mode = resolve_trace_full_message_mode(profile.id, args.message_mode)?;
+                let (rendered, renderer) = match resolved_mode {
+                    ResolvedTraceFullMessageMode::Qwen38(mode) => (
+                        render_qwen38_messages_prompt_with_generation_annotated(
+                            &messages, true, mode,
+                        ),
+                        "qwen3.8_messages_v1",
                     ),
-                    PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => {
-                        render_qwen_messages_prompt_with_generation(
-                            &messages,
-                            false,
-                            true,
-                            QwenGenerationMode::Auto,
-                        )
-                    }
+                    ResolvedTraceFullMessageMode::Qwen36(mode) => (
+                        render_qwen_messages_prompt_with_generation_annotated(
+                            &messages, false, true, mode,
+                        ),
+                        "qwen3.6_messages_v1",
+                    ),
                 };
+                let token_ids = tokenizer
+                    .encode(&rendered.text, false)
+                    .context("tokenize exact rendered messages prompt")?;
+                let spans = align_rendered_message_spans(&tokenizer, &rendered, &token_ids)?;
                 (
                     "messages",
                     Some(false),
-                    tokenizer
-                        .encode(&rendered, false)
-                        .context("tokenize exact Qwen3.8 messages prompt")?,
+                    token_ids,
+                    TraceFullRendering {
+                        renderer,
+                        generation_mode: Some(resolved_mode.artifact_name()),
+                        spans,
+                    },
                 )
             }
             _ => anyhow::bail!("specify exactly one of --prompt, --token-ids, or --messages"),
@@ -1757,7 +1942,14 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     });
     let document = TraceFullDocument {
         schema: "qwen.lens.trace",
-        schema_version: 2,
+        schema_version: 3,
+        producer: TraceFullProducer {
+            build_commit: env!("QWEN_BUILD_COMMIT"),
+            build_dirty: env!("QWEN_BUILD_DIRTY"),
+            build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
+        },
+        deployed_model,
+        tokenizer: tokenizer_summary,
         lens: TraceFullLens {
             kind: "published_full_transport",
             method: manifest.transport.method,
@@ -1769,10 +1961,18 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             payload_blake3: manifest.payload.blake3,
             scoring: "deployed_output_rmsnorm_and_lm_head_full_vocabulary_logits_no_softmax",
         },
+        score_semantics: TraceFullScoreSemantics {
+            kind: "logit",
+            normalization: "deployed_output_rmsnorm",
+            candidate_universe: "full_model_vocabulary",
+            softmax_applied: false,
+        },
+        execution_mode: "passive_packed_prefill_no_interventions",
         input_source,
         add_special_tokens,
         input_token_ids: token_ids,
         input_tokens,
+        rendering,
         coordinates: TraceFullCoordinates {
             source_layer: "zero_based_transformer_block_index_at_post_block_residual",
             source_position: "zero_based_input_token_position",
@@ -1794,8 +1994,119 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         },
         occurrences,
     };
-    println!("{}", serde_json::to_string(&document)?);
+    let artifact_bytes = if output.is_some() || stdout_format == TraceFullStdoutFormat::Json {
+        let bytes = serde_json::to_vec(&document).context("serialize trace artifact")?;
+        ensure!(
+            bytes.len() <= MAX_TRACE_DOCUMENT_BYTES,
+            "serialized trace artifact is {} bytes; limit is {MAX_TRACE_DOCUMENT_BYTES}",
+            bytes.len()
+        );
+        Some(bytes)
+    } else {
+        None
+    };
+    if let (Some(path), Some(bytes)) = (&output, &artifact_bytes) {
+        write_atomic_replace(path, bytes)?;
+    }
+    match stdout_format {
+        TraceFullStdoutFormat::Summary => print_trace_full_summary(&document, output.as_deref()),
+        TraceFullStdoutFormat::Json => {
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            stdout
+                .write_all(
+                    artifact_bytes
+                        .as_deref()
+                        .expect("JSON output was serialized"),
+                )
+                .context("write trace JSON")?;
+            stdout.write_all(b"\n").context("finish trace JSON")?;
+        }
+    }
     Ok(())
+}
+
+fn effective_trace_stdout_format(
+    explicit: Option<TraceFullStdoutFormat>,
+    has_output: bool,
+) -> TraceFullStdoutFormat {
+    explicit.unwrap_or(if has_output {
+        TraceFullStdoutFormat::Summary
+    } else {
+        TraceFullStdoutFormat::Json
+    })
+}
+
+fn print_trace_full_summary(document: &TraceFullDocument, output: Option<&Path>) {
+    println!(
+        "{} {} | {} tokens x {} layers = {} cells | top-k {}",
+        document.lens.method.to_uppercase(),
+        document.lens.kind,
+        document.input_token_ids.len(),
+        document.selected_layers.len(),
+        document.cells.len(),
+        document.top_k,
+    );
+    println!(
+        "score={} normalization={} candidates={} softmax={} | model={} | renderer={}",
+        document.score_semantics.kind,
+        document.score_semantics.normalization,
+        document.score_semantics.candidate_universe,
+        document.score_semantics.softmax_applied,
+        document.deployed_model.name.as_deref().unwrap_or("unknown"),
+        document.rendering.renderer,
+    );
+    println!(
+        "trace {:.1} ms (prefill {:.1} ms GPU, readout {:.1} ms GPU)",
+        document.timing.trace_execution_wall_ms,
+        document.timing.packed_prefill_gpu_ms,
+        document.timing.readout_gpu_ms,
+    );
+    if let Some(path) = output {
+        println!("artifact {}", path.display());
+    }
+}
+
+fn resolve_trace_full_message_mode(
+    profile: PublishedProfileId,
+    requested: Option<TraceFullMessageMode>,
+) -> Result<ResolvedTraceFullMessageMode> {
+    match profile {
+        PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => match requested {
+            None | Some(TraceFullMessageMode::Auto) => Ok(ResolvedTraceFullMessageMode::Qwen36(
+                QwenGenerationMode::Auto,
+            )),
+            Some(TraceFullMessageMode::Thinking) => Ok(ResolvedTraceFullMessageMode::Qwen36(
+                QwenGenerationMode::Thinking,
+            )),
+            Some(TraceFullMessageMode::NoThinking) => Ok(ResolvedTraceFullMessageMode::Qwen36(
+                QwenGenerationMode::NoThinking,
+            )),
+            Some(mode) => anyhow::bail!(
+                "--message-mode {} is not supported by Qwen3.6 J/R; use auto, thinking, or no-thinking",
+                mode.to_possible_value().unwrap().get_name()
+            ),
+        },
+        PublishedProfileId::Qwen38J => match requested {
+            None | Some(TraceFullMessageMode::Medium | TraceFullMessageMode::Thinking) => {
+                Ok(ResolvedTraceFullMessageMode::Qwen38(
+                    Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
+                ))
+            }
+            Some(TraceFullMessageMode::Low) => Ok(ResolvedTraceFullMessageMode::Qwen38(
+                Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low),
+            )),
+            Some(TraceFullMessageMode::Xhigh) => Ok(ResolvedTraceFullMessageMode::Qwen38(
+                Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh),
+            )),
+            Some(TraceFullMessageMode::NoThinking) => Ok(ResolvedTraceFullMessageMode::Qwen38(
+                Qwen38GenerationMode::NoThinking,
+            )),
+            Some(TraceFullMessageMode::Auto) => anyhow::bail!(
+                "--message-mode auto is not supported by Qwen3.8 J; use thinking, no-thinking, low, medium, or xhigh"
+            ),
+        },
+    }
 }
 
 fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
@@ -1827,6 +2138,10 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
     ensure!(
         args.prompt.is_some() || !args.no_special_tokens,
         "--no-special-tokens only applies to --prompt"
+    );
+    ensure!(
+        args.messages.is_some() || args.message_mode.is_none(),
+        "--message-mode only applies to --messages"
     );
     ensure!(
         args.vectors.len() <= MAX_TRACE_FULL_VECTOR_CELLS,
@@ -1867,6 +2182,96 @@ fn group_trace_full_vector_cells(
         positions.sort_unstable();
     }
     Ok(grouped)
+}
+
+fn align_rendered_message_spans(
+    tokenizer: &Tokenizer,
+    rendered: &AnnotatedMessageRender,
+    full_token_ids: &[i32],
+) -> Result<Vec<TraceFullRenderedSpan>> {
+    let token_pieces = full_token_ids
+        .iter()
+        .map(|&token_id| {
+            tokenizer
+                .try_decode_piece_bytes_exact(token_id)
+                .with_context(|| format!("decode rendered token {token_id}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    map_rendered_message_spans(rendered, &token_pieces)
+}
+
+fn map_rendered_message_spans(
+    rendered: &AnnotatedMessageRender,
+    token_pieces: &[&[u8]],
+) -> Result<Vec<TraceFullRenderedSpan>> {
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(rendered.text.len())
+        .context("allocate rendered token byte validation")?;
+    let mut token_boundaries = BTreeMap::from([(0usize, 0usize)]);
+    for (token_index, piece) in token_pieces.iter().enumerate() {
+        decoded.extend_from_slice(piece);
+        token_boundaries.insert(decoded.len(), token_index + 1);
+    }
+    ensure!(
+        decoded == rendered.text.as_bytes(),
+        "decoded rendered tokens do not reproduce the renderer-authored bytes"
+    );
+
+    for span in &rendered.spans {
+        ensure!(
+            span.byte_start < span.byte_end
+                && span.byte_end <= rendered.text.len()
+                && rendered.text.is_char_boundary(span.byte_start)
+                && rendered.text.is_char_boundary(span.byte_end),
+            "renderer produced an invalid byte span {}..{} for {} bytes",
+            span.byte_start,
+            span.byte_end,
+            rendered.text.len()
+        );
+    }
+
+    rendered
+        .spans
+        .iter()
+        .map(|span| {
+            let token_range = token_boundaries
+                .get(&span.byte_start)
+                .zip(token_boundaries.get(&span.byte_end))
+                .filter(|(start, end)| start < end)
+                .map(|(&start, &end)| (start, end));
+            if is_structural_render_span(span.kind) {
+                ensure!(
+                    token_range.is_some(),
+                    "renderer structural {} span {}..{} is not a nonempty exact token range",
+                    span.kind.as_str(),
+                    span.byte_start,
+                    span.byte_end
+                );
+            }
+            Ok(TraceFullRenderedSpan {
+                kind: span.kind.as_str(),
+                message_index: span.message_index,
+                role: span.role.clone(),
+                channel: span.channel.map(|channel| channel.as_str()),
+                byte_start: span.byte_start,
+                byte_end: span.byte_end,
+                token_start: token_range.map(|range| range.0),
+                token_end: token_range.map(|range| range.1),
+            })
+        })
+        .collect()
+}
+
+fn is_structural_render_span(kind: MessageRenderSpanKind) -> bool {
+    matches!(
+        kind,
+        MessageRenderSpanKind::MessageStartMarker
+            | MessageRenderSpanKind::MessageEndMarker
+            | MessageRenderSpanKind::GeneratedAssistantStartMarker
+            | MessageRenderSpanKind::ThinkingChannelStartMarker
+            | MessageRenderSpanKind::ThinkingChannelEndMarker
+    )
 }
 
 fn validate_trace_full_manifest(manifest: &FullLensManifest) -> Result<()> {
@@ -3021,12 +3426,35 @@ mod tests {
             prompt: Some("hello".into()),
             token_ids: None,
             messages: None,
+            message_mode: None,
             no_special_tokens: false,
             layers: vec![0, 31, 62],
             top_k: 8,
             max_tokens: MAX_RESEARCH_PACKED_READOUT_POSITIONS,
             vectors: Vec::new(),
+            output: None,
+            format: None,
         }
+    }
+
+    #[test]
+    fn trace_stdout_format_defaults_follow_output_presence() {
+        assert_eq!(
+            effective_trace_stdout_format(None, false),
+            TraceFullStdoutFormat::Json
+        );
+        assert_eq!(
+            effective_trace_stdout_format(None, true),
+            TraceFullStdoutFormat::Summary
+        );
+        assert_eq!(
+            effective_trace_stdout_format(Some(TraceFullStdoutFormat::Summary), false),
+            TraceFullStdoutFormat::Summary
+        );
+        assert_eq!(
+            effective_trace_stdout_format(Some(TraceFullStdoutFormat::Json), true),
+            TraceFullStdoutFormat::Json
+        );
     }
 
     fn trace_score(rank: usize, token_id: u32) -> TraceFullTokenScore {
@@ -3037,6 +3465,56 @@ mod tests {
             token_piece_hex: format!("{token_id:02x}"),
             logit: -(rank as f32),
         }
+    }
+
+    #[test]
+    fn rendered_span_mapping_keeps_newline_leading_content_with_null_bpe_boundaries() {
+        let rendered = render_qwen_messages_prompt_with_generation_annotated(
+            &[crate::messages::ChatMessage {
+                role: "user".into(),
+                content: "\n\nhello".into(),
+                ..Default::default()
+            }],
+            false,
+            true,
+            QwenGenerationMode::Auto,
+        );
+        let mut owned_pieces = Vec::<Vec<u8>>::new();
+        let mut span_index = 0;
+        while span_index < rendered.spans.len() {
+            let start = rendered.spans[span_index].byte_start;
+            let mut end = rendered.spans[span_index].byte_end;
+            if !is_structural_render_span(rendered.spans[span_index].kind) {
+                while span_index + 1 < rendered.spans.len()
+                    && !is_structural_render_span(rendered.spans[span_index + 1].kind)
+                {
+                    span_index += 1;
+                    end = rendered.spans[span_index].byte_end;
+                }
+            }
+            owned_pieces.push(rendered.text.as_bytes()[start..end].to_vec());
+            span_index += 1;
+        }
+        let pieces = owned_pieces.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+        let spans = map_rendered_message_spans(&rendered, &pieces).unwrap();
+        let content = rendered
+            .spans
+            .iter()
+            .position(|span| span.kind == MessageRenderSpanKind::MessageContent)
+            .unwrap();
+        assert_eq!(
+            &rendered.text[rendered.spans[content].byte_start..rendered.spans[content].byte_end],
+            "\n\nhello"
+        );
+        assert_eq!(
+            (spans[content].token_start, spans[content].token_end),
+            (None, None)
+        );
+        assert!(spans.iter().zip(&rendered.spans).all(|(mapped, authored)| {
+            !is_structural_render_span(authored.kind)
+                || matches!((mapped.token_start, mapped.token_end), (Some(start), Some(end)) if start < end)
+        }));
     }
 
     #[test]
@@ -3255,6 +3733,59 @@ mod tests {
         validate_trace_full_args(&args).unwrap();
         args.prompt = Some("also set".into());
         assert!(validate_trace_full_args(&args).is_err());
+    }
+
+    #[test]
+    fn trace_message_modes_are_model_compatible_and_record_resolved_modes() {
+        for profile in [PublishedProfileId::Qwen36J, PublishedProfileId::Qwen36R] {
+            assert_eq!(
+                resolve_trace_full_message_mode(profile, None)
+                    .unwrap()
+                    .artifact_name(),
+                "auto"
+            );
+            assert_eq!(
+                resolve_trace_full_message_mode(profile, Some(TraceFullMessageMode::Thinking))
+                    .unwrap()
+                    .artifact_name(),
+                "thinking"
+            );
+            assert_eq!(
+                resolve_trace_full_message_mode(profile, Some(TraceFullMessageMode::NoThinking))
+                    .unwrap()
+                    .artifact_name(),
+                "no_thinking"
+            );
+            for invalid in [
+                TraceFullMessageMode::Low,
+                TraceFullMessageMode::Medium,
+                TraceFullMessageMode::Xhigh,
+            ] {
+                assert!(resolve_trace_full_message_mode(profile, Some(invalid)).is_err());
+            }
+        }
+        for (requested, expected) in [
+            (None, "thinking_medium"),
+            (Some(TraceFullMessageMode::Thinking), "thinking_medium"),
+            (Some(TraceFullMessageMode::Medium), "thinking_medium"),
+            (Some(TraceFullMessageMode::Low), "thinking_low"),
+            (Some(TraceFullMessageMode::Xhigh), "thinking_xhigh"),
+            (Some(TraceFullMessageMode::NoThinking), "no_thinking"),
+        ] {
+            assert_eq!(
+                resolve_trace_full_message_mode(PublishedProfileId::Qwen38J, requested)
+                    .unwrap()
+                    .artifact_name(),
+                expected
+            );
+        }
+        assert!(
+            resolve_trace_full_message_mode(
+                PublishedProfileId::Qwen38J,
+                Some(TraceFullMessageMode::Auto)
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -20,6 +20,19 @@ passed unchanged.
 Sampling defaults to greedy. `--temperature`, `--top-k`, `--top-p`, `--min-p`,
 and `--seed` expose the existing deterministic native sampler.
 
+Without `--output`, stdout defaults to the complete `qwen.lens.run` version-1
+JSON document, preserving the original pipe-friendly behavior. With `--output`,
+stdout defaults to a compact summary while the document is persisted. An
+explicit `--format json` always prints JSON; explicit `--format summary` is also
+allowed without an output file when discarding the full artifact is intentional.
+`--output PATH` atomically replaces a regular run file in an existing parent
+directory; symlink leaves are rejected. The common ordinary-Qwen, Flash-Next, and Muse
+envelope records the runtime and model path, canonical plan path and parsed plan,
+input source and exact token IDs, sampler settings, decoded text and stop reason,
+operation applications, requested and emitted live readouts, and native captures
+when produced. Model identity and rendered message-role spans are intentionally
+reserved for a later schema increment.
+
 ## Full Readout
 
 `read-full` dispatches imported Qwen full J/R and assembled Muse full J/R assets
@@ -54,22 +67,46 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- trace-full \
   --model /path/to/Qwen3.6-27B.gguf \
   --full-lens /path/to/qwen3.6-27b/r-lens-native-v1 \
   --messages /path/to/messages.json \
+  --message-mode thinking \
   --layers 0,31,62 \
   --vectors 31:5,62:5 \
-  --top-k 8
+  --top-k 8 \
+  --output trace.json
 ```
 
-Use exactly one of `--prompt`, `--token-ids`, or `--messages`. Message input uses
-the matching Qwen3.6 or Qwen3.8 renderer; Qwen3.8 uses medium thinking without
-an injected effort instruction. Inputs are never truncated and are bounded at
-128 tokens. Omit `--layers` to trace all 63 published source layers.
+Use exactly one of `--prompt`, `--token-ids`, or `--messages`. `--message-mode`
+is accepted only with messages. For Qwen3.6 J/R, omission or `auto` preserves
+the existing Auto transition, while `thinking` and `no-thinking` select those
+exact transitions; effort tiers are rejected. For Qwen3.8 J, omission,
+`medium`, or `thinking` selects the exact medium transition, `low` and `xhigh`
+select their exact effort tiers, and `no-thinking` selects the exact closed
+thinking transition; `auto` is rejected. `rendering.generation_mode` records
+the resolved mode (`auto`, `thinking`, `no_thinking`, or a `thinking_*` tier).
+Inputs are never truncated and are bounded at 128 tokens. Omit `--layers` to
+trace all 63 published source layers.
 
 The command performs one packed prompt forward, streams only the selected F16
-transport matrices, and keeps full logits on Metal. JSON output contains exact
-input token pieces, compact layer-position top-k cells, timings, and token
-occurrence counts globally and per layer. One occurrence means one token ID in
-one returned top-k list. Runtime tracing checks artifact geometry and byte
-length, but does not hash the model or rescan the 3.3 GiB payload.
+transport matrices, and keeps full logits on Metal. Without `--output`, stdout
+defaults to the complete JSON document. With `--output`, stdout defaults to a
+compact summary; explicit `--format json` always prints JSON, while explicit
+`--format summary` without an output intentionally discards the full document.
+`--output` is resolved and validated before model loading, then atomically
+replaces a normal result file after successful execution. The version-3 JSON
+contains exact input token pieces, compact layer-position top-k cells, explicit
+logit/no-softmax semantics, lightweight model/tokenizer locator identities,
+timings, and token occurrence counts globally and per layer. One occurrence
+means one token ID in one returned top-k list. Runtime tracing checks artifact
+geometry and byte length, but does not hash the model or rescan the 3.3 GiB
+payload.
+
+For `--messages`, the renderer authors byte spans while constructing the exact
+prompt. Exact token boundaries are recorded when the full tokenization has them;
+nonstructural role, content, separator, and reasoning spans use null token bounds
+when an authored boundary falls inside a BPE token. Structural selector markers
+must always have a nonempty exact token range or trace creation fails. This
+enables selectors such as
+`role:user:end`, `role:assistant:start`, and `channel:thinking:start` without
+searching decoded delimiter-shaped text.
 
 `--vectors LAYER:POSITION,...` optionally includes up to 32 selected transported
 target-space vectors inline in the same JSON. It may be repeated; cells must be
@@ -79,6 +116,75 @@ before the deployed output RMSNorm and LM head. It is not the source activation,
 logits, or an observed target-layer activation. The JSON reports the J/R method,
 source revision, payload digest, shape, coordinate semantics, and deterministic
 cell order alongside the values.
+
+## Offline Inspection
+
+`inspect` accepts trace schema versions 2 and 3 and never loads a model:
+
+```sh
+qwen-lens inspect trace.json summary
+qwen-lens inspect trace.json positions
+qwen-lens inspect trace.json aggregate --limit 25 --layers 18..31,62 \
+  --position message:0:end --position prefill:last
+qwen-lens inspect trace.json position message:1:start --layers 31,62 --top-k 8
+qwen-lens inspect trace.json token --id 18659 --position role:assistant:end --layers 18..62
+```
+
+`--format json` returns a typed result for any view. Version 3 requires producer,
+model, tokenizer, score-semantics, execution-mode, and rendering metadata;
+version 2 remains readable without those fields. Aggregate rows preserve
+exact token IDs and show total top-k occurrences, top-1 occurrences, best rank,
+raw per-layer counts, and a one-character-per-selected-layer ASCII stripe. A
+token missing at a cell is reported as `outside captured top-k`; it is never
+treated as a known zero score or full-vocabulary absence. Token IDs at or above a
+declared model vocabulary size are rejected. Semantic selectors require
+version-3 renderer-authored exact structural spans; numeric positions and
+`prefill:last` also work with version 2. `positions` emits one compact line per
+input token and a typed JSON equivalent, including aligned structural labels
+and a separate exact anchor inventory. Its anchors include `prefill:last`,
+explicit `message:N:start|end`, the generated assistant start, channel edges,
+and role aliases. Role aliases resolve to the last matching authored message
+boundary and report that message index. Generated channel markers take
+precedence over history; an open generated channel makes its `:end` selector
+fail rather than falling back to a historical close. Historical markers remain
+visible on their token lines with message metadata. Unaligned content spans do
+not acquire invented token ranges.
+
+`aggregate`, `position`, and `token` accept `--layers` as comma-separated IDs
+or inclusive ranges. Ranges select captured layers in the artifact's captured
+order; unknown explicit IDs, empty selections, and duplicates are errors.
+Repeatable aggregate `--position` selectors recompute ranking, counts, and the
+layer timeline over exactly the resolved positions. JSON results record the
+effective layers and positions and retain explicit top-k censor fields.
+
+## Exact Artifact Comparison
+
+`compare` performs one bounded, offline comparison of two artifacts of the same
+supported schema:
+
+```sh
+qwen-lens compare left.json right.json --format text --limit 25
+qwen-lens compare left.json right.json --format json --limit 25
+```
+
+It accepts only validated, same-version `qwen.lens.trace` v2 or v3 pairs, or
+`qwen.lens.run` v1 pairs. Each input must be a regular non-symlink file no
+larger than 256 MiB. Mixed schemas, unknown versions, incompatible trace
+geometry or score semantics, and runs with different prompt IDs, runtime, model
+path, or sampler settings are rejected.
+
+Trace cells align only by their exact captured layer/position coordinates and
+candidates by token ID. Captured-top-k entry/exit is explicit; absent ranks and
+logits remain null. The result includes top-1 changes, bounded cell and aggregate
+token-ID/display differences, and vector metrics only when target layer,
+coordinate metadata, dtype, stage, hidden size, cell coordinates, and dimensions
+are compatible. Run readouts align only by the complete documented readout key,
+then by `(token_id,row_id,word_id,label)`. Incompatible score kinds or candidate
+universes remain unmatched; one-sided returned candidates are reported as
+entering or exiting the readout top-k. Generated-token divergence, stop reasons,
+operation applications, and native-capture counts are reported without executing
+or loading a model. `--limit` bounds deterministic detail lists while the typed
+JSON retains total counts.
 
 ## Plan
 
@@ -207,11 +313,13 @@ the deployed GGUF. The acknowledgement is required because the transport was
 fitted on the published BF16 checkpoint and is being transferred to a GGUF
 runtime. Legacy `published_full_j` plans remain accepted as an alias.
 
-Native selected artifacts may be J or R fits. Their live scores are F64 dot
-products over the artifact's selected token rows. `workspace_template`
-artifacts use the camilablank/workspace-lenses BF16 `[layer, row, hidden]`
-safetensors plus authoritative row-label TSV and are scored by F64 cosine over
-the raw post-block residual.
+Native and published selected J/R artifacts report selected-row projection
+numerator scores over only the artifact's selected token rows. Muse selected
+rows use the same semantics. These are neither probabilities nor full-vocabulary
+logits. `workspace_template` artifacts use the camilablank/workspace-lenses BF16
+`[layer, row, hidden]` safetensors plus authoritative row-label TSV and report
+cosine similarity over the template rows. Every emitted readout carries its
+`score_kind` and `candidate_universe`.
 
 Direction rows may select a native `token_id`, a template `template_row_id`, or
 an exact unique template `label`. `unit_l2` is required for residual-relative

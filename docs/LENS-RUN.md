@@ -151,6 +151,55 @@ an exact unique template `label`. `unit_l2` is required for residual-relative
 addition, projection, and source-to-target displacement. Fixed addition also
 accepts `as_stored`.
 
+### Muse Glimmer
+
+Muse uses the same plan actions and scope semantics with model-bound
+`native_selected` artifacts. It accepts token-ID directions, passive readouts,
+or operations without readouts; `--identity-cache` is required. Template lenses,
+native-hyper directions, and `--messages` remain unsupported for Muse.
+
+```json
+{
+  "version": 1,
+  "lenses": [
+    {"kind": "native_selected", "id": "j", "artifact": "muse-j"}
+  ],
+  "directions": [
+    {
+      "id": "token",
+      "lens": "j",
+      "row": {"kind": "token_id", "token_id": 24},
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "prefill-add",
+      "scope": {
+        "layers": {"kind": "values", "values": [50]},
+        "prefill": {"kind": "values", "values": [1]}
+      },
+      "action": {
+        "kind": "residual_l2_fraction",
+        "direction": "token",
+        "coefficient": 0.01
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "live",
+      "lens": "j",
+      "scope": {
+        "layers": {"kind": "values", "values": [50]},
+        "prefill": {"kind": "all"}
+      },
+      "top_k": 8
+    }
+  ]
+}
+```
+
 ### Flash-Next Native Hyper Direction
 
 Flash-Next uses an explicit raw direction source rather than pretending an
@@ -217,9 +266,10 @@ sampled stop token is reported but never fed back through a decode step.
 `run` intentionally uses fresh serial token-major execution so intervention
 schedules remain exact. Ordinary dense and MoE runs consume completed native
 selected-token J/R rows and workspace-template rows. Flash-Next runs use only
-explicit native hyper directions. Concurrent or speculative decode and prefix
-caching are not selected silently. `trace-full` separately uses packed prefill
-for passive full-J prompt traces.
+explicit native hyper directions. Muse runs consume model-bound selected-token
+J/R rows for readout and all four post-block action kinds. Concurrent or
+speculative decode and prefix caching are not selected silently. `trace-full`
+separately uses packed prefill for passive full-J prompt traces.
 
 ## Flash-Next Capability Boundary
 

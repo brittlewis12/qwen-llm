@@ -34,7 +34,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | mixed-half Q8 VJP gate |
+| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | four-pass bank attribution |
 
 ## Current Status
 
@@ -84,6 +84,9 @@ the Q256 and C32 gates were model-free, and production remains B32/C16/Q128.
 An address-only block-major Q8 sidecar saves only 2.63% command-GPU time
 including packing and 3.40% with free packing, so production retains row-major
 Q8 records.
+A mixed-half operand VJP meets the released gate/up numerical envelope but is
+30.431% slower. The immediate common-Q8 microkernel search now pivots from
+unpriced retiles to owned bank-stage attribution.
 Muse identity resolution accepts only an existing cache root or fresh Hugging
 Face declarations and fails rather than hashing weights.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
@@ -91,19 +94,24 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Qualify one private model-free mixed-half Q8 VJP against the incumbent
-C16/Q128/K64 kernel at `6656x19968` gate/up and `19968x6656` down with
-`n_query=512`. Retain row-major Q8, output traversal, and F32 accumulators;
-stage dequantized weights and cotangents as half and use
-half-input/F32-accumulate MMA. Use deterministic nonzero, block-varying Q8
-records and cotangents with separate outputs. Require finite complete output,
-relative L2 at or below `5e-5`, scaled max
-`max_abs(candidate-control) / max(max_abs(control), 1)` at or below `2e-4`,
-cosine at or above `0.9999999`, and at least 25% median command-GPU time saving
-on both shapes. After one warmup per arm, take five order-alternating pairs.
-Stop on the first required failure, assert retrospective elapsed time at or
-below 180 seconds, and apply an external 180-second cap. Do not load a model
-asset or launch a corpus fit.
+Attribute the incumbent model-free target-51 B32/T16 R bank with four
+descriptor-backed serial encoders inside one command buffer. Bind feed-forward
+reverse to `scratch.hidden[2]`, attention-output reverse to `scratch.query[0]`,
+causal-GQA reverse to `scratch.query[1]`, `scratch.kv[0]`, `scratch.kv[1]`, and
+`scratch.query[2]`, and attention-input reverse to `grad_input`. Mechanically
+extract helpers while the ordinary path retains one serial encoder and exact
+dispatch order. Never call `sampleCountersInBuffer`, request dispatch-boundary
+samples, or use rotating or cumulative-prefix subtraction. Check command error
+before resolving timestamps. Warm ordinary and sampled arms once, then run
+`O/S/O/S/O/S/O`. Require residual-identity output bits and matching
+kernel/order/grid/thread topology; only encoder count may differ. Require raw
+span coverage within 0.5% of command-GPU time, signed transition ambiguity at
+or below 2.5%, sampled perturbation against interpolated ordinary controls at
+or below 10%, within-arm drift at or below 5%, and at least two valid sampled
+arms whose stage shares repeat within two percentage points. Assert
+retrospective elapsed time at or below 180 seconds and apply an external
+180-second cap. Load no model asset and authorize no optimization without a
+measured material stage ceiling.
 
 ## Hard Exclusions
 
@@ -118,8 +126,7 @@ integrity.
 
 ## Fast Follows
 
-1. Qualify a separate bounded production seam only if both FFN shapes clear the
-   numerical and 25% command-GPU gates.
+1. Design one bounded candidate only after attribution exposes a material stage.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

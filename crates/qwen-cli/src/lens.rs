@@ -152,7 +152,7 @@ struct FitRowsArgs {
     #[arg(long, default_value_t = 4)]
     skip_first: usize,
 
-    /// Tokenize/truncate each record to this bound (maximum 16 for now).
+    /// Tokenize/truncate each record to this bound (maximum 128).
     #[arg(long, default_value_t = MAX_RESEARCH_WORKSPACE_TOKENS)]
     max_tokens: usize,
 
@@ -215,7 +215,7 @@ struct FitTokensArgs {
     #[arg(long, default_value_t = 4)]
     skip_first: usize,
 
-    /// Tokenize/truncate each record to this bound (maximum 16 for now).
+    /// Tokenize/truncate each record to this bound (maximum 128).
     #[arg(long, default_value_t = MAX_RESEARCH_WORKSPACE_TOKENS)]
     max_tokens: usize,
 

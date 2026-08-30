@@ -34,9 +34,9 @@ use std::time::Instant;
 /// Lightweight locator identity derived from model metadata, shard paths, and
 /// file stamps. It is useful within one machine, but is not a content digest.
 pub const RESEARCH_IDENTITY_SCHEME: &str = "qwen_llm_model_locator_v1";
-pub const MAX_RESEARCH_GDN_TOKENS: usize = 16;
-pub const MAX_RESEARCH_ATTN_TOKENS: usize = 16;
-pub const MAX_RESEARCH_WORKSPACE_TOKENS: usize = 16;
+pub const MAX_RESEARCH_GDN_TOKENS: usize = 128;
+pub const MAX_RESEARCH_ATTN_TOKENS: usize = 128;
+pub const MAX_RESEARCH_WORKSPACE_TOKENS: usize = 128;
 pub const MAX_RESEARCH_WORKSPACE_DIM_BATCH: usize = 32;
 pub const MAX_RESEARCH_PACKED_READOUT_POSITIONS: usize = 128;
 const PACKED_FULL_READOUT_CHUNK_SIZE: usize = 16;

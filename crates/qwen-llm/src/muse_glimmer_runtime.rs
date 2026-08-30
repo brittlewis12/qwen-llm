@@ -199,6 +199,20 @@ impl MuseGlimmerTextRunner<'_, '_> {
             .deployed_logits_from_post_block_residual(residual, &mut self.session)?)
     }
 
+    /// Apply one row-major F16 hidden-to-hidden transport to a post-block
+    /// residual without advancing or otherwise mutating the text session.
+    /// Artifact consumers remain responsible for binding the bytes to this
+    /// model, fitting corpus, method, and selected source layer.
+    pub fn apply_f16_post_block_transport(
+        &self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+    ) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .apply_f16_post_block_transport(transport_bytes, source_residual)?)
+    }
+
     pub fn forward_token_with_post_block_interventions(
         &mut self,
         token: u32,
@@ -478,8 +492,32 @@ mod tests {
                 captured.layer_values(0).expect("captured final residual"),
             )
             .expect("run deployed output tail");
+        let hidden = captured.hidden_size;
+        let mut identity = vec![0u8; hidden * hidden * 2];
+        for coordinate in 0..hidden {
+            let offset = (coordinate * hidden + coordinate) * 2;
+            identity[offset..offset + 2].copy_from_slice(&half::f16::ONE.to_bits().to_le_bytes());
+        }
+        let transported = runner
+            .apply_f16_post_block_transport(
+                &identity,
+                captured.layer_values(0).expect("captured final residual"),
+            )
+            .expect("apply identity transport");
 
         assert_eq!(runner.next_position(), next_position);
+        assert_eq!(
+            transported
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            captured
+                .layer_values(0)
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             tail_logits
                 .iter()

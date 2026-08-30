@@ -9,10 +9,10 @@
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTensor,
     PostBlockIntervention, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
-    encode_copy_offset_f32, encode_get_rows_f32, encode_post_block_intervention_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16_kv,
-    encode_sigmoid_mul_f32, encode_silu_mul_f32, evaluate_metal_memory_admission,
-    host_page_size_bytes,
+    encode_copy_offset_f32, encode_get_rows_f32, encode_mat_vec_f16_f32,
+    encode_post_block_intervention_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32, encode_silu_mul_f32,
+    evaluate_metal_memory_admission, host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
@@ -657,6 +657,60 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             return Err(MuseGlimmerTextSessionError::CommandBuffer(reason));
         }
         Ok(session.read_logits())
+    }
+
+    pub(crate) fn apply_f16_post_block_transport(
+        &self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+    ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
+        let hidden = self.weights.config.hidden_size as usize;
+        validate_f16_transport(transport_bytes, hidden)?;
+        validate_deployed_output_residual(source_residual, hidden)?;
+        let transport = MetalTensor::from_bytes(
+            self.ctx,
+            transport_bytes,
+            vec![hidden as u64, hidden as u64],
+            GgmlType::F16,
+        )?;
+        let source = MetalTensor::from_bytes(
+            self.ctx,
+            bytemuck::cast_slice(source_residual),
+            vec![hidden as u64],
+            GgmlType::F32,
+        )?;
+        let transported = MetalTensor::zeros_f32(self.ctx, vec![hidden as u64])?;
+        let command = self.ctx.queue.commandBuffer().ok_or_else(|| {
+            MuseGlimmerTextSessionError::CommandBuffer("allocation failed".into())
+        })?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = encode_mat_vec_f16_f32(
+            self.ctx,
+            &encoder,
+            &transport,
+            &source,
+            &transported,
+            hidden,
+            hidden,
+        );
+        encoder.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        let status = command.status();
+        let command_error = command.error().map(|error| error.to_string());
+        if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
+            return Err(MuseGlimmerTextSessionError::CommandBuffer(format!(
+                "status={status:?}, error={command_error:?}"
+            )));
+        }
+        let values = read_f32(&transported);
+        if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+            return invalid(format!(
+                "F16 post-block transport produced a non-finite value at index {index}"
+            ));
+        }
+        Ok(values)
     }
 
     pub fn forward_token_capture_post_blocks(
@@ -1714,6 +1768,33 @@ fn validate_deployed_output_residual(
     Ok(())
 }
 
+fn validate_f16_transport(
+    transport_bytes: &[u8],
+    hidden_size: usize,
+) -> Result<(), MuseGlimmerTextSessionError> {
+    let expected = hidden_size
+        .checked_mul(hidden_size)
+        .and_then(|values| values.checked_mul(2))
+        .ok_or_else(|| {
+            MuseGlimmerTextSessionError::Invalid("F16 transport byte count overflow".into())
+        })?;
+    if transport_bytes.len() != expected {
+        return invalid(format!(
+            "F16 post-block transport must contain exactly {expected} bytes, got {}",
+            transport_bytes.len()
+        ));
+    }
+    for (index, chunk) in transport_bytes.chunks_exact(2).enumerate() {
+        let value = half::f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap()));
+        if !value.is_finite() {
+            return invalid(format!(
+                "F16 post-block transport contains a non-finite value at index {index}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn invalid<T>(detail: impl Into<String>) -> Result<T, MuseGlimmerTextSessionError> {
     Err(MuseGlimmerTextSessionError::Invalid(detail.into()))
 }
@@ -1789,6 +1870,16 @@ mod tests {
         assert!(validate_deployed_output_residual(&[0.0, 1.0, 2.0, 3.0], 3).is_err());
         assert!(validate_deployed_output_residual(&[0.0, f32::NAN, 2.0], 3).is_err());
         assert!(validate_deployed_output_residual(&[0.0, f32::INFINITY, 2.0], 3).is_err());
+    }
+
+    #[test]
+    fn f16_transport_validation_requires_exact_finite_square_matrix() {
+        let one = half::f16::ONE.to_bits().to_le_bytes();
+        validate_f16_transport(&one.repeat(4), 2).unwrap();
+        assert!(validate_f16_transport(&one.repeat(3), 2).is_err());
+        let mut non_finite = one.repeat(4);
+        non_finite[2..4].copy_from_slice(&half::f16::NAN.to_bits().to_le_bytes());
+        assert!(validate_f16_transport(&non_finite, 2).is_err());
     }
 
     #[test]

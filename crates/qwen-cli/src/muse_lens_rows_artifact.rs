@@ -124,7 +124,7 @@ pub(crate) struct Checkpoint {
     pub diagnostics: Vec<ReplayDiagnostic>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ModelSummary {
     pub path: String,
@@ -136,7 +136,7 @@ pub(crate) struct ModelSummary {
     pub content_authenticated: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CorpusSummary {
     pub selected_records: usize,
@@ -172,7 +172,7 @@ pub(crate) struct FitSummary {
     pub vjp_timings: VjpTimings,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Provenance {
     pub build_commit: String,
@@ -255,6 +255,7 @@ pub(crate) fn validate_config(
     profile: MuseGlimmerArtifactProfile,
     content_id: &str,
 ) -> Result<()> {
+    validate_stored_config(config)?;
     ensure!(
         config.architecture == ARCHITECTURE_NAME
             && config.artifact_profile == muse_lens_artifact::profile_name(profile)
@@ -264,6 +265,19 @@ pub(crate) fn validate_config(
     ensure!(
         config.geometry == muse_lens_artifact::geometry(model),
         "Muse row-shard geometry differs from the running model"
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_stored_config(config: &Config) -> Result<()> {
+    let profile = profile_from_name(&config.artifact_profile)
+        .context("Muse row-shard artifact profile is unsupported")?;
+    let reference = MuseGlimmerConfig::unsloth_release_reference();
+    ensure!(
+        config.architecture == ARCHITECTURE_NAME
+            && config.artifact_profile == muse_lens_artifact::profile_name(profile)
+            && config.geometry == muse_lens_artifact::geometry(&reference),
+        "Muse row-shard stored model geometry or profile is unsupported"
     );
     ensure!(
         is_blake3(&config.model_content_blake3) && is_blake3(&config.corpus_blake3),
@@ -281,7 +295,7 @@ pub(crate) fn validate_config(
         "Muse row-shard transport contract is unsupported"
     );
     ensure!(
-        config.target_layer > 0 && config.target_layer < model.layer_count,
+        config.target_layer > 0 && config.target_layer < config.geometry.layer_count,
         "Muse row-shard target layer is out of range"
     );
     ensure!(
@@ -303,7 +317,7 @@ pub(crate) fn validate_config(
     ensure!(
         row_count > 0
             && row_count <= MUSE_GLIMMER_FULL_TRANSPORT_MAX_ROWS_PER_SHARD
-            && config.row_end <= model.hidden_size,
+            && config.row_end <= config.geometry.hidden_size,
         "Muse row-shard rows are empty, too large, or outside hidden size"
     );
     ensure!(
@@ -330,36 +344,107 @@ pub(crate) fn validate_config(
     Ok(())
 }
 
-pub(crate) fn validate_complete(
-    manifest: &Manifest,
-    expected_config: &Config,
-    prompts: &[PreparedPrompt],
-    expected_config_blake3: &str,
-) -> Result<()> {
+pub(crate) fn validate_stored(manifest: &Manifest) -> Result<()> {
     ensure!(
         manifest.schema == SCHEMA
             && manifest.schema_version == SCHEMA_VERSION
             && manifest.status == "complete",
         "artifact is not a complete Muse full-transport row shard"
     );
+    validate_stored_config(&manifest.config)?;
+    ensure!(
+        manifest.config_blake3 == super::digest_json(&manifest.config)?,
+        "stored Muse row-shard config digest is inconsistent"
+    );
+    ensure!(
+        manifest.model.architecture == manifest.config.architecture
+            && manifest.model.artifact_profile == manifest.config.artifact_profile
+            && manifest.model.content_blake3 == manifest.config.model_content_blake3
+            && manifest.model.content_authenticated
+            && !manifest.model.path.is_empty()
+            && !manifest.model.content_identity_outcome.is_empty(),
+        "stored Muse row-shard model summary is inconsistent"
+    );
+    let skipped = u64::try_from(manifest.corpus.skipped_prompts.len())
+        .context("stored Muse row-shard skipped prompt count")?;
+    ensure!(
+        manifest.corpus.selected_records == manifest.config.selected_records
+            && manifest.corpus.used_prompts > 0
+            && manifest.corpus.used_prompts.checked_add(skipped)
+                == u64::try_from(manifest.corpus.selected_records).ok()
+            && manifest.corpus.truncated_prompts <= manifest.corpus.used_prompts
+            && manifest.corpus.ordered_token_ids_blake3 == manifest.config.corpus_blake3
+            && manifest.corpus.add_special_tokens == manifest.config.add_special_tokens
+            && manifest.corpus.max_tokens == manifest.config.max_tokens
+            && manifest.corpus.prompt_reduction == PROMPT_REDUCTION,
+        "stored Muse row-shard corpus summary is inconsistent"
+    );
+    let mut skipped_ids = std::collections::HashSet::new();
+    ensure!(
+        manifest
+            .corpus
+            .skipped_prompts
+            .iter()
+            .all(|prompt| !prompt.id.is_empty() && skipped_ids.insert(&prompt.id)),
+        "stored Muse row-shard skipped prompt IDs are empty or duplicated"
+    );
+    ensure!(
+        manifest.fit.method == manifest.config.method
+            && manifest.fit.rule_contract == manifest.config.rule_contract
+            && manifest.fit.target_layer == manifest.config.target_layer
+            && manifest.fit.source_layers == manifest.config.source_layers
+            && manifest.fit.coordinate == manifest.config.coordinate
+            && manifest.fit.estimator == manifest.config.estimator
+            && manifest.fit.orientation == manifest.config.orientation
+            && manifest.fit.reduction == manifest.config.reduction
+            && manifest.fit.row_start == manifest.config.row_start
+            && manifest.fit.row_end == manifest.config.row_end
+            && manifest.fit.skip_first == manifest.config.skip_first
+            && manifest.fit.query_batch_size == manifest.config.query_batch_size
+            && manifest.fit.valid_position_denominator == "number_of_valid_source_positions"
+            && manifest.fit.accumulator_dtype == "f32"
+            && manifest.fit.storage_dtype == "f32_le"
+            && valid_seconds(manifest.fit.forward_seconds)
+            && valid_seconds(manifest.fit.vjp_wall_seconds)
+            && manifest.fit.vjp_timings.is_valid(),
+        "stored Muse row-shard fit summary is inconsistent"
+    );
+    let shape = expected_shape(&manifest.config)?;
+    let expected_bytes = shape
+        .into_iter()
+        .try_fold(4usize, |bytes, dimension| bytes.checked_mul(dimension))
+        .context("stored Muse row-shard payload size overflow")?;
+    ensure!(
+        manifest.payload.path == PAYLOAD_NAME
+            && manifest.payload.dtype == "f32_le"
+            && manifest.payload.shape == shape
+            && manifest.payload.byte_length == expected_bytes as u64
+            && is_blake3(&manifest.payload.blake3),
+        "stored Muse row-shard payload descriptor is inconsistent"
+    );
+    validate_diagnostics(&manifest.diagnostics, &manifest.config)?;
+    ensure!(
+        manifest.provenance.build_source_state == manifest.config.build_source_state
+            && manifest.provenance.build_stamp_error == "none",
+        "stored Muse row-shard provenance is inconsistent"
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_complete(
+    manifest: &Manifest,
+    expected_config: &Config,
+    prompts: &[PreparedPrompt],
+    expected_config_blake3: &str,
+) -> Result<()> {
+    validate_stored(manifest)?;
     ensure!(
         &manifest.config == expected_config,
         "completed Muse row-shard config differs from the requested fit"
     );
-    let embedded_digest = super::digest_json(&manifest.config)?;
     ensure!(
-        manifest.config_blake3 == embedded_digest
-            && manifest.config_blake3 == expected_config_blake3,
+        manifest.config_blake3 == expected_config_blake3,
         "completed Muse row-shard config digest is inconsistent"
-    );
-    ensure!(
-        manifest.model.architecture == expected_config.architecture
-            && manifest.model.artifact_profile == expected_config.artifact_profile
-            && manifest.model.content_blake3 == expected_config.model_content_blake3
-            && manifest.model.content_authenticated
-            && !manifest.model.path.is_empty()
-            && !manifest.model.content_identity_outcome.is_empty(),
-        "completed Muse row-shard model summary is inconsistent"
     );
 
     let expected_skipped = prompts
@@ -385,53 +470,8 @@ pub(crate) fn validate_complete(
             && manifest.corpus.used_prompts == expected_used
             && manifest.corpus.skipped_prompts == expected_skipped
             && manifest.corpus.truncated_prompts == expected_truncated
-            && manifest.corpus.ordered_token_ids_blake3 == expected_config.corpus_blake3
-            && manifest.corpus.add_special_tokens == expected_config.add_special_tokens
-            && manifest.corpus.max_tokens == expected_config.max_tokens
-            && manifest.corpus.prompt_reduction == PROMPT_REDUCTION,
+            && manifest.corpus.ordered_token_ids_blake3 == expected_config.corpus_blake3,
         "completed Muse row-shard corpus summary is inconsistent"
-    );
-
-    ensure!(
-        manifest.fit.method == expected_config.method
-            && manifest.fit.rule_contract == expected_config.rule_contract
-            && manifest.fit.target_layer == expected_config.target_layer
-            && manifest.fit.source_layers == expected_config.source_layers
-            && manifest.fit.coordinate == expected_config.coordinate
-            && manifest.fit.estimator == expected_config.estimator
-            && manifest.fit.orientation == expected_config.orientation
-            && manifest.fit.reduction == expected_config.reduction
-            && manifest.fit.row_start == expected_config.row_start
-            && manifest.fit.row_end == expected_config.row_end
-            && manifest.fit.skip_first == expected_config.skip_first
-            && manifest.fit.query_batch_size == expected_config.query_batch_size
-            && manifest.fit.valid_position_denominator == "number_of_valid_source_positions"
-            && manifest.fit.accumulator_dtype == "f32"
-            && manifest.fit.storage_dtype == "f32_le"
-            && valid_seconds(manifest.fit.forward_seconds)
-            && valid_seconds(manifest.fit.vjp_wall_seconds)
-            && manifest.fit.vjp_timings.is_valid(),
-        "completed Muse row-shard fit summary is inconsistent"
-    );
-
-    let expected_shape = expected_shape(expected_config)?;
-    let expected_bytes = expected_shape
-        .into_iter()
-        .try_fold(4usize, |bytes, dimension| bytes.checked_mul(dimension))
-        .context("Muse row-shard payload size overflow")?;
-    ensure!(
-        manifest.payload.path == PAYLOAD_NAME
-            && manifest.payload.dtype == "f32_le"
-            && manifest.payload.shape == expected_shape
-            && manifest.payload.byte_length == expected_bytes as u64
-            && is_blake3(&manifest.payload.blake3),
-        "completed Muse row-shard payload descriptor is inconsistent"
-    );
-    validate_diagnostics(&manifest.diagnostics, expected_config)?;
-    ensure!(
-        manifest.provenance.build_source_state == expected_config.build_source_state
-            && manifest.provenance.build_stamp_error == "none",
-        "completed Muse row-shard provenance is inconsistent"
     );
     Ok(())
 }
@@ -507,6 +547,14 @@ fn valid_build_source_state(value: &str) -> bool {
     value
         .strip_prefix("git-source-sha256-v2:")
         .is_some_and(is_blake3)
+}
+
+fn profile_from_name(value: &str) -> Option<MuseGlimmerArtifactProfile> {
+    match value {
+        "unsloth_q8_0" => Some(MuseGlimmerArtifactProfile::UnslothQ8_0),
+        "unsloth_bf16" => Some(MuseGlimmerArtifactProfile::UnslothBf16),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

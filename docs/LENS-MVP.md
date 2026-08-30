@@ -71,6 +71,10 @@ seconds of VJP wall on the pre-integration CPU-attention path. The integrated
 hybrid completes the same B32 VJP in 5.016 seconds (`2.8068x`) and matches all
 10,862,592 prior F32 outputs within `1.863e-7` max absolute error. At 208 B32
 batches, the default 25-prompt job now projects to a 7.246-hour VJP-only floor.
+The promoted block-major R256 engine reuses replay across eight B32 banks,
+measures 32.817 seconds against a 45.052-second chunk-major control, and matches
+all 86,900,736 outputs bitwise. Its 25-prompt/26-shard engine projection is
+5.925 hours before capture, checkpoint I/O, and assembly.
 Muse identity resolution accepts only an existing cache root or fresh Hugging
 Face declarations and fails rather than hashing weights.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
@@ -78,10 +82,10 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Build a model-free 256-row block-major engine that reuses each prompt/layer
-replay across eight B32 reverse banks. Preserve B32 kernel execution and require
-full scalar-equivalent output before one bounded, no-publication R256 A/B. Do
-not launch a corpus fit as part of this gate.
+Qualify one private RoPE-correct all-Metal sliding-block reverse at released
+T16/B32/R against the prepared CPU-sliding path. Use block 50, one shared replay
+and covector bank, paired samples, a 180-second hard stop, the existing numerical
+gates, and a 15% median wall floor. Do not launch a corpus fit.
 
 ## Hard Exclusions
 
@@ -91,12 +95,12 @@ integrity.
 
 ## Blockers
 
-- The measured B32 schedule repeats row-independent replay 208 times per prompt.
+- Sliding-block reverse owns 24.110 of 32.817 seconds per R256 shard-prompt.
 - The production fitting corpus and prompt count are not yet selected.
 
 ## Fast Follows
 
-1. Bank sliding inverse-RoPE only after block-major replay reuse is qualified.
+1. Persistent cross-bank Q8 reverse only after sliding-bank qualification.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

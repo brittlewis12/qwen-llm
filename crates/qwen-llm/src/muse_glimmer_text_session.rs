@@ -16,13 +16,13 @@ use crate::metal::{
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
 use crate::muse_glimmer_lens::{
-    MuseGlimmerLensCapture, MuseGlimmerLensError, MuseGlimmerSelectedTokenCovectors,
-    validate_capture_request,
+    MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS, MuseGlimmerLensCapture, MuseGlimmerLensCaptureBank,
+    MuseGlimmerLensError, MuseGlimmerSelectedTokenCovectors,
 };
 use crate::muse_glimmer_lens_fit::{
-    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerOneBlockVjp,
-    muse_glimmer_fit_adjacent_full_attention_selected_tokens,
-    muse_glimmer_one_full_attention_block_vjp,
+    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerMultiSourceSelectedTokenFit,
+    MuseGlimmerOneBlockVjp, muse_glimmer_fit_adjacent_full_attention_selected_tokens,
+    muse_glimmer_fit_selected_tokens_to_sources, muse_glimmer_one_full_attention_block_vjp,
 };
 use crate::muse_glimmer_metal::{
     encode_muse_glimmer_logit_softcap_f32, encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
@@ -653,39 +653,56 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         target_block: u32,
         session: &mut MuseGlimmerTextSession,
     ) -> Result<MuseGlimmerLensCapture, MuseGlimmerTextSessionError> {
+        self.capture_fresh_lens_prompt_blocks(tokens, &[target_block], session)?
+            .block_capture(target_block)
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid(
+                    "single-block capture was absent from capture bank".into(),
+                )
+            })
+    }
+
+    pub(crate) fn capture_fresh_lens_prompt_blocks(
+        &self,
+        tokens: &[u32],
+        target_blocks: &[u32],
+        session: &mut MuseGlimmerTextSession,
+    ) -> Result<MuseGlimmerLensCaptureBank, MuseGlimmerTextSessionError> {
         session.ensure_usable()?;
-        validate_capture_request(
+        validate_multi_lens_capture_request(
             tokens.len(),
-            target_block,
+            target_blocks,
             self.weights.layers.len(),
             session.next_position,
             session.geometry.capacity,
-        )
-        .map_err(|error| MuseGlimmerTextSessionError::Invalid(error.to_string()))?;
+        )?;
         for &token in tokens {
             self.validate_token_and_session(token, session)?;
         }
 
         let hidden_size = session.geometry.hidden_size;
-        let bank_shape = vec![hidden_size as u64, tokens.len() as u64];
+        let bank_shape = vec![
+            hidden_size as u64,
+            tokens.len() as u64,
+            target_blocks.len() as u64,
+        ];
         let input = MetalTensor::zeros_f32(self.ctx, bank_shape.clone())?;
         let post_attention = MetalTensor::zeros_f32(self.ctx, bank_shape.clone())?;
         let post_block = MetalTensor::zeros_f32(self.ctx, bank_shape)?;
         for (token_slot, &token) in tokens.iter().enumerate() {
             let destination = MuseGlimmerLensCaptureDestination {
-                target_block: target_block as usize,
-                input: input
-                    .view_subrange((token_slot * hidden_size) as u64, vec![hidden_size as u64]),
-                post_attention: post_attention
-                    .view_subrange((token_slot * hidden_size) as u64, vec![hidden_size as u64]),
-                post_block: post_block
-                    .view_subrange((token_slot * hidden_size) as u64, vec![hidden_size as u64]),
+                target_blocks,
+                token_slot,
+                n_tokens: tokens.len(),
+                input: &input,
+                post_attention: &post_attention,
+                post_block: &post_block,
             };
             self.execute_token_with_capture(token, session, &destination)?;
         }
 
-        Ok(MuseGlimmerLensCapture::new(
-            target_block,
+        Ok(MuseGlimmerLensCaptureBank::new(
+            target_blocks.to_vec(),
             tokens.to_vec(),
             hidden_size,
             read_f32(&input),
@@ -720,6 +737,27 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             self.ctx,
             &self.weights,
             capture,
+            covectors,
+            skip_first,
+            rule,
+        )
+    }
+
+    pub(crate) fn fit_selected_tokens_to_sources(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        covectors: &MuseGlimmerSelectedTokenCovectors,
+        skip_first: usize,
+        rule: crate::muse_glimmer_lens::MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerLensError> {
+        muse_glimmer_fit_selected_tokens_to_sources(
+            self.ctx,
+            &self.weights,
+            captures,
+            target_block,
+            source_layers,
             covectors,
             skip_first,
             rule,
@@ -861,14 +899,14 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
 
         for (layer_index, layer) in self.weights.layers.iter().enumerate() {
             if let Some(MuseGlimmerProductionCaptureSink::Lens(capture)) = capture
-                && capture.target_block == layer_index
+                && let Ok(block_slot) = capture.target_blocks.binary_search(&(layer_index as u32))
             {
                 encode_copy_offset_f32(
                     self.ctx,
                     encoder,
                     &session.residual,
                     0,
-                    &capture.input,
+                    &capture.block_token_view(capture.input, block_slot, geometry.hidden_size),
                     geometry.hidden_size,
                 )?;
             }
@@ -1000,14 +1038,18 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &session.residual, &session.branch_normed)?;
             if let Some(MuseGlimmerProductionCaptureSink::Lens(capture)) = capture
-                && capture.target_block == layer_index
+                && let Ok(block_slot) = capture.target_blocks.binary_search(&(layer_index as u32))
             {
                 encode_copy_offset_f32(
                     self.ctx,
                     encoder,
                     &session.residual,
                     0,
-                    &capture.post_attention,
+                    &capture.block_token_view(
+                        capture.post_attention,
+                        block_slot,
+                        geometry.hidden_size,
+                    ),
                     geometry.hidden_size,
                 )?;
             }
@@ -1063,14 +1105,14 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &session.residual, &session.branch_normed)?;
             if let Some(MuseGlimmerProductionCaptureSink::Lens(capture)) = capture
-                && capture.target_block == layer_index
+                && let Ok(block_slot) = capture.target_blocks.binary_search(&(layer_index as u32))
             {
                 encode_copy_offset_f32(
                     self.ctx,
                     encoder,
                     &session.residual,
                     0,
-                    &capture.post_block,
+                    &capture.block_token_view(capture.post_block, block_slot, geometry.hidden_size),
                     geometry.hidden_size,
                 )?;
             }
@@ -1122,11 +1164,25 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     }
 }
 
-struct MuseGlimmerLensCaptureDestination {
-    target_block: usize,
-    input: MetalTensor,
-    post_attention: MetalTensor,
-    post_block: MetalTensor,
+struct MuseGlimmerLensCaptureDestination<'a> {
+    target_blocks: &'a [u32],
+    token_slot: usize,
+    n_tokens: usize,
+    input: &'a MetalTensor,
+    post_attention: &'a MetalTensor,
+    post_block: &'a MetalTensor,
+}
+
+impl MuseGlimmerLensCaptureDestination<'_> {
+    fn block_token_view(
+        &self,
+        bank: &MetalTensor,
+        block_slot: usize,
+        hidden_size: usize,
+    ) -> MetalTensor {
+        let offset = (block_slot * self.n_tokens + self.token_slot) * hidden_size;
+        bank.view_subrange(offset as u64, vec![hidden_size as u64])
+    }
 }
 
 struct MuseGlimmerPostBlockCaptureDestination<'a> {
@@ -1136,7 +1192,7 @@ struct MuseGlimmerPostBlockCaptureDestination<'a> {
 
 #[derive(Clone, Copy)]
 enum MuseGlimmerProductionCaptureSink<'a> {
-    Lens(&'a MuseGlimmerLensCaptureDestination),
+    Lens(&'a MuseGlimmerLensCaptureDestination<'a>),
     PostBlock(&'a MuseGlimmerPostBlockCaptureDestination<'a>),
 }
 
@@ -1158,6 +1214,47 @@ fn validate_live_capture_layers(
         }
         if slot > 0 && layer_ids[slot - 1] >= layer {
             return invalid("live capture layers must be sorted and unique");
+        }
+    }
+    Ok(())
+}
+
+fn validate_multi_lens_capture_request(
+    token_count: usize,
+    target_blocks: &[u32],
+    layer_count: usize,
+    next_position: usize,
+    capacity: usize,
+) -> Result<(), MuseGlimmerTextSessionError> {
+    if next_position != 0 {
+        return invalid(format!(
+            "lens capture requires a fresh session at position zero, got {next_position}"
+        ));
+    }
+    if token_count == 0 || token_count > MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS {
+        return invalid(format!(
+            "lens capture prompt length must be in 1..={MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS}, got {token_count}"
+        ));
+    }
+    if token_count > capacity {
+        return invalid(format!(
+            "lens capture of {token_count} tokens exceeds session capacity {capacity}"
+        ));
+    }
+    if target_blocks.is_empty() || target_blocks.len() > layer_count {
+        return invalid(format!(
+            "lens capture block count must be in 1..={layer_count}, got {}",
+            target_blocks.len()
+        ));
+    }
+    for (slot, &block) in target_blocks.iter().enumerate() {
+        if block == 0 || block as usize >= layer_count {
+            return invalid(format!(
+                "lens capture target block must be in 1..{layer_count}, got {block}"
+            ));
+        }
+        if slot > 0 && target_blocks[slot - 1] >= block {
+            return invalid("lens capture target blocks must be sorted and unique");
         }
     }
     Ok(())
@@ -1316,6 +1413,18 @@ mod tests {
         assert!(validate_live_capture_layers(&[4, 3], 52).is_err());
         assert!(validate_live_capture_layers(&[52], 52).is_err());
         assert!(validate_live_capture_layers(&vec![0; 65], 52).is_err());
+    }
+
+    #[test]
+    fn multi_lens_capture_requires_fresh_sorted_unique_nonzero_blocks() {
+        validate_multi_lens_capture_request(3, &[1, 50, 51], 52, 0, 3).unwrap();
+        assert!(validate_multi_lens_capture_request(3, &[], 52, 0, 3).is_err());
+        assert!(validate_multi_lens_capture_request(3, &[0], 52, 0, 3).is_err());
+        assert!(validate_multi_lens_capture_request(3, &[50, 50], 52, 0, 3).is_err());
+        assert!(validate_multi_lens_capture_request(3, &[51, 50], 52, 0, 3).is_err());
+        assert!(validate_multi_lens_capture_request(3, &[52], 52, 0, 3).is_err());
+        assert!(validate_multi_lens_capture_request(3, &[50], 52, 1, 3).is_err());
+        assert!(validate_multi_lens_capture_request(17, &[50], 52, 0, 17).is_err());
     }
 
     #[test]

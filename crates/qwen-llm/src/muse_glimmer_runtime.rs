@@ -4,10 +4,13 @@ use crate::gguf::GgufFile;
 use crate::metal::{MetalContext, MetalMemoryAdmission, evaluate_metal_memory_admission};
 use crate::muse_glimmer::MuseGlimmerConfig;
 use crate::muse_glimmer_lens::{
-    MuseGlimmerLensCapture, MuseGlimmerLensError, MuseGlimmerLensRule,
+    MuseGlimmerLensCapture, MuseGlimmerLensCaptureBank, MuseGlimmerLensError, MuseGlimmerLensRule,
     MuseGlimmerSelectedTokenCovectors, muse_glimmer_selected_token_covectors,
 };
-use crate::muse_glimmer_lens_fit::{MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerOneBlockVjp};
+use crate::muse_glimmer_lens_fit::{
+    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerMultiSourceSelectedTokenFit,
+    MuseGlimmerOneBlockVjp,
+};
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
 };
@@ -210,6 +213,20 @@ impl MuseGlimmerTextRunner<'_, '_> {
             .capture_fresh_lens_prompt(tokens, target_block, &mut self.session)?)
     }
 
+    /// Capture block input, post-attention, and post-block coordinates for a
+    /// sorted unique set of nonzero blocks in one fresh scalar prompt pass.
+    pub fn capture_fresh_lens_prompt_blocks(
+        &mut self,
+        tokens: &[u32],
+        target_blocks: &[u32],
+    ) -> Result<MuseGlimmerLensCaptureBank, MuseGlimmerRuntimeError> {
+        Ok(self.forward.capture_fresh_lens_prompt_blocks(
+            tokens,
+            target_blocks,
+            &mut self.session,
+        )?)
+    }
+
     /// Reverse one `[T,H]` cotangent through the selected full-attention block's
     /// smooth F32 model-level replay. Capture diagnostics report drift from
     /// production's F16 KV path; the VJP is intentionally not an STE through
@@ -238,6 +255,27 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self
             .forward
             .fit_adjacent_full_attention_selected_tokens(capture, covectors, skip_first, rule)?)
+    }
+
+    /// Fit selected-token directions from one target to arbitrary strictly
+    /// increasing post-block source layers below it.
+    pub fn fit_selected_tokens_to_sources(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        covectors: &MuseGlimmerSelectedTokenCovectors,
+        skip_first: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerRuntimeError> {
+        Ok(self.forward.fit_selected_tokens_to_sources(
+            captures,
+            target_block,
+            source_layers,
+            covectors,
+            skip_first,
+            rule,
+        )?)
     }
 
     pub fn prefill_with_command_checkpoint<F>(

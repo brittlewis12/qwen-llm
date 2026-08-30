@@ -159,6 +159,86 @@ impl MuseGlimmerLensCapture {
     }
 }
 
+/// Fresh-prompt residual coordinates in block-major `[B,T,H]` layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerLensCaptureBank {
+    block_ids: Vec<u32>,
+    token_ids: Vec<u32>,
+    hidden_size: usize,
+    input_residuals: Vec<f32>,
+    post_attention_residuals: Vec<f32>,
+    post_block_residuals: Vec<f32>,
+}
+
+impl MuseGlimmerLensCaptureBank {
+    pub(crate) fn new(
+        block_ids: Vec<u32>,
+        token_ids: Vec<u32>,
+        hidden_size: usize,
+        input_residuals: Vec<f32>,
+        post_attention_residuals: Vec<f32>,
+        post_block_residuals: Vec<f32>,
+    ) -> Self {
+        Self {
+            block_ids,
+            token_ids,
+            hidden_size,
+            input_residuals,
+            post_attention_residuals,
+            post_block_residuals,
+        }
+    }
+
+    pub fn block_ids(&self) -> &[u32] {
+        &self.block_ids
+    }
+
+    pub fn token_ids(&self) -> &[u32] {
+        &self.token_ids
+    }
+
+    pub fn n_tokens(&self) -> usize {
+        self.token_ids.len()
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    pub fn block_slot(&self, block: u32) -> Option<usize> {
+        self.block_ids.binary_search(&block).ok()
+    }
+
+    pub fn input_residuals(&self, block: u32) -> Option<&[f32]> {
+        self.block_values(&self.input_residuals, block)
+    }
+
+    pub fn post_attention_residuals(&self, block: u32) -> Option<&[f32]> {
+        self.block_values(&self.post_attention_residuals, block)
+    }
+
+    pub fn post_block_residuals(&self, block: u32) -> Option<&[f32]> {
+        self.block_values(&self.post_block_residuals, block)
+    }
+
+    pub fn block_capture(&self, block: u32) -> Option<MuseGlimmerLensCapture> {
+        Some(MuseGlimmerLensCapture::new(
+            block,
+            self.token_ids.clone(),
+            self.hidden_size,
+            self.input_residuals(block)?.to_vec(),
+            self.post_attention_residuals(block)?.to_vec(),
+            self.post_block_residuals(block)?.to_vec(),
+        ))
+    }
+
+    fn block_values<'a>(&self, values: &'a [f32], block: u32) -> Option<&'a [f32]> {
+        let block_elements = self.n_tokens().checked_mul(self.hidden_size)?;
+        let start = self.block_slot(block)?.checked_mul(block_elements)?;
+        values.get(start..start.checked_add(block_elements)?)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerSelectedTokenCovectors {
     token_ids: Vec<u32>,
@@ -310,6 +390,7 @@ fn fold_selected_token_covectors(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn validate_capture_request(
     token_count: usize,
     target_block: u32,
@@ -409,6 +490,30 @@ mod tests {
         assert!(validate_capture_request(1, 1, 52, 1, 16).is_err());
         assert!(validate_capture_request(1, 0, 52, 0, 16).is_err());
         assert!(validate_capture_request(1, 52, 52, 0, 16).is_err());
+    }
+
+    #[test]
+    fn capture_bank_views_and_extraction_are_block_major() {
+        let bank = MuseGlimmerLensCaptureBank::new(
+            vec![2, 4],
+            vec![10, 11],
+            2,
+            (0..8).map(|value| value as f32).collect(),
+            (10..18).map(|value| value as f32).collect(),
+            (20..28).map(|value| value as f32).collect(),
+        );
+        assert_eq!(bank.block_slot(2), Some(0));
+        assert_eq!(bank.block_slot(4), Some(1));
+        assert_eq!(bank.input_residuals(4).unwrap(), [4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(
+            bank.post_attention_residuals(2).unwrap(),
+            [10.0, 11.0, 12.0, 13.0]
+        );
+        let block = bank.block_capture(4).unwrap();
+        assert_eq!(block.target_block(), 4);
+        assert_eq!(block.token_ids(), [10, 11]);
+        assert_eq!(block.post_block_residuals(), [24.0, 25.0, 26.0, 27.0]);
+        assert!(bank.block_capture(3).is_none());
     }
 
     #[test]

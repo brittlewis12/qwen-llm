@@ -34,7 +34,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | packed-Q8 sidecar gate |
+| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | mixed-half Q8 VJP gate |
 
 ## Current Status
 
@@ -81,6 +81,9 @@ seconds. Full and sliding commands are at parity, and the engine projection is
 now 4.934 hours.
 Bounded probes reject B64 outer banks, Q256 query tiles, and C32 input tiles;
 the Q256 and C32 gates were model-free, and production remains B32/C16/Q128.
+An address-only block-major Q8 sidecar saves only 2.63% command-GPU time
+including packing and 3.40% with free packing, so production retains row-major
+Q8 records.
 Muse identity resolution accepts only an existing cache root or fresh Hugging
 Face declarations and fails rather than hashing weights.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
@@ -88,16 +91,19 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Qualify one private model-free block-major Q8 sidecar against the incumbent
-row-major C16/Q128/K64 kernel at released `6656x19968` FFN gate/up and
-transposed down shapes with `n_query=512`. Use deterministic nonzero,
-block-varying Q8 records and separate outputs. Warm each arm, then take five
-alternating paired trains under the same command-GPU timing scope. Candidate
-trains pack into a preallocated reusable sidecar and execute eight dependent
-dispatches; controls execute eight incumbent dispatches. Require complete
-bitwise equality and candidate median at or below `0.75x` control median on
-both directions. Hard-stop at 180 seconds. Do not load a model asset or launch
-a corpus fit.
+Qualify one private model-free mixed-half Q8 VJP against the incumbent
+C16/Q128/K64 kernel at `6656x19968` gate/up and `19968x6656` down with
+`n_query=512`. Retain row-major Q8, output traversal, and F32 accumulators;
+stage dequantized weights and cotangents as half and use
+half-input/F32-accumulate MMA. Use deterministic nonzero, block-varying Q8
+records and cotangents with separate outputs. Require finite complete output,
+relative L2 at or below `5e-5`, scaled max
+`max_abs(candidate-control) / max(max_abs(control), 1)` at or below `2e-4`,
+cosine at or above `0.9999999`, and at least 25% median command-GPU time saving
+on both shapes. After one warmup per arm, take five order-alternating pairs.
+Stop on the first required failure, assert retrospective elapsed time at or
+below 180 seconds, and apply an external 180-second cap. Do not load a model
+asset or launch a corpus fit.
 
 ## Hard Exclusions
 
@@ -112,7 +118,8 @@ integrity.
 
 ## Fast Follows
 
-1. Integrate bounded-residency packed-Q8 sidecars only if both FFN shapes clear.
+1. Qualify a separate bounded production seam only if both FFN shapes clear the
+   numerical and 25% command-GPU gates.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

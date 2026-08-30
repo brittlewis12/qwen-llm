@@ -1,8 +1,10 @@
 use super::lens_run::{
     Action, DirectionDefinition, DirectionRow, LensDefinition, LensPlan, LensRunArgs, LiveReadout,
-    LiveScore, OperationApplication, RunResult, Scope, Selector, emit_run_output,
+    LiveScore, OperationApplication, RunExecutionBinding, RunPublishedLensBinding,
+    RunPublishedMatrixBinding, RunResult, Scope, Selector, emit_run_output,
 };
 use super::muse_lens_artifact as artifact;
+use super::muse_published_full_lens_artifact as published;
 use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, checkpoint_content_identity_without_weight_hashing,
@@ -19,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 struct LoadedMuseLens {
     method: String,
+    candidate_universe: &'static str,
     target_layer: u32,
     source_layers: Vec<u32>,
     token_ids: Vec<u32>,
@@ -112,25 +115,57 @@ pub(crate) fn run(
         "Muse lens execution must not hash model weights"
     );
     let content_id = super::hex(&content.content_id);
-    let mut lenses = HashMap::new();
-    for lens in &plan.lenses {
-        let LensDefinition::NativeSelected { id, artifact: path } = lens else {
-            bail!("Muse plans support native_selected lenses only");
-        };
-        let loaded = load_muse_artifact(&resolve(plan_dir, path), &config, profile, &content_id)?;
-        ensure!(
-            lenses.insert(id.clone(), loaded).is_none(),
-            "duplicate Muse lens id"
-        );
-    }
     let forward_count = prompt_ids
         .len()
         .checked_add(args.max_new_tokens.saturating_sub(1))
         .context("Muse forward count overflow")?;
     let context = MetalContext::new().context("initialize Metal for Muse Lens run")?;
-    let execution = prepare_execution_plan(plan, lenses, &config, &context)?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, forward_count)
         .context("load Muse Lens runner model")?;
+    let mut lenses = HashMap::new();
+    let mut published_lenses = Vec::new();
+    for lens in &plan.lenses {
+        let (id, loaded_lens) = match lens {
+            LensDefinition::NativeSelected { id, artifact: path } => (
+                id,
+                load_muse_artifact(&resolve(plan_dir, path), &config, profile, &content_id)?,
+            ),
+            LensDefinition::PublishedFullTransport {
+                id,
+                artifact: path,
+                token_ids,
+                allow_unvalidated_transfer,
+            } => {
+                let source_layers = required_lens_layers(&plan, id, config.layer_count)?;
+                let (loaded_lens, binding) = load_published_muse_artifact(
+                    id,
+                    &resolve(plan_dir, path),
+                    token_ids,
+                    &source_layers,
+                    *allow_unvalidated_transfer,
+                    &config,
+                    &context,
+                    &loaded,
+                )?;
+                published_lenses.push(binding);
+                (id, loaded_lens)
+            }
+            LensDefinition::WorkspaceTemplate { .. } => {
+                bail!("Muse plans do not support workspace_template lenses")
+            }
+        };
+        ensure!(
+            lenses.insert(id.clone(), loaded_lens).is_none(),
+            "duplicate Muse lens id"
+        );
+    }
+    let execution_binding = (!published_lenses.is_empty()).then(|| RunExecutionBinding {
+        deployed_model_content_blake3: content_id.clone(),
+        content_identity_outcome: format!("{:?}", content.outcome),
+        weight_bytes_hashed: content.bytes_hashed,
+        published_lenses,
+    });
+    let execution = prepare_execution_plan(plan, lenses, &config, &context)?;
     let mut runner = loaded
         .create_runner(&context)
         .context("create Muse Lens runner")?;
@@ -193,6 +228,7 @@ pub(crate) fn run(
             live_readouts,
             native_hyper_captures: Vec::new(),
         },
+        execution_binding,
         output_path,
     )
 }
@@ -223,12 +259,194 @@ fn load_muse_artifact(
     let values = artifact::decode_payload(&bytes, &manifest)?;
     Ok(LoadedMuseLens {
         method: manifest.transport.method,
+        candidate_universe: "lens_artifact_selected_token_rows",
         target_layer: manifest.transport.target_layer,
         source_layers: manifest.transport.source_layers,
         token_ids: manifest.selected.token_ids,
         hidden_size: config.hidden_size as usize,
         values,
     })
+}
+
+fn required_lens_layers(plan: &LensPlan, lens_id: &str, layer_count: u32) -> Result<Vec<u32>> {
+    let direction_lenses = plan
+        .directions
+        .iter()
+        .filter_map(|definition| match definition {
+            DirectionDefinition::LensRow(direction) => {
+                Some((direction.id.as_str(), direction.lens.as_str()))
+            }
+            DirectionDefinition::NativeHyper(_) => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let mut layers = BTreeSet::new();
+    for readout in &plan.readouts {
+        if readout.lens == lens_id {
+            layers.extend(selector_values(&readout.scope.layers, layer_count)?);
+        }
+    }
+    for operation in &plan.operations {
+        if operation.action.direction_ids().any(|direction| {
+            direction_lenses
+                .get(direction)
+                .is_some_and(|candidate| *candidate == lens_id)
+        }) {
+            layers.extend(selector_values(&operation.scope.layers, layer_count)?);
+        }
+    }
+    Ok(layers.into_iter().collect())
+}
+
+fn load_published_muse_artifact(
+    lens_id: &str,
+    artifact_path: &Path,
+    token_ids: &[u32],
+    source_layers: &[u32],
+    allow_unvalidated_transfer: bool,
+    config: &MuseGlimmerConfig,
+    context: &MetalContext,
+    loaded: &MuseGlimmerLoadedModel,
+) -> Result<(LoadedMuseLens, RunPublishedLensBinding)> {
+    ensure!(
+        allow_unvalidated_transfer,
+        "published Muse full transport requires allow_unvalidated_transfer=true"
+    );
+    let manifest_path = if artifact_path.is_dir() {
+        artifact_path.join(published::MANIFEST_NAME)
+    } else {
+        artifact_path.to_path_buf()
+    };
+    let manifest: published::Manifest = super::read_json_file(&manifest_path)?;
+    published::validate_manifest(&manifest).with_context(|| {
+        format!(
+            "validate Muse published artifact {}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest_canonical_json_blake3 = super::digest_json(&manifest)?;
+    ensure!(
+        manifest.model.geometry == artifact::geometry(config)
+            && manifest.model.architecture == qwen_llm::muse_glimmer::ARCHITECTURE_NAME,
+        "Muse published transport geometry differs from the running model"
+    );
+    ensure!(
+        !source_layers.is_empty()
+            && source_layers.windows(2).all(|pair| pair[0] < pair[1])
+            && source_layers.iter().all(|layer| manifest
+                .transport
+                .source_layers
+                .binary_search(layer)
+                .is_ok()),
+        "published Muse source layers must be sorted unique artifact layers"
+    );
+    let mut unique_tokens = BTreeSet::new();
+    ensure!(
+        !token_ids.is_empty()
+            && token_ids.len() <= 32
+            && token_ids
+                .iter()
+                .all(|token| *token < config.vocab_size && unique_tokens.insert(*token)),
+        "published Muse token IDs must be 1..=32 unique model-vocabulary IDs"
+    );
+
+    let covectors = loaded
+        .selected_token_lens_covectors(context, token_ids)
+        .context("derive Muse deployed-model selected-token covectors")?;
+    ensure!(
+        covectors.token_ids() == token_ids
+            && covectors.hidden_size() == config.hidden_size as usize,
+        "Muse selected-token covector metadata is inconsistent"
+    );
+    let projected_count = source_layers
+        .len()
+        .checked_mul(token_ids.len())
+        .and_then(|count| count.checked_mul(config.hidden_size as usize))
+        .context("published Muse projected direction count overflow")?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(projected_count)
+        .context("allocate published Muse projected directions")?;
+    let directory = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    for &layer in source_layers {
+        let descriptor = manifest
+            .payload
+            .matrices
+            .iter()
+            .find(|matrix| matrix.source_layer == layer)
+            .context("Muse published transport omitted a requested source matrix")?;
+        let matrix = super::muse_full_lens::read_matrix(
+            directory,
+            &manifest.payload.path,
+            manifest.payload.byte_length,
+            descriptor,
+        )?;
+        let projected = loaded
+            .project_f16_transport_lens_covectors(context, &matrix, &covectors)
+            .with_context(|| format!("project Muse published source layer {layer}"))?;
+        ensure!(
+            projected.len() == token_ids.len() * config.hidden_size as usize,
+            "Muse published projection returned an invalid shape"
+        );
+        values.extend(projected);
+    }
+    ensure!(
+        values.len() == projected_count && values.iter().all(|value| value.is_finite()),
+        "Muse published projection returned invalid values"
+    );
+    let selected_matrices = source_layers
+        .iter()
+        .map(|&layer| {
+            let descriptor = manifest
+                .payload
+                .matrices
+                .iter()
+                .find(|matrix| matrix.source_layer == layer)
+                .expect("selected matrix was validated before projection");
+            RunPublishedMatrixBinding {
+                source_layer: layer,
+                blake3: descriptor.blake3.clone(),
+            }
+        })
+        .collect();
+    let canonical_manifest_path = std::fs::canonicalize(&manifest_path).with_context(|| {
+        format!(
+            "resolve Muse published manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    let binding = RunPublishedLensBinding {
+        lens_id: lens_id.into(),
+        manifest: canonical_manifest_path,
+        manifest_canonical_json_blake3,
+        profile: manifest.profile.clone(),
+        method: manifest.transport.method.clone(),
+        target_layer: manifest.transport.target_layer,
+        fitted_checkpoint: manifest.model.fitted_checkpoint.clone(),
+        fitted_checkpoint_revision: manifest.model.fitted_checkpoint_revision.clone(),
+        source_repository: manifest.source.repository.clone(),
+        source_revision: manifest.source.revision.clone(),
+        source_sha256: manifest.source.sha256.clone(),
+        payload_blake3: manifest.payload.blake3.clone(),
+        claims_basis: manifest.fit.claims_basis.clone(),
+        transfer_validation_status: manifest.transfer.validation_status.clone(),
+        selected_token_ids: token_ids.to_vec(),
+        selected_matrices,
+    };
+    Ok((
+        LoadedMuseLens {
+            method: format!(
+                "published_{}_selected_token_numerator",
+                manifest.transport.method
+            ),
+            candidate_universe: "plan_selected_published_token_rows",
+            target_layer: manifest.transport.target_layer,
+            source_layers: source_layers.to_vec(),
+            token_ids: token_ids.to_vec(),
+            hidden_size: config.hidden_size as usize,
+            values,
+        },
+        binding,
+    ))
 }
 
 fn prepare_execution_plan(
@@ -432,10 +650,11 @@ fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
         "Muse Lens plans require at least one operation or readout"
     );
     ensure!(
-        plan.lenses
-            .iter()
-            .all(|lens| matches!(lens, LensDefinition::NativeSelected { .. })),
-        "Muse Lens plans support native_selected lenses only"
+        plan.lenses.iter().all(|lens| matches!(
+            lens,
+            LensDefinition::NativeSelected { .. } | LensDefinition::PublishedFullTransport { .. }
+        )),
+        "Muse Lens plans support native_selected and published_full_transport lenses only"
     );
     for direction in &plan.directions {
         ensure!(
@@ -444,7 +663,7 @@ fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
                 DirectionDefinition::LensRow(definition)
                     if matches!(&definition.row, DirectionRow::TokenId { .. })
             ),
-            "Muse directions require a native selected-token row"
+            "Muse directions require a selected token row"
         );
     }
     Ok(())
@@ -693,7 +912,7 @@ fn append_live_readouts(
                 lens: readout.lens.clone(),
                 method: lens.method.clone(),
                 score_kind: "selected_row_projection_numerator",
-                candidate_universe: "lens_artifact_selected_token_rows",
+                candidate_universe: lens.candidate_universe,
                 source_layer: layer,
                 target_layer: Some(lens.target_layer),
                 phase: event.label(),
@@ -714,6 +933,7 @@ mod tests {
     fn scoring_is_f64_dot_and_stable_token_tie_break() {
         let lens = LoadedMuseLens {
             method: "J".into(),
+            candidate_universe: "lens_artifact_selected_token_rows",
             target_layer: 51,
             source_layers: vec![49, 50],
             token_ids: vec![9, 3],
@@ -732,6 +952,7 @@ mod tests {
     fn source_selector_must_be_a_nonempty_artifact_subset() {
         let lens = LoadedMuseLens {
             method: "J".into(),
+            candidate_universe: "lens_artifact_selected_token_rows",
             target_layer: 51,
             source_layers: vec![49, 50],
             token_ids: vec![1],
@@ -751,6 +972,7 @@ mod tests {
     fn event_layer_matching_scores_each_selected_source_offset() {
         let lens = LoadedMuseLens {
             method: "R".into(),
+            candidate_universe: "lens_artifact_selected_token_rows",
             target_layer: 51,
             source_layers: vec![49, 50],
             token_ids: vec![7],
@@ -804,6 +1026,29 @@ mod tests {
         .unwrap();
         validate_plan(&plan, &args).unwrap();
 
+        let published: LensPlan = serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{
+                "kind":"published_full_transport",
+                "id":"p",
+                "artifact":"published",
+                "token_ids":[7,8],
+                "allow_unvalidated_transfer":true
+            }],
+            "directions": [
+                {"id":"p7","lens":"p","row":{"kind":"token_id","token_id":7},"normalization":"unit_l2"}
+            ],
+            "operations": [
+                {"id":"steer","scope":{"layers":{"kind":"values","values":[25]},"prefill":{"kind":"all"}},"action":{"kind":"fixed_add","direction":"p7","coefficient":1.0}}
+            ],
+            "readouts": [
+                {"id":"live","lens":"p","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"top_k":2}
+            ]
+        }))
+        .unwrap();
+        validate_plan(&published, &args).unwrap();
+        assert_eq!(required_lens_layers(&published, "p", 52).unwrap(), [25, 50]);
+
         let template: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"workspace_template","id":"x","weights":"w","labels":"l"}],"directions":[],"operations":[],"readouts":[{"id":"r","lens":"x","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"top_k":1}]})).unwrap();
         assert!(validate_plan(&template, &args).is_err());
         let label: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"native_selected","id":"x","artifact":"a"}],"directions":[{"id":"d","lens":"x","row":{"kind":"label","label":"no"},"normalization":"unit_l2"}],"operations":[{"id":"o","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"fixed_add","direction":"d","coefficient":1.0}}],"readouts":[]})).unwrap();
@@ -821,6 +1066,7 @@ mod tests {
             "x".to_string(),
             LoadedMuseLens {
                 method: "J".into(),
+                candidate_universe: "lens_artifact_selected_token_rows",
                 target_layer: 51,
                 source_layers: vec![49, 50],
                 token_ids: vec![7, 8],

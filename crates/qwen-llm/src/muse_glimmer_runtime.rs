@@ -8,6 +8,7 @@ use crate::muse_glimmer::MuseGlimmerConfig;
 use crate::muse_glimmer_lens::{
     MuseGlimmerLensCapture, MuseGlimmerLensCaptureBank, MuseGlimmerLensError, MuseGlimmerLensRule,
     MuseGlimmerSelectedTokenCovectors, muse_glimmer_selected_token_covectors,
+    project_f16_transport_covectors,
 };
 use crate::muse_glimmer_lens_fit::{
     MuseGlimmerAdjacentRowSlab, MuseGlimmerAdjacentSelectedTokenFit,
@@ -145,6 +146,29 @@ impl MuseGlimmerLoadedModel {
             ctx,
             &self.weights,
             token_ids,
+        )?)
+    }
+
+    pub fn project_f16_transport_lens_covectors(
+        &self,
+        ctx: &MetalContext,
+        transport_bytes: &[u8],
+        covectors: &MuseGlimmerSelectedTokenCovectors,
+    ) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
+        if ctx.device.registryID() != self.device_registry_id {
+            return invalid(format!(
+                "loaded model belongs to Metal device registry {}, projection context is {}",
+                self.device_registry_id,
+                ctx.device.registryID()
+            ));
+        }
+        if covectors.hidden_size() != self.config().hidden_size as usize {
+            return invalid("selected-token covectors have the wrong hidden size");
+        }
+        Ok(project_f16_transport_covectors(
+            ctx,
+            transport_bytes,
+            covectors,
         )?)
     }
 

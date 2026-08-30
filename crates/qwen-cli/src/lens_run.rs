@@ -421,6 +421,8 @@ pub(crate) struct RunOutput {
     live_readouts: Vec<LiveReadout>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     native_hyper_captures: Vec<NativeHyperCapture>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_binding: Option<RunExecutionBinding>,
 }
 
 #[derive(Debug, Serialize)]
@@ -489,17 +491,56 @@ pub(crate) struct RunResult {
     pub(crate) native_hyper_captures: Vec<NativeHyperCapture>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct RunExecutionBinding {
+    pub(crate) deployed_model_content_blake3: String,
+    pub(crate) content_identity_outcome: String,
+    pub(crate) weight_bytes_hashed: u64,
+    pub(crate) published_lenses: Vec<RunPublishedLensBinding>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RunPublishedLensBinding {
+    pub(crate) lens_id: String,
+    pub(crate) manifest: PathBuf,
+    pub(crate) manifest_canonical_json_blake3: String,
+    pub(crate) profile: String,
+    pub(crate) method: String,
+    pub(crate) target_layer: u32,
+    pub(crate) fitted_checkpoint: String,
+    pub(crate) fitted_checkpoint_revision: String,
+    pub(crate) source_repository: String,
+    pub(crate) source_revision: String,
+    pub(crate) source_sha256: String,
+    pub(crate) payload_blake3: String,
+    pub(crate) claims_basis: String,
+    pub(crate) transfer_validation_status: String,
+    pub(crate) selected_token_ids: Vec<u32>,
+    pub(crate) selected_matrices: Vec<RunPublishedMatrixBinding>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RunPublishedMatrixBinding {
+    pub(crate) source_layer: u32,
+    pub(crate) blake3: String,
+}
+
 pub(crate) fn emit_run_output(
     args: &LensRunArgs,
     runtime_kind: &'static str,
     plan_path: &Path,
     plan: LensPlan,
     result: RunResult,
+    execution_binding: Option<RunExecutionBinding>,
     output_path: Option<&Path>,
 ) -> Result<()> {
     let artifact = RunOutput {
         schema: RUN_SCHEMA,
-        schema_version: RUN_SCHEMA_VERSION,
+        schema_version: if execution_binding.is_some() {
+            2
+        } else {
+            RUN_SCHEMA_VERSION
+        },
         runtime_kind,
         model_path: args.model.clone(),
         canonical_plan_path: plan_path.to_path_buf(),
@@ -521,6 +562,7 @@ pub(crate) fn emit_run_output(
         operation_applications: result.operation_applications,
         live_readouts: result.live_readouts,
         native_hyper_captures: result.native_hyper_captures,
+        execution_binding,
     };
     let stdout_format = effective_run_stdout_format(args.format, output_path.is_some());
     let bytes = if output_path.is_some() || stdout_format == RunStdoutFormat::Json {
@@ -791,6 +833,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         &plan_path,
         plan,
         result,
+        None,
         output_path.as_deref(),
     )
 }
@@ -910,7 +953,15 @@ fn run_qwen4exp(
         native_hyper_captures,
     };
     let plan = execution.plan.clone();
-    emit_run_output(args, "flash_next", plan_path, plan, result, output_path)
+    emit_run_output(
+        args,
+        "flash_next",
+        plan_path,
+        plan,
+        result,
+        None,
+        output_path,
+    )
 }
 
 fn prepare_qwen4exp_execution_plan(
@@ -2421,6 +2472,7 @@ mod tests {
                 scores: Vec::new(),
             }],
             native_hyper_captures: Vec::new(),
+            execution_binding: None,
         };
         let value = serde_json::to_value(&artifact).unwrap();
         assert_eq!(value["schema"], RUN_SCHEMA);
@@ -2470,6 +2522,7 @@ mod tests {
             }],
             live_readouts: Vec::new(),
             native_hyper_captures: Vec::new(),
+            execution_binding: None,
         };
         assert_eq!(
             run_summary(&artifact, Some(Path::new("/tmp/run.json"))),

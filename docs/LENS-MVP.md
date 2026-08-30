@@ -12,6 +12,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Imported Qwen3.6 matched full J/R and Qwen3.8 full J transports support packed
   layer x position top-k, selected transported vectors, and selected-token live
   directions.
+- The pinned eyes-ml Muse Glimmer J transport imports without pickle execution,
+  supports selected-position full-vocabulary readout, and supplies plan-selected
+  live directions and interventions under an explicit BF16-to-GGUF transfer gate.
 - Packed traces can be persisted as versioned, replaceable result artifacts and
   inspected offline by summary, token/anchor map, aggregate frequency, semantic
   or numeric position, exact token-ID trajectory, and strict paired comparison
@@ -30,8 +33,9 @@ UI, generic plugin systems, and production hardening are out of scope.
   layer, prefill, and decode scopes.
 - Multiple matching operations execute in plan-file order.
 - Raw prompts, literal token IDs, and strict message JSON control rendering.
-- Ordinary dense and MoE inference paths run interventions. Muse selected/full
-  transport mechanics exist; Flash-Next exposes only raw native hyper control.
+- Ordinary dense and MoE inference paths run interventions. Muse supports native
+  selected and published full-transport directions; Flash-Next exposes only raw
+  native hyper control.
 
 ## Qualification
 
@@ -56,10 +60,14 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes with 124 tests and two model-bound
+- The active `qwen-lens` unit suite passes with 128 tests and two model-bound
   tests intentionally ignored.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
+- The exact 4.52 GB eyes-ml Muse source imports to 51 pinned F16 matrices. On the
+  deployed Q8 model, `The capital of France is` ranks ` Paris` first at L50; a
+  one-site published direction run records one application and emits ` Paris`.
+  This is implementation qualification, not a transfer-equivalence claim.
 
 ## Honest Boundaries
 
@@ -75,6 +83,9 @@ UI, generic plugin systems, and production hardening are out of scope.
   its separate real template asset.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
+- The published Muse J lens was fitted on 900 text-only BF16 prompts. Q8 use and
+  image-token positions remain explicitly unvalidated transfers. No published
+  Muse R profile is accepted until its final asset and recipe are pinned.
 - Muse's best T16 R256 engine projects to roughly `4.93h` for 6,656 rows and 25
   prompts; merely linear T128 scaling is about `39.5h`, before its required
   tiled-attention redesign. A paper-comparable full Muse fit is deadline-closed.

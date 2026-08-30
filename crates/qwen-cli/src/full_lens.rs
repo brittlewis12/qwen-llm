@@ -179,7 +179,7 @@ pub(crate) struct ReadFullArgs {
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 
-    /// Directory produced by `import-full` or `assemble-muse-full`.
+    /// Directory produced by `import-full`, `import-muse-full`, or `assemble-muse-full`.
     #[arg(long)]
     pub(crate) full_lens: PathBuf,
 
@@ -225,7 +225,7 @@ pub(crate) struct ReadFullArgs {
     #[arg(long)]
     pub(crate) identity_cache: PathBuf,
 
-    /// Acknowledge Qwen published-lens transfer; not needed for model-bound Muse assets.
+    /// Acknowledge a published BF16-to-GGUF transfer; not needed for model-bound Muse assets.
     #[arg(long)]
     pub(crate) allow_unvalidated_transfer: bool,
 

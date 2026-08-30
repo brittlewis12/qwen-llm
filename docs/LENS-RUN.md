@@ -20,8 +20,8 @@ passed unchanged.
 Sampling defaults to greedy. `--temperature`, `--top-k`, `--top-p`, `--min-p`,
 and `--seed` expose the existing deterministic native sampler.
 
-Without `--output`, stdout defaults to the complete `qwen.lens.run` version-1
-JSON document, preserving the original pipe-friendly behavior. With `--output`,
+Without `--output`, stdout defaults to the complete `qwen.lens.run` JSON
+document, preserving the original pipe-friendly behavior. With `--output`,
 stdout defaults to a compact summary while the document is persisted. An
 explicit `--format json` always prints JSON; explicit `--format summary` is also
 allowed without an output file when discarding the full artifact is intentional.
@@ -30,23 +30,40 @@ directory; symlink leaves are rejected. The common ordinary-Qwen, Flash-Next, an
 envelope records the runtime and model path, canonical plan path and parsed plan,
 input source and exact token IDs, sampler settings, decoded text and stop reason,
 operation applications, requested and emitted live readouts, and native captures
-when produced. Model identity and rendered message-role spans are intentionally
-reserved for a later schema increment.
+when produced. Existing runs remain schema version 1. Published Muse runs emit
+version 2 with the deployed model content identity, canonical lens-manifest and
+source/payload identities, explicit transfer status, selected token IDs, and the
+exact selected matrix digests. Rendered message-role spans remain reserved for a
+later schema increment.
 
 ## Full Readout
 
-`read-full` dispatches imported Qwen full J/R and assembled Muse full J/R assets
-by manifest schema. It captures one selected prompt position and returns
-deployed full-vocabulary logits for caller-ordered source layers. Muse reads are
-bound to an exact cached or fresh Hugging Face-declared GGUF identity and verify
-each selected F16 matrix. Muse fails closed if that identity is unavailable; it
-never falls back to hashing model weights.
+`read-full` dispatches imported Qwen, assembled model-bound Muse, and imported
+published Muse transports by manifest schema. It captures one selected prompt
+position and returns deployed full-vocabulary logits for caller-ordered source
+layers. Muse reads use an exact cached or fresh Hugging Face-declared GGUF
+identity and verify each selected F16 matrix. Muse fails closed if that identity
+is unavailable; it never falls back to hashing model weights.
+
+Import the exact pinned eyes-ml J asset without interpreting or executing its
+pickle metadata:
+
+```sh
+cargo run -q --release -p qwen-cli --bin qwen-lens -- import-muse-full \
+  --source /path/to/Muse-Glimmer-30B_jacobian_lens.pt \
+  --output /path/to/Muse-Glimmer-30B-jlens-published-v1
+```
+
+The importer pins the source SHA-256, exact ZIP inventory, opaque `data.pkl`,
+whole extracted payload, and all 51 matrix digests. Published Muse reads require
+`--allow-unvalidated-transfer`; model-bound locally assembled Muse assets do not.
 
 ```sh
 cargo run -q --release -p qwen-cli --bin qwen-lens -- read-full \
   --model /path/to/model.gguf \
   --full-lens /path/to/full-lens \
   --identity-cache /path/to/private-cache \
+  --allow-unvalidated-transfer \
   --prompt "What does this mean?" \
   --layers 25,50 \
   --top-k 10 \
@@ -168,10 +185,11 @@ qwen-lens compare left.json right.json --format json --limit 25
 ```
 
 It accepts only validated, same-version `qwen.lens.trace` v2 or v3 pairs, or
-`qwen.lens.run` v1 pairs. Each input must be a regular non-symlink file no
+`qwen.lens.run` v1 or v2 pairs. Each input must be a regular non-symlink file no
 larger than 256 MiB. Mixed schemas, unknown versions, incompatible trace
 geometry or score semantics, and runs with different prompt IDs, runtime, model
-path, or sampler settings are rejected.
+path, stable execution identities, or sampler settings are rejected. Cache-state
+outcomes remain recorded but do not make identical content identities incomparable.
 
 Trace cells align only by their exact captured layer/position coordinates and
 candidates by token ID. Captured-top-k entry/exit is explicit; absent ranks and
@@ -315,7 +333,9 @@ runtime. Legacy `published_full_j` plans remain accepted as an alias.
 
 Native and published selected J/R artifacts report selected-row projection
 numerator scores over only the artifact's selected token rows. Muse selected
-rows use the same semantics. These are neither probabilities nor full-vocabulary
+rows use the same semantics; published Muse covectors include its positive
+output multiplier, while the residual-dependent RMS denominator and nonlinear
+softcap remain omitted. These are neither probabilities nor full-vocabulary
 logits. `workspace_template` artifacts use the camilablank/workspace-lenses BF16
 `[layer, row, hidden]` safetensors plus authoritative row-label TSV and report
 cosine similarity over the template rows. Every emitted readout carries its
@@ -333,8 +353,10 @@ addition also accepts `as_stored`.
 ### Muse Glimmer
 
 Muse uses the same plan actions and scope semantics with model-bound
-`native_selected` artifacts. It accepts token-ID directions, passive readouts,
-or operations without readouts; `--identity-cache` is required. Template lenses,
+`native_selected` artifacts or imported `published_full_transport` artifacts. It
+accepts token-ID directions, passive readouts, or operations without readouts;
+`--identity-cache` is required. Published plans read and project only referenced
+source layers and require `allow_unvalidated_transfer: true`. Template lenses,
 native-hyper directions, and `--messages` remain unsupported for Muse.
 
 ```json

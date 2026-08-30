@@ -71,8 +71,9 @@ pub(crate) fn run(args: CompareArgs) -> Result<()> {
         }
         "qwen.lens.run" => {
             ensure!(
-                left_envelope.schema_version == 1 && right_envelope.schema_version == 1,
-                "run comparison supports schema version 1 only"
+                matches!(left_envelope.schema_version, 1 | 2)
+                    && left_envelope.schema_version == right_envelope.schema_version,
+                "run comparison supports same-version schema 1 or 2 pairs only"
             );
             let left: RunDocument = serde_json::from_slice(&left_bytes)
                 .with_context(|| format!("parse run JSON {}", args.left.display()))?;
@@ -659,14 +660,60 @@ struct RunDocument {
     live_readouts: Vec<RunReadout>,
     #[serde(default)]
     native_hyper_captures: Vec<serde_json::Value>,
+    #[serde(default)]
+    execution_binding: Option<RunExecutionBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RunExecutionBinding {
+    deployed_model_content_blake3: String,
+    content_identity_outcome: String,
+    weight_bytes_hashed: u64,
+    published_lenses: Vec<RunPublishedLensBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RunPublishedLensBinding {
+    lens_id: String,
+    manifest: PathBuf,
+    manifest_canonical_json_blake3: String,
+    profile: String,
+    method: String,
+    target_layer: u32,
+    fitted_checkpoint: String,
+    fitted_checkpoint_revision: String,
+    source_repository: String,
+    source_revision: String,
+    source_sha256: String,
+    payload_blake3: String,
+    claims_basis: String,
+    transfer_validation_status: String,
+    selected_token_ids: Vec<u32>,
+    selected_matrices: Vec<RunPublishedMatrixBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RunPublishedMatrixBinding {
+    source_layer: u32,
+    blake3: String,
 }
 
 impl RunDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "qwen.lens.run" && self.schema_version == 1,
+            self.schema == "qwen.lens.run" && matches!(self.schema_version, 1 | 2),
             "unsupported run schema/version"
         );
+        match (self.schema_version, &self.execution_binding) {
+            (1, None) => {}
+            (2, Some(binding)) => binding.validate()?,
+            (1, Some(_)) => bail!("run schema version 1 must not contain execution_binding"),
+            (2, None) => bail!("run schema version 2 requires execution_binding"),
+            _ => unreachable!(),
+        }
         ensure!(
             self.sampler.temperature.is_finite()
                 && self.sampler.top_p.is_finite()
@@ -692,6 +739,66 @@ impl RunDocument {
         }
         Ok(())
     }
+}
+
+impl RunExecutionBinding {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            is_lower_hex_digest(&self.deployed_model_content_blake3)
+                && !self.content_identity_outcome.is_empty()
+                && self.weight_bytes_hashed == 0
+                && !self.published_lenses.is_empty(),
+            "run execution binding has invalid model identity or no published lenses"
+        );
+        let mut lens_ids = BTreeSet::new();
+        for lens in &self.published_lenses {
+            ensure!(
+                !lens.lens_id.is_empty()
+                    && lens_ids.insert(&lens.lens_id)
+                    && is_lower_hex_digest(&lens.manifest_canonical_json_blake3)
+                    && !lens.profile.is_empty()
+                    && matches!(lens.method.as_str(), "J" | "R")
+                    && !lens.fitted_checkpoint.is_empty()
+                    && !lens.fitted_checkpoint_revision.is_empty()
+                    && !lens.source_repository.is_empty()
+                    && !lens.source_revision.is_empty()
+                    && is_lower_hex_digest(&lens.source_sha256)
+                    && is_lower_hex_digest(&lens.payload_blake3)
+                    && !lens.claims_basis.is_empty()
+                    && !lens.transfer_validation_status.is_empty()
+                    && !lens.selected_token_ids.is_empty()
+                    && !lens.selected_matrices.is_empty(),
+                "run published lens binding is incomplete"
+            );
+            let mut layers = BTreeSet::new();
+            let unique_tokens = lens
+                .selected_token_ids
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            ensure!(
+                unique_tokens.len() == lens.selected_token_ids.len()
+                    && lens.selected_matrices.iter().all(|matrix| {
+                        layers.insert(matrix.source_layer) && is_lower_hex_digest(&matrix.blake3)
+                    }),
+                "run published lens binding has duplicate tokens/layers or invalid matrix digests"
+            );
+        }
+        Ok(())
+    }
+
+    fn stable_identity_eq(&self, other: &Self) -> bool {
+        self.deployed_model_content_blake3 == other.deployed_model_content_blake3
+            && self.weight_bytes_hashed == other.weight_bytes_hashed
+            && self.published_lenses == other.published_lenses
+    }
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -869,6 +976,12 @@ fn compare_runs(left: &RunDocument, right: &RunDocument, limit: usize) -> Result
         left.model_path == right.model_path,
         "run model paths differ"
     );
+    let bindings_match = match (&left.execution_binding, &right.execution_binding) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.stable_identity_eq(right),
+        _ => false,
+    };
+    ensure!(bindings_match, "run stable execution bindings differ");
     ensure!(
         left.sampler == right.sampler,
         "run sampler settings or seed differ"
@@ -1370,6 +1483,7 @@ mod tests {
                 scores,
             }],
             native_hyper_captures: Vec::new(),
+            execution_binding: None,
         }
     }
 
@@ -1381,6 +1495,57 @@ mod tests {
             label: None,
             score,
         }
+    }
+
+    fn run_execution_binding() -> RunExecutionBinding {
+        RunExecutionBinding {
+            deployed_model_content_blake3: "11".repeat(32),
+            content_identity_outcome: "Hit".into(),
+            weight_bytes_hashed: 0,
+            published_lenses: vec![RunPublishedLensBinding {
+                lens_id: "published-j".into(),
+                manifest: "/lens/lens.json".into(),
+                manifest_canonical_json_blake3: "22".repeat(32),
+                profile: "eyes-profile".into(),
+                method: "J".into(),
+                target_layer: 51,
+                fitted_checkpoint: "eyes/model".into(),
+                fitted_checkpoint_revision: "revision".into(),
+                source_repository: "eyes/lens".into(),
+                source_revision: "source-revision".into(),
+                source_sha256: "33".repeat(32),
+                payload_blake3: "44".repeat(32),
+                claims_basis: "pinned_repository_model_card".into(),
+                transfer_validation_status: "unvalidated".into(),
+                selected_token_ids: vec![7],
+                selected_matrices: vec![RunPublishedMatrixBinding {
+                    source_layer: 25,
+                    blake3: "55".repeat(32),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn version_two_runs_require_and_exactly_match_execution_bindings() {
+        let mut left = run_document(vec![3], vec![]);
+        left.schema_version = 2;
+        left.execution_binding = Some(run_execution_binding());
+        let mut right = run_document(vec![3], vec![]);
+        right.schema_version = 2;
+        right.execution_binding = Some(run_execution_binding());
+        right
+            .execution_binding
+            .as_mut()
+            .unwrap()
+            .content_identity_outcome = "DeclaredAndStored".into();
+        left.validate().unwrap();
+        right.validate().unwrap();
+        compare_runs(&left, &right, 10).unwrap();
+
+        right.execution_binding.as_mut().unwrap().published_lenses[0].selected_matrices[0].blake3 =
+            "66".repeat(32);
+        assert!(compare_runs(&left, &right, 10).is_err());
     }
 
     #[test]

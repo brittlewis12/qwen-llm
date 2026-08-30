@@ -2,7 +2,7 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, RmsNormVjpRule, SwiGluVjpRule,
-    encode_get_rows_f32,
+    encode_frozen_linear_vjp_f32, encode_get_rows_f32,
 };
 use crate::muse_glimmer_residency::{MuseGlimmerMetalWeights, MuseGlimmerResidencyError};
 use crate::tensor::GgmlType;
@@ -366,6 +366,91 @@ pub fn muse_glimmer_selected_token_covectors(
     })
 }
 
+/// Project selected target-score covectors through one row-major F16 transport.
+/// The token-major `[K,H]` result computes `transport^T * covector`.
+pub fn project_f16_transport_covectors(
+    ctx: &MetalContext,
+    transport_bytes: &[u8],
+    covectors: &MuseGlimmerSelectedTokenCovectors,
+) -> Result<Vec<f32>, MuseGlimmerLensError> {
+    let hidden_size = covectors.hidden_size;
+    let token_count = covectors.token_ids.len();
+    if hidden_size == 0 || token_count == 0 || token_count > MUSE_GLIMMER_LENS_MAX_SELECTED_TOKENS {
+        return invalid("invalid Muse transport projection dimensions");
+    }
+    let matrix_words = hidden_size
+        .checked_mul(hidden_size)
+        .ok_or_else(|| MuseGlimmerLensError::Invalid("transport matrix size overflow".into()))?;
+    let matrix_bytes = matrix_words.checked_mul(2).ok_or_else(|| {
+        MuseGlimmerLensError::Invalid("transport matrix byte size overflow".into())
+    })?;
+    if transport_bytes.len() != matrix_bytes {
+        return invalid(format!(
+            "transport byte length {} != expected {matrix_bytes}",
+            transport_bytes.len()
+        ));
+    }
+    for (index, bytes) in transport_bytes.chunks_exact(2).enumerate() {
+        let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if bits & 0x7c00 == 0x7c00 {
+            return invalid(format!("non-finite transport F16 at word {index}"));
+        }
+    }
+    let value_count = token_count
+        .checked_mul(hidden_size)
+        .ok_or_else(|| MuseGlimmerLensError::Invalid("projected value count overflow".into()))?;
+    if covectors.values.len() != value_count
+        || covectors.values.iter().any(|value| !value.is_finite())
+    {
+        return invalid("invalid Muse selected-token covector payload");
+    }
+
+    let transport = MetalTensor::from_bytes(
+        ctx,
+        transport_bytes,
+        vec![hidden_size as u64, hidden_size as u64],
+        GgmlType::F16,
+    )?;
+    let grad_output = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(&covectors.values),
+        vec![hidden_size as u64, token_count as u64],
+        GgmlType::F32,
+    )?;
+    let grad_input = MetalTensor::zeros_f32(ctx, vec![hidden_size as u64, token_count as u64])?;
+    let command = ctx
+        .queue
+        .commandBuffer()
+        .ok_or_else(|| MuseGlimmerLensError::CommandBuffer("allocation failed".into()))?;
+    let encoder = KernelEncoder::begin(&command);
+    let encode_result = encode_frozen_linear_vjp_f32(
+        ctx,
+        &encoder,
+        &transport,
+        &grad_output,
+        &grad_input,
+        hidden_size,
+        hidden_size,
+        token_count,
+    );
+    encoder.end();
+    encode_result?;
+    command.commit();
+    command.waitUntilCompleted();
+    let status = command.status();
+    let command_error = command.error().map(|error| error.to_string());
+    if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
+        return Err(MuseGlimmerLensError::CommandBuffer(format!(
+            "status={status:?}, error={command_error:?}"
+        )));
+    }
+    let values = read_f32(&grad_input);
+    if values.len() != value_count || values.iter().any(|value| !value.is_finite()) {
+        return invalid("Muse transport projection produced invalid values");
+    }
+    Ok(values)
+}
+
 fn fold_selected_token_covectors(
     rows: &mut [f32],
     gamma: &[f32],
@@ -449,6 +534,28 @@ mod tests {
     use crate::gguf::GgufFile;
     use crate::muse_glimmer_residency::MuseGlimmerMetalWeightPlan;
     use crate::muse_glimmer_text_session::{MuseGlimmerTextForward, MuseGlimmerTextSession};
+    use half::f16;
+
+    #[test]
+    fn f16_transport_projection_is_transpose_times_token_covector() {
+        let context = MetalContext::new().unwrap();
+        let matrix = [1.0_f32, 2.0, 3.0, 4.0]
+            .into_iter()
+            .flat_map(|value| f16::from_f32(value).to_bits().to_le_bytes())
+            .collect::<Vec<_>>();
+        let covectors = MuseGlimmerSelectedTokenCovectors {
+            token_ids: vec![7, 9],
+            hidden_size: 2,
+            logit_scale: 1.0,
+            values: vec![5.0, 6.0, -1.0, 2.0],
+        };
+        let projected = project_f16_transport_covectors(&context, &matrix, &covectors).unwrap();
+        assert_eq!(projected, [23.0, 34.0, 5.0, 6.0]);
+
+        let mut invalid = matrix;
+        invalid[1] = 0x7c;
+        assert!(project_f16_transport_covectors(&context, &invalid, &covectors).is_err());
+    }
 
     #[test]
     fn muse_rule_identifiers_pin_rms_swiglu_and_attention_semantics() {

@@ -2,6 +2,7 @@ use super::full_lens::ReadFullArgs;
 use super::muse_full_lens_artifact as artifact;
 use super::muse_lens_artifact;
 use super::muse_lens_rows_artifact as rows;
+use super::muse_published_full_lens_artifact as published;
 use anyhow::{Context, Result, ensure};
 use blake3::Hasher;
 use clap::Args;
@@ -63,6 +64,22 @@ struct ReadoutDocument {
 }
 
 #[derive(Debug, Serialize)]
+struct PublishedReadoutDocument {
+    schema: &'static str,
+    schema_version: u32,
+    readout: &'static str,
+    score_semantics: &'static str,
+    ranking_scope: &'static str,
+    source_site: &'static str,
+    input: ReadoutInput,
+    artifact: PublishedReadoutArtifact,
+    deployed_model: ReadoutModel,
+    transfer: PublishedReadoutTransfer,
+    reader: ReadoutReader,
+    results: Vec<LayerReadout>,
+}
+
+#[derive(Debug, Serialize)]
 struct ReadoutInput {
     source: &'static str,
     add_special_tokens: Option<bool>,
@@ -91,6 +108,36 @@ struct ReadoutArtifact {
     query_batch_size: usize,
     storage_dtype: &'static str,
     conversion: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishedReadoutArtifact {
+    binding: &'static str,
+    manifest: PathBuf,
+    manifest_canonical_json_blake3: String,
+    profile: String,
+    declared_payload_blake3: String,
+    method: String,
+    target_layer: u32,
+    orientation: String,
+    source_repository: String,
+    source_revision: String,
+    source_sha256: String,
+    fitted_checkpoint: String,
+    fitted_checkpoint_revision: String,
+    claims_basis: String,
+    fit_n_prompts: u64,
+    fit_max_sequence_length: u32,
+    fit_skip_first: u32,
+    fit_modality: String,
+    storage_dtype: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishedReadoutTransfer {
+    validation_status: String,
+    override_policy: &'static str,
+    image_token_status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -150,13 +197,57 @@ struct TokenScore {
     logit: f32,
 }
 
+enum ReadArtifact {
+    Local {
+        manifest: artifact::Manifest,
+        canonical_json_blake3: String,
+    },
+    Published {
+        manifest: published::Manifest,
+        canonical_json_blake3: String,
+    },
+}
+
+impl ReadArtifact {
+    fn source_layers(&self) -> &[u32] {
+        match self {
+            Self::Local { manifest, .. } => &manifest.config.source_layers,
+            Self::Published { manifest, .. } => &manifest.transport.source_layers,
+        }
+    }
+
+    fn payload_path(&self) -> &str {
+        match self {
+            Self::Local { manifest, .. } => &manifest.payload.path,
+            Self::Published { manifest, .. } => &manifest.payload.path,
+        }
+    }
+
+    fn payload_byte_length(&self) -> u64 {
+        match self {
+            Self::Local { manifest, .. } => manifest.payload.byte_length,
+            Self::Published { manifest, .. } => manifest.payload.byte_length,
+        }
+    }
+
+    fn matrices(&self) -> &[artifact::MatrixDescriptor] {
+        match self {
+            Self::Local { manifest, .. } => &manifest.payload.matrices,
+            Self::Published { manifest, .. } => &manifest.payload.matrices,
+        }
+    }
+}
+
 pub(crate) fn is_artifact(directory: &Path) -> Result<bool> {
     let path = directory.join(artifact::MANIFEST_NAME);
     if !path.exists() {
         return Ok(false);
     }
     let probe: SchemaProbe = super::read_json_file(&path)?;
-    Ok(probe.schema == artifact::SCHEMA)
+    Ok(matches!(
+        probe.schema.as_str(),
+        artifact::SCHEMA | published::SCHEMA
+    ))
 }
 
 pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
@@ -167,21 +258,51 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     validate_read_args(&args)?;
     let full_lens = canonical_real_directory(&args.full_lens, "Muse full-transport artifact")?;
     let manifest_path = full_lens.join(artifact::MANIFEST_NAME);
-    let manifest: artifact::Manifest = super::read_json_file(&manifest_path)?;
-    artifact::validate_manifest(&manifest)?;
-    let manifest_canonical_json_blake3 = super::digest_json(&manifest)?;
+    let probe: SchemaProbe = super::read_json_file(&manifest_path)?;
+    let read_artifact = match probe.schema.as_str() {
+        artifact::SCHEMA => {
+            let manifest: artifact::Manifest = super::read_json_file(&manifest_path)?;
+            artifact::validate_manifest(&manifest)?;
+            let canonical_json_blake3 = super::digest_json(&manifest)?;
+            ReadArtifact::Local {
+                manifest,
+                canonical_json_blake3,
+            }
+        }
+        published::SCHEMA => {
+            ensure!(
+                args.allow_unvalidated_transfer,
+                "published Muse full transport requires --allow-unvalidated-transfer for BF16-to-GGUF use"
+            );
+            let manifest: published::Manifest = super::read_json_file(&manifest_path)?;
+            published::validate_manifest(&manifest)?;
+            let canonical_json_blake3 = super::digest_json(&manifest)?;
+            ReadArtifact::Published {
+                manifest,
+                canonical_json_blake3,
+            }
+        }
+        schema => anyhow::bail!("unsupported Muse full-transport schema {schema:?}"),
+    };
 
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open Muse model {}", args.model.display()))?;
     let bound =
         MuseGlimmerModel::from_gguf(&gguf).context("bind Muse model for full-transport readout")?;
-    ensure!(
-        manifest.config.architecture == ARCHITECTURE_NAME
-            && manifest.config.artifact_profile
-                == muse_lens_artifact::profile_name(bound.artifact_profile)
-            && manifest.config.geometry == muse_lens_artifact::geometry(&bound.config),
-        "Muse full transport does not match the deployed model profile or geometry"
-    );
+    match &read_artifact {
+        ReadArtifact::Local { manifest, .. } => ensure!(
+            manifest.config.architecture == ARCHITECTURE_NAME
+                && manifest.config.artifact_profile
+                    == muse_lens_artifact::profile_name(bound.artifact_profile)
+                && manifest.config.geometry == muse_lens_artifact::geometry(&bound.config),
+            "Muse full transport does not match the deployed model profile or geometry"
+        ),
+        ReadArtifact::Published { manifest, .. } => ensure!(
+            manifest.model.architecture == ARCHITECTURE_NAME
+                && manifest.model.geometry == muse_lens_artifact::geometry(&bound.config),
+            "Muse published full transport does not match the deployed release geometry"
+        ),
+    }
     let content = checkpoint_content_identity_without_weight_hashing(
         &gguf,
         &CheckpointIdentityCache::new(&args.identity_cache),
@@ -194,9 +315,15 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     })?;
     let content_id = super::hex(&content.content_id);
     ensure!(
-        content_id == manifest.config.model_content_blake3 && content.bytes_hashed == 0,
-        "Muse full transport was fitted for a different GGUF content identity"
+        content.bytes_hashed == 0,
+        "Muse full readout refuses model identities that hash weight bytes"
     );
+    if let ReadArtifact::Local { manifest, .. } = &read_artifact {
+        ensure!(
+            content_id == manifest.config.model_content_blake3,
+            "Muse full transport was fitted for a different GGUF content identity"
+        );
+    }
 
     let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
         .context("load Muse tokenizer for full readout")?;
@@ -208,7 +335,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         "--position {selected_position} is outside {} input tokens",
         token_ids.len()
     );
-    let layers = select_layers(&args.layers, &manifest.config.source_layers)?;
+    let layers = select_layers(&args.layers, read_artifact.source_layers())?;
     let mut capture_layers = layers.clone();
     capture_layers.sort_unstable();
     let capture_slots = capture_layers
@@ -247,14 +374,18 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         .try_reserve_exact(layers.len())
         .context("allocate Muse full-readout layer results")?;
     for &layer in &layers {
-        let descriptor = manifest
-            .payload
-            .matrices
+        let descriptor = read_artifact
+            .matrices()
             .iter()
             .find(|matrix| matrix.source_layer == layer)
             .context("Muse full transport omitted a selected source matrix")?;
         let started = Instant::now();
-        let matrix = read_matrix(&full_lens, &manifest.payload, descriptor)?;
+        let matrix = read_matrix(
+            &full_lens,
+            read_artifact.payload_path(),
+            read_artifact.payload_byte_length(),
+            descriptor,
+        )?;
         let matrix_read_wall_ms = started.elapsed().as_secs_f64() * 1e3;
         let capture_slot = *capture_slots
             .get(&layer)
@@ -312,60 +443,129 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         });
     }
 
-    let document = ReadoutDocument {
-        schema: "muse_glimmer.lens.full_readout",
-        schema_version: 1,
-        readout: "full_vocabulary",
-        score_semantics: "deployed_output_rmsnorm_native_head_scale_softcap_no_softmax_v1",
-        ranking_scope: "full_vocabulary",
-        source_site: "post_block_residual",
-        input: ReadoutInput {
-            source: input_source,
-            add_special_tokens,
-            token_ids,
-            selected_position,
-            captured_token_id: capture.token_id,
-            predicts_position: selected_position + 1,
-        },
-        artifact: ReadoutArtifact {
-            manifest: manifest_path,
-            manifest_canonical_json_blake3,
-            declared_payload_blake3: manifest.payload.blake3.clone(),
-            model_content_blake3: manifest.config.model_content_blake3.clone(),
-            content_identity_policy: manifest.config.content_identity_policy.clone(),
-            identity_input_outcomes: manifest.identity.input_outcomes.clone(),
-            artifact_profile: manifest.config.artifact_profile.clone(),
-            method: manifest.config.method.clone(),
-            target_layer: manifest.config.target_layer,
-            orientation: manifest.config.orientation.clone(),
-            corpus_blake3: manifest.config.corpus_blake3.clone(),
-            fit_used_prompts: manifest.corpus.used_prompts,
-            fit_max_tokens: manifest.config.max_tokens,
-            fit_skip_first: manifest.config.skip_first,
-            query_batch_size: manifest.config.query_batch_size,
-            storage_dtype: "f16_le",
-            conversion: manifest.assembly.conversion.clone(),
-        },
-        deployed_model: ReadoutModel {
-            path: args.model,
-            content_blake3: content_id,
-            content_identity_outcome: format!("{:?}", content.outcome),
-            weight_bytes_hashed: content.bytes_hashed,
-            architecture: ARCHITECTURE_NAME,
-            artifact_profile: manifest.config.artifact_profile,
-            n_layers: model_config.layer_count,
-            hidden_size: model_config.hidden_size,
-            vocab_size: model_config.vocab_size,
-            output_tail: "rmsnorm_native_output_projection_logit_scale_final_softcap",
-        },
-        reader: ReadoutReader {
-            build_commit: env!("QWEN_BUILD_COMMIT"),
-            build_dirty: env!("QWEN_BUILD_DIRTY"),
-            build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
-        },
-        results,
+    let input = ReadoutInput {
+        source: input_source,
+        add_special_tokens,
+        token_ids,
+        selected_position,
+        captured_token_id: capture.token_id,
+        predicts_position: selected_position + 1,
     };
-    let bytes = super::serialize_json_pretty_bounded(&document, "Muse full readout")?;
+    let content_identity_outcome = format!("{:?}", content.outcome);
+    let runtime_profile = muse_lens_artifact::profile_name(bound.artifact_profile).to_owned();
+    let bytes = match read_artifact {
+        ReadArtifact::Local {
+            manifest,
+            canonical_json_blake3,
+        } => {
+            let document = ReadoutDocument {
+                schema: "muse_glimmer.lens.full_readout",
+                schema_version: 1,
+                readout: "full_vocabulary",
+                score_semantics: "deployed_output_rmsnorm_native_head_scale_softcap_no_softmax_v1",
+                ranking_scope: "full_vocabulary",
+                source_site: "post_block_residual",
+                input,
+                artifact: ReadoutArtifact {
+                    manifest: manifest_path,
+                    manifest_canonical_json_blake3: canonical_json_blake3,
+                    declared_payload_blake3: manifest.payload.blake3.clone(),
+                    model_content_blake3: manifest.config.model_content_blake3.clone(),
+                    content_identity_policy: manifest.config.content_identity_policy.clone(),
+                    identity_input_outcomes: manifest.identity.input_outcomes.clone(),
+                    artifact_profile: manifest.config.artifact_profile.clone(),
+                    method: manifest.config.method.clone(),
+                    target_layer: manifest.config.target_layer,
+                    orientation: manifest.config.orientation.clone(),
+                    corpus_blake3: manifest.config.corpus_blake3.clone(),
+                    fit_used_prompts: manifest.corpus.used_prompts,
+                    fit_max_tokens: manifest.config.max_tokens,
+                    fit_skip_first: manifest.config.skip_first,
+                    query_batch_size: manifest.config.query_batch_size,
+                    storage_dtype: "f16_le",
+                    conversion: manifest.assembly.conversion.clone(),
+                },
+                deployed_model: ReadoutModel {
+                    path: args.model.clone(),
+                    content_blake3: content_id,
+                    content_identity_outcome,
+                    weight_bytes_hashed: content.bytes_hashed,
+                    architecture: ARCHITECTURE_NAME,
+                    artifact_profile: runtime_profile,
+                    n_layers: model_config.layer_count,
+                    hidden_size: model_config.hidden_size,
+                    vocab_size: model_config.vocab_size,
+                    output_tail: "rmsnorm_native_output_projection_logit_scale_final_softcap",
+                },
+                reader: ReadoutReader {
+                    build_commit: env!("QWEN_BUILD_COMMIT"),
+                    build_dirty: env!("QWEN_BUILD_DIRTY"),
+                    build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
+                },
+                results,
+            };
+            super::serialize_json_pretty_bounded(&document, "Muse full readout")?
+        }
+        ReadArtifact::Published {
+            manifest,
+            canonical_json_blake3,
+        } => {
+            let document = PublishedReadoutDocument {
+                schema: "muse_glimmer.lens.full_readout",
+                schema_version: 2,
+                readout: "published_full_vocabulary",
+                score_semantics: "deployed_output_rmsnorm_native_head_scale_softcap_no_softmax_v1",
+                ranking_scope: "full_vocabulary",
+                source_site: "post_block_residual",
+                input,
+                artifact: PublishedReadoutArtifact {
+                    binding: "published_checkpoint_geometry_transfer",
+                    manifest: manifest_path,
+                    manifest_canonical_json_blake3: canonical_json_blake3,
+                    profile: manifest.profile,
+                    declared_payload_blake3: manifest.payload.blake3,
+                    method: manifest.transport.method,
+                    target_layer: manifest.transport.target_layer,
+                    orientation: manifest.transport.orientation,
+                    source_repository: manifest.source.repository,
+                    source_revision: manifest.source.revision,
+                    source_sha256: manifest.source.sha256,
+                    fitted_checkpoint: manifest.model.fitted_checkpoint,
+                    fitted_checkpoint_revision: manifest.model.fitted_checkpoint_revision,
+                    claims_basis: manifest.fit.claims_basis,
+                    fit_n_prompts: manifest.fit.n_prompts,
+                    fit_max_sequence_length: manifest.fit.max_sequence_length,
+                    fit_skip_first: manifest.fit.skip_first,
+                    fit_modality: manifest.fit.modality,
+                    storage_dtype: manifest.payload.dtype,
+                },
+                deployed_model: ReadoutModel {
+                    path: args.model.clone(),
+                    content_blake3: content_id,
+                    content_identity_outcome,
+                    weight_bytes_hashed: content.bytes_hashed,
+                    architecture: ARCHITECTURE_NAME,
+                    artifact_profile: runtime_profile,
+                    n_layers: model_config.layer_count,
+                    hidden_size: model_config.hidden_size,
+                    vocab_size: model_config.vocab_size,
+                    output_tail: "rmsnorm_native_output_projection_logit_scale_final_softcap",
+                },
+                transfer: PublishedReadoutTransfer {
+                    validation_status: manifest.transfer.validation_status,
+                    override_policy: "explicit_allow_unvalidated_transfer",
+                    image_token_status: manifest.transfer.image_token_status,
+                },
+                reader: ReadoutReader {
+                    build_commit: env!("QWEN_BUILD_COMMIT"),
+                    build_dirty: env!("QWEN_BUILD_DIRTY"),
+                    build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
+                },
+                results,
+            };
+            super::serialize_json_pretty_bounded(&document, "Muse published full readout")?
+        }
+    };
     if let Some(output) = args.output {
         let output = super::resolve_output_path(&output)?;
         super::publish_immutable(&output, &bytes)?;
@@ -474,15 +674,20 @@ fn select_layers(requested: &[u32], available: &[u32]) -> Result<Vec<u32>> {
     Ok(layers)
 }
 
-fn read_matrix(
+pub(crate) fn read_matrix(
     directory: &Path,
-    payload: &artifact::Payload,
+    payload_path: &str,
+    payload_byte_length: u64,
     matrix: &artifact::MatrixDescriptor,
 ) -> Result<Vec<u8>> {
-    let path = directory.join(&payload.path);
+    ensure!(
+        Path::new(payload_path).components().count() == 1,
+        "Muse full-transport payload path must be one relative filename"
+    );
+    let path = directory.join(payload_path);
     let (mut file, length) = super::open_regular_file(&path)?;
     ensure!(
-        length as u64 == payload.byte_length,
+        length as u64 == payload_byte_length,
         "Muse full-transport payload length changed"
     );
     file.seek(SeekFrom::Start(matrix.byte_offset))
@@ -1066,6 +1271,32 @@ fn config_source_count(shards: &[ShardInput]) -> Result<usize> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn artifact_probe_recognizes_local_and_published_muse_schemas() {
+        let root = std::env::temp_dir().join(format!(
+            "qwen-muse-full-probe-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for (schema, expected) in [
+            (artifact::SCHEMA, true),
+            (published::SCHEMA, true),
+            ("qwen.workspace_lens_full_transport", false),
+        ] {
+            std::fs::write(
+                root.join(artifact::MANIFEST_NAME),
+                format!(r#"{{"schema":"{schema}"}}"#),
+            )
+            .unwrap();
+            assert_eq!(is_artifact(&root).unwrap(), expected);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn f32_to_f16_conversion_is_little_endian_and_fails_closed() {

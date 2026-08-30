@@ -17,7 +17,7 @@
 //! timestamp semantics; and the cache root is private and trusted. BLAKE3
 //! detects accidental cache corruption, not malicious replacement. Declared
 //! digests additionally trust the downloader's verification and the source
-//! mtime ordering against the sidecar timestamp. Concurrent source truncation
+//! mtime/ctime ordering against the sidecar timestamp. Concurrent source truncation
 //! retains the loader's existing possible-SIGBUS contract. `ctime` is
 //! intentionally part of the key, so renames and hardlink changes may
 //! conservatively force a rehash.
@@ -38,10 +38,6 @@ const DECLARED_CONTENT_DOMAIN: &[u8] = b"qwen-checkpoint-declared-ordered-conten
 const COMPATIBILITY_DOMAIN: &[u8] = b"qwen-checkpoint-compatibility-v1\0";
 const IDENTITY_MODE_ENV: &str = "QWEN_CHECKPOINT_MODEL_IDENTITY";
 const SIDECAR_MAX_BYTES: u64 = 4096;
-/// Downloaders stamp the sidecar after the shard's final write; allow modest
-/// filesystem timestamp skew before treating the shard as newer than its
-/// declaration.
-const SIDECAR_MTIME_SLACK_SECONDS: f64 = 5.0;
 const PARALLEL_HASH_MIN_BYTES: usize = 1024 * 1024;
 const CACHE_MAGIC: &[u8; 8] = b"QWENMID\0";
 const CACHE_VERSION: u32 = 1;
@@ -156,6 +152,10 @@ pub enum CheckpointIdentityError {
         "{IDENTITY_MODE_ENV}={0:?} is not a recognized checkpoint identity mode; use auto or hashed"
     )]
     IdentityModeEnv(String),
+    #[error(
+        "checkpoint content identity has no matching cache entry or fresh declared shard digests; refusing to hash model bytes"
+    )]
+    HashingRequired,
     #[error("checkpoint identity I/O: {0}")]
     Io(#[from] io::Error),
 }
@@ -206,6 +206,17 @@ pub fn checkpoint_content_identity(
 ) -> Result<CheckpointContentReport, CheckpointIdentityError> {
     let sources = source_views(gguf);
     resolve_content_sources(&sources, cache, || {})
+}
+
+/// Resolve a strong cached or downloader-declared content root without ever
+/// hashing mapped model bytes. A cold source without complete fresh sidecars
+/// fails closed instead of falling back to an exhaustive scan.
+pub fn checkpoint_content_identity_without_weight_hashing(
+    gguf: &GgufFile,
+    cache: &CheckpointIdentityCache,
+) -> Result<CheckpointContentReport, CheckpointIdentityError> {
+    let sources = source_views(gguf);
+    resolve_content_sources_without_weight_hashing(&sources, cache)
 }
 
 /// Report whether every shard carries a fresh declared-digest sidecar, without
@@ -350,10 +361,44 @@ where
     })
 }
 
+fn resolve_content_sources_without_weight_hashing(
+    sources: &[SourceView<'_>],
+    cache: &CheckpointIdentityCache,
+) -> Result<CheckpointContentReport, CheckpointIdentityError> {
+    validate_sources(sources, false)?;
+    let metadata_key = metadata_key(sources);
+    let cache_path = cache_path(cache.root(), &metadata_key);
+    if let CacheRead::Hit(content_id) =
+        read_cache_entry(&cache_path, &metadata_key).unwrap_or(CacheRead::Miss)
+    {
+        validate_sources(sources, false)?;
+        return Ok(CheckpointContentReport {
+            content_id,
+            outcome: IdentityCacheOutcome::Hit,
+            bytes_hashed: 0,
+        });
+    }
+    let content_id =
+        declared_ordered_content(sources).ok_or(CheckpointIdentityError::HashingRequired)?;
+    validate_sources(sources, false)?;
+    let stored = write_cache_entry(cache.root(), &cache_path, metadata_key, content_id).is_ok();
+    validate_sources(sources, false)?;
+    Ok(CheckpointContentReport {
+        content_id,
+        outcome: if stored {
+            IdentityCacheOutcome::DeclaredAndStored
+        } else {
+            IdentityCacheOutcome::DeclaredUncached
+        },
+        bytes_hashed: 0,
+    })
+}
+
 /// Compose the declared content root when every shard has a fresh sidecar.
 ///
 /// Any missing, malformed, oversized, or stale sidecar disqualifies the whole
-/// declared derivation; the caller falls back to exhaustive hashing.
+/// declared derivation. Permissive callers hash the content; strict callers
+/// fail closed.
 fn declared_ordered_content(sources: &[SourceView<'_>]) -> Option<[u8; 32]> {
     let digests = declared_shard_digests(sources)?;
     let mut content = blake3::Hasher::new();
@@ -425,7 +470,8 @@ fn parse_declared_sidecar(raw: &str, baseline: SourceStamp) -> Option<[u8; 32]> 
         return None;
     }
     let source_mtime = baseline.mtime_sec as f64 + baseline.mtime_nsec as f64 * 1e-9;
-    if source_mtime > stamped + SIDECAR_MTIME_SLACK_SECONDS {
+    let source_ctime = baseline.ctime_sec as f64 + baseline.ctime_nsec as f64 * 1e-9;
+    if stamped < source_mtime.max(source_ctime) {
         return None;
     }
     Some(digest)
@@ -757,7 +803,9 @@ mod tests {
         }
 
         fn fresh_sidecar_timestamp(&self) -> f64 {
-            self.baseline.mtime_sec as f64 + self.baseline.mtime_nsec as f64 * 1e-9 + 1.0
+            let mtime = self.baseline.mtime_sec as f64 + self.baseline.mtime_nsec as f64 * 1e-9;
+            let ctime = self.baseline.ctime_sec as f64 + self.baseline.ctime_nsec as f64 * 1e-9;
+            mtime.max(ctime) + 1.0
         }
     }
 
@@ -1012,6 +1060,41 @@ mod tests {
         .unwrap();
         assert_eq!(sticky_hashed_mode.outcome, IdentityCacheOutcome::Hit);
         assert_eq!(sticky_hashed_mode.content_id, declared.content_id);
+    }
+
+    #[test]
+    fn strict_non_hashing_identity_uses_declarations_or_cache_only() {
+        let temp = TestDir::new("strict-declared");
+        let source = TestSource::create(&temp.0, "model.gguf", b"model bytes must not be hashed");
+        let sources = [source.view()];
+        let cache = CheckpointIdentityCache::new(temp.0.join("identity"));
+        assert!(matches!(
+            resolve_content_sources_without_weight_hashing(&sources, &cache),
+            Err(CheckpointIdentityError::HashingRequired)
+        ));
+
+        source.write_sidecar(TEST_COMMIT, TEST_SHA256, source.fresh_sidecar_timestamp());
+        let declared = resolve_content_sources_without_weight_hashing(&sources, &cache).unwrap();
+        assert_eq!(declared.outcome, IdentityCacheOutcome::DeclaredAndStored);
+        assert_eq!(declared.bytes_hashed, 0);
+
+        std::fs::remove_dir_all(temp.0.join(".cache")).unwrap();
+        let cached = resolve_content_sources_without_weight_hashing(&sources, &cache).unwrap();
+        assert_eq!(cached.outcome, IdentityCacheOutcome::Hit);
+        assert_eq!(cached.content_id, declared.content_id);
+        assert_eq!(cached.bytes_hashed, 0);
+    }
+
+    #[test]
+    fn declared_identity_rejects_sidecar_older_than_source_ctime() {
+        let temp = TestDir::new("declared-ctime");
+        let source = TestSource::create(&temp.0, "model.gguf", b"model");
+        let stamped = source.fresh_sidecar_timestamp();
+        let mut replaced = source.baseline;
+        replaced.ctime_sec = (stamped.floor() as i64).saturating_add(1);
+        replaced.ctime_nsec = 0;
+        let sidecar = format!("{TEST_COMMIT}\n{TEST_SHA256}\n{stamped}\n");
+        assert!(parse_declared_sidecar(&sidecar, replaced).is_none());
     }
 
     #[test]

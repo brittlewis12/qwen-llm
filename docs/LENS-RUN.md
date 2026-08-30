@@ -20,6 +20,30 @@ passed unchanged.
 Sampling defaults to greedy. `--temperature`, `--top-k`, `--top-p`, `--min-p`,
 and `--seed` expose the existing deterministic native sampler.
 
+## Full Readout
+
+`read-full` dispatches imported Qwen full-J and assembled Muse full J/R assets
+by manifest schema. It captures one selected prompt position and returns
+deployed full-vocabulary logits for caller-ordered source layers. Muse reads are
+bound to an exact cached or fresh Hugging Face-declared GGUF identity and verify
+each selected F16 matrix. Muse fails closed if that identity is unavailable; it
+never falls back to hashing model weights.
+
+```sh
+cargo run -q --release -p qwen-cli --bin qwen-lens -- read-full \
+  --model /path/to/model.gguf \
+  --full-lens /path/to/full-lens \
+  --identity-cache /path/to/private-cache \
+  --prompt "What does this mean?" \
+  --layers 25,50 \
+  --top-k 10 \
+  --include-vector
+```
+
+`--include-vector` adds the selected transported target-coordinate residual
+before output RMSNorm. Its JSON includes operation, stage, dtype, coordinate,
+hidden size, shape, and values. Omit it for compact top-k output.
+
 ## Packed Full-J Trace
 
 `trace-full` reads the imported Qwen3.8 27B full J-lens across every requested

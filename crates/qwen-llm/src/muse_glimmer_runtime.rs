@@ -11,7 +11,9 @@ use crate::muse_glimmer_lens::{
 };
 use crate::muse_glimmer_lens_fit::{
     MuseGlimmerAdjacentRowSlab, MuseGlimmerAdjacentSelectedTokenFit,
+    MuseGlimmerBatchedFullTransportRowFit, MuseGlimmerFullTransportRowFit,
     MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerOneBlockVjp,
+    MuseGlimmerQueryBatchComposedVjp, MuseGlimmerQueryBatchOneBlockVjp,
 };
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
@@ -187,6 +189,31 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self.forward.forward_token(token, &mut self.session)?)
     }
 
+    /// Apply the resident deployed output norm, projection, scale, and softcap
+    /// to one final post-block residual without advancing the text session.
+    pub fn deployed_logits_from_post_block_residual(
+        &mut self,
+        residual: &[f32],
+    ) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .deployed_logits_from_post_block_residual(residual, &mut self.session)?)
+    }
+
+    /// Apply one row-major F16 hidden-to-hidden transport to a post-block
+    /// residual without advancing or otherwise mutating the text session.
+    /// Artifact consumers remain responsible for binding the bytes to this
+    /// model, fitting corpus, method, and selected source layer.
+    pub fn apply_f16_post_block_transport(
+        &self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+    ) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .apply_f16_post_block_transport(transport_bytes, source_residual)?)
+    }
+
     pub fn forward_token_with_post_block_interventions(
         &mut self,
         token: u32,
@@ -272,6 +299,58 @@ impl MuseGlimmerTextRunner<'_, '_> {
             .lens_one_full_attention_block_vjp(capture, target_cotangent, rule)?)
     }
 
+    /// Reverse a query-major `[Q,T,H]` cotangent bank through one attention
+    /// block. The primal replay is shared across Q; Q must be in the bounded
+    /// range advertised by `MUSE_GLIMMER_QUERY_BATCH_MAX`.
+    pub fn lens_one_attention_block_vjp_query_batch(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerRuntimeError> {
+        Ok(self.forward.lens_one_attention_block_vjp_query_batch(
+            capture,
+            target_cotangents,
+            query_count,
+            rule,
+        )?)
+    }
+
+    pub fn lens_one_full_attention_block_vjp_query_batch(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerRuntimeError> {
+        Ok(self.forward.lens_one_full_attention_block_vjp_query_batch(
+            capture,
+            target_cotangents,
+            query_count,
+            rule,
+        )?)
+    }
+
+    pub fn lens_composed_vjp_query_batch(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        target_cotangents: &[f32],
+        query_count: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerQueryBatchComposedVjp, MuseGlimmerRuntimeError> {
+        Ok(self.forward.lens_composed_vjp_query_batch(
+            captures,
+            target_block,
+            source_layers,
+            target_cotangents,
+            query_count,
+            rule,
+        )?)
+    }
+
     /// Fit one direction per selected token from `target_block` to exactly
     /// `target_block - 1`. Positions are `skip_first..T-1`; each VJP places
     /// one covector on every valid target row and means the matching source rows.
@@ -323,6 +402,51 @@ impl MuseGlimmerTextRunner<'_, '_> {
         )?)
     }
 
+    /// Fit selected rows of the scalar full-transport oracle. Each output row
+    /// is a hidden-space basis covector placed at every valid target position.
+    pub fn fit_full_transport_rows_to_sources(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        output_row_ids: &[u32],
+        skip_first: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerFullTransportRowFit, MuseGlimmerRuntimeError> {
+        Ok(self.forward.fit_full_transport_rows_to_sources(
+            captures,
+            target_block,
+            source_layers,
+            output_row_ids,
+            skip_first,
+            rule,
+        )?)
+    }
+
+    /// Fit full-transport rows with exact query batches, chunking the row IDs
+    /// by `query_batch_size` while retaining scalar source/row orientation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_full_transport_rows_to_sources_batched(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        output_row_ids: &[u32],
+        skip_first: usize,
+        query_batch_size: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerBatchedFullTransportRowFit, MuseGlimmerRuntimeError> {
+        Ok(self.forward.fit_full_transport_rows_to_sources_batched(
+            captures,
+            target_block,
+            source_layers,
+            output_row_ids,
+            skip_first,
+            query_batch_size,
+            rule,
+        )?)
+    }
+
     pub fn prefill_with_command_checkpoint<F>(
         &mut self,
         tokens: &[u32],
@@ -350,6 +474,7 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, MuseGlimmerRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::GgufFile;
     use crate::muse_glimmer::MuseGlimmerConfig;
 
     #[test]
@@ -360,5 +485,65 @@ mod tests {
         let plan = MuseGlimmerTextSessionMemoryPlan::for_geometry(&ctx, &geometry).unwrap();
         assert!(plan.priced_upper_bytes() >= plan.logical_bytes());
         assert_eq!(geometry.capacity(), 257);
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn deployed_output_tail_matches_forward_from_captured_final_residual_bitwise() {
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let mut model = MuseGlimmerLoadedModel::load(&ctx, &gguf, 1).expect("load Muse Q8 target");
+        let final_layer = model.config().layer_count - 1;
+        let token = model.config().bos_token_id;
+        let mut runner = model.create_runner(&ctx).expect("create Muse runner");
+        let captured = runner
+            .forward_token_capture_post_blocks(token, &[final_layer])
+            .expect("forward and capture final residual");
+        let next_position = runner.next_position();
+        let tail_logits = runner
+            .deployed_logits_from_post_block_residual(
+                captured.layer_values(0).expect("captured final residual"),
+            )
+            .expect("run deployed output tail");
+        let hidden = captured.hidden_size;
+        let mut identity = vec![0u8; hidden * hidden * 2];
+        for coordinate in 0..hidden {
+            let offset = (coordinate * hidden + coordinate) * 2;
+            identity[offset..offset + 2].copy_from_slice(&half::f16::ONE.to_bits().to_le_bytes());
+        }
+        let transported = runner
+            .apply_f16_post_block_transport(
+                &identity,
+                captured.layer_values(0).expect("captured final residual"),
+            )
+            .expect("apply identity transport");
+
+        assert_eq!(runner.next_position(), next_position);
+        assert_eq!(
+            transported
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            captured
+                .layer_values(0)
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            tail_logits
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            captured
+                .logits
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
     }
 }

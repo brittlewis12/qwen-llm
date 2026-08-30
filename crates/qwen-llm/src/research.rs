@@ -578,6 +578,13 @@ pub struct ResearchFullVocabularyReadout {
     pub scores: Vec<ResearchVocabularyScore>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResearchFullVocabularyReadoutWithVector {
+    pub readout: ResearchFullVocabularyReadout,
+    /// Transported target-coordinate residual before output RMSNorm.
+    pub transported_values: Vec<f32>,
+}
+
 /// Opaque packed post-block residual capture owned by one loaded model.
 /// The resident `[T,K,H]` Metal tensor is intentionally private.
 pub struct ResearchPackedPostBlockCapture<'model> {
@@ -1613,6 +1620,19 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         source_residual: &[f32],
         top_k: usize,
     ) -> Result<ResearchFullVocabularyReadout, ResearchError> {
+        Ok(self
+            .apply_f16_transport_topk_with_vector(transport_bytes, source_residual, top_k)?
+            .readout)
+    }
+
+    /// Apply one row-major F16 transport and return both deployed top-k logits
+    /// and the transported target-coordinate residual before output RMSNorm.
+    pub fn apply_f16_transport_topk_with_vector(
+        &self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+        top_k: usize,
+    ) -> Result<ResearchFullVocabularyReadoutWithVector, ResearchError> {
         const TOP_K_MAX: usize = 16;
         if top_k == 0 || top_k > TOP_K_MAX {
             return Err(ResearchError::InvalidFullReadoutTopK {
@@ -1801,9 +1821,12 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 logit,
             });
         }
-        Ok(ResearchFullVocabularyReadout {
-            rms_denominator_f64_recomputed,
-            scores,
+        Ok(ResearchFullVocabularyReadoutWithVector {
+            readout: ResearchFullVocabularyReadout {
+                rms_denominator_f64_recomputed,
+                scores,
+            },
+            transported_values,
         })
     }
 

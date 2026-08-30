@@ -1,7 +1,9 @@
 use super::muse_lens_artifact as artifact;
 use super::{FitMethod, FitTokensArgs};
 use anyhow::{Context, Result, bail, ensure};
-use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
+use qwen_llm::checkpoint_identity::{
+    CheckpointIdentityCache, checkpoint_content_identity_without_weight_hashing,
+};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME, MuseGlimmerModel};
@@ -57,14 +59,20 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
         config.vocab_size,
     )?;
     let corpus_blake3 = super::corpus_digest(&prompts);
-    let content =
-        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(&args.identity_cache))
-            .with_context(|| {
-                format!(
-                    "resolve Muse GGUF content identity using {}",
-                    args.identity_cache.display()
-                )
-            })?;
+    let content = checkpoint_content_identity_without_weight_hashing(
+        &gguf,
+        &CheckpointIdentityCache::new(&args.identity_cache),
+    )
+    .with_context(|| {
+        format!(
+            "resolve Muse GGUF identity without hashing weights using {}",
+            args.identity_cache.display()
+        )
+    })?;
+    ensure!(
+        content.bytes_hashed == 0,
+        "Muse selected-token fitting must not hash model weights"
+    );
     let content_id = super::hex(&content.content_id);
 
     let context = MetalContext::new().context("initialize Metal for Muse lens fitting")?;

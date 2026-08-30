@@ -19,15 +19,18 @@ mod full_lens;
 mod lens_run;
 #[allow(dead_code)]
 mod messages;
+mod muse_full_lens;
+mod muse_full_lens_artifact;
 mod muse_lens_artifact;
 mod muse_lens_fit;
-mod muse_lens_rows;
+mod muse_lens_rows_artifact;
+mod muse_lens_rows_fit;
 mod muse_lens_run;
 #[allow(dead_code)]
 mod template_lens;
 use full_lens::{
     CompareTransferArgs, ImportFullArgs, ReadFullArgs, TraceFullArgs, compare_transfer,
-    import_full, read_full, trace_full,
+    import_full, read_full as read_qwen_full, trace_full,
 };
 
 const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
@@ -73,6 +76,9 @@ enum Command {
     FitRows(FitRowsArgs),
     /// Fit resumable projected J-lens or R-lens selected-token readouts.
     FitTokens(FitTokensArgs),
+    /// Assemble complete Muse row shards into one self-contained F16 transport.
+    #[command(name = "assemble-muse-full")]
+    AssembleMuseFull(muse_full_lens::AssembleMuseFullArgs),
     /// Import the pinned Eyes ML Qwen3.8-27B full J-lens without executing pickle.
     ImportFull(ImportFullArgs),
     /// Compare the published J-lens with native deployed-checkpoint J directions.
@@ -115,7 +121,7 @@ struct FitRowsArgs {
     #[arg(long)]
     output: PathBuf,
 
-    /// Ordinary-Qwen content cache; accepted but unused by Muse row fitting.
+    /// Identity cache; Muse accepts cache or fresh declarations without hashing weights.
     #[arg(long)]
     identity_cache: PathBuf,
 
@@ -496,6 +502,7 @@ fn main() -> Result<()> {
         Command::LensRun(args) => lens_run::run(args),
         Command::FitRows(args) => fit_rows(args),
         Command::FitTokens(args) => fit_tokens(args),
+        Command::AssembleMuseFull(args) => muse_full_lens::assemble(args),
         Command::ImportFull(args) => import_full(args),
         Command::CompareTransfer(args) => compare_transfer(args),
         Command::ReadFull(args) => read_full(args),
@@ -503,14 +510,26 @@ fn main() -> Result<()> {
     }
 }
 
-fn fit_rows(mut args: FitRowsArgs) -> Result<()> {
-    validate_args(&args)?;
+fn fit_rows(args: FitRowsArgs) -> Result<()> {
     let gguf = qwen_llm::gguf::GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
     if muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
-        return muse_lens_rows::fit_rows(args, gguf);
+        return muse_lens_rows_fit::fit_rows(args, gguf);
     }
     drop(gguf);
+    fit_qwen_rows(args)
+}
+
+fn read_full(args: ReadFullArgs) -> Result<()> {
+    if muse_full_lens::is_artifact(&args.full_lens)? {
+        muse_full_lens::read_full(args)
+    } else {
+        read_qwen_full(args)
+    }
+}
+
+fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
+    validate_args(&args)?;
     args.output = resolve_output_path(&args.output)?;
     let requests = read_prompt_requests(&args.prompts, args.max_prompts)?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
@@ -3063,9 +3082,10 @@ mod tests {
             "--identity-cache",
             "identity-cache",
             "--allow-unvalidated-transfer",
+            "--include-vector",
         ])
         .unwrap();
-        assert!(matches!(parsed.command, Command::ReadFull(_)));
+        assert!(matches!(parsed.command, Command::ReadFull(ref args) if args.include_vector));
 
         let hyphen_prompt = Cli::try_parse_from([
             "qwen-lens",

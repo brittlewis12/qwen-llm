@@ -4,6 +4,10 @@ Decision: **KEEP** the source-50-only `fit-rows` path as the first production
 consumer of the qualified full-attention VJP bank. It closes estimator layout,
 prompt accumulation, resume, and artifact publication without launching a fit.
 
+This packet records the pre-integration checkpoint. The preserving full-R merge
+supersedes its source-50-only artifact schema with one all-source `[S,R,H]`
+schema while retaining the same bank as the full-block motor.
+
 ## Contract
 
 The first artifact is deliberately narrow:

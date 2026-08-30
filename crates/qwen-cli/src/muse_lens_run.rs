@@ -4,7 +4,9 @@ use super::lens_run::{
 };
 use super::muse_lens_artifact as artifact;
 use anyhow::{Context, Result, bail, ensure};
-use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
+use qwen_llm::checkpoint_identity::{
+    CheckpointIdentityCache, checkpoint_content_identity_without_weight_hashing,
+};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{MetalContext, MetalTensor, PostBlockIntervention};
 use qwen_llm::muse_glimmer::{MuseGlimmerArtifactProfile, MuseGlimmerConfig, MuseGlimmerModel};
@@ -132,13 +134,20 @@ pub(crate) fn run(
     );
     super::lens_run::validate_reachable_scopes(&plan, prompt_ids.len(), args.max_new_tokens)?;
 
-    let content = checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(cache))
-        .with_context(|| {
-            format!(
-                "resolve running Muse GGUF identity using {}",
-                cache.display()
-            )
-        })?;
+    let content = checkpoint_content_identity_without_weight_hashing(
+        &gguf,
+        &CheckpointIdentityCache::new(cache),
+    )
+    .with_context(|| {
+        format!(
+            "resolve running Muse GGUF identity without hashing weights using {}",
+            cache.display()
+        )
+    })?;
+    ensure!(
+        content.bytes_hashed == 0,
+        "Muse lens execution must not hash model weights"
+    );
     let content_id = super::hex(&content.content_id);
     let mut lenses = HashMap::new();
     for lens in &plan.lenses {
@@ -838,7 +847,7 @@ mod tests {
         let config = bound.config.clone();
         let profile = bound.artifact_profile;
         drop(bound);
-        let content = checkpoint_content_identity(
+        let content = checkpoint_content_identity_without_weight_hashing(
             &gguf,
             &CheckpointIdentityCache::new(root.join("identity")),
         )?;

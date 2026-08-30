@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Selected N=527 Strict Router KEEP
+
+Status: admit exact N=527 to the existing strict E8P32 router. The qualified
+token set is now `{512, 527, 2048}`; all other widths remain generic.
+
+- A focused release differential preserves complete router logits, top-k IDs
+  and weights, shared scale, route counts and slots, including the 15-row tail
+  in the strict kernel's seventeenth output tile.
+- A release B-C-C-B isolates only the final N=527 router in the frozen
+  `2048+3+527` selected-prefill plan. N=2,048 uses strict routing in every arm.
+- Aggregate prefill GPU moves `5,212.211417 -> 5,065.299813 ms`, saving
+  `146.911605 ms` or 2.818604%. Both balanced comparisons are positive.
+- Every arm emits the exact expected JSON, generates 23 tokens over 22
+  transitions, and stops on EOS.
+- Roll back all qualified widths with
+  `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0`.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-router-n527/`.
+
 ## 2026-08-29 - Flash-Next Selected GQA4 Attention KEEP
 
 Status: default two bit-preserving GQA4 kernels inside the experimental
@@ -208,7 +227,7 @@ Adversarial leverage session: `01a04de7-d66e-73f1-b3de-14ba60527c89`.
 ## 2026-08-29 - Flash-Next Natural N=512 Strict Router GO
 
 Status: enable strict E8P32 at exact N=512 by default. The exact admitted token
-set is now `{512, 2048}`; roll back both with
+set at this checkpoint is `{512, 2048}`; roll back both with
 `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0`.
 
 - Candidate checkpoint `0b0c468` reused the unchanged strict-order kernel behind

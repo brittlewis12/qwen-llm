@@ -257,8 +257,11 @@ decode command GPU `46.716405 -> 45.402361 ms/transition`. Natural N=512 now
 measures the generic F32 router at `3.960750 ms/layer`, or 14.81% of command GPU;
 strict E8P32 is now promoted there after reducing the leaf to
 `0.690375 ms/layer` and warm command GPU `1149.058875 -> 990.813875 ms`.
-GPU-equivalent N=512 throughput rises `445.58 -> 516.75 tok/s`; exact N=2,048
-remains qualified and every other width remains generic. The force-ranked lane
+GPU-equivalent N=512 throughput rises `445.58 -> 516.75 tok/s`. The same
+bit-exact strict kernel is now qualified at exact N=527: an isolated B-C-C-B on
+the selected `2048+3+527` plan moves aggregate prefill GPU
+`5,212.211417 -> 5,065.299813 ms`, saving 2.82%. The exact admitted set is now
+`{512, 527, 2048}` and every other width remains generic. The force-ranked lane
 is now:
 
 Internal placement first reduced cold first-pass wall

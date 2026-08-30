@@ -209,7 +209,7 @@ pub(crate) struct ReadFullArgs {
     #[arg(long)]
     pub(crate) position: Option<usize>,
 
-    /// Source layers in output order; defaults to all 0..62.
+    /// Source layers in output order; defaults to every artifact source layer.
     #[arg(long, value_delimiter = ',')]
     pub(crate) layers: Vec<u32>,
 
@@ -246,25 +246,25 @@ pub(crate) struct ReadFullArgs {
         .args(["prompt", "token_ids", "messages"])
 ))]
 pub(crate) struct TraceFullArgs {
-    /// Matching dense Qwen3.6 or Qwen3.8 GGUF used for packed capture and readout.
+    /// Matching Qwen3.6, Qwen3.8, or Muse Glimmer GGUF used for capture and readout.
     #[arg(short = 'm', long)]
-    model: PathBuf,
+    pub(crate) model: PathBuf,
 
-    /// Directory produced by `qwen-lens import-full`.
+    /// Directory produced by `qwen-lens import-full` or `import-muse-full`.
     #[arg(long)]
-    full_lens: PathBuf,
+    pub(crate) full_lens: PathBuf,
 
     /// Raw text prompt; tokenizer-configured specials are enabled by default.
     #[arg(long, allow_hyphen_values = true)]
-    prompt: Option<String>,
+    pub(crate) prompt: Option<String>,
 
     /// Literal comma-separated token IDs; no specials are added.
     #[arg(long, value_delimiter = ',')]
-    token_ids: Option<Vec<i32>>,
+    pub(crate) token_ids: Option<Vec<i32>>,
 
     /// Strict system/user/assistant message array or wrapper JSON.
     #[arg(long)]
-    messages: Option<PathBuf>,
+    pub(crate) messages: Option<PathBuf>,
 
     /// Generation transition for --messages; supported values depend on the lens model.
     #[arg(
@@ -273,7 +273,7 @@ pub(crate) struct TraceFullArgs {
         requires = "messages",
         conflicts_with_all = ["prompt", "token_ids"]
     )]
-    message_mode: Option<TraceFullMessageMode>,
+    pub(crate) message_mode: Option<TraceFullMessageMode>,
 
     /// Disable tokenizer-configured special insertion for --prompt.
     #[arg(
@@ -281,41 +281,49 @@ pub(crate) struct TraceFullArgs {
         requires = "prompt",
         conflicts_with_all = ["token_ids", "messages"]
     )]
-    no_special_tokens: bool,
+    pub(crate) no_special_tokens: bool,
 
     /// Unique source layers in caller output order; defaults to every artifact layer.
     #[arg(long, value_delimiter = ',')]
-    layers: Vec<u32>,
+    pub(crate) layers: Vec<u32>,
 
     /// Full-vocabulary results per layer and position.
     #[arg(long, default_value_t = 8)]
-    top_k: usize,
+    pub(crate) top_k: usize,
 
     /// Reject inputs above this bound without truncating them.
     #[arg(long, default_value_t = MAX_RESEARCH_PACKED_READOUT_POSITIONS)]
-    max_tokens: usize,
+    pub(crate) max_tokens: usize,
 
     /// Transported target-space vectors to include as layer:position cells.
     #[arg(long = "vectors", value_delimiter = ',')]
-    vectors: Vec<TraceFullVectorCell>,
+    pub(crate) vectors: Vec<TraceFullVectorCell>,
+
+    /// Muse only: private cache for a declared GGUF content identity.
+    #[arg(long)]
+    pub(crate) identity_cache: Option<PathBuf>,
+
+    /// Muse only: acknowledge published BF16-to-GGUF transfer.
+    #[arg(long)]
+    pub(crate) allow_unvalidated_transfer: bool,
 
     /// Replace this JSON result file atomically after a successful trace.
     #[arg(long)]
-    output: Option<PathBuf>,
+    pub(crate) output: Option<PathBuf>,
 
     /// Human summary or the complete JSON document on stdout.
     #[arg(long, value_enum)]
-    format: Option<TraceFullStdoutFormat>,
+    pub(crate) format: Option<TraceFullStdoutFormat>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum TraceFullStdoutFormat {
+pub(crate) enum TraceFullStdoutFormat {
     Summary,
     Json,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum TraceFullMessageMode {
+pub(crate) enum TraceFullMessageMode {
     Auto,
     Thinking,
     NoThinking,
@@ -351,9 +359,9 @@ impl ResolvedTraceFullMessageMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct TraceFullVectorCell {
-    source_layer: u32,
-    source_position: usize,
+pub(crate) struct TraceFullVectorCell {
+    pub(crate) source_layer: u32,
+    pub(crate) source_position: usize,
 }
 
 pub(crate) struct ProjectedFullTokenDirections {
@@ -3185,6 +3193,8 @@ mod tests {
             top_k: 8,
             max_tokens: MAX_RESEARCH_PACKED_READOUT_POSITIONS,
             vectors: Vec::new(),
+            identity_cache: None,
+            allow_unvalidated_transfer: false,
             output: None,
             format: None,
         }

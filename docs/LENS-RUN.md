@@ -74,10 +74,10 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- read-full \
 before output RMSNorm. Its JSON includes operation, stage, dtype, coordinate,
 hidden size, shape, and values. Omit it for compact top-k output.
 
-## Packed Full-Transport Trace
+## Full-Transport Trace
 
-`trace-full` reads an imported Qwen3.6 27B J/R or Qwen3.8 27B J transport across
-every requested prompt position and source layer:
+`trace-full` reads an imported Qwen3.6 27B J/R, Qwen3.8 27B J, or published Muse
+Glimmer J transport across every requested prompt position and source layer:
 
 ```sh
 cargo run -q --release -p qwen-cli --bin qwen-lens -- trace-full \
@@ -102,8 +102,17 @@ the resolved mode (`auto`, `thinking`, `no_thinking`, or a `thinking_*` tier).
 Inputs are never truncated and are bounded at 128 tokens. Omit `--layers` to
 trace all 63 published source layers.
 
-The command performs one packed prompt forward, streams only the selected F16
-transport matrices, and keeps full logits on Metal. Without `--output`, stdout
+Qwen performs one packed prompt forward, streams only the selected F16 transport
+matrices, and keeps full logits on Metal. Published Muse tracing currently
+accepts raw `--prompt` or literal `--token-ids`; exact annotated ATEM message
+spans are not yet available, so `--messages` fails closed. Muse additionally
+requires `--identity-cache` and `--allow-unvalidated-transfer`. It captures the
+scalar prefill once, uploads each selected 88.6 MB matrix once, and reuses it
+across positions; `execution_mode` records this rather than claiming packed
+prefill. Muse logits apply the deployed output RMSNorm, native head, output
+multiplier, and final softcap, with no softmax.
+
+Without `--output`, stdout
 defaults to the complete JSON document. With `--output`, stdout defaults to a
 compact summary; explicit `--format json` always prints JSON, while explicit
 `--format summary` without an output intentionally discards the full document.
@@ -112,9 +121,10 @@ replaces a normal result file after successful execution. The version-3 JSON
 contains exact input token pieces, compact layer-position top-k cells, explicit
 logit/no-softmax semantics, lightweight model/tokenizer locator identities,
 timings, and token occurrence counts globally and per layer. One occurrence
-means one token ID in one returned top-k list. Runtime tracing checks artifact
-geometry and byte length, but does not hash the model or rescan the 3.3 GiB
-payload.
+means one token ID in one returned top-k list. Qwen tracing checks artifact
+geometry and byte length without rescanning the 3.3 GiB payload. Muse verifies
+each selected matrix and resolves a declared/cached GGUF identity without
+hashing model weights.
 
 For `--messages`, the renderer authors byte spans while constructing the exact
 prompt. Exact token boundaries are recorded when the full tokenization has them;

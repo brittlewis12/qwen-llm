@@ -13,8 +13,9 @@ UI, generic plugin systems, and production hardening are out of scope.
   layer x position top-k, selected transported vectors, and selected-token live
   directions.
 - The pinned eyes-ml Muse Glimmer J transport imports without pickle execution,
-  supports selected-position full-vocabulary readout, and supplies plan-selected
-  live directions and interventions under an explicit BF16-to-GGUF transfer gate.
+  supports selected-position and layer x position full-vocabulary traces, and
+  supplies plan-selected live directions and interventions under an explicit
+  BF16-to-GGUF transfer gate. Muse traces use the existing offline inspector.
 - Packed traces can be persisted as versioned, replaceable result artifacts and
   inspected offline by summary, token/anchor map, aggregate frequency, semantic
   or numeric position, exact token-ID trajectory, and strict paired comparison
@@ -60,7 +61,7 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes with 128 tests and two model-bound
+- The active `qwen-lens` unit suite passes with 129 tests and two model-bound
   tests intentionally ignored.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
@@ -68,6 +69,9 @@ UI, generic plugin systems, and production hardening are out of scope.
   deployed Q8 model, `The capital of France is` ranks ` Paris` first at L50; a
   one-site published direction run records one application and emits ` Paris`.
   This is implementation qualification, not a transfer-equivalence claim.
+- A real 6-position x 3-layer Muse trace self-validates as `qwen.lens.trace` v3,
+  includes an L50/P5 transported vector, and passes summary, positions,
+  position, token-trajectory, and exact-comparison inspector paths.
 
 ## Honest Boundaries
 

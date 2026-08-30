@@ -35,7 +35,7 @@ mod published_pt;
 mod template_lens;
 use full_lens::{
     CompareTransferArgs, ImportFullArgs, ReadFullArgs, TraceFullArgs, compare_transfer,
-    import_full, read_full as read_qwen_full, trace_full,
+    import_full, read_full as read_qwen_full, trace_full as trace_qwen_full,
 };
 
 const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
@@ -545,6 +545,14 @@ fn read_full(args: ReadFullArgs) -> Result<()> {
         muse_full_lens::read_full(args)
     } else {
         read_qwen_full(args)
+    }
+}
+
+fn trace_full(args: TraceFullArgs) -> Result<()> {
+    if muse_full_lens::is_artifact(&args.full_lens)? {
+        muse_full_lens::trace_full(args)
+    } else {
+        trace_qwen_full(args)
     }
 }
 

@@ -1,4 +1,4 @@
-use super::full_lens::ReadFullArgs;
+use super::full_lens::{ReadFullArgs, TraceFullArgs, TraceFullStdoutFormat};
 use super::muse_full_lens_artifact as artifact;
 use super::muse_lens_artifact;
 use super::muse_lens_rows_artifact as rows;
@@ -236,6 +236,180 @@ impl ReadArtifact {
             Self::Published { manifest, .. } => &manifest.payload.matrices,
         }
     }
+}
+
+const MAX_MUSE_TRACE_TOKENS: usize = 128;
+const MAX_MUSE_TRACE_VECTOR_CELLS: usize = 32;
+const MAX_MUSE_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+struct MuseTraceDocument {
+    schema: &'static str,
+    schema_version: u32,
+    producer: MuseTraceProducer,
+    deployed_model: MuseTraceModel,
+    tokenizer: MuseTraceTokenizer,
+    lens: MuseTraceLens,
+    score_semantics: MuseTraceScoreSemantics,
+    execution_mode: &'static str,
+    input_source: &'static str,
+    add_special_tokens: Option<bool>,
+    input_token_ids: Vec<i32>,
+    input_tokens: Vec<MuseTraceInputToken>,
+    rendering: MuseTraceRendering,
+    coordinates: MuseTraceCoordinates,
+    selected_layers: Vec<u32>,
+    top_k: usize,
+    occurrence_definition: &'static str,
+    cells: Vec<MuseTraceCell>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vectors: Option<MuseTraceVectors>,
+    timing: BTreeMap<&'static str, f64>,
+    occurrences: MuseTraceOccurrences,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceProducer {
+    build_commit: &'static str,
+    build_dirty: &'static str,
+    build_source_state: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceModel {
+    path: PathBuf,
+    locator_scheme: &'static str,
+    locator_id: String,
+    content_authenticated: bool,
+    architecture: Option<String>,
+    name: Option<String>,
+    base_model_name: Option<String>,
+    n_layers: u32,
+    hidden_size: u32,
+    vocab_size: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceTokenizer {
+    metadata_id: String,
+    model: Option<String>,
+    pretokenizer: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceLens {
+    kind: &'static str,
+    method: String,
+    target_layer: u32,
+    source_site: String,
+    source_repository: String,
+    source_revision: String,
+    source_filename: String,
+    payload_blake3: String,
+    fitted_checkpoint: String,
+    fitted_checkpoint_revision: String,
+    orientation: String,
+    transfer_validation_status: String,
+    transfer_override_policy: &'static str,
+    image_token_status: String,
+    scoring: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceScoreSemantics {
+    kind: &'static str,
+    normalization: &'static str,
+    candidate_universe: &'static str,
+    softmax_applied: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceInputToken {
+    position: usize,
+    token_id: i32,
+    token_display_lossy: String,
+    token_piece_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceRendering {
+    renderer: &'static str,
+    generation_mode: Option<&'static str>,
+    spans: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceCoordinates {
+    source_layer: &'static str,
+    source_position: &'static str,
+    predicts_position: &'static str,
+    rank: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceCell {
+    source_layer: u32,
+    source_position: usize,
+    source_token_id: i32,
+    predicts_position: usize,
+    top_k: Vec<MuseTraceTokenScore>,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceTokenScore {
+    rank: usize,
+    token_id: u32,
+    token_display_lossy: String,
+    token_piece_hex: String,
+    logit: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceVectors {
+    operation: &'static str,
+    stage: &'static str,
+    value_dtype: &'static str,
+    hidden_coordinate: &'static str,
+    hidden_size: usize,
+    shape: [usize; 2],
+    cell_order: &'static str,
+    cells: Vec<MuseTraceVector>,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceVector {
+    source_layer: u32,
+    source_position: usize,
+    source_token_id: i32,
+    predicts_position: usize,
+    values: Vec<f32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct MuseTraceOccurrence {
+    token_id: u32,
+    count: usize,
+    top1_count: usize,
+    best_rank: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceLayerOccurrences {
+    source_layer: u32,
+    tokens: Vec<MuseTraceOccurrence>,
+}
+
+#[derive(Debug, Serialize)]
+struct MuseTraceOccurrences {
+    global: Vec<MuseTraceOccurrence>,
+    per_layer: Vec<MuseTraceLayerOccurrences>,
+}
+
+#[derive(Clone, Copy)]
+struct MuseOccurrenceAccumulator {
+    count: usize,
+    top1_count: usize,
+    best_rank: usize,
 }
 
 pub(crate) fn is_artifact(directory: &Path) -> Result<bool> {
@@ -572,6 +746,554 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     }
     println!("{}", String::from_utf8(bytes).unwrap());
     Ok(())
+}
+
+pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
+    super::validate_token_build_identity(
+        env!("QWEN_BUILD_SOURCE_STATE"),
+        env!("QWEN_BUILD_STAMP_ERROR"),
+    )?;
+    validate_trace_args(&args)?;
+    let output = args
+        .output
+        .as_deref()
+        .map(super::resolve_output_file_path)
+        .transpose()?;
+    let stdout_format = args.format.unwrap_or(if output.is_some() {
+        TraceFullStdoutFormat::Summary
+    } else {
+        TraceFullStdoutFormat::Json
+    });
+    let trace_started = Instant::now();
+    let full_lens =
+        canonical_real_directory(&args.full_lens, "Muse published full-transport artifact")?;
+    let manifest_path = full_lens.join(published::MANIFEST_NAME);
+    let manifest: published::Manifest = super::read_json_file(&manifest_path)?;
+    published::validate_manifest(&manifest)?;
+    ensure!(
+        args.allow_unvalidated_transfer,
+        "published Muse trace requires --allow-unvalidated-transfer for BF16-to-GGUF use"
+    );
+    let layers = select_layers(&args.layers, &manifest.transport.source_layers)?;
+
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open Muse model {}", args.model.display()))?;
+    let bound = MuseGlimmerModel::from_gguf(&gguf).context("bind Muse model for full trace")?;
+    ensure!(
+        manifest.model.architecture == ARCHITECTURE_NAME
+            && manifest.model.geometry == muse_lens_artifact::geometry(&bound.config),
+        "Muse published trace artifact does not match deployed release geometry"
+    );
+    let identity_cache = args
+        .identity_cache
+        .as_ref()
+        .context("Muse trace-full requires --identity-cache")?;
+    let content = checkpoint_content_identity_without_weight_hashing(
+        &gguf,
+        &CheckpointIdentityCache::new(identity_cache),
+    )
+    .with_context(|| {
+        format!(
+            "resolve Muse model identity without hashing weights using {}",
+            identity_cache.display()
+        )
+    })?;
+    ensure!(
+        content.bytes_hashed == 0,
+        "Muse trace-full refuses model identities that hash weight bytes"
+    );
+    let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
+        .context("load Muse tokenizer for full trace")?;
+    muse_lens_artifact::validate_tokenizer(&tokenizer, &bound.config)?;
+    let (input_source, renderer, add_special_tokens, token_ids) =
+        prepare_trace_input(&args, &tokenizer, bound.config.vocab_size)?;
+    let vector_requests = validate_trace_vector_requests(&args, &layers, token_ids.len())?;
+
+    let mut capture_layers = layers.clone();
+    capture_layers.sort_unstable();
+    let capture_slots = capture_layers
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(slot, layer)| (layer, slot))
+        .collect::<BTreeMap<_, _>>();
+    let hidden_size = bound.config.hidden_size as usize;
+    let values_per_layer = token_ids
+        .len()
+        .checked_mul(hidden_size)
+        .context("Muse trace capture size overflow")?;
+    let mut captured_by_layer = BTreeMap::<u32, Vec<f32>>::new();
+    for &layer in &layers {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(values_per_layer)
+            .context("allocate Muse trace captures")?;
+        captured_by_layer.insert(layer, values);
+    }
+
+    let context = MetalContext::new().context("initialize Metal for Muse full trace")?;
+    let model_load_started = Instant::now();
+    let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, token_ids.len())
+        .context("load Muse model for full trace")?;
+    let model_load_wall_ms = model_load_started.elapsed().as_secs_f64() * 1e3;
+    let model_config = loaded.config().clone();
+    let mut runner = loaded
+        .create_runner(&context)
+        .context("create Muse full-trace runner")?;
+    let prefill_started = Instant::now();
+    for (position, &token_id) in token_ids.iter().enumerate() {
+        let capture = runner
+            .forward_token_capture_post_blocks(token_id as u32, &capture_layers)
+            .with_context(|| format!("capture Muse trace position {position}"))?;
+        ensure!(
+            capture.position == position
+                && capture.token_id == token_id as u32
+                && capture.layer_ids == capture_layers
+                && capture.hidden_size == hidden_size,
+            "Muse trace capture metadata is inconsistent at position {position}"
+        );
+        for &layer in &layers {
+            let slot = capture_slots[&layer];
+            captured_by_layer
+                .get_mut(&layer)
+                .expect("selected Muse trace layer has capture storage")
+                .extend_from_slice(
+                    capture
+                        .layer_values(slot)
+                        .context("Muse trace capture payload is too short")?,
+                );
+        }
+    }
+    let prefill_wall_ms = prefill_started.elapsed().as_secs_f64() * 1e3;
+    ensure!(
+        captured_by_layer
+            .values()
+            .all(|values| values.len() == values_per_layer),
+        "Muse trace did not capture a complete layer-position grid"
+    );
+
+    let expected_cells = layers
+        .len()
+        .checked_mul(token_ids.len())
+        .context("Muse trace cell count overflow")?;
+    let mut cells = Vec::new();
+    cells
+        .try_reserve_exact(expected_cells)
+        .context("allocate Muse trace cells")?;
+    let mut vectors = Vec::new();
+    vectors
+        .try_reserve_exact(vector_requests.len())
+        .context("allocate Muse trace vectors")?;
+    let mut matrix_read_wall_ms = 0.0;
+    let mut transport_wall_ms = 0.0;
+    let mut output_tail_wall_ms = 0.0;
+    for &layer in &layers {
+        let descriptor = manifest
+            .payload
+            .matrices
+            .iter()
+            .find(|matrix| matrix.source_layer == layer)
+            .context("Muse published trace omitted a selected source matrix")?;
+        let started = Instant::now();
+        let matrix = read_matrix(
+            &full_lens,
+            &manifest.payload.path,
+            manifest.payload.byte_length,
+            descriptor,
+        )?;
+        matrix_read_wall_ms += started.elapsed().as_secs_f64() * 1e3;
+        let started = Instant::now();
+        let prepared = runner
+            .prepare_f16_post_block_transport(&matrix)
+            .with_context(|| format!("prepare Muse trace source layer {layer}"))?;
+        transport_wall_ms += started.elapsed().as_secs_f64() * 1e3;
+        let captures = &captured_by_layer[&layer];
+        for (position, &source_token_id) in token_ids.iter().enumerate() {
+            let start = position * hidden_size;
+            let source_residual = &captures[start..start + hidden_size];
+            let started = Instant::now();
+            let transported = runner
+                .apply_prepared_f16_post_block_transport(&prepared, source_residual)
+                .with_context(|| format!("apply Muse trace layer {layer} position {position}"))?;
+            transport_wall_ms += started.elapsed().as_secs_f64() * 1e3;
+            let started = Instant::now();
+            let logits = runner
+                .deployed_logits_from_post_block_residual(&transported)
+                .with_context(|| {
+                    format!("apply Muse trace output tail at layer {layer} position {position}")
+                })?;
+            output_tail_wall_ms += started.elapsed().as_secs_f64() * 1e3;
+            let ranked = top_k_logits(&logits, args.top_k)?;
+            let mut top_k = Vec::with_capacity(ranked.len());
+            for (rank, (token_id, logit)) in ranked.into_iter().enumerate() {
+                let piece = tokenizer
+                    .try_decode_piece_bytes_exact(token_id as i32)
+                    .with_context(|| format!("decode Muse trace token {token_id}"))?;
+                top_k.push(MuseTraceTokenScore {
+                    rank,
+                    token_id,
+                    token_display_lossy: String::from_utf8_lossy(&piece).into_owned(),
+                    token_piece_hex: super::hex(&piece),
+                    logit,
+                });
+            }
+            if vector_requests.contains(&(layer, position)) {
+                vectors.push(MuseTraceVector {
+                    source_layer: layer,
+                    source_position: position,
+                    source_token_id,
+                    predicts_position: position + 1,
+                    values: transported,
+                });
+            }
+            cells.push(MuseTraceCell {
+                source_layer: layer,
+                source_position: position,
+                source_token_id,
+                predicts_position: position + 1,
+                top_k,
+            });
+        }
+    }
+    ensure!(
+        cells.len() == expected_cells && vectors.len() == vector_requests.len(),
+        "Muse trace produced an incomplete result grid"
+    );
+    let occurrences = aggregate_muse_trace_occurrences(&cells, &layers);
+    let mut input_tokens = Vec::new();
+    input_tokens
+        .try_reserve_exact(token_ids.len())
+        .context("allocate Muse trace input-token records")?;
+    for (position, &token_id) in token_ids.iter().enumerate() {
+        let piece = tokenizer
+            .try_decode_piece_bytes_exact(token_id)
+            .with_context(|| format!("decode Muse input token {token_id}"))?;
+        input_tokens.push(MuseTraceInputToken {
+            position,
+            token_id,
+            token_display_lossy: String::from_utf8_lossy(&piece).into_owned(),
+            token_piece_hex: super::hex(&piece),
+        });
+    }
+    let mut timing = BTreeMap::new();
+    timing.insert("model_load_wall_ms", model_load_wall_ms);
+    timing.insert("scalar_prefill_capture_wall_ms", prefill_wall_ms);
+    timing.insert("matrix_read_wall_ms", matrix_read_wall_ms);
+    timing.insert("transport_wall_ms", transport_wall_ms);
+    timing.insert("output_tail_wall_ms", output_tail_wall_ms);
+    timing.insert(
+        "trace_execution_wall_ms",
+        trace_started.elapsed().as_secs_f64() * 1e3,
+    );
+    let model_name = args
+        .model
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let document = MuseTraceDocument {
+        schema: "qwen.lens.trace",
+        schema_version: 3,
+        producer: MuseTraceProducer {
+            build_commit: env!("QWEN_BUILD_COMMIT"),
+            build_dirty: env!("QWEN_BUILD_DIRTY"),
+            build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
+        },
+        deployed_model: MuseTraceModel {
+            path: args.model.clone(),
+            locator_scheme: "ordered_gguf_declared_content_blake3_v1",
+            locator_id: super::hex(&content.content_id),
+            content_authenticated: true,
+            architecture: Some(ARCHITECTURE_NAME.into()),
+            name: model_name,
+            base_model_name: None,
+            n_layers: model_config.layer_count,
+            hidden_size: model_config.hidden_size,
+            vocab_size: model_config.vocab_size,
+        },
+        tokenizer: MuseTraceTokenizer {
+            metadata_id: super::hex(&model_config.tokenizer_identity_sha256),
+            model: Some(model_config.tokenizer_model.clone()),
+            pretokenizer: Some(model_config.tokenizer_pre.clone()),
+        },
+        lens: MuseTraceLens {
+            kind: "published_full_transport",
+            method: manifest.transport.method.clone(),
+            target_layer: manifest.transport.target_layer,
+            source_site: manifest.transport.coordinate.clone(),
+            source_repository: manifest.source.repository.clone(),
+            source_revision: manifest.source.revision.clone(),
+            source_filename: manifest.source.filename.clone(),
+            payload_blake3: manifest.payload.blake3.clone(),
+            fitted_checkpoint: manifest.model.fitted_checkpoint.clone(),
+            fitted_checkpoint_revision: manifest.model.fitted_checkpoint_revision.clone(),
+            orientation: manifest.transport.orientation.clone(),
+            transfer_validation_status: manifest.transfer.validation_status.clone(),
+            transfer_override_policy: "explicit_allow_unvalidated_transfer",
+            image_token_status: manifest.transfer.image_token_status.clone(),
+            scoring: "transport_then_deployed_output_tail",
+        },
+        score_semantics: MuseTraceScoreSemantics {
+            kind: "logit",
+            normalization: "deployed_output_rmsnorm_native_head_scale_softcap",
+            candidate_universe: "full_model_vocabulary",
+            softmax_applied: false,
+        },
+        execution_mode: "passive_scalar_prefill_prepared_transport_no_interventions",
+        input_source,
+        add_special_tokens,
+        input_token_ids: token_ids,
+        input_tokens,
+        rendering: MuseTraceRendering {
+            renderer,
+            generation_mode: None,
+            spans: Vec::new(),
+        },
+        coordinates: MuseTraceCoordinates {
+            source_layer: "zero_based_post_block_layer_id",
+            source_position: "zero_based_tokenized_input_position",
+            predicts_position: "source_position_plus_one",
+            rank: "zero_based_descending_logit_with_token_id_tie_break",
+        },
+        selected_layers: layers,
+        top_k: args.top_k,
+        occurrence_definition: "one_token_id_appearing_in_one_returned_top_k_list",
+        cells,
+        vectors: (!vectors.is_empty()).then_some(MuseTraceVectors {
+            operation: "row_major_f16_transport_times_source_residual",
+            stage: "before_output_rmsnorm",
+            value_dtype: "f32",
+            hidden_coordinate: "target_post_block_residual",
+            hidden_size,
+            shape: [vectors.len(), hidden_size],
+            cell_order: "selected_layer_order_then_source_position",
+            cells: vectors,
+        }),
+        timing,
+        occurrences,
+    };
+    let bytes = serde_json::to_vec(&document).context("serialize Muse trace artifact")?;
+    ensure!(
+        bytes.len() <= MAX_MUSE_TRACE_DOCUMENT_BYTES,
+        "serialized Muse trace artifact is {} bytes; limit is {MAX_MUSE_TRACE_DOCUMENT_BYTES}",
+        bytes.len()
+    );
+    super::lens_inspect::parse_trace_bytes(&bytes, Path::new("<generated Muse trace>"))
+        .context("self-validate generated Muse trace artifact")?;
+    if let Some(path) = &output {
+        super::write_atomic_replace(path, &bytes)?;
+    }
+    match stdout_format {
+        TraceFullStdoutFormat::Summary => print_muse_trace_summary(&document, output.as_deref()),
+        TraceFullStdoutFormat::Json => {
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            stdout.write_all(&bytes).context("write Muse trace JSON")?;
+            stdout.write_all(b"\n").context("finish Muse trace JSON")?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_trace_args(args: &TraceFullArgs) -> Result<()> {
+    ensure!(
+        args.messages.is_none() && args.message_mode.is_none(),
+        "Muse trace-full currently supports --prompt or --token-ids, not --messages"
+    );
+    ensure!(
+        args.prompt.is_some() ^ args.token_ids.is_some(),
+        "Muse trace-full requires exactly one of --prompt or --token-ids"
+    );
+    ensure!(
+        args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
+        "--prompt must not be empty"
+    );
+    ensure!(
+        args.prompt.is_some() || !args.no_special_tokens,
+        "--no-special-tokens only applies to --prompt"
+    );
+    ensure!(
+        args.top_k > 0 && args.top_k <= 16,
+        "--top-k must be in 1..=16"
+    );
+    ensure!(
+        args.max_tokens > 0 && args.max_tokens <= MAX_MUSE_TRACE_TOKENS,
+        "Muse --max-tokens must be in 1..={MAX_MUSE_TRACE_TOKENS}"
+    );
+    ensure!(
+        args.vectors.len() <= MAX_MUSE_TRACE_VECTOR_CELLS,
+        "Muse trace supports at most {MAX_MUSE_TRACE_VECTOR_CELLS} vector cells"
+    );
+    ensure!(
+        args.identity_cache.is_some(),
+        "Muse trace-full requires --identity-cache"
+    );
+    Ok(())
+}
+
+fn prepare_trace_input(
+    args: &TraceFullArgs,
+    tokenizer: &LlamaCppTokenizer,
+    vocab_size: u32,
+) -> Result<(&'static str, &'static str, Option<bool>, Vec<i32>)> {
+    let (input_source, renderer, add_special_tokens, token_ids) = if let Some(prompt) = &args.prompt
+    {
+        let add_special_tokens = !args.no_special_tokens;
+        (
+            "prompt",
+            "muse_tokenizer_raw_prompt",
+            Some(add_special_tokens),
+            tokenizer
+                .encode(prompt, add_special_tokens)
+                .context("tokenize Muse trace prompt")?,
+        )
+    } else {
+        (
+            "token_ids",
+            "literal_token_ids",
+            None,
+            args.token_ids.clone().unwrap_or_default(),
+        )
+    };
+    ensure!(!token_ids.is_empty(), "Muse trace input has no tokens");
+    ensure!(
+        token_ids.len() <= args.max_tokens,
+        "Muse trace input has {} tokens, exceeding --max-tokens {}",
+        token_ids.len(),
+        args.max_tokens
+    );
+    ensure!(
+        token_ids
+            .iter()
+            .all(|token| *token >= 0 && (*token as u32) < vocab_size),
+        "Muse trace input contains a token outside vocabulary {vocab_size}"
+    );
+    Ok((input_source, renderer, add_special_tokens, token_ids))
+}
+
+fn validate_trace_vector_requests(
+    args: &TraceFullArgs,
+    layers: &[u32],
+    token_count: usize,
+) -> Result<BTreeSet<(u32, usize)>> {
+    let mut requests = BTreeSet::new();
+    ensure!(
+        args.vectors.iter().all(|cell| {
+            layers.contains(&cell.source_layer)
+                && cell.source_position < token_count
+                && requests.insert((cell.source_layer, cell.source_position))
+        }),
+        "Muse vector cells must be unique selected-layer positions inside the input"
+    );
+    Ok(requests)
+}
+
+fn aggregate_muse_trace_occurrences(
+    cells: &[MuseTraceCell],
+    selected_layers: &[u32],
+) -> MuseTraceOccurrences {
+    let mut global = BTreeMap::<u32, MuseOccurrenceAccumulator>::new();
+    let mut per_layer = BTreeMap::<u32, BTreeMap<u32, MuseOccurrenceAccumulator>>::new();
+    for cell in cells {
+        let mut cell_ranks = BTreeMap::<u32, usize>::new();
+        for score in &cell.top_k {
+            cell_ranks
+                .entry(score.token_id)
+                .and_modify(|rank| *rank = (*rank).min(score.rank))
+                .or_insert(score.rank);
+        }
+        for (token_id, rank) in cell_ranks {
+            update_muse_occurrence(&mut global, token_id, rank);
+            update_muse_occurrence(
+                per_layer.entry(cell.source_layer).or_default(),
+                token_id,
+                rank,
+            );
+        }
+    }
+    MuseTraceOccurrences {
+        global: sorted_muse_occurrences(global),
+        per_layer: selected_layers
+            .iter()
+            .map(|&source_layer| MuseTraceLayerOccurrences {
+                source_layer,
+                tokens: sorted_muse_occurrences(
+                    per_layer.remove(&source_layer).unwrap_or_default(),
+                ),
+            })
+            .collect(),
+    }
+}
+
+fn update_muse_occurrence(
+    occurrences: &mut BTreeMap<u32, MuseOccurrenceAccumulator>,
+    token_id: u32,
+    rank: usize,
+) {
+    occurrences
+        .entry(token_id)
+        .and_modify(|occurrence| {
+            occurrence.count += 1;
+            occurrence.top1_count += usize::from(rank == 0);
+            occurrence.best_rank = occurrence.best_rank.min(rank);
+        })
+        .or_insert(MuseOccurrenceAccumulator {
+            count: 1,
+            top1_count: usize::from(rank == 0),
+            best_rank: rank,
+        });
+}
+
+fn sorted_muse_occurrences(
+    occurrences: BTreeMap<u32, MuseOccurrenceAccumulator>,
+) -> Vec<MuseTraceOccurrence> {
+    let mut occurrences = occurrences
+        .into_iter()
+        .map(|(token_id, occurrence)| MuseTraceOccurrence {
+            token_id,
+            count: occurrence.count,
+            top1_count: occurrence.top1_count,
+            best_rank: occurrence.best_rank,
+        })
+        .collect::<Vec<_>>();
+    occurrences.sort_unstable_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| right.top1_count.cmp(&left.top1_count))
+            .then_with(|| left.best_rank.cmp(&right.best_rank))
+            .then_with(|| left.token_id.cmp(&right.token_id))
+    });
+    occurrences
+}
+
+fn print_muse_trace_summary(document: &MuseTraceDocument, output: Option<&Path>) {
+    println!(
+        "{} {} | {} tokens x {} layers = {} cells | top-k {}",
+        document.lens.method,
+        document.lens.kind,
+        document.input_token_ids.len(),
+        document.selected_layers.len(),
+        document.cells.len(),
+        document.top_k,
+    );
+    println!(
+        "score={} normalization={} candidates={} softmax={} | model={} | renderer={}",
+        document.score_semantics.kind,
+        document.score_semantics.normalization,
+        document.score_semantics.candidate_universe,
+        document.score_semantics.softmax_applied,
+        document.deployed_model.name.as_deref().unwrap_or("unknown"),
+        document.rendering.renderer,
+    );
+    println!(
+        "trace {:.1} ms (prefill {:.1} ms, transport {:.1} ms, output {:.1} ms)",
+        document.timing["trace_execution_wall_ms"],
+        document.timing["scalar_prefill_capture_wall_ms"],
+        document.timing["transport_wall_ms"],
+        document.timing["output_tail_wall_ms"],
+    );
+    if let Some(path) = output {
+        println!("artifact {}", path.display());
+    }
 }
 
 fn validate_read_args(args: &ReadFullArgs) -> Result<()> {
@@ -1368,5 +2090,43 @@ mod tests {
         let mut invalid = logits;
         invalid[3] = f32::NAN;
         assert!(top_k_logits(&invalid, 3).is_err());
+    }
+
+    #[test]
+    fn trace_occurrences_match_inspector_ordering_and_layer_schedule() {
+        let score = |rank, token_id| MuseTraceTokenScore {
+            rank,
+            token_id,
+            token_display_lossy: token_id.to_string(),
+            token_piece_hex: format!("{token_id:02x}"),
+            logit: -(rank as f32),
+        };
+        let cells = vec![
+            MuseTraceCell {
+                source_layer: 25,
+                source_position: 0,
+                source_token_id: 1,
+                predicts_position: 1,
+                top_k: vec![score(0, 7), score(1, 9)],
+            },
+            MuseTraceCell {
+                source_layer: 50,
+                source_position: 0,
+                source_token_id: 1,
+                predicts_position: 1,
+                top_k: vec![score(0, 9), score(1, 7)],
+            },
+        ];
+        let occurrences = aggregate_muse_trace_occurrences(&cells, &[50, 25]);
+        assert_eq!(
+            occurrences
+                .global
+                .iter()
+                .map(|item| (item.token_id, item.count, item.top1_count))
+                .collect::<Vec<_>>(),
+            [(7, 2, 1), (9, 2, 1)]
+        );
+        assert_eq!(occurrences.per_layer[0].source_layer, 50);
+        assert_eq!(occurrences.per_layer[1].source_layer, 25);
     }
 }

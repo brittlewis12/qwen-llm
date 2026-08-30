@@ -598,6 +598,11 @@ pub struct MuseGlimmerTextForward<'ctx, 'model> {
     weights: MuseGlimmerMetalModelWeights<'model>,
 }
 
+pub struct MuseGlimmerPreparedF16Transport {
+    tensor: MetalTensor,
+    hidden_size: usize,
+}
+
 impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     pub fn new(
         ctx: &'ctx MetalContext,
@@ -665,15 +670,41 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         transport_bytes: &[u8],
         source_residual: &[f32],
     ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
+        let transport = self.prepare_f16_post_block_transport(transport_bytes)?;
+        self.apply_prepared_f16_post_block_transport(&transport, source_residual)
+    }
+
+    pub(crate) fn prepare_f16_post_block_transport(
+        &self,
+        transport_bytes: &[u8],
+    ) -> Result<MuseGlimmerPreparedF16Transport, MuseGlimmerTextSessionError> {
         let hidden = self.weights.config.hidden_size as usize;
         validate_f16_transport(transport_bytes, hidden)?;
-        validate_deployed_output_residual(source_residual, hidden)?;
-        let transport = MetalTensor::from_bytes(
+        let tensor = MetalTensor::from_bytes(
             self.ctx,
             transport_bytes,
             vec![hidden as u64, hidden as u64],
             GgmlType::F16,
         )?;
+        Ok(MuseGlimmerPreparedF16Transport {
+            tensor,
+            hidden_size: hidden,
+        })
+    }
+
+    pub(crate) fn apply_prepared_f16_post_block_transport(
+        &self,
+        transport: &MuseGlimmerPreparedF16Transport,
+        source_residual: &[f32],
+    ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
+        let hidden = self.weights.config.hidden_size as usize;
+        if transport.hidden_size != hidden {
+            return invalid(format!(
+                "prepared F16 transport hidden size {} != model hidden size {hidden}",
+                transport.hidden_size
+            ));
+        }
+        validate_deployed_output_residual(source_residual, hidden)?;
         let source = MetalTensor::from_bytes(
             self.ctx,
             bytemuck::cast_slice(source_residual),
@@ -688,7 +719,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         let encode_result = encode_mat_vec_f16_f32(
             self.ctx,
             &encoder,
-            &transport,
+            &transport.tensor,
             &source,
             &transported,
             hidden,

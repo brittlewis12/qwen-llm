@@ -20,9 +20,9 @@ use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
 };
 use crate::muse_glimmer_text_session::{
-    MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES, MuseGlimmerPostBlockForward, MuseGlimmerTextForward,
-    MuseGlimmerTextGeometry, MuseGlimmerTextSession, MuseGlimmerTextSessionError,
-    MuseGlimmerTextSessionMemoryPlan,
+    MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES, MuseGlimmerPostBlockForward,
+    MuseGlimmerPreparedF16Transport, MuseGlimmerTextForward, MuseGlimmerTextGeometry,
+    MuseGlimmerTextSession, MuseGlimmerTextSessionError, MuseGlimmerTextSessionMemoryPlan,
 };
 use objc2_metal::MTLDevice;
 
@@ -236,6 +236,27 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self
             .forward
             .apply_f16_post_block_transport(transport_bytes, source_residual)?)
+    }
+
+    /// Upload and validate one F16 transport for repeated passive applications.
+    pub fn prepare_f16_post_block_transport(
+        &self,
+        transport_bytes: &[u8],
+    ) -> Result<MuseGlimmerPreparedF16Transport, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .prepare_f16_post_block_transport(transport_bytes)?)
+    }
+
+    /// Apply a prepared transport without advancing or mutating the text session.
+    pub fn apply_prepared_f16_post_block_transport(
+        &self,
+        transport: &MuseGlimmerPreparedF16Transport,
+        source_residual: &[f32],
+    ) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .apply_prepared_f16_post_block_transport(transport, source_residual)?)
     }
 
     pub fn forward_token_with_post_block_interventions(

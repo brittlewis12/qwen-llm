@@ -215,8 +215,12 @@ the raw post-block residual.
 
 Direction rows may select a native `token_id`, a template `template_row_id`, or
 an exact unique template `label`. `unit_l2` is required for residual-relative
-addition, projection, and source-to-target displacement. Fixed addition also
-accepts `as_stored`.
+addition, projection, source-to-target displacement, and coordinate swap. Fixed
+addition also accepts `as_stored`.
+
+```json
+{"kind":"coordinate_swap","source":"concept-a","target":"concept-b","coefficient":1.0}
+```
 
 ### Muse Glimmer
 
@@ -319,10 +323,15 @@ fixed_add:             x <- x + coefficient * v
 residual_l2_fraction:  x <- x + coefficient * ||x||_2 * v
 projection_ablate:     x <- x - coefficient * dot(x, v) * v
 source_to_target:      x <- x + coefficient * dot(x, source) * (target - source)
+coordinate_swap:       u <- unit(source - target)
+                       x <- x - 2 * coefficient * dot(x, u) * u
 ```
 
-`source_to_target` is a directed one-coordinate displacement. It is not the
-two-coordinate pseudoinverse swap used in the global-workspace paper.
+For unit source and target directions, coefficient-1 `coordinate_swap` is
+mathematically identical to `x + V(swap(V^dagger x) - V^dagger x)` for
+`V = [source, target]`: it exchanges both coordinates and leaves their
+orthogonal complement unchanged. Linearly dependent pairs are rejected.
+`source_to_target` remains the older directed one-coordinate displacement.
 
 The output is one JSON object containing prompt and generated token IDs,
 decoded text, stop reason, reached operation sites, and requested live scores.
@@ -339,7 +348,7 @@ selected-token J/R rows and workspace-template rows. Dense Qwen3.6 can project
 selected directions from its released matched J/R pair; dense Qwen3.8 can do so
 from its published J transport. Flash-Next runs use only explicit native hyper
 directions. Muse runs consume model-bound selected-token J/R rows for readout
-and all four post-block action kinds. Concurrent or speculative decode and
+and all five post-block action kinds. Concurrent or speculative decode and
 prefix caching are not selected silently. `trace-full` separately uses packed
 prefill for passive full-transport prompt traces.
 

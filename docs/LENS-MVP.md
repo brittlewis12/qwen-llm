@@ -17,8 +17,9 @@ UI, generic plugin systems, and production hardening are out of scope.
   length for row shards and selected-token artifacts.
 - The released Qwen3.6 phrase/template asset supports real cosine readout and
   directions by row or exact label.
-- Fixed add, residual-L2-relative add, projection ablation, and directed
-  source-to-target displacement share exact layer, prefill, and decode scopes.
+- Fixed add, residual-L2-relative add, projection ablation, canonical
+  coordinate swap, and directed source-to-target displacement share exact
+  layer, prefill, and decode scopes.
 - Multiple matching operations execute in plan-file order.
 - Raw prompts, literal token IDs, and strict message JSON control rendering.
 - Ordinary dense and MoE inference paths run interventions. Muse selected/full
@@ -44,7 +45,10 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A one-site R `basketball` intervention raises its live selected-token score
   from `2.3286` to `6.7954` and records exactly one requested application. The
   baseline already emits `basketball`, so no behavioral sensitivity is claimed.
-- The active `qwen-lens` unit suite passes with 97 tests and two model-bound
+- A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
+  versus `Jordan` selected-token ranking at exactly the requested L20/position-3
+  site. The unchanged output is recorded without a behavioral claim.
+- The active `qwen-lens` unit suite passes with 99 tests and two model-bound
   tests intentionally ignored.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
@@ -56,8 +60,8 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Published Qwen transports were fitted against BF16 model execution and stored
   as F16. GGUF transfer is explicit: Qwen3.8 late-layer Q8 agreement is strong;
   Qwen3.6 Q4 has bounded local J/R qualification, not broad equivalence.
-- `source_to_target` is a directed displacement, not the paper's two-coordinate
-  pseudoinverse swap.
+- `coordinate_swap` is the paper-equivalent two-coordinate exchange;
+  `source_to_target` remains a separate directed displacement for compatibility.
 - No complete, method-matched local R asset currently exists for Qwen3.8 or
   Muse. Qwen3.6 now has the released T128/skip-4/target-62 matched J/R pair plus
   its separate real template asset.
@@ -66,19 +70,21 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Native Qwen3.8 full-R fitting is correct at T128 but not currently economical:
   a measured B8/all-source prompt takes `167.65s` of VJP, projecting the matched
   25-prompt, 5,120-row asset to roughly 31 days.
+- The independent Qwen3.8 block-native screen lowers the idealized linear floor
+  to `21.46-22.50h`, but GDN traffic alone reaches `23.92-25.19h` before other
+  reverse work. It does not provide a credible one-day full-fit path.
 
 ## Active Gate
 
-The shortest honest full-R path is complete through the released Qwen3.6 pair.
-Checkpoint and reintegrate this lane before choosing the next gap. Native
-Qwen3.8 full fitting still requires the independent block-operator optimization;
-do not launch a full native fit at current throughput.
+The shortest honest full-R and intervention-parity path is complete through the
+released Qwen3.6 pair plus canonical coordinate swap. Checkpoint and reintegrate
+the swap lane. Muse T128 requires a distinct tiled-attention redesign; do not
+silently turn it into the next deadline-critical implementation lane.
 
 ## Deferred
 
-REST, UI, corpus-scale batching, canonical pseudoinverse coordinate swaps,
-Flash-Next lens fitting, Muse T128, and native full-Qwen block-operator
-optimization wait until the selected full-R lane requires them.
+REST, UI, corpus-scale batching, Flash-Next lens fitting, Muse T128, and native
+full-Qwen block-operator optimization wait until an active lane requires them.
 
 Keep this file concise and update it in place. It is a capability and scope
 ledger, not a work log.

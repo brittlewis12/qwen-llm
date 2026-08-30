@@ -245,6 +245,11 @@ pub(crate) enum Action {
         target: String,
         coefficient: f32,
     },
+    CoordinateSwap {
+        source: String,
+        target: String,
+        coefficient: f32,
+    },
 }
 
 impl Action {
@@ -253,7 +258,8 @@ impl Action {
             Self::FixedAdd { coefficient, .. }
             | Self::ResidualL2Fraction { coefficient, .. }
             | Self::ProjectionAblate { coefficient, .. }
-            | Self::SourceToTarget { coefficient, .. } => *coefficient,
+            | Self::SourceToTarget { coefficient, .. }
+            | Self::CoordinateSwap { coefficient, .. } => *coefficient,
         }
     }
 
@@ -264,7 +270,8 @@ impl Action {
             | Self::ProjectionAblate { direction, .. } => {
                 EitherDirectionIds::One(std::iter::once(direction.as_str()))
             }
-            Self::SourceToTarget { source, target, .. } => {
+            Self::SourceToTarget { source, target, .. }
+            | Self::CoordinateSwap { source, target, .. } => {
                 EitherDirectionIds::Two([source.as_str(), target.as_str()].into_iter())
             }
         }
@@ -463,6 +470,7 @@ struct ExecutionPlan {
     plan: LensPlan,
     lenses: HashMap<String, PreparedLens>,
     directions: HashMap<String, PreparedDirection>,
+    coordinate_swaps: HashMap<String, PreparedDirection>,
     capture_layers: Vec<u32>,
     layer_slots: HashMap<u32, usize>,
     n_layer: u32,
@@ -1077,6 +1085,23 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
             "operation {} coefficient must be finite and nonzero",
             operation.id
         );
+        if let Action::CoordinateSwap {
+            source,
+            target,
+            coefficient,
+        } = &operation.action
+        {
+            ensure!(
+                source != target,
+                "coordinate-swap operation {} requires distinct source and target directions",
+                operation.id
+            );
+            ensure!(
+                (2.0 * *coefficient).is_finite(),
+                "coordinate-swap operation {} coefficient overflows its reflection scale",
+                operation.id
+            );
+        }
         for direction in operation.action.direction_ids() {
             ensure!(
                 direction_ids.contains(direction),
@@ -1383,6 +1408,13 @@ fn prepare_execution_plan(
         }
         directions.insert(direction_id.to_owned(), PreparedDirection { rows });
     }
+    let coordinate_swaps = prepare_coordinate_swaps(
+        &plan.operations,
+        &directions,
+        loaded.context(),
+        arch.n_layer,
+        arch.hidden_size as usize,
+    )?;
     let capture = if capture_layers.is_empty() {
         None
     } else {
@@ -1395,12 +1427,140 @@ fn prepare_execution_plan(
         plan: plan.clone(),
         lenses,
         directions,
+        coordinate_swaps,
         capture_layers,
         layer_slots,
         n_layer: arch.n_layer,
         hidden_size: arch.hidden_size as usize,
         capture,
     })
+}
+
+fn prepare_coordinate_swaps(
+    operations: &[OperationDefinition],
+    directions: &HashMap<String, PreparedDirection>,
+    context: &MetalContext,
+    n_layer: u32,
+    hidden_size: usize,
+) -> Result<HashMap<String, PreparedDirection>> {
+    let mut swaps = HashMap::new();
+    let mut reflection_cache = HashMap::<(String, String, u32), MetalTensor>::new();
+    for operation in operations {
+        let Action::CoordinateSwap { source, target, .. } = &operation.action else {
+            continue;
+        };
+        let pair = if source <= target {
+            (source.clone(), target.clone())
+        } else {
+            (target.clone(), source.clone())
+        };
+        let layers = operation
+            .scope
+            .layers
+            .expand(n_layer, &format!("operation {} layers", operation.id))?;
+        let source = directions
+            .get(source)
+            .with_context(|| format!("coordinate swap {} has no source direction", operation.id))?;
+        let target = directions
+            .get(target)
+            .with_context(|| format!("coordinate swap {} has no target direction", operation.id))?;
+        let mut rows = BTreeMap::new();
+        for layer in layers {
+            let cache_key = (pair.0.clone(), pair.1.clone(), layer);
+            if let Some(reflection) = reflection_cache.get(&cache_key) {
+                ensure!(rows.insert(layer, reflection.clone()).is_none());
+                continue;
+            }
+            let source = source.rows.get(&layer).with_context(|| {
+                format!(
+                    "coordinate swap {} source is unavailable at layer {layer}",
+                    operation.id
+                )
+            })?;
+            let target = target.rows.get(&layer).with_context(|| {
+                format!(
+                    "coordinate swap {} target is unavailable at layer {layer}",
+                    operation.id
+                )
+            })?;
+            let reflection = coordinate_swap_reflection_direction(
+                &read_f32_tensor(source, hidden_size),
+                &read_f32_tensor(target, hidden_size),
+                &format!("{} at layer {layer}", operation.id),
+            )?;
+            let reflection = MetalTensor::from_bytes(
+                context,
+                bytemuck::cast_slice(&reflection),
+                vec![hidden_size as u64],
+                GgmlType::F32,
+            )?;
+            ensure!(
+                reflection_cache
+                    .insert(cache_key, reflection.clone())
+                    .is_none()
+            );
+            ensure!(rows.insert(layer, reflection).is_none());
+        }
+        ensure!(
+            swaps
+                .insert(operation.id.clone(), PreparedDirection { rows })
+                .is_none(),
+            "duplicate coordinate-swap operation {}",
+            operation.id
+        );
+    }
+    Ok(swaps)
+}
+
+pub(crate) fn coordinate_swap_reflection_direction(
+    source: &[f32],
+    target: &[f32],
+    id: &str,
+) -> Result<Vec<f32>> {
+    ensure!(
+        !source.is_empty() && source.len() == target.len(),
+        "coordinate swap {id} directions have incompatible shapes"
+    );
+    ensure!(
+        source.iter().chain(target).all(|value| value.is_finite()),
+        "coordinate swap {id} contains a non-finite direction"
+    );
+    let source_sq = source
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>();
+    let target_sq = target
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>();
+    let source_norm = source_sq.sqrt();
+    let target_norm = target_sq.sqrt();
+    ensure!(
+        source_norm.is_finite()
+            && target_norm.is_finite()
+            && source_norm > 0.0
+            && target_norm > 0.0,
+        "coordinate swap {id} has a zero or non-finite direction norm"
+    );
+    let cosine = source
+        .iter()
+        .zip(target)
+        .map(|(&source, &target)| f64::from(source) * f64::from(target))
+        .sum::<f64>()
+        / (source_norm * target_norm);
+    let cosine = cosine.clamp(-1.0, 1.0);
+    ensure!(
+        1.0 - cosine * cosine > 1e-10,
+        "coordinate swap {id} directions are linearly dependent"
+    );
+    let difference = source
+        .iter()
+        .zip(target)
+        .map(|(&source, &target)| {
+            (f64::from(source) / source_norm - f64::from(target) / target_norm) as f32
+        })
+        .collect();
+    normalize_direction(difference, Normalization::UnitL2, id)
 }
 
 fn lens_has_layer(prepared: &PreparedLens, layer: u32) -> bool {
@@ -1416,6 +1576,7 @@ fn action_requires_unit_l2(action: &Action) -> bool {
         Action::ResidualL2Fraction { .. }
             | Action::ProjectionAblate { .. }
             | Action::SourceToTarget { .. }
+            | Action::CoordinateSwap { .. }
     )
 }
 
@@ -1694,8 +1855,13 @@ fn forward_event(
     for layer in 0..execution.n_layer {
         for operation in &execution.plan.operations {
             if scope_matches(&operation.scope, phase, layer)? {
-                let intervention =
-                    action_to_intervention(&operation.action, layer, &execution.directions)?;
+                let intervention = action_to_intervention(
+                    &operation.id,
+                    &operation.action,
+                    layer,
+                    &execution.directions,
+                    &execution.coordinate_swaps,
+                )?;
                 interventions.push((operation.id.clone(), layer, intervention));
             }
         }
@@ -1788,9 +1954,11 @@ fn selector_contains(selector: &Selector, value: u32) -> bool {
 }
 
 fn action_to_intervention<'a>(
+    operation_id: &str,
     action: &'a Action,
     layer: u32,
     directions: &'a HashMap<String, PreparedDirection>,
+    coordinate_swaps: &'a HashMap<String, PreparedDirection>,
 ) -> Result<PostBlockIntervention<'a>> {
     let direction = |id: &str| -> Result<&'a MetalTensor> {
         directions
@@ -1833,10 +2001,22 @@ fn action_to_intervention<'a>(
             target: direction(target)?,
             coefficient: *coefficient,
         },
+        Action::CoordinateSwap { coefficient, .. } => PostBlockIntervention::Projection {
+            layer,
+            direction: coordinate_swaps
+                .get(operation_id)
+                .and_then(|prepared| prepared.rows.get(&layer))
+                .with_context(|| {
+                    format!(
+                        "coordinate swap {operation_id} has no reflection direction at layer {layer}"
+                    )
+                })?,
+            coefficient: 2.0 * *coefficient,
+        },
     })
 }
 
-fn read_f32_tensor(tensor: &MetalTensor, length: usize) -> Vec<f32> {
+pub(crate) fn read_f32_tensor(tensor: &MetalTensor, length: usize) -> Vec<f32> {
     let mut values = vec![0.0; length];
     unsafe {
         let source = tensor
@@ -2061,6 +2241,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.operations[0].action.coefficient(), 0.0001);
+    }
+
+    #[test]
+    fn coordinate_swap_requires_distinct_unit_directions() {
+        let plan = |source: &str, target: &str, target_normalization: &str| {
+            serde_json::from_value::<LensPlan>(json!({
+                "version": 1,
+                "lenses": [{"kind":"workspace_template","id":"t","weights":"w","labels":"l"}],
+                "directions": [
+                    {"id":"source","lens":"t","row":{"kind":"template_row_id","template_row_id":0},"normalization":"unit_l2"},
+                    {"id":"target","lens":"t","row":{"kind":"template_row_id","template_row_id":1},"normalization":target_normalization}
+                ],
+                "operations": [{
+                    "id":"swap",
+                    "scope":{"layers":{"kind":"values","values":[2]},"prefill":{"kind":"all"}},
+                    "action":{"kind":"coordinate_swap","source":source,"target":target,"coefficient":1.0}
+                }],
+                "readouts": []
+            }))
+            .unwrap()
+        };
+
+        validate_plan(&plan("source", "target", "unit_l2")).unwrap();
+        assert!(validate_plan(&plan("source", "source", "unit_l2")).is_err());
+        assert!(validate_plan(&plan("source", "target", "as_stored")).is_err());
+    }
+
+    #[test]
+    fn coordinate_swap_reflection_exchanges_two_lens_coordinates() {
+        let source = [1.0_f32, 0.0, 0.0];
+        let target = [0.6_f32, 0.8, 0.0];
+        let mut activation = [2.0_f32, -1.0, 5.0];
+        let source_before = activation
+            .iter()
+            .zip(source)
+            .map(|(&x, v)| x * v)
+            .sum::<f32>();
+        let target_before = activation
+            .iter()
+            .zip(target)
+            .map(|(&x, v)| x * v)
+            .sum::<f32>();
+        let reflection = coordinate_swap_reflection_direction(&source, &target, "test").unwrap();
+        let projection = activation
+            .iter()
+            .zip(&reflection)
+            .map(|(&x, &u)| x * u)
+            .sum::<f32>();
+        for (value, &direction) in activation.iter_mut().zip(&reflection) {
+            *value -= 2.0 * projection * direction;
+        }
+        let source_after = activation
+            .iter()
+            .zip(source)
+            .map(|(&x, v)| x * v)
+            .sum::<f32>();
+        let target_after = activation
+            .iter()
+            .zip(target)
+            .map(|(&x, v)| x * v)
+            .sum::<f32>();
+        assert!((source_after - target_before).abs() < 1e-5);
+        assert!((target_after - source_before).abs() < 1e-5);
+        assert!((activation[2] - 5.0).abs() < 1e-6);
+        assert!(coordinate_swap_reflection_direction(&source, &[2.0, 0.0, 0.0], "bad").is_err());
     }
 
     #[test]

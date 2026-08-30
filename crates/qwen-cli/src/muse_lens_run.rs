@@ -35,6 +35,7 @@ struct MuseExecutionPlan {
     plan: LensPlan,
     lenses: HashMap<String, LoadedMuseLens>,
     directions: HashMap<String, PreparedMuseDirection>,
+    coordinate_swaps: HashMap<String, PreparedMuseDirection>,
     capture_layers: Vec<u32>,
     layer_slots: HashMap<u32, usize>,
     layer_count: u32,
@@ -329,14 +330,90 @@ fn prepare_execution_plan(
                 .is_none()
         );
     }
+    let coordinate_swaps =
+        prepare_coordinate_swaps(&plan.operations, &directions, config, context)?;
     Ok(MuseExecutionPlan {
         plan,
         lenses,
         directions,
+        coordinate_swaps,
         capture_layers,
         layer_slots,
         layer_count: config.layer_count,
     })
+}
+
+fn prepare_coordinate_swaps(
+    operations: &[super::lens_run::OperationDefinition],
+    directions: &HashMap<String, PreparedMuseDirection>,
+    config: &MuseGlimmerConfig,
+    context: &MetalContext,
+) -> Result<HashMap<String, PreparedMuseDirection>> {
+    let hidden_size = config.hidden_size as usize;
+    let mut swaps = HashMap::new();
+    let mut reflection_cache = HashMap::<(String, String, u32), MetalTensor>::new();
+    for operation in operations {
+        let Action::CoordinateSwap { source, target, .. } = &operation.action else {
+            continue;
+        };
+        let pair = if source <= target {
+            (source.clone(), target.clone())
+        } else {
+            (target.clone(), source.clone())
+        };
+        let layers = selector_values(&operation.scope.layers, config.layer_count)?;
+        let source = directions
+            .get(source)
+            .with_context(|| format!("coordinate swap {} has no source direction", operation.id))?;
+        let target = directions
+            .get(target)
+            .with_context(|| format!("coordinate swap {} has no target direction", operation.id))?;
+        let mut rows = BTreeMap::new();
+        for layer in layers {
+            let cache_key = (pair.0.clone(), pair.1.clone(), layer);
+            if let Some(reflection) = reflection_cache.get(&cache_key) {
+                ensure!(rows.insert(layer, reflection.clone()).is_none());
+                continue;
+            }
+            let source = source.rows.get(&layer).with_context(|| {
+                format!(
+                    "coordinate swap {} source is unavailable at layer {layer}",
+                    operation.id
+                )
+            })?;
+            let target = target.rows.get(&layer).with_context(|| {
+                format!(
+                    "coordinate swap {} target is unavailable at layer {layer}",
+                    operation.id
+                )
+            })?;
+            let reflection = super::lens_run::coordinate_swap_reflection_direction(
+                &super::lens_run::read_f32_tensor(source, hidden_size),
+                &super::lens_run::read_f32_tensor(target, hidden_size),
+                &format!("{} at layer {layer}", operation.id),
+            )?;
+            let reflection = MetalTensor::from_bytes(
+                context,
+                bytemuck::cast_slice(&reflection),
+                vec![config.hidden_size as u64],
+                GgmlType::F32,
+            )?;
+            ensure!(
+                reflection_cache
+                    .insert(cache_key, reflection.clone())
+                    .is_none()
+            );
+            ensure!(rows.insert(layer, reflection).is_none());
+        }
+        ensure!(
+            swaps
+                .insert(operation.id.clone(), PreparedMuseDirection { rows })
+                .is_none(),
+            "duplicate coordinate-swap operation {}",
+            operation.id
+        );
+    }
+    Ok(swaps)
 }
 
 fn muse_lens_row(
@@ -552,7 +629,13 @@ fn event_interventions<'a>(
                 interventions.push((
                     operation.id.clone(),
                     layer,
-                    action_to_intervention(&operation.action, layer, &execution.directions)?,
+                    action_to_intervention(
+                        &operation.id,
+                        &operation.action,
+                        layer,
+                        &execution.directions,
+                        &execution.coordinate_swaps,
+                    )?,
                 ));
             }
         }
@@ -561,9 +644,11 @@ fn event_interventions<'a>(
 }
 
 fn action_to_intervention<'a>(
+    operation_id: &str,
     action: &Action,
     layer: u32,
     directions: &'a HashMap<String, PreparedMuseDirection>,
+    coordinate_swaps: &'a HashMap<String, PreparedMuseDirection>,
 ) -> Result<PostBlockIntervention<'a>> {
     let direction = |id: &str| -> Result<&'a MetalTensor> {
         directions
@@ -605,6 +690,18 @@ fn action_to_intervention<'a>(
             source: direction(source)?,
             target: direction(target)?,
             coefficient: *coefficient,
+        },
+        Action::CoordinateSwap { coefficient, .. } => PostBlockIntervention::Projection {
+            layer,
+            direction: coordinate_swaps
+                .get(operation_id)
+                .and_then(|prepared| prepared.rows.get(&layer))
+                .with_context(|| {
+                    format!(
+                        "coordinate swap {operation_id} has no reflection direction at layer {layer}"
+                    )
+                })?,
+            coefficient: 2.0 * *coefficient,
         },
     })
 }
@@ -721,14 +818,15 @@ mod tests {
             "version": 1,
             "lenses": [{"kind":"native_selected","id":"x","artifact":"a"}],
             "directions": [
-                {"id":"a","lens":"x","row":{"kind":"token_id","token_id":7},"normalization":"as_stored"},
+                {"id":"a","lens":"x","row":{"kind":"token_id","token_id":7},"normalization":"unit_l2"},
                 {"id":"u","lens":"x","row":{"kind":"token_id","token_id":8},"normalization":"unit_l2"}
             ],
             "operations": [
                 {"id":"fixed","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"fixed_add","direction":"a","coefficient":1.0}},
                 {"id":"relative","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"residual_l2_fraction","direction":"u","coefficient":0.1}},
                 {"id":"ablate","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"projection_ablate","direction":"u","coefficient":1.0}},
-                {"id":"swap","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"source_to_target","source":"u","target":"u","coefficient":0.5}}
+                {"id":"displace","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"source_to_target","source":"u","target":"u","coefficient":0.5}},
+                {"id":"swap","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"coordinate_swap","source":"u","target":"a","coefficient":1.0}}
             ],
             "readouts": []
         }))
@@ -763,14 +861,15 @@ mod tests {
             "version": 1,
             "lenses": [{"kind":"native_selected","id":"x","artifact":"a"}],
             "directions": [
-                {"id":"a","lens":"x","row":{"kind":"token_id","token_id":7},"normalization":"as_stored"},
+                {"id":"a","lens":"x","row":{"kind":"token_id","token_id":7},"normalization":"unit_l2"},
                 {"id":"u","lens":"x","row":{"kind":"token_id","token_id":8},"normalization":"unit_l2"}
             ],
             "operations": [
                 {"id":"fixed","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"fixed_add","direction":"a","coefficient":1.0}},
                 {"id":"relative","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"residual_l2_fraction","direction":"u","coefficient":0.1}},
                 {"id":"ablate","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"projection_ablate","direction":"u","coefficient":1.0}},
-                {"id":"swap","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"source_to_target","source":"u","target":"a","coefficient":0.5}}
+                {"id":"displace","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"source_to_target","source":"u","target":"a","coefficient":0.5}},
+                {"id":"swap","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"coordinate_swap","source":"u","target":"a","coefficient":1.0}}
             ],
             "readouts": []
         }))
@@ -788,6 +887,7 @@ mod tests {
                 ("fixed", 50),
                 ("relative", 50),
                 ("ablate", 50),
+                ("displace", 50),
                 ("swap", 50)
             ]
         );
@@ -806,6 +906,13 @@ mod tests {
         assert!(matches!(
             interventions[3].2,
             PostBlockIntervention::SourceToTarget { .. }
+        ));
+        assert!(matches!(
+            interventions[4].2,
+            PostBlockIntervention::Projection {
+                coefficient: 2.0,
+                ..
+            }
         ));
         assert!(
             event_interventions(&execution, Event::Prefill(1))

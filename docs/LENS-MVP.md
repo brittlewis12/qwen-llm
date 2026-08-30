@@ -86,11 +86,11 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Qualify one private model-free Q8 kernel with 256-query tile reuse against the
-incumbent 128-query tile at released `6656x19968` FFN gate/up and transposed down
-shapes with `n_query=512`. Warm once, take five alternating GPU-time samples,
-require bitwise equality and 15% on both directions, and hard-stop at 180
-seconds. Do not load a model asset or launch a corpus fit.
+Qualify one private model-free Q8 C32/Q128 kernel against incumbent C16/Q128 at
+released `6656x19968` FFN gate/up and transposed down shapes with `n_query=512`.
+Warm once, take five alternating GPU-time samples, require bitwise equality and
+25% on both directions, and hard-stop at 180 seconds. Do not load a model asset
+or launch a corpus fit.
 
 ## Hard Exclusions
 
@@ -105,7 +105,7 @@ integrity.
 
 ## Fast Follows
 
-1. Integrate 256-query Q8 reuse only if both released FFN shapes clear the gate.
+1. Integrate C32/Q128 only if both released FFN shapes clear the gate.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

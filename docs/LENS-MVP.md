@@ -21,7 +21,7 @@ not compensating abstraction.
 - [x] Explicit layer:position masks can export transported J-space vectors.
 - [x] Flash-Next exposes serial native hyper-state capture and fixed addition.
 - [x] The CLI runs Flash-Next with explicit native hyper directions.
-- [x] Muse Glimmer fits and runs adjacent full-attention selected-token J/R lenses.
+- [x] Muse Glimmer fits and runs composed full/sliding selected-token J/R lenses.
 
 ## Model Support
 
@@ -30,7 +30,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | adjacent full-attention J/R selected tokens | live CLI passed | scalar only | sliding-block VJP |
+| Muse Glimmer 30B | composed multi-source J/R selected tokens | none | scalar live readout | post-block interventions |
 
 ## Current Status
 
@@ -38,17 +38,19 @@ The CLI handoff is verified on real dense, ordinary MoE, native J/R, and
 workspace-template assets. Selected-mask vector export is complete for dense
 published full-J traces. Muse Glimmer scalar text generation matches the local
 Q8 llama.cpp logits oracle. Real Q8 `fit-tokens` and `run` commands now produce
-and consume model-bound J/R artifacts with prefill and decode readouts at the
-post-block residual coordinate.
+and consume model-bound J/R artifacts across composed full/sliding blocks, with
+multiple selected source layers and prefill/decode readouts at the post-block
+residual coordinate.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
 until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Add Muse's adjacent-pair RoPE transpose and validate one adjacent sliding-block
-J/R transport before composing across multiple blocks. Preserve the same replay,
-finite-difference, artifact, and live-score gates. Do not broaden to full rows,
-generic backends, REST, UI, or experiments before this passes.
+Add Muse post-block interventions using fitted selected-token rows, preserving
+the existing layer/position/decode scopes and ordered stacking semantics. Keep
+the first slice bounded to the intervention primitives already exposed by the
+ordinary runtime; do not broaden to full rows, generic backends, REST, UI, or
+experiments.
 
 ## Hard Exclusions
 
@@ -62,11 +64,9 @@ hardening.
 
 ## Fast Follows
 
-1. Compose Muse transport across multiple blocks after the sliding-block slice.
-2. Support multiple Muse source layers with the existing selected-token payload orientation.
-3. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
-4. Sparse position filtering and traces beyond 128 positions.
-5. Corpus batching only after measured throughput requires it.
+1. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
+2. Sparse position filtering and traces beyond 128 positions.
+3. Corpus batching only after measured throughput requires it.
 
 This file is updated in place. It is not a work log or design document. Keep
 one active gate, at most three blockers, and at most five fast follows.

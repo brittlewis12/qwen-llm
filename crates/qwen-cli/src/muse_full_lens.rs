@@ -1,13 +1,24 @@
+use super::full_lens::ReadFullArgs;
 use super::muse_full_lens_artifact as artifact;
+use super::muse_lens_artifact;
 use super::muse_lens_rows_artifact as rows;
 use anyhow::{Context, Result, ensure};
 use blake3::Hasher;
 use clap::Args;
 use half::f16;
+use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
+use qwen_llm::gguf::GgufFile;
+use qwen_llm::metal::MetalContext;
+use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME, MuseGlimmerModel};
+use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
+use qwen_llm::tokenizer::LlamaCppTokenizer;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Debug, Args)]
 pub(crate) struct AssembleMuseFullArgs {
@@ -27,6 +38,499 @@ pub(crate) struct AssembleMuseFullArgs {
 struct ShardInput {
     directory: PathBuf,
     manifest: rows::Manifest,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaProbe {
+    schema: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadoutDocument {
+    schema: &'static str,
+    schema_version: u32,
+    readout: &'static str,
+    score_semantics: &'static str,
+    ranking_scope: &'static str,
+    source_site: &'static str,
+    input: ReadoutInput,
+    artifact: ReadoutArtifact,
+    deployed_model: ReadoutModel,
+    reader: ReadoutReader,
+    results: Vec<LayerReadout>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadoutInput {
+    source: &'static str,
+    add_special_tokens: Option<bool>,
+    token_ids: Vec<u32>,
+    selected_position: usize,
+    captured_token_id: u32,
+    predicts_position: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadoutArtifact {
+    manifest: PathBuf,
+    manifest_canonical_json_blake3: String,
+    declared_payload_blake3: String,
+    model_content_blake3: String,
+    artifact_profile: String,
+    method: String,
+    target_layer: u32,
+    orientation: String,
+    corpus_blake3: String,
+    fit_used_prompts: u64,
+    fit_max_tokens: usize,
+    fit_skip_first: usize,
+    query_batch_size: usize,
+    storage_dtype: &'static str,
+    conversion: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadoutModel {
+    path: PathBuf,
+    content_blake3: String,
+    architecture: &'static str,
+    artifact_profile: String,
+    n_layers: u32,
+    hidden_size: u32,
+    vocab_size: u32,
+    output_tail: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadoutReader {
+    build_commit: &'static str,
+    build_dirty: &'static str,
+    build_source_state: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct LayerReadout {
+    source_layer: u32,
+    source_position: usize,
+    source_token_id: u32,
+    predicts_position: usize,
+    verified_matrix_blake3: String,
+    rms_denominator_f64_recomputed: f32,
+    matrix_read_wall_ms: f64,
+    transport_wall_ms: f64,
+    output_tail_wall_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transported_vector: Option<TransportedVector>,
+    top_k: Vec<TokenScore>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransportedVector {
+    operation: &'static str,
+    stage: &'static str,
+    value_dtype: &'static str,
+    hidden_coordinate: &'static str,
+    hidden_size: usize,
+    shape: [usize; 1],
+    values: Vec<f32>,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenScore {
+    rank: usize,
+    token_id: u32,
+    token_display_lossy: String,
+    token_piece_hex: String,
+    logit: f32,
+}
+
+pub(crate) fn is_artifact(directory: &Path) -> Result<bool> {
+    let path = directory.join(artifact::MANIFEST_NAME);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let probe: SchemaProbe = super::read_json_file(&path)?;
+    Ok(probe.schema == artifact::SCHEMA)
+}
+
+pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
+    super::validate_token_build_identity(
+        env!("QWEN_BUILD_SOURCE_STATE"),
+        env!("QWEN_BUILD_STAMP_ERROR"),
+    )?;
+    validate_read_args(&args)?;
+    let full_lens = canonical_real_directory(&args.full_lens, "Muse full-transport artifact")?;
+    let manifest_path = full_lens.join(artifact::MANIFEST_NAME);
+    let manifest: artifact::Manifest = super::read_json_file(&manifest_path)?;
+    artifact::validate_manifest(&manifest)?;
+    let manifest_canonical_json_blake3 = super::digest_json(&manifest)?;
+
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open Muse model {}", args.model.display()))?;
+    let bound =
+        MuseGlimmerModel::from_gguf(&gguf).context("bind Muse model for full-transport readout")?;
+    ensure!(
+        manifest.config.architecture == ARCHITECTURE_NAME
+            && manifest.config.artifact_profile
+                == muse_lens_artifact::profile_name(bound.artifact_profile)
+            && manifest.config.geometry == muse_lens_artifact::geometry(&bound.config),
+        "Muse full transport does not match the deployed model profile or geometry"
+    );
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(&args.identity_cache))
+            .with_context(|| {
+                format!(
+                    "resolve Muse model identity using {}",
+                    args.identity_cache.display()
+                )
+            })?;
+    let content_id = super::hex(&content.content_id);
+    ensure!(
+        content_id == manifest.config.model_content_blake3,
+        "Muse full transport was fitted for a different GGUF content identity"
+    );
+
+    let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
+        .context("load Muse tokenizer for full readout")?;
+    muse_lens_artifact::validate_tokenizer(&tokenizer, &bound.config)?;
+    let (input_source, add_special_tokens, token_ids) = prepare_read_input(&args, &tokenizer)?;
+    let selected_position = args.position.unwrap_or(token_ids.len() - 1);
+    ensure!(
+        selected_position < token_ids.len(),
+        "--position {selected_position} is outside {} input tokens",
+        token_ids.len()
+    );
+    let layers = select_layers(&args.layers, &manifest.config.source_layers)?;
+    let mut capture_layers = layers.clone();
+    capture_layers.sort_unstable();
+    let capture_slots = capture_layers
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(slot, layer)| (layer, slot))
+        .collect::<BTreeMap<_, _>>();
+
+    let prefix = &token_ids[..=selected_position];
+    let context = MetalContext::new().context("initialize Metal for Muse full readout")?;
+    let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, prefix.len())
+        .context("load Muse model for full readout")?;
+    let model_config = loaded.config().clone();
+    let mut runner = loaded
+        .create_runner(&context)
+        .context("create Muse full-readout runner")?;
+    for &token in &prefix[..prefix.len() - 1] {
+        runner
+            .forward_token(token)
+            .context("forward Muse full-readout prefix")?;
+    }
+    let capture = runner
+        .forward_token_capture_post_blocks(prefix[prefix.len() - 1], &capture_layers)
+        .context("capture Muse full-readout source residuals")?;
+    ensure!(
+        capture.position == selected_position
+            && capture.token_id == token_ids[selected_position]
+            && capture.layer_ids == capture_layers
+            && capture.hidden_size == model_config.hidden_size as usize,
+        "Muse full-readout capture metadata is inconsistent"
+    );
+
+    let mut results = Vec::new();
+    results
+        .try_reserve_exact(layers.len())
+        .context("allocate Muse full-readout layer results")?;
+    for &layer in &layers {
+        let descriptor = manifest
+            .payload
+            .matrices
+            .iter()
+            .find(|matrix| matrix.source_layer == layer)
+            .context("Muse full transport omitted a selected source matrix")?;
+        let started = Instant::now();
+        let matrix = read_matrix(&full_lens, &manifest.payload, descriptor)?;
+        let matrix_read_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let capture_slot = *capture_slots
+            .get(&layer)
+            .context("Muse capture omitted a selected source layer")?;
+        let source_residual = capture
+            .layer_values(capture_slot)
+            .context("Muse capture residual payload is too short")?;
+
+        let started = Instant::now();
+        let transported = runner
+            .apply_f16_post_block_transport(&matrix, source_residual)
+            .with_context(|| format!("apply Muse full transport at source layer {layer}"))?;
+        let transport_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let rms_denominator_f64_recomputed =
+            rms_denominator(&transported, model_config.rms_epsilon);
+        let started = Instant::now();
+        let logits = runner
+            .deployed_logits_from_post_block_residual(&transported)
+            .with_context(|| format!("apply Muse deployed output tail at source layer {layer}"))?;
+        let output_tail_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let ranked = top_k_logits(&logits, args.top_k)?;
+        let mut top_k = Vec::with_capacity(ranked.len());
+        for (rank, (token_id, logit)) in ranked.into_iter().enumerate() {
+            let piece = tokenizer
+                .try_decode_piece_bytes_exact(token_id as i32)
+                .with_context(|| format!("decode Muse readout token {token_id}"))?;
+            top_k.push(TokenScore {
+                rank,
+                token_id,
+                token_display_lossy: String::from_utf8_lossy(&piece).into_owned(),
+                token_piece_hex: super::hex(&piece),
+                logit,
+            });
+        }
+        results.push(LayerReadout {
+            source_layer: layer,
+            source_position: selected_position,
+            source_token_id: capture.token_id,
+            predicts_position: selected_position + 1,
+            verified_matrix_blake3: descriptor.blake3.clone(),
+            rms_denominator_f64_recomputed,
+            matrix_read_wall_ms,
+            transport_wall_ms,
+            output_tail_wall_ms,
+            transported_vector: args.include_vector.then_some(TransportedVector {
+                operation: "row_major_f16_transport_times_source_residual",
+                stage: "before_output_rmsnorm",
+                value_dtype: "f32",
+                hidden_coordinate: "target_post_block_residual",
+                hidden_size: model_config.hidden_size as usize,
+                shape: [model_config.hidden_size as usize],
+                values: transported,
+            }),
+            top_k,
+        });
+    }
+
+    let document = ReadoutDocument {
+        schema: "muse_glimmer.lens.full_readout",
+        schema_version: 1,
+        readout: "full_vocabulary",
+        score_semantics: "deployed_output_rmsnorm_native_head_scale_softcap_no_softmax_v1",
+        ranking_scope: "full_vocabulary",
+        source_site: "post_block_residual",
+        input: ReadoutInput {
+            source: input_source,
+            add_special_tokens,
+            token_ids,
+            selected_position,
+            captured_token_id: capture.token_id,
+            predicts_position: selected_position + 1,
+        },
+        artifact: ReadoutArtifact {
+            manifest: manifest_path,
+            manifest_canonical_json_blake3,
+            declared_payload_blake3: manifest.payload.blake3.clone(),
+            model_content_blake3: manifest.config.model_content_blake3.clone(),
+            artifact_profile: manifest.config.artifact_profile.clone(),
+            method: manifest.config.method.clone(),
+            target_layer: manifest.config.target_layer,
+            orientation: manifest.config.orientation.clone(),
+            corpus_blake3: manifest.config.corpus_blake3.clone(),
+            fit_used_prompts: manifest.corpus.used_prompts,
+            fit_max_tokens: manifest.config.max_tokens,
+            fit_skip_first: manifest.config.skip_first,
+            query_batch_size: manifest.config.query_batch_size,
+            storage_dtype: "f16_le",
+            conversion: manifest.assembly.conversion.clone(),
+        },
+        deployed_model: ReadoutModel {
+            path: args.model,
+            content_blake3: content_id,
+            architecture: ARCHITECTURE_NAME,
+            artifact_profile: manifest.config.artifact_profile,
+            n_layers: model_config.layer_count,
+            hidden_size: model_config.hidden_size,
+            vocab_size: model_config.vocab_size,
+            output_tail: "rmsnorm_native_output_projection_logit_scale_final_softcap",
+        },
+        reader: ReadoutReader {
+            build_commit: env!("QWEN_BUILD_COMMIT"),
+            build_dirty: env!("QWEN_BUILD_DIRTY"),
+            build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
+        },
+        results,
+    };
+    let bytes = super::serialize_json_pretty_bounded(&document, "Muse full readout")?;
+    if let Some(output) = args.output {
+        let output = super::resolve_output_path(&output)?;
+        super::publish_immutable(&output, &bytes)?;
+    }
+    println!("{}", String::from_utf8(bytes).unwrap());
+    Ok(())
+}
+
+fn validate_read_args(args: &ReadFullArgs) -> Result<()> {
+    ensure!(
+        args.prompt.is_some() ^ !args.token_ids.is_empty(),
+        "exactly one of --prompt or --token-ids is required"
+    );
+    ensure!(
+        args.top_k > 0 && args.top_k <= 16,
+        "--top-k must be in 1..=16"
+    );
+    ensure!(
+        args.max_tokens > 0 && args.max_tokens <= 4_096,
+        "--max-tokens must be in 1..=4096"
+    );
+    ensure!(
+        args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
+        "--prompt must not be empty"
+    );
+    ensure!(
+        args.prompt.is_some() || !args.no_special_tokens,
+        "--no-special-tokens only applies to --prompt"
+    );
+    ensure!(
+        args.position
+            .is_none_or(|position| position < args.max_tokens),
+        "--position must be below --max-tokens"
+    );
+    ensure!(
+        args.token_ids.is_empty() || args.token_ids.len() <= args.max_tokens,
+        "--token-ids count must not exceed --max-tokens"
+    );
+    ensure!(
+        args.position
+            .is_none_or(|position| args.token_ids.is_empty() || position < args.token_ids.len()),
+        "--position is outside the literal --token-ids input"
+    );
+    Ok(())
+}
+
+fn prepare_read_input(
+    args: &ReadFullArgs,
+    tokenizer: &LlamaCppTokenizer,
+) -> Result<(&'static str, Option<bool>, Vec<u32>)> {
+    let (source, add_special_tokens, signed) = if let Some(prompt) = &args.prompt {
+        let add_special_tokens = !args.no_special_tokens;
+        (
+            "prompt",
+            Some(add_special_tokens),
+            tokenizer
+                .encode(prompt, add_special_tokens)
+                .context("tokenize Muse full-readout prompt")?,
+        )
+    } else {
+        let mut signed = Vec::with_capacity(args.token_ids.len());
+        for &token in &args.token_ids {
+            ensure!(
+                token < tokenizer.n_vocab() && token <= i32::MAX as u32,
+                "--token-ids entry {token} is outside Muse vocabulary {}",
+                tokenizer.n_vocab()
+            );
+            signed.push(token as i32);
+        }
+        ("token_ids", None, signed)
+    };
+    ensure!(!signed.is_empty(), "Muse full-readout input has no tokens");
+    ensure!(
+        signed.len() <= args.max_tokens,
+        "Muse full-readout input has {} tokens, exceeding --max-tokens {}",
+        signed.len(),
+        args.max_tokens
+    );
+    let tokens = signed
+        .into_iter()
+        .map(|token| {
+            ensure!(
+                token >= 0 && (token as u32) < tokenizer.n_vocab(),
+                "Muse tokenizer produced token {token} outside its vocabulary"
+            );
+            Ok(token as u32)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((source, add_special_tokens, tokens))
+}
+
+fn select_layers(requested: &[u32], available: &[u32]) -> Result<Vec<u32>> {
+    let layers = if requested.is_empty() {
+        available.to_vec()
+    } else {
+        requested.to_vec()
+    };
+    let mut unique = HashSet::new();
+    ensure!(
+        !layers.is_empty()
+            && layers
+                .iter()
+                .all(|layer| unique.insert(*layer) && available.binary_search(layer).is_ok()),
+        "--layers must be unique source layers present in the Muse full transport"
+    );
+    Ok(layers)
+}
+
+fn read_matrix(
+    directory: &Path,
+    payload: &artifact::Payload,
+    matrix: &artifact::MatrixDescriptor,
+) -> Result<Vec<u8>> {
+    let path = directory.join(&payload.path);
+    let (mut file, length) = super::open_regular_file(&path)?;
+    ensure!(
+        length as u64 == payload.byte_length,
+        "Muse full-transport payload length changed"
+    );
+    file.seek(SeekFrom::Start(matrix.byte_offset))
+        .with_context(|| format!("seek Muse source matrix {}", matrix.source_layer))?;
+    let matrix_len = usize::try_from(matrix.byte_length)
+        .context("Muse source matrix byte length does not fit this platform")?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(matrix_len)
+        .context("allocate Muse source matrix")?;
+    bytes.resize(matrix_len, 0);
+    file.read_exact(&mut bytes)
+        .with_context(|| format!("read Muse source matrix {}", matrix.source_layer))?;
+    ensure!(
+        blake3::hash(&bytes).to_hex().as_str() == matrix.blake3,
+        "Muse source matrix {} digest mismatch",
+        matrix.source_layer
+    );
+    Ok(bytes)
+}
+
+fn rms_denominator(values: &[f32], epsilon: f32) -> f32 {
+    ((values
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        / values.len() as f64)
+        + f64::from(epsilon))
+    .sqrt() as f32
+}
+
+fn top_k_logits(logits: &[f32], top_k: usize) -> Result<Vec<(u32, f32)>> {
+    ensure!(top_k > 0 && top_k <= 16, "invalid Muse top-k bound");
+    let mut ranked = Vec::<(u32, f32)>::with_capacity(top_k);
+    for (token_id, &logit) in logits.iter().enumerate() {
+        ensure!(
+            logit.is_finite(),
+            "Muse output tail produced non-finite logits"
+        );
+        let token_id = u32::try_from(token_id).context("Muse logit token ID")?;
+        if ranked.len() < top_k {
+            ranked.push((token_id, logit));
+            ranked.sort_by(compare_scores);
+        } else if compare_scores(&(token_id, logit), ranked.last().unwrap()).is_lt() {
+            *ranked.last_mut().unwrap() = (token_id, logit);
+            ranked.sort_by(compare_scores);
+        }
+    }
+    ensure!(
+        ranked.len() == top_k,
+        "Muse vocabulary is smaller than top-k"
+    );
+    Ok(ranked)
+}
+
+fn compare_scores(left: &(u32, f32), right: &(u32, f32)) -> std::cmp::Ordering {
+    right
+        .1
+        .total_cmp(&left.1)
+        .then_with(|| left.0.cmp(&right.0))
 }
 
 pub(crate) fn assemble(mut args: AssembleMuseFullArgs) -> Result<()> {
@@ -573,5 +1077,17 @@ mod tests {
         std::fs::write(root.join(artifact::PAYLOAD_NAME), b"abcdEfgh").unwrap();
         assert!(verify_complete_payload(&root, &payload).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn full_vocabulary_top_k_is_descending_with_stable_token_ties() {
+        let logits = [0.5, 2.0, 2.0, -1.0, 1.5];
+        assert_eq!(
+            top_k_logits(&logits, 3).unwrap(),
+            [(1, 2.0), (2, 2.0), (4, 1.5)]
+        );
+        let mut invalid = logits;
+        invalid[3] = f32::NAN;
+        assert!(top_k_logits(&invalid, 3).is_err());
     }
 }

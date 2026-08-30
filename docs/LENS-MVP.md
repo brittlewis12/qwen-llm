@@ -25,6 +25,7 @@ not compensating abstraction.
 - [x] Muse Glimmer applies scoped, ordered selected-token interventions.
 - [x] Muse Glimmer fits resumable, query-batched full-transport J/R row shards.
 - [x] Muse Glimmer assembles and applies self-contained F16 full transports.
+- [x] `read-full` exposes Muse full-vocabulary logits and transported vectors.
 
 ## Model Support
 
@@ -33,7 +34,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | selected tokens + resumable full J/R rows | selected-token CLI passed | scalar live readout | full readout CLI |
+| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | scalar top-k + vectors | produce full R asset |
 
 ## Current Status
 
@@ -57,7 +58,9 @@ independent CPU attention queries while retaining scalar numerical checks.
 Muse full-transport fitting now has bounded query batches, prompt-level resume,
 model/corpus-bound row shards in `[source,row,hidden]` order, and a real Q8 R-lens
 CLI proof. Self-contained F16 assembly, exact deployed output-tail replay, and
-F16 hidden-transport application are implemented; readout CLI consumption remains.
+F16 hidden-transport application are implemented. `read-full` now dispatches
+Muse assets with exact GGUF binding, selected-matrix verification, deployed
+post-softcap full-vocabulary logits, and optional target vectors.
 One real Q8 T=16 R row shard spanning all 51 sources completes in 15.61 seconds
 for one prompt (1.53 seconds capture, 14.08 seconds VJP).
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
@@ -65,8 +68,8 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Expose assembled Muse transports through full-vocabulary readout and selected
-transported-vector CLI output, preserving exact model/source binding.
+Choose the full-R fitting corpus, run the resumable complete fit, and assemble
+the 4.21 GiB F16 asset without delaying immediate CLI use.
 
 ## Hard Exclusions
 
@@ -76,13 +79,13 @@ integrity.
 
 ## Blockers
 
-- Full-vocabulary and selected-vector CLI consumption is not wired yet.
+- The production fitting corpus and prompt count are not yet selected.
 - The measured default 25-prompt full fit projects to roughly 22.5 hours before
   assembly; reduce that only if the required corpus makes it deadline-critical.
 
 ## Fast Follows
 
-1. Metal causal-GQA reverse and fixed scratch if production timing requires it.
+1. Packed Muse layer x position tracing after the scalar full asset is usable.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

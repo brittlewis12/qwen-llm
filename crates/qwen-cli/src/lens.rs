@@ -30,7 +30,7 @@ mod muse_lens_run;
 mod template_lens;
 use full_lens::{
     CompareTransferArgs, ImportFullArgs, ReadFullArgs, TraceFullArgs, compare_transfer,
-    import_full, read_full, trace_full,
+    import_full, read_full as read_qwen_full, trace_full,
 };
 
 const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
@@ -517,6 +517,14 @@ fn fit_rows(args: FitRowsArgs) -> Result<()> {
         return muse_lens_rows_fit::fit_rows(args, gguf);
     }
     fit_qwen_rows(args)
+}
+
+fn read_full(args: ReadFullArgs) -> Result<()> {
+    if muse_full_lens::is_artifact(&args.full_lens)? {
+        muse_full_lens::read_full(args)
+    } else {
+        read_qwen_full(args)
+    }
 }
 
 fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
@@ -3073,9 +3081,10 @@ mod tests {
             "--identity-cache",
             "identity-cache",
             "--allow-unvalidated-transfer",
+            "--include-vector",
         ])
         .unwrap();
-        assert!(matches!(parsed.command, Command::ReadFull(_)));
+        assert!(matches!(parsed.command, Command::ReadFull(ref args) if args.include_vector));
 
         let hyphen_prompt = Cli::try_parse_from([
             "qwen-lens",

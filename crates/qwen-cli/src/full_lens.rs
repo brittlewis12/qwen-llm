@@ -91,13 +91,13 @@ pub(crate) struct CompareTransferArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ReadFullArgs {
-    /// Dense Qwen3.8 GGUF model used for capture, final norm, and LM head.
+    /// Dense Qwen3.8 or Muse Glimmer GGUF used for capture and deployed output.
     #[arg(short = 'm', long)]
-    model: PathBuf,
+    pub(crate) model: PathBuf,
 
-    /// Directory produced by `qwen-lens import-full`.
+    /// Directory produced by `import-full` or `assemble-muse-full`.
     #[arg(long)]
-    full_lens: PathBuf,
+    pub(crate) full_lens: PathBuf,
 
     /// Text prompt. Exactly one of --prompt or --token-ids is required.
     #[arg(
@@ -106,7 +106,7 @@ pub(crate) struct ReadFullArgs {
         conflicts_with = "token_ids",
         required_unless_present = "token_ids"
     )]
-    prompt: Option<String>,
+    pub(crate) prompt: Option<String>,
 
     /// Literal prompt token IDs. Exactly one of --prompt or --token-ids is required.
     #[arg(
@@ -115,39 +115,43 @@ pub(crate) struct ReadFullArgs {
         conflicts_with = "prompt",
         required_unless_present = "prompt"
     )]
-    token_ids: Vec<u32>,
+    pub(crate) token_ids: Vec<u32>,
 
     /// Disable tokenizer-configured BOS/EOS insertion for text prompts.
     #[arg(long)]
-    no_special_tokens: bool,
+    pub(crate) no_special_tokens: bool,
 
     /// Input position to inspect; defaults to the final prompt token.
     #[arg(long)]
-    position: Option<usize>,
+    pub(crate) position: Option<usize>,
 
     /// Source layers in output order; defaults to all 0..62.
     #[arg(long, value_delimiter = ',')]
-    layers: Vec<u32>,
+    pub(crate) layers: Vec<u32>,
 
     /// Full-vocabulary results per layer (maximum 16).
     #[arg(long, default_value_t = 10)]
-    top_k: usize,
+    pub(crate) top_k: usize,
 
     /// Reject prompts above this bound instead of silently truncating them.
     #[arg(long, default_value_t = 256)]
-    max_tokens: usize,
+    pub(crate) max_tokens: usize,
 
     /// Private cache directory for the strong ordered-GGUF content identity.
     #[arg(long)]
-    identity_cache: PathBuf,
+    pub(crate) identity_cache: PathBuf,
 
-    /// Explicitly acknowledge that BF16-to-deployed-checkpoint transfer is unvalidated.
+    /// Acknowledge Qwen published-lens transfer; not needed for model-bound Muse assets.
     #[arg(long)]
-    allow_unvalidated_transfer: bool,
+    pub(crate) allow_unvalidated_transfer: bool,
+
+    /// Include each selected pre-output-norm transported hidden vector.
+    #[arg(long)]
+    pub(crate) include_vector: bool,
 
     /// Optional immutable deterministic JSON result.
     #[arg(long)]
-    output: Option<PathBuf>,
+    pub(crate) output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -512,7 +516,20 @@ struct FullLayerReadout {
     source_token_id: i32,
     predicts_position: usize,
     rms_denominator_f64_recomputed: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transported_vector: Option<FullTransportedVector>,
     top_k: Vec<FullTokenScore>,
+}
+
+#[derive(Debug, Serialize)]
+struct FullTransportedVector {
+    operation: &'static str,
+    stage: &'static str,
+    value_dtype: &'static str,
+    hidden_coordinate: &'static str,
+    hidden_size: usize,
+    shape: [usize; 1],
+    values: Vec<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1142,13 +1159,13 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             layer, selected_position, args.top_k
         );
         let readout = research
-            .apply_f16_transport_topk(&matrix, residual, args.top_k)
+            .apply_f16_transport_topk_with_vector(&matrix, residual, args.top_k)
             .with_context(|| format!("apply full-lens source layer {layer}"))?;
         let mut top_k = Vec::new();
         top_k
-            .try_reserve_exact(readout.scores.len())
+            .try_reserve_exact(readout.readout.scores.len())
             .context("allocate decoded full-lens top-k")?;
-        for (rank, score) in readout.scores.into_iter().enumerate() {
+        for (rank, score) in readout.readout.scores.into_iter().enumerate() {
             let token_id = i32::try_from(score.token_id).context("decode full-lens token ID")?;
             let piece = tokenizer
                 .try_decode_piece_bytes_exact(token_id)
@@ -1168,7 +1185,16 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
                 source_position: selected_position,
                 source_token_id: capture.token_id,
                 predicts_position: selected_position + 1,
-                rms_denominator_f64_recomputed: readout.rms_denominator_f64_recomputed,
+                rms_denominator_f64_recomputed: readout.readout.rms_denominator_f64_recomputed,
+                transported_vector: args.include_vector.then_some(FullTransportedVector {
+                    operation: "row_major_f16_transport_times_source_residual",
+                    stage: "before_output_rmsnorm",
+                    value_dtype: "f32",
+                    hidden_coordinate: "target_post_block_residual",
+                    hidden_size,
+                    shape: [hidden_size],
+                    values: readout.transported_values,
+                }),
                 top_k,
             },
         ));
@@ -2597,6 +2623,7 @@ mod tests {
             max_tokens: 256,
             identity_cache: "identity-cache".into(),
             allow_unvalidated_transfer: true,
+            include_vector: false,
             output: None,
         }
     }

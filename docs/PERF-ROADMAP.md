@@ -307,6 +307,17 @@ profiler is removed. Do not call this a mechanism KILL or GO, and do not rerun
 adaptively. Reopen only under a new preregistered observer that preserves raw
 timestamp availability and first-inversion evidence.
 
+Selected packed QSA now defaults two GQA4 kernels inside its existing
+default-off envelope. The gathered-QK leaf removes per-slot barriers and moves
+`24.485458 -> 6.931125 ms`; four-head softmax/value reuse moves
+`32.844667 -> 10.429312 ms`, with bytewise incumbent equality. On the frozen
+2,578-token known-answer prompt, release B-C-C-B moves aggregate prefill GPU
+`6,303.917229 -> 5,397.047021 ms` (14.39%) while every arm emits the expected
+JSON and EOS. The independent rollback flags are
+`QWEN4EXP_QSA_GQA4_LOGITS=0` and `QWEN4EXP_QSA_GQA4_VALUE=0`. This is a
+performance promotion inside selected execution, not semantic authority to
+enable selected packed QSA globally.
+
 1. Keep selected packed QSA default-off. Bound its semantic disposition to two
    held-out natural selected contexts plus one known-answer long-context case,
    with `NLL_selected - NLL_safe <= ln(1.01)` and both known-answer predicates

@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Selected GQA4 Attention KEEP
+
+Status: default two bit-preserving GQA4 kernels inside the experimental
+selected packed-QSA path. Selected packed QSA itself remains default-off.
+
+- Gathered QK removes the per-slot threadgroup barriers while computing four
+  query heads from each shared KV-head key. Its 12-layer N=32 leaf moves
+  `24.485458 -> 6.931125 ms`, saving 71.69%.
+- Softmax/value retains four independent reductions and chronological
+  accumulators while sharing each value load across four query heads. Its leaf
+  moves `32.844667 -> 10.429312 ms`, saving 68.25%.
+- Complete logits, mutated softmax rows, and attention outputs are bytewise
+  equal to the incumbents. Focused packet, fault, and two-band gates pass.
+- A release B-C-C-B on the 2,578-token known-answer prompt moves aggregate
+  prefill GPU `6,303.917229 -> 5,397.047021 ms`, saving 14.39%; both balanced
+  pairs are positive and all four arms emit the expected JSON and EOS.
+- Roll back independently with `QWEN4EXP_QSA_GQA4_LOGITS=0` or
+  `QWEN4EXP_QSA_GQA4_VALUE=0`.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-selected-gqa4/`.
+Adversarial review: `01a0500f-6313-7563-b258-b1664fc1320b`.
+
 ## 2026-08-29 - Flash-Next GDN/QSA Named-Stage INVALID
 
 Status: no performance decision. Remove the temporary named-stage profiler and

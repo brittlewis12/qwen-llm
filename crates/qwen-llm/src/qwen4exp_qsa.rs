@@ -46,6 +46,15 @@ const SELECTED_AUDIT_ORDER_MISMATCH_STATUS: i32 = 5;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
+crate::env_flag!(
+    default_on configured_qwen4exp_qsa_gqa4_logits_enabled,
+    "QWEN4EXP_QSA_GQA4_LOGITS"
+);
+crate::env_flag!(
+    default_on configured_qwen4exp_qsa_gqa4_value_enabled,
+    "QWEN4EXP_QSA_GQA4_VALUE"
+);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QwenSparseAttentionPackedRangePlan {
     end_position: usize,
@@ -2820,6 +2829,34 @@ fn preflight_selected_attention_primitives(ctx: &MetalContext) -> Result<(), Qwe
             ctx.device.maxThreadgroupMemoryLength(),
         )?;
     }
+    for (enabled, kernel, threads, dynamic_memory) in [
+        (
+            configured_qwen4exp_qsa_gqa4_logits_enabled(),
+            "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
+            PACKED_ATTENTION_THREADS,
+            0,
+        ),
+        (
+            configured_qwen4exp_qsa_gqa4_value_enabled(),
+            "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
+            ATTENTION_THREADS,
+            4 * ATTENTION_SCRATCH_FLOATS * size_of::<f32>(),
+        ),
+    ] {
+        if !enabled {
+            continue;
+        }
+        let pipeline = ctx.pipeline(kernel)?;
+        validate_cooperative_pipeline_threads(
+            kernel,
+            pipeline.threadExecutionWidth(),
+            pipeline.maxTotalThreadsPerThreadgroup(),
+            threads,
+            pipeline.staticThreadgroupMemoryLength(),
+            dynamic_memory,
+            ctx.device.maxThreadgroupMemoryLength(),
+        )?;
+    }
     Ok(())
 }
 
@@ -5372,6 +5409,21 @@ fn encode_attention_logits_packed(
     start_position: usize,
     query_count: usize,
 ) -> Result<(), MetalError> {
+    if configured_qwen4exp_qsa_gqa4_logits_enabled() {
+        return encode_attention_logits_packed_gqa4(
+            ctx,
+            enc,
+            query,
+            key_cache,
+            token_ids,
+            selected_count,
+            selector_status,
+            logits,
+            geometry,
+            start_position,
+            query_count,
+        );
+    }
     let g = geometry;
     let heads_per_kv = g.query_heads / g.kv_heads;
     let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_logits_packed_f16")?;
@@ -5400,6 +5452,49 @@ fn encode_attention_logits_packed(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn encode_attention_logits_packed_gqa4(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key_cache: &MetalTensor,
+    token_ids: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    logits: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    start_position: usize,
+    query_count: usize,
+) -> Result<(), MetalError> {
+    const SLOTS_PER_THREADGROUP: usize = 32;
+    let g = geometry;
+    let heads_per_kv = g.query_heads / g.kv_heads;
+    let head_groups = heads_per_kv / PACKED_ATTENTION_HEADS_PER_TG;
+    let slot_tiles = g.output_width().div_ceil(SLOTS_PER_THREADGROUP);
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &packed_attention_args(g, start_position, query_count));
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, key_cache);
+    enc.set_tensor(3, token_ids);
+    enc.set_tensor(4, selected_count);
+    enc.set_tensor(5, selector_status);
+    enc.set_tensor(6, logits);
+    enc.dispatch(
+        MTLSize {
+            width: head_groups * slot_tiles,
+            height: g.kv_heads,
+            depth: query_count,
+        },
+        MTLSize {
+            width: PACKED_ATTENTION_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn encode_attention_softmax_value_packed(
     ctx: &MetalContext,
@@ -5415,6 +5510,22 @@ fn encode_attention_softmax_value_packed(
     start_position: usize,
     query_count: usize,
 ) -> Result<(), MetalError> {
+    if configured_qwen4exp_qsa_gqa4_value_enabled() {
+        return encode_attention_softmax_value_packed_gqa4(
+            ctx,
+            enc,
+            query_gate_projection,
+            value_cache,
+            token_ids,
+            selected_count,
+            selector_status,
+            logits,
+            attention,
+            geometry,
+            start_position,
+            query_count,
+        );
+    }
     let g = geometry;
     let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_softmax_value_packed_f16")?;
     enc.set_pipeline(&pso);
@@ -5432,6 +5543,51 @@ fn encode_attention_softmax_value_packed(
             width: g.query_heads,
             height: query_count,
             depth: 1,
+        },
+        MTLSize {
+            width: ATTENTION_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_attention_softmax_value_packed_gqa4(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query_gate_projection: &MetalTensor,
+    value_cache: &MetalTensor,
+    token_ids: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    logits: &MetalTensor,
+    attention: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    start_position: usize,
+    query_count: usize,
+) -> Result<(), MetalError> {
+    const HEADS_PER_GROUP: usize = 4;
+    const SCRATCH_FLOATS: usize = HEADS_PER_GROUP * ATTENTION_SCRATCH_FLOATS;
+    let g = geometry;
+    let heads_per_kv = g.query_heads / g.kv_heads;
+    let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &packed_attention_args(g, start_position, query_count));
+    enc.set_tensor(1, query_gate_projection);
+    enc.set_tensor(2, value_cache);
+    enc.set_tensor(3, token_ids);
+    enc.set_tensor(4, selected_count);
+    enc.set_tensor(5, selector_status);
+    enc.set_tensor(6, logits);
+    enc.set_tensor(7, attention);
+    enc.set_threadgroup_memory(0, SCRATCH_FLOATS * size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: heads_per_kv / HEADS_PER_GROUP,
+            height: g.kv_heads,
+            depth: query_count,
         },
         MTLSize {
             width: ATTENTION_THREADS,
@@ -7317,15 +7473,16 @@ mod tests {
                 "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
                 "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
                 "kernel_qwen4exp_qsa_expand_ids_packed_i32",
-                "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+                "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
             ]
         );
         assert_dispatch_shape(
             &census,
             "qwen4exp.qsa.selected_attention.logits_packet",
-            "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+            "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
             [
-                (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                ((g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG)
+                    * g.output_width().div_ceil(32)) as u64,
                 g.kv_heads as u64,
                 QUERIES as u64,
             ],
@@ -7462,16 +7619,17 @@ mod tests {
                         "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
                         "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
                         "kernel_qwen4exp_qsa_expand_ids_packed_i32",
-                        "kernel_qwen4exp_qsa_attention_logits_packed_f16",
-                        "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                        "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
+                        "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
                     ]
                 );
                 assert_dispatch_shape(
                     &census,
                     "qwen4exp.qsa.selected_attention.packet",
-                    "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+                    "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
                     [
-                        (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                        ((g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG)
+                            * g.output_width().div_ceil(32)) as u64,
                         g.kv_heads as u64,
                         query_count as u64,
                     ],
@@ -7480,8 +7638,12 @@ mod tests {
                 assert_dispatch_shape(
                     &census,
                     "qwen4exp.qsa.selected_attention.packet",
-                    "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
-                    [g.query_heads as u64, query_count as u64, 1],
+                    "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
+                    [
+                        (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                        g.kv_heads as u64,
+                        query_count as u64,
+                    ],
                     [ATTENTION_THREADS as u64, 1, 1],
                 );
             }
@@ -7771,16 +7933,17 @@ mod tests {
                 .map(|row| row.kernel.as_str())
                 .collect::<Vec<_>>(),
             [
-                "kernel_qwen4exp_qsa_attention_logits_packed_f16",
-                "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
+                "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
             ]
         );
         assert_dispatch_shape(
             &census,
             "qwen4exp.qsa.selected_attention.faults",
-            "kernel_qwen4exp_qsa_attention_logits_packed_f16",
+            "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
             [
-                (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                ((g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG)
+                    * g.output_width().div_ceil(32)) as u64,
                 g.kv_heads as u64,
                 QUERIES as u64,
             ],
@@ -7789,8 +7952,12 @@ mod tests {
         assert_dispatch_shape(
             &census,
             "qwen4exp.qsa.selected_attention.faults",
-            "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
-            [g.query_heads as u64, QUERIES as u64, 1],
+            "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
+            [
+                (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                g.kv_heads as u64,
+                QUERIES as u64,
+            ],
             [ATTENTION_THREADS as u64, 1, 1],
         );
     }
@@ -7862,8 +8029,8 @@ mod tests {
                 "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
                 "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
                 "kernel_qwen4exp_qsa_expand_ids_packed_i32",
-                "kernel_qwen4exp_qsa_attention_logits_packed_f16",
-                "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
+                "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
                 "kernel_qwen4exp_qsa_audit_selected_i32",
             ] {
                 assert_eq!(
@@ -7874,7 +8041,9 @@ mod tests {
             }
             let softmax = names
                 .iter()
-                .position(|&name| name == "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16")
+                .position(|&name| {
+                    name == "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16"
+                })
                 .unwrap();
             let audit = names
                 .iter()
@@ -8066,8 +8235,8 @@ mod tests {
                 "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
                 "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
                 "kernel_qwen4exp_qsa_expand_ids_packed_i32",
-                "kernel_qwen4exp_qsa_attention_logits_packed_f16",
-                "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
+                "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
                 "kernel_qwen4exp_qsa_audit_selected_i32",
             ];
             for ordinal in 0..2 {

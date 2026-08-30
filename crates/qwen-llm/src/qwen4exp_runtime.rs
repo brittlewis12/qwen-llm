@@ -3675,8 +3675,8 @@ mod tests {
             "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
             "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
             "kernel_qwen4exp_qsa_expand_ids_packed_i32",
-            "kernel_qwen4exp_qsa_attention_logits_packed_f16",
-            "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+            "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
+            "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
             "kernel_qwen4exp_qsa_audit_selected_i32",
         ];
         assert!(crate::metal::mat_vec_q8_0_lcpp_enabled());

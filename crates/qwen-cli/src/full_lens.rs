@@ -17,8 +17,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::{CompressionMethod, ZipArchive};
 
 use crate::messages::{
-    Qwen38GenerationMode, Qwen38ReasoningEffort, parse_strict_messages_input,
-    render_qwen38_messages_prompt_with_generation,
+    Qwen38GenerationMode, Qwen38ReasoningEffort, QwenGenerationMode, parse_strict_messages_input,
+    render_qwen_messages_prompt_with_generation, render_qwen38_messages_prompt_with_generation,
 };
 
 use super::{
@@ -33,18 +33,9 @@ const FULL_SCHEMA: &str = "qwen.workspace_lens_full_transport";
 const FULL_SCHEMA_VERSION: u32 = 1;
 const FULL_MANIFEST_NAME: &str = "lens.json";
 const FULL_PAYLOAD_NAME: &str = "transport.f16le";
-const SOURCE_REPOSITORY: &str = "eyes-ml/Qwen3.8-27B_jacobian-lens";
-const SOURCE_REVISION: &str = "f8608c19b441f605d87ce46b80184f3774d75f2c";
-const SOURCE_FILENAME: &str = "Qwen3.8-27B_jacobian_lens.pt";
-const SOURCE_BYTES: u64 = 3_303_033_664;
-const SOURCE_SHA256: &str = "6b51f369e45a68b7eb775081ba5d195bb41360fb2abd15b0ab5b49881b638d49";
-const DATA_PICKLE_SHA256: &str = "3e58341435e2178dc78af9689fab7dd872661063e5087848b0099f436aa7d448";
-const PAYLOAD_BLAKE3: &str = "4a75d250d754d6e02f7d865bf84253a4804df3f49a7f5ccd6059c74f0f26b9e3";
-const ARCHIVE_ROOT: &str = "Qwen3.8-27B_jacobian_lens";
 const FITTED_CHECKPOINT_REVISION: &str = "32a8451f38193fc75b72146ac69afe12e8f6326d";
 const HIDDEN_SIZE: usize = 5_120;
 const SOURCE_LAYER_COUNT: usize = 63;
-const TARGET_LAYER: u32 = 63;
 const N_LAYERS: u32 = 64;
 const VOCAB_SIZE: u32 = 248_320;
 const MATRIX_BYTES: u64 = (HIDDEN_SIZE as u64) * (HIDDEN_SIZE as u64) * 2;
@@ -55,9 +46,97 @@ const MAX_FULL_READOUT_PROMPT_TOKENS: usize = 4_096;
 const MAX_FULL_READOUT_TOP_K: usize = 16;
 const MAX_TRACE_FULL_VECTOR_CELLS: usize = 32;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublishedProfileId {
+    Qwen38J,
+    Qwen36J,
+    Qwen36R,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PublishedProfile {
+    id: PublishedProfileId,
+    method: &'static str,
+    source_repository: &'static str,
+    source_revision: &'static str,
+    source_filename: &'static str,
+    source_bytes: u64,
+    source_sha256: &'static str,
+    data_pickle_sha256: &'static str,
+    expected_payload_blake3: &'static str,
+    archive_root: &'static str,
+    target_layer: u32,
+    identity_anchor_layer: Option<u32>,
+    base_model: &'static str,
+    fitted_checkpoint: &'static str,
+    fitted_checkpoint_revision: &'static str,
+    model_name_fragment: &'static str,
+    license: &'static str,
+}
+
+const PUBLISHED_PROFILES: [PublishedProfile; 3] = [
+    PublishedProfile {
+        id: PublishedProfileId::Qwen38J,
+        method: "j",
+        source_repository: "eyes-ml/Qwen3.8-27B_jacobian-lens",
+        source_revision: "f8608c19b441f605d87ce46b80184f3774d75f2c",
+        source_filename: "Qwen3.8-27B_jacobian_lens.pt",
+        source_bytes: 3_303_033_664,
+        source_sha256: "6b51f369e45a68b7eb775081ba5d195bb41360fb2abd15b0ab5b49881b638d49",
+        data_pickle_sha256: "3e58341435e2178dc78af9689fab7dd872661063e5087848b0099f436aa7d448",
+        expected_payload_blake3: "4a75d250d754d6e02f7d865bf84253a4804df3f49a7f5ccd6059c74f0f26b9e3",
+        archive_root: "Qwen3.8-27B_jacobian_lens",
+        target_layer: 63,
+        identity_anchor_layer: None,
+        base_model: "Qwen/Qwen3.8-27B",
+        fitted_checkpoint: "eyes-ml/Qwen3.8-27B",
+        fitted_checkpoint_revision: FITTED_CHECKPOINT_REVISION,
+        model_name_fragment: "qwen3.8",
+        license: "Apache-2.0",
+    },
+    PublishedProfile {
+        id: PublishedProfileId::Qwen36J,
+        method: "j",
+        source_repository: "camilablank/workspace-lenses",
+        source_revision: "d740106d1e0f95456dc8718fba2895e9c8ffd6ef",
+        source_filename: "qwen3.6-27b/j-lens/lens.pt",
+        source_bytes: 3_303_028_503,
+        source_sha256: "a036b35843d389b6655df721711917436fb79c83358c1861a4d58ad103a02724",
+        data_pickle_sha256: "4e0c9b7e0b2f362d3711813314073a66eb76657d84875f038d3688705a3a3f70",
+        expected_payload_blake3: "a76c67d0c977696970511bbaf23baeb9e02f6a526c873069b4bb18c92317965e",
+        archive_root: "lens",
+        target_layer: 62,
+        identity_anchor_layer: Some(62),
+        base_model: "Qwen/Qwen3.6-27B",
+        fitted_checkpoint: "Qwen/Qwen3.6-27B",
+        fitted_checkpoint_revision: "not_recorded_in_published_artifact",
+        model_name_fragment: "qwen3.6",
+        license: "MIT",
+    },
+    PublishedProfile {
+        id: PublishedProfileId::Qwen36R,
+        method: "r",
+        source_repository: "camilablank/workspace-lenses",
+        source_revision: "d740106d1e0f95456dc8718fba2895e9c8ffd6ef",
+        source_filename: "qwen3.6-27b/r-lens/lens.pt",
+        source_bytes: 3_303_028_567,
+        source_sha256: "fe4d0b6a17318760e67e7a5ed417fc5dbb8e66129c6944656f506b2f10ce6192",
+        data_pickle_sha256: "fcb9a42587adf9069e1fe5189d88c37ff3f505c5e62825ad5ce2da764ad4e424",
+        expected_payload_blake3: "0be52938f7a3b6f9e419017aa03036b70fe97e18d304193116b8263fac69f58e",
+        archive_root: "lens",
+        target_layer: 62,
+        identity_anchor_layer: Some(62),
+        base_model: "Qwen/Qwen3.6-27B",
+        fitted_checkpoint: "Qwen/Qwen3.6-27B",
+        fitted_checkpoint_revision: "not_recorded_in_published_artifact",
+        model_name_fragment: "qwen3.6",
+        license: "MIT",
+    },
+];
+
 #[derive(Debug, Args)]
 pub(crate) struct ImportFullArgs {
-    /// Exact pinned .pt asset from eyes-ml/Qwen3.8-27B_jacobian-lens.
+    /// One supported exact pinned published .pt transport asset.
     #[arg(long)]
     source: PathBuf,
 
@@ -91,7 +170,7 @@ pub(crate) struct CompareTransferArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ReadFullArgs {
-    /// Dense Qwen3.8 or Muse Glimmer GGUF used for capture and deployed output.
+    /// Dense Qwen3.6, Qwen3.8, or Muse Glimmer GGUF used for capture and output.
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 
@@ -162,7 +241,7 @@ pub(crate) struct ReadFullArgs {
         .args(["prompt", "token_ids", "messages"])
 ))]
 pub(crate) struct TraceFullArgs {
-    /// Dense Qwen3.8 GGUF model used for packed capture, final norm, and LM head.
+    /// Matching dense Qwen3.6 or Qwen3.8 GGUF used for packed capture and readout.
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -178,7 +257,7 @@ pub(crate) struct TraceFullArgs {
     #[arg(long, value_delimiter = ',')]
     token_ids: Option<Vec<i32>>,
 
-    /// Strict Qwen3.8 system/user/assistant message array or wrapper JSON.
+    /// Strict system/user/assistant message array or wrapper JSON.
     #[arg(long)]
     messages: Option<PathBuf>,
 
@@ -202,7 +281,7 @@ pub(crate) struct TraceFullArgs {
     #[arg(long, default_value_t = MAX_RESEARCH_PACKED_READOUT_POSITIONS)]
     max_tokens: usize,
 
-    /// Transported J-space vectors to include as layer:position cells.
+    /// Transported target-space vectors to include as layer:position cells.
     #[arg(long = "vectors", value_delimiter = ',')]
     vectors: Vec<TraceFullVectorCell>,
 }
@@ -302,11 +381,25 @@ struct PublishedFit {
     n_prompts: u64,
     max_sequence_length: u32,
     skip_first: u32,
-    valid_positions_per_prompt: u32,
-    dim_batch: u32,
-    model_execution_dtype: String,
-    accumulator_dtype: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    valid_positions_per_prompt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dim_batch: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_execution_dtype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accumulator_dtype: Option<String>,
     serialized_dtype: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docs_consumed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    n_positions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    config_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    weighting: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    corpus_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -381,7 +474,7 @@ struct TransferFullLens {
     n_prompts: u64,
     max_sequence_length: u32,
     skip_first: u32,
-    valid_positions_per_prompt: u32,
+    valid_positions_per_prompt: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -576,6 +669,10 @@ struct TraceFullLens {
     method: String,
     target_layer: u32,
     source_site: String,
+    source_repository: String,
+    source_revision: String,
+    source_filename: String,
+    payload_blake3: String,
     scoring: &'static str,
 }
 
@@ -675,8 +772,10 @@ struct OccurrenceAccumulator {
 struct ArchiveSpec<'a> {
     root: &'a str,
     layer_count: usize,
+    hidden_size: usize,
     matrix_bytes: u64,
     data_pickle_sha256: &'a str,
+    identity_storage_index: Option<usize>,
 }
 
 pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
@@ -687,30 +786,35 @@ pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
     args.output = resolve_output_path(&args.output)?;
     let (mut source, source_length) = open_regular_file(&args.source)?;
     ensure!(
-        source_length as u64 == SOURCE_BYTES,
-        "{} length {} != pinned source length {}",
+        PUBLISHED_PROFILES
+            .iter()
+            .any(|profile| profile.source_bytes == source_length as u64),
+        "{} length {} does not match any supported pinned full-lens asset",
         args.source.display(),
         source_length,
-        SOURCE_BYTES
     );
     let source_metadata = source
         .metadata()
         .with_context(|| format!("inspect opened {}", args.source.display()))?;
     let source_modified = source_metadata.modified().ok();
     let source_sha256 = hash_sha256(&mut source, &args.source)?;
-    ensure!(
-        source_sha256 == SOURCE_SHA256,
-        "{} SHA-256 {} != pinned source SHA-256 {}",
-        args.source.display(),
-        source_sha256,
-        SOURCE_SHA256
-    );
+    let profile = profile_for_source(source_length as u64, &source_sha256).with_context(|| {
+        format!(
+            "{} SHA-256 {} does not identify a supported pinned full-lens asset",
+            args.source.display(),
+            source_sha256
+        )
+    })?;
 
     prepare_output_directory(&args.output)?;
     let manifest_path = args.output.join(FULL_MANIFEST_NAME);
     if manifest_path.exists() {
         let manifest: FullLensManifest = read_json_file(&manifest_path)?;
         validate_manifest(&manifest)?;
+        ensure!(
+            profile_for_manifest(&manifest)?.id == profile.id,
+            "existing output artifact was imported from a different published lens"
+        );
         verify_payload(&args.output, &manifest.payload)?;
         println!("{}", serde_json::to_string_pretty(&manifest)?);
         return Ok(());
@@ -722,10 +826,14 @@ pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
     let mut archive = ZipArchive::new(source)
         .with_context(|| format!("open pinned torch ZIP {}", args.source.display()))?;
     let spec = ArchiveSpec {
-        root: ARCHIVE_ROOT,
+        root: profile.archive_root,
         layer_count: SOURCE_LAYER_COUNT,
+        hidden_size: HIDDEN_SIZE,
         matrix_bytes: MATRIX_BYTES,
-        data_pickle_sha256: DATA_PICKLE_SHA256,
+        data_pickle_sha256: profile.data_pickle_sha256,
+        identity_storage_index: profile
+            .identity_anchor_layer
+            .and_then(|layer| usize::try_from(layer).ok()),
     };
     validate_archive(&mut archive, spec)?;
 
@@ -744,7 +852,7 @@ pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
             .with_context(|| format!("sync full-lens staging payload {}", staging.display()))?;
         drop(output);
         ensure!(
-            payload.blake3 == PAYLOAD_BLAKE3,
+            payload.blake3 == profile.expected_payload_blake3,
             "imported transport payload BLAKE3 does not match the pinned source payload"
         );
 
@@ -753,7 +861,7 @@ pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
             .metadata()
             .with_context(|| format!("reinspect opened {}", args.source.display()))?;
         ensure!(
-            final_metadata.len() == SOURCE_BYTES
+            final_metadata.len() == profile.source_bytes
                 && final_metadata.modified().ok() == source_modified,
             "pinned source changed while it was being imported"
         );
@@ -765,7 +873,7 @@ pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
     }
     let payload = import?;
 
-    let manifest = published_manifest(payload);
+    let manifest = published_manifest(profile, payload);
     validate_manifest(&manifest)?;
     publish_immutable(
         &manifest_path,
@@ -781,6 +889,10 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
     validate_artifact_directory(&args.native_readouts, "native readouts")?;
     let full_manifest: FullLensManifest = read_json_file(&args.full_lens.join(FULL_MANIFEST_NAME))?;
     validate_manifest(&full_manifest)?;
+    ensure!(
+        profile_for_manifest(&full_manifest)?.id == PublishedProfileId::Qwen38J,
+        "transfer comparison currently supports only the published Qwen3.8 J lens"
+    );
     let (native_manifest, native_values) = load_native_j_readouts(&args.native_readouts)?;
     ensure!(
         native_manifest.readouts.token_ids.len() <= MAX_PROJECTED_FULL_TOKENS,
@@ -889,7 +1001,9 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
         .enumerate()
         .map(|(slot, layer)| (layer, slot))
         .collect();
-    let mut matrix = vec![0u8; MATRIX_BYTES as usize];
+    let matrix_bytes = transport_matrix_bytes(&full_manifest)?;
+    let mut matrix =
+        vec![0u8; usize::try_from(matrix_bytes).context("full-lens matrix byte count")?];
     let mut payload_hasher = Blake3Hasher::new();
     let mut directions = Vec::with_capacity(source_slots.len() * token_count);
     let projection_started = Instant::now();
@@ -1017,24 +1131,14 @@ pub(crate) fn project_full_token_directions(
     source_layers: &[u32],
     loaded: &qwen_llm::runtime::LoadedModel,
 ) -> Result<ProjectedFullTokenDirections> {
-    validate_artifact_directory(artifact, "published full J lens")?;
+    validate_artifact_directory(artifact, "published full transport lens")?;
     let manifest: FullLensManifest = read_json_file(&artifact.join(FULL_MANIFEST_NAME))?;
     validate_manifest(&manifest)?;
+    validate_deployed_model(&manifest, loaded)?;
     let arch = loaded.arch();
     ensure!(
-        arch.n_layer == manifest.model.n_layers
-            && arch.hidden_size == manifest.model.hidden_size
-            && arch.vocab_size == manifest.model.vocab_size
-            && arch == qwen_llm::model::QWEN3_27B,
-        "deployed model does not match the published full J-lens geometry"
-    );
-    ensure!(
-        qwen38_model_metadata(loaded.gguf()),
-        "published full J-lens directions require Qwen3.8 model and tokenizer metadata"
-    );
-    ensure!(
         !token_ids.is_empty() && token_ids.len() <= MAX_PROJECTED_FULL_TOKENS,
-        "published full J lens requires 1..={} selected token IDs",
+        "published full transport lens requires 1..={} selected token IDs",
         MAX_PROJECTED_FULL_TOKENS
     );
     let mut unique_tokens = BTreeSet::new();
@@ -1042,7 +1146,7 @@ pub(crate) fn project_full_token_directions(
         token_ids
             .iter()
             .all(|&token| token < arch.vocab_size && unique_tokens.insert(token)),
-        "published full J-lens token IDs must be unique and inside the model vocabulary"
+        "published full transport token IDs must be unique and inside the model vocabulary"
     );
     ensure!(
         !source_layers.is_empty()
@@ -1050,15 +1154,15 @@ pub(crate) fn project_full_token_directions(
             && source_layers
                 .iter()
                 .all(|layer| manifest.transport.source_layers.contains(layer)),
-        "published full J-lens source layers must be nonempty, sorted, unique artifact layers"
+        "published full transport source layers must be nonempty, sorted, unique artifact layers"
     );
 
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(1))
-        .context("create published full J-lens projection sequence")?;
+        .context("create published full transport projection sequence")?;
     let research = loaded
         .research_session(&mut sequence)
-        .context("open published full J-lens projection session")?;
+        .context("open published full transport projection session")?;
     let selected = research
         .selected_token_readouts(token_ids)
         .context("derive deployed-model selected-token covectors")?;
@@ -1067,19 +1171,21 @@ pub(crate) fn project_full_token_directions(
         .len()
         .checked_mul(token_ids.len())
         .and_then(|value| value.checked_mul(hidden_size))
-        .context("published full J-lens projected direction count overflow")?;
+        .context("published full transport projected direction count overflow")?;
     let mut values = Vec::new();
     values
         .try_reserve_exact(projected_values)
-        .context("allocate published full J-lens projected directions")?;
+        .context("allocate published full transport projected directions")?;
 
     let payload_path = artifact.join(&manifest.payload.path);
     let (mut payload, payload_length) = open_regular_file(&payload_path)?;
     ensure!(
         payload_length as u64 == manifest.payload.byte_length,
-        "published full J-lens payload length does not match its manifest"
+        "published full transport payload length does not match its manifest"
     );
-    let matrix_length = usize::try_from(MATRIX_BYTES).context("full J-lens matrix byte count")?;
+    let matrix_bytes = transport_matrix_bytes(&manifest)?;
+    let matrix_length =
+        usize::try_from(matrix_bytes).context("full transport matrix byte count")?;
     let mut matrix = vec![0_u8; matrix_length];
     for &layer in source_layers {
         let layer_slot = manifest
@@ -1087,34 +1193,37 @@ pub(crate) fn project_full_token_directions(
             .source_layers
             .iter()
             .position(|&candidate| candidate == layer)
-            .context("published full J-lens layer disappeared after validation")?;
+            .context("published full transport layer disappeared after validation")?;
         let offset = u64::try_from(layer_slot)
-            .context("published full J-lens layer slot does not fit u64")?
-            .checked_mul(MATRIX_BYTES)
-            .context("published full J-lens matrix offset overflow")?;
+            .context("published full transport layer slot does not fit u64")?
+            .checked_mul(matrix_bytes)
+            .context("published full transport matrix offset overflow")?;
         payload
             .seek(SeekFrom::Start(offset))
-            .with_context(|| format!("seek published full J-lens source layer {layer}"))?;
+            .with_context(|| format!("seek published full transport source layer {layer}"))?;
         payload
             .read_exact(&mut matrix)
-            .with_context(|| format!("read published full J-lens source layer {layer}"))?;
+            .with_context(|| format!("read published full transport source layer {layer}"))?;
         ensure_finite_f16(&matrix, layer as usize, 0)?;
         let projected = research
             .project_f16_transport_readouts(&matrix, &selected)
-            .with_context(|| format!("project published full J-lens source layer {layer}"))?;
+            .with_context(|| format!("project published full transport source layer {layer}"))?;
         ensure!(
             projected.len() == token_ids.len() * hidden_size,
-            "published full J-lens projection returned an invalid shape"
+            "published full transport projection returned an invalid shape"
         );
         values.extend(projected);
     }
     ensure!(
         values.len() == projected_values && values.iter().all(|value| value.is_finite()),
-        "published full J-lens projection returned invalid values"
+        "published full transport projection returned invalid values"
     );
 
     Ok(ProjectedFullTokenDirections {
-        method: "published_j_selected_token_numerator".into(),
+        method: format!(
+            "published_{}_selected_token_numerator",
+            manifest.transport.method
+        ),
         target_layer: manifest.transport.target_layer,
         source_layers: source_layers.to_vec(),
         token_ids: selected
@@ -1155,17 +1264,8 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     let loaded = runtime
         .load_model(&args.model)
         .with_context(|| format!("load model {}", args.model.display()))?;
+    validate_deployed_model(&manifest, &loaded)?;
     let arch = loaded.arch();
-    ensure!(
-        arch.n_layer == manifest.model.n_layers
-            && arch.hidden_size == manifest.model.hidden_size
-            && arch.vocab_size == manifest.model.vocab_size,
-        "deployed model geometry does not match the published full lens"
-    );
-    ensure!(
-        arch == qwen_llm::model::QWEN3_27B,
-        "deployed model does not match the exact dense Qwen3 27B architecture contract"
-    );
     let identity = loaded.research_identity();
     let content = checkpoint_content_identity(
         loaded.gguf(),
@@ -1242,7 +1342,8 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         "full lens payload length does not match its manifest"
     );
     let hidden_size = arch.hidden_size as usize;
-    let matrix_len = usize::try_from(MATRIX_BYTES).context("full-lens matrix byte count")?;
+    let matrix_len = usize::try_from(transport_matrix_bytes(&manifest)?)
+        .context("full-lens matrix byte count")?;
     let mut matrix = Vec::new();
     matrix
         .try_reserve_exact(matrix_len)
@@ -1420,6 +1521,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let manifest_path = args.full_lens.join(FULL_MANIFEST_NAME);
     let manifest: FullLensManifest = read_json_file(&manifest_path)?;
     validate_trace_full_manifest(&manifest)?;
+    let profile = profile_for_manifest(&manifest)?;
     let layers = if args.layers.is_empty() {
         manifest.transport.source_layers.clone()
     } else {
@@ -1437,17 +1539,8 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let loaded = runtime
         .load_model(&args.model)
         .with_context(|| format!("load model {}", args.model.display()))?;
+    validate_deployed_model(&manifest, &loaded)?;
     let arch = loaded.arch();
-    ensure!(
-        arch.n_layer == manifest.model.n_layers
-            && arch.hidden_size == manifest.model.hidden_size
-            && arch.vocab_size == manifest.model.vocab_size,
-        "deployed model geometry does not match the published full lens"
-    );
-    ensure!(
-        arch == qwen_llm::model::QWEN3_27B,
-        "deployed model does not match the exact dense Qwen3 27B architecture contract"
-    );
     let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
     let (input_source, add_special_tokens, token_ids) =
         match (&args.prompt, &args.token_ids, &args.messages) {
@@ -1470,18 +1563,24 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
                 ("token_ids", None, token_ids.clone())
             }
             (None, None, Some(path)) => {
-                ensure!(
-                    qwen38_model_metadata(loaded.gguf()),
-                    "--messages requires Qwen3.8 tokenizer metadata"
-                );
                 let raw = std::fs::read_to_string(path)
                     .with_context(|| format!("read messages {}", path.display()))?;
                 let messages = parse_strict_messages_input(&raw, &path.display().to_string())?;
-                let rendered = render_qwen38_messages_prompt_with_generation(
-                    &messages,
-                    true,
-                    Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
-                );
+                let rendered = match profile.id {
+                    PublishedProfileId::Qwen38J => render_qwen38_messages_prompt_with_generation(
+                        &messages,
+                        true,
+                        Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
+                    ),
+                    PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => {
+                        render_qwen_messages_prompt_with_generation(
+                            &messages,
+                            false,
+                            true,
+                            QwenGenerationMode::Auto,
+                        )
+                    }
+                };
                 (
                     "messages",
                     Some(false),
@@ -1525,7 +1624,8 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         payload_length as u64 == manifest.payload.byte_length,
         "full lens payload length does not match its manifest"
     );
-    let matrix_len = usize::try_from(MATRIX_BYTES).context("full-lens matrix byte count")?;
+    let matrix_bytes = transport_matrix_bytes(&manifest)?;
+    let matrix_len = usize::try_from(matrix_bytes).context("full-lens matrix byte count")?;
     let mut matrix = Vec::new();
     matrix
         .try_reserve_exact(matrix_len)
@@ -1574,7 +1674,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             .position(|&candidate| candidate == layer)
             .with_context(|| format!("full lens has no payload slot for layer {layer}"))?;
         let matrix_offset = (layer_slot as u64)
-            .checked_mul(MATRIX_BYTES)
+            .checked_mul(matrix_bytes)
             .context("full-lens matrix offset overflow")?;
         let read_started = Instant::now();
         payload_file
@@ -1646,7 +1746,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     }
     let occurrences = aggregate_trace_full_occurrences(&cells, &layers);
     let vectors = (!args.vectors.is_empty()).then(|| TraceFullVectors {
-        operation: "row_major_f16_j_transport_times_f32_post_block_residual",
+        operation: "row_major_f16_transport_times_f32_post_block_residual",
         stage: "transported_target_coordinate_before_output_rmsnorm_and_lm_head",
         value_dtype: "f32",
         hidden_coordinate: "zero_based_target_layer_residual_coordinate",
@@ -1659,10 +1759,14 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         schema: "qwen.lens.trace",
         schema_version: 2,
         lens: TraceFullLens {
-            kind: "published_full_j",
+            kind: "published_full_transport",
             method: manifest.transport.method,
             target_layer: manifest.transport.target_layer,
             source_site: manifest.transport.capture_site,
+            source_repository: manifest.source.repository,
+            source_revision: manifest.source.revision,
+            source_filename: manifest.source.filename,
+            payload_blake3: manifest.payload.blake3,
             scoring: "deployed_output_rmsnorm_and_lm_head_full_vocabulary_logits_no_softmax",
         },
         input_source,
@@ -1772,47 +1876,67 @@ fn validate_trace_full_manifest(manifest: &FullLensManifest) -> Result<()> {
         "unsupported full lens schema version"
     );
     ensure!(manifest.status == "complete", "full lens is not complete");
+    let profile = profile_for_manifest(manifest)?;
     ensure!(
-        manifest.transport
-            == (FullTransport {
-                method: "j".into(),
-                target_layer: TARGET_LAYER,
-                source_layers: (0..SOURCE_LAYER_COUNT as u32).collect(),
-                capture_site: "post_block_residual".into(),
-                orientation: ORIENTATION.into(),
-                hidden_size: HIDDEN_SIZE as u32,
-                bias: "none".into(),
-                storage_dtype: "f16_le".into(),
-            }),
+        manifest.transport == canonical_transport(profile),
         "full lens transport contract is not canonical"
     );
     ensure!(
-        manifest.model.n_layers == N_LAYERS
-            && manifest.model.hidden_size == HIDDEN_SIZE as u32
-            && manifest.model.vocab_size == VOCAB_SIZE,
+        manifest.model == canonical_model(profile),
         "full lens model geometry is not canonical"
     );
     ensure!(
         manifest.payload.path == FULL_PAYLOAD_NAME
             && manifest.payload.dtype == "f16_le"
             && manifest.payload.shape == [SOURCE_LAYER_COUNT, HIDDEN_SIZE, HIDDEN_SIZE]
-            && manifest.payload.byte_length == PAYLOAD_BYTES,
+            && manifest.payload.byte_length == PAYLOAD_BYTES
+            && manifest.payload.blake3 == profile.expected_payload_blake3,
         "full lens payload descriptor is not canonical"
     );
     Ok(())
 }
 
-fn qwen38_model_metadata(gguf: &GgufFile) -> bool {
+fn model_metadata_matches_profile(gguf: &GgufFile, profile: PublishedProfile) -> bool {
     let named = [
         gguf.get_str("general.name"),
         gguf.get_str("general.base_model.0.name"),
     ]
     .into_iter()
     .flatten()
-    .any(|value| value.to_ascii_lowercase().contains("qwen3.8"));
+    .any(|value| {
+        let value = value.to_ascii_lowercase();
+        value.contains(profile.model_name_fragment) && value.contains("27b")
+    });
     named
         && gguf.get_str("tokenizer.ggml.model") == Some("gpt2")
         && gguf.get_str("tokenizer.ggml.pre") == Some("qwen35")
+}
+
+fn validate_deployed_model(
+    manifest: &FullLensManifest,
+    loaded: &qwen_llm::runtime::LoadedModel,
+) -> Result<()> {
+    let profile = profile_for_manifest(manifest)?;
+    let arch = loaded.arch();
+    let mut expected = qwen_llm::model::QWEN3_27B;
+    ensure!(
+        arch.mtp_n_hidden_layers <= expected.mtp_n_hidden_layers,
+        "deployed model has an unsupported MTP inventory"
+    );
+    expected.mtp_n_hidden_layers = arch.mtp_n_hidden_layers;
+    ensure!(
+        arch.n_layer == manifest.model.n_layers
+            && arch.hidden_size == manifest.model.hidden_size
+            && arch.vocab_size == manifest.model.vocab_size
+            && arch == expected,
+        "deployed model does not match the published full transport geometry"
+    );
+    ensure!(
+        model_metadata_matches_profile(loaded.gguf(), profile),
+        "deployed model metadata does not match published asset {}",
+        profile.source_filename
+    );
+    Ok(())
 }
 
 fn aggregate_trace_full_occurrences(
@@ -2200,26 +2324,40 @@ fn aggregate_layer_metrics(
         .collect())
 }
 
-fn published_manifest(payload: FullPayload) -> FullLensManifest {
+fn profile_for_source(byte_length: u64, sha256: &str) -> Option<PublishedProfile> {
+    PUBLISHED_PROFILES
+        .iter()
+        .copied()
+        .find(|profile| profile.source_bytes == byte_length && profile.source_sha256 == sha256)
+}
+
+fn profile_for_manifest(manifest: &FullLensManifest) -> Result<PublishedProfile> {
+    PUBLISHED_PROFILES
+        .iter()
+        .copied()
+        .find(|profile| {
+            manifest.transport.method == profile.method
+                && manifest.source.repository == profile.source_repository
+                && manifest.source.revision == profile.source_revision
+                && manifest.source.filename == profile.source_filename
+                && manifest.source.byte_length == profile.source_bytes
+                && manifest.source.sha256 == profile.source_sha256
+                && manifest.source.data_pickle_sha256 == profile.data_pickle_sha256
+        })
+        .context("full lens manifest does not identify a supported pinned published asset")
+}
+
+fn published_manifest(profile: PublishedProfile, payload: FullPayload) -> FullLensManifest {
     FullLensManifest {
         schema: FULL_SCHEMA.into(),
         schema_version: FULL_SCHEMA_VERSION,
         status: "complete".into(),
-        transport: FullTransport {
-            method: "j".into(),
-            target_layer: TARGET_LAYER,
-            source_layers: (0..SOURCE_LAYER_COUNT as u32).collect(),
-            capture_site: "post_block_residual".into(),
-            orientation: ORIENTATION.into(),
-            hidden_size: HIDDEN_SIZE as u32,
-            bias: "none".into(),
-            storage_dtype: "f16_le".into(),
-        },
-        model: canonical_model(),
-        fit: canonical_fit(),
-        source: canonical_source(),
+        transport: canonical_transport(profile),
+        model: canonical_model(profile),
+        fit: canonical_fit(profile),
+        source: canonical_source(profile),
         payload,
-        transfer: canonical_transfer_policy(),
+        transfer: canonical_transfer_policy(profile),
         provenance: ImportProvenance {
             build_commit: env!("QWEN_BUILD_COMMIT").into(),
             build_dirty: env!("QWEN_BUILD_DIRTY").into(),
@@ -2231,11 +2369,24 @@ fn published_manifest(payload: FullPayload) -> FullLensManifest {
     }
 }
 
-fn canonical_model() -> FullModel {
+fn canonical_transport(profile: PublishedProfile) -> FullTransport {
+    FullTransport {
+        method: profile.method.into(),
+        target_layer: profile.target_layer,
+        source_layers: (0..SOURCE_LAYER_COUNT as u32).collect(),
+        capture_site: "post_block_residual".into(),
+        orientation: ORIENTATION.into(),
+        hidden_size: HIDDEN_SIZE as u32,
+        bias: "none".into(),
+        storage_dtype: "f16_le".into(),
+    }
+}
+
+fn canonical_model(profile: PublishedProfile) -> FullModel {
     FullModel {
-        base_model: "Qwen/Qwen3.8-27B".into(),
-        fitted_checkpoint: "eyes-ml/Qwen3.8-27B".into(),
-        fitted_checkpoint_revision: FITTED_CHECKPOINT_REVISION.into(),
+        base_model: profile.base_model.into(),
+        fitted_checkpoint: profile.fitted_checkpoint.into(),
+        fitted_checkpoint_revision: profile.fitted_checkpoint_revision.into(),
         architecture: "qwen3_hybrid_dense".into(),
         n_layers: N_LAYERS,
         hidden_size: HIDDEN_SIZE as u32,
@@ -2245,38 +2396,74 @@ fn canonical_model() -> FullModel {
     }
 }
 
-fn canonical_fit() -> PublishedFit {
-    PublishedFit {
-        fitter: "neuronpedia_utils/jlens/fit_lens.py".into(),
-        fitter_revision: "7724688596eb734a0662f911bf183151a5c66b2f".into(),
-        dataset: "Salesforce/wikitext:wikitext-103-raw-v1".into(),
-        split: "train".into(),
-        n_prompts: 1_000,
-        max_sequence_length: 128,
-        skip_first: 16,
-        valid_positions_per_prompt: 111,
-        dim_batch: 8,
-        model_execution_dtype: "bfloat16".into(),
-        accumulator_dtype: "float32".into(),
-        serialized_dtype: "float16".into(),
+fn canonical_fit(profile: PublishedProfile) -> PublishedFit {
+    match profile.id {
+        PublishedProfileId::Qwen38J => PublishedFit {
+            fitter: "neuronpedia_utils/jlens/fit_lens.py".into(),
+            fitter_revision: "7724688596eb734a0662f911bf183151a5c66b2f".into(),
+            dataset: "Salesforce/wikitext:wikitext-103-raw-v1".into(),
+            split: "train".into(),
+            n_prompts: 1_000,
+            max_sequence_length: 128,
+            skip_first: 16,
+            valid_positions_per_prompt: Some(111),
+            dim_batch: Some(8),
+            model_execution_dtype: Some("bfloat16".into()),
+            accumulator_dtype: Some("float32".into()),
+            serialized_dtype: "float16".into(),
+            docs_consumed: None,
+            n_positions: None,
+            config_json: None,
+            weighting: None,
+            corpus_mode: None,
+        },
+        PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => PublishedFit {
+            fitter: "jlens.fit".into(),
+            fitter_revision: "modal".into(),
+            dataset: "NeelNanda/pile-10k".into(),
+            split: "not_recorded_in_published_artifact".into(),
+            n_prompts: 25,
+            max_sequence_length: 128,
+            skip_first: 4,
+            valid_positions_per_prompt: None,
+            dim_batch: None,
+            model_execution_dtype: Some("bfloat16".into()),
+            accumulator_dtype: None,
+            serialized_dtype: "float16".into(),
+            docs_consumed: Some(25),
+            n_positions: Some("0.0".into()),
+            config_json: Some(match profile.id {
+                PublishedProfileId::Qwen36J => r#"{"estimator": "standard"}"#.into(),
+                PublishedProfileId::Qwen36R => r#"{"estimator": "relp", "rules": {"ln_rule": true, "identity_rule": true, "half_rule": true, "include_qk_norms": false}}"#.into(),
+                PublishedProfileId::Qwen38J => unreachable!(),
+            }),
+            weighting: Some("uniform".into()),
+            corpus_mode: Some("pretrain".into()),
+        },
     }
 }
 
-fn canonical_source() -> PublishedSource {
+fn canonical_source(profile: PublishedProfile) -> PublishedSource {
     PublishedSource {
-        repository: SOURCE_REPOSITORY.into(),
-        revision: SOURCE_REVISION.into(),
-        filename: SOURCE_FILENAME.into(),
-        byte_length: SOURCE_BYTES,
-        sha256: SOURCE_SHA256.into(),
-        data_pickle_sha256: DATA_PICKLE_SHA256.into(),
-        license: "Apache-2.0".into(),
+        repository: profile.source_repository.into(),
+        revision: profile.source_revision.into(),
+        filename: profile.source_filename.into(),
+        byte_length: profile.source_bytes,
+        sha256: profile.source_sha256.into(),
+        data_pickle_sha256: profile.data_pickle_sha256.into(),
+        license: profile.license.into(),
     }
 }
 
-fn canonical_transfer_policy() -> TransferPolicy {
+fn canonical_transfer_policy(profile: PublishedProfile) -> TransferPolicy {
     TransferPolicy {
-        fitted_weight_precision: "bfloat16".into(),
+        fitted_weight_precision: match profile.id {
+            PublishedProfileId::Qwen38J => "bfloat16",
+            PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => {
+                "bfloat16_model_float16_serialized_transport"
+            }
+        }
+        .into(),
         deployed_checkpoint_policy: "geometry_preserving_transfer_requires_validation".into(),
         validation_status: "unvalidated".into(),
     }
@@ -2289,30 +2476,21 @@ fn validate_manifest(manifest: &FullLensManifest) -> Result<()> {
         "unsupported full lens schema version"
     );
     ensure!(manifest.status == "complete", "full lens is not complete");
+    let profile = profile_for_manifest(manifest)?;
     ensure!(
-        manifest.transport
-            == (FullTransport {
-                method: "j".into(),
-                target_layer: TARGET_LAYER,
-                source_layers: (0..SOURCE_LAYER_COUNT as u32).collect(),
-                capture_site: "post_block_residual".into(),
-                orientation: ORIENTATION.into(),
-                hidden_size: HIDDEN_SIZE as u32,
-                bias: "none".into(),
-                storage_dtype: "f16_le".into(),
-            }),
+        manifest.transport == canonical_transport(profile),
         "full lens transport contract is not canonical"
     );
     ensure!(
-        manifest.model == canonical_model(),
+        manifest.model == canonical_model(profile),
         "full lens model contract is not canonical"
     );
     ensure!(
-        manifest.fit == canonical_fit(),
+        manifest.fit == canonical_fit(profile),
         "full lens fit contract is not canonical"
     );
     ensure!(
-        manifest.source == canonical_source(),
+        manifest.source == canonical_source(profile),
         "full lens source provenance is not canonical"
     );
     ensure!(
@@ -2320,11 +2498,11 @@ fn validate_manifest(manifest: &FullLensManifest) -> Result<()> {
             && manifest.payload.dtype == "f16_le"
             && manifest.payload.shape == [SOURCE_LAYER_COUNT, HIDDEN_SIZE, HIDDEN_SIZE]
             && manifest.payload.byte_length == PAYLOAD_BYTES
-            && manifest.payload.blake3 == PAYLOAD_BLAKE3,
+            && manifest.payload.blake3 == profile.expected_payload_blake3,
         "full lens payload descriptor is not canonical"
     );
     ensure!(
-        manifest.transfer == canonical_transfer_policy(),
+        manifest.transfer == canonical_transfer_policy(profile),
         "full lens transfer policy is not fail-closed"
     );
     validate_token_build_identity(
@@ -2345,6 +2523,19 @@ fn validate_archive<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     spec: ArchiveSpec<'_>,
 ) -> Result<()> {
+    let expected_matrix_bytes = (spec.hidden_size as u64)
+        .checked_mul(spec.hidden_size as u64)
+        .and_then(|words| words.checked_mul(2))
+        .context("pinned matrix byte count overflow")?;
+    ensure!(
+        spec.matrix_bytes == expected_matrix_bytes,
+        "pinned matrix byte count does not match hidden size"
+    );
+    ensure!(
+        spec.identity_storage_index
+            .is_none_or(|index| index < spec.layer_count),
+        "identity storage index is outside the archive layer inventory"
+    );
     let expected_names = expected_archive_names(spec);
     ensure!(
         archive.len() == expected_names.len(),
@@ -2475,6 +2666,14 @@ fn extract_payload<R: Read + Seek, W: Write>(
                 layer,
                 matrix_byte_offset as usize / 2,
             )?;
+            if spec.identity_storage_index == Some(layer) {
+                ensure_identity_f16(
+                    &buffer[..chunk_length],
+                    matrix_byte_offset as usize / 2,
+                    spec.hidden_size,
+                    layer,
+                )?;
+            }
             output
                 .write_all(&buffer[..chunk_length])
                 .with_context(|| format!("write imported storage layer {layer}"))?;
@@ -2504,10 +2703,39 @@ fn extract_payload<R: Read + Seek, W: Write>(
     Ok(FullPayload {
         path: FULL_PAYLOAD_NAME.into(),
         dtype: "f16_le".into(),
-        shape: [spec.layer_count, HIDDEN_SIZE, HIDDEN_SIZE],
+        shape: [spec.layer_count, spec.hidden_size, spec.hidden_size],
         byte_length,
         blake3: hasher.finalize().to_hex().to_string(),
     })
+}
+
+fn ensure_identity_f16(
+    bytes: &[u8],
+    word_offset: usize,
+    hidden_size: usize,
+    layer: usize,
+) -> Result<()> {
+    ensure!(hidden_size > 0, "identity matrix hidden size is zero");
+    let (words, remainder) = bytes.as_chunks::<2>();
+    ensure!(remainder.is_empty(), "identity F16 chunk has trailing byte");
+    for (index, chunk) in words.iter().enumerate() {
+        let coordinate = word_offset
+            .checked_add(index)
+            .context("identity matrix coordinate overflow")?;
+        let row = coordinate / hidden_size;
+        let column = coordinate % hidden_size;
+        let bits = u16::from_le_bytes(*chunk);
+        let valid = if row == column {
+            bits == 0x3c00
+        } else {
+            bits & 0x7fff == 0
+        };
+        ensure!(
+            valid,
+            "pinned storage layer {layer} is not the claimed F16 identity at row {row}, column {column}"
+        );
+    }
+    Ok(())
 }
 
 fn ensure_finite_f16(bytes: &[u8], layer: usize, word_offset: usize) -> Result<()> {
@@ -2645,6 +2873,26 @@ fn publish_streamed_payload(
     sync_directory(destination.parent().unwrap_or_else(|| Path::new(".")))
 }
 
+fn transport_matrix_bytes(manifest: &FullLensManifest) -> Result<u64> {
+    ensure!(
+        manifest.payload.dtype == "f16_le"
+            && manifest.payload.shape[0] == manifest.transport.source_layers.len()
+            && manifest.payload.shape[1] == manifest.transport.hidden_size as usize
+            && manifest.payload.shape[2] == manifest.transport.hidden_size as usize,
+        "full lens payload shape does not match its transport"
+    );
+    let matrix_bytes = u64::from(manifest.transport.hidden_size)
+        .checked_mul(u64::from(manifest.transport.hidden_size))
+        .and_then(|words| words.checked_mul(2))
+        .context("full lens matrix byte count overflow")?;
+    ensure!(
+        matrix_bytes.checked_mul(manifest.transport.source_layers.len() as u64)
+            == Some(manifest.payload.byte_length),
+        "full lens payload length does not match its matrix inventory"
+    );
+    Ok(matrix_bytes)
+}
+
 fn verify_payload(directory: &Path, payload: &FullPayload) -> Result<()> {
     ensure!(
         Path::new(&payload.path).components().count() == 1,
@@ -2661,10 +2909,23 @@ fn verify_payload(directory: &Path, payload: &FullPayload) -> Result<()> {
     );
     let mut hasher = Blake3Hasher::new();
     let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
-    for layer in 0..SOURCE_LAYER_COUNT {
-        let mut remaining = MATRIX_BYTES;
+    let hidden_size = payload.shape[1];
+    ensure!(
+        payload.dtype == "f16_le" && hidden_size > 0 && payload.shape[2] == hidden_size,
+        "full lens payload shape is invalid"
+    );
+    let matrix_bytes = (hidden_size as u64)
+        .checked_mul(hidden_size as u64)
+        .and_then(|words| words.checked_mul(2))
+        .context("full lens payload matrix byte count overflow")?;
+    ensure!(
+        matrix_bytes.checked_mul(payload.shape[0] as u64) == Some(payload.byte_length),
+        "full lens payload matrix inventory does not match its byte length"
+    );
+    for layer in 0..payload.shape[0] {
+        let mut remaining = matrix_bytes;
         while remaining > 0 {
-            let matrix_byte_offset = MATRIX_BYTES - remaining;
+            let matrix_byte_offset = matrix_bytes - remaining;
             let read = usize::try_from(remaining.min(buffer.len() as u64))
                 .context("full lens verification chunk")?;
             file.read_exact(&mut buffer[..read])
@@ -2731,7 +2992,7 @@ mod tests {
             dtype: "f16_le".into(),
             shape: [SOURCE_LAYER_COUNT, HIDDEN_SIZE, HIDDEN_SIZE],
             byte_length: PAYLOAD_BYTES,
-            blake3: PAYLOAD_BLAKE3.into(),
+            blake3: PUBLISHED_PROFILES[0].expected_payload_blake3.into(),
         }
     }
 
@@ -2780,15 +3041,17 @@ mod tests {
 
     #[test]
     fn extracts_pinned_inventory_without_executing_pickle() {
-        let matrix = [0x00, 0x3c, 0x00, 0xc0];
+        let matrix = [0x00, 0x3c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3c];
         let pickle = b"inert fixture";
         let bytes = test_archive(&matrix, pickle);
         let digest = hex(&Sha256::digest(pickle));
         let spec = ArchiveSpec {
             root: "lens",
             layer_count: 1,
+            hidden_size: 2,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
+            identity_storage_index: Some(0),
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         validate_archive(&mut archive, spec).unwrap();
@@ -2807,8 +3070,10 @@ mod tests {
         let spec = ArchiveSpec {
             root: "lens",
             layer_count: 1,
+            hidden_size: 1,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
+            identity_storage_index: None,
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         validate_archive(&mut archive, spec).unwrap();
@@ -2818,27 +3083,59 @@ mod tests {
 
     #[test]
     fn full_manifest_binds_every_published_claim_and_payload_digest() {
-        let manifest = published_manifest(canonical_payload());
+        let profile = PUBLISHED_PROFILES[0];
+        let manifest = published_manifest(profile, canonical_payload());
         validate_manifest(&manifest).unwrap();
         assert_eq!(manifest.fit.skip_first, 16);
-        assert_eq!(manifest.fit.accumulator_dtype, "float32");
+        assert_eq!(manifest.fit.accumulator_dtype.as_deref(), Some("float32"));
 
-        let mut wrong_fit = published_manifest(canonical_payload());
-        wrong_fit.fit.accumulator_dtype = "bfloat16".into();
+        let mut wrong_fit = published_manifest(profile, canonical_payload());
+        wrong_fit.fit.accumulator_dtype = Some("bfloat16".into());
         assert!(validate_manifest(&wrong_fit).is_err());
 
-        let mut wrong_payload = published_manifest(canonical_payload());
+        let mut wrong_payload = published_manifest(profile, canonical_payload());
         wrong_payload.payload.blake3 = "00".repeat(32);
         assert!(validate_manifest(&wrong_payload).is_err());
     }
 
     #[test]
-    fn trace_manifest_validates_geometry_without_binding_hash_metadata() {
-        let mut manifest = published_manifest(canonical_payload());
-        manifest.payload.blake3 = "not-used-by-trace-full".into();
+    fn released_qwen36_pair_has_matched_recipe_and_distinct_methods() {
+        let j_profile = PUBLISHED_PROFILES[1];
+        let r_profile = PUBLISHED_PROFILES[2];
+        let j = published_manifest(
+            j_profile,
+            FullPayload {
+                blake3: j_profile.expected_payload_blake3.into(),
+                ..canonical_payload()
+            },
+        );
+        let r = published_manifest(
+            r_profile,
+            FullPayload {
+                blake3: r_profile.expected_payload_blake3.into(),
+                ..canonical_payload()
+            },
+        );
+        validate_manifest(&j).unwrap();
+        validate_manifest(&r).unwrap();
+        assert_eq!(j.transport.method, "j");
+        assert_eq!(r.transport.method, "r");
+        assert_eq!(j.transport.target_layer, 62);
+        assert_eq!(j.fit.n_prompts, 25);
+        assert_eq!(j.fit.max_sequence_length, 128);
+        assert_eq!(j.fit.skip_first, 4);
+        assert_eq!(j.fit.dataset, r.fit.dataset);
+    }
+
+    #[test]
+    fn trace_manifest_validates_geometry_and_pinned_digest_without_rescanning_payload() {
+        let mut manifest = published_manifest(PUBLISHED_PROFILES[0], canonical_payload());
         manifest.provenance.build_source_state = "not-used-by-trace-full".into();
         validate_trace_full_manifest(&manifest).unwrap();
 
+        manifest.payload.blake3 = "00".repeat(32);
+        assert!(validate_trace_full_manifest(&manifest).is_err());
+        manifest.payload.blake3 = PUBLISHED_PROFILES[0].expected_payload_blake3.into();
         manifest.payload.byte_length -= 2;
         assert!(validate_trace_full_manifest(&manifest).is_err());
     }
@@ -2851,8 +3148,10 @@ mod tests {
         let spec = ArchiveSpec {
             root: "lens",
             layer_count: 1,
+            hidden_size: 1,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
+            identity_storage_index: None,
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         assert!(validate_archive(&mut archive, spec).is_err());

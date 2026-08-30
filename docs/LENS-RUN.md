@@ -22,7 +22,7 @@ and `--seed` expose the existing deterministic native sampler.
 
 ## Full Readout
 
-`read-full` dispatches imported Qwen full-J and assembled Muse full J/R assets
+`read-full` dispatches imported Qwen full J/R and assembled Muse full J/R assets
 by manifest schema. It captures one selected prompt position and returns
 deployed full-vocabulary logits for caller-ordered source layers. Muse reads are
 bound to an exact cached or fresh Hugging Face-declared GGUF identity and verify
@@ -44,15 +44,15 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- read-full \
 before output RMSNorm. Its JSON includes operation, stage, dtype, coordinate,
 hidden size, shape, and values. Omit it for compact top-k output.
 
-## Packed Full-J Trace
+## Packed Full-Transport Trace
 
-`trace-full` reads the imported Qwen3.8 27B full J-lens across every requested
-prompt position and source layer:
+`trace-full` reads an imported Qwen3.6 27B J/R or Qwen3.8 27B J transport across
+every requested prompt position and source layer:
 
 ```sh
 cargo run -q --release -p qwen-cli --bin qwen-lens -- trace-full \
-  --model /path/to/Qwen3.8-27B.gguf \
-  --full-lens /path/to/Qwen3.8-27B-jlens-native-v1 \
+  --model /path/to/Qwen3.6-27B.gguf \
+  --full-lens /path/to/qwen3.6-27b/r-lens-native-v1 \
   --messages /path/to/messages.json \
   --layers 0,31,62 \
   --vectors 31:5,62:5 \
@@ -60,9 +60,9 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- trace-full \
 ```
 
 Use exactly one of `--prompt`, `--token-ids`, or `--messages`. Message input uses
-the exact Qwen3.8 generation template with medium thinking and no injected
-effort instruction. Inputs are never truncated and are bounded at 128 tokens.
-Omit `--layers` to trace all 63 published source layers.
+the matching Qwen3.6 or Qwen3.8 renderer; Qwen3.8 uses medium thinking without
+an injected effort instruction. Inputs are never truncated and are bounded at
+128 tokens. Omit `--layers` to trace all 63 published source layers.
 
 The command performs one packed prompt forward, streams only the selected F16
 transport matrices, and keeps full logits on Metal. JSON output contains exact
@@ -72,12 +72,13 @@ one returned top-k list. Runtime tracing checks artifact geometry and byte
 length, but does not hash the model or rescan the 3.3 GiB payload.
 
 `--vectors LAYER:POSITION,...` optionally includes up to 32 selected transported
-J-space rows inline in the same JSON. It may be repeated; cells must be unique,
-must use selected layers, and use zero-based tokenized-input positions. Each
-F32 vector is `J_layer * post_block_residual` in target coordinates before the
-deployed output RMSNorm and LM head. It is not the source activation, logits,
-or an observed target-layer activation. The JSON reports shape, coordinate
-semantics, and deterministic cell order alongside the values.
+target-space vectors inline in the same JSON. It may be repeated; cells must be
+unique, must use selected layers, and use zero-based tokenized-input positions.
+Each F32 vector is `transport_layer * post_block_residual` in target coordinates
+before the deployed output RMSNorm and LM head. It is not the source activation,
+logits, or an observed target-layer activation. The JSON reports the J/R method,
+source revision, payload digest, shape, coordinate semantics, and deterministic
+cell order alongside the values.
 
 ## Plan
 
@@ -164,15 +165,15 @@ Paths are resolved relative to the plan file. This example uses a completed
 }
 ```
 
-An imported published Qwen3.8 full J transport can also supply selected token
-directions directly. `run` reads and projects only layers referenced by the
-plan; no new fit or intermediate artifact is required:
+An imported published Qwen3.6 J/R or Qwen3.8 J transport can also supply
+selected token directions directly. `run` reads and projects only layers
+referenced by the plan; no new fit or intermediate artifact is required:
 
 ```json
 {
   "version": 1,
   "lenses": [{
-    "kind": "published_full_j",
+    "kind": "published_full_transport",
     "id": "published-j",
     "artifact": "/path/to/Qwen3.8-27B-jlens-native-v1",
     "token_ids": [31367],
@@ -201,9 +202,10 @@ plan; no new fit or intermediate artifact is required:
 ```
 
 The selected token list is bounded to 32 unique model-vocabulary IDs. Its
-directions are `J_layer^T * (LM-head row * output-RMSNorm gamma)` for the
-deployed GGUF. The acknowledgement is required because the transport was fitted
-on the published BF16 checkpoint and is being transferred to a GGUF runtime.
+directions are `transport_layer^T * (LM-head row * output-RMSNorm gamma)` for
+the deployed GGUF. The acknowledgement is required because the transport was
+fitted on the published BF16 checkpoint and is being transferred to a GGUF
+runtime. Legacy `published_full_j` plans remain accepted as an alias.
 
 Native selected artifacts may be J or R fits. Their live scores are F64 dot
 products over the artifact's selected token rows. `workspace_template`
@@ -333,13 +335,13 @@ sampled stop token is reported but never fed back through a decode step.
 
 `run` intentionally uses fresh serial token-major execution so intervention
 schedules remain exact. Ordinary dense and MoE runs consume completed native
-selected-token J/R rows and workspace-template rows. Dense Qwen3.8 can also
-project selected directions directly from its imported published full J
-transport. Flash-Next runs use only explicit native hyper directions. Muse runs
-consume model-bound selected-token J/R rows for readout and all four post-block
-action kinds. Concurrent or speculative decode and prefix caching are not
-selected silently. `trace-full` separately uses packed prefill for passive
-full-J prompt traces.
+selected-token J/R rows and workspace-template rows. Dense Qwen3.6 can project
+selected directions from its released matched J/R pair; dense Qwen3.8 can do so
+from its published J transport. Flash-Next runs use only explicit native hyper
+directions. Muse runs consume model-bound selected-token J/R rows for readout
+and all four post-block action kinds. Concurrent or speculative decode and
+prefix caching are not selected silently. `trace-full` separately uses packed
+prefill for passive full-transport prompt traces.
 
 ## Flash-Next Capability Boundary
 

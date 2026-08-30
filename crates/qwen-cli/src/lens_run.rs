@@ -114,7 +114,8 @@ pub(crate) enum LensDefinition {
         id: String,
         artifact: PathBuf,
     },
-    PublishedFullJ {
+    #[serde(rename = "published_full_transport", alias = "published_full_j")]
+    PublishedFullTransport {
         id: String,
         artifact: PathBuf,
         token_ids: Vec<u32>,
@@ -131,7 +132,7 @@ impl LensDefinition {
     fn id(&self) -> &str {
         match self {
             Self::NativeSelected { id, .. }
-            | Self::PublishedFullJ { id, .. }
+            | Self::PublishedFullTransport { id, .. }
             | Self::WorkspaceTemplate { id, .. } => id,
         }
     }
@@ -990,7 +991,7 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
     )?;
     unique_ids(plan.readouts.iter().map(|item| item.id.as_str()), "readout")?;
     for lens in &plan.lenses {
-        if let LensDefinition::PublishedFullJ {
+        if let LensDefinition::PublishedFullTransport {
             id,
             token_ids,
             allow_unvalidated_transfer,
@@ -1002,11 +1003,11 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
                 !token_ids.is_empty()
                     && token_ids.len() <= MAX_PUBLISHED_FULL_TOKEN_IDS
                     && unique.len() == token_ids.len(),
-                "published full J lens {id} requires 1..={MAX_PUBLISHED_FULL_TOKEN_IDS} unique token IDs"
+                "published full transport lens {id} requires 1..={MAX_PUBLISHED_FULL_TOKEN_IDS} unique token IDs"
             );
             ensure!(
                 *allow_unvalidated_transfer,
-                "published full J lens {id} requires allow_unvalidated_transfer=true for BF16-to-GGUF use"
+                "published full transport lens {id} requires allow_unvalidated_transfer=true for BF16-to-GGUF use"
             );
         }
     }
@@ -1015,7 +1016,7 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
         .lenses
         .iter()
         .filter_map(|lens| match lens {
-            LensDefinition::PublishedFullJ { id, token_ids, .. } => Some((
+            LensDefinition::PublishedFullTransport { id, token_ids, .. } => Some((
                 id.as_str(),
                 token_ids.iter().copied().collect::<HashSet<_>>(),
             )),
@@ -1044,13 +1045,13 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
                 if let Some(token_ids) = published_full_tokens.get(direction.lens.as_str()) {
                     let DirectionRow::TokenId { token_id } = direction.row else {
                         bail!(
-                            "published full J direction {} requires row.kind=token_id",
+                            "published full transport direction {} requires row.kind=token_id",
                             direction.id
                         );
                     };
                     ensure!(
                         token_id >= 0 && token_ids.contains(&(token_id as u32)),
-                        "published full J direction {} selects token {} absent from lens {}",
+                        "published full transport direction {} selects token {} absent from lens {}",
                         direction.id,
                         token_id,
                         direction.lens
@@ -1281,7 +1282,7 @@ fn prepare_execution_plan(
                     arch.vocab_size,
                 )?),
             },
-            LensDefinition::PublishedFullJ {
+            LensDefinition::PublishedFullTransport {
                 id,
                 artifact,
                 token_ids,
@@ -1289,7 +1290,7 @@ fn prepare_execution_plan(
             } => {
                 let layers = required_lens_layers
                     .get(id.as_str())
-                    .with_context(|| format!("published full J lens {id} is not used"))?
+                    .with_context(|| format!("published full transport lens {id} is not used"))?
                     .iter()
                     .copied()
                     .collect::<Vec<_>>();
@@ -2063,12 +2064,12 @@ mod tests {
     }
 
     #[test]
-    fn published_full_j_plan_requires_explicit_transfer_and_unique_tokens() {
+    fn published_full_transport_plan_requires_explicit_transfer_and_unique_tokens() {
         let plan = |token_ids: serde_json::Value, allow_unvalidated_transfer: bool| {
             serde_json::from_value::<LensPlan>(json!({
                 "version": 1,
                 "lenses": [{
-                    "kind": "published_full_j",
+                    "kind": "published_full_transport",
                     "id": "j",
                     "artifact": "published",
                     "token_ids": token_ids,
@@ -2102,13 +2103,37 @@ mod tests {
         validate_ordinary_plan(&valid).unwrap();
         assert!(matches!(
             &valid.lenses[0],
-            LensDefinition::PublishedFullJ { token_ids, .. } if token_ids == &[42, 43]
+            LensDefinition::PublishedFullTransport { token_ids, .. } if token_ids == &[42, 43]
         ));
 
         assert!(validate_plan(&plan(json!([42, 43]), false)).is_err());
         assert!(validate_plan(&plan(json!([42, 42]), true)).is_err());
         assert!(validate_plan(&plan(json!([]), true)).is_err());
         assert!(validate_plan(&plan(json!([43]), true)).is_err());
+
+        let legacy: LensPlan = serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{
+                "kind": "published_full_j",
+                "id": "j",
+                "artifact": "published",
+                "token_ids": [42],
+                "allow_unvalidated_transfer": true
+            }],
+            "directions": [],
+            "operations": [],
+            "readouts": [{
+                "id": "read",
+                "lens": "j",
+                "scope": {"layers":{"kind":"values","values":[31]},"prefill":{"kind":"all"}},
+                "top_k": 1
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy.lenses[0],
+            LensDefinition::PublishedFullTransport { .. }
+        ));
     }
 
     #[test]

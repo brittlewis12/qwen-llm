@@ -79,14 +79,14 @@ enum Command {
     /// Assemble complete Muse row shards into one self-contained F16 transport.
     #[command(name = "assemble-muse-full")]
     AssembleMuseFull(muse_full_lens::AssembleMuseFullArgs),
-    /// Import the pinned Eyes ML Qwen3.8-27B full J-lens without executing pickle.
+    /// Import one pinned published Qwen3.6/Qwen3.8 full J/R transport safely.
     ImportFull(ImportFullArgs),
     /// Compare the published J-lens with native deployed-checkpoint J directions.
     #[command(alias = "validate-transfer")]
     CompareTransfer(CompareTransferArgs),
-    /// Read full-vocabulary logits through an imported published J-lens.
+    /// Read full-vocabulary logits through an imported published J/R transport.
     ReadFull(ReadFullArgs),
-    /// Trace packed full-vocabulary published J-lens top-k across layers and positions.
+    /// Trace packed full-vocabulary published J/R top-k across layers and positions.
     #[command(name = "trace-full")]
     TraceFull(TraceFullArgs),
 }

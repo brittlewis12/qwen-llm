@@ -9,8 +9,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 ## Working Capability
 
-- Imported Qwen3.8 full J transports support packed layer x position top-k,
-  selected transported vectors, and selected-token live directions.
+- Imported Qwen3.6 matched full J/R and Qwen3.8 full J transports support packed
+  layer x position top-k, selected transported vectors, and selected-token live
+  directions.
 - Native selected-token J/R artifacts support live readout and intervention.
 - Ordinary dense Qwen native J/R fitting supports the published T128 sequence
   length for row shards and selected-token artifacts.
@@ -35,7 +36,15 @@ UI, generic plugin systems, and production hardening are out of scope.
 - The released introspection prompt reproduces its `ele...` baseline, but a
   user-turn-only coefficient `0.1` does not flip it. Published strength
   sensitivity is not yet claimed as replicated.
-- The active `qwen-lens` unit suite passes with 96 tests and two model-bound
+- The pinned Qwen3.6 pair imports without pickle execution; both target-62
+  anchors are verified as exact F16 identity matrices during import.
+- On `The athlete Michael Jordan plays the sport of`, R ranks ` basketball`
+  second at the Jordan position on L20 while J omits it from top-8; their L62
+  readouts coincide. This is a bounded released-asset parity check.
+- A one-site R `basketball` intervention raises its live selected-token score
+  from `2.3286` to `6.7954` and records exactly one requested application. The
+  baseline already emits `basketball`, so no behavioral sensitivity is claimed.
+- The active `qwen-lens` unit suite passes with 97 tests and two model-bound
   tests intentionally ignored.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
@@ -44,12 +53,14 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 - Muse fitting remains capped at T16 by its separate fixed-scratch bank. T16 is
   an implementation smoke lane, not parity with published T128 fitting.
-- The published Qwen3.8 transport was fitted on BF16. Late-layer Q8 transfer is
-  strong in existing comparisons; early-layer transfer remains unresolved.
+- Published Qwen transports were fitted against BF16 model execution and stored
+  as F16. GGUF transfer is explicit: Qwen3.8 late-layer Q8 agreement is strong;
+  Qwen3.6 Q4 has bounded local J/R qualification, not broad equivalence.
 - `source_to_target` is a directed displacement, not the paper's two-coordinate
   pseudoinverse swap.
 - No complete, method-matched local R asset currently exists for Qwen3.8 or
-  Muse. The real Qwen3.6 template asset is not an R-lens substitute.
+  Muse. Qwen3.6 now has the released T128/skip-4/target-62 matched J/R pair plus
+  its separate real template asset.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
 - Native Qwen3.8 full-R fitting is correct at T128 but not currently economical:
@@ -58,10 +69,10 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 ## Active Gate
 
-Choose the shortest honest full-R path. The released Qwen3.6 matched J/R pair
-has the required T128/skip-4/target-62 recipe and a matching local model; native
-Qwen3.8 full fitting requires a non-incremental block-operator optimization.
-Do not launch a full native fit at current throughput.
+The shortest honest full-R path is complete through the released Qwen3.6 pair.
+Checkpoint and reintegrate this lane before choosing the next gap. Native
+Qwen3.8 full fitting still requires the independent block-operator optimization;
+do not launch a full native fit at current throughput.
 
 ## Deferred
 

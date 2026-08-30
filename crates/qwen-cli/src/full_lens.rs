@@ -50,7 +50,7 @@ const VOCAB_SIZE: u32 = 248_320;
 const MATRIX_BYTES: u64 = (HIDDEN_SIZE as u64) * (HIDDEN_SIZE as u64) * 2;
 const PAYLOAD_BYTES: u64 = MATRIX_BYTES * (SOURCE_LAYER_COUNT as u64);
 const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
-const MAX_TRANSFER_COMPARISON_TOKENS: usize = 32;
+const MAX_PROJECTED_FULL_TOKENS: usize = 32;
 const MAX_FULL_READOUT_PROMPT_TOKENS: usize = 4_096;
 const MAX_FULL_READOUT_TOP_K: usize = 16;
 const MAX_TRACE_FULL_VECTOR_CELLS: usize = 32;
@@ -211,6 +211,15 @@ pub(crate) struct TraceFullArgs {
 struct TraceFullVectorCell {
     source_layer: u32,
     source_position: usize,
+}
+
+pub(crate) struct ProjectedFullTokenDirections {
+    pub(crate) method: String,
+    pub(crate) target_layer: u32,
+    pub(crate) source_layers: Vec<u32>,
+    pub(crate) token_ids: Vec<i32>,
+    pub(crate) hidden_size: usize,
+    pub(crate) values: Vec<f32>,
 }
 
 impl FromStr for TraceFullVectorCell {
@@ -774,9 +783,9 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
     validate_manifest(&full_manifest)?;
     let (native_manifest, native_values) = load_native_j_readouts(&args.native_readouts)?;
     ensure!(
-        native_manifest.readouts.token_ids.len() <= MAX_TRANSFER_COMPARISON_TOKENS,
+        native_manifest.readouts.token_ids.len() <= MAX_PROJECTED_FULL_TOKENS,
         "transfer comparison supports at most {} selected tokens, got {}",
-        MAX_TRANSFER_COMPARISON_TOKENS,
+        MAX_PROJECTED_FULL_TOKENS,
         native_manifest.readouts.token_ids.len()
     );
     ensure!(
@@ -1000,6 +1009,122 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
     }
     println!("{}", String::from_utf8(report_bytes).unwrap());
     Ok(())
+}
+
+pub(crate) fn project_full_token_directions(
+    artifact: &Path,
+    token_ids: &[u32],
+    source_layers: &[u32],
+    loaded: &qwen_llm::runtime::LoadedModel,
+) -> Result<ProjectedFullTokenDirections> {
+    validate_artifact_directory(artifact, "published full J lens")?;
+    let manifest: FullLensManifest = read_json_file(&artifact.join(FULL_MANIFEST_NAME))?;
+    validate_manifest(&manifest)?;
+    let arch = loaded.arch();
+    ensure!(
+        arch.n_layer == manifest.model.n_layers
+            && arch.hidden_size == manifest.model.hidden_size
+            && arch.vocab_size == manifest.model.vocab_size
+            && arch == qwen_llm::model::QWEN3_27B,
+        "deployed model does not match the published full J-lens geometry"
+    );
+    ensure!(
+        qwen38_model_metadata(loaded.gguf()),
+        "published full J-lens directions require Qwen3.8 model and tokenizer metadata"
+    );
+    ensure!(
+        !token_ids.is_empty() && token_ids.len() <= MAX_PROJECTED_FULL_TOKENS,
+        "published full J lens requires 1..={} selected token IDs",
+        MAX_PROJECTED_FULL_TOKENS
+    );
+    let mut unique_tokens = BTreeSet::new();
+    ensure!(
+        token_ids
+            .iter()
+            .all(|&token| token < arch.vocab_size && unique_tokens.insert(token)),
+        "published full J-lens token IDs must be unique and inside the model vocabulary"
+    );
+    ensure!(
+        !source_layers.is_empty()
+            && source_layers.windows(2).all(|pair| pair[0] < pair[1])
+            && source_layers
+                .iter()
+                .all(|layer| manifest.transport.source_layers.contains(layer)),
+        "published full J-lens source layers must be nonempty, sorted, unique artifact layers"
+    );
+
+    let mut sequence = loaded
+        .create_sequence(SequenceConfig::new(1))
+        .context("create published full J-lens projection sequence")?;
+    let research = loaded
+        .research_session(&mut sequence)
+        .context("open published full J-lens projection session")?;
+    let selected = research
+        .selected_token_readouts(token_ids)
+        .context("derive deployed-model selected-token covectors")?;
+    let hidden_size = selected.hidden_size;
+    let projected_values = source_layers
+        .len()
+        .checked_mul(token_ids.len())
+        .and_then(|value| value.checked_mul(hidden_size))
+        .context("published full J-lens projected direction count overflow")?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(projected_values)
+        .context("allocate published full J-lens projected directions")?;
+
+    let payload_path = artifact.join(&manifest.payload.path);
+    let (mut payload, payload_length) = open_regular_file(&payload_path)?;
+    ensure!(
+        payload_length as u64 == manifest.payload.byte_length,
+        "published full J-lens payload length does not match its manifest"
+    );
+    let matrix_length = usize::try_from(MATRIX_BYTES).context("full J-lens matrix byte count")?;
+    let mut matrix = vec![0_u8; matrix_length];
+    for &layer in source_layers {
+        let layer_slot = manifest
+            .transport
+            .source_layers
+            .iter()
+            .position(|&candidate| candidate == layer)
+            .context("published full J-lens layer disappeared after validation")?;
+        let offset = u64::try_from(layer_slot)
+            .context("published full J-lens layer slot does not fit u64")?
+            .checked_mul(MATRIX_BYTES)
+            .context("published full J-lens matrix offset overflow")?;
+        payload
+            .seek(SeekFrom::Start(offset))
+            .with_context(|| format!("seek published full J-lens source layer {layer}"))?;
+        payload
+            .read_exact(&mut matrix)
+            .with_context(|| format!("read published full J-lens source layer {layer}"))?;
+        ensure_finite_f16(&matrix, layer as usize, 0)?;
+        let projected = research
+            .project_f16_transport_readouts(&matrix, &selected)
+            .with_context(|| format!("project published full J-lens source layer {layer}"))?;
+        ensure!(
+            projected.len() == token_ids.len() * hidden_size,
+            "published full J-lens projection returned an invalid shape"
+        );
+        values.extend(projected);
+    }
+    ensure!(
+        values.len() == projected_values && values.iter().all(|value| value.is_finite()),
+        "published full J-lens projection returned invalid values"
+    );
+
+    Ok(ProjectedFullTokenDirections {
+        method: "published_j_selected_token_numerator".into(),
+        target_layer: manifest.transport.target_layer,
+        source_layers: source_layers.to_vec(),
+        token_ids: selected
+            .token_ids
+            .into_iter()
+            .map(|token| token as i32)
+            .collect(),
+        hidden_size,
+        values,
+    })
 }
 
 pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
@@ -1346,7 +1471,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             }
             (None, None, Some(path)) => {
                 ensure!(
-                    qwen38_trace_prompt_protocol(&loaded.gguf()),
+                    qwen38_model_metadata(loaded.gguf()),
                     "--messages requires Qwen3.8 tokenizer metadata"
                 );
                 let raw = std::fs::read_to_string(path)
@@ -1677,7 +1802,7 @@ fn validate_trace_full_manifest(manifest: &FullLensManifest) -> Result<()> {
     Ok(())
 }
 
-fn qwen38_trace_prompt_protocol(gguf: &GgufFile) -> bool {
+fn qwen38_model_metadata(gguf: &GgufFile) -> bool {
     let named = [
         gguf.get_str("general.name"),
         gguf.get_str("general.base_model.0.name"),

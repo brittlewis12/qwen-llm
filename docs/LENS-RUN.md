@@ -164,6 +164,47 @@ Paths are resolved relative to the plan file. This example uses a completed
 }
 ```
 
+An imported published Qwen3.8 full J transport can also supply selected token
+directions directly. `run` reads and projects only layers referenced by the
+plan; no new fit or intermediate artifact is required:
+
+```json
+{
+  "version": 1,
+  "lenses": [{
+    "kind": "published_full_j",
+    "id": "published-j",
+    "artifact": "/path/to/Qwen3.8-27B-jlens-native-v1",
+    "token_ids": [31367],
+    "allow_unvalidated_transfer": true
+  }],
+  "directions": [{
+    "id": "lightning",
+    "lens": "published-j",
+    "row": {"kind": "token_id", "token_id": 31367},
+    "normalization": "unit_l2"
+  }],
+  "operations": [{
+    "id": "prefill-add",
+    "scope": {
+      "layers": {"kind": "range", "start": 24, "end": 58},
+      "prefill": {"kind": "all"}
+    },
+    "action": {
+      "kind": "residual_l2_fraction",
+      "direction": "lightning",
+      "coefficient": 0.1
+    }
+  }],
+  "readouts": []
+}
+```
+
+The selected token list is bounded to 32 unique model-vocabulary IDs. Its
+directions are `J_layer^T * (LM-head row * output-RMSNorm gamma)` for the
+deployed GGUF. The acknowledgement is required because the transport was fitted
+on the published BF16 checkpoint and is being transferred to a GGUF runtime.
+
 Native selected artifacts may be J or R fits. Their live scores are F64 dot
 products over the artifact's selected token rows. `workspace_template`
 artifacts use the camilablank/workspace-lenses BF16 `[layer, row, hidden]`
@@ -278,6 +319,9 @@ projection_ablate:     x <- x - coefficient * dot(x, v) * v
 source_to_target:      x <- x + coefficient * dot(x, source) * (target - source)
 ```
 
+`source_to_target` is a directed one-coordinate displacement. It is not the
+two-coordinate pseudoinverse swap used in the global-workspace paper.
+
 The output is one JSON object containing prompt and generated token IDs,
 decoded text, stop reason, reached operation sites, and requested live scores.
 Flash runs also include bounded `native_hyper_captures`; each record identifies
@@ -289,11 +333,13 @@ sampled stop token is reported but never fed back through a decode step.
 
 `run` intentionally uses fresh serial token-major execution so intervention
 schedules remain exact. Ordinary dense and MoE runs consume completed native
-selected-token J/R rows and workspace-template rows. Flash-Next runs use only
-explicit native hyper directions. Muse runs consume model-bound selected-token
-J/R rows for readout and all four post-block action kinds. Concurrent or
-speculative decode and prefix caching are not selected silently. `trace-full`
-separately uses packed prefill for passive full-J prompt traces.
+selected-token J/R rows and workspace-template rows. Dense Qwen3.8 can also
+project selected directions directly from its imported published full J
+transport. Flash-Next runs use only explicit native hyper directions. Muse runs
+consume model-bound selected-token J/R rows for readout and all four post-block
+action kinds. Concurrent or speculative decode and prefix caching are not
+selected silently. `trace-full` separately uses packed prefill for passive
+full-J prompt traces.
 
 ## Flash-Next Capability Boundary
 

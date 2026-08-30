@@ -33,6 +33,7 @@ const MAX_SELECTOR_VALUES: usize = 4096;
 const MAX_TOP_K: usize = 1024;
 const MAX_NEW_TOKENS: usize = 4096;
 const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
+const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
 
 #[derive(Debug, Args)]
 #[command(group(
@@ -113,6 +114,12 @@ pub(crate) enum LensDefinition {
         id: String,
         artifact: PathBuf,
     },
+    PublishedFullJ {
+        id: String,
+        artifact: PathBuf,
+        token_ids: Vec<u32>,
+        allow_unvalidated_transfer: bool,
+    },
     WorkspaceTemplate {
         id: String,
         weights: PathBuf,
@@ -123,7 +130,9 @@ pub(crate) enum LensDefinition {
 impl LensDefinition {
     fn id(&self) -> &str {
         match self {
-            Self::NativeSelected { id, .. } | Self::WorkspaceTemplate { id, .. } => id,
+            Self::NativeSelected { id, .. }
+            | Self::PublishedFullJ { id, .. }
+            | Self::WorkspaceTemplate { id, .. } => id,
         }
     }
 }
@@ -980,7 +989,39 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
         "operation",
     )?;
     unique_ids(plan.readouts.iter().map(|item| item.id.as_str()), "readout")?;
+    for lens in &plan.lenses {
+        if let LensDefinition::PublishedFullJ {
+            id,
+            token_ids,
+            allow_unvalidated_transfer,
+            ..
+        } = lens
+        {
+            let unique = token_ids.iter().copied().collect::<HashSet<_>>();
+            ensure!(
+                !token_ids.is_empty()
+                    && token_ids.len() <= MAX_PUBLISHED_FULL_TOKEN_IDS
+                    && unique.len() == token_ids.len(),
+                "published full J lens {id} requires 1..={MAX_PUBLISHED_FULL_TOKEN_IDS} unique token IDs"
+            );
+            ensure!(
+                *allow_unvalidated_transfer,
+                "published full J lens {id} requires allow_unvalidated_transfer=true for BF16-to-GGUF use"
+            );
+        }
+    }
     let lens_ids: HashSet<&str> = plan.lenses.iter().map(LensDefinition::id).collect();
+    let published_full_tokens = plan
+        .lenses
+        .iter()
+        .filter_map(|lens| match lens {
+            LensDefinition::PublishedFullJ { id, token_ids, .. } => Some((
+                id.as_str(),
+                token_ids.iter().copied().collect::<HashSet<_>>(),
+            )),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
     let direction_ids: HashSet<&str> = plan
         .directions
         .iter()
@@ -993,12 +1034,29 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
         .collect();
     for direction in &plan.directions {
         match direction {
-            DirectionDefinition::LensRow(direction) => ensure!(
-                lens_ids.contains(direction.lens.as_str()),
-                "direction {} references unknown lens {}",
-                direction.id,
-                direction.lens
-            ),
+            DirectionDefinition::LensRow(direction) => {
+                ensure!(
+                    lens_ids.contains(direction.lens.as_str()),
+                    "direction {} references unknown lens {}",
+                    direction.id,
+                    direction.lens
+                );
+                if let Some(token_ids) = published_full_tokens.get(direction.lens.as_str()) {
+                    let DirectionRow::TokenId { token_id } = direction.row else {
+                        bail!(
+                            "published full J direction {} requires row.kind=token_id",
+                            direction.id
+                        );
+                    };
+                    ensure!(
+                        token_id >= 0 && token_ids.contains(&(token_id as u32)),
+                        "published full J direction {} selects token {} absent from lens {}",
+                        direction.id,
+                        token_id,
+                        direction.lens
+                    );
+                }
+            }
             DirectionDefinition::NativeHyper(direction) => {
                 let (path, _) = direction.source.path_and_layer();
                 ensure!(
@@ -1172,6 +1230,45 @@ fn prepare_execution_plan(
     loaded: &qwen_llm::runtime::LoadedModel,
 ) -> Result<ExecutionPlan> {
     let arch = loaded.arch();
+    let direction_defs = plan
+        .directions
+        .iter()
+        .map(|direction| (direction.id(), direction))
+        .collect::<HashMap<_, _>>();
+    let mut direction_layers: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+    let mut required_lens_layers: HashMap<&str, BTreeSet<u32>> = HashMap::new();
+    for operation in &plan.operations {
+        let layers = operation
+            .scope
+            .layers
+            .expand(arch.n_layer, "operation.layers")?;
+        for direction_id in operation.action.direction_ids() {
+            let direction = direction_defs[direction_id].lens_row().with_context(|| {
+                format!("ordinary runtime cannot load native hyper direction {direction_id}")
+            })?;
+            direction_layers
+                .entry(direction_id)
+                .or_default()
+                .extend(layers.iter().copied());
+            required_lens_layers
+                .entry(direction.lens.as_str())
+                .or_default()
+                .extend(layers.iter().copied());
+        }
+    }
+    let mut readout_layers = BTreeSet::new();
+    for readout in &plan.readouts {
+        let layers = readout
+            .scope
+            .layers
+            .expand(arch.n_layer, "readout.layers")?;
+        required_lens_layers
+            .entry(readout.lens.as_str())
+            .or_default()
+            .extend(layers.iter().copied());
+        readout_layers.extend(layers);
+    }
+
     let mut lenses = HashMap::new();
     for definition in &plan.lenses {
         let prepared = match definition {
@@ -1184,6 +1281,36 @@ fn prepare_execution_plan(
                     arch.vocab_size,
                 )?),
             },
+            LensDefinition::PublishedFullJ {
+                id,
+                artifact,
+                token_ids,
+                allow_unvalidated_transfer: _,
+            } => {
+                let layers = required_lens_layers
+                    .get(id.as_str())
+                    .with_context(|| format!("published full J lens {id} is not used"))?
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>();
+                let projected = super::full_lens::project_full_token_directions(
+                    &resolve_plan_path(plan_dir, artifact),
+                    token_ids,
+                    &layers,
+                    loaded,
+                )?;
+                PreparedLens {
+                    id: id.clone(),
+                    lens: LoadedLens::Native(NativeLens {
+                        method: projected.method,
+                        target_layer: projected.target_layer,
+                        source_layers: projected.source_layers,
+                        token_ids: projected.token_ids,
+                        hidden_size: projected.hidden_size,
+                        values: projected.values,
+                    }),
+                }
+            }
             LensDefinition::WorkspaceTemplate {
                 id,
                 weights,
@@ -1211,20 +1338,6 @@ fn prepare_execution_plan(
         ensure!(lenses.insert(prepared.id.clone(), prepared).is_none());
     }
 
-    let mut direction_layers: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
-    for operation in &plan.operations {
-        let layers = operation
-            .scope
-            .layers
-            .expand(arch.n_layer, "operation.layers")?;
-        for direction_id in operation.action.direction_ids() {
-            direction_layers
-                .entry(direction_id)
-                .or_default()
-                .extend(layers.iter().copied());
-        }
-    }
-    let mut readout_layers = BTreeSet::new();
     for readout in &plan.readouts {
         let layers = readout
             .scope
@@ -1240,7 +1353,6 @@ fn prepare_execution_plan(
                 layer
             );
         }
-        readout_layers.extend(layers);
     }
     let capture_layers: Vec<u32> = readout_layers.iter().copied().collect();
     let layer_slots = capture_layers
@@ -1249,11 +1361,6 @@ fn prepare_execution_plan(
         .map(|(slot, &layer)| (layer, slot))
         .collect::<HashMap<_, _>>();
 
-    let direction_defs = plan
-        .directions
-        .iter()
-        .map(|direction| (direction.id(), direction))
-        .collect::<HashMap<_, _>>();
     let mut directions = HashMap::new();
     for (direction_id, layers) in direction_layers {
         let definition = direction_defs[direction_id];
@@ -1953,6 +2060,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.operations[0].action.coefficient(), 0.0001);
+    }
+
+    #[test]
+    fn published_full_j_plan_requires_explicit_transfer_and_unique_tokens() {
+        let plan = |token_ids: serde_json::Value, allow_unvalidated_transfer: bool| {
+            serde_json::from_value::<LensPlan>(json!({
+                "version": 1,
+                "lenses": [{
+                    "kind": "published_full_j",
+                    "id": "j",
+                    "artifact": "published",
+                    "token_ids": token_ids,
+                    "allow_unvalidated_transfer": allow_unvalidated_transfer
+                }],
+                "directions": [{
+                    "id": "concept",
+                    "lens": "j",
+                    "row": {"kind": "token_id", "token_id": 42},
+                    "normalization": "unit_l2"
+                }],
+                "operations": [{
+                    "id": "add",
+                    "scope": {
+                        "layers": {"kind": "values", "values": [31]},
+                        "prefill": {"kind": "all"}
+                    },
+                    "action": {
+                        "kind": "residual_l2_fraction",
+                        "direction": "concept",
+                        "coefficient": 0.01
+                    }
+                }],
+                "readouts": []
+            }))
+            .unwrap()
+        };
+
+        let valid = plan(json!([42, 43]), true);
+        validate_plan(&valid).unwrap();
+        validate_ordinary_plan(&valid).unwrap();
+        assert!(matches!(
+            &valid.lenses[0],
+            LensDefinition::PublishedFullJ { token_ids, .. } if token_ids == &[42, 43]
+        ));
+
+        assert!(validate_plan(&plan(json!([42, 43]), false)).is_err());
+        assert!(validate_plan(&plan(json!([42, 42]), true)).is_err());
+        assert!(validate_plan(&plan(json!([]), true)).is_err());
+        assert!(validate_plan(&plan(json!([43]), true)).is_err());
     }
 
     #[test]

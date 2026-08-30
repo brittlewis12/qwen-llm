@@ -160,6 +160,11 @@ struct FitRowsArgs {
     #[arg(long, default_value_t = 25)]
     max_prompts: usize,
 
+    /// Muse only: stop after N selected records, including skipped records.
+    /// This execution budget starts at the resume cursor and is excluded from fit identity.
+    #[arg(long)]
+    records_this_run: Option<usize>,
+
     /// Disable the tokenizer's configured BOS/EOS insertion policy.
     #[arg(long)]
     no_special_tokens: bool,
@@ -1149,6 +1154,10 @@ fn validate_args(args: &FitRowsArgs) -> Result<()> {
         MAX_PROMPT_RECORDS
     );
     ensure!(args.dim_batch > 0, "--dim-batch must be nonzero");
+    ensure!(
+        args.records_this_run.is_none(),
+        "--records-this-run is supported only for Muse row fitting"
+    );
     ensure!(
         args.dim_batch <= MAX_RESEARCH_WORKSPACE_DIM_BATCH,
         "--dim-batch {} exceeds native workspace limit {}",
@@ -2804,6 +2813,7 @@ mod tests {
             skip_first: 0,
             max_tokens: 2,
             max_prompts: 1,
+            records_this_run: None,
             no_special_tokens: false,
             resume: false,
         }
@@ -2917,6 +2927,9 @@ mod tests {
         assert!(validate_args(&args).is_err());
         args.dim_batch = 1;
         args.max_prompts = MAX_PROMPT_RECORDS + 1;
+        assert!(validate_args(&args).is_err());
+        args = test_fit_args();
+        args.records_this_run = Some(1);
         assert!(validate_args(&args).is_err());
     }
 

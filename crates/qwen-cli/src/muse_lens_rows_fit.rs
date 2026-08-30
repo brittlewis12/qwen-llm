@@ -150,7 +150,10 @@ pub(crate) fn fit_rows(mut args: FitRowsArgs, gguf: GgufFile) -> Result<()> {
     let traversed_blocks = ((args.source_layers[0] + 1)..=args.target_layer).collect::<Vec<_>>();
     let rule = artifact::rule(args.method);
 
-    for (record_index, prompt) in prompts.iter().enumerate().skip(active.next_record) {
+    let invocation_start = active.next_record;
+    let record_range = fit_record_range(active.next_record, prompts.len(), args.records_this_run)?;
+    for record_index in record_range {
+        let prompt = &prompts[record_index];
         if let Some(skipped) = super::skipped_prompt(prompt, args.skip_first) {
             active.skipped_prompts.push(skipped);
             active.next_record = record_index + 1;
@@ -256,6 +259,16 @@ pub(crate) fn fit_rows(mut args: FitRowsArgs, gguf: GgufFile) -> Result<()> {
             shape,
         )?;
     }
+    if active.next_record < prompts.len() {
+        eprintln!(
+            "paused Muse row fit at record {}/{} after {} record(s) this invocation; checkpoint generation {} is resumable with --resume",
+            active.next_record,
+            prompts.len(),
+            active.next_record - invocation_start,
+            active.generation,
+        );
+        return Ok(());
+    }
     ensure!(
         active.used_prompts > 0,
         "no Muse corpus prompt had valid fit positions"
@@ -343,6 +356,7 @@ fn validate_args(args: &FitRowsArgs) -> Result<()> {
         "Muse --max-prompts must be in 1..={}",
         super::MAX_PROMPT_RECORDS
     );
+    validate_records_this_run(args.records_this_run)?;
     ensure!(
         args.dim_batch > 0 && args.dim_batch <= MUSE_GLIMMER_QUERY_BATCH_MAX,
         "Muse --dim-batch must be in 1..={MUSE_GLIMMER_QUERY_BATCH_MAX}"
@@ -684,6 +698,30 @@ fn remove_uncommitted_generation(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_records_this_run(records_this_run: Option<usize>) -> Result<()> {
+    ensure!(
+        records_this_run != Some(0),
+        "--records-this-run must be nonzero"
+    );
+    Ok(())
+}
+
+fn fit_record_range(
+    next_record: usize,
+    total_records: usize,
+    records_this_run: Option<usize>,
+) -> Result<std::ops::Range<usize>> {
+    ensure!(
+        next_record <= total_records,
+        "Muse row-fit checkpoint cursor exceeds selected corpus"
+    );
+    validate_records_this_run(records_this_run)?;
+    let end = records_this_run
+        .map(|count| next_record.saturating_add(count).min(total_records))
+        .unwrap_or(total_records);
+    Ok(next_record..end)
+}
+
 fn block_kind(kind: MuseGlimmerAttentionBlockKind) -> &'static str {
     match kind {
         MuseGlimmerAttentionBlockKind::Full => "full",
@@ -746,6 +784,7 @@ mod tests {
             skip_first: 0,
             max_tokens: 2,
             max_prompts: 1,
+            records_this_run: None,
             no_special_tokens: true,
             resume: false,
         }
@@ -812,6 +851,21 @@ mod tests {
         value = args();
         value.resume = true;
         validate_args(&value).unwrap();
+        value.records_this_run = Some(1);
+        validate_args(&value).unwrap();
+        value.records_this_run = Some(0);
+        assert!(validate_args(&value).is_err());
+    }
+
+    #[test]
+    fn fit_record_budget_advances_from_the_resume_cursor() {
+        assert_eq!(fit_record_range(0, 25, None).unwrap(), 0..25);
+        assert_eq!(fit_record_range(0, 25, Some(1)).unwrap(), 0..1);
+        assert_eq!(fit_record_range(1, 25, Some(1)).unwrap(), 1..2);
+        assert_eq!(fit_record_range(24, 25, Some(8)).unwrap(), 24..25);
+        assert_eq!(fit_record_range(25, 25, Some(1)).unwrap(), 25..25);
+        assert!(fit_record_range(0, 25, Some(0)).is_err());
+        assert!(fit_record_range(26, 25, Some(1)).is_err());
     }
 
     #[test]

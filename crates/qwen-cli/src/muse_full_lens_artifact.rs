@@ -5,7 +5,7 @@ use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME, MuseGlimmerConfig};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const SCHEMA: &str = "muse_glimmer.full_transport";
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 pub(crate) const MANIFEST_NAME: &str = "lens.json";
 pub(crate) const PAYLOAD_NAME: &str = "transport.f16le";
 pub(crate) const PARTIAL_PAYLOAD_NAME: &str = "transport.f16le.partial";

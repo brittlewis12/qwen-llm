@@ -130,6 +130,132 @@ pub fn encode_muse_glimmer_rope_adjacent_pair_in_place_f32(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn encode_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key: &MetalTensor,
+    query_head_count: usize,
+    key_head_count: usize,
+    head_dim: usize,
+    row_count: usize,
+    position_period: usize,
+    theta: f32,
+    inverse: bool,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "muse_glimmer_rope_periodic";
+    if query_head_count == 0
+        || key_head_count == 0
+        || head_dim == 0
+        || !head_dim.is_multiple_of(2)
+        || row_count == 0
+        || position_period == 0
+        || !row_count.is_multiple_of(position_period)
+    {
+        return bad_shape(
+            KERNEL,
+            format!(
+                "head counts, even head_dim, rows, and a row-dividing position period must be nonzero, got q={query_head_count} k={key_head_count} dim={head_dim} rows={row_count} period={position_period}"
+            ),
+        );
+    }
+    if !theta.is_finite() || theta <= 0.0 {
+        return bad_shape(
+            KERNEL,
+            format!("theta must be finite and positive, got {theta}"),
+        );
+    }
+
+    let query_width = checked_elements(KERNEL, query_head_count, head_dim, "query width")?;
+    let key_width = checked_elements(KERNEL, key_head_count, head_dim, "key width")?;
+    let query_elements = checked_elements(KERNEL, row_count, query_width, "query elements")?;
+    let key_elements = checked_elements(KERNEL, row_count, key_width, "key elements")?;
+    validate_writable_f32_shape(
+        query,
+        query_elements,
+        &[query_width as u64, row_count as u64],
+        "query",
+        KERNEL,
+    )?;
+    validate_writable_f32_shape(
+        key,
+        key_elements,
+        &[key_width as u64, row_count as u64],
+        "key",
+        KERNEL,
+    )?;
+    if metal_tensor_ranges_overlap(query, key) {
+        return bad_shape(KERNEL, "query and key storage ranges overlap".into());
+    }
+
+    let pairs_per_head = head_dim / 2;
+    let query_pairs_per_row = checked_elements(
+        KERNEL,
+        query_head_count,
+        pairs_per_head,
+        "query pairs per row",
+    )?;
+    let key_pairs_per_row =
+        checked_elements(KERNEL, key_head_count, pairs_per_head, "key pairs per row")?;
+    let query_pair_count =
+        checked_elements(KERNEL, row_count, query_pairs_per_row, "query pair count")?;
+    let key_pair_count = checked_elements(KERNEL, row_count, key_pairs_per_row, "key pair count")?;
+    let pair_count = query_pair_count
+        .checked_add(key_pair_count)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "combined pair count overflow".into(),
+        })?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        query_pair_count: u32,
+        pair_count: u32,
+        query_pairs_per_row: u32,
+        key_pairs_per_row: u32,
+        head_dim: u32,
+        position_period: u32,
+        inverse: u32,
+        theta: f32,
+    }
+
+    let pso = ctx.pipeline("kernel_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32")?;
+    enc.note_write(query);
+    enc.note_write(key);
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            query_pair_count: checked_u32(KERNEL, query_pair_count, "query pair count")?,
+            pair_count: checked_u32(KERNEL, pair_count, "pair count")?,
+            query_pairs_per_row: checked_u32(KERNEL, query_pairs_per_row, "query pairs per row")?,
+            key_pairs_per_row: checked_u32(KERNEL, key_pairs_per_row, "key pairs per row")?,
+            head_dim: checked_u32(KERNEL, head_dim, "head_dim")?,
+            position_period: checked_u32(KERNEL, position_period, "position period")?,
+            inverse: u32::from(inverse),
+            theta,
+        },
+    );
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, key);
+    let threads = pso.maxTotalThreadsPerThreadgroup().min(256);
+    enc.dispatch(
+        MTLSize {
+            width: pair_count.div_ceil(threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_muse_glimmer_logit_softcap_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -629,6 +755,10 @@ mod tests {
         .unwrap()
     }
 
+    fn tensor_from_f32_shape(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
+        MetalTensor::from_bytes(ctx, bytemuck::cast_slice(values), shape, GgmlType::F32).unwrap()
+    }
+
     fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
         let mut values = vec![0.0; tensor.n_elements() as usize];
         unsafe {
@@ -696,6 +826,83 @@ mod tests {
         for (actual, raw) in read_f32(&logits).into_iter().zip(logits_source) {
             let expected = 20.0 * (raw * 0.196_116_13 / 20.0).tanh();
             assert!((actual - expected).abs() < 2e-5, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn periodic_adjacent_rope_matches_cpu_and_round_trips() {
+        const B: usize = 3;
+        const T: usize = 5;
+        const QH: usize = 2;
+        const KH: usize = 1;
+        const D: usize = 8;
+        const THETA: f32 = 500_000.0;
+        let ctx = MetalContext::new().unwrap();
+        let rows = B * T;
+        let query_source = (0..rows * QH * D)
+            .map(|index| (index % 97) as f32 * 0.013 - 0.4)
+            .collect::<Vec<_>>();
+        let key_source = (0..rows * KH * D)
+            .map(|index| (index % 71) as f32 * -0.017 + 0.3)
+            .collect::<Vec<_>>();
+        let query = tensor_from_f32_shape(&ctx, &query_source, vec![(QH * D) as u64, rows as u64]);
+        let key = tensor_from_f32_shape(&ctx, &key_source, vec![(KH * D) as u64, rows as u64]);
+        let rotate_cpu = |values: &mut [f32], heads: usize, inverse: bool| {
+            for row in 0..rows {
+                let position = row % T;
+                for head in 0..heads {
+                    let base = (row * heads + head) * D;
+                    for pair in 0..D / 2 {
+                        let relative = pair * 2;
+                        let angle = position as f32 * THETA.powf(-(relative as f32) / D as f32);
+                        let (mut sine, cosine) = angle.sin_cos();
+                        if inverse {
+                            sine = -sine;
+                        }
+                        let first = values[base + relative];
+                        let second = values[base + relative + 1];
+                        values[base + relative] = first * cosine - second * sine;
+                        values[base + relative + 1] = first * sine + second * cosine;
+                    }
+                }
+            }
+        };
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32(
+            &ctx, &encoder, &query, &key, QH, KH, D, rows, T, THETA, false,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+
+        let mut expected_query = query_source.clone();
+        let mut expected_key = key_source.clone();
+        rotate_cpu(&mut expected_query, QH, false);
+        rotate_cpu(&mut expected_key, KH, false);
+        for (actual, expected) in read_f32(&query).into_iter().zip(expected_query) {
+            assert!((actual - expected).abs() < 2e-5, "{actual} != {expected}");
+        }
+        for (actual, expected) in read_f32(&key).into_iter().zip(expected_key) {
+            assert!((actual - expected).abs() < 2e-5, "{actual} != {expected}");
+        }
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32(
+            &ctx, &encoder, &query, &key, QH, KH, D, rows, T, THETA, true,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        for (actual, expected) in read_f32(&query).into_iter().zip(query_source) {
+            assert!((actual - expected).abs() < 4e-5, "{actual} != {expected}");
+        }
+        for (actual, expected) in read_f32(&key).into_iter().zip(key_source) {
+            assert!((actual - expected).abs() < 4e-5, "{actual} != {expected}");
         }
     }
 

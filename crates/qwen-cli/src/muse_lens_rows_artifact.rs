@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const SCHEMA: &str = "muse_glimmer.full_transport_row_shard";
 pub(crate) const CHECKPOINT_SCHEMA: &str = "muse_glimmer.full_transport_row_checkpoint";
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 pub(crate) const PAYLOAD_NAME: &str = "rows.f32le";
 pub(crate) const MANIFEST_NAME: &str = "shard.json";
 pub(crate) const CHECKPOINT_NAME: &str = "checkpoint.json";
@@ -66,6 +66,7 @@ pub(crate) struct Payload {
 pub(crate) struct VjpTimings {
     pub replay_seconds: f64,
     pub full_attention_bank_command_seconds: f64,
+    pub sliding_attention_bank_command_seconds: f64,
     pub feed_forward_reverse_seconds: f64,
     pub attention_output_reverse_seconds: f64,
     pub attention_cpu_reverse_seconds: f64,
@@ -77,6 +78,7 @@ impl VjpTimings {
     pub(crate) fn add_assign(&mut self, other: &Self) {
         self.replay_seconds += other.replay_seconds;
         self.full_attention_bank_command_seconds += other.full_attention_bank_command_seconds;
+        self.sliding_attention_bank_command_seconds += other.sliding_attention_bank_command_seconds;
         self.feed_forward_reverse_seconds += other.feed_forward_reverse_seconds;
         self.attention_output_reverse_seconds += other.attention_output_reverse_seconds;
         self.attention_cpu_reverse_seconds += other.attention_cpu_reverse_seconds;
@@ -88,6 +90,7 @@ impl VjpTimings {
         let components = [
             self.replay_seconds,
             self.full_attention_bank_command_seconds,
+            self.sliding_attention_bank_command_seconds,
             self.feed_forward_reverse_seconds,
             self.attention_output_reverse_seconds,
             self.attention_cpu_reverse_seconds,
@@ -710,11 +713,15 @@ mod tests {
         let mut timings = VjpTimings {
             replay_seconds: 1.0,
             full_attention_bank_command_seconds: 2.0,
+            sliding_attention_bank_command_seconds: 0.5,
             total_seconds: 4.0,
             ..Default::default()
         };
         assert!(timings.is_valid());
         assert!(timings.fits_within_wall(4.5));
+        timings.sliding_attention_bank_command_seconds = 5.0;
+        assert!(!timings.is_valid());
+        timings.sliding_attention_bank_command_seconds = 0.5;
         timings.full_attention_bank_command_seconds = 5.0;
         assert!(!timings.is_valid());
         timings.full_attention_bank_command_seconds = 2.0;

@@ -35,6 +35,47 @@ kernel void kernel_muse_glimmer_rope_adjacent_pair_in_place_f32(
     values[second_index] = first * sine + second * cosine;
 }
 
+struct muse_glimmer_rope_periodic_args {
+    uint q_pair_count;
+    uint pair_count;
+    uint q_pairs_per_row;
+    uint k_pairs_per_row;
+    uint head_dim;
+    uint position_period;
+    uint inverse;
+    float theta;
+};
+
+kernel void kernel_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32(
+        constant muse_glimmer_rope_periodic_args & args [[buffer(0)]],
+        device float * q [[buffer(1)]],
+        device float * k [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index >= args.pair_count) return;
+    const bool is_q = index < args.q_pair_count;
+    const uint local_index = is_q ? index : index - args.q_pair_count;
+    const uint pairs_per_row = is_q ? args.q_pairs_per_row : args.k_pairs_per_row;
+    const uint row = local_index / pairs_per_row;
+    const uint pair_in_row = local_index - row * pairs_per_row;
+    const uint pairs_per_head = args.head_dim / 2u;
+    const uint relative = (pair_in_row % pairs_per_head) * 2u;
+    const ulong first_index = (ulong)row * pairs_per_row * 2u
+        + (ulong)pair_in_row * 2u;
+    const ulong second_index = first_index + 1u;
+    device float * values = is_q ? q : k;
+
+    const uint position = row % args.position_period;
+    const float angle = float(position)
+        * pow(args.theta, -float(relative) / float(args.head_dim));
+    const float cosine = cos(angle);
+    float sine = sin(angle);
+    if (args.inverse != 0u) sine = -sine;
+    const float first = values[first_index];
+    const float second = values[second_index];
+    values[first_index] = first * cosine - second * sine;
+    values[second_index] = first * sine + second * cosine;
+}
+
 struct muse_glimmer_softcap_args {
     uint n;
     float scale;

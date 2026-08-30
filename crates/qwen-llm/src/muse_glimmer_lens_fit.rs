@@ -20,7 +20,10 @@ use crate::muse_glimmer_lens::{
     MuseGlimmerLensCapture, MuseGlimmerLensCaptureBank, MuseGlimmerLensError, MuseGlimmerLensRule,
     MuseGlimmerRmsNormSite, MuseGlimmerSelectedTokenCovectors,
 };
-use crate::muse_glimmer_metal::encode_muse_glimmer_causal_gqa_vjp_bank_f32;
+use crate::muse_glimmer_metal::{
+    encode_muse_glimmer_causal_gqa_vjp_bank_f32,
+    encode_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32,
+};
 use crate::muse_glimmer_residency::{MuseGlimmerMetalLayerWeights, MuseGlimmerMetalModelWeights};
 use crate::tensor::GgmlType;
 use objc2_metal::{
@@ -51,6 +54,7 @@ pub struct MuseGlimmerOneBlockVjp {
 pub struct MuseGlimmerQueryBatchVjpTimings {
     pub replay: Duration,
     pub full_attention_bank_command: Duration,
+    pub sliding_attention_bank_command: Duration,
     pub feed_forward_reverse: Duration,
     pub attention_output_reverse: Duration,
     pub attention_cpu_reverse: Duration,
@@ -62,6 +66,7 @@ impl MuseGlimmerQueryBatchVjpTimings {
     fn add_components_assign(&mut self, other: Self) {
         self.replay += other.replay;
         self.full_attention_bank_command += other.full_attention_bank_command;
+        self.sliding_attention_bank_command += other.sliding_attention_bank_command;
         self.feed_forward_reverse += other.feed_forward_reverse;
         self.attention_output_reverse += other.attention_output_reverse;
         self.attention_cpu_reverse += other.attention_cpu_reverse;
@@ -547,42 +552,26 @@ pub(crate) fn muse_glimmer_fit_full_transport_rows_to_sources_batched(
             ))
         })?;
         let replay_started = Instant::now();
-        if weights.layers[block as usize].sliding_attention {
-            let prepared = MuseGlimmerPreparedAttentionBlock::new(ctx, weights, &capture)?;
-            timings.replay += replay_started.elapsed();
-            let diagnostic = &mut diagnostics[diagnostic_slot];
-            diagnostic.post_attention_replay_max_abs_error =
-                prepared.post_attention_replay_max_abs_error;
-            diagnostic.post_block_replay_max_abs_error = prepared.post_block_replay_max_abs_error;
-            for bank in &mut banks {
-                let vjp = reverse_prepared_attention_block_vjp_query_batch(
-                    ctx,
-                    &prepared,
-                    &bank.current,
-                    bank.query_count,
-                    rule,
-                )?;
-                timings.add_components_assign(vjp.timings);
-                bank.current = vjp.input_cotangents;
-            }
+        let prepared = if weights.layers[block as usize].sliding_attention {
+            MuseGlimmerPreparedMetalAttentionBlock::new_sliding(ctx, weights, &capture)?
         } else {
-            let prepared = MuseGlimmerPreparedFullAttentionBlock::new(ctx, weights, &capture)?;
-            timings.replay += replay_started.elapsed();
-            let (post_attention, post_block) = prepared.replay_max_abs_errors();
-            let diagnostic = &mut diagnostics[diagnostic_slot];
-            diagnostic.post_attention_replay_max_abs_error = post_attention;
-            diagnostic.post_block_replay_max_abs_error = post_block;
-            for bank in &mut banks {
-                let vjp = reverse_prepared_full_attention_block_vjp_query_batch(
-                    ctx,
-                    &prepared,
-                    &bank.current,
-                    bank.query_count,
-                    rule,
-                )?;
-                timings.add_components_assign(vjp.timings);
-                bank.current = vjp.input_cotangents;
-            }
+            MuseGlimmerPreparedMetalAttentionBlock::new(ctx, weights, &capture)?
+        };
+        timings.replay += replay_started.elapsed();
+        let (post_attention, post_block) = prepared.replay_max_abs_errors();
+        let diagnostic = &mut diagnostics[diagnostic_slot];
+        diagnostic.post_attention_replay_max_abs_error = post_attention;
+        diagnostic.post_block_replay_max_abs_error = post_block;
+        for bank in &mut banks {
+            let vjp = reverse_prepared_metal_attention_block_vjp_query_batch(
+                ctx,
+                &prepared,
+                &bank.current,
+                bank.query_count,
+                rule,
+            )?;
+            timings.add_components_assign(vjp.timings);
+            bank.current = vjp.input_cotangents;
         }
 
         if let Ok(source_slot) = source_layers.binary_search(&(block - 1)) {
@@ -882,7 +871,7 @@ pub(crate) fn muse_glimmer_fit_adjacent_full_attention_rows_batched(
     }
     let valid_positions = adjacent_fit_position_range(capture.n_tokens(), skip_first)?;
     let n_valid_positions = valid_positions.len();
-    let prepared = MuseGlimmerPreparedFullAttentionBlock::new(ctx, weights, capture)?;
+    let prepared = MuseGlimmerPreparedMetalAttentionBlock::new(ctx, weights, capture)?;
     let row_count = usize::try_from(rows.end - rows.start)
         .map_err(|_| MuseGlimmerLensError::Invalid("row count exceeds usize".into()))?;
     let basis_count = dim_batch.min(row_count);
@@ -894,7 +883,7 @@ pub(crate) fn muse_glimmer_fit_adjacent_full_attention_rows_batched(
     let shape = row_shape(hidden_size, basis_count * capture.n_tokens())?;
     let current = MetalTensor::zeros_f32(ctx, shape.clone())?;
     let next = MetalTensor::zeros_f32(ctx, shape)?;
-    let mut workspace = MuseGlimmerFullAttentionBankWorkspace::new(ctx, &prepared, basis_count)?;
+    let mut workspace = MuseGlimmerMetalAttentionBankWorkspace::new(ctx, &prepared, basis_count)?;
     let mut current_values = vec![0.0_f32; trajectory_elements];
     let value_count = checked_mul(row_count, hidden_size, "adjacent row slab values")?;
     let mut values = Vec::with_capacity(value_count);
@@ -1719,7 +1708,7 @@ impl MuseGlimmerOneBlockVjpBankScratch {
     }
 }
 
-pub(crate) struct MuseGlimmerPreparedFullAttentionBlock<'weights> {
+pub(crate) struct MuseGlimmerPreparedMetalAttentionBlock<'weights> {
     config: &'weights MuseGlimmerConfig,
     device_registry_id: u64,
     target_block: u32,
@@ -1729,13 +1718,30 @@ pub(crate) struct MuseGlimmerPreparedFullAttentionBlock<'weights> {
     post_block_replay_max_abs_error: f32,
 }
 
-impl<'weights> MuseGlimmerPreparedFullAttentionBlock<'weights> {
+impl<'weights> MuseGlimmerPreparedMetalAttentionBlock<'weights> {
     pub(crate) fn new(
         ctx: &MetalContext,
         weights: &MuseGlimmerMetalModelWeights<'weights>,
         capture: &MuseGlimmerLensCapture,
     ) -> Result<Self, MuseGlimmerLensError> {
         require_full_attention_block(weights, capture.target_block())?;
+        Self::new_any(ctx, weights, capture)
+    }
+
+    fn new_sliding(
+        ctx: &MetalContext,
+        weights: &MuseGlimmerMetalModelWeights<'weights>,
+        capture: &MuseGlimmerLensCapture,
+    ) -> Result<Self, MuseGlimmerLensError> {
+        require_sliding_attention_block(weights, capture.target_block())?;
+        Self::new_any(ctx, weights, capture)
+    }
+
+    fn new_any(
+        ctx: &MetalContext,
+        weights: &MuseGlimmerMetalModelWeights<'weights>,
+        capture: &MuseGlimmerLensCapture,
+    ) -> Result<Self, MuseGlimmerLensError> {
         let geometry = MuseAttentionGeometry::from_weights(weights)?;
         let layer = *validate_replay_request(
             weights,
@@ -1804,7 +1810,7 @@ impl<'weights> MuseGlimmerPreparedFullAttentionBlock<'weights> {
         encoder: &KernelEncoder,
         current: &MetalTensor,
         next: &MetalTensor,
-        workspace: &mut MuseGlimmerFullAttentionBankWorkspace,
+        workspace: &mut MuseGlimmerMetalAttentionBankWorkspace,
         rule: MuseGlimmerLensRule,
     ) -> Result<(), MuseGlimmerLensError> {
         let expected_device = self.device_registry_id;
@@ -1823,7 +1829,7 @@ impl<'weights> MuseGlimmerPreparedFullAttentionBlock<'weights> {
                 "one-block VJP bank device mismatch prepared={expected_device} context={context_device} encoder={encoder_device} workspace={workspace_device} current={current_device} next={next_device}"
             ));
         }
-        encode_muse_glimmer_one_full_attention_block_vjp_bank(
+        encode_muse_glimmer_one_attention_block_vjp_bank(
             ctx,
             encoder,
             self.config,
@@ -1839,15 +1845,15 @@ impl<'weights> MuseGlimmerPreparedFullAttentionBlock<'weights> {
 
 /// Scratch may not be reused by another command until its owning command has
 /// completed.
-pub(crate) struct MuseGlimmerFullAttentionBankWorkspace {
+pub(crate) struct MuseGlimmerMetalAttentionBankWorkspace {
     device_registry_id: u64,
     scratch: MuseGlimmerOneBlockVjpBankScratch,
 }
 
-impl MuseGlimmerFullAttentionBankWorkspace {
+impl MuseGlimmerMetalAttentionBankWorkspace {
     pub(crate) fn new(
         ctx: &MetalContext,
-        prepared: &MuseGlimmerPreparedFullAttentionBlock<'_>,
+        prepared: &MuseGlimmerPreparedMetalAttentionBlock<'_>,
         basis_count: usize,
     ) -> Result<Self, MuseGlimmerLensError> {
         let device_registry_id = ctx.device.registryID();
@@ -1870,7 +1876,7 @@ impl MuseGlimmerFullAttentionBankWorkspace {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_muse_glimmer_one_full_attention_block_vjp_bank(
+fn encode_muse_glimmer_one_attention_block_vjp_bank(
     ctx: &MetalContext,
     encoder: &KernelEncoder,
     config: &MuseGlimmerConfig,
@@ -1883,9 +1889,6 @@ fn encode_muse_glimmer_one_full_attention_block_vjp_bank(
 ) -> Result<(), MuseGlimmerLensError> {
     if encoder.is_concurrent() {
         return invalid("one-block VJP bank requires a serial encoder");
-    }
-    if layer.sliding_attention {
-        return invalid("one-block VJP bank currently requires full attention");
     }
     let geometry = prepared.geometry;
     let n_tokens = prepared.n_tokens;
@@ -2037,6 +2040,21 @@ fn encode_muse_glimmer_one_full_attention_block_vjp_bank(
         geometry.kv_heads,
         geometry.head_dim,
     )?;
+    if layer.sliding_attention {
+        encode_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32(
+            ctx,
+            encoder,
+            &scratch.query[1],
+            &scratch.kv[0],
+            geometry.q_heads,
+            geometry.kv_heads,
+            geometry.head_dim,
+            bank_rows,
+            n_tokens,
+            geometry.rope_theta,
+            true,
+        )?;
+    }
 
     encode_frozen_linear_vjp_bank_f32(
         ctx,
@@ -2286,6 +2304,8 @@ fn replay_state(
             geometry.rope_theta,
             false,
         )?;
+        write_f32(&tensors.q, &q)?;
+        write_f32(&tensors.k, &k)?;
     }
     let attention = cpu_causal_gqa_forward(&q, &k, &v, &attention_gate, n_tokens, geometry)?;
     write_f32(&tensors.attention_output, &attention.attention_output)?;
@@ -2725,9 +2745,9 @@ pub(crate) fn muse_glimmer_one_attention_block_vjp(
     })
 }
 
-fn reverse_prepared_full_attention_block_vjp_query_batch(
+fn reverse_prepared_metal_attention_block_vjp_query_batch(
     ctx: &MetalContext,
-    prepared: &MuseGlimmerPreparedFullAttentionBlock<'_>,
+    prepared: &MuseGlimmerPreparedMetalAttentionBlock<'_>,
     target_cotangents: &[f32],
     query_count: usize,
     rule: MuseGlimmerLensRule,
@@ -2746,7 +2766,7 @@ fn reverse_prepared_full_attention_block_vjp_query_batch(
     )?;
     let current = from_f32(ctx, target_cotangents, shape.clone())?;
     let next = MetalTensor::zeros_f32(ctx, shape)?;
-    let mut workspace = MuseGlimmerFullAttentionBankWorkspace::new(ctx, prepared, query_count)?;
+    let mut workspace = MuseGlimmerMetalAttentionBankWorkspace::new(ctx, prepared, query_count)?;
 
     let reverse_started = Instant::now();
     run_command(ctx, |encoder| {
@@ -2754,9 +2774,15 @@ fn reverse_prepared_full_attention_block_vjp_query_batch(
     })?;
     let reverse_elapsed = reverse_started.elapsed();
     let input_cotangents = read_f32(&next);
-    require_finite("full-attention bank input cotangents", &input_cotangents)?;
+    require_finite("Metal attention bank input cotangents", &input_cotangents)?;
     let (post_attention_replay_max_abs_error, post_block_replay_max_abs_error) =
         prepared.replay_max_abs_errors();
+    let (full_attention_bank_command, sliding_attention_bank_command) =
+        if prepared.layer.sliding_attention {
+            (Duration::ZERO, reverse_elapsed)
+        } else {
+            (reverse_elapsed, Duration::ZERO)
+        };
     Ok(MuseGlimmerQueryBatchOneBlockVjp {
         target_block: prepared.target_block(),
         rule,
@@ -2767,7 +2793,8 @@ fn reverse_prepared_full_attention_block_vjp_query_batch(
         post_attention_replay_max_abs_error,
         post_block_replay_max_abs_error,
         timings: MuseGlimmerQueryBatchVjpTimings {
-            full_attention_bank_command: reverse_elapsed,
+            full_attention_bank_command,
+            sliding_attention_bank_command,
             total: total_started.elapsed(),
             ..Default::default()
         },
@@ -2787,9 +2814,37 @@ pub(crate) fn muse_glimmer_one_full_attention_block_vjp_query_batch(
     let geometry = MuseAttentionGeometry::from_weights(weights)?;
     validate_query_batch_request(capture, target_cotangents, query_count, geometry.hidden)?;
     let replay_started = Instant::now();
-    let prepared = MuseGlimmerPreparedFullAttentionBlock::new(ctx, weights, capture)?;
+    let prepared = MuseGlimmerPreparedMetalAttentionBlock::new(ctx, weights, capture)?;
     let replay_elapsed = replay_started.elapsed();
-    let mut result = reverse_prepared_full_attention_block_vjp_query_batch(
+    let mut result = reverse_prepared_metal_attention_block_vjp_query_batch(
+        ctx,
+        &prepared,
+        target_cotangents,
+        query_count,
+        rule,
+    )?;
+    result.timings.replay = replay_elapsed;
+    result.timings.total = total_started.elapsed();
+    Ok(result)
+}
+
+#[cfg(test)]
+fn muse_glimmer_one_sliding_attention_block_vjp_metal_query_batch(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    capture: &MuseGlimmerLensCapture,
+    target_cotangents: &[f32],
+    query_count: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerLensError> {
+    let total_started = Instant::now();
+    require_sliding_attention_block(weights, capture.target_block())?;
+    let geometry = MuseAttentionGeometry::from_weights(weights)?;
+    validate_query_batch_request(capture, target_cotangents, query_count, geometry.hidden)?;
+    let replay_started = Instant::now();
+    let prepared = MuseGlimmerPreparedMetalAttentionBlock::new_sliding(ctx, weights, capture)?;
+    let replay_elapsed = replay_started.elapsed();
+    let mut result = reverse_prepared_metal_attention_block_vjp_query_batch(
         ctx,
         &prepared,
         target_cotangents,
@@ -2808,26 +2863,49 @@ fn reverse_prepared_attention_block_vjp_query_batch(
     query_count: usize,
     rule: MuseGlimmerLensRule,
 ) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerLensError> {
+    reverse_attention_block_vjp_query_batch_from_replay(
+        ctx,
+        prepared.config,
+        prepared.target_block,
+        &prepared.layer,
+        &prepared.replay,
+        prepared.post_attention_replay_max_abs_error,
+        prepared.post_block_replay_max_abs_error,
+        target_cotangents,
+        query_count,
+        rule,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reverse_attention_block_vjp_query_batch_from_replay(
+    ctx: &MetalContext,
+    config: &MuseGlimmerConfig,
+    target_block: u32,
+    layer: &MuseGlimmerMetalLayerWeights<'_>,
+    replay: &ReplayState,
+    post_attention_replay_max_abs_error: f32,
+    post_block_replay_max_abs_error: f32,
+    target_cotangents: &[f32],
+    query_count: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerQueryBatchOneBlockVjp, MuseGlimmerLensError> {
     let total_started = Instant::now();
-    let geometry = prepared.replay.geometry;
+    let geometry = replay.geometry;
     validate_query_bank_values(
         target_cotangents,
         query_count,
-        prepared.replay.n_tokens,
+        replay.n_tokens,
         geometry.hidden,
     )?;
-    let target_block = prepared.target_block;
-    let layer = &prepared.layer;
-    let n_tokens = prepared.replay.n_tokens;
+    let n_tokens = replay.n_tokens;
     let batch_rows = checked_mul(n_tokens, query_count, "query-batch reverse rows")?;
-    let tensors = &prepared.replay.tensors;
-    let q = prepared.replay.q.as_slice();
-    let k = prepared.replay.k.as_slice();
-    let v = prepared.replay.v.as_slice();
-    let attention_gate = prepared.replay.attention_gate.as_slice();
-    let attention = &prepared.replay.attention;
-    let post_attention_replay_max_abs_error = prepared.post_attention_replay_max_abs_error;
-    let post_block_replay_max_abs_error = prepared.post_block_replay_max_abs_error;
+    let tensors = &replay.tensors;
+    let q = replay.q.as_slice();
+    let k = replay.k.as_slice();
+    let v = replay.v.as_slice();
+    let attention_gate = replay.attention_gate.as_slice();
+    let attention = &replay.attention;
 
     validate_layer_shapes(layer, geometry)?;
 
@@ -2863,7 +2941,7 @@ fn reverse_prepared_attention_block_vjp_query_batch(
                 &batch_token_view(&grad_ffn_raw, token, query_count, geometry.hidden),
                 query_count,
                 geometry.hidden,
-                prepared.config.post_norm_epsilon,
+                config.post_norm_epsilon,
                 rule.rms_norm_rule(MuseGlimmerRmsNormSite::FeedForwardBranchPostNorm),
             )?;
         }
@@ -2933,7 +3011,7 @@ fn reverse_prepared_attention_block_vjp_query_batch(
                 ),
                 query_count,
                 geometry.hidden,
-                prepared.config.rms_epsilon,
+                config.rms_epsilon,
                 rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreFeedForward),
             )?;
         }
@@ -2962,7 +3040,7 @@ fn reverse_prepared_attention_block_vjp_query_batch(
                 &batch_token_view(&grad_attention_raw, token, query_count, geometry.hidden),
                 query_count,
                 geometry.hidden,
-                prepared.config.post_norm_epsilon,
+                config.post_norm_epsilon,
                 rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionBranchPostNorm),
             )?;
         }
@@ -3028,7 +3106,7 @@ fn reverse_prepared_attention_block_vjp_query_batch(
                 ),
                 query_count,
                 geometry.head_dim,
-                prepared.config.rms_epsilon,
+                config.rms_epsilon,
                 rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionQuery),
             )?;
         }
@@ -3047,7 +3125,7 @@ fn reverse_prepared_attention_block_vjp_query_batch(
                 ),
                 query_count,
                 geometry.head_dim,
-                prepared.config.rms_epsilon,
+                config.rms_epsilon,
                 rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionKey),
             )?;
         }
@@ -3129,7 +3207,7 @@ fn reverse_prepared_attention_block_vjp_query_batch(
                 &batch_token_view(&grad_input_branch, token, query_count, geometry.hidden),
                 query_count,
                 geometry.hidden,
-                prepared.config.rms_epsilon,
+                config.rms_epsilon,
                 rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreAttention),
             )?;
         }
@@ -3162,6 +3240,7 @@ fn reverse_prepared_attention_block_vjp_query_batch(
         timings: MuseGlimmerQueryBatchVjpTimings {
             replay: Duration::ZERO,
             full_attention_bank_command: Duration::ZERO,
+            sliding_attention_bank_command: Duration::ZERO,
             feed_forward_reverse: feed_forward_elapsed,
             attention_output_reverse: attention_output_elapsed,
             attention_cpu_reverse: attention_cpu_elapsed,
@@ -3315,6 +3394,21 @@ fn require_full_attention_block(
     if layer.sliding_attention {
         return invalid(format!(
             "target block {target_block} uses sliding attention; this API requires full attention"
+        ));
+    }
+    Ok(())
+}
+
+fn require_sliding_attention_block(
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    target_block: u32,
+) -> Result<(), MuseGlimmerLensError> {
+    let layer = weights.layers.get(target_block as usize).ok_or_else(|| {
+        MuseGlimmerLensError::Invalid(format!("target block {target_block} is out of range"))
+    })?;
+    if !layer.sliding_attention {
+        return invalid(format!(
+            "target block {target_block} uses full attention; this API requires sliding attention"
         ));
     }
     Ok(())
@@ -4123,7 +4217,7 @@ mod tests {
                 replay.post_block_residuals,
             );
             let prepared =
-                MuseGlimmerPreparedFullAttentionBlock::new(&ctx, &weights, &capture).unwrap();
+                MuseGlimmerPreparedMetalAttentionBlock::new(&ctx, &weights, &capture).unwrap();
             let target = attention_values(basis_count * n_tokens * geometry.hidden, 31, 127, 0.003);
             let target_tensor = from_f32(
                 &ctx,
@@ -4137,7 +4231,7 @@ mod tests {
             )
             .unwrap();
             let mut workspace =
-                MuseGlimmerFullAttentionBankWorkspace::new(&ctx, &prepared, basis_count).unwrap();
+                MuseGlimmerMetalAttentionBankWorkspace::new(&ctx, &prepared, basis_count).unwrap();
 
             for rule in [MuseGlimmerLensRule::J, MuseGlimmerLensRule::R] {
                 let command = ctx.queue.commandBuffer().unwrap();
@@ -4179,6 +4273,78 @@ mod tests {
                 assert!(differential.0 <= 5.0e-5, "{differential:?}");
                 assert!(differential.1 <= 2.0e-4, "{differential:?}");
                 assert!(differential.2 >= 0.999_999_9, "{differential:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sliding_attention_metal_bank_matches_cpu_fallback_j_and_r() {
+        let ctx = MetalContext::new().unwrap();
+        let owned = TinyMuseModel::new_with_sliding(&ctx, vec![false, true]);
+        let weights = owned.weights();
+        let geometry = MuseAttentionGeometry::from_weights(&weights).unwrap();
+
+        for (n_tokens, query_count) in [(3usize, 1usize), (5, 3), (16, 32)] {
+            let input = attention_values(n_tokens * geometry.hidden, 59, 163, 0.004);
+            let capture_replay = replay_state(
+                &ctx,
+                &weights,
+                &weights.layers[1],
+                &input,
+                n_tokens,
+                geometry,
+            )
+            .unwrap();
+            let replay = replay_readback(&capture_replay).unwrap();
+            let capture = MuseGlimmerLensCapture::new(
+                1,
+                (0..n_tokens as u32).collect(),
+                geometry.hidden,
+                input,
+                replay.post_attention_residuals,
+                replay.post_block_residuals,
+            );
+            let targets =
+                attention_values(query_count * n_tokens * geometry.hidden, 61, 167, 0.003);
+
+            for rule in [MuseGlimmerLensRule::J, MuseGlimmerLensRule::R] {
+                let cpu = muse_glimmer_one_attention_block_vjp_query_batch(
+                    &ctx,
+                    &weights,
+                    &capture,
+                    &targets,
+                    query_count,
+                    rule,
+                )
+                .unwrap();
+                let metal = muse_glimmer_one_sliding_attention_block_vjp_metal_query_batch(
+                    &ctx,
+                    &weights,
+                    &capture,
+                    &targets,
+                    query_count,
+                    rule,
+                )
+                .unwrap();
+                let differential =
+                    attention_differential(&metal.input_cotangents, &cpu.input_cotangents);
+                eprintln!(
+                    "[muse-sliding-bank] B={query_count} T={n_tokens} rule={rule:?} differential={differential:?} metal={:?} cpu={:?}",
+                    metal.timings, cpu.timings,
+                );
+                assert_eq!(
+                    metal.post_attention_replay_max_abs_error,
+                    cpu.post_attention_replay_max_abs_error
+                );
+                assert_eq!(
+                    metal.post_block_replay_max_abs_error,
+                    cpu.post_block_replay_max_abs_error
+                );
+                assert!(differential.0 <= 5.0e-5, "{differential:?}");
+                assert!(differential.1 <= 2.0e-4, "{differential:?}");
+                assert!(differential.2 >= 0.999_999_9, "{differential:?}");
+                assert!(metal.timings.sliding_attention_bank_command > Duration::ZERO);
+                assert!(cpu.timings.attention_cpu_reverse > Duration::ZERO);
             }
         }
     }
@@ -4532,6 +4698,7 @@ mod tests {
             assert!(differential.2 >= 0.999_999_9, "{rule:?}: {differential:?}");
             let components = block_major.timings.replay
                 + block_major.timings.full_attention_bank_command
+                + block_major.timings.sliding_attention_bank_command
                 + block_major.timings.feed_forward_reverse
                 + block_major.timings.attention_output_reverse
                 + block_major.timings.attention_cpu_reverse
@@ -4543,8 +4710,11 @@ mod tests {
     #[test]
     #[ignore = "bounded released-Q8 R256 block-major falsifier"]
     fn real_q8_block_major_r256_falsifier() {
-        if std::env::var("MUSE_GLIMMER_RUN_R256_FALSIFIER").as_deref() != Ok("1") {
-            eprintln!("set MUSE_GLIMMER_RUN_R256_FALSIFIER=1 to run the bounded Q8 falsifier");
+        let mode = std::env::var("MUSE_GLIMMER_RUN_R256_FALSIFIER").unwrap_or_default();
+        if mode != "1" && mode != "candidate" {
+            eprintln!(
+                "set MUSE_GLIMMER_RUN_R256_FALSIFIER=1 for A/B or =candidate for candidate-only"
+            );
             return;
         }
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
@@ -4588,6 +4758,25 @@ mod tests {
         )
         .expect("run block-major R256 candidate");
         let candidate_elapsed = candidate_started.elapsed();
+        if mode == "candidate" {
+            let components = candidate.timings.replay
+                + candidate.timings.full_attention_bank_command
+                + candidate.timings.sliding_attention_bank_command
+                + candidate.timings.feed_forward_reverse
+                + candidate.timings.attention_output_reverse
+                + candidate.timings.attention_cpu_reverse
+                + candidate.timings.attention_input_reverse;
+            eprintln!(
+                "[muse-full-r-r256-candidate] capture={capture_elapsed:?} candidate={candidate_elapsed:?} timings={:?}",
+                candidate.timings,
+            );
+            assert_eq!(candidate.values.len(), 51 * 256 * 6_656);
+            assert!(components <= candidate.timings.total);
+            assert!(candidate.timings.full_attention_bank_command > Duration::ZERO);
+            assert!(candidate.timings.sliding_attention_bank_command > Duration::ZERO);
+            assert_eq!(candidate.timings.attention_cpu_reverse, Duration::ZERO);
+            return;
+        }
         let control_started = Instant::now();
         let control = chunk_major_full_transport_reference(
             &ctx,
@@ -4626,6 +4815,126 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "bounded released-Q8 sliding block-50 Metal falsifier"]
+    fn real_q8_sliding_block_50_metal_falsifier() {
+        if std::env::var("MUSE_GLIMMER_RUN_SLIDING_FALSIFIER").as_deref() != Ok("1") {
+            eprintln!("set MUSE_GLIMMER_RUN_SLIDING_FALSIFIER=1 to run the bounded Q8 falsifier");
+            return;
+        }
+        let test_started = Instant::now();
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let plan =
+            MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).expect("qualify Muse Q8 target");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit Muse Q8 weights");
+        let realized = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .expect("realize Muse Q8 weights");
+        let weights = realized.into_weights();
+        let tokens = (1..=MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS as u32).collect::<Vec<_>>();
+        let mut session = MuseGlimmerTextSession::new(&ctx, weights.config(), tokens.len())
+            .expect("allocate bounded Muse session");
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).expect("bind Muse forward");
+        let captures = forward
+            .capture_fresh_lens_prompt_blocks(&tokens, &[50], &mut session)
+            .expect("capture sliding block 50");
+        let capture = captures
+            .block_capture(50)
+            .expect("extract sliding block 50");
+        let bound = MuseGlimmerMetalModelWeights::bind(&weights).expect("bind resident weights");
+        let prepared = MuseGlimmerPreparedMetalAttentionBlock::new_sliding(&ctx, &bound, &capture)
+            .expect("prepare shared sliding replay");
+        let query_count = MUSE_GLIMMER_QUERY_BATCH_MAX;
+        let targets = attention_values(
+            query_count * captures.n_tokens() * captures.hidden_size(),
+            67,
+            173,
+            0.003,
+        );
+        let (post_attention_error, post_block_error) = prepared.replay_max_abs_errors();
+        let run_candidate = || {
+            reverse_prepared_metal_attention_block_vjp_query_batch(
+                &ctx,
+                &prepared,
+                &targets,
+                query_count,
+                MuseGlimmerLensRule::R,
+            )
+            .expect("run sliding Metal candidate")
+        };
+        let run_control = || {
+            reverse_attention_block_vjp_query_batch_from_replay(
+                &ctx,
+                prepared.config,
+                prepared.target_block,
+                &prepared.layer,
+                &prepared.replay,
+                post_attention_error,
+                post_block_error,
+                &targets,
+                query_count,
+                MuseGlimmerLensRule::R,
+            )
+            .expect("run sliding CPU control")
+        };
+
+        let warm_candidate = run_candidate();
+        let warm_control = run_control();
+        let warm_differential = attention_differential(
+            &warm_candidate.input_cotangents,
+            &warm_control.input_cotangents,
+        );
+        assert!(warm_differential.0 <= 5.0e-5, "{warm_differential:?}");
+        assert!(warm_differential.1 <= 2.0e-4, "{warm_differential:?}");
+        assert!(warm_differential.2 >= 0.999_999_9, "{warm_differential:?}");
+
+        let mut candidate_samples = Vec::with_capacity(5);
+        let mut control_samples = Vec::with_capacity(5);
+        let mut worst_differential = (0.0_f64, 0.0_f64, 1.0_f64);
+        for pair in 0..5 {
+            let (candidate, control) = if pair % 2 == 0 {
+                (run_candidate(), run_control())
+            } else {
+                let control = run_control();
+                let candidate = run_candidate();
+                (candidate, control)
+            };
+            let differential =
+                attention_differential(&candidate.input_cotangents, &control.input_cotangents);
+            worst_differential.0 = worst_differential.0.max(differential.0);
+            worst_differential.1 = worst_differential.1.max(differential.1);
+            worst_differential.2 = worst_differential.2.min(differential.2);
+            candidate_samples.push(candidate.timings.total.as_secs_f64());
+            control_samples.push(control.timings.total.as_secs_f64());
+        }
+        candidate_samples.sort_by(f64::total_cmp);
+        control_samples.sort_by(f64::total_cmp);
+        let candidate_median = candidate_samples[2];
+        let control_median = control_samples[2];
+        let speedup = control_median / candidate_median;
+        eprintln!(
+            "[muse-sliding-block50] candidate={candidate_samples:?} control={control_samples:?} medians={candidate_median:.9}/{control_median:.9}s speedup={speedup:.6} differential={worst_differential:?} total={:?}",
+            test_started.elapsed(),
+        );
+        assert_eq!(warm_candidate.input_cotangents.len(), 3_407_872);
+        assert!(worst_differential.0 <= 5.0e-5, "{worst_differential:?}");
+        assert!(worst_differential.1 <= 2.0e-4, "{worst_differential:?}");
+        assert!(
+            worst_differential.2 >= 0.999_999_9,
+            "{worst_differential:?}"
+        );
+        assert!(
+            candidate_median <= control_median * 0.85,
+            "candidate median {candidate_median:.9}s did not clear the 15% gate against {control_median:.9}s"
+        );
+        assert!(test_started.elapsed() < Duration::from_secs(180));
+    }
+
+    #[test]
     #[ignore = "bounded zero-Q8 Muse full-block B8/B32 timing gate"]
     fn profile_one_full_attention_block_vjp_bank_zero_q8() {
         use std::time::Instant;
@@ -4648,7 +4957,7 @@ mod tests {
             input,
         );
         let prepared =
-            MuseGlimmerPreparedFullAttentionBlock::new(&ctx, &weights, &capture).unwrap();
+            MuseGlimmerPreparedMetalAttentionBlock::new(&ctx, &weights, &capture).unwrap();
         let model_prepare_seconds = model_prepare_start.elapsed().as_secs_f64();
         assert!(
             model_prepare_seconds <= 30.0,
@@ -4668,7 +4977,7 @@ mod tests {
                 MetalTensor::zeros_f32(&ctx, row_shape(hidden, basis_count * N_TOKENS).unwrap())
                     .unwrap();
             let mut workspace =
-                MuseGlimmerFullAttentionBankWorkspace::new(&ctx, &prepared, basis_count).unwrap();
+                MuseGlimmerMetalAttentionBankWorkspace::new(&ctx, &prepared, basis_count).unwrap();
             let mut run = || {
                 let command = ctx.queue.commandBuffer().unwrap();
                 let encoder = KernelEncoder::begin(&command);

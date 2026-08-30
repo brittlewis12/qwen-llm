@@ -74,7 +74,11 @@ batches, the default 25-prompt job now projects to a 7.246-hour VJP-only floor.
 The promoted block-major R256 engine reuses replay across eight B32 banks,
 measures 32.817 seconds against a 45.052-second chunk-major control, and matches
 all 86,900,736 outputs bitwise. Its 25-prompt/26-shard engine projection is
-5.925 hours before capture, checkpoint I/O, and assembly.
+5.925 hours before capture, checkpoint I/O, and assembly. A RoPE-correct Metal
+bank now replaces the CPU fallback for all 38 sliding blocks: block 50 improves
+from 77.520 to 57.232 ms, while promoted R256 engine wall falls to 27.326
+seconds. Full and sliding commands are at parity, and the engine projection is
+now 4.934 hours.
 Muse identity resolution accepts only an existing cache root or fresh Hugging
 Face declarations and fails rather than hashing weights.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
@@ -82,10 +86,10 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Qualify one private RoPE-correct all-Metal sliding-block reverse at released
-T16/B32/R against the prepared CPU-sliding path. Use block 50, one shared replay
-and covector bank, paired samples, a 180-second hard stop, the existing numerical
-gates, and a 15% median wall floor. Do not launch a corpus fit.
+Qualify one private released-Q8 B64 bank against two serial B32 banks on both
+full block 51 and sliding block 50 at T16/R. Share each replay, warm both paths,
+take three alternating samples, compare complete outputs, require 15% on both
+blocks, and hard-stop at 180 seconds. Do not launch a corpus fit.
 
 ## Hard Exclusions
 
@@ -95,12 +99,12 @@ integrity.
 
 ## Blockers
 
-- Sliding-block reverse owns 24.110 of 32.817 seconds per R256 shard-prompt.
+- The common Metal bank command train owns 24.069 of 27.326 R256 seconds.
 - The production fitting corpus and prompt count are not yet selected.
 
 ## Fast Follows
 
-1. Persistent cross-bank Q8 reverse only after sliding-bank qualification.
+1. Persistent cross-bank Q8 reverse if wider-bank scaling misses its gate.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

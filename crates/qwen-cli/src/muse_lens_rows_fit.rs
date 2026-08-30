@@ -695,6 +695,9 @@ fn vjp_timings(timings: &MuseGlimmerQueryBatchVjpTimings) -> artifact::VjpTiming
     artifact::VjpTimings {
         replay_seconds: timings.replay.as_secs_f64(),
         full_attention_bank_command_seconds: timings.full_attention_bank_command.as_secs_f64(),
+        sliding_attention_bank_command_seconds: timings
+            .sliding_attention_bank_command
+            .as_secs_f64(),
         feed_forward_reverse_seconds: timings.feed_forward_reverse.as_secs_f64(),
         attention_output_reverse_seconds: timings.attention_output_reverse.as_secs_f64(),
         attention_cpu_reverse_seconds: timings.attention_cpu_reverse.as_secs_f64(),

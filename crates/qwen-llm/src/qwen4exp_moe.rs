@@ -56,7 +56,12 @@ const PACKED_IQ4_DOWN_M128_N16_HIDDEN: usize = 2_560;
 const PACKED_IQ4_DOWN_M128_N16_ROUTED: usize = 640;
 const PACKED_IQ4_DOWN_M128_N16_EXPERTS: usize = 512;
 const PACKED_IQ4_DOWN_M128_N16_TOP_K: usize = 10;
-const PACKED_IQ4_DOWN_M128_N16_TOKENS: usize = 512;
+const PACKED_IQ4_DOWN_M128_N16_N512_TOKENS: usize = 512;
+const PACKED_IQ4_DOWN_M128_N16_N527_TOKENS: usize = 527;
+const PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS: [usize; 2] = [
+    PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
+    PACKED_IQ4_DOWN_M128_N16_N527_TOKENS,
+];
 
 #[cfg(test)]
 const QWEN4EXP_IQ3_GATE_UP_CAPTURE_TOKENS: usize = 2_048;
@@ -502,7 +507,7 @@ fn packed_iq4_down_m128_n16_scope_qualified(
         && geometry.expert_count == PACKED_IQ4_DOWN_M128_N16_EXPERTS
         && geometry.experts_per_token == PACKED_IQ4_DOWN_M128_N16_TOP_K
         && dtype == GgmlType::IQ4_NL
-        && tokens == PACKED_IQ4_DOWN_M128_N16_TOKENS
+        && PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS.contains(&tokens)
 }
 
 fn packed_iq4_down_m128_n16_qualified(
@@ -3462,12 +3467,18 @@ mod tests {
         let qualified = |device, geometry, dtype, tokens| {
             packed_iq4_down_m128_n16_scope_qualified(device, geometry, dtype, tokens)
         };
-        assert!(qualified(
-            PACKED_IQ4_DOWN_M128_N16_DEVICE,
-            exact,
-            GgmlType::IQ4_NL,
-            PACKED_IQ4_DOWN_M128_N16_TOKENS,
-        ));
+        for tokens in 1..=MAX_PACKED_TOKENS + 1 {
+            assert_eq!(
+                qualified(
+                    PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                    exact,
+                    GgmlType::IQ4_NL,
+                    tokens,
+                ),
+                PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS.contains(&tokens),
+                "tokens={tokens}",
+            );
+        }
 
         for (label, device, geometry, dtype, tokens) in [
             (
@@ -3475,7 +3486,7 @@ mod tests {
                 "Apple M3 Max",
                 exact,
                 GgmlType::IQ4_NL,
-                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+                PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
             ),
             (
                 "hidden",
@@ -3489,7 +3500,7 @@ mod tests {
                 )
                 .unwrap(),
                 GgmlType::IQ4_NL,
-                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+                PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
             ),
             (
                 "routed",
@@ -3503,7 +3514,7 @@ mod tests {
                 )
                 .unwrap(),
                 GgmlType::IQ4_NL,
-                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+                PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
             ),
             (
                 "experts",
@@ -3517,7 +3528,7 @@ mod tests {
                 )
                 .unwrap(),
                 GgmlType::IQ4_NL,
-                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+                PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
             ),
             (
                 "top-k",
@@ -3531,21 +3542,14 @@ mod tests {
                 )
                 .unwrap(),
                 GgmlType::IQ4_NL,
-                PACKED_IQ4_DOWN_M128_N16_TOKENS,
+                PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
             ),
             (
                 "dtype",
                 PACKED_IQ4_DOWN_M128_N16_DEVICE,
                 exact,
                 GgmlType::Q8_0,
-                PACKED_IQ4_DOWN_M128_N16_TOKENS,
-            ),
-            (
-                "tokens",
-                PACKED_IQ4_DOWN_M128_N16_DEVICE,
-                exact,
-                GgmlType::IQ4_NL,
-                PACKED_IQ4_DOWN_M128_N16_TOKENS - 1,
+                PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
             ),
         ] {
             assert!(!qualified(device, geometry, dtype, tokens), "{label}");
@@ -3554,25 +3558,22 @@ mod tests {
         let Some(ctx) = packed_test_context() else {
             return;
         };
-        with_qwen4exp_moe_iq4_down_m128_n16_override(false, || {
-            assert!(!packed_iq4_down_m128_n16_qualified(
-                &ctx,
-                exact,
-                GgmlType::IQ4_NL,
-                PACKED_IQ4_DOWN_M128_N16_TOKENS,
-            ));
-        });
-        with_qwen4exp_moe_iq4_down_m128_n16_override(true, || {
-            assert_eq!(
-                packed_iq4_down_m128_n16_qualified(
+        for &tokens in &PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS {
+            with_qwen4exp_moe_iq4_down_m128_n16_override(false, || {
+                assert!(!packed_iq4_down_m128_n16_qualified(
                     &ctx,
                     exact,
                     GgmlType::IQ4_NL,
-                    PACKED_IQ4_DOWN_M128_N16_TOKENS,
-                ),
-                ctx.device.name().to_string() == PACKED_IQ4_DOWN_M128_N16_DEVICE,
-            );
-        });
+                    tokens,
+                ));
+            });
+            with_qwen4exp_moe_iq4_down_m128_n16_override(true, || {
+                assert_eq!(
+                    packed_iq4_down_m128_n16_qualified(&ctx, exact, GgmlType::IQ4_NL, tokens,),
+                    ctx.device.name().to_string() == PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                );
+            });
+        }
     }
 
     #[test]
@@ -4622,14 +4623,18 @@ mod tests {
             n_in: usize,
             n_out: usize,
             n_expert: usize,
+            token_capacity: Option<usize>,
             assignments: &[usize],
         ) {
             const GUARD_ELEMENTS: usize = 257;
             const BASELINE_ACTIVE: u32 = 0x7fc0_4111;
             const CANDIDATE_ACTIVE: u32 = 0x7fc0_4222;
-            let n_tokens = assignments.len();
+            let slot_count = assignments.len();
+            let n_tokens = token_capacity.unwrap_or(slot_count);
             assert!(n_in.is_multiple_of(32));
             assert!(n_tokens > 0);
+            assert!(slot_count.is_multiple_of(n_tokens));
+            assert!((1..=16).contains(&(slot_count / n_tokens)));
             assert!(assignments.iter().all(|&expert| expert < n_expert));
 
             let mut counts = vec![0_i32; n_expert];
@@ -4639,7 +4644,8 @@ mod tests {
                 slots[expert * n_tokens + count] = slot as i32;
                 counts[expert] += 1;
             }
-            assert_eq!(counts.iter().sum::<i32>(), n_tokens as i32);
+            assert!(counts.iter().all(|&count| count <= n_tokens as i32));
+            assert_eq!(counts.iter().sum::<i32>(), slot_count as i32);
 
             let weight = weight_bytes(
                 ctx,
@@ -4647,20 +4653,20 @@ mod tests {
                 vec![n_in as u64, n_out as u64, n_expert as u64],
                 GgmlType::IQ4_NL,
             );
-            let inner_values = (0..n_tokens * n_in)
+            let inner_values = (0..slot_count * n_in)
                 .map(|index| ((index * 43 + 17) % 257) as f32 * 0.000_5 - 0.064)
                 .collect::<Vec<_>>();
-            let inner = tensor_f32(ctx, &inner_values, vec![n_in as u64, n_tokens as u64]);
+            let inner = tensor_f32(ctx, &inner_values, vec![n_in as u64, slot_count as u64]);
             let counts = tensor_i32(ctx, &counts, vec![n_expert as u64]);
             let slots = tensor_i32(ctx, &slots, vec![n_tokens as u64, n_expert as u64]);
 
-            let active_elements = n_tokens * n_out;
+            let active_elements = slot_count * n_out;
             let guarded_output = |active_sentinel| {
                 let storage =
                     MetalTensor::zeros_f32(ctx, vec![(active_elements + GUARD_ELEMENTS) as u64])
                         .unwrap();
                 fill_f32_bits(&storage, GUARD_F32_SENTINEL);
-                let view = storage.view_subrange(0, vec![n_out as u64, n_tokens as u64]);
+                let view = storage.view_subrange(0, vec![n_out as u64, slot_count as u64]);
                 fill_f32_bits(&view, active_sentinel);
                 (storage, view)
             };
@@ -4755,18 +4761,55 @@ mod tests {
             .enumerate()
             .flat_map(|(expert, &count)| std::iter::repeat_n(expert, count))
             .collect::<Vec<_>>();
-        run_case(&ctx, "count residues", 32, 129, 10, &residue_assignments);
+        run_case(
+            &ctx,
+            "count residues",
+            32,
+            129,
+            10,
+            None,
+            &residue_assignments,
+        );
 
         let dispersed = (0..512).collect::<Vec<_>>();
-        run_case(&ctx, "dispersed experts 0..511", 32, 64, 512, &dispersed);
+        run_case(
+            &ctx,
+            "dispersed experts 0..511",
+            32,
+            64,
+            512,
+            None,
+            &dispersed,
+        );
 
         let alternating = (0..33).map(|token| token % 2).collect::<Vec<_>>();
         for n_out in [64_usize, 65, 127, 128, 129, 2_560] {
-            run_case(&ctx, &format!("M={n_out}"), 32, n_out, 2, &alternating);
+            run_case(
+                &ctx,
+                &format!("M={n_out}"),
+                32,
+                n_out,
+                2,
+                None,
+                &alternating,
+            );
         }
         for n_in in [64_usize, 640] {
-            run_case(&ctx, &format!("K={n_in}"), n_in, 129, 2, &alternating);
+            run_case(&ctx, &format!("K={n_in}"), n_in, 129, 2, None, &alternating);
         }
+
+        let n527_topk10 = (0..10)
+            .flat_map(|expert| std::iter::repeat_n(expert, 527))
+            .collect::<Vec<_>>();
+        run_case(
+            &ctx,
+            "N=527 top-k=10 boundary",
+            32,
+            129,
+            10,
+            Some(527),
+            &n527_topk10,
+        );
     }
 
     #[test]

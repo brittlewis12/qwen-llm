@@ -282,10 +282,13 @@ Natural N=512 clears the retile gate with `S16=21,294`, `S32=15,377`, and
 `R=0.692398`. The promoted M128xN16xK32 kernel remains bit-exact and moves the
 representative IQ4_NL down leaf `3.512855 -> 2.800188 ms/layer`; warm command GPU
 moves `992.155458 -> 967.134625 ms`, saving 2.52%. It is default only for exact
-N=512 released geometry on Apple M4 Max, with
-`QWEN4EXP_MOE_IQ4_DOWN_M128_N16=0` as rollback. Existing natural N=2,048 counts
-give `R=0.857718`, and every individual layer fails the same `0.75` entry gate;
-do not widen the scope there.
+N in `{512, 527}` on released geometry and Apple M4 Max, with
+`QWEN4EXP_MOE_IQ4_DOWN_M128_N16=0` as rollback. The selected N=527 suffix
+measures `R=0.653701` across its 43 IQ4_NL layers; a conservative model-free
+43-dispatch bracket moves `152.858188 -> 127.086938 ms`, saving 16.86%, while
+the `R=0.75` boundary still saves 12.27%. Existing natural N=2,048 counts give
+`R=0.857718`, and every individual layer fails the same `0.75` entry gate; do
+not widen the scope there.
 
 The retile-private paired IQ4_NL decoder is closed. Optimized AIR proved the
 incumbent still traversed each packed payload twice, and the candidate reduced

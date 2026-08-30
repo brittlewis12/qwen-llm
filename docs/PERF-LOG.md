@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-29 - Flash-Next Selected N=527 IQ4_NL Retile KEEP
+
+Status: admit exact N=527 to the existing M128xN16 IQ4_NL routed-down kernel.
+The qualified token set is now `{512, 527}`; all other widths remain M64xN32.
+
+- A one-pass release capture of only the final N=527 selected command measures
+  `S16=23,864`, `S32=18,253`, and `R=0.653700762` across 43 IQ4_NL layers.
+  Every layer independently remains below the existing `0.75` entry gate.
+- A production-geometry, model-free B-C-C-B with 43 dispatches per arm moves
+  `152.858188 -> 127.086938 ms` at conservative `R=0.699728261`, saving 16.86%.
+  Both balanced pairs are positive and the `R=0.75` boundary still saves 12.27%.
+- The retained differential adds exact N=527/top-k-10 metadata-stride and count
+  coverage while preserving raw F32 bits, input bytes, output ownership, and
+  guards.
+- No whole-model timing packet ran: the expected 25-30 ms effect is below the
+  observed 33-50 ms within-arm aggregate-command spread.
+- Roll back both qualified widths with
+  `QWEN4EXP_MOE_IQ4_DOWN_M128_N16=0`.
+
+Evidence: `docs/bench/2026-08-29-qwen4exp-iq4-down-n527/`.
+Adversarial review: `01a0500f-6313-7563-b258-b1664fc1320b`.
+
 ## 2026-08-29 - Flash-Next Selected N=527 Strict Router KEEP
 
 Status: admit exact N=527 to the existing strict E8P32 router. The qualified

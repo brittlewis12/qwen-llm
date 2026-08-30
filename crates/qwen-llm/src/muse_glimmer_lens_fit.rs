@@ -21,6 +21,8 @@ use crate::muse_glimmer_residency::{MuseGlimmerMetalLayerWeights, MuseGlimmerMet
 use crate::tensor::GgmlType;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
 
+pub const MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS: usize = 32;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerOneBlockVjp {
     pub target_block: u32,
@@ -84,6 +86,39 @@ pub struct MuseGlimmerMultiSourceSelectedTokenFit {
     pub diagnostics: Vec<MuseGlimmerBlockReplayDiagnostic>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerFullTransportRowFit {
+    pub source_layers: Vec<u32>,
+    pub target_block: u32,
+    pub method: MuseGlimmerLensRule,
+    pub output_row_ids: Vec<u32>,
+    pub n_valid_positions: usize,
+    pub hidden_size: usize,
+    /// Source-major, output-row-major fitted rows, flattened `[S,R,H]`.
+    pub values: Vec<f32>,
+    /// Reverse traversal order from target toward the earliest source.
+    pub diagnostics: Vec<MuseGlimmerBlockReplayDiagnostic>,
+}
+
+impl MuseGlimmerFullTransportRowFit {
+    pub fn source_values(&self, source_slot: usize) -> Option<&[f32]> {
+        let elements = self.output_row_ids.len().checked_mul(self.hidden_size)?;
+        let start = source_slot.checked_mul(elements)?;
+        self.values.get(start..start.checked_add(elements)?)
+    }
+
+    pub fn source_row_values(&self, source_slot: usize, row_slot: usize) -> Option<&[f32]> {
+        if row_slot >= self.output_row_ids.len() {
+            return None;
+        }
+        let source_elements = self.output_row_ids.len().checked_mul(self.hidden_size)?;
+        let start = source_slot
+            .checked_mul(source_elements)?
+            .checked_add(row_slot.checked_mul(self.hidden_size)?)?;
+        self.values.get(start..start.checked_add(self.hidden_size)?)
+    }
+}
+
 impl MuseGlimmerMultiSourceSelectedTokenFit {
     pub fn source_values(&self, source_slot: usize) -> Option<&[f32]> {
         let elements = self.token_ids.len().checked_mul(self.hidden_size)?;
@@ -113,71 +148,36 @@ pub(crate) fn muse_glimmer_fit_selected_tokens_to_sources(
     skip_first: usize,
     rule: MuseGlimmerLensRule,
 ) -> Result<MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerLensError> {
-    let traversal =
-        validate_composition_request(weights, captures, target_block, source_layers, covectors)?;
+    let traversal = validate_composition_request(
+        weights,
+        captures,
+        target_block,
+        source_layers,
+        covectors.hidden_size(),
+        covectors.token_ids().len(),
+        Some(MUSE_GLIMMER_LENS_MAX_SELECTED_TOKENS),
+    )?;
     let valid_positions = adjacent_fit_position_range(captures.n_tokens(), skip_first)?;
     let n_valid_positions = valid_positions.len();
-    let positions = valid_positions.clone().collect::<Vec<_>>();
-    let source_elements = covectors
-        .token_ids()
-        .len()
-        .checked_mul(captures.hidden_size())
-        .ok_or_else(|| MuseGlimmerLensError::Invalid("source fit element count overflow".into()))?;
-    let mut values = vec![0.0_f32; source_layers.len() * source_elements];
-    let mut diagnostics = traversal
-        .iter()
-        .map(|&block| MuseGlimmerBlockReplayDiagnostic {
-            block,
-            kind: if weights.layers[block as usize].sliding_attention {
-                MuseGlimmerAttentionBlockKind::Sliding
-            } else {
-                MuseGlimmerAttentionBlockKind::Full
-            },
-            post_attention_replay_max_abs_error: 0.0,
-            post_block_replay_max_abs_error: 0.0,
-        })
-        .collect::<Vec<_>>();
-
-    for token_slot in 0..covectors.token_ids().len() {
-        let covector = covectors.token_values(token_slot).ok_or_else(|| {
-            MuseGlimmerLensError::Invalid(format!(
-                "selected-token covector slot {token_slot} is missing"
-            ))
-        })?;
-        let mut current = muse_glimmer_positioned_target_cotangent(
-            covector,
-            captures.n_tokens(),
-            captures.hidden_size(),
-            &positions,
-        )?;
-        for (diagnostic_slot, &block) in traversal.iter().enumerate() {
+    let mut diagnostics = composition_diagnostics(weights, &traversal);
+    let values = compose_covector_rows_to_sources(
+        source_layers,
+        &traversal,
+        covectors.values(),
+        covectors.token_ids().len(),
+        captures.n_tokens(),
+        captures.hidden_size(),
+        valid_positions,
+        &mut diagnostics,
+        |block, current| {
             let capture = captures.block_capture(block).ok_or_else(|| {
                 MuseGlimmerLensError::Invalid(format!(
                     "capture bank is missing traversed block {block}"
                 ))
             })?;
-            let vjp = muse_glimmer_one_attention_block_vjp(ctx, weights, &capture, &current, rule)?;
-            current = vjp.input_cotangent;
-            let diagnostic = &mut diagnostics[diagnostic_slot];
-            diagnostic.post_attention_replay_max_abs_error = diagnostic
-                .post_attention_replay_max_abs_error
-                .max(vjp.post_attention_replay_max_abs_error);
-            diagnostic.post_block_replay_max_abs_error = diagnostic
-                .post_block_replay_max_abs_error
-                .max(vjp.post_block_replay_max_abs_error);
-            let reached_source = block - 1;
-            if let Ok(source_slot) = source_layers.binary_search(&reached_source) {
-                let reduced = mean_reduce_position_rows(
-                    &current,
-                    captures.n_tokens(),
-                    captures.hidden_size(),
-                    valid_positions.clone(),
-                )?;
-                let start = source_slot * source_elements + token_slot * captures.hidden_size();
-                values[start..start + captures.hidden_size()].copy_from_slice(&reduced);
-            }
-        }
-    }
+            muse_glimmer_one_attention_block_vjp(ctx, weights, &capture, current, rule)
+        },
+    )?;
     require_finite("multi-source selected-token fit", &values)?;
     Ok(MuseGlimmerMultiSourceSelectedTokenFit {
         source_layers: source_layers.to_vec(),
@@ -191,22 +191,84 @@ pub(crate) fn muse_glimmer_fit_selected_tokens_to_sources(
     })
 }
 
+pub(crate) fn muse_glimmer_fit_full_transport_rows_to_sources(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    captures: &MuseGlimmerLensCaptureBank,
+    target_block: u32,
+    source_layers: &[u32],
+    output_row_ids: &[u32],
+    skip_first: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerFullTransportRowFit, MuseGlimmerLensError> {
+    let hidden_size = captures.hidden_size();
+    validate_output_row_ids(output_row_ids, hidden_size)?;
+    let traversal = validate_composition_request(
+        weights,
+        captures,
+        target_block,
+        source_layers,
+        hidden_size,
+        output_row_ids.len(),
+        None,
+    )?;
+    let valid_positions = adjacent_fit_position_range(captures.n_tokens(), skip_first)?;
+    let n_valid_positions = valid_positions.len();
+    let row_elements = checked_mul(output_row_ids.len(), hidden_size, "basis covector elements")?;
+    let mut basis_covectors = vec![0.0_f32; row_elements];
+    for (slot, &row) in output_row_ids.iter().enumerate() {
+        basis_covectors[slot * hidden_size + row as usize] = 1.0;
+    }
+    let mut diagnostics = composition_diagnostics(weights, &traversal);
+    let values = compose_covector_rows_to_sources(
+        source_layers,
+        &traversal,
+        &basis_covectors,
+        output_row_ids.len(),
+        captures.n_tokens(),
+        hidden_size,
+        valid_positions,
+        &mut diagnostics,
+        |block, current| {
+            let capture = captures.block_capture(block).ok_or_else(|| {
+                MuseGlimmerLensError::Invalid(format!(
+                    "capture bank is missing traversed block {block}"
+                ))
+            })?;
+            muse_glimmer_one_attention_block_vjp(ctx, weights, &capture, current, rule)
+        },
+    )?;
+    require_finite("full-transport row fit", &values)?;
+    Ok(MuseGlimmerFullTransportRowFit {
+        source_layers: source_layers.to_vec(),
+        target_block,
+        method: rule,
+        output_row_ids: output_row_ids.to_vec(),
+        n_valid_positions,
+        hidden_size,
+        values,
+        diagnostics,
+    })
+}
+
 fn validate_composition_request(
     weights: &MuseGlimmerMetalModelWeights<'_>,
     captures: &MuseGlimmerLensCaptureBank,
     target_block: u32,
     source_layers: &[u32],
-    covectors: &MuseGlimmerSelectedTokenCovectors,
+    covector_hidden_size: usize,
+    covector_count: usize,
+    max_covectors: Option<usize>,
 ) -> Result<Vec<u32>, MuseGlimmerLensError> {
     if target_block == 0 || target_block as usize >= weights.layers.len() {
         return invalid(format!("invalid composition target block {target_block}"));
     }
     let traversal = composition_traversal(target_block, source_layers)?;
     if captures.hidden_size() != weights.config.hidden_size as usize
-        || covectors.hidden_size() != captures.hidden_size()
+        || covector_hidden_size != captures.hidden_size()
         || captures.token_ids().is_empty()
-        || covectors.token_ids().is_empty()
-        || covectors.token_ids().len() > MUSE_GLIMMER_LENS_MAX_SELECTED_TOKENS
+        || covector_count == 0
+        || max_covectors.is_some_and(|maximum| covector_count > maximum)
     {
         return invalid("capture/covector dimensions or counts do not match composition contract");
     }
@@ -219,6 +281,109 @@ fn validate_composition_request(
         ));
     }
     Ok(traversal)
+}
+
+fn validate_output_row_ids(
+    output_row_ids: &[u32],
+    hidden_size: usize,
+) -> Result<(), MuseGlimmerLensError> {
+    if output_row_ids.is_empty() {
+        return invalid("full-transport fit requires at least one output row");
+    }
+    if output_row_ids.len() > MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS {
+        return invalid(format!(
+            "scalar full-transport fit supports at most {MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS} rows per shard, got {}",
+            output_row_ids.len()
+        ));
+    }
+    if output_row_ids.windows(2).any(|rows| rows[0] >= rows[1]) {
+        return invalid("output row IDs must be strictly increasing");
+    }
+    if let Some(&row) = output_row_ids
+        .iter()
+        .find(|&&row| row as usize >= hidden_size)
+    {
+        return invalid(format!(
+            "output row {row} is outside hidden size {hidden_size}"
+        ));
+    }
+    Ok(())
+}
+
+fn composition_diagnostics(
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    traversal: &[u32],
+) -> Vec<MuseGlimmerBlockReplayDiagnostic> {
+    traversal
+        .iter()
+        .map(|&block| MuseGlimmerBlockReplayDiagnostic {
+            block,
+            kind: if weights.layers[block as usize].sliding_attention {
+                MuseGlimmerAttentionBlockKind::Sliding
+            } else {
+                MuseGlimmerAttentionBlockKind::Full
+            },
+            post_attention_replay_max_abs_error: 0.0,
+            post_block_replay_max_abs_error: 0.0,
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compose_covector_rows_to_sources<F>(
+    source_layers: &[u32],
+    traversal: &[u32],
+    covectors: &[f32],
+    n_covectors: usize,
+    n_tokens: usize,
+    hidden_size: usize,
+    valid_positions: std::ops::Range<usize>,
+    diagnostics: &mut [MuseGlimmerBlockReplayDiagnostic],
+    mut reverse_block: F,
+) -> Result<Vec<f32>, MuseGlimmerLensError>
+where
+    F: FnMut(u32, &[f32]) -> Result<MuseGlimmerOneBlockVjp, MuseGlimmerLensError>,
+{
+    let source_elements = checked_mul(n_covectors, hidden_size, "source fit elements")?;
+    validate_len("target covector rows", covectors, source_elements)?;
+    if diagnostics.len() != traversal.len() {
+        return invalid("composition diagnostic schedule differs from traversal");
+    }
+    let output_elements = checked_mul(source_layers.len(), source_elements, "source fit output")?;
+    let mut values = vec![0.0_f32; output_elements];
+    let positions = valid_positions.clone().collect::<Vec<_>>();
+    for covector_slot in 0..n_covectors {
+        let start = covector_slot * hidden_size;
+        let mut current = muse_glimmer_positioned_target_cotangent(
+            &covectors[start..start + hidden_size],
+            n_tokens,
+            hidden_size,
+            &positions,
+        )?;
+        for (diagnostic_slot, &block) in traversal.iter().enumerate() {
+            let vjp = reverse_block(block, &current)?;
+            current = vjp.input_cotangent;
+            let diagnostic = &mut diagnostics[diagnostic_slot];
+            diagnostic.post_attention_replay_max_abs_error = diagnostic
+                .post_attention_replay_max_abs_error
+                .max(vjp.post_attention_replay_max_abs_error);
+            diagnostic.post_block_replay_max_abs_error = diagnostic
+                .post_block_replay_max_abs_error
+                .max(vjp.post_block_replay_max_abs_error);
+            let reached_source = block - 1;
+            if let Ok(source_slot) = source_layers.binary_search(&reached_source) {
+                let reduced = mean_reduce_position_rows(
+                    &current,
+                    n_tokens,
+                    hidden_size,
+                    valid_positions.clone(),
+                )?;
+                let destination = source_slot * source_elements + covector_slot * hidden_size;
+                values[destination..destination + hidden_size].copy_from_slice(&reduced);
+            }
+        }
+    }
+    Ok(values)
 }
 
 fn composition_traversal(
@@ -1888,6 +2053,122 @@ mod tests {
     }
 
     #[test]
+    fn full_transport_rows_validate_and_expose_source_row_layout() {
+        validate_output_row_ids(&[0, 2], 3).unwrap();
+        assert!(validate_output_row_ids(&[], 3).is_err());
+        assert!(validate_output_row_ids(&[1, 1], 3).is_err());
+        assert!(validate_output_row_ids(&[2, 1], 3).is_err());
+        assert!(validate_output_row_ids(&[0, 3], 3).is_err());
+        assert!(
+            validate_output_row_ids(
+                &(0..=MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS as u32).collect::<Vec<_>>(),
+                MUSE_GLIMMER_FULL_TRANSPORT_MAX_SCALAR_ROWS + 1,
+            )
+            .is_err()
+        );
+
+        let fit = MuseGlimmerFullTransportRowFit {
+            source_layers: vec![4, 9],
+            target_block: 10,
+            method: MuseGlimmerLensRule::R,
+            output_row_ids: vec![0, 2],
+            n_valid_positions: 2,
+            hidden_size: 3,
+            values: (0..12).map(|value| value as f32).collect(),
+            diagnostics: Vec::new(),
+        };
+        assert_eq!(
+            fit.source_values(1).unwrap(),
+            [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]
+        );
+        assert_eq!(fit.source_row_values(0, 1).unwrap(), [3.0, 4.0, 5.0]);
+        assert_eq!(fit.source_row_values(1, 0).unwrap(), [6.0, 7.0, 8.0]);
+        assert!(fit.source_row_values(0, 2).is_none());
+        assert!(fit.source_values(2).is_none());
+    }
+
+    #[test]
+    fn basis_rows_match_generic_covectors_with_orientation_and_mean_reduction() {
+        let source_layers = [0, 1];
+        let traversal = [2, 1];
+        let mut diagnostics = traversal
+            .iter()
+            .map(|&block| MuseGlimmerBlockReplayDiagnostic {
+                block,
+                kind: MuseGlimmerAttentionBlockKind::Full,
+                post_attention_replay_max_abs_error: 0.0,
+                post_block_replay_max_abs_error: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let reverse = |block: u32, current: &[f32]| {
+            let mut input = Vec::with_capacity(current.len());
+            for (position, row) in current.chunks_exact(3).enumerate() {
+                if block == 2 {
+                    let scale = position as f32 + 1.0;
+                    input.extend([
+                        scale * (row[0] + 2.0 * row[1]),
+                        scale * (3.0 * row[0] + row[2]),
+                        scale * 4.0 * row[2],
+                    ]);
+                } else {
+                    input.extend([2.0 * row[0], 3.0 * row[1], 5.0 * row[2]]);
+                }
+            }
+            Ok(MuseGlimmerOneBlockVjp {
+                target_block: block,
+                rule: MuseGlimmerLensRule::J,
+                n_tokens: 3,
+                hidden_size: 3,
+                input_cotangent: input,
+                post_attention_replay_max_abs_error: block as f32 * 0.01,
+                post_block_replay_max_abs_error: block as f32 * 0.02,
+            })
+        };
+        let basis_rows = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let fitted = compose_covector_rows_to_sources(
+            &source_layers,
+            &traversal,
+            &basis_rows,
+            2,
+            3,
+            3,
+            0..2,
+            &mut diagnostics,
+            reverse,
+        )
+        .unwrap();
+        assert_eq!(
+            fitted,
+            [3.0, 13.5, 0.0, 0.0, 4.5, 30.0, 1.5, 4.5, 0.0, 0.0, 1.5, 6.0]
+        );
+
+        let mut scalar_diagnostics = diagnostics
+            .iter()
+            .map(|diagnostic| MuseGlimmerBlockReplayDiagnostic {
+                block: diagnostic.block,
+                kind: diagnostic.kind,
+                post_attention_replay_max_abs_error: 0.0,
+                post_block_replay_max_abs_error: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let scalar = compose_covector_rows_to_sources(
+            &source_layers,
+            &traversal,
+            &[0.0, 0.0, 1.0],
+            1,
+            3,
+            3,
+            0..2,
+            &mut scalar_diagnostics,
+            reverse,
+        )
+        .unwrap();
+        assert_eq!(&fitted[3..6], &scalar[0..3]);
+        assert_eq!(&fitted[9..12], &scalar[3..6]);
+        assert_eq!(diagnostics, scalar_diagnostics);
+    }
+
+    #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn real_q8_block_51_replay_and_vjp_smoke() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
@@ -2196,6 +2477,17 @@ mod tests {
             MuseGlimmerLensRule::R,
         )
         .expect("fit R sources 49 and 50");
+        let basis = muse_glimmer_fit_full_transport_rows_to_sources(
+            &ctx,
+            &bound,
+            &captures,
+            51,
+            &[49, 50],
+            &[0],
+            0,
+            MuseGlimmerLensRule::J,
+        )
+        .expect("fit hidden basis row zero");
         assert_eq!(composed_j.source_layers, [49, 50]);
         assert_eq!(composed_j.target_block, 51);
         assert_eq!(composed_j.n_valid_positions, 2);
@@ -2252,6 +2544,45 @@ mod tests {
             &explicit_source_49,
         )
         .unwrap();
+
+        let basis_target = muse_glimmer_positioned_target_cotangent(
+            &[1.0]
+                .into_iter()
+                .chain(std::iter::repeat_n(
+                    0.0,
+                    weights.config().hidden_size as usize - 1,
+                ))
+                .collect::<Vec<_>>(),
+            tokens.len(),
+            weights.config().hidden_size as usize,
+            &valid_positions,
+        )
+        .unwrap();
+        let basis_explicit_51 = muse_glimmer_one_attention_block_vjp(
+            &ctx,
+            &bound,
+            &capture_51,
+            &basis_target,
+            MuseGlimmerLensRule::J,
+        )
+        .unwrap();
+        let basis_explicit_50 = muse_glimmer_one_attention_block_vjp(
+            &ctx,
+            &bound,
+            &capture_50,
+            &basis_explicit_51.input_cotangent,
+            MuseGlimmerLensRule::J,
+        )
+        .unwrap();
+        let basis_source_49 = mean_reduce_position_rows(
+            &basis_explicit_50.input_cotangent,
+            tokens.len(),
+            weights.config().hidden_size as usize,
+            0..2,
+        )
+        .unwrap();
+        assert_eq!(basis.output_row_ids, [0]);
+        assert_eq!(basis.source_row_values(0, 0).unwrap(), basis_source_49);
 
         let direction = (0..capture_50.input_residuals().len())
             .map(|index| (index as f32 * 0.019_31 + 0.17).sin())

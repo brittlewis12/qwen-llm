@@ -10,8 +10,8 @@ use crate::muse_glimmer_lens::{
     MuseGlimmerSelectedTokenCovectors, muse_glimmer_selected_token_covectors,
 };
 use crate::muse_glimmer_lens_fit::{
-    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerMultiSourceSelectedTokenFit,
-    MuseGlimmerOneBlockVjp,
+    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerFullTransportRowFit,
+    MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerOneBlockVjp,
 };
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
@@ -303,6 +303,27 @@ impl MuseGlimmerTextRunner<'_, '_> {
             target_block,
             source_layers,
             covectors,
+            skip_first,
+            rule,
+        )?)
+    }
+
+    /// Fit selected rows of the scalar full-transport oracle. Each output row
+    /// is a hidden-space basis covector placed at every valid target position.
+    pub fn fit_full_transport_rows_to_sources(
+        &self,
+        captures: &MuseGlimmerLensCaptureBank,
+        target_block: u32,
+        source_layers: &[u32],
+        output_row_ids: &[u32],
+        skip_first: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerFullTransportRowFit, MuseGlimmerRuntimeError> {
+        Ok(self.forward.fit_full_transport_rows_to_sources(
+            captures,
+            target_block,
+            source_layers,
+            output_row_ids,
             skip_first,
             rule,
         )?)

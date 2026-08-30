@@ -81,7 +81,7 @@ pub(crate) struct Manifest {
     pub provenance: Provenance,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Geometry {
     pub layer_count: u32,

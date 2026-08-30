@@ -2600,15 +2600,15 @@ fn write_f32(tensor: &MetalTensor, values: &[f32]) -> Result<(), MuseGlimmerLens
 
 fn max_abs_difference(left: &[f32], right: &[f32]) -> Result<f32, MuseGlimmerLensError> {
     validate_len("replay comparison", left, right.len())?;
-    let value = left
-        .iter()
-        .zip(right)
-        .map(|(&left, &right)| (left - right).abs())
-        .fold(0.0_f32, f32::max);
-    if !value.is_finite() {
-        return invalid("non-finite replay error");
+    let mut maximum = 0.0_f32;
+    for (&left, &right) in left.iter().zip(right) {
+        let difference = (left - right).abs();
+        if !difference.is_finite() {
+            return invalid("non-finite replay error");
+        }
+        maximum = maximum.max(difference);
     }
-    Ok(value)
+    Ok(maximum)
 }
 
 fn softmax_in_place(values: &mut [f32]) {
@@ -3053,6 +3053,13 @@ mod tests {
         let mut non_finite = [1.0; 8];
         non_finite[7] = f32::NAN;
         assert!(validate_query_batch_request(&capture, &non_finite, 2, 2).is_err());
+    }
+
+    #[test]
+    fn replay_difference_rejects_non_finite_operands() {
+        assert_eq!(max_abs_difference(&[1.0, -2.0], &[1.5, -1.0]).unwrap(), 1.0);
+        assert!(max_abs_difference(&[f32::NAN], &[0.0]).is_err());
+        assert!(max_abs_difference(&[0.0], &[f32::INFINITY]).is_err());
     }
 
     #[test]

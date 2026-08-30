@@ -23,6 +23,7 @@ not compensating abstraction.
 - [x] The CLI runs Flash-Next with explicit native hyper directions.
 - [x] Muse Glimmer fits and runs composed full/sliding selected-token J/R lenses.
 - [x] Muse Glimmer applies scoped, ordered selected-token interventions.
+- [x] Muse Glimmer fits resumable, query-batched full-transport J/R row shards.
 
 ## Model Support
 
@@ -31,7 +32,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | scalar selected-token J/R oracle | live CLI implemented | scalar live readout | batched resumable full-R |
+| Muse Glimmer 30B | selected tokens + resumable full J/R rows | selected-token CLI passed | scalar live readout | banked full-R production |
 
 ## Current Status
 
@@ -50,34 +51,38 @@ selected-token fitter remains its correctness oracle; extrapolating that path
 to the default 25-prompt corpus takes roughly nine days and must not be launched.
 The bank-specific native-Q8 transpose VJP is qualified at `25.36-26.69x` on
 all dominant Muse FFN shapes without changing the scalar dispatcher.
+Muse full-transport fitting now has bounded query batches, prompt-level resume,
+model/corpus-bound row shards in `[source,row,hidden]` order, and a real Q8 R-lens
+CLI proof. Self-contained F16 assembly, exact deployed output-tail replay, and
+F16 hidden-transport application are implemented; readout CLI consumption remains.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
 until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Build a shared-primal Muse one-block VJP bank with Metal causal-GQA backward and
-fixed scratch, then compose it into resumable full-R row slabs. Production must
-preserve the scalar estimator exactly. Do not run a long fit until a short
-component packet projects the complete 25-prompt build into an agreed
-hours-scale envelope.
+Wire the qualified 128-row native-Q8 transpose into the shared-primal composed
+Muse VJP, then benchmark one complete-source row shard and project the full fit
+before launching it. Preserve the scalar estimator as the correctness oracle.
 
 ## Hard Exclusions
 
-Artifact security/publication, scientific workflows or analysis, UI, generic
-plugins, unrelated test repair, cross-device support, and production hardening.
+Scientific workflows or analysis, UI, generic plugins, unrelated test repair,
+cross-device support, and production hardening beyond required fit/resume
+integrity.
 
 ## Blockers
 
-- Batched Metal causal-GQA VJP does not exist yet.
-- Shared-primal periodic RMS/SwiGLU VJPs and fixed scratch ownership do not
-  exist yet.
+- The composed fitter is capped at eight queries and does not reach the new
+  128-row native-Q8 bank path.
+- CPU causal-GQA reverse and transient scratch may become the next bottlenecks;
+  optimize them only after the integrated packet measures them.
 
 ## Fast Follows
 
-1. Full-R F16 mmap consumption for full-vocabulary and vector readouts.
+1. Full-vocabulary and selected-vector CLI consumption of assembled Muse assets.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
-4. Decide whether large operation schedules need an application-output cap.
+4. Corpus batching only after measured throughput requires it.
 
 This file is updated in place. It is not a work log or design document. Keep
 one active gate, at most three blockers, and at most five fast follows.

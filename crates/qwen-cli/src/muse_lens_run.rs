@@ -1,15 +1,19 @@
-use super::lens_run::{LensDefinition, LensPlan, LensRunArgs, Scope, Selector};
+use super::lens_run::{
+    Action, DirectionDefinition, DirectionRow, LensDefinition, LensPlan, LensRunArgs, Scope,
+    Selector,
+};
 use super::muse_lens_artifact as artifact;
 use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::metal::MetalContext;
+use qwen_llm::metal::{MetalContext, MetalTensor, PostBlockIntervention};
 use qwen_llm::muse_glimmer::{MuseGlimmerArtifactProfile, MuseGlimmerConfig, MuseGlimmerModel};
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
 use qwen_llm::sampling::{Sampler, SamplingConfig};
+use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenize};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 struct LoadedMuseLens {
@@ -19,6 +23,19 @@ struct LoadedMuseLens {
     token_ids: Vec<u32>,
     hidden_size: usize,
     values: Vec<f32>,
+}
+
+struct PreparedMuseDirection {
+    rows: BTreeMap<u32, MetalTensor>,
+}
+
+struct MuseExecutionPlan {
+    plan: LensPlan,
+    lenses: HashMap<String, LoadedMuseLens>,
+    directions: HashMap<String, PreparedMuseDirection>,
+    capture_layers: Vec<u32>,
+    layer_slots: HashMap<u32, usize>,
+    layer_count: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -47,8 +64,16 @@ struct Output {
     generated_token_ids: Vec<i32>,
     decoded_text: String,
     stop_reason: String,
-    operation_applications: Vec<serde_json::Value>,
+    operation_applications: Vec<OperationApplication>,
     live_readouts: Vec<LiveReadout>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct OperationApplication {
+    id: String,
+    layer: u32,
+    phase: &'static str,
+    index: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,12 +130,7 @@ pub(crate) fn run(
             .all(|&id| id >= 0 && (id as u32) < config.vocab_size),
         "Muse prompt contains an invalid token ID"
     );
-    validate_schedule(
-        &plan,
-        prompt_ids.len(),
-        args.max_new_tokens,
-        config.layer_count,
-    )?;
+    super::lens_run::validate_reachable_scopes(&plan, prompt_ids.len(), args.max_new_tokens)?;
 
     let content = checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(cache))
         .with_context(|| {
@@ -131,27 +151,12 @@ pub(crate) fn run(
             "duplicate Muse lens id"
         );
     }
-    let capture_layers = lenses
-        .values()
-        .flat_map(|lens| lens.source_layers.iter().copied())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let layer_slots = capture_layers
-        .iter()
-        .enumerate()
-        .map(|(slot, &layer)| (layer, slot))
-        .collect::<HashMap<_, _>>();
-    for readout in &plan.readouts {
-        let lens = &lenses[&readout.lens];
-        validate_readout_source_subset(readout, lens, config.layer_count)?;
-    }
-
     let forward_count = prompt_ids
         .len()
         .checked_add(args.max_new_tokens.saturating_sub(1))
         .context("Muse forward count overflow")?;
     let context = MetalContext::new().context("initialize Metal for Muse Lens run")?;
+    let execution = prepare_execution_plan(plan, lenses, &config, &context)?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, forward_count)
         .context("load Muse Lens runner model")?;
     let mut runner = loaded
@@ -167,17 +172,16 @@ pub(crate) fn run(
     let stops = [config.eos_token_id as i32, config.eot_token_id as i32]
         .into_iter()
         .collect::<HashSet<_>>();
+    let mut operation_applications = Vec::new();
     let mut live_readouts = Vec::new();
     let mut logits = Vec::new();
     for (index, &token) in prompt_ids.iter().enumerate() {
         logits = forward_event(
-            &plan,
-            &lenses,
-            &capture_layers,
-            &layer_slots,
+            &execution,
             &mut runner,
             token as u32,
             Event::Prefill(index),
+            &mut operation_applications,
             &mut live_readouts,
         )?;
     }
@@ -194,13 +198,11 @@ pub(crate) fn run(
             break;
         }
         logits = forward_event(
-            &plan,
-            &lenses,
-            &capture_layers,
-            &layer_slots,
+            &execution,
             &mut runner,
             token as u32,
             Event::Decode(index),
+            &mut operation_applications,
             &mut live_readouts,
         )?;
     }
@@ -211,7 +213,7 @@ pub(crate) fn run(
             generated_token_ids: generated.clone(),
             decoded_text: tokenizer.decode(&generated),
             stop_reason,
-            operation_applications: Vec::new(),
+            operation_applications,
             live_readouts
         })?
     );
@@ -252,6 +254,102 @@ fn load_muse_artifact(
     })
 }
 
+fn prepare_execution_plan(
+    plan: LensPlan,
+    lenses: HashMap<String, LoadedMuseLens>,
+    config: &MuseGlimmerConfig,
+    context: &MetalContext,
+) -> Result<MuseExecutionPlan> {
+    let mut readout_layers = BTreeSet::new();
+    for readout in &plan.readouts {
+        let selected =
+            validate_readout_source_subset(readout, &lenses[&readout.lens], config.layer_count)?;
+        readout_layers.extend(selected);
+    }
+    let capture_layers = readout_layers.into_iter().collect::<Vec<_>>();
+    let layer_slots = capture_layers
+        .iter()
+        .enumerate()
+        .map(|(slot, &layer)| (layer, slot))
+        .collect::<HashMap<_, _>>();
+
+    let mut direction_layers: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+    for operation in &plan.operations {
+        let layers = selector_values(&operation.scope.layers, config.layer_count)?;
+        for direction in operation.action.direction_ids() {
+            direction_layers
+                .entry(direction)
+                .or_default()
+                .extend(layers.iter().copied());
+        }
+    }
+    let definitions = plan
+        .directions
+        .iter()
+        .filter_map(|definition| match definition {
+            DirectionDefinition::LensRow(direction) => Some((direction.id.as_str(), direction)),
+            DirectionDefinition::NativeHyper(_) => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let mut directions = HashMap::new();
+    for (id, layers) in direction_layers {
+        let definition = definitions[id];
+        let token_id = match &definition.row {
+            DirectionRow::TokenId { token_id } => *token_id,
+            _ => bail!("Muse direction {id} requires row.kind=token_id"),
+        };
+        let token_id = u32::try_from(token_id)
+            .with_context(|| format!("Muse direction {id} token ID must be nonnegative"))?;
+        let lens = &lenses[&definition.lens];
+        let mut rows = BTreeMap::new();
+        for layer in layers {
+            let raw = muse_lens_row(lens, layer, token_id, id)?;
+            let normalized =
+                super::lens_run::normalize_direction(raw, definition.normalization, id)?;
+            let tensor = MetalTensor::from_bytes(
+                context,
+                bytemuck::cast_slice(&normalized),
+                vec![config.hidden_size as u64],
+                GgmlType::F32,
+            )?;
+            ensure!(rows.insert(layer, tensor).is_none());
+        }
+        ensure!(
+            directions
+                .insert(id.to_string(), PreparedMuseDirection { rows })
+                .is_none()
+        );
+    }
+    Ok(MuseExecutionPlan {
+        plan,
+        lenses,
+        directions,
+        capture_layers,
+        layer_slots,
+        layer_count: config.layer_count,
+    })
+}
+
+fn muse_lens_row(
+    lens: &LoadedMuseLens,
+    layer: u32,
+    token_id: u32,
+    direction_id: &str,
+) -> Result<Vec<f32>> {
+    let source_slot = lens.source_layers.binary_search(&layer).map_err(|_| {
+        anyhow::anyhow!("Muse direction {direction_id} lens has no fitted source layer {layer}")
+    })?;
+    let token_slot = lens
+        .token_ids
+        .iter()
+        .position(|&candidate| candidate == token_id)
+        .with_context(|| {
+            format!("Muse direction {direction_id} lens has no selected token {token_id}")
+        })?;
+    let offset = (source_slot * lens.token_ids.len() + token_slot) * lens.hidden_size;
+    Ok(lens.values[offset..offset + lens.hidden_size].to_vec())
+}
+
 fn validate_readout_source_subset(
     readout: &super::lens_run::ReadoutDefinition,
     lens: &LoadedMuseLens,
@@ -277,16 +375,8 @@ fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
         "Muse Lens run does not support --messages"
     );
     ensure!(
-        plan.directions.is_empty(),
-        "Muse Lens plans do not support directions"
-    );
-    ensure!(
-        plan.operations.is_empty(),
-        "Muse Lens plans do not support operations"
-    );
-    ensure!(
-        !plan.readouts.is_empty(),
-        "Muse Lens plans require readouts"
+        !plan.operations.is_empty() || !plan.readouts.is_empty(),
+        "Muse Lens plans require at least one operation or readout"
     );
     ensure!(
         plan.lenses
@@ -294,6 +384,16 @@ fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
             .all(|lens| matches!(lens, LensDefinition::NativeSelected { .. })),
         "Muse Lens plans support native_selected lenses only"
     );
+    for direction in &plan.directions {
+        ensure!(
+            matches!(
+                direction,
+                DirectionDefinition::LensRow(definition)
+                    if matches!(&definition.row, DirectionRow::TokenId { .. })
+            ),
+            "Muse directions require a native selected-token row"
+        );
+    }
     Ok(())
 }
 
@@ -330,38 +430,6 @@ fn selector_values(selector: &Selector, bound: u32) -> Result<Vec<u32>> {
         "selector value is outside event bound"
     );
     Ok(values)
-}
-
-fn validate_schedule(
-    plan: &LensPlan,
-    prompt_len: usize,
-    max_new: usize,
-    layers: u32,
-) -> Result<()> {
-    for readout in &plan.readouts {
-        ensure!(
-            !selector_values(&readout.scope.layers, layers)?.is_empty(),
-            "Muse readout has empty layer schedule"
-        );
-        if let Some(prefill) = &readout.scope.prefill {
-            ensure!(
-                !selector_values(prefill, prompt_len as u32)?.is_empty(),
-                "Muse readout has empty prefill schedule"
-            );
-        }
-        if let Some(decode) = &readout.scope.decode {
-            let bound = max_new.saturating_sub(1);
-            ensure!(
-                bound > 0,
-                "Muse decode readout cannot run when --max-new-tokens is 1"
-            );
-            ensure!(
-                !selector_values(decode, bound as u32)?.is_empty(),
-                "Muse readout has empty decode schedule"
-            );
-        }
-    }
-    Ok(())
 }
 
 fn matches(scope: &Scope, event: Event, layer: u32) -> bool {
@@ -418,38 +486,134 @@ fn score(lens: &LoadedMuseLens, layer: u32, row: &[f32], top_k: usize) -> Result
 }
 
 fn forward_event(
-    plan: &LensPlan,
-    lenses: &HashMap<String, LoadedMuseLens>,
-    capture_layers: &[u32],
-    layer_slots: &HashMap<u32, usize>,
+    execution: &MuseExecutionPlan,
     runner: &mut qwen_llm::muse_glimmer_runtime::MuseGlimmerTextRunner<'_, '_>,
     token: u32,
     event: Event,
+    operation_applications: &mut Vec<OperationApplication>,
     output: &mut Vec<LiveReadout>,
 ) -> Result<Vec<f32>> {
-    let captured = runner
-        .forward_token_capture_post_blocks(token, capture_layers)
+    let interventions = event_interventions(execution, event)?;
+    let borrowed = interventions
+        .iter()
+        .map(|(_, _, intervention)| *intervention)
+        .collect::<Vec<_>>();
+    let (logits, captured) = if execution.capture_layers.is_empty() {
+        let logits = if borrowed.is_empty() {
+            runner.forward_token(token)
+        } else {
+            runner.forward_token_with_post_block_interventions(token, &borrowed)
+        }
         .with_context(|| format!("forward Muse {} event {}", event.label(), event.index()))?;
-    append_live_readouts(plan, lenses, layer_slots, &captured, event, output)?;
-    Ok(captured.logits)
+        (Some(logits), None)
+    } else {
+        let captured = runner
+            .forward_token_capture_post_blocks_with_interventions(
+                token,
+                &execution.capture_layers,
+                &borrowed,
+            )
+            .with_context(|| format!("forward Muse {} event {}", event.label(), event.index()))?;
+        (None, Some(captured))
+    };
+    operation_applications.extend(interventions.iter().map(|(id, layer, _)| {
+        OperationApplication {
+            id: id.clone(),
+            layer: *layer,
+            phase: event.label(),
+            index: event.index(),
+        }
+    }));
+    if let Some(captured) = captured {
+        append_live_readouts(execution, &captured, event, output)?;
+        Ok(captured.logits)
+    } else {
+        Ok(logits.expect("no-capture Muse forward produced logits"))
+    }
+}
+
+fn event_interventions<'a>(
+    execution: &'a MuseExecutionPlan,
+    event: Event,
+) -> Result<Vec<(String, u32, PostBlockIntervention<'a>)>> {
+    let mut interventions = Vec::new();
+    for layer in 0..execution.layer_count {
+        for operation in &execution.plan.operations {
+            if matches(&operation.scope, event, layer) {
+                interventions.push((
+                    operation.id.clone(),
+                    layer,
+                    action_to_intervention(&operation.action, layer, &execution.directions)?,
+                ));
+            }
+        }
+    }
+    Ok(interventions)
+}
+
+fn action_to_intervention<'a>(
+    action: &Action,
+    layer: u32,
+    directions: &'a HashMap<String, PreparedMuseDirection>,
+) -> Result<PostBlockIntervention<'a>> {
+    let direction = |id: &str| -> Result<&'a MetalTensor> {
+        directions
+            .get(id)
+            .and_then(|prepared| prepared.rows.get(&layer))
+            .with_context(|| format!("Muse direction {id} has no uploaded row for layer {layer}"))
+    };
+    Ok(match action {
+        Action::FixedAdd {
+            direction: id,
+            coefficient,
+        } => PostBlockIntervention::Fixed {
+            layer,
+            direction: direction(id)?,
+            coefficient: *coefficient,
+        },
+        Action::ResidualL2Fraction {
+            direction: id,
+            coefficient,
+        } => PostBlockIntervention::ResidualL2Relative {
+            layer,
+            direction: direction(id)?,
+            coefficient: *coefficient,
+        },
+        Action::ProjectionAblate {
+            direction: id,
+            coefficient,
+        } => PostBlockIntervention::Projection {
+            layer,
+            direction: direction(id)?,
+            coefficient: *coefficient,
+        },
+        Action::SourceToTarget {
+            source,
+            target,
+            coefficient,
+        } => PostBlockIntervention::SourceToTarget {
+            layer,
+            source: direction(source)?,
+            target: direction(target)?,
+            coefficient: *coefficient,
+        },
+    })
 }
 
 fn append_live_readouts(
-    plan: &LensPlan,
-    lenses: &HashMap<String, LoadedMuseLens>,
-    layer_slots: &HashMap<u32, usize>,
+    execution: &MuseExecutionPlan,
     captured: &qwen_llm::muse_glimmer_text_session::MuseGlimmerPostBlockForward,
     event: Event,
     output: &mut Vec<LiveReadout>,
 ) -> Result<()> {
-    for readout in &plan.readouts {
-        let lens = &lenses[&readout.lens];
-        for &layer in &lens.source_layers {
+    for readout in &execution.plan.readouts {
+        let lens = &execution.lenses[&readout.lens];
+        for &layer in &execution.capture_layers {
             if !matches(&readout.scope, event, layer) {
                 continue;
             }
             let row = captured
-                .layer_values(layer_slots[&layer])
+                .layer_values(execution.layer_slots[&layer])
                 .context("Muse captured source layer is missing")?;
             output.push(LiveReadout {
                 id: readout.id.clone(),
@@ -528,8 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn muse_plan_rejects_operations_and_templates() {
-        let plan: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"workspace_template","id":"x","weights":"w","labels":"l"}],"directions":[],"operations":[],"readouts":[{"id":"r","lens":"x","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"top_k":1}]})).unwrap();
+    fn muse_plan_accepts_selected_token_operations_and_rejects_other_direction_kinds() {
         let args = LensRunArgs {
             model: "m".into(),
             plan: "p".into(),
@@ -545,7 +708,101 @@ mod tests {
             min_p: 0.0,
             seed: 0,
         };
-        assert!(validate_plan(&plan, &args).is_err());
+        let plan: LensPlan = serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{"kind":"native_selected","id":"x","artifact":"a"}],
+            "directions": [
+                {"id":"a","lens":"x","row":{"kind":"token_id","token_id":7},"normalization":"as_stored"},
+                {"id":"u","lens":"x","row":{"kind":"token_id","token_id":8},"normalization":"unit_l2"}
+            ],
+            "operations": [
+                {"id":"fixed","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"fixed_add","direction":"a","coefficient":1.0}},
+                {"id":"relative","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"residual_l2_fraction","direction":"u","coefficient":0.1}},
+                {"id":"ablate","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"projection_ablate","direction":"u","coefficient":1.0}},
+                {"id":"swap","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"source_to_target","source":"u","target":"u","coefficient":0.5}}
+            ],
+            "readouts": []
+        }))
+        .unwrap();
+        validate_plan(&plan, &args).unwrap();
+
+        let template: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"workspace_template","id":"x","weights":"w","labels":"l"}],"directions":[],"operations":[],"readouts":[{"id":"r","lens":"x","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"top_k":1}]})).unwrap();
+        assert!(validate_plan(&template, &args).is_err());
+        let label: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"native_selected","id":"x","artifact":"a"}],"directions":[{"id":"d","lens":"x","row":{"kind":"label","label":"no"},"normalization":"unit_l2"}],"operations":[{"id":"o","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"fixed_add","direction":"d","coefficient":1.0}}],"readouts":[]})).unwrap();
+        assert!(validate_plan(&label, &args).is_err());
+    }
+
+    #[test]
+    fn operation_only_execution_prepares_all_actions_in_file_order() {
+        let config = MuseGlimmerConfig::unsloth_release_reference();
+        let hidden = config.hidden_size as usize;
+        let mut values = vec![0.0_f32; 2 * 2 * hidden];
+        values[2 * hidden] = 2.0;
+        values[3 * hidden + 1] = 3.0;
+        let lenses = HashMap::from([(
+            "x".to_string(),
+            LoadedMuseLens {
+                method: "J".into(),
+                target_layer: 51,
+                source_layers: vec![49, 50],
+                token_ids: vec![7, 8],
+                hidden_size: hidden,
+                values,
+            },
+        )]);
+        let plan: LensPlan = serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{"kind":"native_selected","id":"x","artifact":"a"}],
+            "directions": [
+                {"id":"a","lens":"x","row":{"kind":"token_id","token_id":7},"normalization":"as_stored"},
+                {"id":"u","lens":"x","row":{"kind":"token_id","token_id":8},"normalization":"unit_l2"}
+            ],
+            "operations": [
+                {"id":"fixed","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"fixed_add","direction":"a","coefficient":1.0}},
+                {"id":"relative","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"residual_l2_fraction","direction":"u","coefficient":0.1}},
+                {"id":"ablate","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"projection_ablate","direction":"u","coefficient":1.0}},
+                {"id":"swap","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"source_to_target","source":"u","target":"a","coefficient":0.5}}
+            ],
+            "readouts": []
+        }))
+        .unwrap();
+        let context = MetalContext::new().unwrap();
+        let execution = prepare_execution_plan(plan, lenses, &config, &context).unwrap();
+        assert!(execution.capture_layers.is_empty());
+        let interventions = event_interventions(&execution, Event::Prefill(0)).unwrap();
+        assert_eq!(
+            interventions
+                .iter()
+                .map(|(id, layer, _)| (id.as_str(), *layer))
+                .collect::<Vec<_>>(),
+            vec![
+                ("fixed", 50),
+                ("relative", 50),
+                ("ablate", 50),
+                ("swap", 50)
+            ]
+        );
+        assert!(matches!(
+            interventions[0].2,
+            PostBlockIntervention::Fixed { .. }
+        ));
+        assert!(matches!(
+            interventions[1].2,
+            PostBlockIntervention::ResidualL2Relative { .. }
+        ));
+        assert!(matches!(
+            interventions[2].2,
+            PostBlockIntervention::Projection { .. }
+        ));
+        assert!(matches!(
+            interventions[3].2,
+            PostBlockIntervention::SourceToTarget { .. }
+        ));
+        assert!(
+            event_interventions(&execution, Event::Prefill(1))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -661,32 +918,21 @@ mod tests {
                 {"id":"r","lens":"R","scope":{"layers":{"kind":"values","values":[49,50]},"prefill":{"kind":"values","values":[0]}},"top_k":1}
             ]
         }))?;
-        let layer_slots = source_layers
-            .iter()
-            .enumerate()
-            .map(|(slot, &layer)| (layer, slot))
-            .collect::<HashMap<_, _>>();
+        let execution = prepare_execution_plan(plan, artifacts, &config, &context)?;
         let mut emitted = Vec::new();
-        append_live_readouts(
-            &plan,
-            &artifacts,
-            &layer_slots,
-            &live,
-            Event::Prefill(0),
-            &mut emitted,
-        )?;
+        append_live_readouts(&execution, &live, Event::Prefill(0), &mut emitted)?;
         ensure!(
             emitted.len() == 4,
             "real proof did not emit four source scores"
         );
         for readout in emitted {
-            let lens = &artifacts[&readout.lens];
+            let lens = &execution.lenses[&readout.lens];
             let source_slot = lens
                 .source_layers
                 .binary_search(&readout.source_layer)
                 .unwrap();
             let residual = live
-                .layer_values(layer_slots[&readout.source_layer])
+                .layer_values(execution.layer_slots[&readout.source_layer])
                 .with_context(|| format!("missing layer-{} proof capture", readout.source_layer))?;
             let offset = source_slot * lens.token_ids.len() * lens.hidden_size;
             let row = &lens.values[offset..offset + lens.hidden_size];

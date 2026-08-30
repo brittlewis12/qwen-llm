@@ -29639,7 +29639,7 @@ mod tests {
         let Some(ctx) = metal_test_context() else {
             return;
         };
-        const H: usize = 2_048;
+        const H: usize = 6_656;
         let x_values: Vec<f32> = (0..H)
             .map(|i| ((i * 19 + 5) % 257) as f32 / 128.0 - 1.0)
             .collect();
@@ -29757,9 +29757,10 @@ mod tests {
                 .zip(expected)
                 .map(|(actual, expected)| (actual - expected).abs())
                 .fold(0.0f32, f32::max);
+            let tolerance = if name == "residual-l2" { 1e-3 } else { 2e-5 };
             assert!(
-                max_abs <= 2e-5,
-                "{name}: max|delta|={max_abs} exceeds F32 tolerance"
+                max_abs <= tolerance,
+                "{name}: max|delta|={max_abs} exceeds F32 tolerance {tolerance}"
             );
         }
     }

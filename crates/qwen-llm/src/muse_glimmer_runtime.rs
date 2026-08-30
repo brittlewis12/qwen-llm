@@ -1,7 +1,9 @@
 //! Request-shaped Muse Glimmer text runtime.
 
 use crate::gguf::GgufFile;
-use crate::metal::{MetalContext, MetalMemoryAdmission, evaluate_metal_memory_admission};
+use crate::metal::{
+    MetalContext, MetalMemoryAdmission, PostBlockIntervention, evaluate_metal_memory_admission,
+};
 use crate::muse_glimmer::MuseGlimmerConfig;
 use crate::muse_glimmer_lens::{
     MuseGlimmerLensCapture, MuseGlimmerLensCaptureBank, MuseGlimmerLensError, MuseGlimmerLensRule,
@@ -185,6 +187,18 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self.forward.forward_token(token, &mut self.session)?)
     }
 
+    pub fn forward_token_with_post_block_interventions(
+        &mut self,
+        token: u32,
+        interventions: &[PostBlockIntervention<'_>],
+    ) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
+        Ok(self.forward.forward_token_with_post_block_interventions(
+            token,
+            interventions,
+            &mut self.session,
+        )?)
+    }
+
     /// Forward one scalar token normally while copying selected post-block
     /// residuals from the same command buffer. Layer IDs must be sorted unique.
     pub fn forward_token_capture_post_blocks(
@@ -195,6 +209,22 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self
             .forward
             .forward_token_capture_post_blocks(token, layer_ids, &mut self.session)?)
+    }
+
+    pub fn forward_token_capture_post_blocks_with_interventions(
+        &mut self,
+        token: u32,
+        layer_ids: &[u32],
+        interventions: &[PostBlockIntervention<'_>],
+    ) -> Result<MuseGlimmerPostBlockForward, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .forward_token_capture_post_blocks_with_interventions(
+                token,
+                layer_ids,
+                interventions,
+                &mut self.session,
+            )?)
     }
 
     pub fn prefill(&mut self, tokens: &[u32]) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {

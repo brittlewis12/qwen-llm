@@ -8,10 +8,11 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTensor,
-    encode_add_inplace_f32, encode_attn_decode_f16kv_f32, encode_copy_offset_f32,
-    encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32, encode_silu_mul_f32,
-    evaluate_metal_memory_admission, host_page_size_bytes,
+    PostBlockIntervention, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
+    encode_copy_offset_f32, encode_get_rows_f32, encode_post_block_intervention_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_sigmoid_mul_f32, encode_silu_mul_f32, evaluate_metal_memory_admission,
+    host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
@@ -31,8 +32,9 @@ use crate::muse_glimmer_residency::{
     MuseGlimmerMetalModelWeights, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
 };
 use crate::tensor::GgmlType;
+use objc2::rc::Retained;
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLDevice,
+    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLDevice, MTLResource,
 };
 
 pub const MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY: usize = 7_168;
@@ -496,6 +498,31 @@ impl MuseGlimmerTextSession {
         Ok(())
     }
 
+    fn aliases_mutable_buffer(&self, candidate: &MetalTensor) -> bool {
+        [
+            &self.ids,
+            &self.embedding_norm_weight,
+            &self.residual,
+            &self.normed,
+            &self.branch_raw,
+            &self.branch_normed,
+            &self.query_raw,
+            &self.query,
+            &self.key_raw,
+            &self.key,
+            &self.value,
+            &self.attention_gate,
+            &self.attention_output,
+            &self.feed_forward_gate,
+            &self.feed_forward_up,
+            &self.logits,
+            &self.key_cache,
+            &self.value_cache,
+        ]
+        .into_iter()
+        .any(|tensor| Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer))
+    }
+
     fn write_token(&self, token: i32) {
         unsafe {
             let pointer = self.ids.buffer.contents().as_ptr().cast::<i32>();
@@ -562,8 +589,17 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         token: u32,
         session: &mut MuseGlimmerTextSession,
     ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
+        self.forward_token_with_post_block_interventions(token, &[], session)
+    }
+
+    pub fn forward_token_with_post_block_interventions(
+        &self,
+        token: u32,
+        interventions: &[PostBlockIntervention<'_>],
+        session: &mut MuseGlimmerTextSession,
+    ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
         self.validate_token_and_session(token, session)?;
-        self.execute_token(token, session, true)?
+        self.execute_token_with_sink(token, session, true, None, interventions)?
             .ok_or_else(|| MuseGlimmerTextSessionError::Invalid("logits were not produced".into()))
     }
 
@@ -571,6 +607,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         &self,
         token: u32,
         layer_ids: &[u32],
+        session: &mut MuseGlimmerTextSession,
+    ) -> Result<MuseGlimmerPostBlockForward, MuseGlimmerTextSessionError> {
+        self.forward_token_capture_post_blocks_with_interventions(token, layer_ids, &[], session)
+    }
+
+    pub fn forward_token_capture_post_blocks_with_interventions(
+        &self,
+        token: u32,
+        layer_ids: &[u32],
+        interventions: &[PostBlockIntervention<'_>],
         session: &mut MuseGlimmerTextSession,
     ) -> Result<MuseGlimmerPostBlockForward, MuseGlimmerTextSessionError> {
         self.validate_token_and_session(token, session)?;
@@ -589,6 +635,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 session,
                 true,
                 Some(MuseGlimmerProductionCaptureSink::PostBlock(&destination)),
+                interventions,
             )?
             .ok_or_else(|| {
                 MuseGlimmerTextSessionError::Invalid(
@@ -805,7 +852,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         session: &mut MuseGlimmerTextSession,
         produce_logits: bool,
     ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
-        self.execute_token_with_sink(token, session, produce_logits, None)
+        self.execute_token_with_sink(token, session, produce_logits, None, &[])
     }
 
     fn execute_token_with_sink(
@@ -814,7 +861,14 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         session: &mut MuseGlimmerTextSession,
         produce_logits: bool,
         capture: Option<MuseGlimmerProductionCaptureSink<'_>>,
+        interventions: &[PostBlockIntervention<'_>],
     ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
+        validate_post_block_interventions(
+            session,
+            interventions,
+            self.weights.layers.len(),
+            session.geometry.hidden_size,
+        )?;
         let position = session.next_position;
         let position_u32 = u32::try_from(position).map_err(|_| {
             MuseGlimmerTextSessionError::Invalid("session position exceeds u32".into())
@@ -833,6 +887,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 session,
                 produce_logits,
                 capture,
+                interventions,
             )?;
             encoder.end();
             Ok::<(), MuseGlimmerTextSessionError>(())
@@ -865,6 +920,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             session,
             false,
             Some(MuseGlimmerProductionCaptureSink::Lens(capture)),
+            &[],
         )?;
         Ok(())
     }
@@ -877,6 +933,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         session: &MuseGlimmerTextSession,
         produce_logits: bool,
         capture: Option<MuseGlimmerProductionCaptureSink<'_>>,
+        interventions: &[PostBlockIntervention<'_>],
     ) -> Result<(), MuseGlimmerTextSessionError> {
         let geometry = &session.geometry;
         encode_get_rows_f32(
@@ -1104,6 +1161,17 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.post_norm_epsilon,
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &session.residual, &session.branch_normed)?;
+            for intervention in interventions
+                .iter()
+                .filter(|intervention| intervention_layer(intervention) as usize == layer_index)
+            {
+                encode_post_block_intervention_f32(
+                    self.ctx,
+                    encoder,
+                    &session.residual,
+                    intervention,
+                )?;
+            }
             if let Some(MuseGlimmerProductionCaptureSink::Lens(capture)) = capture
                 && let Ok(block_slot) = capture.target_blocks.binary_search(&(layer_index as u32))
             {
@@ -1194,6 +1262,114 @@ struct MuseGlimmerPostBlockCaptureDestination<'a> {
 enum MuseGlimmerProductionCaptureSink<'a> {
     Lens(&'a MuseGlimmerLensCaptureDestination<'a>),
     PostBlock(&'a MuseGlimmerPostBlockCaptureDestination<'a>),
+}
+
+fn intervention_layer(intervention: &PostBlockIntervention<'_>) -> u32 {
+    match intervention {
+        PostBlockIntervention::Fixed { layer, .. }
+        | PostBlockIntervention::ResidualL2Relative { layer, .. }
+        | PostBlockIntervention::Projection { layer, .. }
+        | PostBlockIntervention::SourceToTarget { layer, .. } => *layer,
+    }
+}
+
+fn validate_post_block_interventions(
+    session: &MuseGlimmerTextSession,
+    interventions: &[PostBlockIntervention<'_>],
+    layer_count: usize,
+    hidden_size: usize,
+) -> Result<(), MuseGlimmerTextSessionError> {
+    for (index, intervention) in interventions.iter().enumerate() {
+        let (layer, coefficient) = match intervention {
+            PostBlockIntervention::Fixed {
+                layer, coefficient, ..
+            }
+            | PostBlockIntervention::ResidualL2Relative {
+                layer, coefficient, ..
+            }
+            | PostBlockIntervention::Projection {
+                layer, coefficient, ..
+            }
+            | PostBlockIntervention::SourceToTarget {
+                layer, coefficient, ..
+            } => (*layer, *coefficient),
+        };
+        if layer as usize >= layer_count {
+            return invalid(format!(
+                "intervention {index} layer {layer} is outside layer count {layer_count}"
+            ));
+        }
+        if !coefficient.is_finite() || coefficient == 0.0 {
+            return invalid(format!(
+                "intervention {index} coefficient must be finite and nonzero, got {coefficient}"
+            ));
+        }
+        match intervention {
+            PostBlockIntervention::Fixed { direction, .. }
+            | PostBlockIntervention::ResidualL2Relative { direction, .. }
+            | PostBlockIntervention::Projection { direction, .. } => {
+                validate_intervention_tensor(session, direction, hidden_size, index, "direction")?;
+            }
+            PostBlockIntervention::SourceToTarget { source, target, .. } => {
+                validate_intervention_tensor(session, source, hidden_size, index, "source")?;
+                validate_intervention_tensor(session, target, hidden_size, index, "target")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_intervention_tensor(
+    session: &MuseGlimmerTextSession,
+    tensor: &MetalTensor,
+    hidden_size: usize,
+    index: usize,
+    role: &str,
+) -> Result<(), MuseGlimmerTextSessionError> {
+    let byte_count = hidden_size
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            MuseGlimmerTextSessionError::Invalid(format!(
+                "intervention {index} {role} byte count overflow"
+            ))
+        })?;
+    let end = tensor
+        .offset
+        .checked_add(byte_count as u64)
+        .ok_or_else(|| {
+            MuseGlimmerTextSessionError::Invalid(format!(
+                "intervention {index} {role} endpoint overflow"
+            ))
+        })?;
+    if tensor.dtype != GgmlType::F32
+        || tensor.shape != [hidden_size as u64]
+        || tensor.n_elements() as usize != hidden_size
+        || !tensor
+            .offset
+            .is_multiple_of(std::mem::align_of::<f32>() as u64)
+        || end > tensor.buffer.length() as u64
+    {
+        return invalid(format!(
+            "intervention {index} {role} must be aligned F32 [{hidden_size}], got {:?} {:?} offset={} buffer_bytes={}",
+            tensor.dtype,
+            tensor.shape,
+            tensor.offset,
+            tensor.buffer.length()
+        ));
+    }
+    let device = tensor.buffer.device().registryID();
+    if device != session.device_registry_id {
+        return invalid(format!(
+            "intervention {index} {role} belongs to Metal device {device}, expected {}",
+            session.device_registry_id
+        ));
+    }
+    if session.aliases_mutable_buffer(tensor) {
+        return invalid(format!(
+            "intervention {index} {role} aliases mutable session storage"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_live_capture_layers(
@@ -1416,6 +1592,77 @@ mod tests {
     }
 
     #[test]
+    fn post_block_interventions_require_bounded_non_aliasing_f32_rows() {
+        let ctx = MetalContext::new().unwrap();
+        let config = MuseGlimmerConfig::unsloth_release_reference();
+        let session = MuseGlimmerTextSession::new(&ctx, &config, 1).unwrap();
+        let hidden = config.hidden_size as usize;
+        let direction = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![1.0_f32; hidden]),
+            vec![hidden as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let valid = [
+            PostBlockIntervention::Fixed {
+                layer: 0,
+                direction: &direction,
+                coefficient: 1.0,
+            },
+            PostBlockIntervention::ResidualL2Relative {
+                layer: 1,
+                direction: &direction,
+                coefficient: 0.1,
+            },
+            PostBlockIntervention::Projection {
+                layer: 2,
+                direction: &direction,
+                coefficient: 1.0,
+            },
+            PostBlockIntervention::SourceToTarget {
+                layer: 51,
+                source: &direction,
+                target: &direction,
+                coefficient: 0.5,
+            },
+        ];
+        validate_post_block_interventions(&session, &valid, 52, hidden).unwrap();
+
+        let bad_layer = [PostBlockIntervention::Fixed {
+            layer: 52,
+            direction: &direction,
+            coefficient: 1.0,
+        }];
+        assert!(validate_post_block_interventions(&session, &bad_layer, 52, hidden).is_err());
+        let bad_coefficient = [PostBlockIntervention::Projection {
+            layer: 1,
+            direction: &direction,
+            coefficient: 0.0,
+        }];
+        assert!(validate_post_block_interventions(&session, &bad_coefficient, 52, hidden).is_err());
+        let short = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[1.0_f32]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let bad_shape = [PostBlockIntervention::Fixed {
+            layer: 1,
+            direction: &short,
+            coefficient: 1.0,
+        }];
+        assert!(validate_post_block_interventions(&session, &bad_shape, 52, hidden).is_err());
+        let alias = [PostBlockIntervention::Fixed {
+            layer: 1,
+            direction: &session.residual,
+            coefficient: 1.0,
+        }];
+        assert!(validate_post_block_interventions(&session, &alias, 52, hidden).is_err());
+    }
+
+    #[test]
     fn multi_lens_capture_requires_fresh_sorted_unique_nonzero_blocks() {
         validate_multi_lens_capture_request(3, &[1, 50, 51], 52, 0, 3).unwrap();
         assert!(validate_multi_lens_capture_request(3, &[], 52, 0, 3).is_err());
@@ -1455,10 +1702,10 @@ mod tests {
             .expect("ordinary decode token");
         session.reset().expect("reset identical state");
         let captured_prefill = forward
-            .forward_token_capture_post_blocks(tokens[0], &[0, 3, 51], &mut session)
+            .forward_token_capture_post_blocks(tokens[0], &[0, 3, 50, 51], &mut session)
             .expect("capture prefill token");
         let captured_decode = forward
-            .forward_token_capture_post_blocks(tokens[1], &[0, 3, 51], &mut session)
+            .forward_token_capture_post_blocks(tokens[1], &[0, 3, 50, 51], &mut session)
             .expect("capture decode token");
         assert_eq!(
             ordinary_prefill
@@ -1483,8 +1730,8 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         for capture in [&captured_prefill, &captured_decode] {
-            assert_eq!(capture.layer_ids, [0, 3, 51]);
-            assert_eq!(capture.post_block_residuals.len(), 3 * 6_656);
+            assert_eq!(capture.layer_ids, [0, 3, 50, 51]);
+            assert_eq!(capture.post_block_residuals.len(), 4 * 6_656);
             assert!(
                 capture
                     .post_block_residuals
@@ -1495,6 +1742,88 @@ mod tests {
         assert_eq!(captured_prefill.position, 0);
         assert_eq!(captured_decode.position, 1);
         assert_eq!(session.next_position(), 2);
+
+        let baseline = captured_prefill.layer_values(2).unwrap().to_vec();
+        let mut unit = vec![0.0_f32; weights.config().hidden_size as usize];
+        unit[0] = 1.0;
+        let direction = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&unit),
+            vec![unit.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let fixed = PostBlockIntervention::Fixed {
+            layer: 50,
+            direction: &direction,
+            coefficient: 1.0,
+        };
+        let projection = PostBlockIntervention::Projection {
+            layer: 50,
+            direction: &direction,
+            coefficient: 0.5,
+        };
+        session.reset().unwrap();
+        let fixed_then_projection = forward
+            .forward_token_capture_post_blocks_with_interventions(
+                tokens[0],
+                &[50],
+                &[fixed, projection],
+                &mut session,
+            )
+            .unwrap();
+        session.reset().unwrap();
+        let projection_then_fixed = forward
+            .forward_token_capture_post_blocks_with_interventions(
+                tokens[0],
+                &[50],
+                &[projection, fixed],
+                &mut session,
+            )
+            .unwrap();
+        let mut expected_fixed_then_projection = baseline.clone();
+        expected_fixed_then_projection[0] += 1.0;
+        expected_fixed_then_projection[0] -= 0.5 * expected_fixed_then_projection[0];
+        let mut expected_projection_then_fixed = baseline;
+        expected_projection_then_fixed[0] -= 0.5 * expected_projection_then_fixed[0];
+        expected_projection_then_fixed[0] += 1.0;
+        for (actual, expected) in [
+            (
+                fixed_then_projection.layer_values(0).unwrap(),
+                expected_fixed_then_projection.as_slice(),
+            ),
+            (
+                projection_then_fixed.layer_values(0).unwrap(),
+                expected_projection_then_fixed.as_slice(),
+            ),
+        ] {
+            let max_abs = actual
+                .iter()
+                .zip(expected)
+                .map(|(&left, &right)| (left - right).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(max_abs < 1e-5, "ordered intervention max_abs={max_abs}");
+        }
+        assert!(
+            (fixed_then_projection.layer_values(0).unwrap()[0]
+                - projection_then_fixed.layer_values(0).unwrap()[0])
+                .abs()
+                > 0.49
+        );
+        assert!(
+            fixed_then_projection
+                .logits
+                .iter()
+                .zip(&projection_then_fixed.logits)
+                .any(|(&left, &right)| left.to_bits() != right.to_bits())
+        );
+        assert!(
+            fixed_then_projection
+                .logits
+                .iter()
+                .chain(&projection_then_fixed.logits)
+                .all(|value| value.is_finite())
+        );
     }
 
     #[test]

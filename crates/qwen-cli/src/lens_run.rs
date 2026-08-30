@@ -247,7 +247,7 @@ impl Action {
         }
     }
 
-    fn direction_ids<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+    pub(crate) fn direction_ids<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
         match self {
             Self::FixedAdd { direction, .. }
             | Self::ResidualL2Fraction { direction, .. }
@@ -1483,7 +1483,7 @@ fn native_payload_offset(
     (layer_slot * token_count + token_slot) * hidden_size
 }
 
-fn normalize_direction(
+pub(crate) fn normalize_direction(
     mut row: Vec<f32>,
     normalization: Normalization,
     id: &str,
@@ -1514,7 +1514,7 @@ fn normalize_direction(
     Ok(row)
 }
 
-fn validate_reachable_scopes(
+pub(crate) fn validate_reachable_scopes(
     plan: &LensPlan,
     prompt_len: usize,
     max_new_tokens: usize,

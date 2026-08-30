@@ -539,6 +539,22 @@ impl MuseGlimmerTextSession {
         }
     }
 
+    fn write_residual(&self, residual: &[f32]) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                residual.as_ptr(),
+                self.residual
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(self.residual.offset as usize)
+                    .cast::<f32>(),
+                residual.len(),
+            );
+        }
+    }
+
     fn cache_views(
         &self,
         layer: usize,
@@ -608,6 +624,39 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         self.validate_token_and_session(token, session)?;
         self.execute_token_with_sink(token, session, true, None, interventions)?
             .ok_or_else(|| MuseGlimmerTextSessionError::Invalid("logits were not produced".into()))
+    }
+
+    pub(crate) fn deployed_logits_from_post_block_residual(
+        &self,
+        residual: &[f32],
+        session: &mut MuseGlimmerTextSession,
+    ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
+        session.ensure_usable()?;
+        self.validate_session_geometry(session)?;
+        validate_deployed_output_residual(residual, session.geometry.hidden_size)?;
+        session.write_residual(residual);
+
+        let command = self.ctx.queue.commandBuffer().ok_or_else(|| {
+            MuseGlimmerTextSessionError::CommandBuffer("allocation failed".into())
+        })?;
+        let encode_result = (|| {
+            let encoder = KernelEncoder::begin(&command);
+            self.encode_deployed_output_tail(&encoder, session)?;
+            encoder.end();
+            Ok::<(), MuseGlimmerTextSessionError>(())
+        })();
+        encode_result?;
+
+        command.commit();
+        command.waitUntilCompleted();
+        let status = command.status();
+        let command_error = command.error().map(|error| error.to_string());
+        if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
+            let reason = format!("status={status:?}, error={command_error:?}");
+            session.poison_reason = Some(reason.clone());
+            return Err(MuseGlimmerTextSessionError::CommandBuffer(reason));
+        }
+        Ok(session.read_logits())
     }
 
     pub fn forward_token_capture_post_blocks(
@@ -924,6 +973,26 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         session: &MuseGlimmerTextSession,
     ) -> Result<(), MuseGlimmerTextSessionError> {
         session.ensure_usable()?;
+        self.validate_session_geometry(session)?;
+        if token >= self.weights.config.vocab_size {
+            return invalid(format!(
+                "token {token} is outside vocabulary {}",
+                self.weights.config.vocab_size
+            ));
+        }
+        if session.next_position >= session.geometry.capacity {
+            return invalid(format!(
+                "session capacity {} is exhausted",
+                session.geometry.capacity
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_session_geometry(
+        &self,
+        session: &MuseGlimmerTextSession,
+    ) -> Result<(), MuseGlimmerTextSessionError> {
         if session.geometry.hidden_size != self.weights.config.hidden_size as usize
             || session.geometry.feed_forward_size != self.weights.config.feed_forward_size as usize
             || session.geometry.vocab_size != self.weights.config.vocab_size as usize
@@ -936,18 +1005,6 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 "session belongs to Metal device registry {}, forward context is {}",
                 session.device_registry_id,
                 self.ctx.device.registryID()
-            ));
-        }
-        if token >= self.weights.config.vocab_size {
-            return invalid(format!(
-                "token {token} is outside vocabulary {}",
-                self.weights.config.vocab_size
-            ));
-        }
-        if session.next_position >= session.geometry.capacity {
-            return invalid(format!(
-                "session capacity {} is exhausted",
-                session.geometry.capacity
             ));
         }
         Ok(())
@@ -1309,32 +1366,41 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         }
 
         if produce_logits {
-            encode_rms_norm_mul_f32(
-                self.ctx,
-                encoder,
-                &session.residual,
-                self.weights.output_norm,
-                &session.normed,
-                self.weights.config.rms_epsilon,
-            )?;
-            encode_mat_vec_dispatch(
-                self.ctx,
-                encoder,
-                self.weights.output,
-                &session.normed,
-                &session.logits,
-                geometry.hidden_size,
-                geometry.vocab_size,
-            )?;
-            encode_muse_glimmer_logit_softcap_f32(
-                self.ctx,
-                encoder,
-                &session.logits,
-                &session.logits,
-                self.weights.config.logit_scale,
-                self.weights.config.final_logit_softcap,
-            )?;
+            self.encode_deployed_output_tail(encoder, session)?;
         }
+        Ok(())
+    }
+
+    fn encode_deployed_output_tail(
+        &self,
+        encoder: &KernelEncoder,
+        session: &MuseGlimmerTextSession,
+    ) -> Result<(), MuseGlimmerTextSessionError> {
+        encode_rms_norm_mul_f32(
+            self.ctx,
+            encoder,
+            &session.residual,
+            self.weights.output_norm,
+            &session.normed,
+            self.weights.config.rms_epsilon,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            encoder,
+            self.weights.output,
+            &session.normed,
+            &session.logits,
+            session.geometry.hidden_size,
+            session.geometry.vocab_size,
+        )?;
+        encode_muse_glimmer_logit_softcap_f32(
+            self.ctx,
+            encoder,
+            &session.logits,
+            &session.logits,
+            self.weights.config.logit_scale,
+            self.weights.config.final_logit_softcap,
+        )?;
         Ok(())
     }
 }
@@ -1630,6 +1696,24 @@ fn checked_bytes(
         .ok_or_else(|| MuseGlimmerTextSessionError::Invalid(format!("{label} byte count overflow")))
 }
 
+fn validate_deployed_output_residual(
+    residual: &[f32],
+    hidden_size: usize,
+) -> Result<(), MuseGlimmerTextSessionError> {
+    if residual.len() != hidden_size {
+        return invalid(format!(
+            "deployed output residual must contain exactly {hidden_size} F32 values, got {}",
+            residual.len()
+        ));
+    }
+    if let Some(index) = residual.iter().position(|value| !value.is_finite()) {
+        return invalid(format!(
+            "deployed output residual contains a non-finite F32 value at index {index}"
+        ));
+    }
+    Ok(())
+}
+
 fn invalid<T>(detail: impl Into<String>) -> Result<T, MuseGlimmerTextSessionError> {
     Err(MuseGlimmerTextSessionError::Invalid(detail.into()))
 }
@@ -1696,6 +1780,15 @@ mod tests {
         assert!(validate_live_capture_layers(&[4, 3], 52).is_err());
         assert!(validate_live_capture_layers(&[52], 52).is_err());
         assert!(validate_live_capture_layers(&vec![0; 65], 52).is_err());
+    }
+
+    #[test]
+    fn deployed_output_residual_requires_exact_finite_hidden_row() {
+        validate_deployed_output_residual(&[0.0, -1.5, 2.0], 3).unwrap();
+        assert!(validate_deployed_output_residual(&[0.0, 1.0], 3).is_err());
+        assert!(validate_deployed_output_residual(&[0.0, 1.0, 2.0, 3.0], 3).is_err());
+        assert!(validate_deployed_output_residual(&[0.0, f32::NAN, 2.0], 3).is_err());
+        assert!(validate_deployed_output_residual(&[0.0, f32::INFINITY, 2.0], 3).is_err());
     }
 
     #[test]

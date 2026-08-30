@@ -188,6 +188,17 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self.forward.forward_token(token, &mut self.session)?)
     }
 
+    /// Apply the resident deployed output norm, projection, scale, and softcap
+    /// to one final post-block residual without advancing the text session.
+    pub fn deployed_logits_from_post_block_residual(
+        &mut self,
+        residual: &[f32],
+    ) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .deployed_logits_from_post_block_residual(residual, &mut self.session)?)
+    }
+
     pub fn forward_token_with_post_block_interventions(
         &mut self,
         token: u32,
@@ -433,6 +444,7 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, MuseGlimmerRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::GgufFile;
     use crate::muse_glimmer::MuseGlimmerConfig;
 
     #[test]
@@ -443,5 +455,41 @@ mod tests {
         let plan = MuseGlimmerTextSessionMemoryPlan::for_geometry(&ctx, &geometry).unwrap();
         assert!(plan.priced_upper_bytes() >= plan.logical_bytes());
         assert_eq!(geometry.capacity(), 257);
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn deployed_output_tail_matches_forward_from_captured_final_residual_bitwise() {
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let mut model = MuseGlimmerLoadedModel::load(&ctx, &gguf, 1).expect("load Muse Q8 target");
+        let final_layer = model.config().layer_count - 1;
+        let token = model.config().bos_token_id;
+        let mut runner = model.create_runner(&ctx).expect("create Muse runner");
+        let captured = runner
+            .forward_token_capture_post_blocks(token, &[final_layer])
+            .expect("forward and capture final residual");
+        let next_position = runner.next_position();
+        let tail_logits = runner
+            .deployed_logits_from_post_block_residual(
+                captured.layer_values(0).expect("captured final residual"),
+            )
+            .expect("run deployed output tail");
+
+        assert_eq!(runner.next_position(), next_position);
+        assert_eq!(
+            tail_logits
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            captured
+                .logits
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
     }
 }

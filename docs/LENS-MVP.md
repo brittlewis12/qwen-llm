@@ -31,7 +31,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | scalar selected-token J/R oracle | live CLI implemented | scalar live readout | batched resumable full-R |
+| Muse Glimmer 30B | scalar selected-token J/R oracle | live CLI implemented | B32 full-attention VJP | source-50 row slabs |
 
 ## Current Status
 
@@ -52,16 +52,20 @@ The bank-specific native-Q8 transpose VJP is qualified at `25.36-26.69x` on
 all dominant Muse FFN shapes without changing the scalar dispatcher.
 The banked Metal causal-GQA VJP is CPU-oracle qualified and clears its B32/T16
 5 ms gate without a backward CPU boundary.
+The fixed-scratch full-attention one-block bank now composes the native Q8 and
+attention mechanisms with shared-primal nonlinear VJPs. B32/T16 R-rule commands
+measure 50.77 ms on a resident synthetic release-shape fixture, and all J/R
+composition gates match the scalar oracle within `3.21e-7` scaled max error.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
 until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Build a fixed-scratch full-attention Muse one-block VJP bank using periodic
-shared-primal nonlinear VJPs, then compose it into resumable full-R row slabs.
-Production must preserve the scalar estimator. Do not run a long fit until a
-short component packet projects the complete 25-prompt build into an agreed
-hours-scale envelope.
+Compose the qualified full-attention bank into resumable B32 source-50 row
+slabs. Production must preserve the scalar estimator and prompt order. Do not
+run a long fit until the source-50 control plane closes and sliding-block bank
+integration projects the complete 25-prompt build into an agreed hours-scale
+envelope.
 
 ## Hard Exclusions
 
@@ -70,8 +74,7 @@ plugins, unrelated test repair, cross-device support, and production hardening.
 
 ## Blockers
 
-- Shared-primal periodic RMS/SwiGLU VJPs and fixed one-block scratch do not
-  exist yet.
+- Resumable source-50 row-slab production does not exist yet.
 - Sliding-block bank integration still needs inverse RoPE over Q/K cotangents.
 
 ## Fast Follows

@@ -7,19 +7,24 @@
 //! difference.
 
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalTensor, encode_add_f32, encode_frozen_linear_vjp_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_rows_f32,
-    encode_silu_mul_f32, encode_silu_mul_vjp_f32,
+    KernelEncoder, MetalContext, MetalTensor, encode_add_f32, encode_frozen_linear_vjp_bank_f32,
+    encode_frozen_linear_vjp_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_rows_f32,
+    encode_rms_norm_mul_vjp_periodic_f32, encode_rms_norm_mul_vjp_rows_f32, encode_silu_mul_f32,
+    encode_silu_mul_vjp_f32, encode_silu_mul_vjp_periodic_f32, tensor_ranges_overlap,
 };
 use crate::metal_forward::encode_mat_vec_dispatch;
+use crate::muse_glimmer::MuseGlimmerConfig;
 use crate::muse_glimmer_lens::{
     MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS, MUSE_GLIMMER_LENS_MAX_SELECTED_TOKENS,
     MuseGlimmerLensCapture, MuseGlimmerLensCaptureBank, MuseGlimmerLensError, MuseGlimmerLensRule,
     MuseGlimmerRmsNormSite, MuseGlimmerSelectedTokenCovectors,
 };
+use crate::muse_glimmer_metal::encode_muse_glimmer_causal_gqa_vjp_bank_f32;
 use crate::muse_glimmer_residency::{MuseGlimmerMetalLayerWeights, MuseGlimmerMetalModelWeights};
 use crate::tensor::GgmlType;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
+use objc2_metal::{
+    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLDevice, MTLResource,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerOneBlockVjp {
@@ -658,8 +663,10 @@ struct ReplayTensors {
     input: MetalTensor,
     attention_normed: MetalTensor,
     q_raw: MetalTensor,
+    q_raw_heads: MetalTensor,
     q: MetalTensor,
     k_raw: MetalTensor,
+    k_raw_heads: MetalTensor,
     k: MetalTensor,
     v: MetalTensor,
     attention_gate: MetalTensor,
@@ -690,12 +697,24 @@ impl ReplayTensors {
         let kv_shape = row_shape(geometry.kv, n_tokens)?;
         let ffn_shape = row_shape(geometry.feed_forward, n_tokens)?;
         let probability_shape = vec![n_tokens as u64, geometry.q_heads as u64, n_tokens as u64];
+        let q_raw = MetalTensor::zeros_f32(ctx, query_shape.clone())?;
+        let q_raw_heads = q_raw.view_subrange(
+            0,
+            row_shape(geometry.head_dim, n_tokens * geometry.q_heads)?,
+        );
+        let k_raw = MetalTensor::zeros_f32(ctx, kv_shape.clone())?;
+        let k_raw_heads = k_raw.view_subrange(
+            0,
+            row_shape(geometry.head_dim, n_tokens * geometry.kv_heads)?,
+        );
         Ok(Self {
             input: from_f32(ctx, input, hidden_shape.clone())?,
             attention_normed: MetalTensor::zeros_f32(ctx, hidden_shape.clone())?,
-            q_raw: MetalTensor::zeros_f32(ctx, query_shape.clone())?,
+            q_raw,
+            q_raw_heads,
             q: MetalTensor::zeros_f32(ctx, query_shape.clone())?,
-            k_raw: MetalTensor::zeros_f32(ctx, kv_shape.clone())?,
+            k_raw,
+            k_raw_heads,
             k: MetalTensor::zeros_f32(ctx, kv_shape.clone())?,
             v: MetalTensor::zeros_f32(ctx, kv_shape)?,
             attention_gate: MetalTensor::zeros_f32(ctx, query_shape.clone())?,
@@ -718,11 +737,528 @@ impl ReplayTensors {
 
 struct ReplayState {
     tensors: ReplayTensors,
+    n_tokens: usize,
+    geometry: MuseAttentionGeometry,
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
     attention_gate: Vec<f32>,
     attention: MuseAttentionForward,
+}
+
+struct MuseGlimmerOneBlockVjpBankScratch {
+    basis_count: usize,
+    n_tokens: usize,
+    geometry: MuseAttentionGeometry,
+    hidden: [MetalTensor; 4],
+    feed_forward: [MetalTensor; 3],
+    query: [MetalTensor; 3],
+    query_heads: [MetalTensor; 3],
+    kv: [MetalTensor; 2],
+    kv_heads: [MetalTensor; 2],
+    partial_grad_key: MetalTensor,
+    partial_grad_value: MetalTensor,
+}
+
+impl MuseGlimmerOneBlockVjpBankScratch {
+    fn new(
+        ctx: &MetalContext,
+        basis_count: usize,
+        n_tokens: usize,
+        geometry: MuseAttentionGeometry,
+    ) -> Result<Self, MuseGlimmerLensError> {
+        if basis_count == 0 || n_tokens == 0 || n_tokens > MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS {
+            return invalid(format!(
+                "one-block VJP bank requires B>0 and T in 1..={MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS}, got B={basis_count} T={n_tokens}"
+            ));
+        }
+        let bank_rows = checked_mul(basis_count, n_tokens, "VJP bank rows")?;
+        let hidden_shape = row_shape(geometry.hidden, bank_rows)?;
+        let ffn_shape = row_shape(geometry.feed_forward, bank_rows)?;
+        let query_shape = row_shape(geometry.query, bank_rows)?;
+        let kv_shape = row_shape(geometry.kv, bank_rows)?;
+        let query_head_rows = checked_mul(bank_rows, geometry.q_heads, "query head rows")?;
+        let kv_head_rows = checked_mul(bank_rows, geometry.kv_heads, "KV head rows")?;
+
+        let query_0 = MetalTensor::zeros_f32(ctx, query_shape.clone())?;
+        let query_1 = MetalTensor::zeros_f32(ctx, query_shape.clone())?;
+        let query_2 = MetalTensor::zeros_f32(ctx, query_shape)?;
+        let query_heads = [
+            query_0.view_subrange(0, row_shape(geometry.head_dim, query_head_rows)?),
+            query_1.view_subrange(0, row_shape(geometry.head_dim, query_head_rows)?),
+            query_2.view_subrange(0, row_shape(geometry.head_dim, query_head_rows)?),
+        ];
+        let kv_0 = MetalTensor::zeros_f32(ctx, kv_shape.clone())?;
+        let kv_1 = MetalTensor::zeros_f32(ctx, kv_shape)?;
+        let kv_heads = [
+            kv_0.view_subrange(0, row_shape(geometry.head_dim, kv_head_rows)?),
+            kv_1.view_subrange(0, row_shape(geometry.head_dim, kv_head_rows)?),
+        ];
+        let partial_shape = vec![
+            geometry.head_dim as u64,
+            n_tokens as u64,
+            geometry.q_heads as u64,
+            basis_count as u64,
+        ];
+
+        Ok(Self {
+            basis_count,
+            n_tokens,
+            geometry,
+            hidden: [
+                MetalTensor::zeros_f32(ctx, hidden_shape.clone())?,
+                MetalTensor::zeros_f32(ctx, hidden_shape.clone())?,
+                MetalTensor::zeros_f32(ctx, hidden_shape.clone())?,
+                MetalTensor::zeros_f32(ctx, hidden_shape)?,
+            ],
+            feed_forward: [
+                MetalTensor::zeros_f32(ctx, ffn_shape.clone())?,
+                MetalTensor::zeros_f32(ctx, ffn_shape.clone())?,
+                MetalTensor::zeros_f32(ctx, ffn_shape)?,
+            ],
+            query: [query_0, query_1, query_2],
+            query_heads,
+            kv: [kv_0, kv_1],
+            kv_heads,
+            partial_grad_key: MetalTensor::zeros_f32(ctx, partial_shape.clone())?,
+            partial_grad_value: MetalTensor::zeros_f32(ctx, partial_shape)?,
+        })
+    }
+}
+
+pub(crate) struct MuseGlimmerPreparedFullAttentionBlock<'weights> {
+    config: &'weights MuseGlimmerConfig,
+    device_registry_id: u64,
+    target_block: u32,
+    layer: MuseGlimmerMetalLayerWeights<'weights>,
+    replay: ReplayState,
+    post_attention_replay_max_abs_error: f32,
+    post_block_replay_max_abs_error: f32,
+}
+
+impl<'weights> MuseGlimmerPreparedFullAttentionBlock<'weights> {
+    pub(crate) fn new(
+        ctx: &MetalContext,
+        weights: &MuseGlimmerMetalModelWeights<'weights>,
+        capture: &MuseGlimmerLensCapture,
+    ) -> Result<Self, MuseGlimmerLensError> {
+        require_full_attention_block(weights, capture.target_block())?;
+        let geometry = MuseAttentionGeometry::from_weights(weights)?;
+        let layer = *validate_replay_request(
+            weights,
+            capture.target_block(),
+            capture.input_residuals(),
+            capture.n_tokens(),
+            geometry,
+        )?;
+        if capture.hidden_size() != geometry.hidden {
+            return invalid(format!(
+                "capture hidden size {} differs from model hidden size {}",
+                capture.hidden_size(),
+                geometry.hidden
+            ));
+        }
+        let replay = replay_state(
+            ctx,
+            weights,
+            &layer,
+            capture.input_residuals(),
+            capture.n_tokens(),
+            geometry,
+        )?;
+        let replay_readback = replay_readback(&replay)?;
+        let post_attention_replay_max_abs_error = max_abs_difference(
+            &replay_readback.post_attention_residuals,
+            capture.post_attention_residuals(),
+        )?;
+        let post_block_replay_max_abs_error = max_abs_difference(
+            &replay_readback.post_block_residuals,
+            capture.post_block_residuals(),
+        )?;
+        Ok(Self {
+            config: weights.config,
+            device_registry_id: ctx.device.registryID(),
+            target_block: capture.target_block(),
+            layer,
+            replay,
+            post_attention_replay_max_abs_error,
+            post_block_replay_max_abs_error,
+        })
+    }
+
+    pub(crate) fn target_block(&self) -> u32 {
+        self.target_block
+    }
+
+    pub(crate) fn n_tokens(&self) -> usize {
+        self.replay.n_tokens
+    }
+
+    pub(crate) fn hidden_size(&self) -> usize {
+        self.replay.geometry.hidden
+    }
+
+    pub(crate) fn replay_max_abs_errors(&self) -> (f32, f32) {
+        (
+            self.post_attention_replay_max_abs_error,
+            self.post_block_replay_max_abs_error,
+        )
+    }
+
+    pub(crate) fn encode_bank(
+        &self,
+        ctx: &MetalContext,
+        encoder: &KernelEncoder,
+        current: &MetalTensor,
+        next: &MetalTensor,
+        workspace: &mut MuseGlimmerFullAttentionBankWorkspace,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<(), MuseGlimmerLensError> {
+        let expected_device = self.device_registry_id;
+        let context_device = ctx.device.registryID();
+        let encoder_device = encoder.parent_command_buffer().device().registryID();
+        let workspace_device = workspace.device_registry_id;
+        let current_device = current.buffer.device().registryID();
+        let next_device = next.buffer.device().registryID();
+        if context_device != expected_device
+            || encoder_device != expected_device
+            || workspace_device != expected_device
+            || current_device != expected_device
+            || next_device != expected_device
+        {
+            return invalid(format!(
+                "one-block VJP bank device mismatch prepared={expected_device} context={context_device} encoder={encoder_device} workspace={workspace_device} current={current_device} next={next_device}"
+            ));
+        }
+        encode_muse_glimmer_one_full_attention_block_vjp_bank(
+            ctx,
+            encoder,
+            self.config,
+            &self.layer,
+            &self.replay,
+            current,
+            next,
+            &workspace.scratch,
+            rule,
+        )
+    }
+}
+
+/// Scratch may not be reused by another command until its owning command has
+/// completed.
+pub(crate) struct MuseGlimmerFullAttentionBankWorkspace {
+    device_registry_id: u64,
+    scratch: MuseGlimmerOneBlockVjpBankScratch,
+}
+
+impl MuseGlimmerFullAttentionBankWorkspace {
+    pub(crate) fn new(
+        ctx: &MetalContext,
+        prepared: &MuseGlimmerPreparedFullAttentionBlock<'_>,
+        basis_count: usize,
+    ) -> Result<Self, MuseGlimmerLensError> {
+        let device_registry_id = ctx.device.registryID();
+        if device_registry_id != prepared.device_registry_id {
+            return invalid(format!(
+                "one-block VJP workspace device {device_registry_id} differs from prepared device {}",
+                prepared.device_registry_id
+            ));
+        }
+        Ok(Self {
+            device_registry_id,
+            scratch: MuseGlimmerOneBlockVjpBankScratch::new(
+                ctx,
+                basis_count,
+                prepared.replay.n_tokens,
+                prepared.replay.geometry,
+            )?,
+        })
+    }
+
+    pub(crate) fn basis_count(&self) -> usize {
+        self.scratch.basis_count
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_muse_glimmer_one_full_attention_block_vjp_bank(
+    ctx: &MetalContext,
+    encoder: &KernelEncoder,
+    config: &MuseGlimmerConfig,
+    layer: &MuseGlimmerMetalLayerWeights<'_>,
+    prepared: &ReplayState,
+    grad_post_block: &MetalTensor,
+    grad_input: &MetalTensor,
+    scratch: &MuseGlimmerOneBlockVjpBankScratch,
+    rule: MuseGlimmerLensRule,
+) -> Result<(), MuseGlimmerLensError> {
+    if encoder.is_concurrent() {
+        return invalid("one-block VJP bank requires a serial encoder");
+    }
+    if layer.sliding_attention {
+        return invalid("one-block VJP bank currently requires full attention");
+    }
+    let geometry = prepared.geometry;
+    let n_tokens = prepared.n_tokens;
+    let basis_count = scratch.basis_count;
+    let bank_rows = checked_mul(basis_count, n_tokens, "one-block VJP bank rows")?;
+    if scratch.n_tokens != n_tokens
+        || scratch.geometry.hidden != geometry.hidden
+        || scratch.geometry.feed_forward != geometry.feed_forward
+        || scratch.geometry.q_heads != geometry.q_heads
+        || scratch.geometry.kv_heads != geometry.kv_heads
+        || scratch.geometry.head_dim != geometry.head_dim
+        || grad_post_block.dtype != GgmlType::F32
+        || grad_input.dtype != GgmlType::F32
+        || !grad_input.is_writable()
+        || grad_post_block.shape != scratch.hidden[0].shape
+        || grad_input.shape != scratch.hidden[0].shape
+        || tensor_ranges_overlap(grad_post_block, grad_input)
+    {
+        return invalid("one-block VJP bank scratch or cotangent shape mismatch");
+    }
+    let tensors = &prepared.tensors;
+
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.ffn_branch_raw,
+        layer.post_feed_forward_norm,
+        grad_post_block,
+        &scratch.hidden[0],
+        bank_rows,
+        n_tokens,
+        geometry.hidden,
+        config.post_norm_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::FeedForwardBranchPostNorm),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.feed_forward_down,
+        &scratch.hidden[0],
+        &scratch.feed_forward[0],
+        geometry.feed_forward,
+        geometry.hidden,
+        bank_rows,
+    )?;
+    encode_silu_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.ffn_gate_raw,
+        &tensors.ffn_up,
+        &scratch.feed_forward[0],
+        &scratch.feed_forward[1],
+        &scratch.feed_forward[2],
+        bank_rows,
+        n_tokens,
+        geometry.feed_forward,
+        rule.swiglu_rule(),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.feed_forward_gate,
+        &scratch.feed_forward[1],
+        &scratch.hidden[1],
+        geometry.hidden,
+        geometry.feed_forward,
+        bank_rows,
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.feed_forward_up,
+        &scratch.feed_forward[2],
+        &scratch.hidden[2],
+        geometry.hidden,
+        geometry.feed_forward,
+        bank_rows,
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[1],
+        &scratch.hidden[2],
+        &scratch.hidden[3],
+    )?;
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.post_attention,
+        layer.feed_forward_norm,
+        &scratch.hidden[3],
+        &scratch.hidden[1],
+        bank_rows,
+        n_tokens,
+        geometry.hidden,
+        config.rms_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreFeedForward),
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        grad_post_block,
+        &scratch.hidden[1],
+        &scratch.hidden[2],
+    )?;
+
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.attention_branch_raw,
+        layer.post_attention_norm,
+        &scratch.hidden[2],
+        &scratch.hidden[0],
+        bank_rows,
+        n_tokens,
+        geometry.hidden,
+        config.post_norm_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionBranchPostNorm),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_output,
+        &scratch.hidden[0],
+        &scratch.query[0],
+        geometry.query,
+        geometry.hidden,
+        bank_rows,
+    )?;
+    encode_muse_glimmer_causal_gqa_vjp_bank_f32(
+        ctx,
+        encoder,
+        &tensors.q,
+        &tensors.k,
+        &tensors.v,
+        &tensors.attention_gate,
+        &tensors.attention_output,
+        &tensors.attention_probabilities,
+        &scratch.query[0],
+        &scratch.query[1],
+        &scratch.partial_grad_key,
+        &scratch.partial_grad_value,
+        &scratch.kv[0],
+        &scratch.kv[1],
+        &scratch.query[2],
+        basis_count,
+        n_tokens,
+        geometry.q_heads,
+        geometry.kv_heads,
+        geometry.head_dim,
+    )?;
+
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_value,
+        &scratch.kv[1],
+        &scratch.hidden[0],
+        geometry.hidden,
+        geometry.kv,
+        bank_rows,
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_gate,
+        &scratch.query[2],
+        &scratch.hidden[1],
+        geometry.hidden,
+        geometry.query,
+        bank_rows,
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[0],
+        &scratch.hidden[1],
+        &scratch.hidden[3],
+    )?;
+
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.q_raw_heads,
+        layer.query_norm,
+        &scratch.query_heads[1],
+        &scratch.query_heads[0],
+        checked_mul(bank_rows, geometry.q_heads, "query cotangent head rows")?,
+        checked_mul(n_tokens, geometry.q_heads, "query primal head rows")?,
+        geometry.head_dim,
+        config.rms_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionQuery),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_query,
+        &scratch.query[0],
+        &scratch.hidden[0],
+        geometry.hidden,
+        geometry.query,
+        bank_rows,
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[3],
+        &scratch.hidden[0],
+        &scratch.hidden[1],
+    )?;
+
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.k_raw_heads,
+        layer.key_norm,
+        &scratch.kv_heads[0],
+        &scratch.kv_heads[1],
+        checked_mul(bank_rows, geometry.kv_heads, "key cotangent head rows")?,
+        checked_mul(n_tokens, geometry.kv_heads, "key primal head rows")?,
+        geometry.head_dim,
+        config.rms_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::AttentionKey),
+    )?;
+    encode_frozen_linear_vjp_bank_f32(
+        ctx,
+        encoder,
+        layer.attention_key,
+        &scratch.kv[1],
+        &scratch.hidden[0],
+        geometry.hidden,
+        geometry.kv,
+        bank_rows,
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[1],
+        &scratch.hidden[0],
+        &scratch.hidden[3],
+    )?;
+    encode_rms_norm_mul_vjp_periodic_f32(
+        ctx,
+        encoder,
+        &tensors.input,
+        layer.attention_norm,
+        &scratch.hidden[3],
+        &scratch.hidden[0],
+        bank_rows,
+        n_tokens,
+        geometry.hidden,
+        config.rms_epsilon,
+        rule.rms_norm_rule(MuseGlimmerRmsNormSite::ResidualPreAttention),
+    )?;
+    encode_add_f32(
+        ctx,
+        encoder,
+        &scratch.hidden[2],
+        &scratch.hidden[0],
+        grad_input,
+    )?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -962,6 +1498,8 @@ fn replay_state(
     })?;
     Ok(ReplayState {
         tensors,
+        n_tokens,
+        geometry,
         q,
         k,
         v,
@@ -1015,6 +1553,7 @@ pub(crate) fn muse_glimmer_one_attention_block_vjp(
         v,
         attention_gate,
         attention,
+        ..
     } = state;
     let post_attention_replay_max_abs_error = max_abs_difference(
         &replay.post_attention_residuals,
@@ -1192,10 +1731,6 @@ pub(crate) fn muse_glimmer_one_attention_block_vjp(
     let grad_norm = MetalTensor::zeros_f32(ctx, hidden_shape.clone())?;
     let grad_input_branch = MetalTensor::zeros_f32(ctx, hidden_shape.clone())?;
     let grad_input = MetalTensor::zeros_f32(ctx, hidden_shape)?;
-    let q_raw_heads = tensors.q_raw.view_subrange(
-        0,
-        row_shape(geometry.head_dim, n_tokens * geometry.q_heads)?,
-    );
     let grad_q_heads = grad_q.view_subrange(
         0,
         row_shape(geometry.head_dim, n_tokens * geometry.q_heads)?,
@@ -1203,10 +1738,6 @@ pub(crate) fn muse_glimmer_one_attention_block_vjp(
     let grad_q_raw_heads = grad_q_raw.view_subrange(
         0,
         row_shape(geometry.head_dim, n_tokens * geometry.q_heads)?,
-    );
-    let k_raw_heads = tensors.k_raw.view_subrange(
-        0,
-        row_shape(geometry.head_dim, n_tokens * geometry.kv_heads)?,
     );
     let grad_k_heads = grad_k.view_subrange(
         0,
@@ -1220,7 +1751,7 @@ pub(crate) fn muse_glimmer_one_attention_block_vjp(
         encode_rms_norm_mul_vjp_rows_f32(
             ctx,
             encoder,
-            &q_raw_heads,
+            &tensors.q_raw_heads,
             layer.query_norm,
             &grad_q_heads,
             &grad_q_raw_heads,
@@ -1232,7 +1763,7 @@ pub(crate) fn muse_glimmer_one_attention_block_vjp(
         encode_rms_norm_mul_vjp_rows_f32(
             ctx,
             encoder,
-            &k_raw_heads,
+            &tensors.k_raw_heads,
             layer.key_norm,
             &grad_k_heads,
             &grad_k_raw_heads,
@@ -1305,13 +1836,13 @@ pub(crate) fn muse_glimmer_one_attention_block_vjp(
     })
 }
 
-fn validate_replay_request<'a>(
-    weights: &'a MuseGlimmerMetalModelWeights<'a>,
+fn validate_replay_request<'a, 'weights>(
+    weights: &'a MuseGlimmerMetalModelWeights<'weights>,
     target_block: u32,
     input: &[f32],
     n_tokens: usize,
     geometry: MuseAttentionGeometry,
-) -> Result<&'a MuseGlimmerMetalLayerWeights<'a>, MuseGlimmerLensError> {
+) -> Result<&'a MuseGlimmerMetalLayerWeights<'weights>, MuseGlimmerLensError> {
     if target_block == 0 {
         return invalid("one-block replay requires a nonzero target block");
     }
@@ -1586,6 +2117,7 @@ mod tests {
     use crate::metal::{
         rms_norm_mul_vjp_rows_f32_readback_for_test, silu_mul_vjp_f32_readback_for_test,
     };
+    use crate::muse_glimmer::{MuseGlimmerChatTemplateProfile, MuseGlimmerConfig};
     use crate::muse_glimmer_lens::muse_glimmer_selected_token_covectors;
     use crate::muse_glimmer_metal::{
         encode_muse_glimmer_causal_gqa_vjp_bank_f32,
@@ -1887,6 +2419,439 @@ mod tests {
         let max = samples.iter().copied().fold(0.0f64, f64::max);
         eprintln!("[muse-attn-vjp] B32/T16 gpu_ms={samples:?} mean={mean:.6} max={max:.6}");
         assert!(max <= 5.0, "attention VJP exceeds 5 ms gate");
+    }
+
+    struct TinyMuseModel {
+        config: MuseGlimmerConfig,
+        token_embedding: MetalTensor,
+        output_norm: MetalTensor,
+        output: MetalTensor,
+        attention_norm: MetalTensor,
+        attention_query: MetalTensor,
+        attention_key: MetalTensor,
+        attention_value: MetalTensor,
+        attention_gate: MetalTensor,
+        attention_output: MetalTensor,
+        query_norm: MetalTensor,
+        key_norm: MetalTensor,
+        post_attention_norm: MetalTensor,
+        feed_forward_norm: MetalTensor,
+        feed_forward_gate: MetalTensor,
+        feed_forward_up: MetalTensor,
+        feed_forward_down: MetalTensor,
+        post_feed_forward_norm: MetalTensor,
+    }
+
+    impl TinyMuseModel {
+        fn tensor(ctx: &MetalContext, shape: Vec<u64>, seed: usize) -> MetalTensor {
+            let count = shape.iter().product::<u64>() as usize;
+            let values = (0..count)
+                .map(|index| ((index * (seed * 2 + 1) + seed) % 67) as f32 * 0.0015 - 0.0495)
+                .collect::<Vec<_>>();
+            from_f32(ctx, &values, shape).unwrap()
+        }
+
+        fn norm(ctx: &MetalContext, width: usize, seed: usize) -> MetalTensor {
+            let values = (0..width)
+                .map(|index| 0.75 + ((index * (seed + 1)) % 17) as f32 * 0.02)
+                .collect::<Vec<_>>();
+            from_f32(ctx, &values, vec![width as u64]).unwrap()
+        }
+
+        fn new(ctx: &MetalContext) -> Self {
+            const H: usize = 64;
+            const F: usize = 96;
+            const QH: usize = 2;
+            const KVH: usize = 1;
+            const D: usize = 32;
+            const Q: usize = QH * D;
+            const KV: usize = KVH * D;
+            const V: usize = 8;
+            Self {
+                config: MuseGlimmerConfig {
+                    layer_count: 2,
+                    context_length: 16,
+                    hidden_size: H as u32,
+                    feed_forward_size: F as u32,
+                    vocab_size: V as u32,
+                    query_head_count: QH as u32,
+                    kv_head_count: KVH as u32,
+                    key_head_dim: D as u32,
+                    value_head_dim: D as u32,
+                    rope_theta: 500_000.0,
+                    rms_epsilon: 1.0e-6,
+                    post_norm_epsilon: 1.0e-3,
+                    sliding_window: 2_048,
+                    sliding_layers: vec![false, false],
+                    logit_scale: 1.0,
+                    final_logit_softcap: 20.0,
+                    tokenizer_model: "test".into(),
+                    tokenizer_pre: "test".into(),
+                    bos_token_id: 0,
+                    eos_token_id: 1,
+                    eot_token_id: 2,
+                    padding_token_id: 3,
+                    add_bos_token: true,
+                    add_sep_token: false,
+                    tokenizer_identity_sha256: [0; 32],
+                    chat_template_sha256: [0; 32],
+                    chat_template_profile: MuseGlimmerChatTemplateProfile::MetaFixed,
+                },
+                token_embedding: Self::tensor(ctx, vec![H as u64, V as u64], 1),
+                output_norm: Self::norm(ctx, H, 2),
+                output: Self::tensor(ctx, vec![H as u64, V as u64], 3),
+                attention_norm: Self::norm(ctx, H, 4),
+                attention_query: Self::tensor(ctx, vec![H as u64, Q as u64], 5),
+                attention_key: Self::tensor(ctx, vec![H as u64, KV as u64], 6),
+                attention_value: Self::tensor(ctx, vec![H as u64, KV as u64], 7),
+                attention_gate: Self::tensor(ctx, vec![H as u64, Q as u64], 8),
+                attention_output: Self::tensor(ctx, vec![Q as u64, H as u64], 9),
+                query_norm: Self::norm(ctx, D, 10),
+                key_norm: Self::norm(ctx, D, 11),
+                post_attention_norm: Self::norm(ctx, H, 12),
+                feed_forward_norm: Self::norm(ctx, H, 13),
+                feed_forward_gate: Self::tensor(ctx, vec![H as u64, F as u64], 14),
+                feed_forward_up: Self::tensor(ctx, vec![H as u64, F as u64], 15),
+                feed_forward_down: Self::tensor(ctx, vec![F as u64, H as u64], 16),
+                post_feed_forward_norm: Self::norm(ctx, H, 17),
+            }
+        }
+
+        fn layer(&self) -> MuseGlimmerMetalLayerWeights<'_> {
+            MuseGlimmerMetalLayerWeights {
+                attention_norm: &self.attention_norm,
+                attention_query: &self.attention_query,
+                attention_key: &self.attention_key,
+                attention_value: &self.attention_value,
+                attention_gate: &self.attention_gate,
+                attention_output: &self.attention_output,
+                query_norm: &self.query_norm,
+                key_norm: &self.key_norm,
+                post_attention_norm: &self.post_attention_norm,
+                feed_forward_norm: &self.feed_forward_norm,
+                feed_forward_gate: &self.feed_forward_gate,
+                feed_forward_up: &self.feed_forward_up,
+                feed_forward_down: &self.feed_forward_down,
+                post_feed_forward_norm: &self.post_feed_forward_norm,
+                sliding_attention: false,
+            }
+        }
+
+        fn weights(&self) -> MuseGlimmerMetalModelWeights<'_> {
+            MuseGlimmerMetalModelWeights {
+                config: &self.config,
+                token_embedding: &self.token_embedding,
+                output_norm: &self.output_norm,
+                output: &self.output,
+                layers: vec![self.layer(), self.layer()],
+            }
+        }
+    }
+
+    struct ZeroQ8MuseModel {
+        config: MuseGlimmerConfig,
+        token_embedding: MetalTensor,
+        output_norm: MetalTensor,
+        output: MetalTensor,
+        attention_norm: MetalTensor,
+        attention_query: MetalTensor,
+        attention_key: MetalTensor,
+        attention_value: MetalTensor,
+        attention_gate: MetalTensor,
+        attention_output: MetalTensor,
+        query_norm: MetalTensor,
+        key_norm: MetalTensor,
+        post_attention_norm: MetalTensor,
+        feed_forward_norm: MetalTensor,
+        feed_forward_gate: MetalTensor,
+        feed_forward_up: MetalTensor,
+        feed_forward_down: MetalTensor,
+        post_feed_forward_norm: MetalTensor,
+    }
+
+    impl ZeroQ8MuseModel {
+        fn new(ctx: &MetalContext) -> Self {
+            let config = MuseGlimmerConfig::release_reference();
+            let hidden = config.hidden_size as usize;
+            let feed_forward = config.feed_forward_size as usize;
+            let query = config.query_width().unwrap() as usize;
+            let kv = config.kv_width().unwrap() as usize;
+            let head_dim = config.key_head_dim as usize;
+            Self {
+                config,
+                token_embedding: MetalTensor::zeros_f32(ctx, vec![1]).unwrap(),
+                output_norm: MetalTensor::zeros_f32(ctx, vec![hidden as u64]).unwrap(),
+                output: MetalTensor::zeros_f32(ctx, vec![1]).unwrap(),
+                attention_norm: MetalTensor::zeros_f32(ctx, vec![hidden as u64]).unwrap(),
+                attention_query: MetalTensor::zeros_dtype(
+                    ctx,
+                    vec![hidden as u64, query as u64],
+                    GgmlType::Q8_0,
+                )
+                .unwrap(),
+                attention_key: MetalTensor::zeros_dtype(
+                    ctx,
+                    vec![hidden as u64, kv as u64],
+                    GgmlType::Q8_0,
+                )
+                .unwrap(),
+                attention_value: MetalTensor::zeros_dtype(
+                    ctx,
+                    vec![hidden as u64, kv as u64],
+                    GgmlType::Q8_0,
+                )
+                .unwrap(),
+                attention_gate: MetalTensor::zeros_dtype(
+                    ctx,
+                    vec![hidden as u64, query as u64],
+                    GgmlType::Q8_0,
+                )
+                .unwrap(),
+                attention_output: MetalTensor::zeros_dtype(
+                    ctx,
+                    vec![query as u64, hidden as u64],
+                    GgmlType::Q8_0,
+                )
+                .unwrap(),
+                query_norm: MetalTensor::zeros_f32(ctx, vec![head_dim as u64]).unwrap(),
+                key_norm: MetalTensor::zeros_f32(ctx, vec![head_dim as u64]).unwrap(),
+                post_attention_norm: MetalTensor::zeros_f32(ctx, vec![hidden as u64]).unwrap(),
+                feed_forward_norm: MetalTensor::zeros_f32(ctx, vec![hidden as u64]).unwrap(),
+                feed_forward_gate: MetalTensor::zeros_dtype(
+                    ctx,
+                    vec![hidden as u64, feed_forward as u64],
+                    GgmlType::Q8_0,
+                )
+                .unwrap(),
+                feed_forward_up: MetalTensor::zeros_dtype(
+                    ctx,
+                    vec![hidden as u64, feed_forward as u64],
+                    GgmlType::Q8_0,
+                )
+                .unwrap(),
+                feed_forward_down: MetalTensor::zeros_dtype(
+                    ctx,
+                    vec![feed_forward as u64, hidden as u64],
+                    GgmlType::Q8_0,
+                )
+                .unwrap(),
+                post_feed_forward_norm: MetalTensor::zeros_f32(ctx, vec![hidden as u64]).unwrap(),
+            }
+        }
+
+        fn layer(&self, sliding_attention: bool) -> MuseGlimmerMetalLayerWeights<'_> {
+            MuseGlimmerMetalLayerWeights {
+                attention_norm: &self.attention_norm,
+                attention_query: &self.attention_query,
+                attention_key: &self.attention_key,
+                attention_value: &self.attention_value,
+                attention_gate: &self.attention_gate,
+                attention_output: &self.attention_output,
+                query_norm: &self.query_norm,
+                key_norm: &self.key_norm,
+                post_attention_norm: &self.post_attention_norm,
+                feed_forward_norm: &self.feed_forward_norm,
+                feed_forward_gate: &self.feed_forward_gate,
+                feed_forward_up: &self.feed_forward_up,
+                feed_forward_down: &self.feed_forward_down,
+                post_feed_forward_norm: &self.post_feed_forward_norm,
+                sliding_attention,
+            }
+        }
+
+        fn weights(&self) -> MuseGlimmerMetalModelWeights<'_> {
+            MuseGlimmerMetalModelWeights {
+                config: &self.config,
+                token_embedding: &self.token_embedding,
+                output_norm: &self.output_norm,
+                output: &self.output,
+                layers: self
+                    .config
+                    .sliding_layers
+                    .iter()
+                    .map(|&sliding| self.layer(sliding))
+                    .collect(),
+            }
+        }
+    }
+
+    #[test]
+    fn one_full_attention_block_vjp_bank_matches_scalar() {
+        let ctx = MetalContext::new().unwrap();
+        let owned = TinyMuseModel::new(&ctx);
+        let weights = owned.weights();
+        let geometry = MuseAttentionGeometry::from_weights(&weights).unwrap();
+        let layer = &weights.layers[1];
+
+        for (n_tokens, basis_count) in [(3usize, 1usize), (5, 3), (16, 8)] {
+            let input = attention_values(n_tokens * geometry.hidden, 29, 113, 0.004);
+            let capture_replay =
+                replay_state(&ctx, &weights, layer, &input, n_tokens, geometry).unwrap();
+            let replay = replay_readback(&capture_replay).unwrap();
+            let capture = MuseGlimmerLensCapture::new(
+                1,
+                (0..n_tokens as u32).collect(),
+                geometry.hidden,
+                input.clone(),
+                replay.post_attention_residuals,
+                replay.post_block_residuals,
+            );
+            let prepared =
+                MuseGlimmerPreparedFullAttentionBlock::new(&ctx, &weights, &capture).unwrap();
+            let target = attention_values(basis_count * n_tokens * geometry.hidden, 31, 127, 0.003);
+            let target_tensor = from_f32(
+                &ctx,
+                &target,
+                row_shape(geometry.hidden, basis_count * n_tokens).unwrap(),
+            )
+            .unwrap();
+            let grad_input = MetalTensor::zeros_f32(
+                &ctx,
+                row_shape(geometry.hidden, basis_count * n_tokens).unwrap(),
+            )
+            .unwrap();
+            let mut workspace =
+                MuseGlimmerFullAttentionBankWorkspace::new(&ctx, &prepared, basis_count).unwrap();
+
+            for rule in [MuseGlimmerLensRule::J, MuseGlimmerLensRule::R] {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                prepared
+                    .encode_bank(
+                        &ctx,
+                        &encoder,
+                        &target_tensor,
+                        &grad_input,
+                        &mut workspace,
+                        rule,
+                    )
+                    .unwrap();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none(), "{:?}", command.error());
+
+                let mut expected = Vec::with_capacity(target.len());
+                for basis in 0..basis_count {
+                    let start = basis * n_tokens * geometry.hidden;
+                    let scalar = muse_glimmer_one_full_attention_block_vjp(
+                        &ctx,
+                        &weights,
+                        &capture,
+                        &target[start..start + n_tokens * geometry.hidden],
+                        rule,
+                    )
+                    .unwrap();
+                    expected.extend_from_slice(&scalar.input_cotangent);
+                }
+                let actual = read_f32(&grad_input);
+                let differential = attention_differential(&actual, &expected);
+                eprintln!(
+                    "[muse-block-vjp] B={basis_count} T={n_tokens} rule={rule:?} differential={differential:?}"
+                );
+                assert!(actual.iter().all(|value| value.is_finite()));
+                assert!(differential.0 <= 5.0e-5, "{differential:?}");
+                assert!(differential.1 <= 2.0e-4, "{differential:?}");
+                assert!(differential.2 >= 0.999_999_9, "{differential:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded zero-Q8 Muse full-block B8/B32 timing gate"]
+    fn profile_one_full_attention_block_vjp_bank_zero_q8() {
+        use std::time::Instant;
+
+        let ctx = MetalContext::new().unwrap();
+        let model_prepare_start = Instant::now();
+        let owned = ZeroQ8MuseModel::new(&ctx);
+        let weights = owned.weights();
+        const TARGET_BLOCK: u32 = 51;
+        const N_TOKENS: usize = 16;
+        let hidden = weights.config.hidden_size as usize;
+        assert!(!weights.layers[TARGET_BLOCK as usize].sliding_attention);
+        let input = vec![0.0f32; N_TOKENS * hidden];
+        let capture = MuseGlimmerLensCapture::new(
+            TARGET_BLOCK,
+            (0..N_TOKENS as u32).collect(),
+            hidden,
+            input.clone(),
+            input.clone(),
+            input,
+        );
+        let prepared =
+            MuseGlimmerPreparedFullAttentionBlock::new(&ctx, &weights, &capture).unwrap();
+        let model_prepare_seconds = model_prepare_start.elapsed().as_secs_f64();
+        assert!(
+            model_prepare_seconds <= 30.0,
+            "model preparation took {model_prepare_seconds:.3} s"
+        );
+
+        let mut results = Vec::new();
+        for (basis_count, hard_stop_ms) in [(8usize, 100.0f64), (32, 300.0)] {
+            let current_values = attention_values(basis_count * N_TOKENS * hidden, 37, 131, 0.002);
+            let current = from_f32(
+                &ctx,
+                &current_values,
+                row_shape(hidden, basis_count * N_TOKENS).unwrap(),
+            )
+            .unwrap();
+            let next =
+                MetalTensor::zeros_f32(&ctx, row_shape(hidden, basis_count * N_TOKENS).unwrap())
+                    .unwrap();
+            let mut workspace =
+                MuseGlimmerFullAttentionBankWorkspace::new(&ctx, &prepared, basis_count).unwrap();
+            let mut run = || {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                prepared
+                    .encode_bank(
+                        &ctx,
+                        &encoder,
+                        &current,
+                        &next,
+                        &mut workspace,
+                        MuseGlimmerLensRule::R,
+                    )
+                    .unwrap();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none(), "{:?}", command.error());
+                let start = command.GPUStartTime();
+                let end = command.GPUEndTime();
+                assert!(start.is_finite() && end.is_finite() && start > 0.0 && end > start);
+                (end - start) * 1.0e3
+            };
+            run();
+            let first = run();
+            assert!(
+                first <= hard_stop_ms,
+                "B={basis_count} first command {first:.3} ms exceeds {hard_stop_ms:.0} ms"
+            );
+            let samples = [first, run(), run()];
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            assert_eq!(
+                read_f32(&next)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                current_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "zero-Q8 block VJP must be residual identity"
+            );
+            eprintln!(
+                "[muse-block-vjp-zero-q8] B={basis_count} samples_ms={samples:?} mean_ms={mean:.6}"
+            );
+            results.push((basis_count, mean));
+        }
+        let throughput_ratio = results[1].1 / results[0].1;
+        let selected_basis = if throughput_ratio > 5.0 { 8 } else { 32 };
+        eprintln!(
+            "[muse-block-vjp-zero-q8] model_prepare_s={model_prepare_seconds:.3} B32/B8={throughput_ratio:.3} selected_B={selected_basis}"
+        );
     }
 
     #[test]

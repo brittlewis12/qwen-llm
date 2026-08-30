@@ -543,6 +543,7 @@ impl MuseGlimmerMetalWeights {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct MuseGlimmerMetalLayerWeights<'a> {
     pub attention_norm: &'a MetalTensor,
     pub attention_query: &'a MetalTensor,

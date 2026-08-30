@@ -26938,7 +26938,7 @@ fn tensor_physical_range_valid(
             .is_some_and(|end| end <= tensor.buffer.length() as u64)
 }
 
-fn tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
+pub(crate) fn tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
     if Retained::as_ptr(&left.buffer) != Retained::as_ptr(&right.buffer) {
         return false;
     }

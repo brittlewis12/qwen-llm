@@ -21,8 +21,10 @@ use crate::muse_glimmer_lens::{
     MuseGlimmerLensError, MuseGlimmerSelectedTokenCovectors,
 };
 use crate::muse_glimmer_lens_fit::{
-    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerMultiSourceSelectedTokenFit,
-    MuseGlimmerOneBlockVjp, muse_glimmer_fit_adjacent_full_attention_selected_tokens,
+    MuseGlimmerAdjacentRowSlab, MuseGlimmerAdjacentSelectedTokenFit,
+    MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerOneBlockVjp,
+    muse_glimmer_fit_adjacent_full_attention_rows_batched,
+    muse_glimmer_fit_adjacent_full_attention_selected_tokens,
     muse_glimmer_fit_selected_tokens_to_sources, muse_glimmer_one_full_attention_block_vjp,
 };
 use crate::muse_glimmer_metal::{
@@ -786,6 +788,25 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             capture,
             covectors,
             skip_first,
+            rule,
+        )
+    }
+
+    pub(crate) fn fit_adjacent_full_attention_rows_batched(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        rows: std::ops::Range<u32>,
+        skip_first: usize,
+        dim_batch: usize,
+        rule: crate::muse_glimmer_lens::MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerAdjacentRowSlab, MuseGlimmerLensError> {
+        muse_glimmer_fit_adjacent_full_attention_rows_batched(
+            self.ctx,
+            &self.weights,
+            capture,
+            rows,
+            skip_first,
+            dim_batch,
             rule,
         )
     }

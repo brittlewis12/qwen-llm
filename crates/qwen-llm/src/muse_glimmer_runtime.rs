@@ -10,8 +10,8 @@ use crate::muse_glimmer_lens::{
     MuseGlimmerSelectedTokenCovectors, muse_glimmer_selected_token_covectors,
 };
 use crate::muse_glimmer_lens_fit::{
-    MuseGlimmerAdjacentSelectedTokenFit, MuseGlimmerMultiSourceSelectedTokenFit,
-    MuseGlimmerOneBlockVjp,
+    MuseGlimmerAdjacentRowSlab, MuseGlimmerAdjacentSelectedTokenFit,
+    MuseGlimmerMultiSourceSelectedTokenFit, MuseGlimmerOneBlockVjp,
 };
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
@@ -285,6 +285,21 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self
             .forward
             .fit_adjacent_full_attention_selected_tokens(capture, covectors, skip_first, rule)?)
+    }
+
+    /// Fit contiguous hidden-coordinate rows through one adjacent full-attention
+    /// block with a fixed-size resident VJP bank. Values are row-major `[R,H]`.
+    pub fn fit_adjacent_full_attention_rows_batched(
+        &self,
+        capture: &MuseGlimmerLensCapture,
+        rows: std::ops::Range<u32>,
+        skip_first: usize,
+        dim_batch: usize,
+        rule: MuseGlimmerLensRule,
+    ) -> Result<MuseGlimmerAdjacentRowSlab, MuseGlimmerRuntimeError> {
+        Ok(self
+            .forward
+            .fit_adjacent_full_attention_rows_batched(capture, rows, skip_first, dim_batch, rule)?)
     }
 
     /// Fit selected-token directions from one target to arbitrary strictly

@@ -31,7 +31,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | scalar selected-token J/R oracle | live CLI implemented | B32 full-attention VJP | source-50 row slabs |
+| Muse Glimmer 30B | scalar selected-token J/R oracle | live CLI implemented | resumable B32 source-50 rows | bounded Q8 shard smoke |
 
 ## Current Status
 
@@ -56,16 +56,19 @@ The fixed-scratch full-attention one-block bank now composes the native Q8 and
 attention mechanisms with shared-primal nonlinear VJPs. B32/T16 R-rule commands
 measure 50.77 ms on a resident synthetic release-shape fixture, and all J/R
 composition gates match the scalar oracle within `3.21e-7` scaled max error.
+`fit-rows` now exposes that motor through R-only, B32, target-51/source-50
+shards with at most 256 rows, prompt-order checkpoints, and an explicit local
+model locator that hashes zero weight bytes. Model-free estimator and
+filesystem resume gates pass; no corpus fit has run.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
 until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Compose the qualified full-attention bank into resumable B32 source-50 row
-slabs. Production must preserve the scalar estimator and prompt order. Do not
-run a long fit until the source-50 control plane closes and sliding-block bank
-integration projects the complete 25-prompt build into an agreed hours-scale
-envelope.
+Run one bounded one-prompt, 32-row Q8 source-50 shard to verify real capture,
+resume, and artifact publication. Then add the sliding-block bank seam needed
+to expand the same engine below source 50. Do not run a corpus fit until that
+seam projects the complete 25-prompt build into an agreed hours-scale envelope.
 
 ## Hard Exclusions
 
@@ -74,7 +77,7 @@ plugins, unrelated test repair, cross-device support, and production hardening.
 
 ## Blockers
 
-- Resumable source-50 row-slab production does not exist yet.
+- The source-50 row-slab CLI has not completed one bounded real-Q8 smoke.
 - Sliding-block bank integration still needs inverse RoPE over Q/K cotangents.
 
 ## Fast Follows

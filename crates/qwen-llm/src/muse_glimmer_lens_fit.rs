@@ -26,6 +26,8 @@ use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLDevice, MTLResource,
 };
 
+pub const MUSE_GLIMMER_FULL_R_MAX_DIM_BATCH: usize = 32;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerOneBlockVjp {
     pub target_block: u32,
@@ -56,6 +58,33 @@ pub struct MuseGlimmerAdjacentSelectedTokenFit {
 
 impl MuseGlimmerAdjacentSelectedTokenFit {
     pub fn token_values(&self, slot: usize) -> Option<&[f32]> {
+        let start = slot.checked_mul(self.hidden_size)?;
+        self.values.get(start..start.checked_add(self.hidden_size)?)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerAdjacentRowSlab {
+    pub source_block: u32,
+    pub target_block: u32,
+    pub rule: MuseGlimmerLensRule,
+    pub row_start: u32,
+    pub row_end: u32,
+    pub n_tokens: usize,
+    pub n_valid_positions: usize,
+    pub hidden_size: usize,
+    /// Target-row-major fitted directions, flattened `[R,H]`.
+    pub values: Vec<f32>,
+    pub post_attention_replay_max_abs_error: f32,
+    pub post_block_replay_max_abs_error: f32,
+}
+
+impl MuseGlimmerAdjacentRowSlab {
+    pub fn row_values(&self, row: u32) -> Option<&[f32]> {
+        let slot = row.checked_sub(self.row_start)? as usize;
+        if row >= self.row_end {
+            return None;
+        }
         let start = slot.checked_mul(self.hidden_size)?;
         self.values.get(start..start.checked_add(self.hidden_size)?)
     }
@@ -316,6 +345,105 @@ pub(crate) fn muse_glimmer_fit_adjacent_full_attention_selected_tokens(
         token_ids: covectors.token_ids().to_vec(),
         n_valid_positions,
         hidden_size: capture.hidden_size(),
+        values,
+        post_attention_replay_max_abs_error,
+        post_block_replay_max_abs_error,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn muse_glimmer_fit_adjacent_full_attention_rows_batched(
+    ctx: &MetalContext,
+    weights: &MuseGlimmerMetalModelWeights<'_>,
+    capture: &MuseGlimmerLensCapture,
+    rows: std::ops::Range<u32>,
+    skip_first: usize,
+    dim_batch: usize,
+    rule: MuseGlimmerLensRule,
+) -> Result<MuseGlimmerAdjacentRowSlab, MuseGlimmerLensError> {
+    let hidden_size = capture.hidden_size();
+    let hidden_size_u32 = u32::try_from(hidden_size)
+        .map_err(|_| MuseGlimmerLensError::Invalid("hidden size exceeds u32".into()))?;
+    if rows.start >= rows.end || rows.end > hidden_size_u32 {
+        return invalid(format!(
+            "adjacent row range {}..{} must be nonempty and within hidden size {hidden_size}",
+            rows.start, rows.end
+        ));
+    }
+    if dim_batch == 0 || dim_batch > MUSE_GLIMMER_FULL_R_MAX_DIM_BATCH {
+        return invalid(format!(
+            "adjacent row dim_batch must be in 1..={MUSE_GLIMMER_FULL_R_MAX_DIM_BATCH}, got {dim_batch}"
+        ));
+    }
+    let valid_positions = adjacent_fit_position_range(capture.n_tokens(), skip_first)?;
+    let n_valid_positions = valid_positions.len();
+    let prepared = MuseGlimmerPreparedFullAttentionBlock::new(ctx, weights, capture)?;
+    let row_count = usize::try_from(rows.end - rows.start)
+        .map_err(|_| MuseGlimmerLensError::Invalid("row count exceeds usize".into()))?;
+    let basis_count = dim_batch.min(row_count);
+    let trajectory_elements = checked_mul(
+        checked_mul(basis_count, capture.n_tokens(), "row slab trajectories")?,
+        hidden_size,
+        "row slab trajectory elements",
+    )?;
+    let shape = row_shape(hidden_size, basis_count * capture.n_tokens())?;
+    let current = MetalTensor::zeros_f32(ctx, shape.clone())?;
+    let next = MetalTensor::zeros_f32(ctx, shape)?;
+    let mut workspace = MuseGlimmerFullAttentionBankWorkspace::new(ctx, &prepared, basis_count)?;
+    let mut current_values = vec![0.0_f32; trajectory_elements];
+    let value_count = checked_mul(row_count, hidden_size, "adjacent row slab values")?;
+    let mut values = Vec::with_capacity(value_count);
+
+    let mut chunk_start = rows.start;
+    while chunk_start < rows.end {
+        let chunk_end = rows.end.min(chunk_start.saturating_add(basis_count as u32));
+        let active_basis = usize::try_from(chunk_end - chunk_start)
+            .map_err(|_| MuseGlimmerLensError::Invalid("active row count exceeds usize".into()))?;
+        current_values.fill(0.0);
+        for basis in 0..active_basis {
+            let row = usize::try_from(chunk_start)
+                .ok()
+                .and_then(|start| start.checked_add(basis))
+                .ok_or_else(|| MuseGlimmerLensError::Invalid("target row overflow".into()))?;
+            for position in valid_positions.clone() {
+                let index = (basis * capture.n_tokens() + position) * hidden_size + row;
+                current_values[index] = 1.0;
+            }
+        }
+        write_f32(&current, &current_values)?;
+        run_command(ctx, |encoder| {
+            prepared.encode_bank(ctx, encoder, &current, &next, &mut workspace, rule)
+        })?;
+        let output = read_f32(&next);
+        let trajectory_stride = checked_mul(
+            capture.n_tokens(),
+            hidden_size,
+            "row slab trajectory stride",
+        )?;
+        for basis in 0..active_basis {
+            let start = checked_mul(basis, trajectory_stride, "row slab output offset")?;
+            values.extend(mean_reduce_position_rows(
+                &output[start..start + trajectory_stride],
+                capture.n_tokens(),
+                hidden_size,
+                valid_positions.clone(),
+            )?);
+        }
+        chunk_start = chunk_end;
+    }
+    require_finite("adjacent row slab", &values)?;
+    validate_len("adjacent row slab", &values, value_count)?;
+    let (post_attention_replay_max_abs_error, post_block_replay_max_abs_error) =
+        prepared.replay_max_abs_errors();
+    Ok(MuseGlimmerAdjacentRowSlab {
+        source_block: prepared.target_block() - 1,
+        target_block: prepared.target_block(),
+        rule,
+        row_start: rows.start,
+        row_end: rows.end,
+        n_tokens: prepared.n_tokens(),
+        n_valid_positions,
+        hidden_size: prepared.hidden_size(),
         values,
         post_attention_replay_max_abs_error,
         post_block_replay_max_abs_error,
@@ -973,10 +1101,6 @@ impl MuseGlimmerFullAttentionBankWorkspace {
                 prepared.replay.geometry,
             )?,
         })
-    }
-
-    pub(crate) fn basis_count(&self) -> usize {
-        self.scratch.basis_count
     }
 }
 
@@ -2754,6 +2878,91 @@ mod tests {
                 assert!(differential.1 <= 2.0e-4, "{differential:?}");
                 assert!(differential.2 >= 0.999_999_9, "{differential:?}");
             }
+        }
+    }
+
+    #[test]
+    fn adjacent_row_slab_matches_scalar_basis_and_reduction() {
+        let ctx = MetalContext::new().unwrap();
+        let owned = TinyMuseModel::new(&ctx);
+        let weights = owned.weights();
+        let geometry = MuseAttentionGeometry::from_weights(&weights).unwrap();
+        let n_tokens = 5;
+        let input = attention_values(n_tokens * geometry.hidden, 41, 137, 0.004);
+        let replay = replay_state(
+            &ctx,
+            &weights,
+            &weights.layers[1],
+            &input,
+            n_tokens,
+            geometry,
+        )
+        .unwrap();
+        let replay = replay_readback(&replay).unwrap();
+        let capture = MuseGlimmerLensCapture::new(
+            1,
+            (0..n_tokens as u32).collect(),
+            geometry.hidden,
+            input,
+            replay.post_attention_residuals,
+            replay.post_block_residuals,
+        );
+        let rows = 3..14;
+        let valid_positions = adjacent_fit_position_range(n_tokens, 1).unwrap();
+        let positions = valid_positions.clone().collect::<Vec<_>>();
+
+        for rule in [MuseGlimmerLensRule::J, MuseGlimmerLensRule::R] {
+            let slab = muse_glimmer_fit_adjacent_full_attention_rows_batched(
+                &ctx,
+                &weights,
+                &capture,
+                rows.clone(),
+                1,
+                4,
+                rule,
+            )
+            .unwrap();
+            let mut expected = Vec::new();
+            for row in rows.clone() {
+                let mut basis = vec![0.0_f32; geometry.hidden];
+                basis[row as usize] = 1.0;
+                let target = muse_glimmer_positioned_target_cotangent(
+                    &basis,
+                    n_tokens,
+                    geometry.hidden,
+                    &positions,
+                )
+                .unwrap();
+                let scalar = muse_glimmer_one_full_attention_block_vjp(
+                    &ctx, &weights, &capture, &target, rule,
+                )
+                .unwrap();
+                expected.extend(
+                    mean_reduce_position_rows(
+                        &scalar.input_cotangent,
+                        n_tokens,
+                        geometry.hidden,
+                        valid_positions.clone(),
+                    )
+                    .unwrap(),
+                );
+            }
+            let differential = attention_differential(&slab.values, &expected);
+            assert_eq!(slab.source_block, 0);
+            assert_eq!(slab.target_block, 1);
+            assert_eq!(slab.rule, rule);
+            assert_eq!((slab.row_start, slab.row_end), (rows.start, rows.end));
+            assert_eq!(slab.n_tokens, n_tokens);
+            assert_eq!(slab.n_valid_positions, valid_positions.len());
+            assert_eq!(slab.hidden_size, geometry.hidden);
+            assert_eq!(
+                slab.row_values(rows.start).unwrap(),
+                &slab.values[..geometry.hidden]
+            );
+            assert!(slab.row_values(rows.end).is_none());
+            assert!(differential.0 <= 5.0e-5, "{differential:?}");
+            assert!(differential.1 <= 2.0e-4, "{differential:?}");
+            assert!(differential.2 >= 0.999_999_9, "{differential:?}");
         }
     }
 

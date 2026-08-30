@@ -21,6 +21,7 @@ mod lens_run;
 mod messages;
 mod muse_lens_artifact;
 mod muse_lens_fit;
+mod muse_lens_rows;
 mod muse_lens_run;
 #[allow(dead_code)]
 mod template_lens;
@@ -102,7 +103,7 @@ impl FitMethod {
 
 #[derive(Debug, Args)]
 struct FitRowsArgs {
-    /// Dense Qwen3.8 GGUF model (the first shard is sufficient).
+    /// Dense Qwen3.8 or Muse Glimmer GGUF model (the first shard is sufficient).
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -114,7 +115,7 @@ struct FitRowsArgs {
     #[arg(long)]
     output: PathBuf,
 
-    /// Private cache directory for the strong ordered-GGUF content identity.
+    /// Ordinary-Qwen content cache; accepted but unused by Muse row fitting.
     #[arg(long)]
     identity_cache: PathBuf,
 
@@ -504,6 +505,12 @@ fn main() -> Result<()> {
 
 fn fit_rows(mut args: FitRowsArgs) -> Result<()> {
     validate_args(&args)?;
+    let gguf = qwen_llm::gguf::GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    if muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
+        return muse_lens_rows::fit_rows(args, gguf);
+    }
+    drop(gguf);
     args.output = resolve_output_path(&args.output)?;
     let requests = read_prompt_requests(&args.prompts, args.max_prompts)?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;

@@ -1209,6 +1209,7 @@ dependencies = [
  "objc2-metal",
  "parking_lot",
  "proptest",
+ "rayon",
  "rustc-hash",
  "serde",
  "serde_json",

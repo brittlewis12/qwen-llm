@@ -34,7 +34,7 @@ not compensating abstraction.
 | ordinary dense | native J/R + full-J trace | live CLI passed | vectors + top-k | complete |
 | ordinary MoE | selected rows; fitting deferred | live CLI passed | runtime exists | lens fitting |
 | Flash-Next/qwen4exp | native hyper capture; lenses deferred | CLI fixed add passed | serial only | rectangular readout |
-| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | transposed-F16 FF sidecar gate |
+| Muse Glimmer 30B | selected + full J/R fit/read | selected-token CLI passed | hybrid B32 full/sliding transport | freeze production corpus |
 
 ## Current Status
 
@@ -91,6 +91,9 @@ The legal four-pass B32/T16 observer attributes 40.414 of 50.609 ms, or
 79.8554%, to feed-forward reverse with exact output and dispatch topology. All
 three sampled arms pass coverage, ambiguity, perturbation, and repeatability
 gates.
+A transposed-F16 FF sidecar saves 17.116% including three packs but fails every
+relative-L2 and cosine gate. No precision rescue fits its 2.5524% remaining
+budget. Exact released-Q8 fitting is now at a local 4.934-hour engine plateau.
 Muse identity resolution accepts only an existing cache root or fresh Hugging
 Face declarations and fails rather than hashing weights.
 Flash-Next remains available as a raw hyper-state path, but lens work is frozen
@@ -98,23 +101,18 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Qualify one private model-free transposed-F16 FF sidecar train at released
-`H=6656`, `F=19968`, and `n_query=512`. Use deterministic nonzero Q8 down,
-gate, and up matrices. Pack all three once per candidate sample with a tiled
-Q8-dequantizing transpose into preallocated F16 sidecars: down `[H,F]` and
-gate/up `[F,H]`, totaling exactly 797,442,048 bytes. The `cfg(test)` candidate
-must call `encode_mat_mat_f16_half_act_f32` directly; production remains Q8.
-Use one serial command per arm. Candidate commands contain three packs followed
-by eight complete FF reverse stages; controls contain eight incumbent Q8 FF
-stages over identical Q8-derived primals. Compare each command's
-`GPUEndTime-GPUStartTime`; allocation and differential readback remain outside
-both intervals. Compare the complete down intermediate, both gate/up outputs,
-and final FF output; require finite values, relative L2 at or below `5e-5`,
-scaled max `max_abs(candidate-control) / max(max_abs(control), 1)` at or below
-`2e-4`, and cosine at or above `0.9999999` for every comparison. Warm each arm
-once, take five order-alternating pairs, and require at least 15% median whole-FF
-saving. Assert retrospective elapsed time at or below 180 seconds and apply an
-external 180-second cap. Load no model asset or launch a corpus fit.
+Freeze one production corpus manifest before launching full-R fitting. Record
+exact prompt bytes, prompt IDs, order, `add_special_tokens`, `max_tokens` and
+truncation policy, resulting ordered token IDs or their canonical digest,
+used/skipped prompt classification, tokenizer declaration, `corpus_blake3`,
+skip-first policy, B32 query batch size, target/source blocks, R rule, and R256
+shard boundaries. Bind `model_content_blake3` under
+`cached_or_fresh_hf_declared_digest_only_no_weight_hashing`, require an accepted
+cache/declaration outcome, and record `content_bytes_hashed = 0`. Project engine
+hours as `used_prompts * 26 * 27.325800 / 3600`, explicitly excluding capture,
+checkpoint I/O, and assembly. Every shard retains the existing atomic
+resume/checkpoint contract. This gate performs no fit, model command, or broad
+test; corpus selection requires explicit operator approval.
 
 ## Hard Exclusions
 
@@ -130,8 +128,7 @@ integrity.
 
 ## Fast Follows
 
-1. Qualify bounded per-block sidecar reuse only if the model-free FF gate clears;
-   partial banks remain Q8 until separately measured.
+1. Run the resumable 26-shard fit only after the corpus manifest is frozen.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

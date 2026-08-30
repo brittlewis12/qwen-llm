@@ -86,10 +86,11 @@ until a genuine rectangular fitting or asset path exists.
 
 ## Next Gate
 
-Qualify one private released-Q8 B64 bank against two serial B32 banks on both
-full block 51 and sliding block 50 at T16/R. Share each replay, warm both paths,
-take three alternating samples, compare complete outputs, require 15% on both
-blocks, and hard-stop at 180 seconds. Do not launch a corpus fit.
+Qualify one private model-free Q8 kernel with 256-query tile reuse against the
+incumbent 128-query tile at released `6656x19968` FFN gate/up and transposed down
+shapes with `n_query=512`. Warm once, take five alternating GPU-time samples,
+require bitwise equality and 15% on both directions, and hard-stop at 180
+seconds. Do not load a model asset or launch a corpus fit.
 
 ## Hard Exclusions
 
@@ -104,7 +105,7 @@ integrity.
 
 ## Fast Follows
 
-1. Persistent cross-bank Q8 reverse if wider-bank scaling misses its gate.
+1. Integrate 256-query Q8 reuse only if both released FFN shapes clear the gate.
 2. Rectangular Flash-Next transport/readout when a genuine fit or asset exists.
 3. Thin local REST only after full-R CLI production is qualified.
 4. Corpus batching only after measured throughput requires it.

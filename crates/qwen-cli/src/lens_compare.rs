@@ -6,9 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::lens_input::LensInputRendering;
 #[cfg(test)]
 use super::lens_input::LensRenderedSpan;
+use super::lens_input::{
+    LensInputRendering, is_known_lens_span, is_structural_lens_span, valid_lens_rendering_topology,
+    valid_lens_span_metadata,
+};
 use super::lens_inspect::{self, Cell, TraceDocument, VectorCell};
 use super::lens_run::{self, CoefficientSweepManifest, LensPlan};
 use super::{read_regular_file_bounded, read_regular_file_exact};
@@ -1686,6 +1689,12 @@ impl RunDocument {
                                 "reasoning_low" | "reasoning_medium" | "reasoning_high"
                             ) && rendering.spans.is_empty()
                         }
+                        ("muse_glimmer", "muse_glimmer_atem_annotated_v1") => {
+                            matches!(
+                                mode,
+                                "reasoning_low" | "reasoning_medium" | "reasoning_high"
+                            )
+                        }
                         _ => false,
                     };
                 ensure!(
@@ -1694,7 +1703,7 @@ impl RunDocument {
                 );
                 ensure!(
                     rendering.renderer == "muse_glimmer_atem_v1" || !rendering.spans.is_empty(),
-                    "Qwen structured-message rendering requires renderer-authored spans"
+                    "structured-message rendering requires renderer-authored spans"
                 );
             }
             _ => bail!("run has unsupported input source {:?}", self.input_source),
@@ -1702,8 +1711,9 @@ impl RunDocument {
         let mut previous_byte_end = 0usize;
         let mut previous_token_end = 0usize;
         for span in &rendering.spans {
+            let semantic_metadata_valid = valid_lens_span_metadata(&rendering.renderer, span);
             let token_range_valid = match (span.token_start, span.token_end) {
-                (None, None) => !is_structural_run_span(&span.kind),
+                (None, None) => !is_structural_lens_span(&span.kind),
                 (Some(start), Some(end)) => {
                     let valid = start < end
                         && start >= previous_token_end
@@ -1714,15 +1724,19 @@ impl RunDocument {
                 _ => false,
             };
             ensure!(
-                is_known_run_span(&span.kind)
+                semantic_metadata_valid
+                    && is_known_lens_span(&span.kind)
                     && span.role.as_ref().is_none_or(|role| matches!(
                         role.as_str(),
-                        "system" | "user" | "assistant"
+                        "system" | "user" | "assistant" | "tool"
                     ))
+                    && span.channel.as_ref().is_none_or(|channel| {
+                        matches!(channel.as_str(), "thinking" | "tool_call" | "tool_result")
+                    })
                     && span
-                        .channel
+                        .label
                         .as_ref()
-                        .is_none_or(|channel| channel == "thinking")
+                        .is_none_or(|label| label.len() <= RUN_METADATA_STRING_MAX_BYTES)
                     && span.byte_start < span.byte_end
                     && span.byte_start >= previous_byte_end
                     && span.byte_end <= lens_run::MAX_RUN_ARTIFACT_BYTES
@@ -1731,35 +1745,12 @@ impl RunDocument {
             );
             previous_byte_end = span.byte_end;
         }
+        ensure!(
+            valid_lens_rendering_topology(rendering),
+            "run rendering spans have an invalid record topology"
+        );
         Ok(())
     }
-}
-
-fn is_structural_run_span(kind: &str) -> bool {
-    matches!(
-        kind,
-        "message_start_marker"
-            | "message_end_marker"
-            | "generated_assistant_start_marker"
-            | "thinking_channel_start_marker"
-            | "thinking_channel_end_marker"
-    )
-}
-
-fn is_known_run_span(kind: &str) -> bool {
-    matches!(
-        kind,
-        "message_start_marker"
-            | "role"
-            | "message_content"
-            | "message_end_marker"
-            | "generated_assistant_start_marker"
-            | "generated_assistant_role"
-            | "thinking_channel_start_marker"
-            | "thinking_channel_end_marker"
-            | "reasoning_instruction_content"
-            | "content_separator"
-    )
 }
 
 impl RunExecutionBinding {
@@ -2474,6 +2465,68 @@ mod tests {
         }
     }
 
+    fn annotated_muse_rendering() -> LensInputRendering {
+        let span = |kind: &str,
+                    message_index,
+                    role: Option<&str>,
+                    label: Option<&str>,
+                    byte_start,
+                    token_start| LensRenderedSpan {
+            kind: kind.into(),
+            message_index,
+            tool_call_index: None,
+            role: role.map(str::to_owned),
+            channel: None,
+            label: label.map(str::to_owned),
+            byte_start,
+            byte_end: byte_start + 1,
+            token_start,
+            token_end: token_start.map(|start| start + 1),
+        };
+        LensInputRendering {
+            renderer: "muse_glimmer_atem_annotated_v1".into(),
+            generation_mode: Some("reasoning_high".into()),
+            spans: vec![
+                span("bos_marker", None, None, None, 0, Some(0)),
+                span(
+                    "message_start_marker",
+                    Some(0),
+                    Some("user"),
+                    None,
+                    1,
+                    Some(1),
+                ),
+                span("role", Some(0), Some("user"), None, 2, None),
+                span("message_marker", Some(0), Some("user"), None, 3, Some(2)),
+                span("message_content", Some(0), Some("user"), None, 4, None),
+                span(
+                    "message_end_marker",
+                    Some(0),
+                    Some("user"),
+                    Some("<|eot|>"),
+                    5,
+                    Some(3),
+                ),
+                span(
+                    "generated_assistant_start_marker",
+                    None,
+                    Some("assistant"),
+                    None,
+                    6,
+                    Some(4),
+                ),
+                span(
+                    "generated_assistant_role",
+                    None,
+                    Some("assistant"),
+                    None,
+                    7,
+                    None,
+                ),
+            ],
+        }
+    }
+
     fn sweep_fixture(coefficients: &[f32], mutate: impl Fn(usize, &mut RunDocument)) -> PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -2640,8 +2693,10 @@ mod tests {
             spans: vec![LensRenderedSpan {
                 kind: "message_start_marker".into(),
                 message_index: Some(0),
+                tool_call_index: None,
                 role: Some("user".into()),
                 channel: None,
+                label: None,
                 byte_start: 0,
                 byte_end: 1,
                 token_start: Some(0),
@@ -2663,14 +2718,94 @@ mod tests {
             .push(LensRenderedSpan {
                 kind: "role".into(),
                 message_index: Some(0),
+                tool_call_index: None,
                 role: Some("user".into()),
                 channel: None,
+                label: None,
                 byte_start: 0,
                 byte_end: 2,
                 token_start: Some(1),
                 token_end: Some(2),
             });
         assert!(document.validate().is_err());
+
+        let mut muse = sweep_run_document(0.0);
+        muse.runtime_kind = "muse_glimmer".into();
+        muse.input_source = "messages".into();
+        muse.add_special_tokens = Some(false);
+        muse.prompt_token_ids = vec![1, 2, 3, 4, 5];
+        muse.rendering = Some(annotated_muse_rendering());
+        muse.validate().unwrap();
+
+        muse.rendering = Some(LensInputRendering {
+            renderer: "muse_glimmer_atem_v1".into(),
+            generation_mode: Some("reasoning_high".into()),
+            spans: Vec::new(),
+        });
+        muse.validate().unwrap();
+    }
+
+    #[test]
+    fn annotated_muse_run_spans_require_complete_consistent_records() {
+        let mut document = sweep_run_document(0.0);
+        document.runtime_kind = "muse_glimmer".into();
+        document.input_source = "messages".into();
+        document.add_special_tokens = Some(false);
+        document.prompt_token_ids = vec![1, 2, 3, 4, 5];
+        document.rendering = Some(annotated_muse_rendering());
+        document.validate().unwrap();
+
+        document.rendering.as_mut().unwrap().spans[5].message_index = Some(1);
+        assert!(document.validate().is_err());
+        document.rendering = Some(annotated_muse_rendering());
+        document.rendering.as_mut().unwrap().spans.truncate(1);
+        assert!(document.validate().is_err());
+    }
+
+    #[test]
+    fn annotated_muse_span_metadata_requires_exact_labels_and_call_identity() {
+        let mut span = LensRenderedSpan {
+            kind: "message_end_marker".into(),
+            message_index: Some(0),
+            tool_call_index: None,
+            role: Some("assistant".into()),
+            channel: Some("thinking".into()),
+            label: Some("<|eom|>".into()),
+            byte_start: 0,
+            byte_end: 7,
+            token_start: Some(0),
+            token_end: Some(1),
+        };
+        assert!(valid_lens_span_metadata(
+            "muse_glimmer_atem_annotated_v1",
+            &span
+        ));
+        span.label = Some("<|bad|>".into());
+        assert!(!valid_lens_span_metadata(
+            "muse_glimmer_atem_annotated_v1",
+            &span
+        ));
+        span.label = None;
+        span.kind = "tool_call_content".into();
+        span.channel = Some("tool_call".into());
+        assert!(!valid_lens_span_metadata(
+            "muse_glimmer_atem_annotated_v1",
+            &span
+        ));
+        span.tool_call_index = Some(0);
+        assert!(valid_lens_span_metadata(
+            "muse_glimmer_atem_annotated_v1",
+            &span
+        ));
+        span.role = Some("tool".into());
+        assert!(!valid_lens_span_metadata(
+            "muse_glimmer_atem_annotated_v1",
+            &span
+        ));
+        span.kind = "tool_result_content".into();
+        span.tool_call_index = None;
+        span.channel = Some("tool_result".into());
+        assert!(!valid_lens_span_metadata("qwen3.8_messages_v1", &span));
     }
 
     #[test]

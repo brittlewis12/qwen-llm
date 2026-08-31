@@ -113,6 +113,146 @@ impl Default for MuseGlimmerPromptOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MuseGlimmerPromptSpanKind {
+    BosMarker,
+    MessageStartMarker,
+    Role,
+    Recipient,
+    ToolName,
+    MessageMarker,
+    MessageContent,
+    ReasoningInstructionContent,
+    SystemMetadataContent,
+    ToolDefinitionContent,
+    AssistantReasoningContent,
+    ToolCallContent,
+    ToolResultContent,
+    MessageEndMarker,
+    GeneratedAssistantStartMarker,
+    GeneratedAssistantRole,
+}
+
+impl MuseGlimmerPromptSpanKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BosMarker => "bos_marker",
+            Self::MessageStartMarker => "message_start_marker",
+            Self::Role => "role",
+            Self::Recipient => "recipient",
+            Self::ToolName => "tool_name",
+            Self::MessageMarker => "message_marker",
+            Self::MessageContent => "message_content",
+            Self::ReasoningInstructionContent => "reasoning_instruction_content",
+            Self::SystemMetadataContent => "system_metadata_content",
+            Self::ToolDefinitionContent => "tool_definition_content",
+            Self::AssistantReasoningContent => "assistant_reasoning_content",
+            Self::ToolCallContent => "tool_call_content",
+            Self::ToolResultContent => "tool_result_content",
+            Self::MessageEndMarker => "message_end_marker",
+            Self::GeneratedAssistantStartMarker => "generated_assistant_start_marker",
+            Self::GeneratedAssistantRole => "generated_assistant_role",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MuseGlimmerPromptSpanRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl MuseGlimmerPromptSpanRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MuseGlimmerPromptChannel {
+    Thinking,
+    ToolCall,
+    ToolResult,
+}
+
+impl MuseGlimmerPromptChannel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Thinking => "thinking",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MuseGlimmerPromptSpan {
+    pub kind: MuseGlimmerPromptSpanKind,
+    pub message_index: Option<usize>,
+    pub tool_call_index: Option<usize>,
+    pub role: Option<MuseGlimmerPromptSpanRole>,
+    pub channel: Option<MuseGlimmerPromptChannel>,
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotatedMuseGlimmerPrompt {
+    pub text: String,
+    pub spans: Vec<MuseGlimmerPromptSpan>,
+}
+
+#[derive(Default)]
+struct AnnotatedMuseGlimmerPromptBuilder {
+    text: String,
+    spans: Vec<MuseGlimmerPromptSpan>,
+}
+
+impl AnnotatedMuseGlimmerPromptBuilder {
+    fn push(
+        &mut self,
+        text: &str,
+        kind: MuseGlimmerPromptSpanKind,
+        message_index: Option<usize>,
+        tool_call_index: Option<usize>,
+        role: Option<MuseGlimmerPromptSpanRole>,
+        channel: Option<MuseGlimmerPromptChannel>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let byte_start = self.text.len();
+        self.text.push_str(text);
+        self.spans.push(MuseGlimmerPromptSpan {
+            kind,
+            message_index,
+            tool_call_index,
+            role,
+            channel,
+            byte_start,
+            byte_end: self.text.len(),
+        });
+    }
+
+    fn raw(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
+    fn finish(self) -> AnnotatedMuseGlimmerPrompt {
+        AnnotatedMuseGlimmerPrompt {
+            text: self.text,
+            spans: self.spans,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MuseGlimmerPromptError {
     #[error("Muse Glimmer prompt requires at least one message")]
@@ -150,32 +290,67 @@ pub fn render_muse_glimmer_atem_prompt(
     messages: &[MuseGlimmerMessage],
     options: &MuseGlimmerPromptOptions,
 ) -> Result<String, MuseGlimmerPromptError> {
+    Ok(render_muse_glimmer_atem_prompt_annotated(messages, options)?.text)
+}
+
+pub fn render_muse_glimmer_atem_prompt_annotated(
+    messages: &[MuseGlimmerMessage],
+    options: &MuseGlimmerPromptOptions,
+) -> Result<AnnotatedMuseGlimmerPrompt, MuseGlimmerPromptError> {
     if messages.is_empty() {
         return Err(MuseGlimmerPromptError::EmptyMessages);
     }
     validate_options(options)?;
     validate_messages(messages)?;
 
-    let mut output = String::from(MUSE_GLIMMER_BOS);
+    let mut output = AnnotatedMuseGlimmerPromptBuilder::default();
+    output.push(
+        MUSE_GLIMMER_BOS,
+        MuseGlimmerPromptSpanKind::BosMarker,
+        None,
+        None,
+        None,
+        None,
+    );
     if !messages
         .iter()
         .any(|message| message.role == MuseGlimmerMessageRole::System)
     {
-        output.push_str("<|start|>system<|message|>You are a helpful AI assistant.");
-        output.push_str("\nKnowledge cutoff: ");
-        output.push_str(&options.knowledge_cutoff);
-        output.push('.');
-        output.push_str("\nCurrent date: ");
-        output.push_str(&options.current_date);
-        output.push_str(".\n\n");
-        render_reasoning(&mut output, options.reasoning_strength);
+        push_muse_message_header(
+            &mut output,
+            None,
+            None,
+            MuseGlimmerPromptSpanRole::System,
+            None,
+            None,
+        );
+        let content = format!(
+            "You are a helpful AI assistant.\nKnowledge cutoff: {}.\nCurrent date: {}.\n\n",
+            options.knowledge_cutoff, options.current_date
+        );
+        output.push(
+            &content,
+            MuseGlimmerPromptSpanKind::MessageContent,
+            None,
+            None,
+            Some(MuseGlimmerPromptSpanRole::System),
+            None,
+        );
+        push_muse_reasoning_instruction(&mut output, None, options.reasoning_strength);
         if !options.tools.is_empty() {
-            output.push_str("\n\n");
-            render_tool_definitions(&mut output, options)?;
+            output.raw("\n\n");
+            push_muse_tool_definitions(&mut output, None, options)?;
         }
-        output.push_str("\n\n");
-        render_system_meta(&mut output, options);
-        output.push_str(MUSE_GLIMMER_EOT);
+        output.raw("\n\n");
+        push_muse_system_meta(&mut output, None, options);
+        push_muse_message_end(
+            &mut output,
+            MUSE_GLIMMER_EOT,
+            None,
+            None,
+            MuseGlimmerPromptSpanRole::System,
+            None,
+        );
     }
 
     for (index, message) in messages.iter().enumerate() {
@@ -189,41 +364,116 @@ pub fn render_muse_glimmer_atem_prompt(
         };
         match &message.role {
             MuseGlimmerMessageRole::System => {
-                output.push_str("<|start|>system<|message|>");
+                push_muse_message_header(
+                    &mut output,
+                    Some(index),
+                    None,
+                    MuseGlimmerPromptSpanRole::System,
+                    None,
+                    None,
+                );
                 let content = match options.profile {
                     MuseGlimmerChatTemplateProfile::MetaFixed => message.content.clone(),
                     MuseGlimmerChatTemplateProfile::UnslothLaunch => {
                         normalize_reasoning_effort(&message.content)
                     }
                 };
-                output.push_str(&content);
+                output.push(
+                    &content,
+                    MuseGlimmerPromptSpanKind::MessageContent,
+                    Some(index),
+                    None,
+                    Some(MuseGlimmerPromptSpanRole::System),
+                    None,
+                );
                 if options.profile == MuseGlimmerChatTemplateProfile::MetaFixed
                     || !content.to_ascii_lowercase().contains("reasoning strength")
                 {
-                    output.push_str("\n\n");
-                    render_reasoning(&mut output, options.reasoning_strength);
+                    output.raw("\n\n");
+                    push_muse_reasoning_instruction(
+                        &mut output,
+                        Some(index),
+                        options.reasoning_strength,
+                    );
                 }
                 if !options.tools.is_empty() {
-                    output.push_str("\n\n");
-                    render_tool_definitions(&mut output, options)?;
+                    output.raw("\n\n");
+                    push_muse_tool_definitions(&mut output, Some(index), options)?;
                 }
-                output.push_str("\n\n");
-                render_system_meta(&mut output, options);
-                output.push_str(MUSE_GLIMMER_EOT);
+                output.raw("\n\n");
+                push_muse_system_meta(&mut output, Some(index), options);
+                push_muse_message_end(
+                    &mut output,
+                    MUSE_GLIMMER_EOT,
+                    Some(index),
+                    None,
+                    MuseGlimmerPromptSpanRole::System,
+                    None,
+                );
             }
             MuseGlimmerMessageRole::User => {
-                output.push_str("<|start|>user<|message|>");
-                output.push_str(&message.content);
-                output.push_str(MUSE_GLIMMER_EOT);
+                push_muse_message_header(
+                    &mut output,
+                    Some(index),
+                    None,
+                    MuseGlimmerPromptSpanRole::User,
+                    None,
+                    None,
+                );
+                output.push(
+                    &message.content,
+                    MuseGlimmerPromptSpanKind::MessageContent,
+                    Some(index),
+                    None,
+                    Some(MuseGlimmerPromptSpanRole::User),
+                    None,
+                );
+                push_muse_message_end(
+                    &mut output,
+                    MUSE_GLIMMER_EOT,
+                    Some(index),
+                    None,
+                    MuseGlimmerPromptSpanRole::User,
+                    None,
+                );
             }
             MuseGlimmerMessageRole::Tool { name } => {
-                output.push_str("<|start|>tool ");
-                output.push_str(name);
-                output.push_str("<|message|><tool_output name=\"");
-                output.push_str(name);
-                output.push_str("\">\n");
-                output.push_str(&message.content);
-                output.push_str("\n</tool_output><|eot|>");
+                let channel = Some(MuseGlimmerPromptChannel::ToolResult);
+                push_muse_message_header(
+                    &mut output,
+                    Some(index),
+                    None,
+                    MuseGlimmerPromptSpanRole::Tool,
+                    Some(name),
+                    channel,
+                );
+                output.raw("<tool_output name=\"");
+                output.push(
+                    name,
+                    MuseGlimmerPromptSpanKind::ToolName,
+                    Some(index),
+                    None,
+                    Some(MuseGlimmerPromptSpanRole::Tool),
+                    channel,
+                );
+                output.raw("\">\n");
+                output.push(
+                    &message.content,
+                    MuseGlimmerPromptSpanKind::ToolResultContent,
+                    Some(index),
+                    None,
+                    Some(MuseGlimmerPromptSpanRole::Tool),
+                    channel,
+                );
+                output.raw("\n</tool_output>");
+                push_muse_message_end(
+                    &mut output,
+                    MUSE_GLIMMER_EOT,
+                    Some(index),
+                    None,
+                    MuseGlimmerPromptSpanRole::Tool,
+                    channel,
+                );
             }
             MuseGlimmerMessageRole::Assistant => {
                 if let Some(reasoning) = message
@@ -231,42 +481,249 @@ pub fn render_muse_glimmer_atem_prompt(
                     .as_deref()
                     .filter(|reasoning| !reasoning.is_empty())
                 {
-                    output.push_str("<|start|>assistant to=self<|message|>");
-                    output.push_str(reasoning);
-                    output.push_str(MUSE_GLIMMER_EOM);
+                    let channel = Some(MuseGlimmerPromptChannel::Thinking);
+                    push_muse_message_header(
+                        &mut output,
+                        Some(index),
+                        None,
+                        MuseGlimmerPromptSpanRole::Assistant,
+                        Some("self"),
+                        channel,
+                    );
+                    output.push(
+                        reasoning,
+                        MuseGlimmerPromptSpanKind::AssistantReasoningContent,
+                        Some(index),
+                        None,
+                        Some(MuseGlimmerPromptSpanRole::Assistant),
+                        channel,
+                    );
+                    push_muse_message_end(
+                        &mut output,
+                        MUSE_GLIMMER_EOM,
+                        Some(index),
+                        None,
+                        MuseGlimmerPromptSpanRole::Assistant,
+                        channel,
+                    );
                 }
                 if message.tool_calls.is_empty() {
                     let recipient = message.recipient.as_deref().unwrap_or("user");
                     let end_turn = message.end_turn.unwrap_or(recipient == "user");
-                    output.push_str("<|start|>assistant to=");
-                    output.push_str(recipient);
-                    output.push_str(MUSE_GLIMMER_MESSAGE);
-                    output.push_str(&message.content);
-                    output.push_str(if end_turn {
-                        MUSE_GLIMMER_EOT
+                    let channel = if recipient == "self" {
+                        Some(MuseGlimmerPromptChannel::Thinking)
+                    } else if recipient == "user" {
+                        None
                     } else {
-                        MUSE_GLIMMER_EOM
-                    });
-                } else {
-                    for (call_index, call) in message.tool_calls.iter().enumerate() {
-                        output.push_str("<|start|>assistant to=");
-                        output.push_str(&call.name);
-                        output.push_str(MUSE_GLIMMER_MESSAGE);
-                        render_atem_call(&mut output, call)?;
-                        output.push_str(if call_index + 1 == message.tool_calls.len() {
-                            end_token
+                        Some(MuseGlimmerPromptChannel::ToolCall)
+                    };
+                    push_muse_message_header(
+                        &mut output,
+                        Some(index),
+                        None,
+                        MuseGlimmerPromptSpanRole::Assistant,
+                        Some(recipient),
+                        channel,
+                    );
+                    output.push(
+                        &message.content,
+                        MuseGlimmerPromptSpanKind::MessageContent,
+                        Some(index),
+                        None,
+                        Some(MuseGlimmerPromptSpanRole::Assistant),
+                        channel,
+                    );
+                    push_muse_message_end(
+                        &mut output,
+                        if end_turn {
+                            MUSE_GLIMMER_EOT
                         } else {
                             MUSE_GLIMMER_EOM
-                        });
+                        },
+                        Some(index),
+                        None,
+                        MuseGlimmerPromptSpanRole::Assistant,
+                        channel,
+                    );
+                } else {
+                    for (call_index, call) in message.tool_calls.iter().enumerate() {
+                        let channel = Some(MuseGlimmerPromptChannel::ToolCall);
+                        push_muse_message_header(
+                            &mut output,
+                            Some(index),
+                            Some(call_index),
+                            MuseGlimmerPromptSpanRole::Assistant,
+                            Some(&call.name),
+                            channel,
+                        );
+                        let mut rendered_call = String::new();
+                        render_atem_call(&mut rendered_call, call)?;
+                        output.push(
+                            &rendered_call,
+                            MuseGlimmerPromptSpanKind::ToolCallContent,
+                            Some(index),
+                            Some(call_index),
+                            Some(MuseGlimmerPromptSpanRole::Assistant),
+                            channel,
+                        );
+                        push_muse_message_end(
+                            &mut output,
+                            if call_index + 1 == message.tool_calls.len() {
+                                end_token
+                            } else {
+                                MUSE_GLIMMER_EOM
+                            },
+                            Some(index),
+                            Some(call_index),
+                            MuseGlimmerPromptSpanRole::Assistant,
+                            channel,
+                        );
                     }
                 }
             }
         }
     }
     if options.add_generation_prompt {
-        output.push_str("<|start|>assistant");
+        output.push(
+            MUSE_GLIMMER_START,
+            MuseGlimmerPromptSpanKind::GeneratedAssistantStartMarker,
+            None,
+            None,
+            Some(MuseGlimmerPromptSpanRole::Assistant),
+            None,
+        );
+        output.push(
+            "assistant",
+            MuseGlimmerPromptSpanKind::GeneratedAssistantRole,
+            None,
+            None,
+            Some(MuseGlimmerPromptSpanRole::Assistant),
+            None,
+        );
     }
-    Ok(output)
+    Ok(output.finish())
+}
+
+fn push_muse_message_header(
+    output: &mut AnnotatedMuseGlimmerPromptBuilder,
+    message_index: Option<usize>,
+    tool_call_index: Option<usize>,
+    role: MuseGlimmerPromptSpanRole,
+    recipient: Option<&str>,
+    channel: Option<MuseGlimmerPromptChannel>,
+) {
+    output.push(
+        MUSE_GLIMMER_START,
+        MuseGlimmerPromptSpanKind::MessageStartMarker,
+        message_index,
+        tool_call_index,
+        Some(role),
+        channel,
+    );
+    output.push(
+        role.as_str(),
+        MuseGlimmerPromptSpanKind::Role,
+        message_index,
+        tool_call_index,
+        Some(role),
+        channel,
+    );
+    if let Some(recipient) = recipient {
+        output.raw(match role {
+            MuseGlimmerPromptSpanRole::Assistant => " to=",
+            MuseGlimmerPromptSpanRole::Tool => " ",
+            MuseGlimmerPromptSpanRole::System | MuseGlimmerPromptSpanRole::User => "",
+        });
+        output.push(
+            recipient,
+            if role == MuseGlimmerPromptSpanRole::Tool {
+                MuseGlimmerPromptSpanKind::ToolName
+            } else {
+                MuseGlimmerPromptSpanKind::Recipient
+            },
+            message_index,
+            tool_call_index,
+            Some(role),
+            channel,
+        );
+    }
+    output.push(
+        MUSE_GLIMMER_MESSAGE,
+        MuseGlimmerPromptSpanKind::MessageMarker,
+        message_index,
+        tool_call_index,
+        Some(role),
+        channel,
+    );
+}
+
+fn push_muse_message_end(
+    output: &mut AnnotatedMuseGlimmerPromptBuilder,
+    marker: &str,
+    message_index: Option<usize>,
+    tool_call_index: Option<usize>,
+    role: MuseGlimmerPromptSpanRole,
+    channel: Option<MuseGlimmerPromptChannel>,
+) {
+    output.push(
+        marker,
+        MuseGlimmerPromptSpanKind::MessageEndMarker,
+        message_index,
+        tool_call_index,
+        Some(role),
+        channel,
+    );
+}
+
+fn push_muse_reasoning_instruction(
+    output: &mut AnnotatedMuseGlimmerPromptBuilder,
+    message_index: Option<usize>,
+    strength: MuseGlimmerReasoningStrength,
+) {
+    let text = format!("Reasoning strength: {}.", strength.as_str());
+    output.push(
+        &text,
+        MuseGlimmerPromptSpanKind::ReasoningInstructionContent,
+        message_index,
+        None,
+        Some(MuseGlimmerPromptSpanRole::System),
+        Some(MuseGlimmerPromptChannel::Thinking),
+    );
+}
+
+fn push_muse_tool_definitions(
+    output: &mut AnnotatedMuseGlimmerPromptBuilder,
+    message_index: Option<usize>,
+    options: &MuseGlimmerPromptOptions,
+) -> Result<(), MuseGlimmerPromptError> {
+    let mut text = String::new();
+    render_tool_definitions(&mut text, options)?;
+    output.push(
+        &text,
+        MuseGlimmerPromptSpanKind::ToolDefinitionContent,
+        message_index,
+        None,
+        Some(MuseGlimmerPromptSpanRole::System),
+        None,
+    );
+    Ok(())
+}
+
+fn push_muse_system_meta(
+    output: &mut AnnotatedMuseGlimmerPromptBuilder,
+    message_index: Option<usize>,
+    options: &MuseGlimmerPromptOptions,
+) {
+    let mut text = String::new();
+    render_system_meta(&mut text, options);
+    output.push(
+        &text,
+        MuseGlimmerPromptSpanKind::SystemMetadataContent,
+        message_index,
+        None,
+        Some(MuseGlimmerPromptSpanRole::System),
+        None,
+    );
 }
 
 fn validate_options(options: &MuseGlimmerPromptOptions) -> Result<(), MuseGlimmerPromptError> {
@@ -335,12 +792,6 @@ fn validate_messages(messages: &[MuseGlimmerMessage]) -> Result<(), MuseGlimmerP
         }
     }
     Ok(())
-}
-
-fn render_reasoning(output: &mut String, strength: MuseGlimmerReasoningStrength) {
-    output.push_str("Reasoning strength: ");
-    output.push_str(strength.as_str());
-    output.push('.');
 }
 
 fn render_tool_definitions(
@@ -452,14 +903,27 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn assert_valid_spans(prompt: &AnnotatedMuseGlimmerPrompt) {
+        let mut previous_end = 0;
+        for span in &prompt.spans {
+            assert!(span.byte_start < span.byte_end);
+            assert!(span.byte_start >= previous_end);
+            assert!(prompt.text.is_char_boundary(span.byte_start));
+            assert!(prompt.text.is_char_boundary(span.byte_end));
+            previous_end = span.byte_end;
+        }
+    }
+
     #[test]
     fn renders_release_default_single_turn_bytes() {
-        let prompt = render_muse_glimmer_single_turn(
-            "Why is the sky blue?",
-            None,
+        let messages = [MuseGlimmerMessage::user("Why is the sky blue?")];
+        let annotated = render_muse_glimmer_atem_prompt_annotated(
+            &messages,
             &MuseGlimmerPromptOptions::default(),
         )
         .unwrap();
+        assert_valid_spans(&annotated);
+        let prompt = annotated.text;
         assert_eq!(
             prompt,
             concat!(
@@ -472,6 +936,34 @@ mod tests {
                 "<|start|>user<|message|>Why is the sky blue?<|eot|>",
                 "<|start|>assistant",
             )
+        );
+        assert_eq!(
+            render_muse_glimmer_single_turn(
+                "Why is the sky blue?",
+                None,
+                &MuseGlimmerPromptOptions::default(),
+            )
+            .unwrap(),
+            prompt
+        );
+        let bos = annotated
+            .spans
+            .iter()
+            .find(|span| span.kind == MuseGlimmerPromptSpanKind::BosMarker)
+            .unwrap();
+        assert_eq!(&prompt[bos.byte_start..bos.byte_end], MUSE_GLIMMER_BOS);
+        assert!(bos.message_index.is_none() && bos.role.is_none());
+        let synthetic_system = annotated.spans.iter().find(|span| {
+            span.kind == MuseGlimmerPromptSpanKind::MessageStartMarker
+                && span.role == Some(MuseGlimmerPromptSpanRole::System)
+        });
+        assert!(synthetic_system.unwrap().message_index.is_none());
+        let user_content = annotated.spans.iter().find(|span| {
+            span.kind == MuseGlimmerPromptSpanKind::MessageContent && span.message_index == Some(0)
+        });
+        assert_eq!(
+            user_content.map(|span| &prompt[span.byte_start..span.byte_end]),
+            Some("Why is the sky blue?")
         );
     }
 
@@ -511,12 +1003,119 @@ mod tests {
             MuseGlimmerMessage::tool("weather.lookup", "Sunny"),
             MuseGlimmerMessage::user("Thanks"),
         ];
-        let prompt = render_muse_glimmer_atem_prompt(&messages, &options).unwrap();
+        let annotated = render_muse_glimmer_atem_prompt_annotated(&messages, &options).unwrap();
+        assert_valid_spans(&annotated);
+        let prompt = &annotated.text;
         assert!(prompt.contains("# Valid recipients: \"self\", \"weather.*\", \"user\"."));
         assert!(prompt.contains("<|start|>assistant to=self<|message|>I should check.<|eom|>"));
         assert!(prompt.contains("<atem:invoke name=\"weather.lookup\">"));
         assert!(prompt.contains("<atem:parameter name=\"city\">New York</atem:parameter>"));
         assert!(prompt.contains("<|start|>tool weather.lookup<|message|><tool_output name=\"weather.lookup\">\nSunny\n</tool_output><|eot|>"));
+        let reasoning = annotated
+            .spans
+            .iter()
+            .find(|span| span.kind == MuseGlimmerPromptSpanKind::AssistantReasoningContent)
+            .unwrap();
+        assert_eq!(reasoning.message_index, Some(1));
+        assert_eq!(reasoning.channel, Some(MuseGlimmerPromptChannel::Thinking));
+        assert_eq!(
+            &prompt[reasoning.byte_start..reasoning.byte_end],
+            "I should check."
+        );
+        let call = annotated
+            .spans
+            .iter()
+            .find(|span| span.kind == MuseGlimmerPromptSpanKind::ToolCallContent)
+            .unwrap();
+        assert_eq!(
+            (call.message_index, call.tool_call_index),
+            (Some(1), Some(0))
+        );
+        assert_eq!(call.channel, Some(MuseGlimmerPromptChannel::ToolCall));
+        let result = annotated
+            .spans
+            .iter()
+            .find(|span| span.kind == MuseGlimmerPromptSpanKind::ToolResultContent)
+            .unwrap();
+        assert_eq!(result.message_index, Some(2));
+        assert_eq!(result.channel, Some(MuseGlimmerPromptChannel::ToolResult));
+        assert_eq!(&prompt[result.byte_start..result.byte_end], "Sunny");
+        assert_eq!(
+            render_muse_glimmer_atem_prompt(&messages, &options).unwrap(),
+            *prompt
+        );
+    }
+
+    #[test]
+    fn annotated_recipients_and_end_markers_preserve_multi_record_atem_boundaries() {
+        let mut assistant = MuseGlimmerMessage::assistant("");
+        assistant.reasoning_content = Some("reason".into());
+        assistant.tool_calls = vec![
+            MuseGlimmerToolCall {
+                name: "first".into(),
+                arguments: json!({"x": 1}),
+            },
+            MuseGlimmerToolCall {
+                name: "second".into(),
+                arguments: json!({"y": [1, 2]}),
+            },
+        ];
+        let messages = [MuseGlimmerMessage::user("go"), assistant];
+        let mut options = MuseGlimmerPromptOptions::default();
+        options.add_generation_prompt = false;
+        let annotated = render_muse_glimmer_atem_prompt_annotated(&messages, &options).unwrap();
+        assert_valid_spans(&annotated);
+        assert_eq!(
+            annotated.text,
+            concat!(
+                "<|begin_of_text|><|start|>system<|message|>",
+                "You are a helpful AI assistant.\n",
+                "Knowledge cutoff: 2026-01-04.\n",
+                "Current date: 2026-08-29.\n\n",
+                "Reasoning strength: high.\n\n",
+                "# Valid recipients: \"self\", \"user\".<|eot|>",
+                "<|start|>user<|message|>go<|eot|>",
+                "<|start|>assistant to=self<|message|>reason<|eom|>",
+                "<|start|>assistant to=first<|message|>",
+                "<atem:function_calls>\n",
+                "<atem:invoke name=\"first\">\n",
+                "<atem:parameter name=\"x\">1</atem:parameter>\n",
+                "</atem:invoke>\n",
+                "</atem:function_calls><|eom|>",
+                "<|start|>assistant to=second<|message|>",
+                "<atem:function_calls>\n",
+                "<atem:invoke name=\"second\">\n",
+                "<atem:parameter name=\"y\">[1,2]</atem:parameter>\n",
+                "</atem:invoke>\n",
+                "</atem:function_calls><|eot|>",
+            )
+        );
+        let recipients = annotated
+            .spans
+            .iter()
+            .filter(|span| span.kind == MuseGlimmerPromptSpanKind::Recipient)
+            .map(|span| &annotated.text[span.byte_start..span.byte_end])
+            .collect::<Vec<_>>();
+        assert_eq!(recipients, ["self", "first", "second"]);
+        let assistant_ends = annotated
+            .spans
+            .iter()
+            .filter(|span| {
+                span.kind == MuseGlimmerPromptSpanKind::MessageEndMarker
+                    && span.message_index == Some(1)
+            })
+            .map(|span| &annotated.text[span.byte_start..span.byte_end])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            assistant_ends,
+            [MUSE_GLIMMER_EOM, MUSE_GLIMMER_EOM, MUSE_GLIMMER_EOT]
+        );
+        assert!(
+            annotated
+                .spans
+                .iter()
+                .all(|span| span.kind != MuseGlimmerPromptSpanKind::GeneratedAssistantStartMarker)
+        );
     }
 
     #[test]

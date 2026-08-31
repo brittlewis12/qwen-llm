@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
+use super::lens_input::{
+    LensInputRendering, LensRenderedSpan, is_known_lens_span, is_structural_lens_span,
+    valid_lens_rendering_topology, valid_lens_span_metadata,
+};
 use super::read_regular_file_bounded;
 
 pub(crate) const TRACE_MAX_BYTES: usize = 256 * 1024 * 1024;
@@ -152,29 +156,8 @@ pub(crate) struct ScoreSemantics {
     pub(crate) softmax_applied: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct Rendering {
-    renderer: String,
-    #[serde(default)]
-    generation_mode: Option<String>,
-    #[serde(default)]
-    spans: Vec<RenderedSpan>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RenderedSpan {
-    kind: String,
-    #[serde(default)]
-    message_index: Option<usize>,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    channel: Option<String>,
-    byte_start: usize,
-    byte_end: usize,
-    token_start: Option<usize>,
-    token_end: Option<usize>,
-}
+type Rendering = LensInputRendering;
+type RenderedSpan = LensRenderedSpan;
 
 #[derive(Debug, Deserialize)]
 struct InputToken {
@@ -346,6 +329,7 @@ struct AggregateView {
 struct PositionsView {
     positions: Vec<InputPositionView>,
     anchors: Vec<SemanticAnchorView>,
+    rendering_spans: Vec<RenderedSpan>,
 }
 
 #[derive(Debug, Serialize)]
@@ -362,6 +346,9 @@ struct SemanticAnchorView {
     selector: String,
     position: usize,
     message_index: Option<usize>,
+    tool_call_index: Option<usize>,
+    kind: String,
+    label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -584,9 +571,26 @@ fn validate_trace(document: &TraceDocument) -> Result<()> {
         );
     }
     if let Some(rendering) = &document.rendering {
+        ensure!(
+            !rendering.renderer.is_empty(),
+            "rendering identity is empty"
+        );
         let mut previous_byte_end = 0;
         let mut previous_token_end = 0;
         for span in &rendering.spans {
+            ensure!(
+                is_known_lens_span(&span.kind)
+                    && valid_lens_span_metadata(&rendering.renderer, span)
+                    && span.role.as_ref().is_none_or(|role| matches!(
+                        role.as_str(),
+                        "system" | "user" | "assistant" | "tool"
+                    ))
+                    && span.channel.as_ref().is_none_or(|channel| matches!(
+                        channel.as_str(),
+                        "thinking" | "tool_call" | "tool_result"
+                    )),
+                "rendering span has invalid semantic metadata"
+            );
             ensure!(
                 span.byte_start < span.byte_end,
                 "rendering span has an empty or reversed byte range"
@@ -619,12 +623,18 @@ fn validate_trace(document: &TraceDocument) -> Result<()> {
             );
             if span.message_index.is_none() {
                 ensure!(
-                    span.kind.starts_with("generated_") || span.role.is_some(),
+                    span.kind == "bos_marker"
+                        || span.kind.starts_with("generated_")
+                        || span.role.is_some(),
                     "unattributed rendering span has no role"
                 );
             }
             previous_byte_end = span.byte_end;
         }
+        ensure!(
+            valid_lens_rendering_topology(rendering),
+            "rendering spans have an invalid record topology"
+        );
     }
     let expected_cells = document
         .selected_layers
@@ -1127,6 +1137,12 @@ fn positions_view(document: &TraceDocument) -> Result<PositionsView> {
             if let Some(channel) = &span.channel {
                 label.push_str(&format!("[channel={channel}]"));
             }
+            if let Some(tool_call_index) = span.tool_call_index {
+                label.push_str(&format!("[tool_call={tool_call_index}]"));
+            }
+            if let Some(value) = &span.label {
+                label.push_str(&format!("[label={value:?}]"));
+            }
             for labels in &mut structural[start..end] {
                 labels.push(label.clone());
             }
@@ -1147,7 +1163,15 @@ fn positions_view(document: &TraceDocument) -> Result<PositionsView> {
             anchor_labels: std::mem::take(&mut anchor_labels[token.position]),
         })
         .collect();
-    Ok(PositionsView { positions, anchors })
+    Ok(PositionsView {
+        positions,
+        anchors,
+        rendering_spans: document
+            .rendering
+            .as_ref()
+            .map(|rendering| rendering.spans.clone())
+            .unwrap_or_default(),
+    })
 }
 
 fn semantic_anchors(document: &TraceDocument) -> Result<Vec<SemanticAnchorView>> {
@@ -1157,48 +1181,80 @@ fn semantic_anchors(document: &TraceDocument) -> Result<Vec<SemanticAnchorView>>
             selector: "prefill:last".into(),
             position,
             message_index: None,
+            tool_call_index: None,
+            kind: "prefill_last".into(),
+            label: None,
         });
     }
     let Some(rendering) = &document.rendering else {
         return Ok(anchors);
     };
+    let mut message_edges =
+        BTreeMap::<usize, (Option<&RenderedSpan>, Option<&RenderedSpan>)>::new();
     for span in &rendering.spans {
-        let Some(position) = span.token_start else {
+        let Some(message_index) = span.message_index else {
             continue;
         };
-        let selector = match (span.kind.as_str(), span.message_index) {
-            ("message_start_marker", Some(index)) => Some(format!("message:{index}:start")),
-            ("message_end_marker", Some(index)) => Some(format!("message:{index}:end")),
-            ("generated_assistant_start_marker", None) => Some("generated:assistant:start".into()),
-            _ => None,
-        };
-        if let Some(selector) = selector {
+        let edges = message_edges.entry(message_index).or_default();
+        match span.kind.as_str() {
+            "message_start_marker" if edges.0.is_none() => edges.0 = Some(span),
+            "message_end_marker" => edges.1 = Some(span),
+            _ => {}
+        }
+    }
+    for (message_index, (start, end)) in message_edges {
+        for (edge, span) in [("start", start), ("end", end)] {
+            let Some(span) = span else { continue };
+            let Some(position) = span.token_start else {
+                continue;
+            };
             anchors.push(SemanticAnchorView {
-                selector,
+                selector: format!("message:{message_index}:{edge}"),
                 position,
-                message_index: span.message_index,
+                message_index: Some(message_index),
+                tool_call_index: span.tool_call_index,
+                kind: span.kind.clone(),
+                label: span.label.clone(),
             });
         }
     }
-    let mut role_edges = BTreeMap::<(String, &'static str), (usize, usize)>::new();
-    for span in &rendering.spans {
-        let edge = match span.kind.as_str() {
-            "message_start_marker" => "start",
-            "message_end_marker" => "end",
-            _ => continue,
-        };
-        if let (Some(role), Some(message_index), Some(position)) =
-            (&span.role, span.message_index, span.token_start)
-        {
-            role_edges.insert((role.clone(), edge), (position, message_index));
-        }
-    }
-    for ((role, edge), (position, message_index)) in role_edges {
+    if let Some(span) = rendering
+        .spans
+        .iter()
+        .find(|span| span.kind == "generated_assistant_start_marker")
+        && let Some(position) = span.token_start
+    {
         anchors.push(SemanticAnchorView {
-            selector: format!("role:{role}:{edge}"),
+            selector: "generated:assistant:start".into(),
             position,
-            message_index: Some(message_index),
+            message_index: None,
+            tool_call_index: span.tool_call_index,
+            kind: span.kind.clone(),
+            label: span.label.clone(),
         });
+    }
+    let roles = rendering
+        .spans
+        .iter()
+        .filter_map(|span| span.role.clone())
+        .collect::<BTreeSet<_>>();
+    for role in roles {
+        for edge in ["start", "end"] {
+            let selector = format!("role:{role}:{edge}");
+            if let Some(span) = resolved_structural_span(document, &selector)? {
+                let Some(position) = span.token_start else {
+                    continue;
+                };
+                anchors.push(SemanticAnchorView {
+                    selector,
+                    position,
+                    message_index: span.message_index,
+                    tool_call_index: span.tool_call_index,
+                    kind: format!("role_{edge}"),
+                    label: Some(role.clone()),
+                });
+            }
+        }
     }
     let mut channels = BTreeSet::new();
     for span in &rendering.spans {
@@ -1210,12 +1266,15 @@ fn semantic_anchors(document: &TraceDocument) -> Result<Vec<SemanticAnchorView>>
         for edge in ["start", "end"] {
             let selector = format!("channel:{channel}:{edge}");
             if let Ok(position) = resolve_position(document, &selector) {
-                let message_index = resolved_structural_span(document, &selector)?
-                    .and_then(|span| span.message_index);
+                let span = resolved_structural_span(document, &selector)?;
+                let message_index = span.and_then(|span| span.message_index);
                 anchors.push(SemanticAnchorView {
                     selector,
                     position,
                     message_index,
+                    tool_call_index: span.and_then(|span| span.tool_call_index),
+                    kind: format!("channel_{edge}"),
+                    label: Some(channel.clone()),
                 });
             }
         }
@@ -1249,6 +1308,22 @@ fn resolve_position(document: &TraceDocument, selector: &str) -> Result<usize> {
     let span = resolved_structural_span(document, selector)?.with_context(|| {
         format!("semantic selector {selector:?} matched no authored structural marker")
     })?;
+    let (_, _, edge) = parse_semantic_selector(selector)?;
+    if edge == "end"
+        && !matches!(
+            span.kind.as_str(),
+            "message_end_marker" | "thinking_channel_end_marker"
+        )
+    {
+        return span
+            .token_end
+            .and_then(|end| end.checked_sub(1))
+            .with_context(|| {
+                format!(
+                    "semantic selector {selector:?} matched content without an exact token range"
+                )
+            });
+    }
     span.token_start.with_context(|| {
         format!("semantic selector {selector:?} matched a marker without an exact token range")
     })
@@ -1269,15 +1344,15 @@ fn resolved_structural_span<'a>(
             let index: usize = value
                 .parse()
                 .with_context(|| format!("message index {value:?} does not fit usize"))?;
-            rendering.spans.iter().find(|span| {
-                span.message_index == Some(index)
-                    && span.kind
-                        == if edge == "start" {
-                            "message_start_marker"
-                        } else {
-                            "message_end_marker"
-                        }
-            })
+            if edge == "start" {
+                rendering.spans.iter().find(|span| {
+                    span.message_index == Some(index) && span.kind == "message_start_marker"
+                })
+            } else {
+                rendering.spans.iter().rev().find(|span| {
+                    span.message_index == Some(index) && span.kind == "message_end_marker"
+                })
+            }
         }
         "generated" if value == "assistant" && edge == "start" => rendering
             .spans
@@ -1309,7 +1384,18 @@ fn resolved_structural_span<'a>(
                     )
                 }
             } else {
-                find_structural_span(&rendering.spans, domain, value, edge)
+                match edge {
+                    "start" => rendering
+                        .spans
+                        .iter()
+                        .find(|span| span.channel.as_deref() == Some(value)),
+                    "end" => rendering
+                        .spans
+                        .iter()
+                        .rev()
+                        .find(|span| span.channel.as_deref() == Some(value)),
+                    _ => None,
+                }
             }
         }
         _ => None,
@@ -1318,14 +1404,7 @@ fn resolved_structural_span<'a>(
 }
 
 fn is_structural_marker_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "message_start_marker"
-            | "message_end_marker"
-            | "generated_assistant_start_marker"
-            | "thinking_channel_start_marker"
-            | "thinking_channel_end_marker"
-    )
+    is_structural_lens_span(kind)
 }
 
 fn parse_semantic_selector(selector: &str) -> Result<(&str, &str, &str)> {
@@ -1349,25 +1428,24 @@ fn find_structural_span<'a>(
     value: &str,
     edge: &str,
 ) -> Option<&'a RenderedSpan> {
-    spans.iter().rev().find(|span| match (domain, edge) {
-        ("role", "start") => {
+    let message_index = spans
+        .iter()
+        .filter(|span| span.role.as_deref() == Some(value))
+        .filter_map(|span| span.message_index)
+        .max()?;
+    match (domain, edge) {
+        ("role", "start") => spans.iter().find(|span| {
             span.kind == "message_start_marker"
                 && span.role.as_deref() == Some(value)
-                && span.message_index.is_some()
-        }
-        ("role", "end") => {
+                && span.message_index == Some(message_index)
+        }),
+        ("role", "end") => spans.iter().rev().find(|span| {
             span.kind == "message_end_marker"
                 && span.role.as_deref() == Some(value)
-                && span.message_index.is_some()
-        }
-        ("channel", "start") => {
-            span.kind == "thinking_channel_start_marker" && span.channel.as_deref() == Some(value)
-        }
-        ("channel", "end") => {
-            span.kind == "thinking_channel_end_marker" && span.channel.as_deref() == Some(value)
-        }
-        _ => false,
-    })
+                && span.message_index == Some(message_index)
+        }),
+        _ => None,
+    }
 }
 
 fn token_view(
@@ -1628,13 +1706,45 @@ fn print_positions(view: &PositionsView) {
     println!("anchors");
     for anchor in &view.anchors {
         println!(
-            "{}={}{}",
+            "{}={}{}{} kind={}{}",
             anchor.selector,
             anchor.position,
             anchor
                 .message_index
                 .map(|index| format!(" message={index}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            anchor
+                .tool_call_index
+                .map(|index| format!(" tool_call={index}"))
+                .unwrap_or_default(),
+            anchor.kind,
+            anchor
+                .label
+                .as_ref()
+                .map(|label| format!(" label={label:?}"))
+                .unwrap_or_default(),
+        );
+    }
+    println!("rendering_spans");
+    for (index, span) in view.rendering_spans.iter().enumerate() {
+        println!(
+            "{} kind={} bytes={}..{} tokens={} role={} channel={} message={} tool_call={} label={}",
+            index,
+            span.kind,
+            span.byte_start,
+            span.byte_end,
+            span.token_start
+                .zip(span.token_end)
+                .map_or_else(|| "-".into(), |(start, end)| format!("{start}..{end}")),
+            span.role.as_deref().unwrap_or("-"),
+            span.channel.as_deref().unwrap_or("-"),
+            span.message_index
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            span.tool_call_index
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            span.label
+                .as_ref()
+                .map_or_else(|| "-".into(), |value| format!("{value:?}")),
         );
     }
 }
@@ -1747,8 +1857,10 @@ mod tests {
                 RenderedSpan {
                     kind: "message_start_marker".into(),
                     message_index: Some(0),
+                    tool_call_index: None,
                     role: Some("user".into()),
                     channel: None,
+                    label: None,
                     byte_start: 0,
                     byte_end: 1,
                     token_start: Some(0),
@@ -1757,8 +1869,10 @@ mod tests {
                 RenderedSpan {
                     kind: "thinking_channel_start_marker".into(),
                     message_index: None,
+                    tool_call_index: None,
                     role: Some("assistant".into()),
                     channel: Some("thinking".into()),
+                    label: None,
                     byte_start: 1,
                     byte_end: 2,
                     token_start: Some(1),
@@ -1767,8 +1881,10 @@ mod tests {
                 RenderedSpan {
                     kind: "generated_assistant_start_marker".into(),
                     message_index: None,
+                    tool_call_index: None,
                     role: Some("assistant".into()),
                     channel: None,
+                    label: None,
                     byte_start: 2,
                     byte_end: 3,
                     token_start: Some(2),
@@ -1946,8 +2062,10 @@ mod tests {
             RenderedSpan {
                 kind: "thinking_channel_end_marker".into(),
                 message_index: Some(0),
+                tool_call_index: None,
                 role: Some("assistant".into()),
                 channel: Some("thinking".into()),
+                label: None,
                 byte_start: 1,
                 byte_end: 2,
                 token_start: Some(0),
@@ -1993,8 +2111,10 @@ mod tests {
             RenderedSpan {
                 kind: "message_start_marker".into(),
                 message_index: Some(0),
+                tool_call_index: None,
                 role: Some("user".into()),
                 channel: None,
+                label: None,
                 byte_start: 0,
                 byte_end: 1,
                 token_start: Some(0),
@@ -2003,8 +2123,10 @@ mod tests {
             RenderedSpan {
                 kind: "message_end_marker".into(),
                 message_index: Some(0),
+                tool_call_index: None,
                 role: Some("user".into()),
                 channel: None,
+                label: None,
                 byte_start: 1,
                 byte_end: 2,
                 token_start: Some(0),
@@ -2013,8 +2135,10 @@ mod tests {
             RenderedSpan {
                 kind: "message_start_marker".into(),
                 message_index: Some(2),
+                tool_call_index: None,
                 role: Some("user".into()),
                 channel: None,
+                label: None,
                 byte_start: 2,
                 byte_end: 3,
                 token_start: Some(1),
@@ -2023,8 +2147,10 @@ mod tests {
             RenderedSpan {
                 kind: "message_end_marker".into(),
                 message_index: Some(2),
+                tool_call_index: None,
                 role: Some("user".into()),
                 channel: None,
+                label: None,
                 byte_start: 3,
                 byte_end: 4,
                 token_start: Some(2),
@@ -2058,8 +2184,10 @@ mod tests {
             RenderedSpan {
                 kind: "message_content".into(),
                 message_index: Some(0),
+                tool_call_index: None,
                 role: Some("user".into()),
                 channel: None,
+                label: None,
                 byte_start: 1,
                 byte_end: 2,
                 token_start: None,
@@ -2090,6 +2218,307 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("outside model vocabulary 32")
+        );
+    }
+
+    #[test]
+    fn v3_muse_message_records_resolve_role_and_channel_boundaries() {
+        let mut document = fixture(3, true);
+        let rendering = document.rendering.as_mut().unwrap();
+        rendering.renderer = "muse_glimmer_atem_annotated_v1".into();
+        rendering.generation_mode = Some("reasoning_high".into());
+        for position in 3..8 {
+            let token_id = 10 + position as i32;
+            document.input_token_ids.push(token_id);
+            document.input_tokens.push(input(
+                position,
+                token_id,
+                &char::from(b'a' + position as u8).to_string(),
+            ));
+            for layer in [2, 5] {
+                document.cells.push(Cell {
+                    source_layer: layer,
+                    source_position: position,
+                    source_token_id: token_id,
+                    predicts_position: position + 1,
+                    top_k: vec![score(8, 0, "eight", 1.0), score(9, 1, "nine", 0.5)],
+                });
+            }
+        }
+        let (global, per_layer) = compute_occurrences(&document.cells, &document.selected_layers);
+        document.occurrences = Occurrences {
+            global,
+            per_layer: document
+                .selected_layers
+                .iter()
+                .map(|source_layer| LayerOccurrences {
+                    source_layer: *source_layer,
+                    tokens: per_layer[source_layer].clone(),
+                })
+                .collect(),
+        };
+        document.rendering.as_mut().unwrap().spans = vec![
+            RenderedSpan {
+                kind: "bos_marker".into(),
+                message_index: None,
+                tool_call_index: None,
+                role: None,
+                channel: None,
+                label: None,
+                byte_start: 0,
+                byte_end: 1,
+                token_start: Some(0),
+                token_end: Some(1),
+            },
+            RenderedSpan {
+                kind: "message_start_marker".into(),
+                message_index: Some(0),
+                tool_call_index: None,
+                role: Some("assistant".into()),
+                channel: Some("thinking".into()),
+                label: None,
+                byte_start: 1,
+                byte_end: 2,
+                token_start: Some(1),
+                token_end: Some(2),
+            },
+            RenderedSpan {
+                kind: "role".into(),
+                message_index: Some(0),
+                tool_call_index: None,
+                role: Some("assistant".into()),
+                channel: Some("thinking".into()),
+                label: None,
+                byte_start: 2,
+                byte_end: 3,
+                token_start: None,
+                token_end: None,
+            },
+            RenderedSpan {
+                kind: "recipient".into(),
+                message_index: Some(0),
+                tool_call_index: None,
+                role: Some("assistant".into()),
+                channel: Some("thinking".into()),
+                label: Some("self".into()),
+                byte_start: 3,
+                byte_end: 4,
+                token_start: None,
+                token_end: None,
+            },
+            RenderedSpan {
+                kind: "message_marker".into(),
+                message_index: Some(0),
+                tool_call_index: None,
+                role: Some("assistant".into()),
+                channel: Some("thinking".into()),
+                label: None,
+                byte_start: 4,
+                byte_end: 5,
+                token_start: Some(2),
+                token_end: Some(3),
+            },
+            RenderedSpan {
+                kind: "assistant_reasoning_content".into(),
+                message_index: Some(0),
+                tool_call_index: None,
+                role: Some("assistant".into()),
+                channel: Some("thinking".into()),
+                label: None,
+                byte_start: 5,
+                byte_end: 6,
+                token_start: None,
+                token_end: None,
+            },
+            RenderedSpan {
+                kind: "message_end_marker".into(),
+                message_index: Some(0),
+                tool_call_index: None,
+                role: Some("assistant".into()),
+                channel: Some("thinking".into()),
+                label: Some("<|eom|>".into()),
+                byte_start: 6,
+                byte_end: 7,
+                token_start: Some(3),
+                token_end: Some(4),
+            },
+            RenderedSpan {
+                kind: "message_start_marker".into(),
+                message_index: Some(0),
+                tool_call_index: Some(0),
+                role: Some("assistant".into()),
+                channel: Some("tool_call".into()),
+                label: None,
+                byte_start: 7,
+                byte_end: 8,
+                token_start: Some(4),
+                token_end: Some(5),
+            },
+            RenderedSpan {
+                kind: "role".into(),
+                message_index: Some(0),
+                tool_call_index: Some(0),
+                role: Some("assistant".into()),
+                channel: Some("tool_call".into()),
+                label: None,
+                byte_start: 8,
+                byte_end: 9,
+                token_start: None,
+                token_end: None,
+            },
+            RenderedSpan {
+                kind: "recipient".into(),
+                message_index: Some(0),
+                tool_call_index: Some(0),
+                role: Some("assistant".into()),
+                channel: Some("tool_call".into()),
+                label: Some("first".into()),
+                byte_start: 9,
+                byte_end: 10,
+                token_start: None,
+                token_end: None,
+            },
+            RenderedSpan {
+                kind: "message_marker".into(),
+                message_index: Some(0),
+                tool_call_index: Some(0),
+                role: Some("assistant".into()),
+                channel: Some("tool_call".into()),
+                label: None,
+                byte_start: 10,
+                byte_end: 11,
+                token_start: Some(5),
+                token_end: Some(6),
+            },
+            RenderedSpan {
+                kind: "tool_call_content".into(),
+                message_index: Some(0),
+                tool_call_index: Some(0),
+                role: Some("assistant".into()),
+                channel: Some("tool_call".into()),
+                label: None,
+                byte_start: 11,
+                byte_end: 12,
+                token_start: None,
+                token_end: None,
+            },
+            RenderedSpan {
+                kind: "message_end_marker".into(),
+                message_index: Some(0),
+                tool_call_index: Some(0),
+                role: Some("assistant".into()),
+                channel: Some("tool_call".into()),
+                label: Some("<|eot|>".into()),
+                byte_start: 12,
+                byte_end: 13,
+                token_start: Some(6),
+                token_end: Some(7),
+            },
+            RenderedSpan {
+                kind: "generated_assistant_start_marker".into(),
+                message_index: None,
+                tool_call_index: None,
+                role: Some("assistant".into()),
+                channel: None,
+                label: None,
+                byte_start: 13,
+                byte_end: 14,
+                token_start: Some(7),
+                token_end: Some(8),
+            },
+            RenderedSpan {
+                kind: "generated_assistant_role".into(),
+                message_index: None,
+                tool_call_index: None,
+                role: Some("assistant".into()),
+                channel: None,
+                label: None,
+                byte_start: 14,
+                byte_end: 15,
+                token_start: None,
+                token_end: None,
+            },
+        ];
+        validate_trace(&document).unwrap();
+        assert_eq!(
+            resolve_position(&document, "role:assistant:start").unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_position(&document, "role:assistant:end").unwrap(),
+            6
+        );
+        assert_eq!(resolve_position(&document, "message:0:start").unwrap(), 1);
+        assert_eq!(resolve_position(&document, "message:0:end").unwrap(), 6);
+        assert_eq!(
+            resolve_position(&document, "channel:tool_call:start").unwrap(),
+            4
+        );
+        assert_eq!(
+            resolve_position(&document, "channel:tool_call:end").unwrap(),
+            6
+        );
+        assert_eq!(
+            resolve_position(&document, "channel:thinking:start").unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_position(&document, "channel:thinking:end").unwrap(),
+            3
+        );
+        let view = positions_view(&document).unwrap();
+        let message_end = view
+            .anchors
+            .iter()
+            .filter(|anchor| anchor.selector == "message:0:end")
+            .collect::<Vec<_>>();
+        assert_eq!(message_end.len(), 1);
+        assert_eq!(message_end[0].position, 6);
+        assert_eq!(message_end[0].tool_call_index, Some(0));
+        assert_eq!(message_end[0].label.as_deref(), Some("<|eot|>"));
+        assert!(view.rendering_spans.iter().any(|span| {
+            span.tool_call_index == Some(0)
+                && span.channel.as_deref() == Some("tool_call")
+                && span.label.as_deref() == Some("<|eot|>")
+        }));
+
+        let rendering = document.rendering.as_mut().unwrap();
+        rendering.renderer = "test_messages".into();
+        rendering.generation_mode = Some("thinking".into());
+        document.rendering.as_mut().unwrap().spans = vec![
+            RenderedSpan {
+                kind: "bos_marker".into(),
+                message_index: None,
+                tool_call_index: None,
+                role: None,
+                channel: None,
+                label: None,
+                byte_start: 0,
+                byte_end: 1,
+                token_start: Some(0),
+                token_end: Some(1),
+            },
+            RenderedSpan {
+                kind: "reasoning_instruction_content".into(),
+                message_index: None,
+                tool_call_index: None,
+                role: Some("system".into()),
+                channel: Some("thinking".into()),
+                label: None,
+                byte_start: 1,
+                byte_end: 3,
+                token_start: Some(1),
+                token_end: Some(3),
+            },
+        ];
+        validate_trace(&document).unwrap();
+        assert_eq!(
+            resolve_position(&document, "channel:thinking:start").unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_position(&document, "channel:thinking:end").unwrap(),
+            2
         );
     }
 

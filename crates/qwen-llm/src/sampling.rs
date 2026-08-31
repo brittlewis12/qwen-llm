@@ -54,6 +54,17 @@ impl SamplingConfig {
         }
     }
 
+    /// Sampling preset published with the released Muse Glimmer model.
+    pub fn muse_glimmer(seed: u64) -> Self {
+        Self {
+            temperature: 1.0,
+            top_k: 64,
+            top_p: 0.95,
+            min_p: 0.0,
+            seed,
+        }
+    }
+
     pub fn validate(self) -> Result<Self, SamplingError> {
         if !self.temperature.is_finite() || self.temperature < 0.0 {
             return Err(SamplingError::InvalidTemperature(self.temperature));
@@ -1193,6 +1204,16 @@ mod tests {
                 top_k: 200,
                 top_p: 1.0,
                 min_p: 0.05,
+                seed: 42,
+            }
+        );
+        assert_eq!(
+            SamplingConfig::muse_glimmer(42),
+            SamplingConfig {
+                temperature: 1.0,
+                top_k: 64,
+                top_p: 0.95,
+                min_p: 0.0,
                 seed: 42,
             }
         );

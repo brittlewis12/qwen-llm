@@ -98,6 +98,7 @@ pub(crate) struct RunInvocation {
 pub(crate) enum RunReasoningEffort {
     Low,
     Medium,
+    High,
     Xhigh,
 }
 
@@ -144,7 +145,7 @@ pub(crate) enum DocumentSource {
         .args(["user", "messages", "raw_prompt"])
 ))]
 pub(crate) struct RunArgs {
-    /// Path to a Qwen or DeepSeek V4 GGUF file.
+    /// Path to a Qwen, DeepSeek V4, or Muse Glimmer GGUF file.
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -177,7 +178,8 @@ pub(crate) struct RunArgs {
     #[arg(long, conflicts_with = "raw_prompt")]
     no_thinking: bool,
 
-    /// Qwen3.8 reasoning depth. Omitted defaults to xhigh.
+    /// Reasoning depth. Muse accepts low/medium/high/xhigh and defaults to high;
+    /// Qwen3.8 accepts low/medium/xhigh and defaults to xhigh.
     #[arg(
         long,
         value_name = "EFFORT",
@@ -195,19 +197,19 @@ struct GenerationOverrides {
     #[arg(short = 'n', long = "max-tokens", visible_alias = "tokens")]
     tokens: Option<usize>,
 
-    /// Sampling temperature; zero preserves greedy decoding (default: 0).
+    /// Sampling temperature; omitted uses the detected family preset (Muse: 1, others: 0).
     #[arg(long = "temp", visible_alias = "temperature")]
     temperature: Option<f32>,
 
-    /// Top-k sampling cutoff; zero disables it (default: 200).
+    /// Top-k cutoff; omitted uses the detected family preset (Muse: 64, others: 200).
     #[arg(long)]
     top_k: Option<usize>,
 
-    /// Nucleus sampling cutoff; one disables it (default: 1).
+    /// Nucleus cutoff; omitted uses the detected family preset (Muse: .95, others: 1).
     #[arg(long)]
     top_p: Option<f32>,
 
-    /// Min-p sampling cutoff; zero disables it (default: 0.05).
+    /// Min-p cutoff; omitted uses the detected family preset (Muse: 0, others: .05).
     #[arg(long)]
     min_p: Option<f32>,
 
@@ -421,10 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn run_accepts_only_upstream_qwen38_reasoning_efforts() {
+    fn run_accepts_cross_family_reasoning_levels() {
         for (value, expected) in [
             ("low", RunReasoningEffort::Low),
             ("medium", RunReasoningEffort::Medium),
+            ("high", RunReasoningEffort::High),
             ("xhigh", RunReasoningEffort::Xhigh),
         ] {
             let (_, invocation) = parse(&[
@@ -443,7 +446,7 @@ mod tests {
             assert_eq!(run.reasoning_effort, Some(expected));
         }
 
-        for value in ["high", "max", "none", "unknown"] {
+        for value in ["max", "none", "unknown"] {
             assert!(
                 Args::try_parse_from([
                     "qwen",
@@ -466,8 +469,8 @@ mod tests {
         run.write_long_help(&mut help).unwrap();
         let help = String::from_utf8(help).unwrap();
         assert!(help.contains("--reasoning-effort <EFFORT>"));
-        assert!(help.contains("possible values: low, medium, xhigh"));
-        assert!(help.contains("Omitted defaults to xhigh"));
+        assert!(help.contains("possible values: low, medium, high, xhigh"));
+        assert!(help.contains("Muse accepts low/medium/high/xhigh"));
     }
 
     #[test]

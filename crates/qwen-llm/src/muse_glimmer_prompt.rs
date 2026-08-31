@@ -16,6 +16,7 @@ pub enum MuseGlimmerReasoningStrength {
     Medium,
     #[default]
     High,
+    Xhigh,
 }
 
 impl MuseGlimmerReasoningStrength {
@@ -24,6 +25,7 @@ impl MuseGlimmerReasoningStrength {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Xhigh => "xhigh",
         }
     }
 }
@@ -372,23 +374,13 @@ pub fn render_muse_glimmer_atem_prompt_annotated(
                     None,
                     None,
                 );
-                let content = match options.profile {
-                    MuseGlimmerChatTemplateProfile::MetaFixed => message.content.clone(),
-                    MuseGlimmerChatTemplateProfile::UnslothLaunch => {
-                        normalize_reasoning_effort(&message.content)
-                    }
-                };
-                output.push(
-                    &content,
-                    MuseGlimmerPromptSpanKind::MessageContent,
-                    Some(index),
-                    None,
-                    Some(MuseGlimmerPromptSpanRole::System),
-                    None,
-                );
-                if options.profile == MuseGlimmerChatTemplateProfile::MetaFixed
-                    || !content.to_ascii_lowercase().contains("reasoning strength")
-                {
+                let normalized = normalize_reasoning_directive(
+                    &message.content,
+                    options.reasoning_strength,
+                    index,
+                )?;
+                push_muse_system_message_content(&mut output, Some(index), &normalized);
+                if normalized.directive_range.is_none() {
                     output.raw("\n\n");
                     push_muse_reasoning_instruction(
                         &mut output,
@@ -759,7 +751,18 @@ fn validate_options(options: &MuseGlimmerPromptOptions) -> Result<(), MuseGlimme
 }
 
 fn validate_messages(messages: &[MuseGlimmerMessage]) -> Result<(), MuseGlimmerPromptError> {
+    let mut saw_system = false;
     for (index, message) in messages.iter().enumerate() {
+        if matches!(message.role, MuseGlimmerMessageRole::System) {
+            if saw_system || index != 0 {
+                return Err(MuseGlimmerPromptError::InvalidMessage {
+                    index,
+                    field: "role",
+                    detail: "system must appear at most once and only as the first message".into(),
+                });
+            }
+            saw_system = true;
+        }
         if !matches!(message.role, MuseGlimmerMessageRole::Assistant)
             && (message.reasoning_content.is_some()
                 || message.recipient.is_some()
@@ -890,12 +893,96 @@ fn tool_namespaces(tools: &[MuseGlimmerToolDefinition]) -> Vec<&str> {
     namespaces
 }
 
-fn normalize_reasoning_effort(content: &str) -> String {
-    content
-        .replace("Reasoning effort", "Reasoning strength")
-        .replace("Reasoning Effort", "Reasoning Strength")
-        .replace("reasoning effort", "reasoning strength")
-        .replace("REASONING EFFORT", "REASONING STRENGTH")
+struct NormalizedSystemContent {
+    text: String,
+    directive_range: Option<std::ops::Range<usize>>,
+}
+
+fn normalize_reasoning_directive(
+    content: &str,
+    strength: MuseGlimmerReasoningStrength,
+    message_index: usize,
+) -> Result<NormalizedSystemContent, MuseGlimmerPromptError> {
+    let mut text = String::new();
+    let mut directive_range = None;
+    for (line_index, line) in content.split('\n').enumerate() {
+        if line_index > 0 {
+            text.push('\n');
+        }
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let value = ["reasoning strength:", "reasoning effort:"]
+            .iter()
+            .find_map(|prefix| lower.strip_prefix(prefix).map(str::trim));
+        let Some(value) = value else {
+            text.push_str(line);
+            continue;
+        };
+        let value = value.strip_suffix('.').unwrap_or(value).trim();
+        if !matches!(value, "low" | "medium" | "high" | "xhigh") {
+            return Err(MuseGlimmerPromptError::InvalidMessage {
+                index: message_index,
+                field: "content",
+                detail: format!("reasoning strength has unsupported value {value:?}"),
+            });
+        }
+        if directive_range.is_some() {
+            return Err(MuseGlimmerPromptError::InvalidMessage {
+                index: message_index,
+                field: "content",
+                detail: "contains multiple reasoning-strength directives".into(),
+            });
+        }
+        let start = text.len();
+        text.push_str("Reasoning strength: ");
+        text.push_str(strength.as_str());
+        text.push('.');
+        directive_range = Some(start..text.len());
+    }
+    Ok(NormalizedSystemContent {
+        text,
+        directive_range,
+    })
+}
+
+fn push_muse_system_message_content(
+    output: &mut AnnotatedMuseGlimmerPromptBuilder,
+    message_index: Option<usize>,
+    normalized: &NormalizedSystemContent,
+) {
+    let mut push_content = |text: &str, kind, channel| {
+        output.push(
+            text,
+            kind,
+            message_index,
+            None,
+            Some(MuseGlimmerPromptSpanRole::System),
+            channel,
+        );
+    };
+    let Some(range) = normalized.directive_range.as_ref() else {
+        push_content(
+            &normalized.text,
+            MuseGlimmerPromptSpanKind::MessageContent,
+            None,
+        );
+        return;
+    };
+    push_content(
+        &normalized.text[..range.start],
+        MuseGlimmerPromptSpanKind::MessageContent,
+        None,
+    );
+    push_content(
+        &normalized.text[range.clone()],
+        MuseGlimmerPromptSpanKind::ReasoningInstructionContent,
+        Some(MuseGlimmerPromptChannel::Thinking),
+    );
+    push_content(
+        &normalized.text[range.end..],
+        MuseGlimmerPromptSpanKind::MessageContent,
+        None,
+    );
 }
 
 #[cfg(test)]
@@ -968,16 +1055,95 @@ mod tests {
     }
 
     #[test]
-    fn unsloth_profile_normalizes_existing_reasoning_directive_once() {
+    fn selected_reasoning_strength_normalizes_and_annotates_existing_directive_once() {
+        let annotated = render_muse_glimmer_atem_prompt_annotated(
+            &[
+                MuseGlimmerMessage::system("Be concise.\n\nReasoning Effort: low."),
+                MuseGlimmerMessage::user("hello"),
+            ],
+            &MuseGlimmerPromptOptions {
+                reasoning_strength: MuseGlimmerReasoningStrength::Xhigh,
+                ..MuseGlimmerPromptOptions::default()
+            },
+        )
+        .unwrap();
+        assert_valid_spans(&annotated);
+        let prompt = annotated.text;
+        assert!(prompt.contains("Reasoning strength: xhigh."));
+        assert!(!prompt.contains("Reasoning strength: high."));
+        assert!(!prompt.contains("Reasoning Effort"));
+        let directive = annotated
+            .spans
+            .iter()
+            .find(|span| span.kind == MuseGlimmerPromptSpanKind::ReasoningInstructionContent)
+            .unwrap();
+        assert_eq!(directive.message_index, Some(0));
+        assert_eq!(directive.channel, Some(MuseGlimmerPromptChannel::Thinking));
+        assert_eq!(
+            &prompt[directive.byte_start..directive.byte_end],
+            "Reasoning strength: xhigh."
+        );
+    }
+
+    #[test]
+    fn reasoning_prose_does_not_suppress_the_typed_directive() {
         let prompt = render_muse_glimmer_single_turn(
             "hello",
-            Some("Be concise.\n\nReasoning Effort: low."),
+            Some("Explain the reasoning strength of the evidence."),
             &MuseGlimmerPromptOptions::default(),
         )
         .unwrap();
-        assert!(prompt.contains("Reasoning Strength: low."));
-        assert!(!prompt.contains("Reasoning strength: high."));
-        assert!(!prompt.contains("Reasoning Effort"));
+        assert!(prompt.contains("Explain the reasoning strength of the evidence."));
+        assert!(prompt.contains("Reasoning strength: high."));
+    }
+
+    #[test]
+    fn rejects_invalid_duplicate_or_misplaced_reasoning_directives() {
+        for system in [
+            "Reasoning strength: extreme.",
+            "Reasoning strength: low.\nReasoning effort: high.",
+        ] {
+            assert!(
+                render_muse_glimmer_single_turn(
+                    "hello",
+                    Some(system),
+                    &MuseGlimmerPromptOptions::default(),
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            render_muse_glimmer_atem_prompt(
+                &[
+                    MuseGlimmerMessage::system("Reasoning strength: low."),
+                    MuseGlimmerMessage::system("Reasoning strength: high."),
+                    MuseGlimmerMessage::user("hello"),
+                ],
+                &MuseGlimmerPromptOptions::default(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn renders_every_released_reasoning_strength_exactly() {
+        for (strength, expected) in [
+            (MuseGlimmerReasoningStrength::Low, "low"),
+            (MuseGlimmerReasoningStrength::Medium, "medium"),
+            (MuseGlimmerReasoningStrength::High, "high"),
+            (MuseGlimmerReasoningStrength::Xhigh, "xhigh"),
+        ] {
+            let prompt = render_muse_glimmer_single_turn(
+                "hello",
+                None,
+                &MuseGlimmerPromptOptions {
+                    reasoning_strength: strength,
+                    ..MuseGlimmerPromptOptions::default()
+                },
+            )
+            .unwrap();
+            assert!(prompt.contains(&format!("Reasoning strength: {expected}.")));
+        }
     }
 
     #[test]

@@ -1757,13 +1757,19 @@ impl RunDocument {
                         ("muse_glimmer", "muse_glimmer_atem_v1") => {
                             matches!(
                                 mode,
-                                "reasoning_low" | "reasoning_medium" | "reasoning_high"
+                                "reasoning_low"
+                                    | "reasoning_medium"
+                                    | "reasoning_high"
+                                    | "reasoning_xhigh"
                             ) && rendering.spans.is_empty()
                         }
                         ("muse_glimmer", "muse_glimmer_atem_annotated_v1") => {
                             matches!(
                                 mode,
-                                "reasoning_low" | "reasoning_medium" | "reasoning_high"
+                                "reasoning_low"
+                                    | "reasoning_medium"
+                                    | "reasoning_high"
+                                    | "reasoning_xhigh"
                             )
                         }
                         _ => false,

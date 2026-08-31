@@ -380,7 +380,7 @@ fn resolve_greedy_gpu_decision(
 #[command(
     name = "qwen",
     version,
-    about = "Fast local Qwen and DeepSeek inference on Apple Silicon",
+    about = "Fast local Qwen, DeepSeek, and Muse inference on Apple Silicon",
     args_conflicts_with_subcommands = true,
     after_help = "Examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --system 'Be concise' --user 'Explain this'\n  qwen run -m MODEL --user -\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n  qwen run -m Qwen3.6-35B-A3B.gguf --user 'Explain this' --no-thinking\n\n--no-thinking controls model prompt rendering; it does not hide CLI diagnostics.\nCLI diagnostic suppression is not currently available.\nFor resident JSONL batching and expanded legacy/research help, run:\n  qwen --help\nLegacy flags shown there are flat and cannot be combined with qwen run.",
     after_long_help = "Modern examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n\nLegacy/research examples (flat; do not combine with qwen run):\n  qwen -m MODEL --prompt '<raw model input>'\n  qwen -m MODEL --requests-jsonl requests.jsonl\n\n--no-thinking controls model prompt rendering; it does not hide CLI diagnostics.\nCLI diagnostic suppression is not currently available."
@@ -392,7 +392,7 @@ struct Args {
     #[arg(skip)]
     prepared_prompt: Option<PreparedPrompt>,
 
-    /// Path to a Qwen or DeepSeek V4 GGUF file.
+    /// Path to a Qwen, DeepSeek V4, or Muse Glimmer GGUF file.
     #[arg(short = 'm', long)]
     model: Option<std::path::PathBuf>,
 
@@ -495,7 +495,7 @@ struct Args {
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
     tokens: usize,
 
-    /// Sampling temperature; zero preserves greedy decoding.
+    /// Sampling temperature; zero is greedy. Muse omission uses its released value 1.
     #[arg(
         long = "temp",
         visible_alias = "temperature",
@@ -504,15 +504,15 @@ struct Args {
     )]
     temperature: f32,
 
-    /// Top-k sampling cutoff; zero disables it.
+    /// Top-k cutoff; zero disables it. Muse omission uses its released value 64.
     #[arg(long, hide_short_help = true, default_value_t = 200)]
     top_k: usize,
 
-    /// Nucleus sampling cutoff; one disables it.
+    /// Nucleus cutoff; one disables it. Muse omission uses its released value .95.
     #[arg(long, hide_short_help = true, default_value_t = 1.0)]
     top_p: f32,
 
-    /// Min-p sampling cutoff; zero disables it.
+    /// Min-p cutoff; zero disables it. Muse omission uses its released value 0.
     #[arg(long, hide_short_help = true, default_value_t = 0.05)]
     min_p: f32,
 
@@ -657,6 +657,10 @@ struct Args {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ExplicitCliOptions {
+    temperature: bool,
+    top_k: bool,
+    top_p: bool,
+    min_p: bool,
     prefill_chunk: bool,
     prefix_cache_max_mib: bool,
     cache_prefix_auto_min_tokens: bool,
@@ -673,6 +677,10 @@ impl ExplicitCliOptions {
                 && matches.value_source(id) == Some(ValueSource::CommandLine)
         };
         Self {
+            temperature: command_line("temperature"),
+            top_k: command_line("top_k"),
+            top_p: command_line("top_p"),
+            min_p: command_line("min_p"),
             prefill_chunk: command_line("prefill_chunk"),
             prefix_cache_max_mib: command_line("prefix_cache_max_mib"),
             cache_prefix_auto_min_tokens: command_line("cache_prefix_auto_min_tokens"),
@@ -2907,11 +2915,7 @@ fn prepare_muse_glimmer_prompt(
                 !run.no_thinking,
                 "Muse Glimmer does not declare a no-thinking ATEM profile; use --reasoning-effort low for the lightest supported reasoning mode"
             );
-            let reasoning_strength = match run.reasoning_effort {
-                Some(cli::RunReasoningEffort::Low) => MuseGlimmerReasoningStrength::Low,
-                Some(cli::RunReasoningEffort::Medium) => MuseGlimmerReasoningStrength::Medium,
-                Some(cli::RunReasoningEffort::Xhigh) | None => MuseGlimmerReasoningStrength::High,
-            };
+            let reasoning_strength = resolve_muse_glimmer_reasoning_strength(run.reasoning_effort);
             let options = MuseGlimmerPromptOptions {
                 profile: config.chat_template_profile,
                 reasoning_strength,
@@ -2961,6 +2965,17 @@ fn prepare_muse_glimmer_prompt(
     }
 }
 
+fn resolve_muse_glimmer_reasoning_strength(
+    requested: Option<cli::RunReasoningEffort>,
+) -> MuseGlimmerReasoningStrength {
+    match requested {
+        None | Some(cli::RunReasoningEffort::High) => MuseGlimmerReasoningStrength::High,
+        Some(cli::RunReasoningEffort::Low) => MuseGlimmerReasoningStrength::Low,
+        Some(cli::RunReasoningEffort::Medium) => MuseGlimmerReasoningStrength::Medium,
+        Some(cli::RunReasoningEffort::Xhigh) => MuseGlimmerReasoningStrength::Xhigh,
+    }
+}
+
 fn convert_muse_glimmer_messages(
     messages: Vec<messages::ChatMessage>,
 ) -> Result<Vec<MuseGlimmerMessage>> {
@@ -2998,6 +3013,9 @@ fn resolve_qwen38_generation_mode(
     let effort = match reasoning_effort.unwrap_or(cli::RunReasoningEffort::Xhigh) {
         cli::RunReasoningEffort::Low => Qwen38ReasoningEffort::Low,
         cli::RunReasoningEffort::Medium => Qwen38ReasoningEffort::Medium,
+        cli::RunReasoningEffort::High => {
+            bail!("--reasoning-effort high is supported by Muse Glimmer, not Qwen3.8")
+        }
         cli::RunReasoningEffort::Xhigh => Qwen38ReasoningEffort::Xhigh,
     };
     Ok(Some(Qwen38GenerationMode::Thinking(effort)))
@@ -4220,7 +4238,7 @@ fn run_muse_glimmer_single_turn(
 ) -> Result<()> {
     validate_muse_glimmer_generation_mode(args, explicit, &invocation)?;
     let request_t0 = Instant::now();
-    let sampling = cli_sampling_config(args)?;
+    let sampling = muse_glimmer_sampling_config(args, explicit)?;
     let config =
         MuseGlimmerConfig::from_gguf(gguf).context("bind Muse Glimmer release contract")?;
     let prepared = prepare_muse_glimmer_prompt(invocation, &config, args)?;
@@ -6403,6 +6421,29 @@ fn cli_sampling_config(args: &Args) -> Result<SamplingConfig> {
     .validate()
     .map_err(anyhow::Error::new)
     .context("validate CLI sampling configuration")
+}
+
+fn muse_glimmer_sampling_config(
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Result<SamplingConfig> {
+    let mut config = SamplingConfig::muse_glimmer(args.seed);
+    if explicit.temperature {
+        config.temperature = args.temperature;
+    }
+    if explicit.top_k {
+        config.top_k = args.top_k;
+    }
+    if explicit.top_p {
+        config.top_p = args.top_p;
+    }
+    if explicit.min_p {
+        config.min_p = args.min_p;
+    }
+    config
+        .validate()
+        .map_err(anyhow::Error::new)
+        .context("validate Muse Glimmer sampling configuration")
 }
 
 fn request_sampling_config(request: &JsonlRequest, args: &Args) -> Result<SamplingConfig> {
@@ -12267,6 +12308,31 @@ mod tests {
     }
 
     #[test]
+    fn muse_glimmer_reasoning_strength_preserves_all_released_levels() {
+        for (requested, expected) in [
+            (None, MuseGlimmerReasoningStrength::High),
+            (
+                Some(cli::RunReasoningEffort::Low),
+                MuseGlimmerReasoningStrength::Low,
+            ),
+            (
+                Some(cli::RunReasoningEffort::Medium),
+                MuseGlimmerReasoningStrength::Medium,
+            ),
+            (
+                Some(cli::RunReasoningEffort::High),
+                MuseGlimmerReasoningStrength::High,
+            ),
+            (
+                Some(cli::RunReasoningEffort::Xhigh),
+                MuseGlimmerReasoningStrength::Xhigh,
+            ),
+        ] {
+            assert_eq!(resolve_muse_glimmer_reasoning_strength(requested), expected);
+        }
+    }
+
+    #[test]
     fn qwen4exp_full_shard_prefetch_scope_is_default_off_and_release_scoped() {
         assert!(validate_qwen4exp_full_shard_prefetch_scope(false, 0).is_ok());
         assert!(validate_qwen4exp_full_shard_prefetch_scope(true, 3).is_ok());
@@ -13206,6 +13272,12 @@ mod tests {
                 Some(Qwen38GenerationMode::Thinking(expected))
             );
         }
+        assert!(
+            resolve_qwen38_generation_mode(true, false, Some(cli::RunReasoningEffort::High))
+                .unwrap_err()
+                .to_string()
+                .contains("supported by Muse Glimmer")
+        );
         assert_eq!(
             resolve_qwen38_generation_mode(true, true, None).unwrap(),
             Some(Qwen38GenerationMode::NoThinking)
@@ -14068,6 +14140,79 @@ mod tests {
             r#"{"prompt":"hello","sampling":{"temprature":0.7}}"#,
         );
         assert!(typo.is_err(), "sampling field typos must fail closed");
+    }
+
+    #[test]
+    fn muse_glimmer_sampling_uses_released_defaults_and_explicit_overrides() {
+        let matches = Args::command()
+            .try_get_matches_from(["qwen", "run", "-m", "model.gguf", "--user", "hello"])
+            .unwrap();
+        let (_, run_matches) = matches.subcommand().unwrap();
+        let explicit = ExplicitCliOptions::from_matches(run_matches);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        let invocation = cli::normalize(&mut args);
+        invocation.apply_option_overrides(&mut args);
+        assert_eq!(
+            muse_glimmer_sampling_config(&args, explicit).unwrap(),
+            SamplingConfig::muse_glimmer(42)
+        );
+
+        let matches = Args::command()
+            .try_get_matches_from([
+                "qwen",
+                "-m",
+                "model.gguf",
+                "--prompt",
+                "hello",
+                "--top-k",
+                "0",
+            ])
+            .unwrap();
+        let explicit = ExplicitCliOptions::from_matches(&matches);
+        let args = Args::from_arg_matches(&matches).unwrap();
+        assert_eq!(
+            muse_glimmer_sampling_config(&args, explicit).unwrap(),
+            SamplingConfig {
+                top_k: 0,
+                ..SamplingConfig::muse_glimmer(42)
+            }
+        );
+
+        let matches = Args::command()
+            .try_get_matches_from([
+                "qwen",
+                "run",
+                "-m",
+                "model.gguf",
+                "--user",
+                "hello",
+                "--temp",
+                "0",
+                "--top-k",
+                "0",
+                "--top-p",
+                "1",
+                "--min-p",
+                "0.1",
+                "--seed",
+                "7",
+            ])
+            .unwrap();
+        let (_, run_matches) = matches.subcommand().unwrap();
+        let explicit = ExplicitCliOptions::from_matches(run_matches);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        let invocation = cli::normalize(&mut args);
+        invocation.apply_option_overrides(&mut args);
+        assert_eq!(
+            muse_glimmer_sampling_config(&args, explicit).unwrap(),
+            SamplingConfig {
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.1,
+                seed: 7,
+            }
+        );
     }
 
     #[test]

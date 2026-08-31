@@ -972,7 +972,10 @@ fn validate_trace_input_rendering(document: &TraceDocument, rendering: &Renderin
                         rendering.generation_mode.as_deref().is_some_and(|mode| {
                             matches!(
                                 mode,
-                                "reasoning_low" | "reasoning_medium" | "reasoning_high"
+                                "reasoning_low"
+                                    | "reasoning_medium"
+                                    | "reasoning_high"
+                                    | "reasoning_xhigh"
                             )
                         }) && rendering.spans.is_empty()
                     }
@@ -980,7 +983,10 @@ fn validate_trace_input_rendering(document: &TraceDocument, rendering: &Renderin
                         rendering.generation_mode.as_deref().is_some_and(|mode| {
                             matches!(
                                 mode,
-                                "reasoning_low" | "reasoning_medium" | "reasoning_high"
+                                "reasoning_low"
+                                    | "reasoning_medium"
+                                    | "reasoning_high"
+                                    | "reasoning_xhigh"
                             )
                         }) && !rendering.spans.is_empty()
                     }

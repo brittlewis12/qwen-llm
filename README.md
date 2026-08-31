@@ -57,6 +57,7 @@ qwen run -m MODEL --user "Explain this"
 qwen run -m MODEL --system "Be concise" --user "Explain this"
 qwen run -m Qwen3.8-27B.gguf --reasoning-effort low --user "Explain this"
 qwen run -m Qwen3.8-Flash-Next-Q3_K_XL.gguf --no-thinking --user "Explain this"
+qwen run -m Muse-Glimmer-30B-Q8_0.gguf --reasoning-effort xhigh --user "Explain this"
 qwen run -m MODEL --user -
 ```
 
@@ -78,8 +79,11 @@ qwen run -m MODEL --raw-prompt '<exact model input>'
 
 On validated Qwen3.8 27B and Flash-Next surfaces,
 `--reasoning-effort low|medium|xhigh` selects the exact upstream ordinary-chat
-transition; omission remains xhigh. The option rejects `high`, raw prompts,
-`--no-thinking`, and non-Qwen3.8 identities rather than inventing semantics. On
+transition; omission remains xhigh and `high` fails closed. Muse Glimmer accepts
+`low|medium|high|xhigh` as exact `Reasoning strength` values and defaults to
+`high`. Muse uses its released sampling preset (`temperature=1`, `top_p=.95`,
+`top_k=64`, `min_p=0`) unless a sampling field is explicitly overridden. Raw
+prompts bypass these reasoning controls. On
 validated Qwen3.6 35B A3B and Qwen3.8 surfaces, `--no-thinking` uses the
 model-family non-thinking transition. DeepSeek ordinary chat is already
 non-thinking, so that option is idempotent there. These controls do not suppress

@@ -36,6 +36,7 @@ pub(crate) enum LensMessageMode {
     NoThinking,
     Low,
     Medium,
+    High,
     Xhigh,
 }
 
@@ -708,6 +709,7 @@ impl ResolvedMessageMode {
             Self::Muse(MuseGlimmerReasoningStrength::Low) => "reasoning_low",
             Self::Muse(MuseGlimmerReasoningStrength::Medium) => "reasoning_medium",
             Self::Muse(MuseGlimmerReasoningStrength::High) => "reasoning_high",
+            Self::Muse(MuseGlimmerReasoningStrength::Xhigh) => "reasoning_xhigh",
         }
     }
 }
@@ -1184,6 +1186,9 @@ fn resolve_qwen_message_mode(
             Some(LensMessageMode::NoThinking) => Ok(ResolvedMessageMode::Qwen38(
                 Qwen38GenerationMode::NoThinking,
             )),
+            Some(LensMessageMode::High) => {
+                bail!("--message-mode high is supported by Muse Glimmer, not Qwen3.8")
+            }
             Some(LensMessageMode::Auto) => bail!(
                 "--message-mode auto is not supported by Qwen3.8; use thinking, no-thinking, low, medium, or xhigh"
             ),
@@ -1193,7 +1198,7 @@ fn resolve_qwen_message_mode(
 
 fn resolve_muse_message_mode(requested: Option<LensMessageMode>) -> Result<ResolvedMessageMode> {
     match requested {
-        None | Some(LensMessageMode::Thinking | LensMessageMode::Xhigh) => Ok(
+        None | Some(LensMessageMode::Thinking | LensMessageMode::High) => Ok(
             ResolvedMessageMode::Muse(MuseGlimmerReasoningStrength::High),
         ),
         Some(LensMessageMode::Low) => {
@@ -1202,8 +1207,11 @@ fn resolve_muse_message_mode(requested: Option<LensMessageMode>) -> Result<Resol
         Some(LensMessageMode::Medium) => Ok(ResolvedMessageMode::Muse(
             MuseGlimmerReasoningStrength::Medium,
         )),
+        Some(LensMessageMode::Xhigh) => Ok(ResolvedMessageMode::Muse(
+            MuseGlimmerReasoningStrength::Xhigh,
+        )),
         Some(LensMessageMode::Auto | LensMessageMode::NoThinking) => bail!(
-            "Muse Glimmer supports message modes thinking, low, medium, or xhigh; it declares no auto or no-thinking ATEM profile"
+            "Muse Glimmer supports message modes thinking, low, medium, high, or xhigh; it declares no auto or no-thinking ATEM profile"
         ),
     }
 }
@@ -1721,6 +1729,22 @@ mod tests {
                 .unwrap()
                 .artifact_name(),
             "reasoning_medium"
+        );
+        assert_eq!(
+            resolve_muse_message_mode(Some(LensMessageMode::High))
+                .unwrap()
+                .artifact_name(),
+            "reasoning_high"
+        );
+        assert_eq!(
+            resolve_muse_message_mode(Some(LensMessageMode::Xhigh))
+                .unwrap()
+                .artifact_name(),
+            "reasoning_xhigh"
+        );
+        assert!(
+            resolve_qwen_message_mode(QwenMessageProtocol::Qwen38, Some(LensMessageMode::High))
+                .is_err()
         );
     }
 

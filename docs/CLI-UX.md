@@ -92,11 +92,15 @@ Contract:
   fails closed elsewhere. Qwen3.8 otherwise uses its upstream xhigh transition.
   DeepSeek ordinary chat is already non-thinking, so the flag is an idempotent
   guarantee there.
-- `--reasoning-effort low|medium|xhigh` is restricted to the validated Qwen3.8
-  27B identity and structured `--user`/`--messages` input. Omission remains
-  upstream xhigh; low injects the upstream brief-thinking instruction; medium
-  opens thinking without an effort instruction. `high`, unknown values, raw
-  input, `--no-thinking`, and other model identities fail closed.
+- `--reasoning-effort` is resolved by model family for structured
+  `--user`/`--messages` input. Validated Qwen3.8 accepts
+  `low|medium|xhigh`, defaults to upstream xhigh, and rejects `high`. Muse
+  Glimmer accepts exact `low|medium|high|xhigh` reasoning strengths and defaults
+  to `high`. Unknown values, raw input, and `--no-thinking` combinations fail
+  closed.
+- Muse Glimmer uses the released `temperature=1`, `top_p=.95`, `top_k=64`,
+  `min_p=0` preset. Each explicitly supplied sampling flag overrides only its
+  corresponding field; the request seed remains explicit and deterministic.
 - Modern messages accept only the strict ordinary-chat subset: optional leading
   system, alternating user/assistant turns, and a final user turn. Unknown
   fields, wrapper metadata, unsupported roles, and structured assistant
@@ -104,7 +108,9 @@ Contract:
 - The Qwen3.8 surface is text-only. Image content arrays, developer/tool roles,
   structured calls/results, response formats, and projector execution remain
   outside this contract.
-- Existing flat flags retain their current parsing and runtime semantics.
+- Existing flat flags retain their parsing semantics. Omitted sampling values
+  now resolve after family detection, so Muse flat and modern invocations both
+  receive its released preset while explicit values remain unchanged.
 
 The short root help should lead with commands and copy-ready examples. The long
 help may retain the expanded documented legacy/research flag surface.

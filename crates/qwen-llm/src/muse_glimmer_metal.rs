@@ -133,6 +133,136 @@ pub fn encode_muse_glimmer_rope_adjacent_pair_in_place_f32(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn encode_muse_glimmer_rope_adjacent_pair_rows_in_place_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key: &MetalTensor,
+    query_head_count: usize,
+    key_head_count: usize,
+    head_dim: usize,
+    row_count: usize,
+    base_position: usize,
+    theta: f32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "muse_glimmer_rope_rows";
+    if query_head_count == 0
+        || key_head_count == 0
+        || head_dim == 0
+        || !head_dim.is_multiple_of(2)
+        || row_count == 0
+    {
+        return bad_shape(
+            KERNEL,
+            format!(
+                "head counts, even head_dim, and rows must be nonzero, got q={query_head_count} k={key_head_count} dim={head_dim} rows={row_count}"
+            ),
+        );
+    }
+    if !theta.is_finite() || theta <= 0.0 {
+        return bad_shape(
+            KERNEL,
+            format!("theta must be finite and positive, got {theta}"),
+        );
+    }
+    let last_position =
+        base_position
+            .checked_add(row_count - 1)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "position range overflow".into(),
+            })?;
+    let base_position_u32 = checked_u32(KERNEL, base_position, "base position")?;
+    checked_u32(KERNEL, last_position, "last position")?;
+
+    let query_width = checked_elements(KERNEL, query_head_count, head_dim, "query width")?;
+    let key_width = checked_elements(KERNEL, key_head_count, head_dim, "key width")?;
+    let query_elements = checked_elements(KERNEL, row_count, query_width, "query elements")?;
+    let key_elements = checked_elements(KERNEL, row_count, key_width, "key elements")?;
+    validate_writable_f32_shape(
+        query,
+        query_elements,
+        &[query_width as u64, row_count as u64],
+        "query",
+        KERNEL,
+    )?;
+    validate_writable_f32_shape(
+        key,
+        key_elements,
+        &[key_width as u64, row_count as u64],
+        "key",
+        KERNEL,
+    )?;
+    if metal_tensor_ranges_overlap(query, key) {
+        return bad_shape(KERNEL, "query and key storage ranges overlap".into());
+    }
+
+    let pairs_per_head = head_dim / 2;
+    let query_pairs_per_row = checked_elements(
+        KERNEL,
+        query_head_count,
+        pairs_per_head,
+        "query pairs per row",
+    )?;
+    let key_pairs_per_row =
+        checked_elements(KERNEL, key_head_count, pairs_per_head, "key pairs per row")?;
+    let query_pair_count =
+        checked_elements(KERNEL, row_count, query_pairs_per_row, "query pair count")?;
+    let key_pair_count = checked_elements(KERNEL, row_count, key_pairs_per_row, "key pair count")?;
+    let pair_count = query_pair_count
+        .checked_add(key_pair_count)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "combined pair count overflow".into(),
+        })?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        query_pair_count: u32,
+        pair_count: u32,
+        query_pairs_per_row: u32,
+        key_pairs_per_row: u32,
+        head_dim: u32,
+        base_position: u32,
+        theta: f32,
+    }
+
+    let pipeline = ctx.pipeline("kernel_muse_glimmer_rope_adjacent_pair_rows_in_place_f32")?;
+    enc.note_write(query);
+    enc.note_write(key);
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            query_pair_count: checked_u32(KERNEL, query_pair_count, "query pair count")?,
+            pair_count: checked_u32(KERNEL, pair_count, "pair count")?,
+            query_pairs_per_row: checked_u32(KERNEL, query_pairs_per_row, "query pairs per row")?,
+            key_pairs_per_row: checked_u32(KERNEL, key_pairs_per_row, "key pairs per row")?,
+            head_dim: checked_u32(KERNEL, head_dim, "head_dim")?,
+            base_position: base_position_u32,
+            theta,
+        },
+    );
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, key);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(256);
+    enc.dispatch(
+        MTLSize {
+            width: pair_count.div_ceil(threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn encode_muse_glimmer_rope_adjacent_pair_periodic_in_place_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1593,6 +1723,93 @@ mod tests {
         for (actual, raw) in read_f32(&logits).into_iter().zip(logits_source) {
             let expected = 20.0 * (raw * 0.196_116_13 / 20.0).tanh();
             assert!((actual - expected).abs() < 2e-5, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn packed_adjacent_rope_matches_scalar_rows_bitwise() {
+        const ROWS: usize = 5;
+        const QUERY_WIDTH: usize = MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM;
+        const KEY_WIDTH: usize = MUSE_GLIMMER_KV_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM;
+        const THETA: f32 = 500_000.0;
+
+        for base_position in [0, 2_046] {
+            let ctx = MetalContext::new().unwrap();
+            let query_source = (0..ROWS * QUERY_WIDTH)
+                .map(|index| ((index * 17 % 101) as f32 - 50.0) * 0.002)
+                .collect::<Vec<_>>();
+            let key_source = (0..ROWS * KEY_WIDTH)
+                .map(|index| ((index * 13 % 89) as f32 - 44.0) * 0.003)
+                .collect::<Vec<_>>();
+            let packed_query =
+                tensor_from_f32_shape(&ctx, &query_source, vec![QUERY_WIDTH as u64, ROWS as u64]);
+            let packed_key =
+                tensor_from_f32_shape(&ctx, &key_source, vec![KEY_WIDTH as u64, ROWS as u64]);
+            let scalar_query =
+                tensor_from_f32_shape(&ctx, &query_source, vec![QUERY_WIDTH as u64, ROWS as u64]);
+            let scalar_key =
+                tensor_from_f32_shape(&ctx, &key_source, vec![KEY_WIDTH as u64, ROWS as u64]);
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_muse_glimmer_rope_adjacent_pair_rows_in_place_f32(
+                &ctx,
+                &encoder,
+                &packed_query,
+                &packed_key,
+                MUSE_GLIMMER_QUERY_HEAD_COUNT,
+                MUSE_GLIMMER_KV_HEAD_COUNT,
+                MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+                ROWS,
+                base_position,
+                THETA,
+            )
+            .unwrap();
+            for row in 0..ROWS {
+                encode_muse_glimmer_rope_adjacent_pair_in_place_f32(
+                    &ctx,
+                    &encoder,
+                    &scalar_query
+                        .view_subrange((row * QUERY_WIDTH) as u64, vec![QUERY_WIDTH as u64]),
+                    &scalar_key.view_subrange((row * KEY_WIDTH) as u64, vec![KEY_WIDTH as u64]),
+                    MUSE_GLIMMER_QUERY_HEAD_COUNT,
+                    MUSE_GLIMMER_KV_HEAD_COUNT,
+                    MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+                    (base_position + row) as u32,
+                    THETA,
+                )
+                .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(
+                command.status(),
+                objc2_metal::MTLCommandBufferStatus::Completed
+            );
+
+            assert_eq!(
+                read_f32(&packed_query)
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                read_f32(&scalar_query)
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                "query base={base_position}"
+            );
+            assert_eq!(
+                read_f32(&packed_key)
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                read_f32(&scalar_key)
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                "key base={base_position}"
+            );
         }
     }
 

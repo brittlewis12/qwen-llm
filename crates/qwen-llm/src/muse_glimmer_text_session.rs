@@ -39,6 +39,7 @@ use crate::muse_glimmer_metal::{
     MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS, encode_muse_glimmer_attn_decode_f16kv_f32,
     encode_muse_glimmer_attn_prefill_f16kv_f32, encode_muse_glimmer_logit_softcap_f32,
     encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
+    encode_muse_glimmer_rope_adjacent_pair_rows_in_place_f32,
 };
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalModelWeights, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
@@ -1552,27 +1553,18 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.rms_epsilon,
             )?;
             if layer.sliding_attention {
-                for row in 0..rows {
-                    let position = start_position + row;
-                    let position_u32 = u32::try_from(position).map_err(|_| {
-                        MuseGlimmerTextSessionError::Invalid(
-                            "packed prefill position exceeds u32".into(),
-                        )
-                    })?;
-                    let query = packed_row(&packed.query, row, geometry.query_width);
-                    let key = packed_row(&packed.key, row, geometry.kv_width);
-                    encode_muse_glimmer_rope_adjacent_pair_in_place_f32(
-                        self.ctx,
-                        encoder,
-                        &query,
-                        &key,
-                        geometry.query_head_count,
-                        geometry.kv_head_count,
-                        geometry.head_dim,
-                        position_u32,
-                        self.weights.config.rope_theta,
-                    )?;
-                }
+                encode_muse_glimmer_rope_adjacent_pair_rows_in_place_f32(
+                    self.ctx,
+                    encoder,
+                    &packed.query,
+                    &packed.key,
+                    geometry.query_head_count,
+                    geometry.kv_head_count,
+                    geometry.head_dim,
+                    rows,
+                    start_position,
+                    self.weights.config.rope_theta,
+                )?;
             }
 
             let cache_write = geometry.cache_write_offset(layer_index, start_position)?;

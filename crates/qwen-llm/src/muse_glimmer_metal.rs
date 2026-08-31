@@ -327,10 +327,182 @@ pub fn encode_muse_glimmer_logit_softcap_f32(
     Ok(())
 }
 
-const MUSE_GLIMMER_LEGACY_ATTENTION_MAX_POSITIONS: usize = 7_168;
+pub const MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS: usize = 7_168;
 const MUSE_GLIMMER_QUERY_HEAD_COUNT: usize = 32;
 const MUSE_GLIMMER_KV_HEAD_COUNT: usize = 2;
 const MUSE_GLIMMER_ATTENTION_HEAD_DIM: usize = 128;
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_muse_glimmer_attn_prefill_f16kv_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key_cache: &MetalTensor,
+    value_cache: &MetalTensor,
+    output: &MetalTensor,
+    row_count: usize,
+    base_position: usize,
+    query_head_count: usize,
+    kv_head_count: usize,
+    head_dim: usize,
+    sliding_window: Option<usize>,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "muse_glimmer_attn_prefill";
+    if row_count == 0
+        || query_head_count == 0
+        || kv_head_count == 0
+        || head_dim == 0
+        || !query_head_count.is_multiple_of(kv_head_count)
+        || sliding_window == Some(0)
+    {
+        return bad_shape(
+            KERNEL,
+            format!(
+                "expected nonzero rows and GQA geometry, got rows={row_count} q={query_head_count} kv={kv_head_count} dim={head_dim} window={sliding_window:?}"
+            ),
+        );
+    }
+    let end_position =
+        base_position
+            .checked_add(row_count)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "position range overflow".into(),
+            })?;
+    let query_width = checked_elements(KERNEL, query_head_count, head_dim, "query width")?;
+    let kv_width = checked_elements(KERNEL, kv_head_count, head_dim, "KV width")?;
+    let query_elements = checked_elements(KERNEL, row_count, query_width, "query elements")?;
+    let cache_elements = checked_elements(KERNEL, end_position, kv_width, "cache elements")?;
+    let maximum_visible = sliding_window
+        .map(|window| end_position.min(window))
+        .unwrap_or(end_position);
+    if maximum_visible > MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS {
+        return bad_shape(
+            KERNEL,
+            format!(
+                "materialized packed attention supports at most {MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS} visible positions, got {maximum_visible}"
+            ),
+        );
+    }
+    validate_readable_f32(query, query_elements, "query", KERNEL)?;
+    validate_readable_f16(key_cache, cache_elements, "key cache", KERNEL)?;
+    validate_readable_f16(value_cache, cache_elements, "value cache", KERNEL)?;
+    validate_writable_f32(output, query_elements, "output", KERNEL)?;
+    for (source, name) in [
+        (query, "query"),
+        (key_cache, "key cache"),
+        (value_cache, "value cache"),
+    ] {
+        if metal_tensor_ranges_overlap(source, output) {
+            return bad_shape(KERNEL, format!("{name} overlaps output storage"));
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_count: u32,
+        base_position: u32,
+        end_position: u32,
+        kv_stride: u32,
+        query_head_count: u32,
+        kv_head_count: u32,
+        head_dim: u32,
+        sliding_window: u32,
+        scale: f32,
+    }
+    let pipeline = ctx.pipeline("kernel_muse_glimmer_attn_prefill_f16kv_f32")?;
+    let materialized_pipeline = ctx.pipeline("kernel_attn_decode_f16kv")?;
+    let threads = materialized_pipeline
+        .maxTotalThreadsPerThreadgroup()
+        .min(1024);
+    if pipeline.threadExecutionWidth() != 32
+        || materialized_pipeline.threadExecutionWidth() != 32
+        || threads < 32
+        || !threads.is_multiple_of(32)
+        || pipeline.maxTotalThreadsPerThreadgroup() < threads
+    {
+        return bad_shape(
+            KERNEL,
+            format!(
+                "packed attention requires the materialized kernel's positive multiple-of-32 thread geometry, got packed width/max={}/{} materialized width/threads={}/{}",
+                pipeline.threadExecutionWidth(),
+                pipeline.maxTotalThreadsPerThreadgroup(),
+                materialized_pipeline.threadExecutionWidth(),
+                threads,
+            ),
+        );
+    }
+    let simdgroups = threads / 32;
+    let scores_bytes = maximum_visible
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "score scratch byte count overflow".into(),
+        })?;
+    let reduction_bytes = (simdgroups * std::mem::size_of::<f32>()).max(32);
+    let dynamic_memory =
+        scores_bytes
+            .checked_add(reduction_bytes)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "threadgroup memory byte count overflow".into(),
+            })?;
+    let required_memory = pipeline
+        .staticThreadgroupMemoryLength()
+        .checked_add(dynamic_memory)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "total threadgroup memory byte count overflow".into(),
+        })?;
+    if required_memory > ctx.device.maxThreadgroupMemoryLength() {
+        return bad_shape(
+            KERNEL,
+            format!(
+                "packed attention requires {required_memory} threadgroup bytes, device exposes {}",
+                ctx.device.maxThreadgroupMemoryLength()
+            ),
+        );
+    }
+    enc.note_read(query);
+    enc.note_read(key_cache);
+    enc.note_read(value_cache);
+    enc.note_write(output);
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            row_count: checked_u32(KERNEL, row_count, "row count")?,
+            base_position: checked_u32(KERNEL, base_position, "base position")?,
+            end_position: checked_u32(KERNEL, end_position, "end position")?,
+            kv_stride: checked_u32(KERNEL, kv_width, "KV stride")?,
+            query_head_count: checked_u32(KERNEL, query_head_count, "query head count")?,
+            kv_head_count: checked_u32(KERNEL, kv_head_count, "KV head count")?,
+            head_dim: checked_u32(KERNEL, head_dim, "head dim")?,
+            sliding_window: checked_u32(KERNEL, sliding_window.unwrap_or(0), "sliding window")?,
+            scale: (head_dim as f32).sqrt().recip(),
+        },
+    );
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, key_cache);
+    enc.set_tensor(3, value_cache);
+    enc.set_tensor(4, output);
+    enc.set_threadgroup_memory(0, scores_bytes);
+    enc.set_threadgroup_memory(1, reduction_bytes);
+    enc.dispatch(
+        MTLSize {
+            width: query_head_count,
+            height: row_count,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn encode_muse_glimmer_attn_decode_f16kv_f32(
@@ -351,7 +523,7 @@ pub fn encode_muse_glimmer_attn_decode_f16kv_f32(
             "visible position count must be nonzero".into(),
         );
     }
-    if visible_positions <= MUSE_GLIMMER_LEGACY_ATTENTION_MAX_POSITIONS {
+    if visible_positions <= MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS {
         return encode_attn_decode_f16kv_f32(
             ctx,
             enc,
@@ -1014,14 +1186,14 @@ mod tests {
     }
 
     #[test]
-    fn muse_glimmer_attn_online_matches_legacy_inside_overlap() {
+    fn muse_glimmer_attn_online_matches_materialized_inside_overlap() {
         const POSITIONS: usize = 257;
         let ctx = MetalContext::new().unwrap();
         let (query_values, key_values, value_values) = attention_fixture(POSITIONS);
         let query = tensor_from_f32(&ctx, &query_values);
         let key = tensor_from_f16(&ctx, &key_values);
         let value = tensor_from_f16(&ctx, &value_values);
-        let legacy = tensor_from_f32(
+        let materialized = tensor_from_f32(
             &ctx,
             &vec![f32::NAN; MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM],
         );
@@ -1038,7 +1210,7 @@ mod tests {
             &query,
             &key,
             &value,
-            &legacy,
+            &materialized,
             MUSE_GLIMMER_QUERY_HEAD_COUNT,
             MUSE_GLIMMER_KV_HEAD_COUNT,
             MUSE_GLIMMER_ATTENTION_HEAD_DIM,
@@ -1062,30 +1234,129 @@ mod tests {
         command.commit();
         command.waitUntilCompleted();
 
-        let legacy = read_f32(&legacy);
+        let materialized = read_f32(&materialized);
         let online = read_f32(&online);
-        assert!(legacy.iter().all(|value| value.is_finite()));
+        assert!(materialized.iter().all(|value| value.is_finite()));
         assert!(online.iter().all(|value| value.is_finite()));
-        let max_abs = legacy
+        let max_abs = materialized
             .iter()
             .zip(&online)
             .map(|(left, right)| (left - right).abs())
             .fold(0.0_f32, f32::max);
-        let dot = legacy
+        let dot = materialized
             .iter()
             .zip(&online)
             .map(|(left, right)| left * right)
             .sum::<f32>();
-        let legacy_norm = legacy.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let materialized_norm = materialized
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
         let online_norm = online.iter().map(|value| value * value).sum::<f32>().sqrt();
-        let cosine = dot / (legacy_norm * online_norm);
+        let cosine = dot / (materialized_norm * online_norm);
         assert!(max_abs <= 5e-4, "max_abs={max_abs}");
         assert!(cosine >= 0.999_999, "cosine={cosine}");
     }
 
     #[test]
-    fn muse_glimmer_attn_online_crosses_legacy_limit_and_reads_tail() {
-        const POSITIONS: usize = MUSE_GLIMMER_LEGACY_ATTENTION_MAX_POSITIONS + 1;
+    fn muse_glimmer_packed_attention_matches_scalar_rows_bitwise() {
+        const ROWS: usize = 5;
+        const QUERY_WIDTH: usize = MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM;
+        const KV_WIDTH: usize = MUSE_GLIMMER_KV_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM;
+
+        for (base_position, sliding_window) in [(3, None), (2_046, Some(2_048)), (7_163, None)] {
+            let position_count = base_position + ROWS;
+            let ctx = MetalContext::new().unwrap();
+            let query_values = (0..ROWS * QUERY_WIDTH)
+                .map(|index| ((index * 17 % 101) as f32 - 50.0) * 0.002)
+                .collect::<Vec<_>>();
+            let cache_elements = position_count * KV_WIDTH;
+            let key_values = (0..cache_elements)
+                .map(|index| ((index * 13 % 89) as f32 - 44.0) * 0.003)
+                .collect::<Vec<_>>();
+            let value_values = (0..cache_elements)
+                .map(|index| ((index * 19 % 97) as f32 - 48.0) * 0.004)
+                .collect::<Vec<_>>();
+            let query =
+                tensor_from_f32_shape(&ctx, &query_values, vec![QUERY_WIDTH as u64, ROWS as u64]);
+            let key = tensor_from_f16(&ctx, &key_values);
+            let value = tensor_from_f16(&ctx, &value_values);
+            let packed =
+                MetalTensor::zeros_f32(&ctx, vec![QUERY_WIDTH as u64, ROWS as u64]).unwrap();
+            let scalar =
+                MetalTensor::zeros_f32(&ctx, vec![QUERY_WIDTH as u64, ROWS as u64]).unwrap();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_muse_glimmer_attn_prefill_f16kv_f32(
+                &ctx,
+                &encoder,
+                &query,
+                &key,
+                &value,
+                &packed,
+                ROWS,
+                base_position,
+                MUSE_GLIMMER_QUERY_HEAD_COUNT,
+                MUSE_GLIMMER_KV_HEAD_COUNT,
+                MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+                sliding_window,
+            )
+            .unwrap();
+            for row in 0..ROWS {
+                let end = base_position + row + 1;
+                let start = sliding_window
+                    .map(|window| end.saturating_sub(window))
+                    .unwrap_or(0);
+                let visible = end - start;
+                let query_row =
+                    query.view_subrange((row * QUERY_WIDTH) as u64, vec![QUERY_WIDTH as u64]);
+                let output_row =
+                    scalar.view_subrange((row * QUERY_WIDTH) as u64, vec![QUERY_WIDTH as u64]);
+                let key_view =
+                    key.view_subrange((start * KV_WIDTH) as u64, vec![(visible * KV_WIDTH) as u64]);
+                let value_view = value
+                    .view_subrange((start * KV_WIDTH) as u64, vec![(visible * KV_WIDTH) as u64]);
+                encode_attn_decode_f16kv_f32(
+                    &ctx,
+                    &encoder,
+                    &query_row,
+                    &key_view,
+                    &value_view,
+                    &output_row,
+                    MUSE_GLIMMER_QUERY_HEAD_COUNT,
+                    MUSE_GLIMMER_KV_HEAD_COUNT,
+                    MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+                    visible,
+                )
+                .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(
+                command.status(),
+                objc2_metal::MTLCommandBufferStatus::Completed
+            );
+
+            assert_eq!(
+                read_f32(&packed)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&scalar)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "base={base_position} window={sliding_window:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_glimmer_attn_online_crosses_materialized_limit_and_reads_tail() {
+        const POSITIONS: usize = MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS + 1;
         let ctx = MetalContext::new().unwrap();
         let query_values =
             vec![0.0; MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM];

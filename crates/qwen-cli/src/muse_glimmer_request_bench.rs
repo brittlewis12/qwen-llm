@@ -8,7 +8,7 @@ use qwen_llm::muse_glimmer::{
 use qwen_llm::muse_glimmer_prompt::MuseGlimmerReasoningStrength;
 use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerTextRunner};
-use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_PACKED_PREFILL_QUANTUM;
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
 use qwen_llm::tokenizer::{LlamaCppTokenizer, token_ids_sha256_i32le};
 use serde::Serialize;
@@ -892,11 +892,11 @@ fn required_forwards(prompt_tokens: usize, max_tokens: usize) -> Result<usize> {
 
 fn muse_prefill_mode(prompt_tokens: usize) -> &'static str {
     let packed_tokens =
-        prompt_tokens / MUSE_GLIMMER_PACKED_PREFILL_TOKENS * MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+        prompt_tokens / MUSE_GLIMMER_PACKED_PREFILL_QUANTUM * MUSE_GLIMMER_PACKED_PREFILL_QUANTUM;
     match (packed_tokens, prompt_tokens - packed_tokens) {
         (0, _) => "scalar_full_logits",
-        (_, 0) => "packed16_exact_full_logits",
-        _ => "packed16_exact_plus_scalar_tail_full_logits",
+        (_, 0) => "packed_exact_full_logits",
+        _ => "packed_exact_plus_scalar_tail_full_logits",
     }
 }
 
@@ -1086,10 +1086,10 @@ mod tests {
     #[test]
     fn prefill_metadata_names_the_executed_prompt_shape() {
         assert_eq!(muse_prefill_mode(15), "scalar_full_logits");
-        assert_eq!(muse_prefill_mode(16), "packed16_exact_full_logits");
+        assert_eq!(muse_prefill_mode(16), "packed_exact_full_logits");
         assert_eq!(
             muse_prefill_mode(17),
-            "packed16_exact_plus_scalar_tail_full_logits"
+            "packed_exact_plus_scalar_tail_full_logits"
         );
     }
 

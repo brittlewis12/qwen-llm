@@ -154,6 +154,104 @@ kernel void kernel_muse_glimmer_attn_decode_online_f16kv_h128_f32(
     output4[lane] = accumulator / denominator;
 }
 
+struct muse_glimmer_attn_prefill_args {
+    uint n_rows;
+    uint base_pos;
+    uint n_pos;
+    uint kv_stride;
+    uint n_q_heads;
+    uint n_kv_heads;
+    uint head_dim;
+    uint sliding_window;
+    float scale;
+};
+
+// Exact packed form of the established materialized-score decode kernel. One
+// grid dispatch covers every packed query row; each threadgroup retains the
+// same per-head score, reduction, and value-accumulation order as scalar
+// attention. A zero sliding window denotes full attention.
+kernel void kernel_muse_glimmer_attn_prefill_f16kv_f32(
+        constant muse_glimmer_attn_prefill_args & args [[buffer(0)]],
+        device const float * query [[buffer(1)]],
+        device const half * key_cache [[buffer(2)]],
+        device const half * value_cache [[buffer(3)]],
+        device float * output [[buffer(4)]],
+        threadgroup float * scores [[threadgroup(0)]],
+        threadgroup float * shred [[threadgroup(1)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint3 tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint3 ntg [[threads_per_threadgroup]]) {
+    const uint query_head = tgpig.x;
+    const uint row = tgpig.y;
+    const uint thread_index = tpitg.x;
+    const uint thread_count = ntg.x;
+    if (query_head >= args.n_q_heads || row >= args.n_rows) return;
+
+    const uint visible_end = min(args.n_pos, args.base_pos + row + 1u);
+    const uint visible_start = args.sliding_window != 0u && visible_end > args.sliding_window
+        ? visible_end - args.sliding_window
+        : 0u;
+    const uint visible_positions = visible_end - visible_start;
+    const uint group = args.n_q_heads / args.n_kv_heads;
+    const uint kv_head = query_head / group;
+    device const float * query_head_values = query
+        + ((ulong)row * args.n_q_heads + query_head) * args.head_dim;
+    device float * output_head = output
+        + ((ulong)row * args.n_q_heads + query_head) * args.head_dim;
+    device const half * visible_keys = key_cache + (ulong)visible_start * args.kv_stride;
+    device const half * visible_values = value_cache + (ulong)visible_start * args.kv_stride;
+
+    for (uint position = thread_index; position < visible_positions; position += thread_count) {
+        device const half * key = visible_keys
+            + (ulong)position * args.kv_stride
+            + (ulong)kv_head * args.head_dim;
+        float score = 0.0f;
+        for (uint dim = 0; dim < args.head_dim; ++dim) {
+            score += query_head_values[dim] * (float)key[dim];
+        }
+        scores[position] = score * args.scale;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float local_max = -INFINITY;
+    for (uint position = thread_index; position < visible_positions; position += thread_count) {
+        local_max = max(local_max, scores[position]);
+    }
+    local_max = simd_max(local_max);
+    if (tiisg == 0) shred[sgitg] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    local_max = tiisg < (thread_count + 31u) / 32u ? shred[tiisg] : -INFINITY;
+    local_max = simd_max(local_max);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float local_sum = 0.0f;
+    for (uint position = thread_index; position < visible_positions; position += thread_count) {
+        const float weight = exp(scores[position] - local_max);
+        scores[position] = weight;
+        local_sum += weight;
+    }
+    local_sum = simd_sum(local_sum);
+    if (tiisg == 0) shred[sgitg] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    local_sum = tiisg < (thread_count + 31u) / 32u ? shred[tiisg] : 0.0f;
+    local_sum = simd_sum(local_sum);
+    const float inverse_sum = 1.0f / local_sum;
+
+    for (uint dim = thread_index; dim < args.head_dim; dim += thread_count) {
+        float accumulator = 0.0f;
+        for (uint position = 0; position < visible_positions; ++position) {
+            accumulator += scores[position] * (float)visible_values[
+                (ulong)position * args.kv_stride
+                + (ulong)kv_head * args.head_dim
+                + dim
+            ];
+        }
+        output_head[dim] = accumulator * inverse_sum;
+    }
+}
+
 constant constexpr uint MUSE_GLIMMER_VJP_MAX_TOKENS = 16;
 constant constexpr uint MUSE_GLIMMER_SIMD_WIDTH = 32;
 

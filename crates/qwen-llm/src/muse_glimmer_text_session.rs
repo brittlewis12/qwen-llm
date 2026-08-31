@@ -2,9 +2,12 @@
 //!
 //! The initial path uses native Q8_0/BF16 projections and a contiguous F16 KV
 //! cache. Sliding layers use a suffix view while full-attention layers use the
-//! entire prefix. Ordinary prefill batches complete 16-token chunks while
-//! retaining the scalar path for decode, tails, captures, and interventions.
+//! entire prefix. Ordinary prefill batches superchunks of up to 128 tokens on
+//! a 16-token quantum while retaining the scalar path for decode, tails,
+//! captures, and interventions.
 
+#[cfg(test)]
+use crate::metal::encode_mat_mat_q8_0_f32;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTensor,
     PostBlockIntervention, encode_add_inplace_f32, encode_copy_offset_f32, encode_get_rows_f32,
@@ -33,7 +36,8 @@ use crate::muse_glimmer_lens_fit::{
     muse_glimmer_one_full_attention_block_vjp_query_batch,
 };
 use crate::muse_glimmer_metal::{
-    encode_muse_glimmer_attn_decode_f16kv_f32, encode_muse_glimmer_logit_softcap_f32,
+    MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS, encode_muse_glimmer_attn_decode_f16kv_f32,
+    encode_muse_glimmer_attn_prefill_f16kv_f32, encode_muse_glimmer_logit_softcap_f32,
     encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
 };
 use crate::muse_glimmer_residency::{
@@ -47,7 +51,8 @@ use objc2_metal::{
 
 pub const MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
-pub const MUSE_GLIMMER_PACKED_PREFILL_TOKENS: usize = 16;
+pub const MUSE_GLIMMER_PACKED_PREFILL_QUANTUM: usize = 16;
+pub const MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS: usize = 128;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerPostBlockForward {
@@ -372,23 +377,47 @@ impl MuseGlimmerTextSessionMemoryPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MuseGlimmerPrefillPlan {
     packed_chunks: usize,
+    packed_tokens: usize,
     scalar_tail: usize,
 }
 
 impl MuseGlimmerPrefillPlan {
     fn for_tokens(token_count: usize) -> Self {
+        let packed_tokens =
+            token_count / MUSE_GLIMMER_PACKED_PREFILL_QUANTUM * MUSE_GLIMMER_PACKED_PREFILL_QUANTUM;
         Self {
-            packed_chunks: token_count / MUSE_GLIMMER_PACKED_PREFILL_TOKENS,
-            scalar_tail: token_count % MUSE_GLIMMER_PACKED_PREFILL_TOKENS,
+            packed_chunks: packed_tokens / MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS
+                + usize::from(
+                    !packed_tokens.is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS),
+                ),
+            packed_tokens,
+            scalar_tail: token_count - packed_tokens,
         }
     }
 
     fn packed_tokens(self) -> usize {
-        self.packed_chunks * MUSE_GLIMMER_PACKED_PREFILL_TOKENS
+        self.packed_tokens
     }
 }
 
 struct MuseGlimmerPackedPrefillWorkspace {
+    ids: MetalTensor,
+    residual: MetalTensor,
+    normed: MetalTensor,
+    branch_raw: MetalTensor,
+    branch_normed: MetalTensor,
+    query_raw: MetalTensor,
+    query: MetalTensor,
+    key_raw: MetalTensor,
+    key: MetalTensor,
+    value: MetalTensor,
+    attention_gate: MetalTensor,
+    attention_output: MetalTensor,
+    feed_forward_gate: MetalTensor,
+    feed_forward_up: MetalTensor,
+}
+
+struct MuseGlimmerPackedPrefillViews {
     ids: MetalTensor,
     residual: MetalTensor,
     normed: MetalTensor,
@@ -410,7 +439,7 @@ impl MuseGlimmerPackedPrefillWorkspace {
         ctx: &MetalContext,
         geometry: &MuseGlimmerTextGeometry,
     ) -> Result<Self, MuseGlimmerTextSessionError> {
-        let rows = MUSE_GLIMMER_PACKED_PREFILL_TOKENS as u64;
+        let rows = MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS as u64;
         let hidden = geometry.hidden_size as u64;
         let query = geometry.query_width as u64;
         let kv = geometry.kv_width as u64;
@@ -453,9 +482,16 @@ impl MuseGlimmerPackedPrefillWorkspace {
     }
 
     fn write_tokens(&self, tokens: &[u32]) -> Result<(), MuseGlimmerTextSessionError> {
-        if tokens.len() != MUSE_GLIMMER_PACKED_PREFILL_TOKENS {
+        if tokens.len() < MUSE_GLIMMER_PACKED_PREFILL_QUANTUM
+            || tokens.len() > MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS
+            || !tokens
+                .len()
+                .is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_QUANTUM)
+        {
             return invalid(format!(
-                "packed prefill requires exactly {MUSE_GLIMMER_PACKED_PREFILL_TOKENS} tokens, got {}",
+                "packed prefill requires a multiple of {MUSE_GLIMMER_PACKED_PREFILL_QUANTUM} tokens in {}..={}, got {}",
+                MUSE_GLIMMER_PACKED_PREFILL_QUANTUM,
+                MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS,
                 tokens.len()
             ));
         }
@@ -477,6 +513,41 @@ impl MuseGlimmerPackedPrefillWorkspace {
             unsafe { pointer.add(index).write(token) };
         }
         Ok(())
+    }
+
+    fn views(
+        &self,
+        geometry: &MuseGlimmerTextGeometry,
+        rows: usize,
+    ) -> Result<MuseGlimmerPackedPrefillViews, MuseGlimmerTextSessionError> {
+        if rows < MUSE_GLIMMER_PACKED_PREFILL_QUANTUM
+            || rows > MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS
+            || !rows.is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_QUANTUM)
+        {
+            return invalid(format!(
+                "packed workspace rows must be a multiple of {MUSE_GLIMMER_PACKED_PREFILL_QUANTUM} in {}..={}, got {rows}",
+                MUSE_GLIMMER_PACKED_PREFILL_QUANTUM, MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS,
+            ));
+        }
+        let view = |tensor: &MetalTensor, width: usize| {
+            tensor.view_subrange(0, vec![width as u64, rows as u64])
+        };
+        Ok(MuseGlimmerPackedPrefillViews {
+            ids: self.ids.view_subrange(0, vec![rows as u64]),
+            residual: view(&self.residual, geometry.hidden_size),
+            normed: view(&self.normed, geometry.hidden_size),
+            branch_raw: view(&self.branch_raw, geometry.hidden_size),
+            branch_normed: view(&self.branch_normed, geometry.hidden_size),
+            query_raw: view(&self.query_raw, geometry.query_width),
+            query: view(&self.query, geometry.query_width),
+            key_raw: view(&self.key_raw, geometry.kv_width),
+            key: view(&self.key, geometry.kv_width),
+            value: view(&self.value, geometry.kv_width),
+            attention_gate: view(&self.attention_gate, geometry.query_width),
+            attention_output: view(&self.attention_output, geometry.query_width),
+            feed_forward_gate: view(&self.feed_forward_gate, geometry.feed_forward_size),
+            feed_forward_up: view(&self.feed_forward_up, geometry.feed_forward_size),
+        })
     }
 }
 
@@ -690,6 +761,39 @@ impl MuseGlimmerTextSession {
         ))
     }
 
+    fn cache_prefix_views(
+        &self,
+        layer: usize,
+        end_position: usize,
+    ) -> Result<(MetalTensor, MetalTensor), MuseGlimmerTextSessionError> {
+        if layer >= self.geometry.layer_count
+            || end_position == 0
+            || end_position > self.geometry.capacity
+        {
+            return invalid(format!(
+                "cache prefix layer/end {layer}/{end_position} exceeds {}/{}",
+                self.geometry.layer_count, self.geometry.capacity
+            ));
+        }
+        let offset = layer
+            .checked_mul(self.geometry.capacity)
+            .and_then(|value| value.checked_mul(self.geometry.kv_width))
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("cache prefix offset overflow".into())
+            })?;
+        let elements = end_position
+            .checked_mul(self.geometry.kv_width)
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("cache prefix length overflow".into())
+            })?;
+        Ok((
+            self.key_cache
+                .view_subrange(offset as u64, vec![elements as u64]),
+            self.value_cache
+                .view_subrange(offset as u64, vec![elements as u64]),
+        ))
+    }
+
     fn read_logits(&self) -> Vec<f32> {
         let mut logits = vec![0.0_f32; self.geometry.vocab_size];
         unsafe {
@@ -711,6 +815,8 @@ impl MuseGlimmerTextSession {
 pub struct MuseGlimmerTextForward<'ctx, 'model> {
     ctx: &'ctx MetalContext,
     weights: MuseGlimmerMetalModelWeights<'model>,
+    #[cfg(test)]
+    packed_q8_mat_mat: bool,
 }
 
 pub struct MuseGlimmerPreparedF16Transport {
@@ -725,7 +831,23 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     ) -> Result<Self, MuseGlimmerTextSessionError> {
         resident.validate_context(ctx)?;
         let weights = MuseGlimmerMetalModelWeights::bind(resident)?;
-        Ok(Self { ctx, weights })
+        Ok(Self {
+            ctx,
+            weights,
+            #[cfg(test)]
+            packed_q8_mat_mat: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn new_with_packed_q8_mat_mat(
+        ctx: &'ctx MetalContext,
+        resident: &'model MuseGlimmerMetalWeights,
+        packed_q8_mat_mat: bool,
+    ) -> Result<Self, MuseGlimmerTextSessionError> {
+        let mut forward = Self::new(ctx, resident)?;
+        forward.packed_q8_mat_mat = packed_q8_mat_mat;
+        Ok(forward)
     }
 
     pub fn forward_token(
@@ -942,15 +1064,22 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         }
         let plan = MuseGlimmerPrefillPlan::for_tokens(tokens.len());
         let (packed_tokens, scalar_tokens) = tokens.split_at(plan.packed_tokens());
-        let (packed_chunks, packed_remainder) =
-            packed_tokens.as_chunks::<MUSE_GLIMMER_PACKED_PREFILL_TOKENS>();
-        debug_assert!(packed_remainder.is_empty());
         let mut logits = None;
-        for (chunk_index, chunk) in packed_chunks.iter().enumerate() {
+        let mut chunk_start = 0;
+        let mut chunk_index = 0;
+        while chunk_start < packed_tokens.len() {
+            let chunk_end = chunk_start
+                .checked_add(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS)
+                .unwrap_or(usize::MAX)
+                .min(packed_tokens.len());
+            let chunk = &packed_tokens[chunk_start..chunk_end];
             checkpoint()?;
             let produce_logits = plan.scalar_tail == 0 && chunk_index + 1 == plan.packed_chunks;
             logits = self.execute_packed_chunk(chunk, session, produce_logits)?;
+            chunk_start = chunk_end;
+            chunk_index += 1;
         }
+        debug_assert_eq!(chunk_index, plan.packed_chunks);
         for (index, &token) in scalar_tokens.iter().enumerate() {
             checkpoint()?;
             logits = self.execute_token(token, session, index + 1 == scalar_tokens.len())?;
@@ -1256,9 +1385,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
         session.ensure_usable()?;
         self.validate_session_geometry(session)?;
-        if tokens.len() != MUSE_GLIMMER_PACKED_PREFILL_TOKENS {
+        if tokens.len() < MUSE_GLIMMER_PACKED_PREFILL_QUANTUM
+            || tokens.len() > MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS
+            || !tokens
+                .len()
+                .is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_QUANTUM)
+        {
             return invalid(format!(
-                "packed prefill requires exactly {MUSE_GLIMMER_PACKED_PREFILL_TOKENS} tokens, got {}",
+                "packed prefill requires a multiple of {MUSE_GLIMMER_PACKED_PREFILL_QUANTUM} tokens in {}..={}, got {}",
+                MUSE_GLIMMER_PACKED_PREFILL_QUANTUM,
+                MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS,
                 tokens.len()
             ));
         }
@@ -1292,7 +1428,13 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         })?;
         let encode_result = (|| {
             let encoder = KernelEncoder::begin(&command);
-            self.encode_packed_chunk_graph(&encoder, start_position, session, produce_logits)?;
+            self.encode_packed_chunk_graph(
+                &encoder,
+                start_position,
+                tokens.len(),
+                session,
+                produce_logits,
+            )?;
             encoder.end();
             Ok::<(), MuseGlimmerTextSessionError>(())
         })();
@@ -1315,12 +1457,12 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         &self,
         encoder: &KernelEncoder,
         start_position: usize,
+        rows: usize,
         session: &MuseGlimmerTextSession,
         produce_logits: bool,
     ) -> Result<(), MuseGlimmerTextSessionError> {
         let geometry = &session.geometry;
-        let packed = &session.packed;
-        let rows = MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+        let packed = session.packed.views(geometry, rows)?;
 
         encode_get_rows_f32(
             self.ctx,
@@ -1444,25 +1586,50 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 cache_write,
                 rows * geometry.kv_width,
             )?;
-            for row in 0..rows {
-                let position = start_position + row;
-                let query = packed_row(&packed.query, row, geometry.query_width);
-                let attention_output =
-                    packed_row(&packed.attention_output, row, geometry.query_width);
-                let (key_cache, value_cache, visible_positions) =
-                    session.cache_views(layer_index, position, layer.sliding_attention)?;
-                encode_muse_glimmer_attn_decode_f16kv_f32(
+            let end_position = start_position + rows;
+            let maximum_visible = if layer.sliding_attention {
+                end_position.min(geometry.sliding_window)
+            } else {
+                end_position
+            };
+            if maximum_visible <= MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS {
+                let (key_cache, value_cache) =
+                    session.cache_prefix_views(layer_index, end_position)?;
+                encode_muse_glimmer_attn_prefill_f16kv_f32(
                     self.ctx,
                     encoder,
-                    &query,
+                    &packed.query,
                     &key_cache,
                     &value_cache,
-                    &attention_output,
+                    &packed.attention_output,
+                    rows,
+                    start_position,
                     geometry.query_head_count,
                     geometry.kv_head_count,
                     geometry.head_dim,
-                    visible_positions,
+                    layer.sliding_attention.then_some(geometry.sliding_window),
                 )?;
+            } else {
+                for row in 0..rows {
+                    let position = start_position + row;
+                    let query = packed_row(&packed.query, row, geometry.query_width);
+                    let attention_output =
+                        packed_row(&packed.attention_output, row, geometry.query_width);
+                    let (key_cache, value_cache, visible_positions) =
+                        session.cache_views(layer_index, position, layer.sliding_attention)?;
+                    encode_muse_glimmer_attn_decode_f16kv_f32(
+                        self.ctx,
+                        encoder,
+                        &query,
+                        &key_cache,
+                        &value_cache,
+                        &attention_output,
+                        geometry.query_head_count,
+                        geometry.kv_head_count,
+                        geometry.head_dim,
+                        visible_positions,
+                    )?;
+                }
             }
             encode_sigmoid_mul_f32(
                 self.ctx,
@@ -1574,6 +1741,13 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         rows: usize,
     ) -> Result<(), MuseGlimmerTextSessionError> {
         if weight.dtype == GgmlType::Q8_0 {
+            #[cfg(test)]
+            if self.packed_q8_mat_mat {
+                encode_mat_mat_q8_0_f32(
+                    self.ctx, encoder, weight, input, output, n_in, n_out, rows,
+                )?;
+                return Ok(());
+            }
             encode_mat_vec_q8_0_batch_f32(
                 self.ctx, encoder, weight, input, output, n_in, n_out, rows,
             )?;
@@ -2242,7 +2416,7 @@ fn session_allocation_specs(
     specs.push((
         "session.packed.ids".into(),
         checked_bytes(
-            MUSE_GLIMMER_PACKED_PREFILL_TOKENS,
+            MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS,
             std::mem::size_of::<i32>(),
             "session.packed.ids",
         )?,
@@ -2311,7 +2485,7 @@ fn checked_packed_f32_bytes(
     label: &str,
 ) -> Result<u64, MuseGlimmerTextSessionError> {
     let elements = row_width
-        .checked_mul(MUSE_GLIMMER_PACKED_PREFILL_TOKENS)
+        .checked_mul(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS)
         .ok_or_else(|| {
             MuseGlimmerTextSessionError::Invalid(format!("{label} packed element count overflow"))
         })?;
@@ -2418,7 +2592,7 @@ mod tests {
         let plan = MuseGlimmerTextSessionMemoryPlan::for_geometry(&ctx, &geometry).unwrap();
         let cache_bytes = 2_u64 * 52 * 2_048 * 256 * 2;
         assert!(plan.logical_bytes() > cache_bytes);
-        assert!(plan.logical_bytes() < cache_bytes + 10 * 1024 * 1024);
+        assert!(plan.logical_bytes() < cache_bytes + 64 * 1024 * 1024);
         assert!(plan.priced_upper_bytes() >= plan.logical_bytes());
         assert_eq!(plan.allocations().len(), 32);
         assert!(
@@ -2441,19 +2615,24 @@ mod tests {
     }
 
     #[test]
-    fn prefill_plan_uses_complete_sixteen_token_chunks_and_scalar_tail() {
-        for (tokens, packed_chunks, scalar_tail) in [
-            (0, 0, 0),
-            (1, 0, 1),
-            (15, 0, 15),
-            (16, 1, 0),
-            (17, 1, 1),
-            (31, 1, 15),
-            (32, 2, 0),
-            (6_229, 389, 5),
+    fn prefill_plan_uses_128_token_superchunks_and_sixteen_token_quantum() {
+        for (tokens, packed_chunks, packed_tokens, scalar_tail) in [
+            (0, 0, 0, 0),
+            (1, 0, 0, 1),
+            (15, 0, 0, 15),
+            (16, 1, 16, 0),
+            (17, 1, 16, 1),
+            (31, 1, 16, 15),
+            (32, 1, 32, 0),
+            (127, 1, 112, 15),
+            (128, 1, 128, 0),
+            (144, 2, 144, 0),
+            (256, 2, 256, 0),
+            (6_229, 49, 6_224, 5),
         ] {
             let plan = MuseGlimmerPrefillPlan::for_tokens(tokens);
             assert_eq!(plan.packed_chunks, packed_chunks, "tokens={tokens}");
+            assert_eq!(plan.packed_tokens(), packed_tokens, "tokens={tokens}");
             assert_eq!(plan.scalar_tail, scalar_tail, "tokens={tokens}");
             assert_eq!(
                 plan.packed_tokens() + plan.scalar_tail,
@@ -2468,7 +2647,7 @@ mod tests {
         let ctx = MetalContext::new().unwrap();
         let n_in = 64;
         let n_out = 7;
-        let rows = MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+        let rows = MUSE_GLIMMER_PACKED_PREFILL_QUANTUM;
         let mut weight_bytes = Vec::with_capacity(n_out * (n_in / 32) * 34);
         for output in 0..n_out {
             for block in 0..n_in / 32 {
@@ -2700,6 +2879,58 @@ mod tests {
 
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn packed_q8_prefill_n144_superchunk_state_matches_scalar_bitwise() {
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
+            .expect("qualify and plan Muse Q8 target");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit Muse Q8 residency");
+        let realized = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .expect("realize Muse Q8 weights");
+        let weights = realized.into_weights();
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).expect("bind Muse forward");
+        let mut scalar = MuseGlimmerTextSession::new(&ctx, weights.config(), 145)
+            .expect("allocate scalar session");
+        let mut packed = MuseGlimmerTextSession::new(&ctx, weights.config(), 145)
+            .expect("allocate packed session");
+        let tokens = std::iter::once(weights.config().bos_token_id)
+            .chain((1..145).map(|index| 1_000 + index))
+            .collect::<Vec<_>>();
+
+        let mut scalar_endpoint = None;
+        for (index, &token) in tokens[..144].iter().enumerate() {
+            scalar_endpoint = forward
+                .execute_token(token, &mut scalar, index == 143)
+                .expect("run scalar prefill token");
+        }
+        let scalar_endpoint = scalar_endpoint.expect("produce scalar endpoint logits");
+        let packed_endpoint = forward
+            .prefill(&tokens[..144], &mut packed)
+            .expect("run 128-plus-16 packed prefill");
+        assert_logits_bitwise_equal("N=144 packed endpoint", &packed_endpoint, &scalar_endpoint);
+        assert_eq!(scalar.next_position(), 144);
+        assert_eq!(packed.next_position(), 144);
+
+        let scalar_continuation = forward
+            .forward_token(tokens[144], &mut scalar)
+            .expect("run scalar baseline continuation");
+        let packed_continuation = forward
+            .forward_token(tokens[144], &mut packed)
+            .expect("run packed-state continuation");
+        assert_logits_bitwise_equal(
+            "N=144 packed scalar continuation",
+            &packed_continuation,
+            &scalar_continuation,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_prefill_n128_wall_screen() {
         use std::time::Instant;
 
@@ -2776,6 +3007,333 @@ mod tests {
             ratio <= 0.85,
             "packed N=128 wall ratio {ratio:.3} exceeds 0.85 promotion gate"
         );
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn packed_q8_mat_mat_n128_numerical_and_wall_screen() {
+        use std::time::Instant;
+
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let tokenizer = LlamaCppTokenizer::open(&path).expect("open Muse tokenizer");
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
+            .expect("qualify and plan Muse Q8 target");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit Muse Q8 residency");
+        let realized = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .expect("realize Muse Q8 weights");
+        let weights = realized.into_weights();
+        let exact_forward =
+            MuseGlimmerTextForward::new_with_packed_q8_mat_mat(&ctx, &weights, false)
+                .expect("bind exact Muse forward");
+        let matrix_forward =
+            MuseGlimmerTextForward::new_with_packed_q8_mat_mat(&ctx, &weights, true)
+                .expect("bind matrix Muse forward");
+        let prompt = "The quick brown fox jumps over the lazy dog while the patient astronomer records each changing constellation. ".repeat(32);
+        let mut tokens = tokenizer
+            .encode(&prompt, true)
+            .expect("tokenize natural Muse screen prompt")
+            .into_iter()
+            .map(|token| u32::try_from(token).expect("nonnegative Muse token"))
+            .collect::<Vec<_>>();
+        assert!(tokens.len() >= 128);
+        tokens.truncate(128);
+
+        let capacity = tokens.len() + 16;
+        let mut warm = MuseGlimmerTextSession::new(&ctx, weights.config(), 1)
+            .expect("allocate warmup session");
+        exact_forward
+            .forward_token(tokens[0], &mut warm)
+            .expect("warm resident weights");
+        let mut exact = MuseGlimmerTextSession::new(&ctx, weights.config(), capacity)
+            .expect("allocate exact screen session");
+        let mut matrix = MuseGlimmerTextSession::new(&ctx, weights.config(), capacity)
+            .expect("allocate matrix screen session");
+
+        let mut run_exact = || {
+            exact.reset().expect("reset exact screen session");
+            let started = Instant::now();
+            let logits = exact_forward
+                .prefill(&tokens, &mut exact)
+                .expect("run exact packed screen prompt");
+            (started.elapsed().as_secs_f64() * 1e3, logits)
+        };
+        let mut run_matrix = || {
+            matrix.reset().expect("reset matrix screen session");
+            let started = Instant::now();
+            let logits = matrix_forward
+                .prefill(&tokens, &mut matrix)
+                .expect("run matrix packed screen prompt");
+            (started.elapsed().as_secs_f64() * 1e3, logits)
+        };
+        let (exact_first_ms, exact_first) = run_exact();
+        let (matrix_first_ms, matrix_first) = run_matrix();
+        let (matrix_second_ms, matrix_second) = run_matrix();
+        let (exact_second_ms, exact_second) = run_exact();
+        assert_logits_bitwise_equal("exact replay", &exact_second, &exact_first);
+        assert_logits_bitwise_equal("matrix replay", &matrix_second, &matrix_first);
+
+        let endpoint = compare_logits(&matrix_second, &exact_second);
+        let exact_ms = (exact_first_ms + exact_second_ms) * 0.5;
+        let matrix_ms = (matrix_first_ms + matrix_second_ms) * 0.5;
+        let ratio = matrix_ms / exact_ms;
+        eprintln!(
+            "Muse Q8 matrix N=128 screen: exact={exact_ms:.2} ms matrix={matrix_ms:.2} ms ratio={ratio:.3} exact_tps={:.2} matrix_tps={:.2} endpoint={endpoint:?}",
+            tokens.len() as f64 / (exact_ms / 1e3),
+            tokens.len() as f64 / (matrix_ms / 1e3),
+        );
+        assert!(
+            ratio <= 0.75,
+            "matrix N=128 wall ratio {ratio:.3} exceeds 0.75 diagnostic performance gate"
+        );
+        assert!(endpoint.cosine > 0.999_99, "endpoint {endpoint:?}");
+        assert!(endpoint.relative_rms < 0.002, "endpoint {endpoint:?}");
+        assert!(endpoint.max_abs < 0.1, "endpoint {endpoint:?}");
+        assert_eq!(
+            endpoint.candidate_argmax, endpoint.reference_argmax,
+            "endpoint {endpoint:?}"
+        );
+
+        let packed = matrix
+            .packed
+            .views(&matrix.geometry, tokens.len())
+            .expect("bind matrix stage views");
+        let (projection_wall_ms, projection_gpu_ms) = measure_gpu_chain(&ctx, |encoder| {
+            for layer in &matrix_forward.weights.layers {
+                matrix_forward.encode_packed_projection(
+                    encoder,
+                    layer.attention_query,
+                    &packed.normed,
+                    &packed.query_raw,
+                    matrix.geometry.hidden_size,
+                    matrix.geometry.query_width,
+                    tokens.len(),
+                )?;
+                matrix_forward.encode_packed_projection(
+                    encoder,
+                    layer.attention_key,
+                    &packed.normed,
+                    &packed.key_raw,
+                    matrix.geometry.hidden_size,
+                    matrix.geometry.kv_width,
+                    tokens.len(),
+                )?;
+                matrix_forward.encode_packed_projection(
+                    encoder,
+                    layer.attention_value,
+                    &packed.normed,
+                    &packed.value,
+                    matrix.geometry.hidden_size,
+                    matrix.geometry.kv_width,
+                    tokens.len(),
+                )?;
+                matrix_forward.encode_packed_projection(
+                    encoder,
+                    layer.attention_gate,
+                    &packed.normed,
+                    &packed.attention_gate,
+                    matrix.geometry.hidden_size,
+                    matrix.geometry.query_width,
+                    tokens.len(),
+                )?;
+                matrix_forward.encode_packed_projection(
+                    encoder,
+                    layer.attention_output,
+                    &packed.attention_output,
+                    &packed.branch_raw,
+                    matrix.geometry.query_width,
+                    matrix.geometry.hidden_size,
+                    tokens.len(),
+                )?;
+                matrix_forward.encode_packed_projection(
+                    encoder,
+                    layer.feed_forward_gate,
+                    &packed.normed,
+                    &packed.feed_forward_gate,
+                    matrix.geometry.hidden_size,
+                    matrix.geometry.feed_forward_size,
+                    tokens.len(),
+                )?;
+                matrix_forward.encode_packed_projection(
+                    encoder,
+                    layer.feed_forward_up,
+                    &packed.normed,
+                    &packed.feed_forward_up,
+                    matrix.geometry.hidden_size,
+                    matrix.geometry.feed_forward_size,
+                    tokens.len(),
+                )?;
+                matrix_forward.encode_packed_projection(
+                    encoder,
+                    layer.feed_forward_down,
+                    &packed.feed_forward_gate,
+                    &packed.branch_raw,
+                    matrix.geometry.feed_forward_size,
+                    matrix.geometry.hidden_size,
+                    tokens.len(),
+                )?;
+            }
+            Ok(())
+        });
+        let (attention_wall_ms, attention_gpu_ms) = measure_gpu_chain(&ctx, |encoder| {
+            for (layer_index, layer) in matrix_forward.weights.layers.iter().enumerate() {
+                for row in 0..tokens.len() {
+                    let query = packed_row(&packed.query, row, matrix.geometry.query_width);
+                    let output =
+                        packed_row(&packed.attention_output, row, matrix.geometry.query_width);
+                    let (key_cache, value_cache, visible_positions) =
+                        matrix.cache_views(layer_index, row, layer.sliding_attention)?;
+                    encode_muse_glimmer_attn_decode_f16kv_f32(
+                        &ctx,
+                        encoder,
+                        &query,
+                        &key_cache,
+                        &value_cache,
+                        &output,
+                        matrix.geometry.query_head_count,
+                        matrix.geometry.kv_head_count,
+                        matrix.geometry.head_dim,
+                        visible_positions,
+                    )?;
+                }
+            }
+            Ok(())
+        });
+        let (rope_wall_ms, rope_gpu_ms) = measure_gpu_chain(&ctx, |encoder| {
+            for layer in &matrix_forward.weights.layers {
+                if !layer.sliding_attention {
+                    continue;
+                }
+                for row in 0..tokens.len() {
+                    let query = packed_row(&packed.query, row, matrix.geometry.query_width);
+                    let key = packed_row(&packed.key, row, matrix.geometry.kv_width);
+                    encode_muse_glimmer_rope_adjacent_pair_in_place_f32(
+                        &ctx,
+                        encoder,
+                        &query,
+                        &key,
+                        matrix.geometry.query_head_count,
+                        matrix.geometry.kv_head_count,
+                        matrix.geometry.head_dim,
+                        row as u32,
+                        matrix_forward.weights.config.rope_theta,
+                    )?;
+                }
+            }
+            Ok(())
+        });
+        eprintln!(
+            "Muse Q8 matrix N=128 isolated synthetic chains: projections wall/gpu={projection_wall_ms:.2}/{projection_gpu_ms:.2} ms attention={attention_wall_ms:.2}/{attention_gpu_ms:.2} ms rope={rope_wall_ms:.2}/{rope_gpu_ms:.2} ms nonadditive_wall_sum={:.2} ms full_wall={matrix_ms:.2} ms",
+            projection_wall_ms + attention_wall_ms + rope_wall_ms,
+        );
+
+        let mut exact_logits = exact_second;
+        let mut matrix_logits = matrix_second;
+        let mut minimum_cosine = endpoint.cosine;
+        let mut maximum_relative_rms = endpoint.relative_rms;
+        let mut maximum_absolute = endpoint.max_abs;
+        let mut greedy_ids = Vec::with_capacity(16);
+        for step in 0..16 {
+            let exact_token = greedy_argmax(&exact_logits);
+            let matrix_token = greedy_argmax(&matrix_logits);
+            assert_eq!(
+                matrix_token, exact_token,
+                "greedy token mismatch at step {step}"
+            );
+            greedy_ids.push(exact_token);
+            exact_logits = exact_forward
+                .forward_token(exact_token, &mut exact)
+                .expect("run exact scalar continuation");
+            matrix_logits = matrix_forward
+                .forward_token(matrix_token, &mut matrix)
+                .expect("run matrix scalar continuation");
+            let comparison = compare_logits(&matrix_logits, &exact_logits);
+            minimum_cosine = minimum_cosine.min(comparison.cosine);
+            maximum_relative_rms = maximum_relative_rms.max(comparison.relative_rms);
+            maximum_absolute = maximum_absolute.max(comparison.max_abs);
+        }
+        eprintln!(
+            "Muse Q8 matrix continuation: greedy_ids={greedy_ids:?} min_cosine={minimum_cosine:.9} max_relative_rms={maximum_relative_rms:.6e} max_abs={maximum_absolute:.6e}"
+        );
+        assert!(minimum_cosine > 0.999_99);
+        assert!(maximum_relative_rms < 0.006);
+        assert!(maximum_absolute < 0.3);
+    }
+
+    fn measure_gpu_chain<F>(ctx: &MetalContext, mut encode: F) -> (f64, f64)
+    where
+        F: FnMut(&KernelEncoder) -> Result<(), MuseGlimmerTextSessionError>,
+    {
+        let mut walls = Vec::with_capacity(3);
+        let mut gpu = Vec::with_capacity(3);
+        for iteration in 0..5 {
+            let started = std::time::Instant::now();
+            let command = ctx.queue.commandBuffer().expect("allocate stage command");
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).expect("encode stage chain");
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            if iteration >= 2 {
+                walls.push(started.elapsed().as_secs_f64() * 1e3);
+                gpu.push((command.GPUEndTime() - command.GPUStartTime()) * 1e3);
+            }
+        }
+        walls.sort_by(f64::total_cmp);
+        gpu.sort_by(f64::total_cmp);
+        (walls[1], gpu[1])
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct LogitComparison {
+        cosine: f64,
+        relative_rms: f64,
+        max_abs: f32,
+        candidate_argmax: u32,
+        reference_argmax: u32,
+    }
+
+    fn compare_logits(candidate: &[f32], reference: &[f32]) -> LogitComparison {
+        assert_eq!(candidate.len(), reference.len());
+        let mut dot = 0.0_f64;
+        let mut candidate_sq = 0.0_f64;
+        let mut reference_sq = 0.0_f64;
+        let mut difference_sq = 0.0_f64;
+        let mut max_abs = 0.0_f32;
+        for (&candidate, &reference) in candidate.iter().zip(reference) {
+            assert!(candidate.is_finite() && reference.is_finite());
+            dot += f64::from(candidate) * f64::from(reference);
+            candidate_sq += f64::from(candidate) * f64::from(candidate);
+            reference_sq += f64::from(reference) * f64::from(reference);
+            let difference = candidate - reference;
+            difference_sq += f64::from(difference) * f64::from(difference);
+            max_abs = max_abs.max(difference.abs());
+        }
+        LogitComparison {
+            cosine: dot / (candidate_sq.sqrt() * reference_sq.sqrt()),
+            relative_rms: (difference_sq / reference_sq).sqrt(),
+            max_abs,
+            candidate_argmax: greedy_argmax(candidate),
+            reference_argmax: greedy_argmax(reference),
+        }
+    }
+
+    fn greedy_argmax(logits: &[f32]) -> u32 {
+        logits
+            .iter()
+            .enumerate()
+            .max_by(|(left_index, left), (right_index, right)| {
+                left.total_cmp(right)
+                    .then_with(|| right_index.cmp(left_index))
+            })
+            .map(|(index, _)| index as u32)
+            .expect("nonempty logits")
     }
 
     fn assert_logits_bitwise_equal(label: &str, left: &[f32], right: &[f32]) {

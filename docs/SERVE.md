@@ -353,9 +353,10 @@ because client model-pickers probe it).
   Capture is best-effort and admitted against cache bytes plus Metal/process
   headroom; denial or failure is logged and generation continues. Both family
   caches enforce the configured byte budget.
-  Muse currently performs a fresh exact packed prefill in complete 16-token
-  chunks, followed by a scalar tail, into its reset resident session for every
-  request. It reports `cached_tokens=0`, `matched_tokens=0`, and `restore_ms=0`.
+  Muse currently performs a fresh exact packed prefill in superchunks of up to
+  128 tokens with a 16-token packing quantum, followed by a scalar tail, into
+  its reset resident session for every request. It reports `cached_tokens=0`,
+  `matched_tokens=0`, and `restore_ms=0`.
   Durable publication keeps the existing completed-else-prompt shadowing
   policy. **Durable publication remains parked**: current serve is RAM-only,
   so cross-restart warmth still re-prefills. `--durable-dual-publish` is

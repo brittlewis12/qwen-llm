@@ -69,7 +69,9 @@ use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, Mus
 use qwen_llm::muse_glimmer_prompt::MuseGlimmerReasoningStrength;
 use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
-use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+use qwen_llm::muse_glimmer_text_session::{
+    MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS, MUSE_GLIMMER_PACKED_PREFILL_QUANTUM,
+};
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
@@ -4268,15 +4270,18 @@ fn run_muse_glimmer_single_turn(
         stop_tokens == expected_stop_tokens,
         "Muse Glimmer release stop tokens must be EOS/EOT {expected_stop_tokens:?}, got {stop_tokens:?}"
     );
-    let prefill_packed_tokens = prompt_tokens.len() / MUSE_GLIMMER_PACKED_PREFILL_TOKENS
-        * MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+    let prefill_packed_tokens = prompt_tokens.len() / MUSE_GLIMMER_PACKED_PREFILL_QUANTUM
+        * MUSE_GLIMMER_PACKED_PREFILL_QUANTUM;
     let prefill_scalar_tail_commands = prompt_tokens.len() - prefill_packed_tokens;
-    let prefill_commands =
-        prefill_packed_tokens / MUSE_GLIMMER_PACKED_PREFILL_TOKENS + prefill_scalar_tail_commands;
+    let prefill_commands = prefill_packed_tokens / MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS
+        + usize::from(
+            !prefill_packed_tokens.is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS),
+        )
+        + prefill_scalar_tail_commands;
     let prefill_mode = match (prefill_packed_tokens, prefill_scalar_tail_commands) {
         (0, _) => "scalar_tail",
-        (_, 0) => "packed16_exact",
-        _ => "packed16_exact+scalar_tail",
+        (_, 0) => "packed_exact",
+        _ => "packed_exact+scalar_tail",
     };
 
     eprintln!(

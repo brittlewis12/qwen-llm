@@ -39,12 +39,15 @@ stdout defaults to a compact summary while the document is persisted. An
 explicit `--format json` always prints JSON; explicit `--format summary` is also
 allowed without an output file when discarding the full artifact is intentional.
 `--output PATH` atomically replaces a regular run file in an existing parent
-directory; symlink leaves are rejected. Run schema v3 records the runtime and
-model path, canonical plan path and parsed plan, input source, exact token IDs,
-resolved renderer/mode, authored byte/token spans, sampler settings, decoded
-text and stop reason, operation applications, requested and emitted live
-readouts, and native captures. Published Muse runs additionally bind the model
-content identity and exact selected lens matrices.
+directory; symlink leaves are rejected. Run schema v4 records the runtime and
+model path, canonical plan path, exact authored plan and canonical-JSON BLAKE3,
+numeric resolved execution plan, semantic position bindings, input source,
+exact token IDs, resolved renderer/mode, authored byte/token spans, sampler
+settings, decoded text and stop reason, operation applications, requested and
+emitted live readouts, and native captures. The offline validator recomputes the
+resolved plan and every binding from the authored plan plus rendering metadata.
+Published Muse runs additionally bind the model content identity and exact
+selected lens matrices. Run schemas v1 through v3 remain readable.
 
 ## Coefficient Sweep
 
@@ -74,10 +77,11 @@ operation application is recorded.
 
 Every arm gets a fresh sequence and a fresh sampler initialized with the same
 requested seed. Arms execute serially; no KV state, sampler state, or generated
-tokens cross arm boundaries. Each child remains an ordinary `qwen.lens.run` v3
-artifact containing its exact effective plan. The command writes all children
-to a private sibling staging directory and exclusively publishes a new output
-directory only after every arm and the manifest are synced:
+tokens cross arm boundaries. Each child is an ordinary `qwen.lens.run` v4
+artifact containing its exact effective authored and resolved plans. The command
+writes all children to a private sibling staging directory and exclusively
+publishes a new output directory only after every arm and the manifest are
+synced:
 
 ```text
 new-sweep/
@@ -86,10 +90,10 @@ new-sweep/
   arms/000001/run.json
 ```
 
-The `qwen.lens.coefficient_sweep` v1 manifest records producer build identity,
-the canonical source-plan path, selected operation, ordered coefficients, and
-each child path, byte length, and BLAKE3 digest. Existing output paths are never
-replaced.
+The `qwen.lens.coefficient_sweep` v2 manifest records producer build identity,
+the canonical source-plan path, embedded authored source plan and its
+canonical-JSON BLAKE3, selected operation, ordered coefficients, and each child
+path, byte length, and BLAKE3 digest. Existing output paths are never replaced.
 
 `inspect-sweep` verifies and summarizes the complete bundle without loading a
 model:
@@ -111,10 +115,11 @@ exact detail records across the complete report.
 The report defaults to the first numeric-zero arm (or arm 0), groups exact
 duplicate coefficients and exact generated outputs, and includes bounded exact
 readout comparisons against the reference. `--reference-arm` changes the
-reference explicitly. Manifest v1 does not hash or embed the authored source
-plan, so the report honestly marks that external source-plan identity as
-`unverifiable_manifest_v1`; it still proves child integrity and that effective
-plans differ only at the selected coefficient.
+reference explicitly. Manifest v2 verifies that every effective authored plan
+is exactly the embedded source plan with only the selected coefficient changed,
+then independently recomputes every child's resolved semantic position
+bindings. Legacy manifest v1 remains readable and is honestly marked
+`unverifiable_manifest_v1` because it did not hash or embed the source plan.
 
 Individual children remain compatible with the normal offline comparator:
 
@@ -325,7 +330,7 @@ qwen-lens compare left.json right.json --format json --limit 25
 ```
 
 It accepts only validated, same-version `qwen.lens.trace` v2 or v3 pairs, or
-`qwen.lens.run` v1, v2, or v3 pairs. Each input must be a regular non-symlink file no
+`qwen.lens.run` v1, v2, v3, or v4 pairs. Each input must be a regular non-symlink file no
 larger than 256 MiB. Mixed schemas, unknown versions, incompatible trace
 geometry, score semantics, input rendering provenance, and runs with different prompt IDs, runtime, model
 path, stable execution identities, or sampler settings are rejected. Cache-state
@@ -428,6 +433,74 @@ Paths are resolved relative to the plan file. This example uses a completed
   ]
 }
 ```
+
+Plan v1 keeps the original numeric-only scope grammar. Plan v2 additionally
+allows exact renderer-authored prefill selectors while retaining the same lens,
+direction, action, and numeric decode contracts:
+
+```json
+{
+  "version": 2,
+  "lenses": [
+    {"kind":"native_selected","id":"j","artifact":"artifacts/j-token-fit"}
+  ],
+  "directions": [],
+  "operations": [],
+  "readouts": [{
+    "id": "boundary",
+    "lens": "j",
+    "scope": {
+      "layers": {"kind":"range","start":24,"end":50},
+      "prefill": {
+        "kind": "rendered_spans",
+        "selectors": [
+          {
+            "span_kind": "message_content",
+            "role": "user",
+            "occurrence": "last",
+            "edge": "end"
+          },
+          {
+            "span_kind": "generated_assistant_start_marker",
+            "edge": "start"
+          }
+        ]
+      }
+    },
+    "top_k": 8
+  }]
+}
+```
+
+Each rendered selector requires `span_kind` and `edge`; it may additionally
+constrain `message_index`, `tool_call_index`, `role`, `channel`, and `label`.
+`occurrence` defaults to `unique`, which rejects ambiguous matches; `first` or
+`last` must be authored explicitly when several spans are expected. `start`
+binds `token_start`, while `end` binds `token_end - 1`. A selected span without
+an exact nonempty token range fails rather than assigning a boundary-crossing
+BPE token heuristically. Multiple selectors in one scope may not collapse to
+the same numeric position.
+
+Useful exact targets include:
+
+- final user content token: `message_content`, `role=user`, `last`, `end`;
+- assistant generation marker: `generated_assistant_start_marker`, `start`;
+- final tool-result content token: `tool_result_content`,
+  `channel=tool_result`, `last`, `end`;
+- tool-result terminator: `message_end_marker`, `channel=tool_result`, `last`,
+  `start`;
+- compiled developer content: `message_content`, `role=system`,
+  `label=developer`.
+
+Channel constraints are portable across exact renderers: Open Responses tool
+results compile with `role=user`, while Muse ATEM tool results retain
+`role=tool`. Filtering on `span_kind` plus `channel=tool_result` preserves that
+actual role in the binding artifact. Semantic selectors work with exact Qwen
+messages, Open Responses, Muse ATEM, and structured Flash-Next input. They fail
+for raw text and literal IDs, which intentionally carry no authored semantic
+spans; those paths retain numeric selectors for malformed or forged inputs.
+Decode selectors remain numeric because the last reached decode transition can
+depend on an early stop token.
 
 An imported published Qwen3.6 J/R or Qwen3.8 J transport can also supply
 selected token directions directly. `run` reads and projects only layers
@@ -584,7 +657,9 @@ operation must select exactly that layer.
 - Prefill indices are zero-based positions in the resolved prompt token IDs.
 - Decode step 0 feeds the first sampled token back to produce second-token
   logits. Target the final prefill position to affect the first sampled token.
-- Selectors are `all`, sorted unique `values`, or an inclusive `range`.
+- Layer and decode selectors are `all`, sorted unique `values`, or an inclusive
+  `range`. Plan-v2 prefill scopes may also use `rendered_spans`; artifacts retain
+  the authored selectors and exact resolved numeric positions.
 - Operations matching one site execute in JSON array order.
 - Live readouts observe the residual after all matching operations at the site.
 

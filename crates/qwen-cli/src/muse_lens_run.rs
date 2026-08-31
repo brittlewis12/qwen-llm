@@ -2,7 +2,7 @@ use super::lens_input::prepare_muse_input;
 use super::lens_run::{
     Action, DirectionDefinition, DirectionRow, LensDefinition, LensPlan, LensRunArgs, LiveReadout,
     LiveScore, OperationApplication, RunExecutionBinding, RunPublishedLensBinding,
-    RunPublishedMatrixBinding, RunResult, Scope, Selector, emit_run_output,
+    RunPublishedMatrixBinding, RunResult, Scope, Selector, bind_plan_positions, emit_run_output,
 };
 use super::muse_lens_artifact as artifact;
 use super::muse_published_full_lens_artifact as published;
@@ -105,7 +105,9 @@ pub(crate) fn run(
             .all(|&id| id >= 0 && (id as u32) < config.vocab_size),
         "Muse prompt contains an invalid token ID"
     );
-    super::lens_run::validate_reachable_scopes(&plan, prompt_ids.len(), args.max_new_tokens)?;
+    let bound_plan = bind_plan_positions(&plan, &prepared_input.rendering, prompt_ids.len())?;
+    let plan = &bound_plan.resolved;
+    super::lens_run::validate_reachable_scopes(plan, prompt_ids.len(), args.max_new_tokens)?;
 
     let content = checkpoint_content_identity_without_weight_hashing(
         &gguf,
@@ -172,7 +174,7 @@ pub(crate) fn run(
         weight_bytes_hashed: content.bytes_hashed,
         published_lenses,
     });
-    let execution = prepare_execution_plan(plan, lenses, &config, &context)?;
+    let execution = prepare_execution_plan(plan.clone(), lenses, &config, &context)?;
     let mut runner = loaded
         .create_runner(&context)
         .context("create Muse Lens runner")?;
@@ -220,12 +222,11 @@ pub(crate) fn run(
             &mut live_readouts,
         )?;
     }
-    let plan = execution.plan.clone();
     emit_run_output(
         args,
         "muse_glimmer",
         plan_path,
-        plan,
+        bound_plan,
         &prepared_input,
         RunResult {
             prompt_token_ids: prompt_ids.to_vec(),
@@ -690,6 +691,9 @@ fn selector_values(selector: &Selector, bound: u32) -> Result<Vec<u32>> {
             ensure!(start <= end, "invalid selector range");
             (*start..=*end).collect()
         }
+        Selector::RenderedSpans { .. } => {
+            bail!("Muse execution plan contains an unresolved selector")
+        }
     };
     ensure!(
         values.iter().all(|&v| v < bound),
@@ -698,23 +702,28 @@ fn selector_values(selector: &Selector, bound: u32) -> Result<Vec<u32>> {
     Ok(values)
 }
 
-fn matches(scope: &Scope, event: Event, layer: u32) -> bool {
-    let contains = |selector: &Selector, value| match selector {
-        Selector::All => true,
-        Selector::Values { values } => values.binary_search(&value).is_ok(),
-        Selector::Range { start, end } => (*start..=*end).contains(&value),
+fn matches(scope: &Scope, event: Event, layer: u32) -> Result<bool> {
+    let contains = |selector: &Selector, value| -> Result<bool> {
+        Ok(match selector {
+            Selector::All => true,
+            Selector::Values { values } => values.binary_search(&value).is_ok(),
+            Selector::Range { start, end } => (*start..=*end).contains(&value),
+            Selector::RenderedSpans { .. } => {
+                bail!("Muse execution plan contains an unresolved selector")
+            }
+        })
     };
-    contains(&scope.layers, layer)
+    Ok(contains(&scope.layers, layer)?
         && match event {
-            Event::Prefill(index) => scope
-                .prefill
-                .as_ref()
-                .is_some_and(|s| contains(s, index as u32)),
-            Event::Decode(index) => scope
-                .decode
-                .as_ref()
-                .is_some_and(|s| contains(s, index as u32)),
-        }
+            Event::Prefill(index) => match &scope.prefill {
+                Some(selector) => contains(selector, index as u32)?,
+                None => false,
+            },
+            Event::Decode(index) => match &scope.decode {
+                Some(selector) => contains(selector, index as u32)?,
+                None => false,
+            },
+        })
 }
 
 fn score(lens: &LoadedMuseLens, layer: u32, row: &[f32], top_k: usize) -> Result<Vec<LiveScore>> {
@@ -805,7 +814,7 @@ fn event_interventions<'a>(
     let mut interventions = Vec::new();
     for layer in 0..execution.layer_count {
         for operation in &execution.plan.operations {
-            if matches(&operation.scope, event, layer) {
+            if matches(&operation.scope, event, layer)? {
                 interventions.push((
                     operation.id.clone(),
                     layer,
@@ -895,7 +904,7 @@ fn append_live_readouts(
     for readout in &execution.plan.readouts {
         let lens = &execution.lenses[&readout.lens];
         for &layer in &execution.capture_layers {
-            if !matches(&readout.scope, event, layer) {
+            if !matches(&readout.scope, event, layer)? {
                 continue;
             }
             let row = captured
@@ -975,9 +984,9 @@ mod tests {
         };
         let plan: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"native_selected","id":"x","artifact":"a"}],"directions":[],"operations":[],"readouts":[{"id":"r","lens":"x","scope":{"layers":{"kind":"values","values":[49,50]},"prefill":{"kind":"values","values":[1]}},"top_k":1}]})).unwrap();
         let scope = &plan.readouts[0].scope;
-        assert!(matches(scope, Event::Prefill(1), 49));
-        assert!(matches(scope, Event::Prefill(1), 50));
-        assert!(!matches(scope, Event::Prefill(0), 49));
+        assert!(matches(scope, Event::Prefill(1), 49).unwrap());
+        assert!(matches(scope, Event::Prefill(1), 50).unwrap());
+        assert!(!matches(scope, Event::Prefill(0), 49).unwrap());
         assert_eq!(score(&lens, 49, &[3.0, 4.0], 1).unwrap()[0].score, 3.0);
         assert_eq!(score(&lens, 50, &[3.0, 4.0], 1).unwrap()[0].score, 8.0);
     }

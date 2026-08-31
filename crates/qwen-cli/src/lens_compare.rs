@@ -105,9 +105,9 @@ pub(crate) fn run(args: CompareArgs) -> Result<()> {
         }
         "qwen.lens.run" => {
             ensure!(
-                matches!(left_envelope.schema_version, 1 | 2 | 3)
+                matches!(left_envelope.schema_version, 1 | 2 | 3 | 4)
                     && left_envelope.schema_version == right_envelope.schema_version,
-                "run comparison supports same-version schema 1, 2, or 3 pairs only"
+                "run comparison supports same-version schema 1, 2, 3, or 4 pairs only"
             );
             let left = parse_run_bytes(&left_bytes, &args.left)?;
             let right = parse_run_bytes(&right_bytes, &args.right)?;
@@ -272,9 +272,14 @@ pub(crate) fn inspect_sweep(args: InspectSweepArgs) -> Result<()> {
         run_validation: match reference.schema_version {
             1 => "strict_known_qwen_lens_run_v1",
             3 => "strict_known_qwen_lens_run_v3",
-            _ => unreachable!("validated sweep children use run schema v1 or v3"),
+            4 => "strict_known_qwen_lens_run_v4",
+            _ => unreachable!("validated sweep children use run schema v1, v3, or v4"),
         },
-        source_plan_identity: "unverifiable_manifest_v1",
+        source_plan_identity: match loaded.manifest.schema_version {
+            1 => "unverifiable_manifest_v1",
+            2 => "verified_embedded_canonical_json_blake3",
+            _ => unreachable!("validated sweep schema"),
+        },
         sweep_root: loaded.root,
         manifest_blake3: loaded.manifest_blake3,
         operation_id,
@@ -368,9 +373,11 @@ fn load_sweep(path: &Path) -> Result<LoadedSweep> {
             document,
         });
     }
-    let reference_plan = plans
-        .first()
-        .context("coefficient sweep manifest has no arms")?;
+    let reference_plan = manifest
+        .source_plan
+        .as_ref()
+        .or_else(|| plans.first())
+        .context("coefficient sweep manifest has no source plan or arms")?;
     for (arm, plan) in manifest.arms.iter().zip(&plans) {
         let expected = lens_run::plan_with_operation_coefficient(
             reference_plan,
@@ -405,13 +412,19 @@ fn validate_sweep_child(
     manifest: &CoefficientSweepManifest,
     arm: &lens_run::CoefficientSweepArm,
 ) -> Result<LensPlan> {
+    let valid_child_version = match manifest.schema_version {
+        1 => matches!(document.schema_version, 1 | 3),
+        2 => document.schema_version == 4,
+        _ => false,
+    };
     ensure!(
-        matches!(document.schema_version, 1 | 3)
+        valid_child_version
             && document.runtime_kind == "ordinary_qwen"
             && document.execution_binding.is_none()
             && document.native_hyper_captures.is_empty(),
-        "sweep child {} must be an ordinary qwen.lens.run v1 or v3 without native captures",
-        arm.index
+        "sweep child {} has a run schema incompatible with sweep manifest v{} or contains unsupported runtime state",
+        arm.index,
+        manifest.schema_version
     );
     ensure!(
         document.decoded_text.len() <= RUN_DECODED_TEXT_MAX_BYTES
@@ -448,7 +461,20 @@ fn validate_sweep_child(
         .with_context(|| format!("parse sweep child {} effective plan", arm.index))?;
     lens_run::validate_sweep_effective_plan(&plan, &manifest.operation_id)
         .with_context(|| format!("validate sweep child {} effective plan", arm.index))?;
-    let operation = plan
+    let authored_plan = if document.schema_version == 4 {
+        let value = document
+            .authored_plan
+            .as_ref()
+            .context("run v4 sweep child lacks authored plan")?;
+        let authored: LensPlan = serde_json::from_value(value.clone())
+            .with_context(|| format!("parse sweep child {} authored plan", arm.index))?;
+        lens_run::validate_sweep_effective_plan(&authored, &manifest.operation_id)
+            .with_context(|| format!("validate sweep child {} authored plan", arm.index))?;
+        authored
+    } else {
+        plan.clone()
+    };
+    let operation = authored_plan
         .operations
         .iter()
         .find(|operation| operation.id == manifest.operation_id)
@@ -568,7 +594,7 @@ fn validate_sweep_child(
             arm.index
         );
     }
-    Ok(plan)
+    Ok(authored_plan)
 }
 
 fn sweep_scope_matches(
@@ -597,6 +623,7 @@ fn selector_matches(selector: &lens_run::Selector, value: u32) -> bool {
         lens_run::Selector::All => true,
         lens_run::Selector::Values { values } => values.binary_search(&value).is_ok(),
         lens_run::Selector::Range { start, end } => (*start..=*end).contains(&value),
+        lens_run::Selector::RenderedSpans { .. } => false,
     }
 }
 
@@ -628,6 +655,7 @@ fn ensure_sweep_run_context(reference: &RunDocument, candidate: &RunDocument) ->
             && reference.input_source == candidate.input_source
             && reference.add_special_tokens == candidate.add_special_tokens
             && reference.rendering == candidate.rendering
+            && reference.position_bindings == candidate.position_bindings
             && reference.max_new_tokens == candidate.max_new_tokens,
         "sweep child run schema or input/generation context differs"
     );
@@ -721,7 +749,8 @@ fn compare_sweep_runs(
         }
     }
     Ok(SweepReferenceComparison {
-        plans_equal: reference.plan == candidate.plan,
+        plans_equal: reference.plan == candidate.plan
+            && reference.authored_plan == candidate.authored_plan,
         first_generated_token_divergence: first_divergence(
             &reference.generated_token_ids,
             &candidate.generated_token_ids,
@@ -1471,7 +1500,13 @@ struct RunDocument {
     runtime_kind: String,
     model_path: PathBuf,
     canonical_plan_path: PathBuf,
+    #[serde(default)]
+    authored_plan: Option<serde_json::Value>,
+    #[serde(default)]
+    authored_plan_canonical_json_blake3: Option<String>,
     plan: serde_json::Value,
+    #[serde(default)]
+    position_bindings: Vec<lens_run::PositionBinding>,
     input_source: String,
     #[serde(default)]
     add_special_tokens: Option<bool>,
@@ -1541,7 +1576,7 @@ struct RunPublishedMatrixBinding {
 impl RunDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "qwen.lens.run" && matches!(self.schema_version, 1 | 2 | 3),
+            self.schema == "qwen.lens.run" && matches!(self.schema_version, 1 | 2 | 3 | 4),
             "unsupported run schema/version"
         );
         match (self.schema_version, &self.execution_binding) {
@@ -1549,6 +1584,8 @@ impl RunDocument {
             (2, Some(binding)) => binding.validate()?,
             (3, Some(binding)) => binding.validate()?,
             (3, None) => {}
+            (4, Some(binding)) => binding.validate()?,
+            (4, None) => {}
             (1, Some(_)) => bail!("run schema version 1 must not contain execution_binding"),
             (2, None) => bail!("run schema version 2 requires execution_binding"),
             _ => unreachable!(),
@@ -1558,7 +1595,17 @@ impl RunDocument {
                 self.add_special_tokens.is_none() && self.rendering.is_none(),
                 "run schema versions 1 and 2 must not contain input-rendering metadata"
             ),
-            3 => self.validate_input_rendering()?,
+            3 | 4 => self.validate_input_rendering()?,
+            _ => unreachable!(),
+        }
+        match self.schema_version {
+            1 | 2 | 3 => ensure!(
+                self.authored_plan.is_none()
+                    && self.authored_plan_canonical_json_blake3.is_none()
+                    && self.position_bindings.is_empty(),
+                "run schema versions 1 through 3 must not contain authored-plan provenance"
+            ),
+            4 => self.validate_authored_plan_provenance()?,
             _ => unreachable!(),
         }
         ensure!(
@@ -1644,7 +1691,7 @@ impl RunDocument {
         let rendering = self
             .rendering
             .as_ref()
-            .context("run schema version 3 requires rendering metadata")?;
+            .context("run schema version 3 or 4 requires rendering metadata")?;
         ensure!(
             !rendering.renderer.is_empty()
                 && rendering.renderer.len() <= RUN_METADATA_STRING_MAX_BYTES
@@ -1772,6 +1819,129 @@ impl RunDocument {
         ensure!(
             valid_lens_rendering_topology(rendering),
             "run rendering spans have an invalid record topology"
+        );
+        Ok(())
+    }
+
+    fn validate_authored_plan_provenance(&self) -> Result<()> {
+        let authored_value = self
+            .authored_plan
+            .as_ref()
+            .context("run schema version 4 requires authored_plan")?;
+        let authored: LensPlan = serde_json::from_value(authored_value.clone())
+            .context("parse run authored Lens plan")?;
+        let resolved: LensPlan =
+            serde_json::from_value(self.plan.clone()).context("parse run resolved Lens plan")?;
+        lens_run::validate_run_artifact_plan(&authored, &self.runtime_kind)
+            .context("validate run authored plan")?;
+        lens_run::validate_run_artifact_plan(&resolved, &self.runtime_kind)
+            .context("validate run resolved plan")?;
+        lens_run::validate_reachable_scopes(
+            &resolved,
+            self.prompt_token_ids.len(),
+            self.max_new_tokens,
+        )
+        .context("validate run resolved scope reachability")?;
+        let rendering = self
+            .rendering
+            .as_ref()
+            .context("run schema version 4 requires rendering metadata")?;
+        let expected =
+            lens_run::bind_plan_positions(&authored, rendering, self.prompt_token_ids.len())
+                .context("resolve run authored semantic positions")?;
+        ensure!(
+            expected.resolved == resolved && expected.position_bindings == self.position_bindings,
+            "run resolved plan or position bindings differ from the authored plan and rendering"
+        );
+        let digest = self
+            .authored_plan_canonical_json_blake3
+            .as_deref()
+            .context("run schema version 4 requires authored-plan digest")?;
+        ensure!(
+            expected.authored_plan_canonical_json_blake3 == digest && is_lower_hex_digest(digest),
+            "run authored-plan canonical JSON BLAKE3 is invalid"
+        );
+        ensure!(
+            serde_json::to_value(&resolved.readouts)?
+                == serde_json::Value::Array(self.requested_live_readouts.clone()),
+            "run requested readouts differ from the resolved plan"
+        );
+        self.validate_v4_execution_records(&resolved)?;
+        Ok(())
+    }
+
+    fn validate_v4_execution_records(&self, plan: &LensPlan) -> Result<()> {
+        let operations = plan
+            .operations
+            .iter()
+            .map(|operation| (operation.id.as_str(), operation))
+            .collect::<BTreeMap<_, _>>();
+        let mut application_keys = BTreeSet::new();
+        for application in &self.operation_applications {
+            let operation = operations
+                .get(application.id.as_str())
+                .with_context(|| format!("run records unknown operation {}", application.id))?;
+            ensure!(
+                operation.action.coefficient() != 0.0
+                    && sweep_scope_matches(
+                        &operation.scope,
+                        &application.phase,
+                        application.index,
+                        application.layer,
+                        self,
+                    ),
+                "run operation application is disabled or outside its resolved scope"
+            );
+            ensure!(
+                application_keys.insert((
+                    application.id.as_str(),
+                    application.layer,
+                    application.phase.as_str(),
+                    application.index,
+                )),
+                "run repeats an operation application"
+            );
+        }
+
+        let readout_definitions = plan
+            .readouts
+            .iter()
+            .map(|readout| (readout.id.as_str(), readout))
+            .collect::<BTreeMap<_, _>>();
+        readout_map(self)?;
+        let mut readout_semantics = BTreeMap::new();
+        for readout in &self.live_readouts {
+            let definition = readout_definitions
+                .get(readout.id.as_str())
+                .with_context(|| format!("run emits unknown readout {}", readout.id))?;
+            ensure!(
+                readout.lens == definition.lens
+                    && readout.scores.len() <= definition.top_k
+                    && sweep_scope_matches(
+                        &definition.scope,
+                        &readout.phase,
+                        readout.index,
+                        readout.source_layer,
+                        self,
+                    ),
+                "run readout differs from its resolved definition or scope"
+            );
+            let semantics = (
+                readout.method.as_str(),
+                readout.score_kind.as_str(),
+                readout.candidate_universe.as_str(),
+                readout.target_layer,
+            );
+            if let Some(previous) = readout_semantics.insert(readout.id.as_str(), semantics) {
+                ensure!(
+                    previous == semantics,
+                    "run changes one readout's score semantics across sites"
+                );
+            }
+        }
+        ensure!(
+            self.runtime_kind == "flash_next" || self.native_hyper_captures.is_empty(),
+            "non-Flash run contains native hyper captures"
         );
         Ok(())
     }
@@ -2059,7 +2229,7 @@ fn compare_runs(left: &RunDocument, right: &RunDocument, limit: usize) -> Result
         alignment: "exact readout key and exact candidate identity; no inferred alignment",
         runtime_kind: left.runtime_kind.clone(),
         model_path: left.model_path.clone(),
-        plans_equal: left.plan == right.plan,
+        plans_equal: left.plan == right.plan && left.authored_plan == right.authored_plan,
         left_generated_text: left.decoded_text.clone(),
         right_generated_text: right.decoded_text.clone(),
         left_generated_token_ids: left.generated_token_ids.clone(),
@@ -2435,7 +2605,10 @@ mod tests {
             runtime_kind: "ordinary_qwen".into(),
             model_path: "/model.gguf".into(),
             canonical_plan_path: "/source/plan.json".into(),
+            authored_plan: None,
+            authored_plan_canonical_json_blake3: None,
             plan: serde_json::to_value(plan).unwrap(),
+            position_bindings: Vec::new(),
             input_source: "token_ids".into(),
             add_special_tokens: None,
             rendering: Some(LensInputRendering {
@@ -2586,6 +2759,8 @@ mod tests {
                 build_source_state: format!("git-source-sha256-v2:{}", "b".repeat(64)),
             },
             canonical_source_plan_path: "/source/plan.json".into(),
+            source_plan: None,
+            source_plan_canonical_json_blake3: None,
             operation_id: "swept".into(),
             coefficients: coefficients.to_vec(),
             arms,
@@ -2600,10 +2775,37 @@ mod tests {
 
     fn rewrite_sweep_manifest(root: &Path, mutate: impl FnOnce(&mut CoefficientSweepManifest)) {
         let path = root.join("manifest.json");
-        let mut manifest: CoefficientSweepManifest =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut manifest =
+            lens_run::parse_sweep_manifest_bytes(&std::fs::read(&path).unwrap()).unwrap();
         mutate(&mut manifest);
         std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    fn upgrade_sweep_fixture_to_v2(root: &Path) {
+        let manifest_path = root.join("manifest.json");
+        let mut manifest =
+            lens_run::parse_sweep_manifest_bytes(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let source_plan = sweep_plan(0.25);
+        manifest.schema_version = 2;
+        manifest.source_plan = Some(source_plan.clone());
+        manifest.source_plan_canonical_json_blake3 =
+            Some(lens_run::canonical_plan_blake3(&source_plan).unwrap());
+        for arm in &mut manifest.arms {
+            let path = root.join(&arm.artifact);
+            let mut document: RunDocument =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let plan: LensPlan = serde_json::from_value(document.plan.clone()).unwrap();
+            document.schema_version = 4;
+            document.authored_plan = Some(document.plan.clone());
+            document.authored_plan_canonical_json_blake3 =
+                Some(lens_run::canonical_plan_blake3(&plan).unwrap());
+            document.position_bindings = Vec::new();
+            let bytes = serde_json::to_vec(&document).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            arm.byte_length = bytes.len() as u64;
+            arm.blake3 = blake3::hash(&bytes).to_hex().to_string();
+        }
+        std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
 
     fn rewrite_sweep_child(root: &Path, index: usize, mutate: impl FnOnce(&mut serde_json::Value)) {
@@ -2669,6 +2871,38 @@ mod tests {
         );
         assert_eq!(detail_budget, 8);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_v2_verifies_embedded_source_plan_and_v4_children() {
+        let root = sweep_fixture(&[0.0, 0.1], |_, _| {});
+        upgrade_sweep_fixture_to_v2(&root);
+        let loaded = load_sweep(&root).unwrap();
+        assert_eq!(loaded.manifest.schema_version, 2);
+        assert_eq!(loaded.arms[0].document.schema_version, 4);
+
+        rewrite_sweep_manifest(&root, |manifest| {
+            manifest.source_plan_canonical_json_blake3 = Some("0".repeat(64));
+        });
+        assert!(load_sweep(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+
+        let mixed = sweep_fixture(&[0.0], |_, _| {});
+        upgrade_sweep_fixture_to_v2(&mixed);
+        rewrite_sweep_child(&mixed, 0, |document| {
+            document["schema_version"] = json!(3);
+            document.as_object_mut().unwrap().remove("authored_plan");
+            document
+                .as_object_mut()
+                .unwrap()
+                .remove("authored_plan_canonical_json_blake3");
+            document
+                .as_object_mut()
+                .unwrap()
+                .remove("position_bindings");
+        });
+        assert!(load_sweep(&mixed).is_err());
+        std::fs::remove_dir_all(mixed).unwrap();
     }
 
     #[test]
@@ -2957,6 +3191,143 @@ mod tests {
         assert!(document.validate().is_err());
         document.runtime_kind = "ordinary_qwen".into();
         document.rendering.as_mut().unwrap().generation_mode = Some("reasoning_high".into());
+        assert!(document.validate().is_err());
+    }
+
+    #[test]
+    fn run_v4_recomputes_authored_semantic_position_bindings() {
+        let authored: LensPlan = serde_json::from_value(json!({
+            "version": 2,
+            "lenses": [{"kind":"native_selected","id":"j","artifact":"j"}],
+            "directions": [],
+            "operations": [],
+            "readouts": [{
+                "id":"live",
+                "lens":"j",
+                "scope":{
+                    "layers":{"kind":"values","values":[1]},
+                    "prefill":{"kind":"rendered_spans","selectors":[{
+                        "span_kind":"message_content",
+                        "role":"user",
+                        "edge":"end"
+                    }]}
+                },
+                "top_k":1
+            }]
+        }))
+        .unwrap();
+        let rendering = LensInputRendering {
+            renderer: "qwen_chatml_messages_v1".into(),
+            generation_mode: Some("auto".into()),
+            spans: vec![LensRenderedSpan {
+                kind: "message_content".into(),
+                message_index: Some(0),
+                tool_call_index: None,
+                role: Some("user".into()),
+                channel: None,
+                label: None,
+                byte_start: 0,
+                byte_end: 1,
+                token_start: Some(0),
+                token_end: Some(1),
+            }],
+        };
+        let bound = lens_run::bind_plan_positions(&authored, &rendering, 1).unwrap();
+        assert_eq!(bound.position_bindings.len(), 1);
+        let requested_live_readouts = serde_json::to_value(&bound.resolved.readouts)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        let mut document = RunDocument {
+            schema: "qwen.lens.run".into(),
+            schema_version: 4,
+            runtime_kind: "ordinary_qwen".into(),
+            model_path: "/model.gguf".into(),
+            canonical_plan_path: "/plan.json".into(),
+            authored_plan: Some(serde_json::to_value(&authored).unwrap()),
+            authored_plan_canonical_json_blake3: Some(bound.authored_plan_canonical_json_blake3),
+            plan: serde_json::to_value(&bound.resolved).unwrap(),
+            position_bindings: bound.position_bindings,
+            input_source: "messages".into(),
+            add_special_tokens: Some(false),
+            rendering: Some(rendering),
+            prompt_token_ids: vec![1],
+            generated_token_ids: vec![2],
+            sampler: RunSampler {
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: 0,
+            },
+            max_new_tokens: 1,
+            decoded_text: "x".into(),
+            stop_reason: "max_new_tokens".into(),
+            operation_applications: Vec::new(),
+            requested_live_readouts,
+            live_readouts: Vec::new(),
+            native_hyper_captures: Vec::new(),
+            execution_binding: None,
+        };
+        document.validate().unwrap();
+
+        document.position_bindings[0].resolved_index = 1;
+        assert!(document.validate().is_err());
+        document.position_bindings[0].resolved_index = 0;
+        document.authored_plan_canonical_json_blake3 = Some("0".repeat(64));
+        assert!(document.validate().is_err());
+
+        document.authored_plan_canonical_json_blake3 =
+            Some(lens_run::canonical_plan_blake3(&authored).unwrap());
+        document.live_readouts.push(RunReadout {
+            id: "live".into(),
+            lens: "j".into(),
+            method: "J".into(),
+            score_kind: "selected_row_projection_numerator".into(),
+            candidate_universe: "selected_rows".into(),
+            source_layer: 1,
+            target_layer: Some(2),
+            phase: "prefill".into(),
+            index: 1,
+            scores: Vec::new(),
+        });
+        assert!(document.validate().is_err());
+        document.live_readouts.clear();
+
+        let mut invalid_plan = authored.clone();
+        invalid_plan.readouts[0].lens = "missing".into();
+        let invalid_bound =
+            lens_run::bind_plan_positions(&invalid_plan, document.rendering.as_ref().unwrap(), 1)
+                .unwrap();
+        document.authored_plan = Some(serde_json::to_value(&invalid_plan).unwrap());
+        document.authored_plan_canonical_json_blake3 =
+            Some(invalid_bound.authored_plan_canonical_json_blake3);
+        document.plan = serde_json::to_value(&invalid_bound.resolved).unwrap();
+        document.position_bindings = invalid_bound.position_bindings;
+        document.requested_live_readouts = serde_json::to_value(&invalid_plan.readouts)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(document.validate().is_err());
+
+        let mut unreachable = authored.clone();
+        unreachable.readouts[0].scope.prefill =
+            Some(lens_run::Selector::Values { values: vec![5] });
+        let unreachable_bound =
+            lens_run::bind_plan_positions(&unreachable, document.rendering.as_ref().unwrap(), 1)
+                .unwrap();
+        document.authored_plan = Some(serde_json::to_value(&unreachable).unwrap());
+        document.authored_plan_canonical_json_blake3 =
+            Some(unreachable_bound.authored_plan_canonical_json_blake3);
+        document.plan = serde_json::to_value(&unreachable_bound.resolved).unwrap();
+        document.position_bindings = unreachable_bound.position_bindings;
+        document.requested_live_readouts = serde_json::to_value(&unreachable.readouts)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
         assert!(document.validate().is_err());
     }
 
@@ -3258,7 +3629,10 @@ mod tests {
             runtime_kind: "ordinary_qwen".into(),
             model_path: "model.gguf".into(),
             canonical_plan_path: "/plan.json".into(),
+            authored_plan: None,
+            authored_plan_canonical_json_blake3: None,
             plan: serde_json::from_value(json!({"version": 1, "lenses": [], "directions": [], "operations": [], "readouts": []})).unwrap(),
+            position_bindings: Vec::new(),
             input_source: "token_ids".into(),
             add_special_tokens: None,
             rendering: None,

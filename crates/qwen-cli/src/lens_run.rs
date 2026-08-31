@@ -1,6 +1,6 @@
 use crate::lens_input::{
-    LensInputRendering, LensInputSpec, LensMessageMode, PreparedLensInput,
-    prepare_qwen_model_input, validate_lens_input_spec,
+    LensInputRendering, LensInputSpec, LensMessageMode, LensRenderedSpan, PreparedLensInput,
+    is_known_lens_span, prepare_qwen_model_input, validate_lens_input_spec,
 };
 use crate::template_lens::{TemplateLens, TemplateScore, TemplateVocabulary};
 use anyhow::{Context, Result, bail, ensure};
@@ -35,15 +35,18 @@ const MAX_DIRECTIONS: usize = 4096;
 const MAX_OPERATIONS: usize = 4096;
 const MAX_READOUTS: usize = 1024;
 const MAX_SELECTOR_VALUES: usize = 4096;
+const MAX_RENDERED_SELECTOR_TEXT_BYTES: usize = 1024;
+const MAX_RENDERED_SELECTORS_PER_PLAN: usize = 1024;
+const MAX_RENDERED_SELECTOR_MATCH_WORK: usize = 1_000_000;
 const MAX_TOP_K: usize = 1024;
 pub(crate) const MAX_NEW_TOKENS: usize = 4096;
 const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
 pub(crate) const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 const RUN_SCHEMA: &str = "qwen.lens.run";
-const RUN_SCHEMA_VERSION: u32 = 3;
+const RUN_SCHEMA_VERSION: u32 = 4;
 const SWEEP_SCHEMA: &str = "qwen.lens.coefficient_sweep";
-const SWEEP_SCHEMA_VERSION: u32 = 1;
+const SWEEP_SCHEMA_VERSION: u32 = 2;
 const SWEEP_MANIFEST_NAME: &str = "manifest.json";
 const MAX_SWEEP_ARMS: usize = 64;
 
@@ -516,12 +519,55 @@ pub(crate) struct Scope {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Selector {
     All,
-    Values { values: Vec<u32> },
-    Range { start: u32, end: u32 },
+    Values {
+        values: Vec<u32>,
+    },
+    Range {
+        start: u32,
+        end: u32,
+    },
+    RenderedSpans {
+        selectors: Vec<RenderedSpanSelector>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RenderedSpanSelector {
+    pub(crate) span_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_call_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) label: Option<String>,
+    #[serde(default)]
+    pub(crate) occurrence: RenderedSpanOccurrence,
+    pub(crate) edge: RenderedSpanEdge,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RenderedSpanOccurrence {
+    #[default]
+    Unique,
+    First,
+    Last,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RenderedSpanEdge {
+    Start,
+    End,
 }
 
 impl Selector {
-    fn validate(&self, name: &str) -> Result<()> {
+    fn validate(&self, name: &str, allow_rendered_spans: bool) -> Result<()> {
         match self {
             Self::All => Ok(()),
             Self::Values { values } => {
@@ -547,15 +593,34 @@ impl Selector {
                 );
                 Ok(())
             }
+            Self::RenderedSpans { selectors } => {
+                ensure!(
+                    allow_rendered_spans,
+                    "{name} does not support rendered-span selectors"
+                );
+                ensure!(
+                    !selectors.is_empty() && selectors.len() <= MAX_SELECTOR_VALUES,
+                    "{name} rendered_spans requires 1..={MAX_SELECTOR_VALUES} selectors"
+                );
+                ensure!(
+                    selectors.iter().collect::<BTreeSet<_>>().len() == selectors.len(),
+                    "{name} repeats an authored rendered-span selector"
+                );
+                for (index, selector) in selectors.iter().enumerate() {
+                    selector.validate(&format!("{name}.selectors[{index}]"))?;
+                }
+                Ok(())
+            }
         }
     }
 
     fn expand(&self, upper_bound: u32, name: &str) -> Result<Vec<u32>> {
-        self.validate(name)?;
+        self.validate(name, false)?;
         let values = match self {
             Self::All => (0..upper_bound).collect(),
             Self::Values { values } => values.clone(),
             Self::Range { start, end } => (*start..=*end).collect(),
+            Self::RenderedSpans { .. } => unreachable!("validation rejects unresolved selectors"),
         };
         ensure!(
             values.iter().all(|&value| value < upper_bound),
@@ -565,21 +630,295 @@ impl Selector {
     }
 }
 
-impl Scope {
+impl RenderedSpanSelector {
     fn validate(&self, name: &str) -> Result<()> {
-        self.layers.validate(&format!("{name}.layers"))?;
+        ensure!(
+            is_known_lens_span(&self.span_kind),
+            "{name}.span_kind is not a known renderer span"
+        );
+        ensure!(
+            self.message_index
+                .is_none_or(|index| index < MAX_SELECTOR_VALUES)
+                && self
+                    .tool_call_index
+                    .is_none_or(|index| index < MAX_SELECTOR_VALUES),
+            "{name} message/tool-call index exceeds the selector bound"
+        );
+        ensure!(
+            self.role
+                .as_deref()
+                .is_none_or(|role| { matches!(role, "system" | "user" | "assistant" | "tool") }),
+            "{name}.role is unsupported"
+        );
+        ensure!(
+            self.channel.as_deref().is_none_or(|channel| {
+                matches!(channel, "thinking" | "tool_call" | "tool_result")
+            }),
+            "{name}.channel is unsupported"
+        );
+        for (field, value) in [
+            ("role", self.role.as_deref()),
+            ("channel", self.channel.as_deref()),
+            ("label", self.label.as_deref()),
+        ] {
+            ensure!(
+                value.is_none_or(|value| {
+                    !value.is_empty() && value.len() <= MAX_RENDERED_SELECTOR_TEXT_BYTES
+                }),
+                "{name}.{field} is empty or too long"
+            );
+        }
+        Ok(())
+    }
+
+    fn matches(&self, span: &LensRenderedSpan) -> bool {
+        span.kind == self.span_kind
+            && self
+                .message_index
+                .is_none_or(|value| span.message_index == Some(value))
+            && self
+                .tool_call_index
+                .is_none_or(|value| span.tool_call_index == Some(value))
+            && self
+                .role
+                .as_deref()
+                .is_none_or(|value| span.role.as_deref() == Some(value))
+            && self
+                .channel
+                .as_deref()
+                .is_none_or(|value| span.channel.as_deref() == Some(value))
+            && self
+                .label
+                .as_deref()
+                .is_none_or(|value| span.label.as_deref() == Some(value))
+    }
+}
+
+impl Scope {
+    fn validate(&self, name: &str, plan_version: u32) -> Result<()> {
+        self.layers.validate(&format!("{name}.layers"), false)?;
         ensure!(
             self.prefill.is_some() || self.decode.is_some(),
             "{name} must select prefill and/or decode"
         );
         if let Some(selector) = &self.prefill {
-            selector.validate(&format!("{name}.prefill"))?;
+            selector.validate(&format!("{name}.prefill"), plan_version == 2)?;
         }
         if let Some(selector) = &self.decode {
-            selector.validate(&format!("{name}.decode"))?;
+            selector.validate(&format!("{name}.decode"), false)?;
         }
         Ok(())
     }
+}
+
+pub(crate) fn bind_plan_positions(
+    authored: &LensPlan,
+    rendering: &LensInputRendering,
+    prompt_len: usize,
+) -> Result<BoundLensPlan> {
+    validate_plan_position_selectors(authored)?;
+    let rendered_selector_count = authored
+        .operations
+        .iter()
+        .map(|operation| operation.scope.rendered_selector_count())
+        .chain(
+            authored
+                .readouts
+                .iter()
+                .map(|readout| readout.scope.rendered_selector_count()),
+        )
+        .try_fold(0usize, |total, count| total.checked_add(count))
+        .context("rendered-selector count overflow")?;
+    ensure!(
+        rendered_selector_count <= MAX_RENDERED_SELECTORS_PER_PLAN,
+        "Lens plan has {rendered_selector_count} rendered selectors; limit is {MAX_RENDERED_SELECTORS_PER_PLAN}"
+    );
+    if rendered_selector_count > 0 {
+        let match_work = rendered_selector_count
+            .checked_mul(rendering.spans.len())
+            .context("rendered-selector match-work overflow")?;
+        ensure!(
+            match_work <= MAX_RENDERED_SELECTOR_MATCH_WORK,
+            "rendered selectors require {match_work} span comparisons; limit is {MAX_RENDERED_SELECTOR_MATCH_WORK}"
+        );
+    }
+    let mut resolved = authored.clone();
+    let mut position_bindings = Vec::new();
+    for operation in &mut resolved.operations {
+        bind_scope_prefill(
+            &mut operation.scope,
+            "operation",
+            &operation.id,
+            rendering,
+            prompt_len,
+            &mut position_bindings,
+        )?;
+    }
+    for readout in &mut resolved.readouts {
+        bind_scope_prefill(
+            &mut readout.scope,
+            "readout",
+            &readout.id,
+            rendering,
+            prompt_len,
+            &mut position_bindings,
+        )?;
+    }
+    Ok(BoundLensPlan {
+        authored: authored.clone(),
+        resolved,
+        authored_plan_canonical_json_blake3: canonical_plan_blake3(authored)?,
+        position_bindings,
+    })
+}
+
+impl Scope {
+    fn rendered_selector_count(&self) -> usize {
+        match &self.prefill {
+            Some(Selector::RenderedSpans { selectors }) => selectors.len(),
+            _ => 0,
+        }
+    }
+}
+
+fn validate_plan_position_selectors(plan: &LensPlan) -> Result<()> {
+    ensure!(
+        matches!(plan.version, 1 | 2),
+        "Lens plan version must be 1 or 2"
+    );
+    ensure!(
+        plan.operations.len() <= MAX_OPERATIONS && plan.readouts.len() <= MAX_READOUTS,
+        "Lens plan has too many operations or readouts"
+    );
+    for operation in &plan.operations {
+        operation
+            .scope
+            .validate(&format!("operation {} scope", operation.id), plan.version)?;
+    }
+    for readout in &plan.readouts {
+        readout
+            .scope
+            .validate(&format!("readout {} scope", readout.id), plan.version)?;
+    }
+    Ok(())
+}
+
+fn bind_scope_prefill(
+    scope: &mut Scope,
+    owner_kind: &str,
+    owner_id: &str,
+    rendering: &LensInputRendering,
+    prompt_len: usize,
+    bindings: &mut Vec<PositionBinding>,
+) -> Result<()> {
+    let Some(Selector::RenderedSpans { selectors }) = scope.prefill.as_ref() else {
+        return Ok(());
+    };
+    ensure!(
+        !rendering.spans.is_empty(),
+        "{owner_kind} {owner_id} rendered-span prefill selectors require renderer-authored spans; raw text and literal token IDs have none"
+    );
+    let selectors = selectors.clone();
+    let mut values = BTreeSet::new();
+    for (selector_index, selector) in selectors.into_iter().enumerate() {
+        let mut match_count = 0usize;
+        let mut first_match = None;
+        let mut last_match = None;
+        for matched in rendering
+            .spans
+            .iter()
+            .enumerate()
+            .filter(|(_, span)| selector.matches(span))
+        {
+            match_count += 1;
+            first_match.get_or_insert(matched);
+            last_match = Some(matched);
+        }
+        ensure!(
+            match_count > 0,
+            "{owner_kind} {owner_id} rendered selector {selector_index} matched no authored span"
+        );
+        let (rendering_span_index, span) = match selector.occurrence {
+            RenderedSpanOccurrence::Unique => {
+                ensure!(
+                    match_count == 1,
+                    "{owner_kind} {owner_id} rendered selector {selector_index} matched {} spans; choose first or last explicitly",
+                    match_count
+                );
+                first_match.expect("nonempty matches")
+            }
+            RenderedSpanOccurrence::First => first_match.expect("nonempty matches"),
+            RenderedSpanOccurrence::Last => last_match.expect("nonempty matches"),
+        };
+        let (token_start, token_end) = span
+            .token_start
+            .zip(span.token_end)
+            .with_context(|| {
+                format!(
+                    "{owner_kind} {owner_id} rendered selector {selector_index} matched span {rendering_span_index} without an exact token range"
+                )
+            })?;
+        ensure!(
+            token_start < token_end && token_end <= prompt_len,
+            "{owner_kind} {owner_id} rendered selector {selector_index} matched an invalid token range"
+        );
+        let position = match selector.edge {
+            RenderedSpanEdge::Start => token_start,
+            RenderedSpanEdge::End => token_end - 1,
+        };
+        let resolved_index =
+            u32::try_from(position).context("resolved prefill position exceeds u32")?;
+        ensure!(
+            values.insert(resolved_index),
+            "{owner_kind} {owner_id} rendered selectors resolve repeatedly to prefill position {position}"
+        );
+        bindings.push(PositionBinding {
+            owner_kind: owner_kind.into(),
+            owner_id: owner_id.into(),
+            phase: "prefill".into(),
+            selector_index,
+            selector,
+            rendering_span_index,
+            matched_span: span.clone(),
+            resolved_index,
+            absolute_position: position,
+        });
+    }
+    scope.prefill = Some(Selector::Values {
+        values: values.into_iter().collect(),
+    });
+    Ok(())
+}
+
+pub(crate) fn canonical_plan_blake3(plan: &LensPlan) -> Result<String> {
+    let bytes = serde_json::to_vec(plan).context("serialize canonical Lens plan JSON")?;
+    ensure!(
+        bytes.len() <= MAX_PLAN_BYTES,
+        "canonical Lens plan exceeds limit"
+    );
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PositionBinding {
+    pub(crate) owner_kind: String,
+    pub(crate) owner_id: String,
+    pub(crate) phase: String,
+    pub(crate) selector_index: usize,
+    pub(crate) selector: RenderedSpanSelector,
+    pub(crate) rendering_span_index: usize,
+    pub(crate) matched_span: LensRenderedSpan,
+    pub(crate) resolved_index: u32,
+    pub(crate) absolute_position: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BoundLensPlan {
+    pub(crate) authored: LensPlan,
+    pub(crate) resolved: LensPlan,
+    pub(crate) authored_plan_canonical_json_blake3: String,
+    pub(crate) position_bindings: Vec<PositionBinding>,
 }
 
 #[derive(Debug, Serialize)]
@@ -589,7 +928,10 @@ pub(crate) struct RunOutput {
     runtime_kind: &'static str,
     model_path: PathBuf,
     canonical_plan_path: PathBuf,
+    authored_plan: LensPlan,
+    authored_plan_canonical_json_blake3: String,
     plan: LensPlan,
+    position_bindings: Vec<PositionBinding>,
     input_source: &'static str,
     add_special_tokens: Option<bool>,
     rendering: LensInputRendering,
@@ -633,6 +975,10 @@ pub(crate) struct CoefficientSweepManifest {
     pub(crate) schema_version: u32,
     pub(crate) producer: SweepProducer,
     pub(crate) canonical_source_plan_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_plan: Option<LensPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_plan_canonical_json_blake3: Option<String>,
     pub(crate) operation_id: String,
     pub(crate) coefficients: Vec<f32>,
     pub(crate) arms: Vec<CoefficientSweepArm>,
@@ -751,7 +1097,7 @@ pub(crate) fn emit_run_output(
     args: &LensRunArgs,
     runtime_kind: &'static str,
     plan_path: &Path,
-    plan: LensPlan,
+    bound_plan: BoundLensPlan,
     prepared_input: &PreparedLensInput,
     result: RunResult,
     execution_binding: Option<RunExecutionBinding>,
@@ -761,7 +1107,7 @@ pub(crate) fn emit_run_output(
         args,
         runtime_kind,
         plan_path,
-        plan,
+        bound_plan,
         prepared_input,
         result,
         execution_binding,
@@ -793,19 +1139,23 @@ fn build_run_output(
     args: &LensRunArgs,
     runtime_kind: &'static str,
     plan_path: &Path,
-    plan: LensPlan,
+    bound_plan: BoundLensPlan,
     prepared_input: &PreparedLensInput,
     result: RunResult,
     execution_binding: Option<RunExecutionBinding>,
 ) -> RunOutput {
+    let requested_live_readouts = bound_plan.resolved.readouts.clone();
     RunOutput {
         schema: RUN_SCHEMA,
         schema_version: RUN_SCHEMA_VERSION,
         runtime_kind,
         model_path: args.model.clone(),
         canonical_plan_path: plan_path.to_path_buf(),
-        requested_live_readouts: plan.readouts.clone(),
-        plan,
+        authored_plan: bound_plan.authored,
+        authored_plan_canonical_json_blake3: bound_plan.authored_plan_canonical_json_blake3,
+        requested_live_readouts,
+        plan: bound_plan.resolved,
+        position_bindings: bound_plan.position_bindings,
         input_source: prepared_input.source,
         add_special_tokens: prepared_input.add_special_tokens,
         rendering: prepared_input.rendering.clone(),
@@ -999,7 +1349,8 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         "prompt contains a token outside the model vocabulary"
     );
 
-    let execution = prepare_execution_plan(&plan, plan_dir, &loaded)?;
+    let bound_plan = bind_plan_positions(&plan, &prepared_input.rendering, prompt_token_ids.len())?;
+    let execution = prepare_execution_plan(&bound_plan.resolved, plan_dir, &loaded)?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
     let stop_tokens: HashSet<i32> = loaded.gguf().stop_token_ids()?.into_iter().collect();
     let result = execute_ordinary_arm(
@@ -1015,7 +1366,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         &args,
         "ordinary_qwen",
         &plan_path,
-        plan,
+        bound_plan,
         &prepared_input,
         result,
         None,
@@ -1172,7 +1523,12 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
         "prompt contains a token outside the model vocabulary"
     );
 
-    let mut execution = prepare_execution_plan(&source_plan, plan_dir, &loaded)?;
+    let source_bound_plan = bind_plan_positions(
+        &source_plan,
+        &prepared_input.rendering,
+        prompt_token_ids.len(),
+    )?;
+    let mut execution = prepare_execution_plan(&source_bound_plan.resolved, plan_dir, &loaded)?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
     let stop_tokens = loaded
         .gguf()
@@ -1188,9 +1544,18 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
         let mut arms = Vec::with_capacity(args.coefficients.len());
         let mut summaries = Vec::with_capacity(args.coefficients.len());
         for (index, &coefficient) in args.coefficients.iter().enumerate() {
-            let effective_plan =
+            let effective_authored_plan =
                 plan_with_operation_coefficient(&source_plan, &args.operation, coefficient)?;
-            execution.plan = effective_plan.clone();
+            let effective_bound_plan = bind_plan_positions(
+                &effective_authored_plan,
+                &prepared_input.rendering,
+                prompt_token_ids.len(),
+            )?;
+            ensure!(
+                effective_bound_plan.position_bindings == source_bound_plan.position_bindings,
+                "coefficient sweep changed semantic position bindings"
+            );
+            execution.plan = effective_bound_plan.resolved.clone();
             let result = execute_ordinary_arm(
                 &loaded,
                 &tokenizer,
@@ -1212,7 +1577,7 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
                 &arm_args,
                 "ordinary_qwen",
                 &plan_path,
-                effective_plan,
+                effective_bound_plan,
                 &prepared_input,
                 result,
                 None,
@@ -1243,6 +1608,12 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
                 build_source_state: env!("QWEN_BUILD_SOURCE_STATE").into(),
             },
             canonical_source_plan_path: plan_path.clone(),
+            source_plan: Some(source_plan.clone()),
+            source_plan_canonical_json_blake3: Some(
+                source_bound_plan
+                    .authored_plan_canonical_json_blake3
+                    .clone(),
+            ),
             operation_id: args.operation.clone(),
             coefficients: args.coefficients.clone(),
             arms,
@@ -1396,8 +1767,10 @@ fn serialize_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<Vec<u
         bytes.len() <= MAX_PLAN_BYTES,
         "coefficient sweep manifest exceeds {MAX_PLAN_BYTES} bytes"
     );
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("reparse coefficient sweep manifest JSON")?;
     let decoded: CoefficientSweepManifest =
-        serde_json::from_slice(&bytes).context("reparse coefficient sweep manifest")?;
+        serde_json::from_value(value).context("bind coefficient sweep manifest")?;
     validate_sweep_manifest(&decoded)?;
     ensure!(
         serde_json::to_vec(&decoded)? == bytes,
@@ -1407,15 +1780,17 @@ fn serialize_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<Vec<u
 }
 
 pub(crate) fn parse_sweep_manifest_bytes(bytes: &[u8]) -> Result<CoefficientSweepManifest> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).context("parse coefficient sweep manifest JSON")?;
     let manifest: CoefficientSweepManifest =
-        serde_json::from_slice(bytes).context("parse coefficient sweep manifest")?;
+        serde_json::from_value(value).context("bind coefficient sweep manifest")?;
     validate_sweep_manifest(&manifest)?;
     Ok(manifest)
 }
 
 fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
     ensure!(
-        manifest.schema == SWEEP_SCHEMA && manifest.schema_version == SWEEP_SCHEMA_VERSION,
+        manifest.schema == SWEEP_SCHEMA && matches!(manifest.schema_version, 1 | 2),
         "unsupported coefficient sweep manifest schema"
     );
     ensure!(
@@ -1433,9 +1808,44 @@ fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
         manifest.canonical_source_plan_path.is_absolute(),
         "coefficient sweep source plan path must be absolute"
     );
+    match manifest.schema_version {
+        1 => ensure!(
+            manifest.source_plan.is_none() && manifest.source_plan_canonical_json_blake3.is_none(),
+            "coefficient sweep v1 must not contain embedded source-plan provenance"
+        ),
+        2 => {
+            let source_plan = manifest
+                .source_plan
+                .as_ref()
+                .context("coefficient sweep v2 requires embedded source plan")?;
+            validate_plan(source_plan)
+                .context("validate embedded coefficient-sweep source plan")?;
+            validate_ordinary_plan(source_plan)
+                .context("validate embedded coefficient-sweep ordinary-Qwen source plan")?;
+            let digest = manifest
+                .source_plan_canonical_json_blake3
+                .as_deref()
+                .context("coefficient sweep v2 requires source-plan digest")?;
+            ensure!(
+                canonical_plan_blake3(source_plan)? == digest
+                    && digest.len() == 64
+                    && is_lower_hex(digest),
+                "coefficient sweep embedded source-plan digest is invalid"
+            );
+        }
+        _ => unreachable!(),
+    }
     ensure!(
         !manifest.operation_id.is_empty(),
         "coefficient sweep operation ID must not be empty"
+    );
+    ensure!(
+        manifest.source_plan.as_ref().is_none_or(|plan| {
+            plan.operations
+                .iter()
+                .any(|operation| operation.id == manifest.operation_id)
+        }),
+        "coefficient sweep embedded source plan lacks the selected operation"
     );
     ensure!(
         !manifest.coefficients.is_empty() && manifest.coefficients.len() <= MAX_SWEEP_ARMS,
@@ -1539,8 +1949,14 @@ fn run_qwen4exp(
             .all(|&token| token >= 0 && (token as u32) < config.vocab_size),
         "prompt contains a token outside the Flash-Next vocabulary"
     );
-    validate_reachable_scopes(&plan, prompt_token_ids.len(), args.max_new_tokens)?;
-    let execution = prepare_qwen4exp_execution_plan(plan, plan_dir, &config)?;
+    let bound_plan = bind_plan_positions(&plan, &prepared_input.rendering, prompt_token_ids.len())?;
+    validate_reachable_scopes(
+        &bound_plan.resolved,
+        prompt_token_ids.len(),
+        args.max_new_tokens,
+    )?;
+    let execution =
+        prepare_qwen4exp_execution_plan(bound_plan.resolved.clone(), plan_dir, &config)?;
     validate_qwen4exp_event_schedule(&execution, prompt_token_ids.len(), args.max_new_tokens)?;
 
     let required_forwards = prompt_token_ids
@@ -1618,12 +2034,11 @@ fn run_qwen4exp(
         live_readouts: Vec::new(),
         native_hyper_captures,
     };
-    let plan = execution.plan.clone();
     emit_run_output(
         args,
         "flash_next",
         plan_path,
-        plan,
+        bound_plan,
         &prepared_input,
         result,
         None,
@@ -1878,7 +2293,10 @@ fn validate_plan_with_zero_operation(
     plan: &LensPlan,
     zero_operation_id: Option<&str>,
 ) -> Result<()> {
-    ensure!(plan.version == 1, "Lens plan version must be 1");
+    ensure!(
+        matches!(plan.version, 1 | 2),
+        "Lens plan version must be 1 or 2"
+    );
     ensure!(
         !plan.lenses.is_empty()
             || plan
@@ -1988,7 +2406,7 @@ fn validate_plan_with_zero_operation(
     for operation in &plan.operations {
         operation
             .scope
-            .validate(&format!("operation {} scope", operation.id))?;
+            .validate(&format!("operation {} scope", operation.id), plan.version)?;
         let coefficient = operation.action.coefficient();
         ensure!(
             coefficient.is_finite(),
@@ -2043,7 +2461,7 @@ fn validate_plan_with_zero_operation(
     for readout in &plan.readouts {
         readout
             .scope
-            .validate(&format!("readout {} scope", readout.id))?;
+            .validate(&format!("readout {} scope", readout.id), plan.version)?;
         ensure!(
             readout.top_k > 0 && readout.top_k <= MAX_TOP_K,
             "readout {} top_k must be in 1..={MAX_TOP_K}",
@@ -2088,6 +2506,92 @@ pub(crate) fn plan_with_operation_coefficient(
 pub(crate) fn validate_sweep_effective_plan(plan: &LensPlan, operation_id: &str) -> Result<()> {
     validate_plan_with_zero_operation(plan, Some(operation_id))?;
     validate_ordinary_plan(plan)
+}
+
+pub(crate) fn validate_run_artifact_plan(plan: &LensPlan, runtime_kind: &str) -> Result<()> {
+    let zero_operations = plan
+        .operations
+        .iter()
+        .filter(|operation| operation.action.coefficient() == 0.0)
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    ensure!(
+        zero_operations.len() <= 1,
+        "run artifact plan disables more than one operation"
+    );
+    validate_plan_with_zero_operation(plan, zero_operations.first().copied())?;
+    match runtime_kind {
+        "ordinary_qwen" => validate_ordinary_plan(plan),
+        "muse_glimmer" => validate_muse_artifact_plan(plan),
+        "flash_next" => validate_flash_artifact_plan(plan),
+        _ => bail!("run artifact has unsupported runtime kind {runtime_kind:?}"),
+    }
+}
+
+fn validate_muse_artifact_plan(plan: &LensPlan) -> Result<()> {
+    ensure!(
+        !plan.operations.is_empty() || !plan.readouts.is_empty(),
+        "Muse run artifact plan requires an operation or readout"
+    );
+    ensure!(
+        plan.lenses.iter().all(|lens| matches!(
+            lens,
+            LensDefinition::NativeSelected { .. } | LensDefinition::PublishedFullTransport { .. }
+        )),
+        "Muse run artifact plan contains an unsupported lens kind"
+    );
+    ensure!(
+        plan.directions.iter().all(|direction| matches!(
+            direction,
+            DirectionDefinition::LensRow(definition)
+                if matches!(definition.row, DirectionRow::TokenId { .. })
+        )),
+        "Muse run artifact plan requires selected-token directions"
+    );
+    Ok(())
+}
+
+fn validate_flash_artifact_plan(plan: &LensPlan) -> Result<()> {
+    ensure!(
+        plan.lenses.is_empty()
+            && plan.readouts.is_empty()
+            && !plan.operations.is_empty()
+            && plan
+                .directions
+                .iter()
+                .all(|direction| direction.native_hyper().is_some()),
+        "Flash-Next run artifact plan has unsupported lenses, directions, or readouts"
+    );
+    let direction_layers = plan
+        .directions
+        .iter()
+        .filter_map(|direction| {
+            direction.native_hyper().map(|definition| {
+                let (_, layer) = definition.source.path_and_layer();
+                (definition.id.as_str(), layer)
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    for operation in &plan.operations {
+        let Action::FixedAdd { direction, .. } = &operation.action else {
+            bail!("Flash-Next run artifact operations require fixed_add")
+        };
+        let layer = direction_layers.get(direction.as_str()).with_context(|| {
+            format!("Flash-Next operation {} lacks its direction", operation.id)
+        })?;
+        let exact_layer = match &operation.scope.layers {
+            Selector::Values { values } => values.as_slice() == [*layer],
+            Selector::Range { start, end } => start == layer && end == layer,
+            Selector::All | Selector::RenderedSpans { .. } => false,
+        };
+        ensure!(
+            exact_layer,
+            "Flash-Next operation {} does not select exactly its direction layer {}",
+            operation.id,
+            layer
+        );
+    }
+    Ok(())
 }
 
 fn validate_ordinary_plan(plan: &LensPlan) -> Result<()> {
@@ -2808,24 +3312,25 @@ fn operation_enabled(operation: &OperationDefinition) -> bool {
 fn scope_matches(scope: &Scope, phase: Phase, layer: u32) -> Result<bool> {
     let index = u32::try_from(phase.index()).context("event index exceeds u32")?;
     let phase_matches = match phase {
-        Phase::Prefill(_) => scope
-            .prefill
-            .as_ref()
-            .is_some_and(|selector| selector_contains(selector, index)),
-        Phase::Decode(_) => scope
-            .decode
-            .as_ref()
-            .is_some_and(|selector| selector_contains(selector, index)),
+        Phase::Prefill(_) => match &scope.prefill {
+            Some(selector) => selector_contains(selector, index)?,
+            None => false,
+        },
+        Phase::Decode(_) => match &scope.decode {
+            Some(selector) => selector_contains(selector, index)?,
+            None => false,
+        },
     };
-    Ok(phase_matches && selector_contains(&scope.layers, layer))
+    Ok(phase_matches && selector_contains(&scope.layers, layer)?)
 }
 
-fn selector_contains(selector: &Selector, value: u32) -> bool {
-    match selector {
+fn selector_contains(selector: &Selector, value: u32) -> Result<bool> {
+    Ok(match selector {
         Selector::All => true,
         Selector::Values { values } => values.binary_search(&value).is_ok(),
         Selector::Range { start, end } => (*start..=*end).contains(&value),
-    }
+        Selector::RenderedSpans { .. } => bail!("execution plan contains an unresolved selector"),
+    })
 }
 
 fn action_to_intervention<'a>(
@@ -3316,6 +3821,7 @@ mod tests {
 
     #[test]
     fn sweep_manifest_is_ordered_bounded_and_preserves_signed_zero() {
+        let source_plan = sweep_plan();
         let coefficients = vec![0.0, 0.5, -0.0];
         let arms = coefficients
             .iter()
@@ -3337,12 +3843,14 @@ mod tests {
                 build_source_state: format!("git-source-sha256-v2:{}", "b".repeat(64)),
             },
             canonical_source_plan_path: "/tmp/plan.json".into(),
+            source_plan: Some(source_plan.clone()),
+            source_plan_canonical_json_blake3: Some(canonical_plan_blake3(&source_plan).unwrap()),
             operation_id: "swept".into(),
             coefficients,
             arms,
         };
         let bytes = serialize_sweep_manifest(&manifest).unwrap();
-        let decoded: CoefficientSweepManifest = serde_json::from_slice(&bytes).unwrap();
+        let decoded = parse_sweep_manifest_bytes(&bytes).unwrap();
         assert_eq!(decoded.coefficients[2].to_bits(), (-0.0_f32).to_bits());
         assert_eq!(decoded.arms[2].coefficient.to_bits(), (-0.0_f32).to_bits());
 
@@ -3408,14 +3916,18 @@ mod tests {
     #[test]
     fn run_artifact_serializes_envelope_exact_plan_and_score_semantics() {
         let plan = minimal_plan();
+        let plan_digest = canonical_plan_blake3(&plan).unwrap();
         let artifact = RunOutput {
             schema: RUN_SCHEMA,
             schema_version: RUN_SCHEMA_VERSION,
             runtime_kind: "ordinary_qwen",
             model_path: "model.gguf".into(),
             canonical_plan_path: "/canonical/plan.json".into(),
+            authored_plan: plan.clone(),
+            authored_plan_canonical_json_blake3: plan_digest,
             requested_live_readouts: plan.readouts.clone(),
             plan,
+            position_bindings: Vec::new(),
             input_source: "prompt",
             add_special_tokens: Some(true),
             rendering: LensInputRendering {
@@ -3453,7 +3965,7 @@ mod tests {
         };
         let value = serde_json::to_value(&artifact).unwrap();
         assert_eq!(value["schema"], RUN_SCHEMA);
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], 4);
         assert_eq!(value["input_source"], "prompt");
         assert_eq!(value["add_special_tokens"], true);
         assert_eq!(value["rendering"]["renderer"], "tokenizer_text");
@@ -3473,14 +3985,18 @@ mod tests {
     #[test]
     fn summary_contains_required_counts_text_and_artifact_path() {
         let plan = minimal_plan();
+        let plan_digest = canonical_plan_blake3(&plan).unwrap();
         let artifact = RunOutput {
             schema: RUN_SCHEMA,
             schema_version: RUN_SCHEMA_VERSION,
             runtime_kind: "muse_glimmer",
             model_path: "muse.gguf".into(),
             canonical_plan_path: "/canonical/plan.json".into(),
+            authored_plan: plan.clone(),
+            authored_plan_canonical_json_blake3: plan_digest,
             requested_live_readouts: plan.readouts.clone(),
             plan,
+            position_bindings: Vec::new(),
             input_source: "token_ids",
             add_special_tokens: None,
             rendering: LensInputRendering {
@@ -3569,6 +4085,266 @@ mod tests {
                 .expand(4, "layers")
                 .is_err()
         );
+    }
+
+    fn rendered_span(
+        kind: &str,
+        message_index: Option<usize>,
+        role: &str,
+        channel: Option<&str>,
+        token_range: Option<(usize, usize)>,
+    ) -> LensRenderedSpan {
+        LensRenderedSpan {
+            kind: kind.into(),
+            message_index,
+            tool_call_index: None,
+            role: Some(role.into()),
+            channel: channel.map(str::to_owned),
+            label: None,
+            byte_start: token_range.map_or(0, |range| range.0),
+            byte_end: token_range.map_or(1, |range| range.1),
+            token_start: token_range.map(|range| range.0),
+            token_end: token_range.map(|range| range.1),
+        }
+    }
+
+    fn semantic_readout_plan(prefill: serde_json::Value) -> LensPlan {
+        serde_json::from_value(json!({
+            "version": 2,
+            "lenses": [{"kind":"native_selected","id":"j","artifact":"j"}],
+            "directions": [],
+            "operations": [],
+            "readouts": [{
+                "id":"live",
+                "lens":"j",
+                "scope":{"layers":{"kind":"values","values":[1]},"prefill":prefill},
+                "top_k":1
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn rendered_span_selectors_bind_exact_content_edges_and_generated_markers() {
+        let plan = semantic_readout_plan(json!({
+            "kind":"rendered_spans",
+            "selectors":[
+                {"span_kind":"message_content","role":"user","occurrence":"last","edge":"end"},
+                {"span_kind":"generated_assistant_start_marker","edge":"start"}
+            ]
+        }));
+        validate_plan(&plan).unwrap();
+        let rendering = LensInputRendering {
+            renderer: "qwen_open_responses_annotated_v1".into(),
+            generation_mode: Some("auto".into()),
+            spans: vec![
+                rendered_span("message_content", Some(0), "user", None, Some((1, 3))),
+                rendered_span("message_content", Some(2), "user", None, Some((5, 7))),
+                rendered_span(
+                    "generated_assistant_start_marker",
+                    None,
+                    "assistant",
+                    None,
+                    Some((8, 9)),
+                ),
+            ],
+        };
+        let bound = bind_plan_positions(&plan, &rendering, 9).unwrap();
+        assert_eq!(
+            bound.resolved.readouts[0].scope.prefill,
+            Some(Selector::Values { values: vec![6, 8] })
+        );
+        assert_eq!(bound.position_bindings.len(), 2);
+        assert_eq!(bound.position_bindings[0].rendering_span_index, 1);
+        assert_eq!(bound.position_bindings[0].resolved_index, 6);
+        assert_eq!(bound.position_bindings[1].resolved_index, 8);
+        assert_eq!(
+            bound.authored_plan_canonical_json_blake3,
+            canonical_plan_blake3(&plan).unwrap()
+        );
+    }
+
+    #[test]
+    fn tool_result_selectors_are_channel_portable_but_preserve_actual_roles() {
+        let plan = semantic_readout_plan(json!({
+            "kind":"rendered_spans",
+            "selectors":[
+                {"span_kind":"tool_result_content","channel":"tool_result","edge":"end"},
+                {"span_kind":"message_end_marker","channel":"tool_result","edge":"start"}
+            ]
+        }));
+        for role in ["user", "tool"] {
+            let rendering = LensInputRendering {
+                renderer: if role == "user" {
+                    "qwen_open_responses_annotated_v1"
+                } else {
+                    "muse_glimmer_atem_annotated_v1"
+                }
+                .into(),
+                generation_mode: Some("auto".into()),
+                spans: vec![
+                    rendered_span(
+                        "tool_result_content",
+                        Some(3),
+                        role,
+                        Some("tool_result"),
+                        Some((4, 6)),
+                    ),
+                    rendered_span(
+                        "message_end_marker",
+                        Some(3),
+                        role,
+                        Some("tool_result"),
+                        Some((6, 7)),
+                    ),
+                ],
+            };
+            let bound = bind_plan_positions(&plan, &rendering, 7).unwrap();
+            assert_eq!(
+                bound.resolved.readouts[0].scope.prefill,
+                Some(Selector::Values { values: vec![5, 6] })
+            );
+            assert_eq!(
+                bound.position_bindings[0].matched_span.role.as_deref(),
+                Some(role)
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_span_selectors_fail_closed_on_ambiguity_missing_ranges_and_raw_input() {
+        let rendering = LensInputRendering {
+            renderer: "qwen_chatml_messages_v1".into(),
+            generation_mode: Some("auto".into()),
+            spans: vec![
+                rendered_span("message_content", Some(0), "user", None, Some((1, 2))),
+                rendered_span("message_content", Some(2), "user", None, Some((3, 4))),
+            ],
+        };
+        let unique = semantic_readout_plan(json!({
+            "kind":"rendered_spans",
+            "selectors":[{"span_kind":"message_content","role":"user","edge":"end"}]
+        }));
+        assert!(bind_plan_positions(&unique, &rendering, 4).is_err());
+
+        let last = semantic_readout_plan(json!({
+            "kind":"rendered_spans",
+            "selectors":[{"span_kind":"message_content","role":"user","occurrence":"last","edge":"end"}]
+        }));
+        assert_eq!(
+            bind_plan_positions(&last, &rendering, 4)
+                .unwrap()
+                .resolved
+                .readouts[0]
+                .scope
+                .prefill,
+            Some(Selector::Values { values: vec![3] })
+        );
+
+        let mut missing_range = rendering.clone();
+        missing_range.spans[1].token_start = None;
+        missing_range.spans[1].token_end = None;
+        assert!(bind_plan_positions(&last, &missing_range, 4).is_err());
+
+        let raw = LensInputRendering {
+            renderer: "tokenizer_text".into(),
+            generation_mode: None,
+            spans: Vec::new(),
+        };
+        assert!(bind_plan_positions(&last, &raw, 4).is_err());
+
+        let duplicate_position = semantic_readout_plan(json!({
+            "kind":"rendered_spans",
+            "selectors":[
+                {"span_kind":"message_content","message_index":2,"edge":"end"},
+                {"span_kind":"message_content","role":"user","occurrence":"last","edge":"end"}
+            ]
+        }));
+        assert!(bind_plan_positions(&duplicate_position, &rendering, 4).is_err());
+    }
+
+    #[test]
+    fn rendered_span_binding_has_global_selector_and_match_work_bounds() {
+        let make_selectors = |count: usize| {
+            (0..count)
+                .map(|message_index| RenderedSpanSelector {
+                    span_kind: "message_content".into(),
+                    message_index: Some(message_index),
+                    tool_call_index: None,
+                    role: Some("user".into()),
+                    channel: None,
+                    label: None,
+                    occurrence: RenderedSpanOccurrence::Unique,
+                    edge: RenderedSpanEdge::End,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut excessive = minimal_plan();
+        excessive.version = 2;
+        excessive.readouts[0].scope.prefill = Some(Selector::RenderedSpans {
+            selectors: make_selectors(MAX_RENDERED_SELECTORS_PER_PLAN + 1),
+        });
+        let one_span = LensInputRendering {
+            renderer: "qwen_chatml_messages_v1".into(),
+            generation_mode: Some("auto".into()),
+            spans: vec![rendered_span(
+                "message_content",
+                Some(0),
+                "user",
+                None,
+                Some((0, 1)),
+            )],
+        };
+        assert!(bind_plan_positions(&excessive, &one_span, 1).is_err());
+
+        let mut expensive = minimal_plan();
+        expensive.version = 2;
+        expensive.readouts[0].scope.prefill = Some(Selector::RenderedSpans {
+            selectors: make_selectors(1000),
+        });
+        let rendering = LensInputRendering {
+            renderer: "qwen_chatml_messages_v1".into(),
+            generation_mode: Some("auto".into()),
+            spans: (0..1001)
+                .map(|index| {
+                    rendered_span(
+                        "message_content",
+                        Some(index),
+                        "user",
+                        None,
+                        Some((index, index + 1)),
+                    )
+                })
+                .collect(),
+        };
+        assert!(bind_plan_positions(&expensive, &rendering, 1001).is_err());
+    }
+
+    #[test]
+    fn plan_v2_limits_semantic_selectors_to_prefill_and_keeps_numeric_v1_exact() {
+        let semantic_prefill = json!({
+            "kind":"rendered_spans",
+            "selectors":[{"span_kind":"message_content","edge":"end"}]
+        });
+        let mut v1 = semantic_readout_plan(semantic_prefill.clone());
+        v1.version = 1;
+        assert!(validate_plan(&v1).is_err());
+
+        let mut decode = semantic_readout_plan(json!({"kind":"values","values":[0]}));
+        decode.readouts[0].scope.prefill = None;
+        decode.readouts[0].scope.decode = Some(serde_json::from_value(semantic_prefill).unwrap());
+        assert!(validate_plan(&decode).is_err());
+
+        let numeric = minimal_plan();
+        let raw = LensInputRendering {
+            renderer: "literal_token_ids".into(),
+            generation_mode: None,
+            spans: Vec::new(),
+        };
+        let bound = bind_plan_positions(&numeric, &raw, 2).unwrap();
+        assert_eq!(bound.authored, numeric);
+        assert_eq!(bound.resolved, numeric);
+        assert!(bound.position_bindings.is_empty());
     }
 
     #[test]

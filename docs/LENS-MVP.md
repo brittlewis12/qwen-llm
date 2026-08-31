@@ -33,9 +33,13 @@ UI, generic plugin systems, and production hardening are out of scope.
   token spans where BPE boundaries permit them; structural selector markers
   remain exact. Open Responses annotates compiled roles, instruction source,
   reasoning, tool-call/result channels, and per-call identity; Muse ATEM adds
-  recipients, synthetic system metadata, and EOM/EOT records. Trace and run stdout remains JSON by default unless
-  `--output` selects a compact summary; either format can be requested
-  explicitly.
+  recipients, synthetic system metadata, and EOM/EOT records. Trace and run
+  stdout remains JSON by default unless `--output` selects a compact summary;
+  either format can be requested explicitly.
+- Plan v2 can bind prefill operations and live readouts to exact authored spans
+  by kind, message/call index, role, channel, label, occurrence, and start/end
+  token edge. Bindings fail on ambiguity or inexact BPE boundaries and resolve
+  to the existing numeric execution contract for Qwen, Muse, and Flash-Next.
 - Native selected-token J/R artifacts support live readout and intervention.
 - Ordinary dense Qwen native J/R fitting supports the published T128 sequence
   length for row shards and selected-token artifacts.
@@ -53,11 +57,13 @@ UI, generic plugin systems, and production hardening are out of scope.
   reports exact reference-arm readout differences.
 - Raw `--prompt` (`--raw-prompt` alias) bypasses chat templating, while literal
   `--token-ids` bypasses both rendering and tokenization. Both accept deliberate
-  malformed or simulated forged structure without normalizing it.
-- Run artifacts use schema v3 to bind the input source, automatic-special-token
-  policy, resolved renderer/mode, renderer-authored role/channel spans, and exact
-  prompt IDs. Sweep verification treats this rendering metadata as shared arm
-  context.
+  malformed or simulated forged structure without normalizing it; semantic span
+  selectors correctly fail because these paths make no authored-span claim.
+- Run artifacts use schema v4 to bind the authored plan and canonical digest,
+  numeric resolved plan, exact semantic position bindings, input source,
+  automatic-special-token policy, renderer/mode, role/channel spans, and prompt
+  IDs. Sweep v2 embeds and hashes the source plan and treats bindings plus
+  rendering metadata as shared arm context.
 - Ordinary dense and MoE inference paths run interventions. Muse supports native
   selected and published full-transport directions; Flash-Next exposes only raw
   native hyper control.
@@ -85,7 +91,7 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes 206 tests with four model-bound
+- The active `qwen-lens` unit suite passes 213 tests with four model-bound
   qualification tests intentionally ignored by default.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.

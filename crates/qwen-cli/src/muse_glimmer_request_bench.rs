@@ -8,6 +8,7 @@ use qwen_llm::muse_glimmer::{
 use qwen_llm::muse_glimmer_prompt::MuseGlimmerReasoningStrength;
 use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerTextRunner};
+use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
 use qwen_llm::tokenizer::{LlamaCppTokenizer, token_ids_sha256_i32le};
 use serde::Serialize;
@@ -794,7 +795,7 @@ pub fn run(args: MuseRequestArgs) -> Result<()> {
             warmup_scope: "full_request",
             sampler_scope: "fresh_from_effective_config_per_iteration",
             session_scope: "one_resident_session_position_reset_per_iteration",
-            prefill_mode: "scalar_full_logits",
+            prefill_mode: muse_prefill_mode(prompt_tokens.len()),
             decode_mode: "serial_full_logits",
             output_sink: "in_memory_exact_token_bytes",
         },
@@ -887,6 +888,16 @@ fn required_forwards(prompt_tokens: usize, max_tokens: usize) -> Result<usize> {
     prompt_tokens
         .checked_add(max_tokens - 1)
         .context("Muse benchmark forward count overflow")
+}
+
+fn muse_prefill_mode(prompt_tokens: usize) -> &'static str {
+    let packed_tokens =
+        prompt_tokens / MUSE_GLIMMER_PACKED_PREFILL_TOKENS * MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+    match (packed_tokens, prompt_tokens - packed_tokens) {
+        (0, _) => "scalar_full_logits",
+        (_, 0) => "packed16_exact_full_logits",
+        _ => "packed16_exact_plus_scalar_tail_full_logits",
+    }
 }
 
 fn checked_token_id(token: i32, vocab_size: u32, context: &str) -> Result<u32> {
@@ -1070,6 +1081,16 @@ mod tests {
         assert_eq!(required_forwards(10, 4).unwrap(), 13);
         assert!(required_forwards(0, 1).is_err());
         assert!(required_forwards(1, 0).is_err());
+    }
+
+    #[test]
+    fn prefill_metadata_names_the_executed_prompt_shape() {
+        assert_eq!(muse_prefill_mode(15), "scalar_full_logits");
+        assert_eq!(muse_prefill_mode(16), "packed16_exact_full_logits");
+        assert_eq!(
+            muse_prefill_mode(17),
+            "packed16_exact_plus_scalar_tail_full_logits"
+        );
     }
 
     #[test]

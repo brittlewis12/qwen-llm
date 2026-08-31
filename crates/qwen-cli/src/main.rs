@@ -69,6 +69,7 @@ use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, Mus
 use qwen_llm::muse_glimmer_prompt::MuseGlimmerReasoningStrength;
 use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
+use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
@@ -4267,14 +4268,28 @@ fn run_muse_glimmer_single_turn(
         stop_tokens == expected_stop_tokens,
         "Muse Glimmer release stop tokens must be EOS/EOT {expected_stop_tokens:?}, got {stop_tokens:?}"
     );
+    let prefill_packed_tokens = prompt_tokens.len() / MUSE_GLIMMER_PACKED_PREFILL_TOKENS
+        * MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+    let prefill_scalar_tail_commands = prompt_tokens.len() - prefill_packed_tokens;
+    let prefill_commands =
+        prefill_packed_tokens / MUSE_GLIMMER_PACKED_PREFILL_TOKENS + prefill_scalar_tail_commands;
+    let prefill_mode = match (prefill_packed_tokens, prefill_scalar_tail_commands) {
+        (0, _) => "scalar_tail",
+        (_, 0) => "packed16_exact",
+        _ => "packed16_exact+scalar_tail",
+    };
 
     eprintln!(
-        "muse_glimmer: loading {} for text generation; prompt_source={:?} prompt_tokens={} max_generated_tokens={} forward_capacity={} prefill=scalar",
+        "muse_glimmer: loading {} for text generation; prompt_source={:?} prompt_tokens={} max_generated_tokens={} forward_capacity={} prefill_mode={} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={}",
         model_path.display(),
         prepared.source,
         prompt_tokens.len(),
         args.tokens,
         capacity,
+        prefill_mode,
+        prefill_commands,
+        prefill_packed_tokens,
+        prefill_scalar_tail_commands,
     );
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for Muse Glimmer")?;
@@ -4344,15 +4359,19 @@ fn run_muse_glimmer_single_turn(
         0.0
     };
     eprintln!(
-        "muse_glimmer stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} generation_ms={:.1} decode_tps={:.2} total_ms={:.1}",
+        "muse_glimmer stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={} generation_ms={:.1} decode_tps={:.2} total_ms={:.1}",
         prompt_tokens.len(),
         generation.tokens.len(),
         generation.transitions,
         generation.stop_reason.as_str(),
         tokenizer_ms,
         load_ms,
+        prefill_mode,
         prefill_ms,
         prefill_tps,
+        prefill_commands,
+        prefill_packed_tokens,
+        prefill_scalar_tail_commands,
         generation.wall_ms,
         decode_tps,
         request_t0.elapsed().as_secs_f64() * 1e3,

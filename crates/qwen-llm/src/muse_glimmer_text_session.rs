@@ -1,15 +1,17 @@
-//! Correctness-first scalar text execution for Muse Glimmer 30B.
+//! Correctness-first text execution for Muse Glimmer 30B.
 //!
 //! The initial path uses native Q8_0/BF16 projections and a contiguous F16 KV
 //! cache. Sliding layers use a suffix view while full-attention layers use the
-//! entire prefix. Packed prefill is a separate follow-on optimization.
+//! entire prefix. Ordinary prefill batches complete 16-token chunks while
+//! retaining the scalar path for decode, tails, captures, and interventions.
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTensor,
     PostBlockIntervention, encode_add_inplace_f32, encode_copy_offset_f32, encode_get_rows_f32,
-    encode_mat_vec_f16_f32, encode_post_block_intervention_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32,
-    encode_silu_mul_f32, evaluate_metal_memory_admission, host_page_size_bytes,
+    encode_mat_vec_f16_f32, encode_mat_vec_q8_0_batch_f32, encode_post_block_intervention_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32, encode_silu_mul_f32,
+    evaluate_metal_memory_admission, host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
@@ -45,6 +47,7 @@ use objc2_metal::{
 
 pub const MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
+pub const MUSE_GLIMMER_PACKED_PREFILL_TOKENS: usize = 16;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerPostBlockForward {
@@ -366,6 +369,117 @@ impl MuseGlimmerTextSessionMemoryPlan {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MuseGlimmerPrefillPlan {
+    packed_chunks: usize,
+    scalar_tail: usize,
+}
+
+impl MuseGlimmerPrefillPlan {
+    fn for_tokens(token_count: usize) -> Self {
+        Self {
+            packed_chunks: token_count / MUSE_GLIMMER_PACKED_PREFILL_TOKENS,
+            scalar_tail: token_count % MUSE_GLIMMER_PACKED_PREFILL_TOKENS,
+        }
+    }
+
+    fn packed_tokens(self) -> usize {
+        self.packed_chunks * MUSE_GLIMMER_PACKED_PREFILL_TOKENS
+    }
+}
+
+struct MuseGlimmerPackedPrefillWorkspace {
+    ids: MetalTensor,
+    residual: MetalTensor,
+    normed: MetalTensor,
+    branch_raw: MetalTensor,
+    branch_normed: MetalTensor,
+    query_raw: MetalTensor,
+    query: MetalTensor,
+    key_raw: MetalTensor,
+    key: MetalTensor,
+    value: MetalTensor,
+    attention_gate: MetalTensor,
+    attention_output: MetalTensor,
+    feed_forward_gate: MetalTensor,
+    feed_forward_up: MetalTensor,
+}
+
+impl MuseGlimmerPackedPrefillWorkspace {
+    fn new(
+        ctx: &MetalContext,
+        geometry: &MuseGlimmerTextGeometry,
+    ) -> Result<Self, MuseGlimmerTextSessionError> {
+        let rows = MUSE_GLIMMER_PACKED_PREFILL_TOKENS as u64;
+        let hidden = geometry.hidden_size as u64;
+        let query = geometry.query_width as u64;
+        let kv = geometry.kv_width as u64;
+        let feed_forward = geometry.feed_forward_size as u64;
+        Ok(Self {
+            ids: MetalTensor::zeros_i32(ctx, vec![rows])?,
+            residual: MetalTensor::zeros_f32(ctx, vec![hidden, rows])?,
+            normed: MetalTensor::zeros_f32(ctx, vec![hidden, rows])?,
+            branch_raw: MetalTensor::zeros_f32(ctx, vec![hidden, rows])?,
+            branch_normed: MetalTensor::zeros_f32(ctx, vec![hidden, rows])?,
+            query_raw: MetalTensor::zeros_f32(ctx, vec![query, rows])?,
+            query: MetalTensor::zeros_f32(ctx, vec![query, rows])?,
+            key_raw: MetalTensor::zeros_f32(ctx, vec![kv, rows])?,
+            key: MetalTensor::zeros_f32(ctx, vec![kv, rows])?,
+            value: MetalTensor::zeros_f32(ctx, vec![kv, rows])?,
+            attention_gate: MetalTensor::zeros_f32(ctx, vec![query, rows])?,
+            attention_output: MetalTensor::zeros_f32(ctx, vec![query, rows])?,
+            feed_forward_gate: MetalTensor::zeros_f32(ctx, vec![feed_forward, rows])?,
+            feed_forward_up: MetalTensor::zeros_f32(ctx, vec![feed_forward, rows])?,
+        })
+    }
+
+    fn tensors(&self) -> [&MetalTensor; 14] {
+        [
+            &self.ids,
+            &self.residual,
+            &self.normed,
+            &self.branch_raw,
+            &self.branch_normed,
+            &self.query_raw,
+            &self.query,
+            &self.key_raw,
+            &self.key,
+            &self.value,
+            &self.attention_gate,
+            &self.attention_output,
+            &self.feed_forward_gate,
+            &self.feed_forward_up,
+        ]
+    }
+
+    fn write_tokens(&self, tokens: &[u32]) -> Result<(), MuseGlimmerTextSessionError> {
+        if tokens.len() != MUSE_GLIMMER_PACKED_PREFILL_TOKENS {
+            return invalid(format!(
+                "packed prefill requires exactly {MUSE_GLIMMER_PACKED_PREFILL_TOKENS} tokens, got {}",
+                tokens.len()
+            ));
+        }
+        let pointer = unsafe {
+            self.ids
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(self.ids.offset as usize)
+                .cast::<i32>()
+        };
+        for (index, &token) in tokens.iter().enumerate() {
+            let token = i32::try_from(token).map_err(|_| {
+                MuseGlimmerTextSessionError::Invalid(format!(
+                    "packed token {token} exceeds signed 32-bit row-id range"
+                ))
+            })?;
+            unsafe { pointer.add(index).write(token) };
+        }
+        Ok(())
+    }
+}
+
 pub struct MuseGlimmerTextSession {
     geometry: MuseGlimmerTextGeometry,
     memory_plan: MuseGlimmerTextSessionMemoryPlan,
@@ -389,6 +503,7 @@ pub struct MuseGlimmerTextSession {
     attention_output: MetalTensor,
     feed_forward_gate: MetalTensor,
     feed_forward_up: MetalTensor,
+    packed: MuseGlimmerPackedPrefillWorkspace,
     logits: MetalTensor,
     key_cache: MetalTensor,
     value_cache: MetalTensor,
@@ -426,6 +541,7 @@ impl MuseGlimmerTextSession {
             vec![hidden],
             GgmlType::F32,
         )?;
+        let packed = MuseGlimmerPackedPrefillWorkspace::new(ctx, &geometry)?;
         let session = Self {
             geometry,
             memory_plan,
@@ -449,6 +565,7 @@ impl MuseGlimmerTextSession {
             attention_output: MetalTensor::zeros_f32(ctx, vec![query])?,
             feed_forward_gate: MetalTensor::zeros_f32(ctx, vec![feed_forward])?,
             feed_forward_up: MetalTensor::zeros_f32(ctx, vec![feed_forward])?,
+            packed,
             logits: MetalTensor::zeros_f32(ctx, vec![config.vocab_size as u64])?,
             key_cache: MetalTensor::zeros_f16(ctx, vec![cache_elements])?,
             value_cache: MetalTensor::zeros_f16(ctx, vec![cache_elements])?,
@@ -501,7 +618,7 @@ impl MuseGlimmerTextSession {
     }
 
     fn aliases_mutable_buffer(&self, candidate: &MetalTensor) -> bool {
-        [
+        let scalar_alias = [
             &self.ids,
             &self.embedding_norm_weight,
             &self.residual,
@@ -522,7 +639,11 @@ impl MuseGlimmerTextSession {
             &self.value_cache,
         ]
         .into_iter()
-        .any(|tensor| Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer))
+        .any(|tensor| Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer));
+        scalar_alias
+            || self.packed.tensors().into_iter().any(|tensor| {
+                Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer)
+            })
     }
 
     fn write_token(&self, token: i32) {
@@ -819,11 +940,20 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         for &token in tokens {
             self.validate_token_and_session(token, session)?;
         }
-        let final_index = tokens.len() - 1;
+        let plan = MuseGlimmerPrefillPlan::for_tokens(tokens.len());
+        let (packed_tokens, scalar_tokens) = tokens.split_at(plan.packed_tokens());
+        let (packed_chunks, packed_remainder) =
+            packed_tokens.as_chunks::<MUSE_GLIMMER_PACKED_PREFILL_TOKENS>();
+        debug_assert!(packed_remainder.is_empty());
         let mut logits = None;
-        for (index, &token) in tokens.iter().enumerate() {
+        for (chunk_index, chunk) in packed_chunks.iter().enumerate() {
             checkpoint()?;
-            logits = self.execute_token(token, session, index == final_index)?;
+            let produce_logits = plan.scalar_tail == 0 && chunk_index + 1 == plan.packed_chunks;
+            logits = self.execute_packed_chunk(chunk, session, produce_logits)?;
+        }
+        for (index, &token) in scalar_tokens.iter().enumerate() {
+            checkpoint()?;
+            logits = self.execute_token(token, session, index + 1 == scalar_tokens.len())?;
         }
         logits.ok_or_else(|| {
             MuseGlimmerTextSessionError::Invalid("prefill endpoint logits were not produced".into())
@@ -1116,6 +1246,345 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         produce_logits: bool,
     ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
         self.execute_token_with_sink(token, session, produce_logits, None, &[])
+    }
+
+    fn execute_packed_chunk(
+        &self,
+        tokens: &[u32],
+        session: &mut MuseGlimmerTextSession,
+        produce_logits: bool,
+    ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
+        session.ensure_usable()?;
+        self.validate_session_geometry(session)?;
+        if tokens.len() != MUSE_GLIMMER_PACKED_PREFILL_TOKENS {
+            return invalid(format!(
+                "packed prefill requires exactly {MUSE_GLIMMER_PACKED_PREFILL_TOKENS} tokens, got {}",
+                tokens.len()
+            ));
+        }
+        if tokens.len() > session.remaining_forwards() {
+            return invalid(format!(
+                "packed prefill of {} tokens exceeds {} remaining session positions",
+                tokens.len(),
+                session.remaining_forwards()
+            ));
+        }
+        for &token in tokens {
+            if token >= self.weights.config.vocab_size {
+                return invalid(format!(
+                    "token {token} is outside vocabulary {}",
+                    self.weights.config.vocab_size
+                ));
+            }
+        }
+
+        let start_position = session.next_position;
+        let end_position = start_position.checked_add(tokens.len()).ok_or_else(|| {
+            MuseGlimmerTextSessionError::Invalid("packed prefill position range overflow".into())
+        })?;
+        u32::try_from(end_position - 1).map_err(|_| {
+            MuseGlimmerTextSessionError::Invalid("packed prefill position exceeds u32".into())
+        })?;
+        session.packed.write_tokens(tokens)?;
+
+        let command = self.ctx.queue.commandBuffer().ok_or_else(|| {
+            MuseGlimmerTextSessionError::CommandBuffer("allocation failed".into())
+        })?;
+        let encode_result = (|| {
+            let encoder = KernelEncoder::begin(&command);
+            self.encode_packed_chunk_graph(&encoder, start_position, session, produce_logits)?;
+            encoder.end();
+            Ok::<(), MuseGlimmerTextSessionError>(())
+        })();
+        encode_result?;
+
+        command.commit();
+        command.waitUntilCompleted();
+        let status = command.status();
+        let command_error = command.error().map(|error| error.to_string());
+        if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
+            let reason = format!("status={status:?}, error={command_error:?}");
+            session.poison_reason = Some(reason.clone());
+            return Err(MuseGlimmerTextSessionError::CommandBuffer(reason));
+        }
+        session.next_position = end_position;
+        Ok(produce_logits.then(|| session.read_logits()))
+    }
+
+    fn encode_packed_chunk_graph(
+        &self,
+        encoder: &KernelEncoder,
+        start_position: usize,
+        session: &MuseGlimmerTextSession,
+        produce_logits: bool,
+    ) -> Result<(), MuseGlimmerTextSessionError> {
+        let geometry = &session.geometry;
+        let packed = &session.packed;
+        let rows = MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+
+        encode_get_rows_f32(
+            self.ctx,
+            encoder,
+            self.weights.token_embedding,
+            &packed.ids,
+            &packed.normed,
+            rows,
+            geometry.hidden_size,
+        )?;
+        encode_rms_norm_mul_rows_f32(
+            self.ctx,
+            encoder,
+            &packed.normed,
+            &session.embedding_norm_weight,
+            &packed.residual,
+            rows,
+            geometry.hidden_size,
+            self.weights.config.rms_epsilon,
+        )?;
+
+        for (layer_index, layer) in self.weights.layers.iter().enumerate() {
+            encode_rms_norm_mul_rows_f32(
+                self.ctx,
+                encoder,
+                &packed.residual,
+                layer.attention_norm,
+                &packed.normed,
+                rows,
+                geometry.hidden_size,
+                self.weights.config.rms_epsilon,
+            )?;
+            self.encode_packed_projection(
+                encoder,
+                layer.attention_query,
+                &packed.normed,
+                &packed.query_raw,
+                geometry.hidden_size,
+                geometry.query_width,
+                rows,
+            )?;
+            self.encode_packed_projection(
+                encoder,
+                layer.attention_key,
+                &packed.normed,
+                &packed.key_raw,
+                geometry.hidden_size,
+                geometry.kv_width,
+                rows,
+            )?;
+            self.encode_packed_projection(
+                encoder,
+                layer.attention_value,
+                &packed.normed,
+                &packed.value,
+                geometry.hidden_size,
+                geometry.kv_width,
+                rows,
+            )?;
+            self.encode_packed_projection(
+                encoder,
+                layer.attention_gate,
+                &packed.normed,
+                &packed.attention_gate,
+                geometry.hidden_size,
+                geometry.query_width,
+                rows,
+            )?;
+            encode_rms_norm_batched_f32(
+                self.ctx,
+                encoder,
+                &packed.query_raw,
+                layer.query_norm,
+                &packed.query,
+                rows * geometry.query_head_count,
+                geometry.head_dim,
+                self.weights.config.rms_epsilon,
+            )?;
+            encode_rms_norm_batched_f32(
+                self.ctx,
+                encoder,
+                &packed.key_raw,
+                layer.key_norm,
+                &packed.key,
+                rows * geometry.kv_head_count,
+                geometry.head_dim,
+                self.weights.config.rms_epsilon,
+            )?;
+            if layer.sliding_attention {
+                for row in 0..rows {
+                    let position = start_position + row;
+                    let position_u32 = u32::try_from(position).map_err(|_| {
+                        MuseGlimmerTextSessionError::Invalid(
+                            "packed prefill position exceeds u32".into(),
+                        )
+                    })?;
+                    let query = packed_row(&packed.query, row, geometry.query_width);
+                    let key = packed_row(&packed.key, row, geometry.kv_width);
+                    encode_muse_glimmer_rope_adjacent_pair_in_place_f32(
+                        self.ctx,
+                        encoder,
+                        &query,
+                        &key,
+                        geometry.query_head_count,
+                        geometry.kv_head_count,
+                        geometry.head_dim,
+                        position_u32,
+                        self.weights.config.rope_theta,
+                    )?;
+                }
+            }
+
+            let cache_write = geometry.cache_write_offset(layer_index, start_position)?;
+            encode_scatter_offset_f32_to_f16_kv(
+                self.ctx,
+                encoder,
+                &packed.key,
+                &packed.value,
+                &session.key_cache,
+                &session.value_cache,
+                cache_write,
+                rows * geometry.kv_width,
+            )?;
+            for row in 0..rows {
+                let position = start_position + row;
+                let query = packed_row(&packed.query, row, geometry.query_width);
+                let attention_output =
+                    packed_row(&packed.attention_output, row, geometry.query_width);
+                let (key_cache, value_cache, visible_positions) =
+                    session.cache_views(layer_index, position, layer.sliding_attention)?;
+                encode_muse_glimmer_attn_decode_f16kv_f32(
+                    self.ctx,
+                    encoder,
+                    &query,
+                    &key_cache,
+                    &value_cache,
+                    &attention_output,
+                    geometry.query_head_count,
+                    geometry.kv_head_count,
+                    geometry.head_dim,
+                    visible_positions,
+                )?;
+            }
+            encode_sigmoid_mul_f32(
+                self.ctx,
+                encoder,
+                &packed.attention_gate,
+                &packed.attention_output,
+                &packed.attention_output,
+            )?;
+            self.encode_packed_projection(
+                encoder,
+                layer.attention_output,
+                &packed.attention_output,
+                &packed.branch_raw,
+                geometry.query_width,
+                geometry.hidden_size,
+                rows,
+            )?;
+            encode_rms_norm_mul_rows_f32(
+                self.ctx,
+                encoder,
+                &packed.branch_raw,
+                layer.post_attention_norm,
+                &packed.branch_normed,
+                rows,
+                geometry.hidden_size,
+                self.weights.config.post_norm_epsilon,
+            )?;
+            encode_add_inplace_f32(self.ctx, encoder, &packed.residual, &packed.branch_normed)?;
+            encode_rms_norm_mul_rows_f32(
+                self.ctx,
+                encoder,
+                &packed.residual,
+                layer.feed_forward_norm,
+                &packed.normed,
+                rows,
+                geometry.hidden_size,
+                self.weights.config.rms_epsilon,
+            )?;
+            self.encode_packed_projection(
+                encoder,
+                layer.feed_forward_gate,
+                &packed.normed,
+                &packed.feed_forward_gate,
+                geometry.hidden_size,
+                geometry.feed_forward_size,
+                rows,
+            )?;
+            self.encode_packed_projection(
+                encoder,
+                layer.feed_forward_up,
+                &packed.normed,
+                &packed.feed_forward_up,
+                geometry.hidden_size,
+                geometry.feed_forward_size,
+                rows,
+            )?;
+            encode_silu_mul_f32(
+                self.ctx,
+                encoder,
+                &packed.feed_forward_gate,
+                &packed.feed_forward_up,
+                &packed.feed_forward_gate,
+            )?;
+            self.encode_packed_projection(
+                encoder,
+                layer.feed_forward_down,
+                &packed.feed_forward_gate,
+                &packed.branch_raw,
+                geometry.feed_forward_size,
+                geometry.hidden_size,
+                rows,
+            )?;
+            encode_rms_norm_mul_rows_f32(
+                self.ctx,
+                encoder,
+                &packed.branch_raw,
+                layer.post_feed_forward_norm,
+                &packed.branch_normed,
+                rows,
+                geometry.hidden_size,
+                self.weights.config.post_norm_epsilon,
+            )?;
+            encode_add_inplace_f32(self.ctx, encoder, &packed.residual, &packed.branch_normed)?;
+        }
+
+        if produce_logits {
+            encode_copy_offset_f32(
+                self.ctx,
+                encoder,
+                &packed.residual,
+                (rows - 1) * geometry.hidden_size,
+                &session.residual,
+                geometry.hidden_size,
+            )?;
+            self.encode_deployed_output_tail(encoder, session)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_packed_projection(
+        &self,
+        encoder: &KernelEncoder,
+        weight: &MetalTensor,
+        input: &MetalTensor,
+        output: &MetalTensor,
+        n_in: usize,
+        n_out: usize,
+        rows: usize,
+    ) -> Result<(), MuseGlimmerTextSessionError> {
+        if weight.dtype == GgmlType::Q8_0 {
+            encode_mat_vec_q8_0_batch_f32(
+                self.ctx, encoder, weight, input, output, n_in, n_out, rows,
+            )?;
+            return Ok(());
+        }
+        for row in 0..rows {
+            let input = packed_row(input, row, n_in);
+            let output = packed_row(output, row, n_out);
+            encode_mat_vec_dispatch(self.ctx, encoder, weight, &input, &output, n_in, n_out)?;
+        }
+        Ok(())
     }
 
     fn execute_token_with_sink(
@@ -1708,6 +2177,10 @@ fn validate_multi_lens_capture_request(
     Ok(())
 }
 
+fn packed_row(tensor: &MetalTensor, row: usize, width: usize) -> MetalTensor {
+    tensor.view_subrange((row * width) as u64, vec![width as u64])
+}
+
 fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
     let mut values = vec![0.0_f32; tensor.n_elements() as usize];
     unsafe {
@@ -1729,7 +2202,7 @@ fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
 fn session_allocation_specs(
     geometry: &MuseGlimmerTextGeometry,
 ) -> Result<Vec<(String, u64)>, MuseGlimmerTextSessionError> {
-    let mut specs = Vec::with_capacity(18);
+    let mut specs = Vec::with_capacity(32);
     specs.push(("session.ids".into(), std::mem::size_of::<i32>() as u64));
     for name in [
         "session.embedding_norm_weight",
@@ -1767,6 +2240,55 @@ fn session_allocation_specs(
         ));
     }
     specs.push((
+        "session.packed.ids".into(),
+        checked_bytes(
+            MUSE_GLIMMER_PACKED_PREFILL_TOKENS,
+            std::mem::size_of::<i32>(),
+            "session.packed.ids",
+        )?,
+    ));
+    for name in [
+        "session.packed.residual",
+        "session.packed.normed",
+        "session.packed.branch_raw",
+        "session.packed.branch_normed",
+    ] {
+        specs.push((
+            name.into(),
+            checked_packed_f32_bytes(geometry.hidden_size, name)?,
+        ));
+    }
+    for name in [
+        "session.packed.query_raw",
+        "session.packed.query",
+        "session.packed.attention_gate",
+        "session.packed.attention_output",
+    ] {
+        specs.push((
+            name.into(),
+            checked_packed_f32_bytes(geometry.query_width, name)?,
+        ));
+    }
+    for name in [
+        "session.packed.key_raw",
+        "session.packed.key",
+        "session.packed.value",
+    ] {
+        specs.push((
+            name.into(),
+            checked_packed_f32_bytes(geometry.kv_width, name)?,
+        ));
+    }
+    for name in [
+        "session.packed.feed_forward_gate",
+        "session.packed.feed_forward_up",
+    ] {
+        specs.push((
+            name.into(),
+            checked_packed_f32_bytes(geometry.feed_forward_size, name)?,
+        ));
+    }
+    specs.push((
         "session.logits".into(),
         checked_bytes(
             geometry.vocab_size,
@@ -1782,6 +2304,18 @@ fn session_allocation_specs(
     specs.push(("session.key_cache".into(), cache_bytes));
     specs.push(("session.value_cache".into(), cache_bytes));
     Ok(specs)
+}
+
+fn checked_packed_f32_bytes(
+    row_width: usize,
+    label: &str,
+) -> Result<u64, MuseGlimmerTextSessionError> {
+    let elements = row_width
+        .checked_mul(MUSE_GLIMMER_PACKED_PREFILL_TOKENS)
+        .ok_or_else(|| {
+            MuseGlimmerTextSessionError::Invalid(format!("{label} packed element count overflow"))
+        })?;
+    checked_bytes(elements, std::mem::size_of::<f32>(), label)
 }
 
 fn checked_bytes(
@@ -1886,7 +2420,12 @@ mod tests {
         assert!(plan.logical_bytes() > cache_bytes);
         assert!(plan.logical_bytes() < cache_bytes + 10 * 1024 * 1024);
         assert!(plan.priced_upper_bytes() >= plan.logical_bytes());
-        assert_eq!(plan.allocations().len(), 18);
+        assert_eq!(plan.allocations().len(), 32);
+        assert!(
+            plan.allocations()
+                .iter()
+                .any(|allocation| allocation.name == "session.packed.feed_forward_up")
+        );
     }
 
     #[test]
@@ -1896,9 +2435,104 @@ mod tests {
         let mut session = MuseGlimmerTextSession::new(&ctx, &config, 8).unwrap();
         assert_eq!(session.next_position(), 0);
         assert_eq!(session.remaining_forwards(), 8);
-        assert_eq!(session.memory_plan().allocations().len(), 18);
+        assert_eq!(session.memory_plan().allocations().len(), 32);
         assert!(session.admission().admitted);
         session.reset().unwrap();
+    }
+
+    #[test]
+    fn prefill_plan_uses_complete_sixteen_token_chunks_and_scalar_tail() {
+        for (tokens, packed_chunks, scalar_tail) in [
+            (0, 0, 0),
+            (1, 0, 1),
+            (15, 0, 15),
+            (16, 1, 0),
+            (17, 1, 1),
+            (31, 1, 15),
+            (32, 2, 0),
+            (6_229, 389, 5),
+        ] {
+            let plan = MuseGlimmerPrefillPlan::for_tokens(tokens);
+            assert_eq!(plan.packed_chunks, packed_chunks, "tokens={tokens}");
+            assert_eq!(plan.scalar_tail, scalar_tail, "tokens={tokens}");
+            assert_eq!(
+                plan.packed_tokens() + plan.scalar_tail,
+                tokens,
+                "tokens={tokens}"
+            );
+        }
+    }
+
+    #[test]
+    fn packed_q8_projection_rows_match_singleton_accumulation_bitwise() {
+        let ctx = MetalContext::new().unwrap();
+        let n_in = 64;
+        let n_out = 7;
+        let rows = MUSE_GLIMMER_PACKED_PREFILL_TOKENS;
+        let mut weight_bytes = Vec::with_capacity(n_out * (n_in / 32) * 34);
+        for output in 0..n_out {
+            for block in 0..n_in / 32 {
+                let scale = half::f16::from_f32(0.003 * (1 + output + block) as f32);
+                weight_bytes.extend_from_slice(&scale.to_bits().to_le_bytes());
+                for lane in 0..32 {
+                    let quant = ((output * 11 + block * 7 + lane * 3) % 31) as i8 - 15;
+                    weight_bytes.push(quant as u8);
+                }
+            }
+        }
+        let weight = MetalTensor::from_bytes(
+            &ctx,
+            &weight_bytes,
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap();
+        let input_values = (0..rows * n_in)
+            .map(|index| ((index * 17 % 97) as f32 - 48.0) * 0.0025)
+            .collect::<Vec<_>>();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&input_values),
+            vec![n_in as u64, rows as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let packed = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
+        let singleton = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_mat_vec_q8_0_batch_f32(&ctx, &encoder, &weight, &input, &packed, n_in, n_out, rows)
+            .unwrap();
+        for row in 0..rows {
+            crate::metal::encode_mat_vec_q8_0_f32(
+                &ctx,
+                &encoder,
+                &weight,
+                &packed_row(&input, row, n_in),
+                &packed_row(&singleton, row, n_out),
+                n_in,
+                n_out,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+
+        let packed = read_f32(&packed);
+        let singleton = read_f32(&singleton);
+        assert_eq!(
+            packed
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            singleton
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2011,6 +2645,152 @@ mod tests {
         assert!(validate_multi_lens_capture_request(3, &[52], 52, 0, 3).is_err());
         assert!(validate_multi_lens_capture_request(3, &[50], 52, 1, 3).is_err());
         assert!(validate_multi_lens_capture_request(17, &[50], 52, 0, 17).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn packed_q8_prefill_endpoint_and_scalar_continuation_match_scalar_bitwise() {
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
+            .expect("qualify and plan Muse Q8 target");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit Muse Q8 residency");
+        let realized = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .expect("realize Muse Q8 weights");
+        let weights = realized.into_weights();
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).expect("bind Muse forward");
+        let mut scalar = MuseGlimmerTextSession::new(&ctx, weights.config(), 17)
+            .expect("allocate scalar session");
+        let mut packed = MuseGlimmerTextSession::new(&ctx, weights.config(), 17)
+            .expect("allocate packed session");
+        let mut tokens = vec![weights.config().bos_token_id];
+        tokens.extend((0..16).map(|index| 1_000 + index));
+
+        let mut scalar_endpoint = None;
+        for (index, &token) in tokens[..16].iter().enumerate() {
+            scalar_endpoint = forward
+                .execute_token(token, &mut scalar, index == 15)
+                .expect("run scalar prefill token");
+        }
+        let scalar_endpoint = scalar_endpoint.expect("produce scalar endpoint logits");
+        let packed_endpoint = forward
+            .prefill(&tokens[..16], &mut packed)
+            .expect("run packed prefill chunk");
+        assert_logits_bitwise_equal("packed endpoint", &packed_endpoint, &scalar_endpoint);
+        assert_eq!(scalar.next_position(), 16);
+        assert_eq!(packed.next_position(), 16);
+
+        let scalar_continuation = forward
+            .forward_token(tokens[16], &mut scalar)
+            .expect("run scalar baseline continuation");
+        let packed_continuation = forward
+            .forward_token(tokens[16], &mut packed)
+            .expect("run packed-state continuation");
+        assert_logits_bitwise_equal(
+            "packed scalar continuation",
+            &packed_continuation,
+            &scalar_continuation,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn packed_q8_prefill_n128_wall_screen() {
+        use std::time::Instant;
+
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
+            .expect("qualify and plan Muse Q8 target");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit Muse Q8 residency");
+        let realized = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .expect("realize Muse Q8 weights");
+        let weights = realized.into_weights();
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).expect("bind Muse forward");
+        let tokens = std::iter::once(weights.config().bos_token_id)
+            .chain((1..128).map(|index| 1_000 + index))
+            .collect::<Vec<_>>();
+        let mut warm = MuseGlimmerTextSession::new(&ctx, weights.config(), 1)
+            .expect("allocate warmup session");
+        forward
+            .forward_token(tokens[0], &mut warm)
+            .expect("warm resident weights");
+        let mut scalar = MuseGlimmerTextSession::new(&ctx, weights.config(), tokens.len())
+            .expect("allocate scalar screen session");
+        let mut packed = MuseGlimmerTextSession::new(&ctx, weights.config(), tokens.len())
+            .expect("allocate packed screen session");
+
+        let mut run_scalar = || {
+            scalar.reset().expect("reset scalar screen session");
+            let started = Instant::now();
+            let mut logits = None;
+            for (index, &token) in tokens.iter().enumerate() {
+                logits = forward
+                    .execute_token(token, &mut scalar, index + 1 == tokens.len())
+                    .expect("run scalar screen token");
+            }
+            (
+                started.elapsed().as_secs_f64() * 1e3,
+                logits.expect("produce scalar screen logits"),
+            )
+        };
+        let mut run_packed = || {
+            packed.reset().expect("reset packed screen session");
+            let started = Instant::now();
+            let logits = forward
+                .prefill(&tokens, &mut packed)
+                .expect("run packed screen prompt");
+            (started.elapsed().as_secs_f64() * 1e3, logits)
+        };
+
+        let (scalar_first_ms, scalar_first) = run_scalar();
+        let (packed_first_ms, packed_first) = run_packed();
+        let (packed_second_ms, packed_second) = run_packed();
+        let (scalar_second_ms, scalar_second) = run_scalar();
+        for (label, logits) in [
+            ("packed first", &packed_first),
+            ("packed second", &packed_second),
+            ("scalar replay", &scalar_second),
+        ] {
+            assert_logits_bitwise_equal(label, logits, &scalar_first);
+        }
+        let scalar_ms = (scalar_first_ms + scalar_second_ms) * 0.5;
+        let packed_ms = (packed_first_ms + packed_second_ms) * 0.5;
+        let ratio = packed_ms / scalar_ms;
+        eprintln!(
+            "Muse packed N=128 wall screen: scalar={scalar_ms:.2} ms packed={packed_ms:.2} ms ratio={ratio:.3} scalar_tps={:.2} packed_tps={:.2}",
+            tokens.len() as f64 / (scalar_ms / 1e3),
+            tokens.len() as f64 / (packed_ms / 1e3),
+        );
+        assert!(
+            ratio <= 0.85,
+            "packed N=128 wall ratio {ratio:.3} exceeds 0.85 promotion gate"
+        );
+    }
+
+    fn assert_logits_bitwise_equal(label: &str, left: &[f32], right: &[f32]) {
+        assert_eq!(left.len(), right.len(), "{label} logit length");
+        let mismatches = left
+            .iter()
+            .zip(right)
+            .filter(|(left, right)| left.to_bits() != right.to_bits())
+            .count();
+        let max_abs = left
+            .iter()
+            .zip(right)
+            .map(|(&left, &right)| (left - right).abs())
+            .fold(0.0_f32, f32::max);
+        assert_eq!(mismatches, 0, "{label}: max_abs={max_abs}");
     }
 
     #[test]

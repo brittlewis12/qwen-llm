@@ -1,6 +1,6 @@
 use super::muse_full_lens_artifact::MatrixDescriptor;
 use super::muse_lens_artifact;
-use super::published_pt::{ArchiveSpec, ExtractedPayload};
+use super::published_pt::{ArchiveLayout, ArchiveSpec, ExtractedPayload};
 use anyhow::{Context, Result, ensure};
 use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME, MuseGlimmerConfig};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,8 @@ const DATA_PICKLE_SHA256: &str = "f187e6221a2c5540769e3af89d4e0ea81159a1c98a7a1d
 const SERIALIZATION_ID: &str = "1371680345541892666311410627619629120835";
 const ARCHIVE_ROOT: &str = "Muse-Glimmer-30B_jacobian_lens";
 const PAYLOAD_BLAKE3: &str = "64f50f387a56a4533631e62789a896e759f0ebbdb3a9fdbae45898a5dc8a2794";
+const IDENTITY_MATRIX_BLAKE3: &str =
+    "e29104d17d84e4be7d4cac32ccc8470eb46475733e387c6ad12d6a49feaf9574";
 const HIDDEN_SIZE: usize = 6_656;
 const SOURCE_LAYER_COUNT: usize = 51;
 const TARGET_LAYER: u32 = 51;
@@ -86,12 +88,148 @@ pub(crate) enum ProfileId {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct ArchiveClaims {
+    root: &'static str,
+    layout: ArchiveLayout,
+    data_pickle_sha256: &'static str,
+    serialization_id: Option<&'static str>,
+    identity_layer_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ModelClaims {
+    base_model: &'static str,
+    fitted_checkpoint: &'static str,
+    fitted_checkpoint_revision: &'static str,
+    tokenizer_checkpoint: Option<&'static str>,
+    tokenizer_revision: Option<&'static str>,
+    output_rmsnorm_epsilon: f64,
+    output_multiplier: f64,
+    final_logit_softcap: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FitClaims {
+    claims_basis: &'static str,
+    embedded_provenance: bool,
+    fitter: &'static str,
+    fitter_revision: &'static str,
+    transformers_revision: &'static str,
+    recipe_id: Option<&'static str>,
+    dataset: &'static str,
+    dataset_revision: Option<&'static str>,
+    split: &'static str,
+    corpus_preparation: &'static str,
+    corpus_selection: Option<&'static str>,
+    corpus_text_sha256: Option<&'static str>,
+    corpus_token_ids_sha256: Option<&'static str>,
+    estimator_contract: Option<&'static str>,
+    arithmetic_contract: Option<&'static str>,
+    n_prompts: u64,
+    max_sequence_length: u32,
+    skip_first: u32,
+    valid_positions_per_prompt: Option<u32>,
+    dim_batch: u32,
+    model_execution_dtype: &'static str,
+    serialized_dtype: &'static str,
+    stop_rule: &'static str,
+    convergence_status: &'static str,
+    modality: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TransferClaims {
+    binding: &'static str,
+    deployed_checkpoint_policy: &'static str,
+    validation_status: &'static str,
+    image_token_status: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Profile {
     pub(crate) id: ProfileId,
+    name: &'static str,
+    method: &'static str,
+    rule_contract: &'static str,
+    target_layer: u32,
+    source_repository: &'static str,
+    source_revision: &'static str,
+    source_filename: &'static str,
+    source_bytes: u64,
+    source_sha256: &'static str,
+    source_license: &'static str,
+    archive: ArchiveClaims,
+    expected_payload_blake3: &'static str,
+    matrix_blake3: &'static [&'static str],
+    model: ModelClaims,
+    fit: FitClaims,
+    transfer: TransferClaims,
 }
 
 const PROFILES: [Profile; 1] = [Profile {
     id: ProfileId::EyesMlMuseGlimmer30bJ,
+    name: PROFILE_NAME,
+    method: "J",
+    rule_contract: "published_standard_jacobian_lens_v1",
+    target_layer: TARGET_LAYER,
+    source_repository: SOURCE_REPOSITORY,
+    source_revision: SOURCE_REVISION,
+    source_filename: SOURCE_FILENAME,
+    source_bytes: SOURCE_BYTES,
+    source_sha256: SOURCE_SHA256,
+    source_license: "Apache-2.0",
+    archive: ArchiveClaims {
+        root: ARCHIVE_ROOT,
+        layout: ArchiveLayout::LayerStorages,
+        data_pickle_sha256: DATA_PICKLE_SHA256,
+        serialization_id: Some(SERIALIZATION_ID),
+        identity_layer_index: None,
+    },
+    expected_payload_blake3: PAYLOAD_BLAKE3,
+    matrix_blake3: &MATRIX_BLAKE3,
+    model: ModelClaims {
+        base_model: "meta-models/Muse-Glimmer-30B",
+        fitted_checkpoint: "eyes-ml/Muse-Glimmer-30B",
+        fitted_checkpoint_revision: "97e6fe0a8d8d221b100cd67f53fccf0744950abf",
+        tokenizer_checkpoint: None,
+        tokenizer_revision: None,
+        output_rmsnorm_epsilon: 1e-5,
+        output_multiplier: 0.19611613513818404,
+        final_logit_softcap: 20.0,
+    },
+    fit: FitClaims {
+        claims_basis: "pinned_repository_model_card_not_embedded_in_pt",
+        embedded_provenance: false,
+        fitter: "neuronpedia_utils/jlens/fit_lens.py",
+        fitter_revision: "7724688596eb734a0662f911bf183151a5c66b2f",
+        transformers_revision: "a61d9a57c1ca1018fd84acabbf2104fdf468e143",
+        recipe_id: None,
+        dataset: "Salesforce/wikitext:wikitext-103-raw-v1",
+        dataset_revision: None,
+        split: "train",
+        corpus_preparation: "streamed_rechunked_approximately_2000_char_prompts",
+        corpus_selection: None,
+        corpus_text_sha256: None,
+        corpus_token_ids_sha256: None,
+        estimator_contract: None,
+        arithmetic_contract: None,
+        n_prompts: 900,
+        max_sequence_length: 128,
+        skip_first: 16,
+        valid_positions_per_prompt: Some(111),
+        dim_batch: 8,
+        model_execution_dtype: "bfloat16",
+        serialized_dtype: "float16",
+        stop_rule: "smoothed_delta_mean_below_1e-3_after_at_least_100_prompts",
+        convergence_status: "not_reached_at_900_prompts_final_smoothed_delta_approximately_1.5e-3",
+        modality: "text_only",
+    },
+    transfer: TransferClaims {
+        binding: "published_checkpoint_geometry_transfer",
+        deployed_checkpoint_policy: "supported_muse_release_geometry_and_output_contract_requires_explicit_acknowledgement",
+        validation_status: "unvalidated",
+        image_token_status: "unvalidated_text_only_fit",
+    },
 }];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -130,6 +268,10 @@ pub(crate) struct Model {
     pub(crate) base_model: String,
     pub(crate) fitted_checkpoint: String,
     pub(crate) fitted_checkpoint_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tokenizer_checkpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tokenizer_revision: Option<String>,
     pub(crate) output_rmsnorm_epsilon: f64,
     pub(crate) output_multiplier: f64,
     pub(crate) final_logit_softcap: f64,
@@ -143,13 +285,28 @@ pub(crate) struct Fit {
     pub(crate) fitter: String,
     pub(crate) fitter_revision: String,
     pub(crate) transformers_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recipe_id: Option<String>,
     pub(crate) dataset: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dataset_revision: Option<String>,
     pub(crate) split: String,
     pub(crate) corpus_preparation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) corpus_selection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) corpus_text_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) corpus_token_ids_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) estimator_contract: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) arithmetic_contract: Option<String>,
     pub(crate) n_prompts: u64,
     pub(crate) max_sequence_length: u32,
     pub(crate) skip_first: u32,
-    pub(crate) valid_positions_per_prompt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) valid_positions_per_prompt: Option<u32>,
     pub(crate) dim_batch: u32,
     pub(crate) model_execution_dtype: String,
     pub(crate) serialized_dtype: String,
@@ -203,10 +360,11 @@ pub(crate) struct Provenance {
 }
 
 pub(crate) fn profile_for_source(byte_length: u64, sha256: &str) -> Option<Profile> {
-    PROFILES
-        .iter()
-        .copied()
-        .find(|profile| profile.source_bytes() == byte_length && profile.source_sha256() == sha256)
+    PROFILES.iter().copied().find(|profile| {
+        valid_profile_definition(*profile)
+            && profile.source_bytes() == byte_length
+            && profile.source_sha256() == sha256
+    })
 }
 
 pub(crate) fn profile_for_manifest(manifest: &Manifest) -> Result<Profile> {
@@ -214,7 +372,8 @@ pub(crate) fn profile_for_manifest(manifest: &Manifest) -> Result<Profile> {
         .iter()
         .copied()
         .find(|profile| {
-            manifest.profile == profile.name()
+            valid_profile_definition(*profile)
+                && manifest.profile == profile.name()
                 && manifest.source.repository == profile.source_repository()
                 && manifest.source.revision == profile.source_revision()
                 && manifest.source.filename == profile.source_filename()
@@ -226,46 +385,149 @@ pub(crate) fn profile_for_manifest(manifest: &Manifest) -> Result<Profile> {
 
 impl Profile {
     pub(crate) const fn name(self) -> &'static str {
-        match self.id {
-            ProfileId::EyesMlMuseGlimmer30bJ => PROFILE_NAME,
-        }
+        self.name
     }
 
     pub(crate) const fn source_repository(self) -> &'static str {
-        SOURCE_REPOSITORY
+        self.source_repository
     }
 
     pub(crate) const fn source_revision(self) -> &'static str {
-        SOURCE_REVISION
+        self.source_revision
     }
 
     pub(crate) const fn source_filename(self) -> &'static str {
-        SOURCE_FILENAME
+        self.source_filename
     }
 
     pub(crate) const fn source_bytes(self) -> u64 {
-        SOURCE_BYTES
+        self.source_bytes
     }
 
     pub(crate) const fn source_sha256(self) -> &'static str {
-        SOURCE_SHA256
+        self.source_sha256
     }
 
     pub(crate) const fn expected_payload_blake3(self) -> &'static str {
-        PAYLOAD_BLAKE3
+        self.expected_payload_blake3
     }
 
     pub(crate) const fn archive_spec(self) -> ArchiveSpec<'static> {
         ArchiveSpec {
-            root: ARCHIVE_ROOT,
+            root: self.archive.root,
+            layout: self.archive.layout,
             layer_count: SOURCE_LAYER_COUNT,
             hidden_size: HIDDEN_SIZE,
             matrix_bytes: MATRIX_BYTES,
-            data_pickle_sha256: DATA_PICKLE_SHA256,
-            serialization_id: Some(SERIALIZATION_ID),
-            identity_storage_index: None,
+            data_pickle_sha256: self.archive.data_pickle_sha256,
+            serialization_id: self.archive.serialization_id,
+            identity_layer_index: self.archive.identity_layer_index,
         }
     }
+
+    pub(crate) const fn identity_layer_index(self) -> Option<usize> {
+        self.archive.identity_layer_index
+    }
+}
+
+fn valid_profile_definition(profile: Profile) -> bool {
+    let reference = MuseGlimmerConfig::release_reference();
+    let embedded_fit_complete = !profile.fit.embedded_provenance
+        || profile.fit.recipe_id.is_some_and(|value| !value.is_empty())
+            && profile
+                .fit
+                .dataset_revision
+                .is_some_and(|value| !value.is_empty())
+            && profile
+                .fit
+                .corpus_selection
+                .is_some_and(|value| !value.is_empty())
+            && profile.fit.corpus_text_sha256.is_some_and(is_sha256)
+            && profile.fit.corpus_token_ids_sha256.is_some_and(is_sha256)
+            && profile
+                .fit
+                .estimator_contract
+                .is_some_and(|value| !value.is_empty())
+            && profile
+                .fit
+                .arithmetic_contract
+                .is_some_and(|value| !value.is_empty());
+    let embedded_model_complete = !profile.fit.embedded_provenance
+        || profile
+            .model
+            .tokenizer_checkpoint
+            .is_some_and(|value| !value.is_empty())
+            && profile
+                .model
+                .tokenizer_revision
+                .is_some_and(|value| !value.is_empty());
+    matches!(profile.method, "J" | "R")
+        && !profile.name.is_empty()
+        && !profile.rule_contract.is_empty()
+        && profile.target_layer < reference.layer_count
+        && profile.source_bytes >= PAYLOAD_BYTES
+        && is_sha256(profile.source_sha256)
+        && is_sha256(profile.archive.data_pickle_sha256)
+        && is_sha256(profile.expected_payload_blake3)
+        && profile.matrix_blake3.len() == SOURCE_LAYER_COUNT
+        && profile.matrix_blake3.iter().all(|digest| is_sha256(digest))
+        && profile
+            .archive
+            .serialization_id
+            .is_some_and(|value| !value.is_empty())
+        && profile
+            .archive
+            .identity_layer_index
+            .is_none_or(|layer| layer < SOURCE_LAYER_COUNT)
+        && (profile.method != "R"
+            || profile.fit.embedded_provenance
+                && profile.target_layer as usize + 1 == SOURCE_LAYER_COUNT
+                && profile.archive.identity_layer_index == Some(profile.target_layer as usize)
+                && profile.matrix_blake3[profile.target_layer as usize] == IDENTITY_MATRIX_BLAKE3)
+        && [
+            profile.source_repository,
+            profile.source_revision,
+            profile.source_filename,
+            profile.source_license,
+            profile.archive.root,
+            profile.model.base_model,
+            profile.model.fitted_checkpoint,
+            profile.model.fitted_checkpoint_revision,
+            profile.fit.claims_basis,
+            profile.fit.fitter,
+            profile.fit.fitter_revision,
+            profile.fit.transformers_revision,
+            profile.fit.dataset,
+            profile.fit.split,
+            profile.fit.corpus_preparation,
+            profile.fit.model_execution_dtype,
+            profile.fit.serialized_dtype,
+            profile.fit.stop_rule,
+            profile.fit.convergence_status,
+            profile.fit.modality,
+            profile.transfer.binding,
+            profile.transfer.deployed_checkpoint_policy,
+            profile.transfer.validation_status,
+            profile.transfer.image_token_status,
+        ]
+        .iter()
+        .all(|value| !value.is_empty())
+        && profile.fit.n_prompts > 0
+        && profile.fit.max_sequence_length > profile.fit.skip_first
+        && profile
+            .fit
+            .valid_positions_per_prompt
+            .is_none_or(|positions| positions > 0)
+        && profile.fit.dim_batch > 0
+        && embedded_fit_complete
+        && embedded_model_complete
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub(crate) fn payload_from_extracted(
@@ -284,10 +546,11 @@ pub(crate) fn payload_from_extracted(
         .enumerate()
         .map(|(slot, matrix)| {
             ensure!(
-                matrix.storage_index == slot
+                matrix.archive_storage_index
+                    == profile.archive.layout.storage_index_for_layer(slot)
                     && matrix.byte_offset == slot as u64 * MATRIX_BYTES
                     && matrix.byte_length == MATRIX_BYTES
-                    && matrix.blake3 == MATRIX_BLAKE3[slot],
+                    && matrix.blake3 == profile.matrix_blake3[slot],
                 "imported Muse published matrix {slot} does not match the pinned profile"
             );
             Ok(MatrixDescriptor {
@@ -347,7 +610,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             && manifest.transfer == canonical_transfer(profile),
         "Muse published full-transport claims are not canonical"
     );
-    validate_payload(&manifest.payload)?;
+    validate_payload(profile, &manifest.payload)?;
     super::validate_token_build_identity(
         &manifest.provenance.build_source_state,
         &manifest.provenance.build_stamp_error,
@@ -362,13 +625,13 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn validate_payload(payload: &Payload) -> Result<()> {
+fn validate_payload(profile: Profile, payload: &Payload) -> Result<()> {
     ensure!(
         payload.path == PAYLOAD_NAME
             && payload.dtype == "f16_le"
             && payload.shape == [SOURCE_LAYER_COUNT, HIDDEN_SIZE, HIDDEN_SIZE]
             && payload.byte_length == PAYLOAD_BYTES
-            && payload.blake3 == PAYLOAD_BLAKE3
+            && payload.blake3 == profile.expected_payload_blake3
             && payload.matrices.len() == SOURCE_LAYER_COUNT,
         "Muse published payload descriptor is not canonical"
     );
@@ -377,18 +640,18 @@ fn validate_payload(payload: &Payload) -> Result<()> {
             matrix.source_layer == slot as u32
                 && matrix.byte_offset == slot as u64 * MATRIX_BYTES
                 && matrix.byte_length == MATRIX_BYTES
-                && matrix.blake3 == MATRIX_BLAKE3[slot],
+                && matrix.blake3 == profile.matrix_blake3[slot],
             "Muse published matrix descriptor {slot} is not canonical"
         );
     }
     Ok(())
 }
 
-fn canonical_transport(_profile: Profile) -> Transport {
+fn canonical_transport(profile: Profile) -> Transport {
     Transport {
-        method: "J".into(),
-        rule_contract: "published_standard_jacobian_lens_v1".into(),
-        target_layer: TARGET_LAYER,
+        method: profile.method.into(),
+        rule_contract: profile.rule_contract.into(),
+        target_layer: profile.target_layer,
         source_layers: (0..SOURCE_LAYER_COUNT as u32).collect(),
         coordinate: muse_lens_artifact::COORDINATE.into(),
         orientation: "source_layer_target_output_coordinate_source_coordinate".into(),
@@ -396,65 +659,75 @@ fn canonical_transport(_profile: Profile) -> Transport {
     }
 }
 
-fn canonical_model(_profile: Profile) -> Model {
+fn canonical_model(profile: Profile) -> Model {
     let reference = MuseGlimmerConfig::release_reference();
     Model {
         architecture: ARCHITECTURE_NAME.into(),
         geometry: muse_lens_artifact::geometry(&reference),
-        base_model: "meta-models/Muse-Glimmer-30B".into(),
-        fitted_checkpoint: "eyes-ml/Muse-Glimmer-30B".into(),
-        fitted_checkpoint_revision: "97e6fe0a8d8d221b100cd67f53fccf0744950abf".into(),
-        output_rmsnorm_epsilon: 1e-5,
-        output_multiplier: 0.19611613513818404,
-        final_logit_softcap: 20.0,
+        base_model: profile.model.base_model.into(),
+        fitted_checkpoint: profile.model.fitted_checkpoint.into(),
+        fitted_checkpoint_revision: profile.model.fitted_checkpoint_revision.into(),
+        tokenizer_checkpoint: profile.model.tokenizer_checkpoint.map(str::to_owned),
+        tokenizer_revision: profile.model.tokenizer_revision.map(str::to_owned),
+        output_rmsnorm_epsilon: profile.model.output_rmsnorm_epsilon,
+        output_multiplier: profile.model.output_multiplier,
+        final_logit_softcap: profile.model.final_logit_softcap,
     }
 }
 
-fn canonical_fit(_profile: Profile) -> Fit {
+fn canonical_fit(profile: Profile) -> Fit {
     Fit {
-        claims_basis: "pinned_repository_model_card_not_embedded_in_pt".into(),
-        embedded_provenance: false,
-        fitter: "neuronpedia_utils/jlens/fit_lens.py".into(),
-        fitter_revision: "7724688596eb734a0662f911bf183151a5c66b2f".into(),
-        transformers_revision: "a61d9a57c1ca1018fd84acabbf2104fdf468e143".into(),
-        dataset: "Salesforce/wikitext:wikitext-103-raw-v1".into(),
-        split: "train".into(),
-        corpus_preparation: "streamed_rechunked_approximately_2000_char_prompts".into(),
-        n_prompts: 900,
-        max_sequence_length: 128,
-        skip_first: 16,
-        valid_positions_per_prompt: 111,
-        dim_batch: 8,
-        model_execution_dtype: "bfloat16".into(),
-        serialized_dtype: "float16".into(),
-        stop_rule: "smoothed_delta_mean_below_1e-3_after_at_least_100_prompts".into(),
-        convergence_status: "not_reached_at_900_prompts_final_smoothed_delta_approximately_1.5e-3"
-            .into(),
-        modality: "text_only".into(),
+        claims_basis: profile.fit.claims_basis.into(),
+        embedded_provenance: profile.fit.embedded_provenance,
+        fitter: profile.fit.fitter.into(),
+        fitter_revision: profile.fit.fitter_revision.into(),
+        transformers_revision: profile.fit.transformers_revision.into(),
+        recipe_id: profile.fit.recipe_id.map(str::to_owned),
+        dataset: profile.fit.dataset.into(),
+        dataset_revision: profile.fit.dataset_revision.map(str::to_owned),
+        split: profile.fit.split.into(),
+        corpus_preparation: profile.fit.corpus_preparation.into(),
+        corpus_selection: profile.fit.corpus_selection.map(str::to_owned),
+        corpus_text_sha256: profile.fit.corpus_text_sha256.map(str::to_owned),
+        corpus_token_ids_sha256: profile.fit.corpus_token_ids_sha256.map(str::to_owned),
+        estimator_contract: profile.fit.estimator_contract.map(str::to_owned),
+        arithmetic_contract: profile.fit.arithmetic_contract.map(str::to_owned),
+        n_prompts: profile.fit.n_prompts,
+        max_sequence_length: profile.fit.max_sequence_length,
+        skip_first: profile.fit.skip_first,
+        valid_positions_per_prompt: profile.fit.valid_positions_per_prompt,
+        dim_batch: profile.fit.dim_batch,
+        model_execution_dtype: profile.fit.model_execution_dtype.into(),
+        serialized_dtype: profile.fit.serialized_dtype.into(),
+        stop_rule: profile.fit.stop_rule.into(),
+        convergence_status: profile.fit.convergence_status.into(),
+        modality: profile.fit.modality.into(),
     }
 }
 
-fn canonical_source(_profile: Profile) -> Source {
+fn canonical_source(profile: Profile) -> Source {
     Source {
-        repository: SOURCE_REPOSITORY.into(),
-        revision: SOURCE_REVISION.into(),
-        filename: SOURCE_FILENAME.into(),
-        byte_length: SOURCE_BYTES,
-        sha256: SOURCE_SHA256.into(),
-        data_pickle_sha256: DATA_PICKLE_SHA256.into(),
-        serialization_id: SERIALIZATION_ID.into(),
-        license: "Apache-2.0".into(),
+        repository: profile.source_repository.into(),
+        revision: profile.source_revision.into(),
+        filename: profile.source_filename.into(),
+        byte_length: profile.source_bytes,
+        sha256: profile.source_sha256.into(),
+        data_pickle_sha256: profile.archive.data_pickle_sha256.into(),
+        serialization_id: profile
+            .archive
+            .serialization_id
+            .expect("active Muse profile requires serialization ID")
+            .into(),
+        license: profile.source_license.into(),
     }
 }
 
-fn canonical_transfer(_profile: Profile) -> Transfer {
+fn canonical_transfer(profile: Profile) -> Transfer {
     Transfer {
-        binding: "published_checkpoint_geometry_transfer".into(),
-        deployed_checkpoint_policy:
-            "supported_muse_release_geometry_and_output_contract_requires_explicit_acknowledgement"
-                .into(),
-        validation_status: "unvalidated".into(),
-        image_token_status: "unvalidated_text_only_fit".into(),
+        binding: profile.transfer.binding.into(),
+        deployed_checkpoint_policy: profile.transfer.deployed_checkpoint_policy.into(),
+        validation_status: profile.transfer.validation_status.into(),
+        image_token_status: profile.transfer.image_token_status.into(),
     }
 }
 
@@ -462,14 +735,41 @@ fn canonical_transfer(_profile: Profile) -> Transfer {
 mod tests {
     use super::*;
 
-    fn canonical_payload() -> Payload {
+    static TEST_R_MATRIX_BLAKE3: [&str; SOURCE_LAYER_COUNT] =
+        [IDENTITY_MATRIX_BLAKE3; SOURCE_LAYER_COUNT];
+
+    fn complete_r_candidate() -> Profile {
+        let mut candidate = PROFILES[0];
+        candidate.method = "R";
+        candidate.rule_contract = "jlens.relp.muse_glimmer.residual_branch_rms_detached_scale.swiglu_identity_half.attention_jacobian.v1";
+        candidate.target_layer = 50;
+        candidate.archive.identity_layer_index = Some(50);
+        candidate.matrix_blake3 = &TEST_R_MATRIX_BLAKE3;
+        candidate.model.tokenizer_checkpoint = Some("meta-models/Muse-Glimmer-30B");
+        candidate.model.tokenizer_revision = Some("a4e59da52a7bc87ae7251dd5545c0dd437c44b68");
+        candidate.fit.embedded_provenance = true;
+        candidate.fit.recipe_id =
+            Some("blank-bhatia-nanda.muse_glimmer_30b.r_lens.pile10k25.penultimate.skip4.t128.v1");
+        candidate.fit.dataset_revision = Some("127bfedcd5047750df5ccf3a12979a47bfa0bafa");
+        candidate.fit.corpus_selection = Some("first_25_documents_unfiltered_unshuffled");
+        candidate.fit.corpus_text_sha256 =
+            Some("c026d7b8d3382f740a34cb3f00339ac16dd4854a81cf5eb19c7f604ee96f8632");
+        candidate.fit.corpus_token_ids_sha256 =
+            Some("86146f01f323971a9bde07767b3f2e6bda241be3bc36c095d8e90f15d1c4734e");
+        candidate.fit.estimator_contract = Some("average_prompt_jacobian_v1");
+        candidate.fit.arithmetic_contract = Some("float32_accumulate_then_float16_serialize");
+        candidate
+    }
+
+    fn canonical_payload(profile: Profile) -> Payload {
         Payload {
             path: PAYLOAD_NAME.into(),
             dtype: "f16_le".into(),
             shape: [SOURCE_LAYER_COUNT, HIDDEN_SIZE, HIDDEN_SIZE],
             byte_length: PAYLOAD_BYTES,
-            blake3: PAYLOAD_BLAKE3.into(),
-            matrices: MATRIX_BLAKE3
+            blake3: profile.expected_payload_blake3.into(),
+            matrices: profile
+                .matrix_blake3
                 .iter()
                 .enumerate()
                 .map(|(slot, digest)| MatrixDescriptor {
@@ -485,7 +785,8 @@ mod tests {
     #[test]
     fn canonical_profile_binds_publication_geometry_and_digests() {
         let profile = PROFILES[0];
-        let manifest = canonical_manifest(profile, canonical_payload());
+        assert!(valid_profile_definition(profile));
+        let manifest = canonical_manifest(profile, canonical_payload(profile));
         validate_manifest(&manifest).unwrap();
         assert_eq!(manifest.transport.method, "J");
         assert_eq!(manifest.transport.target_layer, 51);
@@ -494,11 +795,38 @@ mod tests {
             (0..51).collect::<Vec<_>>()
         );
         assert_eq!(manifest.model.geometry.hidden_size, 6_656);
+        assert!(manifest.model.tokenizer_revision.is_none());
         assert_eq!(manifest.fit.n_prompts, 900);
 
         let mut changed = manifest.clone();
         changed.payload.matrices[17].blake3 = "00".repeat(32);
         assert!(validate_manifest(&changed).is_err());
+    }
+
+    #[test]
+    fn embedded_r_profile_cannot_activate_without_complete_recipe_provenance() {
+        let mut candidate = complete_r_candidate();
+        assert!(valid_profile_definition(candidate));
+
+        candidate.fit.arithmetic_contract = None;
+        assert!(!valid_profile_definition(candidate));
+
+        let mut unembedded = complete_r_candidate();
+        unembedded.fit.embedded_provenance = false;
+        assert!(!valid_profile_definition(unembedded));
+
+        let mut missing_tokenizer = complete_r_candidate();
+        missing_tokenizer.model.tokenizer_revision = None;
+        assert!(!valid_profile_definition(missing_tokenizer));
+
+        let mut wrong_target = complete_r_candidate();
+        wrong_target.target_layer = 49;
+        wrong_target.archive.identity_layer_index = Some(49);
+        assert!(!valid_profile_definition(wrong_target));
+
+        let mut wrong_identity_digest = complete_r_candidate();
+        wrong_identity_digest.matrix_blake3 = &MATRIX_BLAKE3;
+        assert!(!valid_profile_definition(wrong_identity_digest));
     }
 
     #[test]
@@ -512,7 +840,7 @@ mod tests {
                 .enumerate()
                 .map(
                     |(slot, digest)| super::super::published_pt::ExtractedMatrix {
-                        storage_index: slot,
+                        archive_storage_index: slot,
                         byte_offset: slot as u64 * MATRIX_BYTES,
                         byte_length: MATRIX_BYTES,
                         blake3: (*digest).into(),

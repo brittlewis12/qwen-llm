@@ -85,7 +85,7 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes 202 tests with four model-bound
+- The active `qwen-lens` unit suite passes 206 tests with four model-bound
   qualification tests intentionally ignored by default.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
@@ -118,9 +118,12 @@ UI, generic plugin systems, and production hardening are out of scope.
   Qwen3.6 Q4 has bounded local J/R qualification, not broad equivalence.
 - `coordinate_swap` is the paper-equivalent two-coordinate exchange;
   `source_to_target` remains a separate directed displacement for compatibility.
-- No complete, method-matched local R asset currently exists for Qwen3.8 or
-  Muse. Qwen3.6 now has the released T128/skip-4/target-62 matched J/R pair plus
-  its separate real template asset.
+- No complete, pinned method-matched R asset currently exists for Qwen3.8 or
+  Muse. Qwen3.6 has the released T128/skip-4/target-62 matched J/R pair plus its
+  separate real template asset. An independent CUDA Muse fit now targets the
+  exact first-25-Pile/T128/skip-4/target-50 recipe, but it does not count as an
+  available asset until final publication, digest pinning, import, and readout
+  qualification succeed.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
 - Strict Lens messages match the normal run lane's system/user/assistant subset;
@@ -131,7 +134,10 @@ UI, generic plugin systems, and production hardening are out of scope.
   structure and make no genuine-channel claim.
 - The published Muse J lens was fitted on 900 text-only BF16 prompts. Q8 use and
   image-token positions remain explicitly unvalidated transfers. No published
-  Muse R profile is accepted until its final asset and recipe are pinned.
+  Muse R profile is accepted until its final source/archive/payload digests and
+  embedded recipe provenance are pinned. The importer is profile-owned and can
+  normalize either separate matrix storages or one contiguous rank-3 storage
+  without executing pickle.
 - Muse's best T16 R256 engine projects to roughly `4.93h` for 6,656 rows and 25
   prompts; merely linear T128 scaling is about `39.5h`, before its required
   tiled-attention redesign. A paper-comparable full Muse fit is deadline-closed.
@@ -152,7 +158,7 @@ resident service.
 
 ## Deferred
 
-REST, corpus-scale batching, Flash-Next lens fitting, Muse T128, and native
+REST, corpus-scale batching, Flash-Next lens fitting, native Muse T128, and native
 full-Qwen block-operator optimization remain post-deadline unless requirements
 or available mechanisms materially change. A bounded Neuronpedia extraction
 spike found its current J-lens components coupled to application providers and

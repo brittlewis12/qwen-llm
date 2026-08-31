@@ -21,7 +21,9 @@ use crate::lens_input::{
     validate_lens_input_spec,
 };
 
-use super::published_pt::{ArchiveSpec, ensure_finite_f16, hash_sha256, validate_archive};
+use super::published_pt::{
+    ArchiveLayout, ArchiveSpec, ensure_finite_f16, hash_sha256, validate_archive,
+};
 use super::{
     FitMethod, ORIENTATION, SCHEMA_VERSION, TOKEN_ARTIFACT_MAX_BYTES, TOKEN_ID_ARGUMENT_MAX_COUNT,
     TOKEN_MANIFEST_NAME, TOKEN_ORIENTATION, TOKEN_PAYLOAD_NAME, TOKEN_READOUT_SCHEMA,
@@ -921,12 +923,13 @@ pub(crate) fn import_full(mut args: ImportFullArgs) -> Result<()> {
         .with_context(|| format!("open pinned torch ZIP {}", args.source.display()))?;
     let spec = ArchiveSpec {
         root: profile.archive_root,
+        layout: ArchiveLayout::LayerStorages,
         layer_count: SOURCE_LAYER_COUNT,
         hidden_size: HIDDEN_SIZE,
         matrix_bytes: MATRIX_BYTES,
         data_pickle_sha256: profile.data_pickle_sha256,
         serialization_id: None,
-        identity_storage_index: profile
+        identity_layer_index: profile
             .identity_anchor_layer
             .and_then(|layer| usize::try_from(layer).ok()),
     };
@@ -2996,12 +2999,13 @@ mod tests {
         let digest = hex(&Sha256::digest(pickle));
         let spec = ArchiveSpec {
             root: "lens",
+            layout: ArchiveLayout::LayerStorages,
             layer_count: 1,
             hidden_size: 2,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
             serialization_id: None,
-            identity_storage_index: Some(0),
+            identity_layer_index: Some(0),
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         validate_archive(&mut archive, spec).unwrap();
@@ -3019,12 +3023,13 @@ mod tests {
         let digest = hex(&Sha256::digest(pickle));
         let spec = ArchiveSpec {
             root: "lens",
+            layout: ArchiveLayout::LayerStorages,
             layer_count: 1,
             hidden_size: 1,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
             serialization_id: None,
-            identity_storage_index: None,
+            identity_layer_index: None,
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         validate_archive(&mut archive, spec).unwrap();
@@ -3098,12 +3103,13 @@ mod tests {
         let digest = "00".repeat(32);
         let spec = ArchiveSpec {
             root: "lens",
+            layout: ArchiveLayout::LayerStorages,
             layer_count: 1,
             hidden_size: 1,
             matrix_bytes: matrix.len() as u64,
             data_pickle_sha256: &digest,
             serialization_id: None,
-            identity_storage_index: None,
+            identity_layer_index: None,
         };
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         assert!(validate_archive(&mut archive, spec).is_err());

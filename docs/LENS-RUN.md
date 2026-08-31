@@ -147,6 +147,45 @@ The importer pins the source SHA-256, exact ZIP inventory, opaque `data.pkl`,
 whole extracted payload, and all 51 matrix digests. Published Muse reads require
 `--allow-unvalidated-transfer`; model-bound locally assembled Muse assets do not.
 
+The active published profile is currently the pinned eyes-ml J asset above.
+Import is profile-driven rather than shape-driven: an arbitrary `.pt` with the
+same dimensions is rejected. The pickle is never interpreted. Profiles may
+declare either 51 separate F16 matrix storages or one contiguous rank-3 F16
+storage; both normalize to matrix-major `transport.f16le` with orientation
+`[source_layer, target_output_coordinate, source_coordinate]`.
+
+### Muse R intake
+
+The expected CUDA-produced Muse R asset has logical shape `[51,6656,6656]`.
+It fits post-block residuals 0 through 49 into target block 50 and appends an
+exact identity at source/target block 50; block 51 is not present. Its pinned
+recipe is the first 25 unfiltered, unshuffled documents from
+`NeelNanda/pile-10k`, `max_seq_len=128`, and `skip_first=4`.
+
+R activation remains fail-closed until the completed source supplies all of:
+
+- immutable repository revision, filename, byte length, source SHA-256, and
+  license;
+- archive root/layout, opaque `data.pkl` SHA-256, serialization ID, serialized
+  dtype, and exact matrix orientation;
+- whole canonical payload BLAKE3 and all 51 matrix BLAKE3 values, with matrix 50
+  verified as bit-exact F16 identity;
+- fitted checkpoint and tokenizer revisions, fitter and Transformers revisions,
+  recipe/method/estimator/arithmetic contracts, dataset revision and selection,
+  and raw-text/token-ID corpus SHA-256 values;
+- explicit BF16-checkpoint-to-GGUF and text-only/image-token transfer status.
+
+The importer already owns these facts per profile and supports both likely Torch
+storage layouts, but no Muse R profile is active until those immutable final
+asset values are pinned. The companion JSON report is provenance input, not an
+integrity manifest. A completed source is normalized into the published
+artifact schema rather than mislabeled as a locally fitted/assembled artifact.
+
+`assemble-muse-full` remains the separate model-bound local J/R path: it accepts
+authenticated row-shard artifacts and emits `muse_glimmer.full_transport` v3.
+Those local full artifacts currently support `read-full`; published full
+transports additionally support `trace-full` and plan projection.
+
 ```sh
 cargo run -q --release -p qwen-cli --bin qwen-lens -- read-full \
   --model /path/to/model.gguf \
@@ -458,7 +497,9 @@ Muse uses the same plan actions and scope semantics with model-bound
 accepts token-ID directions, passive readouts, or operations without readouts;
 `--identity-cache` is required. Published plans read and project only referenced
 source layers and require `allow_unvalidated_transfer: true`. Template lenses,
-native-hyper directions, and `--messages` remain unsupported for Muse.
+native-hyper directions, and Open Responses remain unsupported for Muse. Raw
+text, literal token IDs, and exact ATEM-rendered `--user`/`--messages` inputs are
+supported.
 
 ```json
 {

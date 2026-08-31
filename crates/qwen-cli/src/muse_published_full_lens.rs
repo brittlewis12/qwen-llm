@@ -53,7 +53,7 @@ pub(crate) fn import_full(mut args: ImportMuseFullArgs) -> Result<()> {
             artifact::profile_for_manifest(&manifest)?.id == profile.id,
             "existing Muse output was imported from a different published lens"
         );
-        verify_payload(&args.output, &manifest.payload)?;
+        verify_payload(&args.output, &manifest.payload, profile)?;
         println!("{}", serde_json::to_string_pretty(&manifest)?);
         return Ok(());
     }
@@ -91,7 +91,7 @@ pub(crate) fn import_full(mut args: ImportMuseFullArgs) -> Result<()> {
                 && final_metadata.modified().ok() == source_modified,
             "pinned Muse source changed while it was being imported"
         );
-        publish_payload(&staging, &args.output, &payload)?;
+        publish_payload(&staging, &args.output, &payload, profile)?;
         Ok(payload)
     })();
     if import.is_err() {
@@ -144,12 +144,17 @@ fn staging_path(output: &Path) -> Result<PathBuf> {
     )))
 }
 
-fn publish_payload(staging: &Path, output: &Path, payload: &artifact::Payload) -> Result<()> {
+fn publish_payload(
+    staging: &Path,
+    output: &Path,
+    payload: &artifact::Payload,
+    profile: artifact::Profile,
+) -> Result<()> {
     let destination = output.join(&payload.path);
     match std::fs::hard_link(staging, &destination) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            verify_payload(output, payload)?;
+            verify_payload(output, payload, profile)?;
         }
         Err(error) => {
             return Err(error).with_context(|| {
@@ -166,7 +171,11 @@ fn publish_payload(staging: &Path, output: &Path, payload: &artifact::Payload) -
     super::sync_directory(output)
 }
 
-pub(crate) fn verify_payload(directory: &Path, payload: &artifact::Payload) -> Result<()> {
+pub(crate) fn verify_payload(
+    directory: &Path,
+    payload: &artifact::Payload,
+    profile: artifact::Profile,
+) -> Result<()> {
     ensure!(
         Path::new(&payload.path).components().count() == 1,
         "Muse published payload path must be one relative filename"
@@ -179,6 +188,7 @@ pub(crate) fn verify_payload(directory: &Path, payload: &artifact::Payload) -> R
     );
     let mut buffer = vec![0u8; VERIFY_BUFFER_BYTES];
     let mut whole = Hasher::new();
+    let archive_spec = profile.archive_spec();
     for matrix in &payload.matrices {
         file.seek(SeekFrom::Start(matrix.byte_offset))
             .with_context(|| format!("seek Muse published matrix {}", matrix.source_layer))?;
@@ -195,6 +205,14 @@ pub(crate) fn verify_payload(directory: &Path, payload: &artifact::Payload) -> R
                 matrix.source_layer as usize,
                 matrix_offset as usize / 2,
             )?;
+            if profile.identity_layer_index() == Some(matrix.source_layer as usize) {
+                super::published_pt::ensure_identity_f16(
+                    &buffer[..count],
+                    matrix_offset as usize / 2,
+                    archive_spec.hidden_size,
+                    matrix.source_layer as usize,
+                )?;
+            }
             matrix_hasher.update(&buffer[..count]);
             whole.update(&buffer[..count]);
             remaining -= count as u64;

@@ -12,9 +12,10 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Imported Qwen3.6 matched full J/R and Qwen3.8 full J transports support packed
   layer x position top-k, selected transported vectors, and selected-token live
   directions.
-- The pinned eyes-ml Muse Glimmer J transport imports without pickle execution,
-  supports selected-position and layer x position full-vocabulary traces, and
-  supplies plan-selected live directions and interventions under an explicit
+- The pinned eyes-ml Muse Glimmer J transport and independently fitted
+  first-25-Pile R transport import without pickle execution, support
+  selected-position and layer x position full-vocabulary traces, and supply
+  plan-selected live directions and interventions under an explicit
   BF16-to-GGUF transfer gate. Muse traces use the existing offline inspector.
 - Packed traces can be persisted as versioned, replaceable result artifacts and
   inspected offline by summary, token/anchor map, aggregate frequency, semantic
@@ -91,7 +92,7 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes 213 tests with four model-bound
+- The active `qwen-lens` unit suite passes 214 tests with four model-bound
   qualification tests intentionally ignored by default.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
@@ -105,6 +106,21 @@ UI, generic plugin systems, and production hardening are out of scope.
 - The real Muse Q8 tokenizer reconstructs an ATEM system/user prompt exactly;
   BOS, start, message, EOT, and generated-assistant markers all align to exact
   nonempty token ranges.
+- The private published Muse R source independently verifies at SHA-256
+  `3675c137...068c`, imports as 51 finite F16 matrices with payload BLAKE3
+  `31f9cbad...acf8`, and verifies source/target block 50 as exact positive-zero
+  F16 identity. Its opaque pickle digest binds the embedded released recipe,
+  model/tokenizer revisions, corpus hashes, and estimator/arithmetic contracts.
+- On the deployed Muse Q8 GGUF, a 66-position ATEM R trace over L0/L25/L50
+  self-validates with two 6,656-coordinate vectors. At the exact final user
+  boundary, L25 ranks `_request` first and L50 ranks `Interpret` first. A
+  separate literal-token trace accepts a deliberately non-rendered three-token
+  sequence and records `renderer=literal_token_ids`.
+- A semantic `message_content(role=user,last,end)` R intervention at exactly
+  L25/P62 records one application and raises the selected `_request` numerator
+  from `14.124642` to `23.320082`. All other captured prefill/decode sites and
+  the three generated tokens remain unchanged, so this qualifies projection,
+  position binding, and execution without claiming behavioral sensitivity.
 - The real Qwen3.8 Q8 tokenizer reconstructs a tool-loop Open Responses prompt
   exactly; role, thinking, tool-call/result, and generated structural markers
   align to exact nonempty token ranges.
@@ -124,12 +140,12 @@ UI, generic plugin systems, and production hardening are out of scope.
   Qwen3.6 Q4 has bounded local J/R qualification, not broad equivalence.
 - `coordinate_swap` is the paper-equivalent two-coordinate exchange;
   `source_to_target` remains a separate directed displacement for compatibility.
-- No complete, pinned method-matched R asset currently exists for Qwen3.8 or
-  Muse. Qwen3.6 has the released T128/skip-4/target-62 matched J/R pair plus its
-  separate real template asset. An independent CUDA Muse fit now targets the
-  exact first-25-Pile/T128/skip-4/target-50 recipe, but it does not count as an
-  available asset until final publication, digest pinning, import, and readout
-  qualification succeed.
+- No complete method-matched R asset currently exists for Qwen3.8. Qwen3.6 has
+  the released T128/skip-4/target-62 matched J/R pair plus its separate real
+  template asset. Muse now has a complete first-25-Pile/T128/skip-4/target-50 R
+  asset, but it is not a matched pair with the eyes-ml J asset, whose corpus and
+  target differ. Cross-method Muse deltas therefore require a newly matched J
+  fit rather than treating the two available assets as controlled counterparts.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
 - Strict Lens messages match the normal run lane's system/user/assistant subset;
@@ -138,12 +154,12 @@ UI, generic plugin systems, and production hardening are out of scope.
   input to one model-visible system role, while artifact labels retain the input
   source. Raw text and literal IDs remain the path for malformed or forged
   structure and make no genuine-channel claim.
-- The published Muse J lens was fitted on 900 text-only BF16 prompts. Q8 use and
-  image-token positions remain explicitly unvalidated transfers. No published
-  Muse R profile is accepted until its final source/archive/payload digests and
-  embedded recipe provenance are pinned. The importer is profile-owned and can
-  normalize either separate matrix storages or one contiguous rank-3 storage
-  without executing pickle.
+- The published Muse J and R lenses were fitted on text-only BF16 execution;
+  the J used 900 Wikitext prompts and target 51, while R used 25 fixed Pile
+  documents and target 50. Q8 use and image-token positions remain explicitly
+  unvalidated transfers. The importer is profile-owned and can normalize either
+  separate matrix storages or one contiguous rank-3 storage without executing
+  pickle.
 - Muse's best T16 R256 engine projects to roughly `4.93h` for 6,656 rows and 25
   prompts; merely linear T128 scaling is about `39.5h`, before its required
   tiled-attention redesign. A paper-comparable full Muse fit is deadline-closed.

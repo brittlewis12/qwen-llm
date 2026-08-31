@@ -8,7 +8,6 @@ use qwen_llm::muse_glimmer::{
 use qwen_llm::muse_glimmer_prompt::MuseGlimmerReasoningStrength;
 use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerTextRunner};
-use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY;
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
 use qwen_llm::tokenizer::{LlamaCppTokenizer, token_ids_sha256_i32le};
 use serde::Serialize;
@@ -591,8 +590,9 @@ pub fn run(args: MuseRequestArgs) -> Result<()> {
         "--capacity {capacity} is below required forward count {required_forwards}"
     );
     ensure!(
-        capacity <= MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
-        "--capacity {capacity} exceeds Muse reference limit {MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY}"
+        capacity <= config.context_length as usize,
+        "--capacity {capacity} exceeds Muse model context {}",
+        config.context_length
     );
     let stop_tokens = gguf
         .stop_token_ids()

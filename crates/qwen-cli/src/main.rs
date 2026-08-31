@@ -69,7 +69,6 @@ use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, Mus
 use qwen_llm::muse_glimmer_prompt::MuseGlimmerReasoningStrength;
 use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
-use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY;
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
@@ -3316,15 +3315,9 @@ fn muse_glimmer_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Re
         "Muse Glimmer prompt tokenized to zero tokens"
     );
     ensure!(max_tokens > 0, "--tokens must be >= 1");
-    let required = prompt_tokens
+    prompt_tokens
         .checked_add(max_tokens - 1)
-        .context("Muse Glimmer forward budget overflow")?;
-    ensure!(
-        required <= MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
-        "Muse Glimmer request requires {required} token forwards ({prompt_tokens} prompt + {} maximum decode transitions), but the initial reference attention lane supports at most {MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY}; shorten the prompt or reduce --tokens",
-        max_tokens - 1
-    );
-    Ok(required)
+        .context("Muse Glimmer forward budget overflow")
 }
 
 fn validate_muse_glimmer_generation_mode(
@@ -4262,8 +4255,9 @@ fn run_muse_glimmer_single_turn(
         "Muse Glimmer request requires {required_forwards} forwards, beyond --max-context-tokens {capacity}"
     );
     ensure!(
-        capacity <= MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
-        "Muse Glimmer initial text lane supports --max-context-tokens at most {MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY}, got {capacity}"
+        capacity <= config.context_length as usize,
+        "Muse Glimmer --max-context-tokens {capacity} exceeds model context {}",
+        config.context_length
     );
     let stop_tokens = gguf
         .stop_token_ids()
@@ -12249,9 +12243,10 @@ mod tests {
     fn muse_glimmer_forward_budget_counts_only_required_transitions() {
         assert_eq!(muse_glimmer_required_forwards(2, 1).unwrap(), 2);
         assert_eq!(muse_glimmer_required_forwards(2, 3).unwrap(), 4);
-        assert!(
-            muse_glimmer_required_forwards(MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY, 2).is_err()
-        );
+        assert_eq!(muse_glimmer_required_forwards(7_168, 2).unwrap(), 7_169);
+        assert!(muse_glimmer_required_forwards(0, 1).is_err());
+        assert!(muse_glimmer_required_forwards(1, 0).is_err());
+        assert!(muse_glimmer_required_forwards(usize::MAX, 2).is_err());
     }
 
     #[test]

@@ -98,6 +98,7 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
 }
 
 fn muse_serve_limits(
+    model_context: usize,
     has_drafter: bool,
     max_context_tokens: Option<usize>,
     max_tokens: Option<usize>,
@@ -110,10 +111,8 @@ fn muse_serve_limits(
         "Muse Glimmer serve requires --max-context-tokens because its resident session capacity is fixed at startup",
     )?;
     ensure!(
-        context_limit
-            <= qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
-        "Muse Glimmer serve supports --max-context-tokens at most {}, got {context_limit}",
-        qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
+        context_limit <= model_context,
+        "Muse Glimmer --max-context-tokens {context_limit} exceeds model context {model_context}",
     );
     let default_max_tokens = max_tokens.context(
         "Muse Glimmer serve requires explicit --max-tokens; the generic 65536-token default exceeds its reference session capacity",
@@ -152,7 +151,10 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .to_owned();
 
     if muse_glimmer {
+        let config = qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(&gguf)
+            .context("bind Muse Glimmer serve contract")?;
         let (context_limit, default_max_tokens) = muse_serve_limits(
+            config.context_length as usize,
             invocation.drafter.is_some(),
             invocation.max_context_tokens,
             invocation.max_tokens,
@@ -431,14 +433,18 @@ mod tests {
     #[test]
     fn muse_limits_require_explicit_bounded_capacity_and_output_default() {
         assert_eq!(
-            muse_serve_limits(false, Some(7168), Some(2048)).unwrap(),
+            muse_serve_limits(131_072, false, Some(7_168), Some(2_048)).unwrap(),
             (7168, 2048)
         );
-        assert!(muse_serve_limits(true, Some(7168), Some(2048)).is_err());
-        assert!(muse_serve_limits(false, None, Some(2048)).is_err());
-        assert!(muse_serve_limits(false, Some(7168), None).is_err());
-        assert!(muse_serve_limits(false, Some(7169), Some(2048)).is_err());
-        assert!(muse_serve_limits(false, Some(1024), Some(2048)).is_err());
+        assert_eq!(
+            muse_serve_limits(131_072, false, Some(131_072), Some(16_384)).unwrap(),
+            (131_072, 16_384)
+        );
+        assert!(muse_serve_limits(131_072, true, Some(7_168), Some(2_048)).is_err());
+        assert!(muse_serve_limits(131_072, false, None, Some(2_048)).is_err());
+        assert!(muse_serve_limits(131_072, false, Some(7_168), None).is_err());
+        assert!(muse_serve_limits(131_072, false, Some(131_073), Some(2_048)).is_err());
+        assert!(muse_serve_limits(131_072, false, Some(1_024), Some(2_048)).is_err());
     }
 
     #[test]

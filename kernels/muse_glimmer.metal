@@ -91,6 +91,69 @@ kernel void kernel_muse_glimmer_logit_softcap_f32(
     output[index] = args.cap * tanh(input[index] * args.scale / args.cap);
 }
 
+struct muse_glimmer_attn_decode_args {
+    uint n_pos;
+    uint kv_stride;
+    float scale;
+};
+
+// Long-context scalar-decode attention for the released 32Q/2KV/H128 shape.
+// One SIMDgroup owns one query head. Each lane owns one contiguous float4 of
+// the output and all lanes cooperatively reduce the QK dot product. Online
+// softmax keeps the working set in registers regardless of context length.
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_muse_glimmer_attn_decode_online_f16kv_h128_f32(
+        constant muse_glimmer_attn_decode_args & args [[buffer(0)]],
+        device const float * query [[buffer(1)]],
+        device const half * key_cache [[buffer(2)]],
+        device const half * value_cache [[buffer(3)]],
+        device float * output [[buffer(4)]],
+        uint query_head [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr uint QUERY_HEAD_COUNT = 32;
+    constexpr uint KV_HEAD_COUNT = 2;
+    constexpr uint HEAD_DIM = 128;
+    constexpr uint QUERY_GROUP = QUERY_HEAD_COUNT / KV_HEAD_COUNT;
+    if (query_head >= QUERY_HEAD_COUNT) return;
+
+    const uint kv_head = query_head / QUERY_GROUP;
+    const device float4 * query4 =
+        (device const float4 *)(query + (ulong)query_head * HEAD_DIM);
+    device float4 * output4 =
+        (device float4 *)(output + (ulong)query_head * HEAD_DIM);
+    const float4 query_values = query4[lane];
+
+    ulong cache_offset = (ulong)kv_head * HEAD_DIM + (ulong)lane * 4u;
+    const float first_score = simd_sum(dot(
+        query_values,
+        float4(*((device const half4 *)(key_cache + cache_offset)))
+    )) * args.scale;
+    float maximum = first_score;
+    float denominator = 1.0f;
+    float4 accumulator =
+        float4(*((device const half4 *)(value_cache + cache_offset)));
+
+    for (uint position = 1; position < args.n_pos; ++position) {
+        cache_offset = (ulong)position * args.kv_stride
+            + (ulong)kv_head * HEAD_DIM
+            + (ulong)lane * 4u;
+        const float score = simd_sum(dot(
+            query_values,
+            float4(*((device const half4 *)(key_cache + cache_offset)))
+        )) * args.scale;
+        const float next_maximum = max(maximum, score);
+        const float previous_weight = exp(maximum - next_maximum);
+        const float current_weight = exp(score - next_maximum);
+        accumulator = accumulator * previous_weight
+            + float4(*((device const half4 *)(value_cache + cache_offset)))
+                * current_weight;
+        denominator = denominator * previous_weight + current_weight;
+        maximum = next_maximum;
+    }
+
+    output4[lane] = accumulator / denominator;
+}
+
 constant constexpr uint MUSE_GLIMMER_VJP_MAX_TOKENS = 16;
 constant constexpr uint MUSE_GLIMMER_SIMD_WIDTH = 32;
 

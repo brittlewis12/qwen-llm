@@ -1,18 +1,15 @@
 //! Correctness-first scalar text execution for Muse Glimmer 30B.
 //!
 //! The initial path uses native Q8_0/BF16 projections and a contiguous F16 KV
-//! cache. Its reference attention kernel supports at most 7,168 visible tokens;
-//! sliding layers use a suffix view while full-attention layers use the entire
-//! prefix. Packed prefill and long-context streaming attention are separate
-//! follow-on optimizations.
+//! cache. Sliding layers use a suffix view while full-attention layers use the
+//! entire prefix. Packed prefill is a separate follow-on optimization.
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTensor,
-    PostBlockIntervention, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
-    encode_copy_offset_f32, encode_get_rows_f32, encode_mat_vec_f16_f32,
-    encode_post_block_intervention_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32, encode_silu_mul_f32,
-    evaluate_metal_memory_admission, host_page_size_bytes,
+    PostBlockIntervention, encode_add_inplace_f32, encode_copy_offset_f32, encode_get_rows_f32,
+    encode_mat_vec_f16_f32, encode_post_block_intervention_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32,
+    encode_silu_mul_f32, evaluate_metal_memory_admission, host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
@@ -34,7 +31,8 @@ use crate::muse_glimmer_lens_fit::{
     muse_glimmer_one_full_attention_block_vjp_query_batch,
 };
 use crate::muse_glimmer_metal::{
-    encode_muse_glimmer_logit_softcap_f32, encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
+    encode_muse_glimmer_attn_decode_f16kv_f32, encode_muse_glimmer_logit_softcap_f32,
+    encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
 };
 use crate::muse_glimmer_residency::{
     MuseGlimmerMetalModelWeights, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
@@ -45,7 +43,6 @@ use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLDevice, MTLResource,
 };
 
-pub const MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY: usize = 7_168;
 pub const MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
 
@@ -109,12 +106,9 @@ impl MuseGlimmerTextGeometry {
         capacity: usize,
     ) -> Result<Self, MuseGlimmerTextSessionError> {
         config.validate_release_profile()?;
-        if capacity == 0
-            || capacity > config.context_length as usize
-            || capacity > MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY
-        {
+        if capacity == 0 || capacity > config.context_length as usize {
             return invalid(format!(
-                "capacity must be in 1..={MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY} for the reference attention kernel and no larger than model context {}, got {capacity}",
+                "capacity must be in 1..={} for the released model context, got {capacity}",
                 config.context_length
             ));
         }
@@ -1326,7 +1320,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             )?;
             let (key_cache, value_cache, visible_positions) =
                 session.cache_views(layer_index, position, layer.sliding_attention)?;
-            encode_attn_decode_f16kv_f32(
+            encode_muse_glimmer_attn_decode_f16kv_f32(
                 self.ctx,
                 encoder,
                 &session.query,
@@ -1859,24 +1853,27 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     #[test]
-    fn release_geometry_pins_reference_attention_limit_and_cache_windows() {
+    fn release_geometry_accepts_model_context_and_pins_cache_windows() {
         let config = MuseGlimmerConfig::unsloth_release_reference();
-        let geometry = MuseGlimmerTextGeometry::from_config(
-            &config,
-            MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
-        )
-        .unwrap();
+        let capacity = config.context_length as usize;
+        let geometry = MuseGlimmerTextGeometry::from_config(&config, capacity).unwrap();
         assert_eq!(geometry.query_width, 4_096);
         assert_eq!(geometry.kv_width, 256);
         assert_eq!(geometry.layer_count, 52);
         assert_eq!(
-            geometry.visible_cache_range(3, 4_095, false).unwrap().1,
-            4_096 * 256
+            geometry
+                .visible_cache_range(3, capacity - 1, false)
+                .unwrap()
+                .1,
+            capacity * 256
         );
-        let (offset, elements) = geometry.visible_cache_range(2, 4_095, true).unwrap();
-        assert_eq!(offset, (2 * 7_168 + 2_048) * 256);
+        let (offset, elements) = geometry.visible_cache_range(2, capacity - 1, true).unwrap();
+        assert_eq!(offset, (2 * capacity + capacity - 2_048) * 256);
         assert_eq!(elements, 2_048 * 256);
-        assert!(MuseGlimmerTextGeometry::from_config(&config, 7_169).is_err());
+        assert!(MuseGlimmerTextGeometry::from_config(&config, 7_169).is_ok());
+        assert!(MuseGlimmerTextGeometry::from_config(&config, 22_612).is_ok());
+        assert!(MuseGlimmerTextGeometry::from_config(&config, 0).is_err());
+        assert!(MuseGlimmerTextGeometry::from_config(&config, capacity + 1).is_err());
     }
 
     #[test]

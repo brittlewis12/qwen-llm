@@ -217,7 +217,7 @@ struct GenerationOverrides {
     #[arg(long)]
     seed: Option<u64>,
 
-    /// Override Qwen sequence capacity; DeepSeek single-turn rejects this option.
+    /// Override Qwen or Muse sequence capacity; Muse cannot exceed model context.
     #[arg(long)]
     max_context_tokens: Option<usize>,
 

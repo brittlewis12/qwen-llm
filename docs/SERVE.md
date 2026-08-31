@@ -111,8 +111,8 @@ One new subcommand:
 qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   [--max-context-tokens N] [--snapshot-cache-mib 4096] [--drafter GGUF]
 # DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
-# Muse Glimmer requires both --max-context-tokens and --max-tokens; its current
-# resident text session is capped at 7,168 forwards.
+# Muse Glimmer requires both --max-context-tokens and --max-tokens; admitted
+# capacity may extend through its declared 131,072-token context.
 ```
 
 The listener rejects every resolved non-loopback address. Request bodies are

@@ -1,6 +1,8 @@
 //! Muse Glimmer-specific Metal kernels over the shared execution primitives.
 
-use crate::metal::{KernelEncoder, MetalContext, MetalError, MetalTensor};
+use crate::metal::{
+    KernelEncoder, MetalContext, MetalError, MetalTensor, encode_attn_decode_f16kv_f32,
+};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
 use objc2_metal::{MTLBuffer, MTLComputePipelineState, MTLDevice, MTLSize};
@@ -318,6 +320,168 @@ pub fn encode_muse_glimmer_logit_softcap_f32(
         },
         MTLSize {
             width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+const MUSE_GLIMMER_LEGACY_ATTENTION_MAX_POSITIONS: usize = 7_168;
+const MUSE_GLIMMER_QUERY_HEAD_COUNT: usize = 32;
+const MUSE_GLIMMER_KV_HEAD_COUNT: usize = 2;
+const MUSE_GLIMMER_ATTENTION_HEAD_DIM: usize = 128;
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_muse_glimmer_attn_decode_f16kv_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key_cache: &MetalTensor,
+    value_cache: &MetalTensor,
+    output: &MetalTensor,
+    query_head_count: usize,
+    kv_head_count: usize,
+    head_dim: usize,
+    visible_positions: usize,
+) -> Result<(), MetalError> {
+    if visible_positions == 0 {
+        return bad_shape(
+            "muse_glimmer_attn_decode",
+            "visible position count must be nonzero".into(),
+        );
+    }
+    if visible_positions <= MUSE_GLIMMER_LEGACY_ATTENTION_MAX_POSITIONS {
+        return encode_attn_decode_f16kv_f32(
+            ctx,
+            enc,
+            query,
+            key_cache,
+            value_cache,
+            output,
+            query_head_count,
+            kv_head_count,
+            head_dim,
+            visible_positions,
+        );
+    }
+    encode_muse_glimmer_attn_decode_online_f16kv_f32(
+        ctx,
+        enc,
+        query,
+        key_cache,
+        value_cache,
+        output,
+        query_head_count,
+        kv_head_count,
+        head_dim,
+        visible_positions,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_muse_glimmer_attn_decode_online_f16kv_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key_cache: &MetalTensor,
+    value_cache: &MetalTensor,
+    output: &MetalTensor,
+    query_head_count: usize,
+    kv_head_count: usize,
+    head_dim: usize,
+    visible_positions: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "muse_glimmer_attn_decode_online_f16kv";
+    if query_head_count != MUSE_GLIMMER_QUERY_HEAD_COUNT
+        || kv_head_count != MUSE_GLIMMER_KV_HEAD_COUNT
+        || head_dim != MUSE_GLIMMER_ATTENTION_HEAD_DIM
+        || visible_positions == 0
+    {
+        return bad_shape(
+            KERNEL,
+            format!(
+                "expected released 32Q/2KV/H128 geometry and at least one visible position, got q={query_head_count} kv={kv_head_count} dim={head_dim} positions={visible_positions}"
+            ),
+        );
+    }
+    let query_width = checked_elements(KERNEL, query_head_count, head_dim, "query width")?;
+    let kv_width = checked_elements(KERNEL, kv_head_count, head_dim, "KV width")?;
+    let cache_elements = checked_elements(
+        KERNEL,
+        visible_positions,
+        kv_width,
+        "visible cache elements",
+    )?;
+    validate_readable_f32(query, query_width, "query", KERNEL)?;
+    validate_readable_f16(key_cache, cache_elements, "key cache", KERNEL)?;
+    validate_readable_f16(value_cache, cache_elements, "value cache", KERNEL)?;
+    validate_writable_f32(output, query_width, "output", KERNEL)?;
+    for (tensor, alignment, name) in [
+        (query, 16, "query"),
+        (key_cache, 8, "key cache"),
+        (value_cache, 8, "value cache"),
+        (output, 16, "output"),
+    ] {
+        if !tensor.offset.is_multiple_of(alignment) {
+            return bad_shape(
+                KERNEL,
+                format!(
+                    "{name} offset {} is not {alignment}-byte aligned",
+                    tensor.offset
+                ),
+            );
+        }
+    }
+    for (source, name) in [
+        (query, "query"),
+        (key_cache, "key cache"),
+        (value_cache, "value cache"),
+    ] {
+        if metal_tensor_ranges_overlap(source, output) {
+            return bad_shape(KERNEL, format!("{name} overlaps output storage"));
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        visible_positions: u32,
+        kv_stride: u32,
+        scale: f32,
+    }
+    let pipeline = ctx.pipeline("kernel_muse_glimmer_attn_decode_online_f16kv_h128_f32")?;
+    if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32 {
+        return bad_shape(
+            KERNEL,
+            "online attention requires one 32-thread SIMDgroup".into(),
+        );
+    }
+    enc.note_read(query);
+    enc.note_read(key_cache);
+    enc.note_read(value_cache);
+    enc.note_write(output);
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            visible_positions: checked_u32(KERNEL, visible_positions, "visible position count")?,
+            kv_stride: checked_u32(KERNEL, kv_width, "KV stride")?,
+            scale: (head_dim as f32).sqrt().recip(),
+        },
+    );
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, key_cache);
+    enc.set_tensor(3, value_cache);
+    enc.set_tensor(4, output);
+    enc.dispatch(
+        MTLSize {
+            width: query_head_count,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
             height: 1,
             depth: 1,
         },
@@ -657,6 +821,50 @@ fn validate_readable_f32(
     Ok(())
 }
 
+fn validate_readable_f16(
+    tensor: &MetalTensor,
+    elements: usize,
+    name: &str,
+    kernel: &'static str,
+) -> Result<(), MetalError> {
+    if tensor.dtype != GgmlType::F16 || tensor.n_elements() != elements as u64 {
+        return bad_shape(
+            kernel,
+            format!(
+                "{name} must be F16 with {elements} elements, got {:?} and {}",
+                tensor.dtype,
+                tensor.n_elements()
+            ),
+        );
+    }
+    if !tensor
+        .offset
+        .is_multiple_of(std::mem::align_of::<u16>() as u64)
+    {
+        return bad_shape(
+            kernel,
+            format!("{name} offset {} is not F16-aligned", tensor.offset),
+        );
+    }
+    let end = tensor
+        .offset
+        .checked_add(tensor.n_bytes())
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: format!("{name} buffer range overflow"),
+        })?;
+    if end > tensor.buffer.length() as u64 {
+        return bad_shape(
+            kernel,
+            format!(
+                "{name} range ends at {end}, beyond buffer length {}",
+                tensor.buffer.length()
+            ),
+        );
+    }
+    Ok(())
+}
+
 fn validate_writable_f32(
     tensor: &MetalTensor,
     elements: usize,
@@ -759,6 +967,20 @@ mod tests {
         MetalTensor::from_bytes(ctx, bytemuck::cast_slice(values), shape, GgmlType::F32).unwrap()
     }
 
+    fn tensor_from_f16(ctx: &MetalContext, values: &[f32]) -> MetalTensor {
+        let values = values
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect::<Vec<_>>();
+        MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&values),
+            vec![values.len() as u64],
+            GgmlType::F16,
+        )
+        .unwrap()
+    }
+
     fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
         let mut values = vec![0.0; tensor.n_elements() as usize];
         unsafe {
@@ -774,6 +996,280 @@ mod tests {
             );
         }
         values
+    }
+
+    fn attention_fixture(position_count: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let query = (0..MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM)
+            .map(|index| ((index * 17 % 101) as f32 - 50.0) * 0.002)
+            .collect::<Vec<_>>();
+        let cache_elements =
+            position_count * MUSE_GLIMMER_KV_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM;
+        let key = (0..cache_elements)
+            .map(|index| ((index * 13 % 89) as f32 - 44.0) * 0.003)
+            .collect::<Vec<_>>();
+        let value = (0..cache_elements)
+            .map(|index| ((index * 19 % 97) as f32 - 48.0) * 0.004)
+            .collect::<Vec<_>>();
+        (query, key, value)
+    }
+
+    #[test]
+    fn muse_glimmer_attn_online_matches_legacy_inside_overlap() {
+        const POSITIONS: usize = 257;
+        let ctx = MetalContext::new().unwrap();
+        let (query_values, key_values, value_values) = attention_fixture(POSITIONS);
+        let query = tensor_from_f32(&ctx, &query_values);
+        let key = tensor_from_f16(&ctx, &key_values);
+        let value = tensor_from_f16(&ctx, &value_values);
+        let legacy = tensor_from_f32(
+            &ctx,
+            &vec![f32::NAN; MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM],
+        );
+        let online = tensor_from_f32(
+            &ctx,
+            &vec![f32::NAN; MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM],
+        );
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_attn_decode_f16kv_f32(
+            &ctx,
+            &encoder,
+            &query,
+            &key,
+            &value,
+            &legacy,
+            MUSE_GLIMMER_QUERY_HEAD_COUNT,
+            MUSE_GLIMMER_KV_HEAD_COUNT,
+            MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+            POSITIONS,
+        )
+        .unwrap();
+        encode_muse_glimmer_attn_decode_online_f16kv_f32(
+            &ctx,
+            &encoder,
+            &query,
+            &key,
+            &value,
+            &online,
+            MUSE_GLIMMER_QUERY_HEAD_COUNT,
+            MUSE_GLIMMER_KV_HEAD_COUNT,
+            MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+            POSITIONS,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+
+        let legacy = read_f32(&legacy);
+        let online = read_f32(&online);
+        assert!(legacy.iter().all(|value| value.is_finite()));
+        assert!(online.iter().all(|value| value.is_finite()));
+        let max_abs = legacy
+            .iter()
+            .zip(&online)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f32, f32::max);
+        let dot = legacy
+            .iter()
+            .zip(&online)
+            .map(|(left, right)| left * right)
+            .sum::<f32>();
+        let legacy_norm = legacy.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let online_norm = online.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let cosine = dot / (legacy_norm * online_norm);
+        assert!(max_abs <= 5e-4, "max_abs={max_abs}");
+        assert!(cosine >= 0.999_999, "cosine={cosine}");
+    }
+
+    #[test]
+    fn muse_glimmer_attn_online_crosses_legacy_limit_and_reads_tail() {
+        const POSITIONS: usize = MUSE_GLIMMER_LEGACY_ATTENTION_MAX_POSITIONS + 1;
+        let ctx = MetalContext::new().unwrap();
+        let query_values =
+            vec![0.0; MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM];
+        let key_values =
+            vec![0.0; POSITIONS * MUSE_GLIMMER_KV_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM];
+        let mut value_values = key_values.clone();
+        let sentinels = [0, POSITIONS / 2, POSITIONS - 1];
+        for kv_head in 0..MUSE_GLIMMER_KV_HEAD_COUNT {
+            for dimension in 0..MUSE_GLIMMER_ATTENTION_HEAD_DIM {
+                for (ordinal, &position) in sentinels.iter().enumerate() {
+                    let index = (position * MUSE_GLIMMER_KV_HEAD_COUNT + kv_head)
+                        * MUSE_GLIMMER_ATTENTION_HEAD_DIM
+                        + dimension;
+                    value_values[index] = (kv_head as f32 + 1.0) * (ordinal as f32 + 1.0)
+                        + (dimension % 11) as f32 * 0.03125;
+                }
+            }
+        }
+        let query = tensor_from_f32(&ctx, &query_values);
+        let key = tensor_from_f16(&ctx, &key_values);
+        let value = tensor_from_f16(&ctx, &value_values);
+        let output = tensor_from_f32(
+            &ctx,
+            &vec![f32::NAN; MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM],
+        );
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_muse_glimmer_attn_decode_f16kv_f32(
+            &ctx,
+            &encoder,
+            &query,
+            &key,
+            &value,
+            &output,
+            MUSE_GLIMMER_QUERY_HEAD_COUNT,
+            MUSE_GLIMMER_KV_HEAD_COUNT,
+            MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+            POSITIONS,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+
+        let output = read_f32(&output);
+        assert!(output.iter().all(|value| value.is_finite()));
+        for query_head in 0..MUSE_GLIMMER_QUERY_HEAD_COUNT {
+            let kv_head = query_head / (MUSE_GLIMMER_QUERY_HEAD_COUNT / MUSE_GLIMMER_KV_HEAD_COUNT);
+            for dimension in 0..MUSE_GLIMMER_ATTENTION_HEAD_DIM {
+                let sum = sentinels
+                    .iter()
+                    .map(|&position| {
+                        let index = (position * MUSE_GLIMMER_KV_HEAD_COUNT + kv_head)
+                            * MUSE_GLIMMER_ATTENTION_HEAD_DIM
+                            + dimension;
+                        half::f16::from_f32(value_values[index]).to_f32()
+                    })
+                    .sum::<f32>();
+                let expected = sum / POSITIONS as f32;
+                let actual = output[query_head * MUSE_GLIMMER_ATTENTION_HEAD_DIM + dimension];
+                assert!(
+                    (actual - expected).abs() <= 2e-6,
+                    "head={query_head} dim={dimension} actual={actual} expected={expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "allocates 128 MiB of KV and scans the full released context"]
+    fn muse_glimmer_attn_online_reaches_released_context() {
+        const POSITIONS: usize = 131_072;
+        let ctx = MetalContext::new().unwrap();
+        let query = MetalTensor::zeros_f32(
+            &ctx,
+            vec![(MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM) as u64],
+        )
+        .unwrap();
+        let cache_elements =
+            POSITIONS * MUSE_GLIMMER_KV_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM;
+        let key = MetalTensor::zeros_f16(&ctx, vec![cache_elements as u64]).unwrap();
+        let value = MetalTensor::zeros_f16(&ctx, vec![cache_elements as u64]).unwrap();
+        let sentinels = [0, POSITIONS / 2, POSITIONS - 1];
+        unsafe {
+            let values = value.buffer.contents().as_ptr().cast::<u16>();
+            for kv_head in 0..MUSE_GLIMMER_KV_HEAD_COUNT {
+                for dimension in 0..MUSE_GLIMMER_ATTENTION_HEAD_DIM {
+                    for (ordinal, &position) in sentinels.iter().enumerate() {
+                        let index = (position * MUSE_GLIMMER_KV_HEAD_COUNT + kv_head)
+                            * MUSE_GLIMMER_ATTENTION_HEAD_DIM
+                            + dimension;
+                        values.add(index).write(
+                            half::f16::from_f32(
+                                (kv_head + 1) as f32 * (ordinal + 1) as f32
+                                    + (dimension % 7) as f32 * 0.0625,
+                            )
+                            .to_bits(),
+                        );
+                    }
+                }
+            }
+        }
+        let output = tensor_from_f32(
+            &ctx,
+            &vec![f32::NAN; MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM],
+        );
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_muse_glimmer_attn_decode_f16kv_f32(
+            &ctx,
+            &encoder,
+            &query,
+            &key,
+            &value,
+            &output,
+            MUSE_GLIMMER_QUERY_HEAD_COUNT,
+            MUSE_GLIMMER_KV_HEAD_COUNT,
+            MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+            POSITIONS,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+
+        let output = read_f32(&output);
+        assert!(output.iter().all(|value| value.is_finite()));
+        for query_head in [0, 15, 16, 31] {
+            let kv_head = query_head / (MUSE_GLIMMER_QUERY_HEAD_COUNT / MUSE_GLIMMER_KV_HEAD_COUNT);
+            for dimension in 0..MUSE_GLIMMER_ATTENTION_HEAD_DIM {
+                let expected = sentinels
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| {
+                        half::f16::from_f32(
+                            (kv_head + 1) as f32 * (ordinal + 1) as f32
+                                + (dimension % 7) as f32 * 0.0625,
+                        )
+                        .to_f32()
+                    })
+                    .sum::<f32>()
+                    / POSITIONS as f32;
+                let actual = output[query_head * MUSE_GLIMMER_ATTENTION_HEAD_DIM + dimension];
+                assert!(
+                    (actual - expected).abs() <= 2e-7,
+                    "head={query_head} dim={dimension} actual={actual} expected={expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn muse_glimmer_attn_rejects_zero_positions() {
+        let ctx = MetalContext::new().unwrap();
+        let query = MetalTensor::zeros_f32(
+            &ctx,
+            vec![(MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM) as u64],
+        )
+        .unwrap();
+        let cache = MetalTensor::zeros_f16(&ctx, vec![1]).unwrap();
+        let output = MetalTensor::zeros_f32(
+            &ctx,
+            vec![(MUSE_GLIMMER_QUERY_HEAD_COUNT * MUSE_GLIMMER_ATTENTION_HEAD_DIM) as u64],
+        )
+        .unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let error = encode_muse_glimmer_attn_decode_f16kv_f32(
+            &ctx,
+            &encoder,
+            &query,
+            &cache,
+            &cache,
+            &output,
+            MUSE_GLIMMER_QUERY_HEAD_COUNT,
+            MUSE_GLIMMER_KV_HEAD_COUNT,
+            MUSE_GLIMMER_ATTENTION_HEAD_DIM,
+            0,
+        )
+        .unwrap_err();
+        encoder.end();
+        assert!(error.to_string().contains("nonzero"));
     }
 
     #[test]

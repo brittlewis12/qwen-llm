@@ -79,8 +79,34 @@ new-sweep/
 The `qwen.lens.coefficient_sweep` v1 manifest records producer build identity,
 the canonical source-plan path, selected operation, ordered coefficients, and
 each child path, byte length, and BLAKE3 digest. Existing output paths are never
-replaced. Repeated controls and active arms can be checked with the normal
-offline comparator:
+replaced.
+
+`inspect-sweep` verifies and summarizes the complete bundle without loading a
+model:
+
+```sh
+qwen-lens inspect-sweep new-sweep --reference-arm 0 --limit 25
+qwen-lens inspect-sweep new-sweep --format json
+```
+
+It requires the exact manifest/arms directory topology with no extra entries or
+symlinks, checks every declared child length and BLAKE3, parses ordinary
+`qwen.lens.run` v1 children, and rejects cross-arm runtime, model path, prompt,
+sampler, generation-bound, source-plan-path, or effective-plan drift. Only the
+selected operation coefficient may differ. Coefficient matching is bit-exact,
+so `0` and `-0` remain distinct; zero arms must not record the disabled
+operation. Inspection is bounded to 128 MiB of child JSON and 1,024 retained
+exact detail records across the complete report.
+
+The report defaults to the first numeric-zero arm (or arm 0), groups exact
+duplicate coefficients and exact generated outputs, and includes bounded exact
+readout comparisons against the reference. `--reference-arm` changes the
+reference explicitly. Manifest v1 does not hash or embed the authored source
+plan, so the report honestly marks that external source-plan identity as
+`unverifiable_manifest_v1`; it still proves child integrity and that effective
+plans differ only at the selected coefficient.
+
+Individual children remain compatible with the normal offline comparator:
 
 ```sh
 qwen-lens compare new-sweep/arms/000000/run.json \

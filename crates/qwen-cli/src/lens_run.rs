@@ -37,7 +37,7 @@ const MAX_OPERATIONS: usize = 4096;
 const MAX_READOUTS: usize = 1024;
 const MAX_SELECTOR_VALUES: usize = 4096;
 const MAX_TOP_K: usize = 1024;
-const MAX_NEW_TOKENS: usize = 4096;
+pub(crate) const MAX_NEW_TOKENS: usize = 4096;
 const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
 const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
@@ -376,7 +376,7 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    fn coefficient(&self) -> f32 {
+    pub(crate) fn coefficient(&self) -> f32 {
         match self {
             Self::FixedAdd { coefficient, .. }
             | Self::ResidualL2Fraction { coefficient, .. }
@@ -542,32 +542,32 @@ pub(crate) struct RunOutput {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SweepProducer {
-    build_commit: String,
-    build_dirty: String,
-    build_source_state: String,
+pub(crate) struct SweepProducer {
+    pub(crate) build_commit: String,
+    pub(crate) build_dirty: String,
+    pub(crate) build_source_state: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct CoefficientSweepArm {
-    index: usize,
-    coefficient: f32,
-    artifact: String,
-    byte_length: u64,
-    blake3: String,
+pub(crate) struct CoefficientSweepArm {
+    pub(crate) index: usize,
+    pub(crate) coefficient: f32,
+    pub(crate) artifact: String,
+    pub(crate) byte_length: u64,
+    pub(crate) blake3: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct CoefficientSweepManifest {
-    schema: String,
-    schema_version: u32,
-    producer: SweepProducer,
-    canonical_source_plan_path: PathBuf,
-    operation_id: String,
-    coefficients: Vec<f32>,
-    arms: Vec<CoefficientSweepArm>,
+pub(crate) struct CoefficientSweepManifest {
+    pub(crate) schema: String,
+    pub(crate) schema_version: u32,
+    pub(crate) producer: SweepProducer,
+    pub(crate) canonical_source_plan_path: PathBuf,
+    pub(crate) operation_id: String,
+    pub(crate) coefficients: Vec<f32>,
+    pub(crate) arms: Vec<CoefficientSweepArm>,
 }
 
 struct SweepArmSummary {
@@ -1340,15 +1340,27 @@ fn serialize_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<Vec<u
     Ok(bytes)
 }
 
+pub(crate) fn parse_sweep_manifest_bytes(bytes: &[u8]) -> Result<CoefficientSweepManifest> {
+    let manifest: CoefficientSweepManifest =
+        serde_json::from_slice(bytes).context("parse coefficient sweep manifest")?;
+    validate_sweep_manifest(&manifest)?;
+    Ok(manifest)
+}
+
 fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
     ensure!(
         manifest.schema == SWEEP_SCHEMA && manifest.schema_version == SWEEP_SCHEMA_VERSION,
         "unsupported coefficient sweep manifest schema"
     );
     ensure!(
-        !manifest.producer.build_commit.is_empty()
+        matches!(manifest.producer.build_commit.len(), 40 | 64)
+            && is_lower_hex(&manifest.producer.build_commit)
             && matches!(manifest.producer.build_dirty.as_str(), "0" | "1")
-            && !manifest.producer.build_source_state.is_empty(),
+            && manifest
+                .producer
+                .build_source_state
+                .strip_prefix("git-source-sha256-v2:")
+                .is_some_and(|digest| digest.len() == 64 && is_lower_hex(digest)),
         "coefficient sweep producer metadata is invalid"
     );
     ensure!(
@@ -1390,15 +1402,17 @@ fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
             "coefficient sweep arm byte length is invalid"
         );
         ensure!(
-            arm.blake3.len() == 64
-                && arm
-                    .blake3
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            arm.blake3.len() == 64 && is_lower_hex(&arm.blake3),
             "coefficient sweep arm BLAKE3 is invalid"
         );
     }
     Ok(())
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn print_sweep_summary(args: &CoefficientSweepArgs, output: &Path, summaries: &[SweepArmSummary]) {
@@ -1985,7 +1999,7 @@ fn unique_ids<'a>(ids: impl Iterator<Item = &'a str>, kind: &str) -> Result<()> 
     Ok(())
 }
 
-fn plan_with_operation_coefficient(
+pub(crate) fn plan_with_operation_coefficient(
     source: &LensPlan,
     operation_id: &str,
     coefficient: f32,
@@ -2000,6 +2014,11 @@ fn plan_with_operation_coefficient(
     operation.action.set_coefficient(coefficient);
     validate_plan_with_zero_operation(&plan, Some(operation_id))?;
     Ok(plan)
+}
+
+pub(crate) fn validate_sweep_effective_plan(plan: &LensPlan, operation_id: &str) -> Result<()> {
+    validate_plan_with_zero_operation(plan, Some(operation_id))?;
+    validate_ordinary_plan(plan)
 }
 
 fn validate_ordinary_plan(plan: &LensPlan) -> Result<()> {
@@ -3205,7 +3224,7 @@ mod tests {
             producer: SweepProducer {
                 build_commit: "a".repeat(40),
                 build_dirty: "0".into(),
-                build_source_state: "clean".into(),
+                build_source_state: format!("git-source-sha256-v2:{}", "b".repeat(64)),
             },
             canonical_source_plan_path: "/tmp/plan.json".into(),
             operation_id: "swept".into(),
@@ -3217,9 +3236,13 @@ mod tests {
         assert_eq!(decoded.coefficients[2].to_bits(), (-0.0_f32).to_bits());
         assert_eq!(decoded.arms[2].coefficient.to_bits(), (-0.0_f32).to_bits());
 
-        let mut malformed = decoded;
+        let mut malformed = decoded.clone();
         malformed.arms[1].artifact = "../run.json".into();
         assert!(validate_sweep_manifest(&malformed).is_err());
+
+        let mut malformed_producer = decoded;
+        malformed_producer.producer.build_commit = "not-a-commit".into();
+        assert!(validate_sweep_manifest(&malformed_producer).is_err());
     }
 
     #[test]

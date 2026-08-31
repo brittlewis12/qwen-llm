@@ -36,6 +36,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Ordinary Qwen coefficient sweeps reuse one resident model and prepared lens,
   while every serial arm gets a fresh sequence and same-seed sampler. Ordered
   duplicate and zero controls are preserved in immutable hashed child artifacts.
+- Model-free sweep inspection verifies complete bundle topology, child hashes,
+  effective-plan isolation, and shared run context, then groups controls and
+  reports exact reference-arm readout differences.
 - Raw prompts, literal token IDs, and strict message JSON control rendering.
 - Ordinary dense and MoE inference paths run interventions. Muse supports native
   selected and published full-transport directions; Flash-Next exposes only raw
@@ -64,7 +67,7 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes with 134 tests and two model-bound
+- The active `qwen-lens` unit suite passes with 146 tests and two model-bound
   tests intentionally ignored.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
@@ -78,6 +81,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A real Qwen3.8 Q8 published-J `[0,0.1,0]` resident sweep produces byte-identical
   zero controls with no operation applications. The active L31 arm records five
   applications and raises the selected `lightning` score at every prompt site.
+- `inspect-sweep` verifies that real bundle with 10,886 total child bytes, one
+  byte-identical zero-coefficient group, one generated-output group, and five
+  changed active-arm readouts without opening the model or lens.
 
 ## Honest Boundaries
 

@@ -3,13 +3,20 @@ use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use super::lens_inspect::{self, Cell, TraceDocument, VectorCell};
-use super::read_regular_file_bounded;
+use super::lens_run::{self, CoefficientSweepManifest, LensPlan};
+use super::{read_regular_file_bounded, read_regular_file_exact};
 
 const COMPARE_MAX_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_LIMIT: usize = 25;
+const SWEEP_MANIFEST_MAX_BYTES: usize = 16 * 1024 * 1024;
+const SWEEP_INSPECT_MAX_TOTAL_BYTES: usize = 128 * 1024 * 1024;
+const SWEEP_INSPECT_MAX_DETAILS: usize = 1024;
+const RUN_METADATA_STRING_MAX_BYTES: usize = 16 * 1024;
+const RUN_DECODED_TEXT_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Args)]
 pub(crate) struct CompareArgs {
@@ -25,8 +32,29 @@ pub(crate) struct CompareArgs {
     limit: usize,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct InspectSweepArgs {
+    /// New-style qwen.lens.coefficient_sweep directory.
+    sweep: PathBuf,
+    /// Arm compared against every other arm; defaults to the first numeric zero.
+    #[arg(long)]
+    reference_arm: Option<usize>,
+    /// Render concise text or a typed inspection result.
+    #[arg(long, value_enum, default_value_t = InspectSweepFormat::Text)]
+    format: InspectSweepFormat,
+    /// Maximum exact comparison details retained across the complete report.
+    #[arg(long, default_value_t = DEFAULT_LIMIT)]
+    limit: usize,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CompareFormat {
+    Text,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum InspectSweepFormat {
     Text,
     Json,
 }
@@ -75,12 +103,8 @@ pub(crate) fn run(args: CompareArgs) -> Result<()> {
                     && left_envelope.schema_version == right_envelope.schema_version,
                 "run comparison supports same-version schema 1 or 2 pairs only"
             );
-            let left: RunDocument = serde_json::from_slice(&left_bytes)
-                .with_context(|| format!("parse run JSON {}", args.left.display()))?;
-            let right: RunDocument = serde_json::from_slice(&right_bytes)
-                .with_context(|| format!("parse run JSON {}", args.right.display()))?;
-            left.validate()?;
-            right.validate()?;
+            let left = parse_run_bytes(&left_bytes, &args.left)?;
+            let right = parse_run_bytes(&right_bytes, &args.right)?;
             ComparisonResult::Run(compare_runs(&left, &right, args.limit)?)
         }
         schema => bail!("unsupported comparison schema {schema:?}"),
@@ -90,6 +114,790 @@ pub(crate) fn run(args: CompareArgs) -> Result<()> {
         CompareFormat::Text => print_text(&result),
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct SweepInspection {
+    inspection_kind: &'static str,
+    sweep_schema_version: u32,
+    bundle_integrity: &'static str,
+    run_validation: &'static str,
+    source_plan_identity: &'static str,
+    sweep_root: PathBuf,
+    manifest_blake3: String,
+    operation_id: String,
+    canonical_source_plan_path: PathBuf,
+    runtime_kind: String,
+    model_path: PathBuf,
+    reference_arm: usize,
+    reference_coefficient: f32,
+    total_child_bytes: u64,
+    arms: Vec<SweepInspectionArm>,
+    duplicate_coefficient_groups: Vec<DuplicateCoefficientGroup>,
+    generation_groups: Vec<SweepGenerationGroup>,
+    detail_limit: usize,
+    retained_detail_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepInspectionArm {
+    index: usize,
+    coefficient: f32,
+    coefficient_bits: String,
+    artifact: String,
+    byte_length: u64,
+    blake3: String,
+    generation_group: usize,
+    generated_text: String,
+    generated_token_ids: Vec<i32>,
+    stop_reason: String,
+    selected_operation_application_count: usize,
+    total_operation_application_count: usize,
+    live_readout_count: usize,
+    reference_comparison: Option<SweepReferenceComparison>,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepReferenceComparison {
+    plans_equal: bool,
+    first_generated_token_divergence: Option<GeneratedDivergence>,
+    stop_reason_changed: bool,
+    reference_operation_application_count: usize,
+    arm_operation_application_count: usize,
+    matched_readout_count: usize,
+    changed_readout_count: usize,
+    candidate_difference_count: usize,
+    unmatched_readout_count: usize,
+    changed_readouts: Vec<MatchedReadout>,
+    unmatched_readouts: Vec<UnmatchedReadout>,
+}
+
+#[derive(Debug, Serialize)]
+struct DuplicateCoefficientGroup {
+    coefficient: f32,
+    coefficient_bits: String,
+    arm_indices: Vec<usize>,
+    byte_identical: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepGenerationGroup {
+    id: usize,
+    arm_indices: Vec<usize>,
+    generated_token_ids: Vec<i32>,
+    decoded_text: String,
+    stop_reason: String,
+}
+
+type SweepGenerationKey = (Vec<i32>, String, String);
+
+struct LoadedSweep {
+    root: PathBuf,
+    manifest_blake3: String,
+    manifest: CoefficientSweepManifest,
+    arms: Vec<LoadedSweepArm>,
+    total_child_bytes: u64,
+}
+
+struct LoadedSweepArm {
+    index: usize,
+    coefficient: f32,
+    artifact: String,
+    byte_length: u64,
+    blake3: String,
+    document: RunDocument,
+}
+
+pub(crate) fn inspect_sweep(args: InspectSweepArgs) -> Result<()> {
+    ensure!(
+        args.limit > 0 && args.limit <= SWEEP_INSPECT_MAX_DETAILS,
+        "--limit must be in 1..={SWEEP_INSPECT_MAX_DETAILS}"
+    );
+    let loaded = load_sweep(&args.sweep)?;
+    let reference_arm = args.reference_arm.unwrap_or_else(|| {
+        loaded
+            .arms
+            .iter()
+            .position(|arm| arm.coefficient == 0.0)
+            .unwrap_or(0)
+    });
+    ensure!(
+        reference_arm < loaded.arms.len(),
+        "--reference-arm {reference_arm} is outside 0..{}",
+        loaded.arms.len()
+    );
+    let reference = &loaded.arms[reference_arm].document;
+    let (generation_groups, generation_group_by_arm) = sweep_generation_groups(&loaded.arms);
+    let duplicate_coefficient_groups = duplicate_coefficient_groups(&loaded.arms);
+    let operation_id = loaded.manifest.operation_id.clone();
+    let mut arms = Vec::with_capacity(loaded.arms.len());
+    let mut remaining_details = args.limit;
+    for arm in &loaded.arms {
+        let selected_operation_application_count = arm
+            .document
+            .operation_applications
+            .iter()
+            .filter(|application| application.id == operation_id)
+            .count();
+        let reference_comparison = (arm.index != reference_arm)
+            .then(|| compare_sweep_runs(reference, &arm.document, &mut remaining_details))
+            .transpose()?;
+        arms.push(SweepInspectionArm {
+            index: arm.index,
+            coefficient: arm.coefficient,
+            coefficient_bits: coefficient_bits(arm.coefficient),
+            artifact: arm.artifact.clone(),
+            byte_length: arm.byte_length,
+            blake3: arm.blake3.clone(),
+            generation_group: generation_group_by_arm[arm.index],
+            generated_text: arm.document.decoded_text.clone(),
+            generated_token_ids: arm.document.generated_token_ids.clone(),
+            stop_reason: arm.document.stop_reason.clone(),
+            selected_operation_application_count,
+            total_operation_application_count: arm.document.operation_applications.len(),
+            live_readout_count: arm.document.live_readouts.len(),
+            reference_comparison,
+        });
+    }
+    let result = SweepInspection {
+        inspection_kind: "coefficient_sweep",
+        sweep_schema_version: loaded.manifest.schema_version,
+        bundle_integrity: "verified",
+        run_validation: "strict_known_qwen_lens_run_v1",
+        source_plan_identity: "unverifiable_manifest_v1",
+        sweep_root: loaded.root,
+        manifest_blake3: loaded.manifest_blake3,
+        operation_id,
+        canonical_source_plan_path: loaded.manifest.canonical_source_plan_path,
+        runtime_kind: reference.runtime_kind.clone(),
+        model_path: reference.model_path.clone(),
+        reference_arm,
+        reference_coefficient: loaded.arms[reference_arm].coefficient,
+        total_child_bytes: loaded.total_child_bytes,
+        arms,
+        duplicate_coefficient_groups,
+        generation_groups,
+        detail_limit: args.limit,
+        retained_detail_count: args.limit - remaining_details,
+    };
+    match args.format {
+        InspectSweepFormat::Text => print_sweep_inspection(&result),
+        InspectSweepFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+    }
+    Ok(())
+}
+
+fn load_sweep(path: &Path) -> Result<LoadedSweep> {
+    let root = canonical_real_directory(path, "sweep root")?;
+    ensure_directory_entries(
+        &root,
+        [OsString::from("arms"), OsString::from("manifest.json")]
+            .into_iter()
+            .collect(),
+        "sweep root",
+    )?;
+    let manifest_path = root.join("manifest.json");
+    let manifest_bytes = read_regular_file_bounded(&manifest_path, SWEEP_MANIFEST_MAX_BYTES)?;
+    let manifest = lens_run::parse_sweep_manifest_bytes(&manifest_bytes)
+        .with_context(|| format!("validate sweep manifest {}", manifest_path.display()))?;
+    let manifest_blake3 = blake3::hash(&manifest_bytes).to_hex().to_string();
+
+    let arms_root = root.join("arms");
+    require_real_directory(&arms_root, "sweep arms directory")?;
+    let expected_arm_entries = manifest
+        .arms
+        .iter()
+        .map(|arm| OsString::from(format!("{:06}", arm.index)))
+        .collect();
+    ensure_directory_entries(&arms_root, expected_arm_entries, "sweep arms directory")?;
+
+    let mut total_child_bytes = 0usize;
+    let mut arms = Vec::with_capacity(manifest.arms.len());
+    let mut plans = Vec::with_capacity(manifest.arms.len());
+    for arm in &manifest.arms {
+        let arm_directory = arms_root.join(format!("{:06}", arm.index));
+        require_real_directory(&arm_directory, "sweep arm directory")?;
+        ensure_directory_entries(
+            &arm_directory,
+            [OsString::from("run.json")].into_iter().collect(),
+            "sweep arm directory",
+        )?;
+        let byte_length = usize::try_from(arm.byte_length)
+            .context("sweep child byte length does not fit this platform")?;
+        ensure!(
+            byte_length <= COMPARE_MAX_BYTES,
+            "sweep child {} exceeds the {} byte run limit",
+            arm.index,
+            COMPARE_MAX_BYTES
+        );
+        total_child_bytes = total_child_bytes
+            .checked_add(byte_length)
+            .context("sweep child byte total overflow")?;
+        ensure!(
+            total_child_bytes <= SWEEP_INSPECT_MAX_TOTAL_BYTES,
+            "sweep children total {} bytes exceeds inspection limit {}",
+            total_child_bytes,
+            SWEEP_INSPECT_MAX_TOTAL_BYTES
+        );
+        let run_path = arm_directory.join("run.json");
+        let bytes = read_regular_file_exact(&run_path, byte_length)?;
+        ensure!(
+            blake3::hash(&bytes).to_hex().as_str() == arm.blake3,
+            "sweep child {} BLAKE3 does not match manifest",
+            arm.index
+        );
+        let document = parse_run_bytes(&bytes, &run_path)?;
+        let plan = validate_sweep_child(&document, &manifest, arm)?;
+        plans.push(plan);
+        arms.push(LoadedSweepArm {
+            index: arm.index,
+            coefficient: arm.coefficient,
+            artifact: arm.artifact.clone(),
+            byte_length: arm.byte_length,
+            blake3: arm.blake3.clone(),
+            document,
+        });
+    }
+    let reference_plan = plans
+        .first()
+        .context("coefficient sweep manifest has no arms")?;
+    for (arm, plan) in manifest.arms.iter().zip(&plans) {
+        let expected = lens_run::plan_with_operation_coefficient(
+            reference_plan,
+            &manifest.operation_id,
+            arm.coefficient,
+        )?;
+        ensure!(
+            expected == *plan,
+            "sweep child {} plan differs beyond the selected operation coefficient",
+            arm.index
+        );
+    }
+    let reference = &arms
+        .first()
+        .context("coefficient sweep manifest has no loaded arms")?
+        .document;
+    ensure_sweep_readout_semantics(&arms)?;
+    for arm in &arms {
+        ensure_sweep_run_context(reference, &arm.document)?;
+    }
+    Ok(LoadedSweep {
+        root,
+        manifest_blake3,
+        manifest,
+        arms,
+        total_child_bytes: total_child_bytes as u64,
+    })
+}
+
+fn validate_sweep_child(
+    document: &RunDocument,
+    manifest: &CoefficientSweepManifest,
+    arm: &lens_run::CoefficientSweepArm,
+) -> Result<LensPlan> {
+    ensure!(
+        document.schema_version == 1
+            && document.runtime_kind == "ordinary_qwen"
+            && document.execution_binding.is_none()
+            && document.native_hyper_captures.is_empty(),
+        "sweep child {} must be an ordinary qwen.lens.run v1 without native captures",
+        arm.index
+    );
+    ensure!(
+        document.decoded_text.len() <= RUN_DECODED_TEXT_MAX_BYTES
+            && document
+                .operation_applications
+                .iter()
+                .all(|application| { application.id.len() <= RUN_METADATA_STRING_MAX_BYTES })
+            && document.live_readouts.iter().all(|readout| {
+                [
+                    readout.id.as_str(),
+                    readout.lens.as_str(),
+                    readout.method.as_str(),
+                    readout.score_kind.as_str(),
+                    readout.candidate_universe.as_str(),
+                ]
+                .iter()
+                .all(|value| value.len() <= RUN_METADATA_STRING_MAX_BYTES)
+                    && readout.scores.iter().all(|score| {
+                        score
+                            .label
+                            .as_ref()
+                            .is_none_or(|label| label.len() <= RUN_METADATA_STRING_MAX_BYTES)
+                    })
+            }),
+        "sweep child {} exceeds bounded string lengths",
+        arm.index
+    );
+    ensure!(
+        document.canonical_plan_path == manifest.canonical_source_plan_path,
+        "sweep child {} canonical source-plan path differs from manifest",
+        arm.index
+    );
+    let plan: LensPlan = serde_json::from_value(document.plan.clone())
+        .with_context(|| format!("parse sweep child {} effective plan", arm.index))?;
+    lens_run::validate_sweep_effective_plan(&plan, &manifest.operation_id)
+        .with_context(|| format!("validate sweep child {} effective plan", arm.index))?;
+    let operation = plan
+        .operations
+        .iter()
+        .find(|operation| operation.id == manifest.operation_id)
+        .with_context(|| {
+            format!(
+                "sweep child {} has no selected operation {:?}",
+                arm.index, manifest.operation_id
+            )
+        })?;
+    ensure!(
+        operation.action.coefficient().to_bits() == arm.coefficient.to_bits(),
+        "sweep child {} selected coefficient differs from manifest",
+        arm.index
+    );
+    let requested = serde_json::to_value(&plan.readouts)?;
+    ensure!(
+        requested == serde_json::Value::Array(document.requested_live_readouts.clone()),
+        "sweep child {} requested readouts differ from its effective plan",
+        arm.index
+    );
+    let operations = plan
+        .operations
+        .iter()
+        .map(|operation| (operation.id.as_str(), operation))
+        .collect::<BTreeMap<_, _>>();
+    let mut application_keys = BTreeSet::new();
+    for application in &document.operation_applications {
+        let operation = operations.get(application.id.as_str()).with_context(|| {
+            format!(
+                "sweep child {} records unknown operation {}",
+                arm.index, application.id
+            )
+        })?;
+        ensure!(
+            sweep_scope_matches(
+                &operation.scope,
+                &application.phase,
+                application.index,
+                application.layer,
+                document,
+            ),
+            "sweep child {} operation application is outside its effective scope",
+            arm.index
+        );
+        ensure!(
+            application_keys.insert((
+                application.id.as_str(),
+                application.layer,
+                application.phase.as_str(),
+                application.index,
+            )),
+            "sweep child {} repeats an operation application",
+            arm.index
+        );
+    }
+    let readout_definitions = plan
+        .readouts
+        .iter()
+        .map(|readout| (readout.id.as_str(), readout))
+        .collect::<BTreeMap<_, _>>();
+    readout_map(document)?;
+    let mut readout_sites = BTreeSet::new();
+    let mut readout_semantics = BTreeMap::new();
+    for readout in &document.live_readouts {
+        let definition = readout_definitions
+            .get(readout.id.as_str())
+            .with_context(|| {
+                format!(
+                    "sweep child {} emits unknown readout {}",
+                    arm.index, readout.id
+                )
+            })?;
+        ensure!(
+            readout.lens == definition.lens
+                && readout.scores.len() <= definition.top_k
+                && sweep_scope_matches(
+                    &definition.scope,
+                    &readout.phase,
+                    readout.index,
+                    readout.source_layer,
+                    document,
+                ),
+            "sweep child {} live readout differs from its effective definition or scope",
+            arm.index
+        );
+        ensure!(
+            readout_sites.insert((
+                readout.id.as_str(),
+                readout.source_layer,
+                readout.phase.as_str(),
+                readout.index,
+            )),
+            "sweep child {} repeats a planned readout site",
+            arm.index
+        );
+        let semantics = (
+            readout.method.as_str(),
+            readout.score_kind.as_str(),
+            readout.candidate_universe.as_str(),
+            readout.target_layer,
+        );
+        if let Some(existing) = readout_semantics.insert(readout.id.as_str(), semantics) {
+            ensure!(
+                existing == semantics,
+                "sweep child {} changes one readout's score semantics across sites",
+                arm.index
+            );
+        }
+    }
+    if arm.coefficient == 0.0 {
+        ensure!(
+            document
+                .operation_applications
+                .iter()
+                .all(|application| application.id != manifest.operation_id),
+            "sweep child {} zero arm records the disabled selected operation",
+            arm.index
+        );
+    }
+    Ok(plan)
+}
+
+fn sweep_scope_matches(
+    scope: &lens_run::Scope,
+    phase: &str,
+    index: usize,
+    layer: u32,
+    document: &RunDocument,
+) -> bool {
+    let Ok(index_u32) = u32::try_from(index) else {
+        return false;
+    };
+    let phase_selector = match phase {
+        "prefill" if index < document.prompt_token_ids.len() => scope.prefill.as_ref(),
+        "decode" if index < document.generated_token_ids.len().saturating_sub(1) => {
+            scope.decode.as_ref()
+        }
+        _ => return false,
+    };
+    phase_selector.is_some_and(|selector| selector_matches(selector, index_u32))
+        && selector_matches(&scope.layers, layer)
+}
+
+fn selector_matches(selector: &lens_run::Selector, value: u32) -> bool {
+    match selector {
+        lens_run::Selector::All => true,
+        lens_run::Selector::Values { values } => values.binary_search(&value).is_ok(),
+        lens_run::Selector::Range { start, end } => (*start..=*end).contains(&value),
+    }
+}
+
+fn ensure_sweep_readout_semantics(arms: &[LoadedSweepArm]) -> Result<()> {
+    let mut semantics = BTreeMap::<String, (String, String, String, Option<u32>)>::new();
+    for arm in arms {
+        for readout in &arm.document.live_readouts {
+            let current = (
+                readout.method.clone(),
+                readout.score_kind.clone(),
+                readout.candidate_universe.clone(),
+                readout.target_layer,
+            );
+            if let Some(existing) = semantics.insert(readout.id.clone(), current.clone()) {
+                ensure!(
+                    existing == current,
+                    "sweep readout {} changes score semantics across arms",
+                    readout.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_sweep_run_context(reference: &RunDocument, candidate: &RunDocument) -> Result<()> {
+    ensure!(
+        reference.schema_version == candidate.schema_version
+            && reference.input_source == candidate.input_source
+            && reference.max_new_tokens == candidate.max_new_tokens,
+        "sweep child run schema or input/generation context differs"
+    );
+    ensure!(
+        reference.prompt_token_ids == candidate.prompt_token_ids,
+        "sweep child prompt token IDs differ"
+    );
+    ensure!(
+        reference.runtime_kind == candidate.runtime_kind,
+        "sweep child runtime kinds differ"
+    );
+    ensure!(
+        reference.model_path == candidate.model_path,
+        "sweep child model paths differ"
+    );
+    let bindings_match = match (&reference.execution_binding, &candidate.execution_binding) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.stable_identity_eq(right),
+        _ => false,
+    };
+    ensure!(
+        bindings_match,
+        "sweep child stable execution bindings differ"
+    );
+    ensure!(
+        reference.sampler == candidate.sampler,
+        "sweep child sampler settings or seed differ"
+    );
+    readout_map(reference)?;
+    readout_map(candidate)?;
+    Ok(())
+}
+
+fn compare_sweep_runs(
+    reference: &RunDocument,
+    candidate: &RunDocument,
+    remaining_details: &mut usize,
+) -> Result<SweepReferenceComparison> {
+    ensure_sweep_run_context(reference, candidate)?;
+    let left_readouts = readout_map(reference)?;
+    let right_readouts = readout_map(candidate)?;
+    let mut matched_readout_count = 0usize;
+    let mut changed_readout_count = 0usize;
+    let mut candidate_difference_count = 0usize;
+    let mut changed_readouts = Vec::new();
+    let mut unmatched_readout_count = 0usize;
+    let mut unmatched_readouts = Vec::new();
+    for key in left_readouts
+        .keys()
+        .chain(right_readouts.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+    {
+        match (left_readouts.get(&key), right_readouts.get(&key)) {
+            (Some(left), Some(right)) => {
+                matched_readout_count += 1;
+                let retain_readout = *remaining_details > 0;
+                let candidate_limit = remaining_details.saturating_sub(1);
+                let comparison = compare_readout(key, left, right, candidate_limit);
+                candidate_difference_count += comparison.candidate_difference_count;
+                if comparison.candidate_difference_count > 0 {
+                    changed_readout_count += 1;
+                    if retain_readout {
+                        *remaining_details -= 1;
+                        *remaining_details -= comparison.candidate_differences.len();
+                        changed_readouts.push(comparison);
+                    }
+                }
+            }
+            (Some(_), None) => {
+                unmatched_readout_count += 1;
+                if *remaining_details > 0 {
+                    *remaining_details -= 1;
+                    unmatched_readouts.push(UnmatchedReadout {
+                        key,
+                        side: "reference_only",
+                    });
+                }
+            }
+            (None, Some(_)) => {
+                unmatched_readout_count += 1;
+                if *remaining_details > 0 {
+                    *remaining_details -= 1;
+                    unmatched_readouts.push(UnmatchedReadout {
+                        key,
+                        side: "arm_only",
+                    });
+                }
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+    Ok(SweepReferenceComparison {
+        plans_equal: reference.plan == candidate.plan,
+        first_generated_token_divergence: first_divergence(
+            &reference.generated_token_ids,
+            &candidate.generated_token_ids,
+        ),
+        stop_reason_changed: reference.stop_reason != candidate.stop_reason,
+        reference_operation_application_count: reference.operation_applications.len(),
+        arm_operation_application_count: candidate.operation_applications.len(),
+        matched_readout_count,
+        changed_readout_count,
+        candidate_difference_count,
+        unmatched_readout_count,
+        changed_readouts,
+        unmatched_readouts,
+    })
+}
+
+fn canonical_real_directory(path: &Path, label: &str) -> Result<PathBuf> {
+    require_real_directory(path, label)?;
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve {label} {}", path.display()))?;
+    require_real_directory(&canonical, label)?;
+    Ok(canonical)
+}
+
+fn require_real_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label} {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+        "{label} {} must be a real non-symlink directory",
+        path.display()
+    );
+    Ok(())
+}
+
+fn ensure_directory_entries(path: &Path, expected: BTreeSet<OsString>, label: &str) -> Result<()> {
+    let mut actual = BTreeSet::new();
+    for entry in
+        std::fs::read_dir(path).with_context(|| format!("read {label} {}", path.display()))?
+    {
+        let name = entry
+            .with_context(|| format!("read entry in {label} {}", path.display()))?
+            .file_name();
+        actual.insert(name);
+        ensure!(
+            actual.len() <= expected.len(),
+            "{label} {} contains more than {} entries",
+            path.display(),
+            expected.len()
+        );
+    }
+    ensure!(
+        actual == expected,
+        "{label} {} entries differ: expected {:?}, found {:?}",
+        path.display(),
+        expected,
+        actual
+    );
+    Ok(())
+}
+
+fn duplicate_coefficient_groups(arms: &[LoadedSweepArm]) -> Vec<DuplicateCoefficientGroup> {
+    let mut groups: Vec<(u32, Vec<&LoadedSweepArm>)> = Vec::new();
+    for arm in arms {
+        let bits = arm.coefficient.to_bits();
+        if let Some((_, members)) = groups.iter_mut().find(|(candidate, _)| *candidate == bits) {
+            members.push(arm);
+        } else {
+            groups.push((bits, vec![arm]));
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(_, members)| members.len() > 1)
+        .map(|(bits, members)| DuplicateCoefficientGroup {
+            coefficient: f32::from_bits(bits),
+            coefficient_bits: format!("0x{bits:08x}"),
+            arm_indices: members.iter().map(|arm| arm.index).collect(),
+            byte_identical: members
+                .windows(2)
+                .all(|pair| pair[0].blake3 == pair[1].blake3),
+        })
+        .collect()
+}
+
+fn sweep_generation_groups(arms: &[LoadedSweepArm]) -> (Vec<SweepGenerationGroup>, Vec<usize>) {
+    let mut groups: Vec<(SweepGenerationKey, Vec<usize>)> = Vec::new();
+    let mut by_arm = vec![0; arms.len()];
+    for arm in arms {
+        let key = (
+            arm.document.generated_token_ids.clone(),
+            arm.document.decoded_text.clone(),
+            arm.document.stop_reason.clone(),
+        );
+        let group_id =
+            if let Some(index) = groups.iter().position(|(candidate, _)| *candidate == key) {
+                groups[index].1.push(arm.index);
+                index
+            } else {
+                groups.push((key, vec![arm.index]));
+                groups.len() - 1
+            };
+        by_arm[arm.index] = group_id;
+    }
+    let groups = groups
+        .into_iter()
+        .enumerate()
+        .map(
+            |(id, ((generated_token_ids, decoded_text, stop_reason), arm_indices))| {
+                SweepGenerationGroup {
+                    id,
+                    arm_indices,
+                    generated_token_ids,
+                    decoded_text,
+                    stop_reason,
+                }
+            },
+        )
+        .collect();
+    (groups, by_arm)
+}
+
+fn coefficient_bits(coefficient: f32) -> String {
+    format!("0x{:08x}", coefficient.to_bits())
+}
+
+fn print_sweep_inspection(result: &SweepInspection) {
+    println!(
+        "coefficient sweep: bundle_integrity={} run_validation={} arms={} operation={} no_inference=true",
+        result.bundle_integrity,
+        result.run_validation,
+        result.arms.len(),
+        serde_json::to_string(&result.operation_id).expect("string serialization cannot fail")
+    );
+    println!(
+        "runtime={} model={:?} reference_arm={} coefficient={} source_plan_identity={}",
+        result.runtime_kind,
+        result.model_path,
+        result.reference_arm,
+        result.reference_coefficient,
+        result.source_plan_identity
+    );
+    for arm in &result.arms {
+        let comparison = arm.reference_comparison.as_ref();
+        let divergence = comparison
+            .and_then(|comparison| comparison.first_generated_token_divergence.as_ref())
+            .map_or_else(|| "none".into(), |divergence| divergence.index.to_string());
+        println!(
+            "arm={} coefficient={} bits={} generation_group={} generated_text={} stop={} selected_applications={} total_applications={} live_readouts={} divergence={} changed_readouts={} candidate_differences={} unmatched_readouts={}",
+            arm.index,
+            arm.coefficient,
+            arm.coefficient_bits,
+            arm.generation_group,
+            serde_json::to_string(&arm.generated_text).expect("string serialization cannot fail"),
+            serde_json::to_string(&arm.stop_reason).expect("string serialization cannot fail"),
+            arm.selected_operation_application_count,
+            arm.total_operation_application_count,
+            arm.live_readout_count,
+            divergence,
+            comparison.map_or(0, |comparison| comparison.changed_readout_count),
+            comparison.map_or(0, |comparison| comparison.candidate_difference_count),
+            comparison.map_or(0, |comparison| comparison.unmatched_readout_count),
+        );
+    }
+    for group in &result.duplicate_coefficient_groups {
+        println!(
+            "duplicate coefficient={} bits={} arms={:?} byte_identical={}",
+            group.coefficient, group.coefficient_bits, group.arm_indices, group.byte_identical
+        );
+    }
+    for group in &result.generation_groups {
+        println!(
+            "generation_group={} arms={:?} token_ids={:?} text={} stop={}",
+            group.id,
+            group.arm_indices,
+            group.generated_token_ids,
+            serde_json::to_string(&group.decoded_text).expect("string serialization cannot fail"),
+            serde_json::to_string(&group.stop_reason).expect("string serialization cannot fail")
+        );
+    }
+    println!(
+        "manifest_blake3={} total_child_bytes={} retained_details={}/{} sweep={:?}",
+        result.manifest_blake3,
+        result.total_child_bytes,
+        result.retained_detail_count,
+        result.detail_limit,
+        result.sweep_root
+    );
 }
 
 #[derive(Debug, Serialize)]
@@ -627,7 +1435,8 @@ fn vector_metadata_mismatch(left: &TraceDocument, right: &TraceDocument) -> Opti
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RunSampler {
     temperature: f32,
     top_k: usize,
@@ -636,27 +1445,24 @@ struct RunSampler {
     seed: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RunDocument {
     schema: String,
     schema_version: u32,
     runtime_kind: String,
     model_path: PathBuf,
-    #[serde(rename = "canonical_plan_path")]
-    _canonical_plan_path: PathBuf,
+    canonical_plan_path: PathBuf,
     plan: serde_json::Value,
-    #[serde(rename = "input_source")]
-    _input_source: String,
+    input_source: String,
     prompt_token_ids: Vec<i32>,
     generated_token_ids: Vec<i32>,
     sampler: RunSampler,
-    #[serde(rename = "max_new_tokens")]
-    _max_new_tokens: usize,
+    max_new_tokens: usize,
     decoded_text: String,
     stop_reason: String,
     operation_applications: Vec<RunOperationApplication>,
-    #[serde(rename = "requested_live_readouts")]
-    _requested_live_readouts: Vec<serde_json::Value>,
+    requested_live_readouts: Vec<serde_json::Value>,
     live_readouts: Vec<RunReadout>,
     #[serde(default)]
     native_hyper_captures: Vec<serde_json::Value>,
@@ -664,7 +1470,16 @@ struct RunDocument {
     execution_binding: Option<RunExecutionBinding>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+fn parse_run_bytes(bytes: &[u8], path: &Path) -> Result<RunDocument> {
+    let document: RunDocument = serde_json::from_slice(bytes)
+        .with_context(|| format!("parse run JSON {}", path.display()))?;
+    document
+        .validate()
+        .with_context(|| format!("validate run JSON {}", path.display()))?;
+    Ok(document)
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RunExecutionBinding {
     deployed_model_content_blake3: String,
@@ -673,7 +1488,7 @@ struct RunExecutionBinding {
     published_lenses: Vec<RunPublishedLensBinding>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RunPublishedLensBinding {
     lens_id: String,
@@ -694,7 +1509,7 @@ struct RunPublishedLensBinding {
     selected_matrices: Vec<RunPublishedMatrixBinding>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RunPublishedMatrixBinding {
     source_layer: u32,
@@ -716,20 +1531,65 @@ impl RunDocument {
         }
         ensure!(
             self.sampler.temperature.is_finite()
+                && self.sampler.temperature >= 0.0
                 && self.sampler.top_p.is_finite()
-                && self.sampler.min_p.is_finite(),
-            "run sampler contains non-finite settings"
+                && self.sampler.top_p > 0.0
+                && self.sampler.top_p <= 1.0
+                && self.sampler.min_p.is_finite()
+                && (0.0..=1.0).contains(&self.sampler.min_p),
+            "run sampler settings are outside native bounds"
         );
+        ensure!(
+            matches!(
+                self.input_source.as_str(),
+                "prompt" | "token_ids" | "messages"
+            ) && !self.prompt_token_ids.is_empty()
+                && self.prompt_token_ids.len() <= lens_run::MAX_NEW_TOKENS * 16
+                && self.max_new_tokens > 0
+                && self.max_new_tokens <= lens_run::MAX_NEW_TOKENS,
+            "run input source, prompt, or generation bound is invalid"
+        );
+        ensure!(
+            !self.model_path.as_os_str().is_empty()
+                && self.canonical_plan_path.is_absolute()
+                && self.prompt_token_ids.iter().all(|token| *token >= 0)
+                && self.generated_token_ids.iter().all(|token| *token >= 0)
+                && self.generated_token_ids.len() <= self.max_new_tokens,
+            "run model/plan path or token IDs are invalid"
+        );
+        match self.stop_reason.as_str() {
+            "max_new_tokens" => ensure!(
+                self.generated_token_ids.len() == self.max_new_tokens,
+                "max_new_tokens run did not generate its declared bound"
+            ),
+            "stop_token" => ensure!(
+                !self.generated_token_ids.is_empty(),
+                "stop_token run generated no stop token"
+            ),
+            _ => bail!("run has unsupported stop reason {:?}", self.stop_reason),
+        }
+        for application in &self.operation_applications {
+            ensure!(
+                !application.id.is_empty()
+                    && matches!(application.phase.as_str(), "prefill" | "decode"),
+                "run operation application has an invalid ID or phase"
+            );
+        }
         for readout in &self.live_readouts {
             ensure!(
-                !readout.score_kind.is_empty() && !readout.candidate_universe.is_empty(),
+                !readout.id.is_empty()
+                    && !readout.lens.is_empty()
+                    && !readout.method.is_empty()
+                    && !readout.score_kind.is_empty()
+                    && !readout.candidate_universe.is_empty()
+                    && matches!(readout.phase.as_str(), "prefill" | "decode"),
                 "run readout is missing score semantics"
             );
             let mut identities = BTreeSet::new();
             for score in &readout.scores {
                 ensure!(
-                    score.score.is_finite(),
-                    "run readout contains a non-finite score"
+                    score.score.is_finite() && score.token_id.is_none_or(|token| token >= 0),
+                    "run readout contains a non-finite score or negative token ID"
                 );
                 ensure!(
                     identities.insert(score.identity()),
@@ -802,6 +1662,7 @@ fn is_lower_hex_digest(value: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RunOperationApplication {
     id: String,
     layer: u32,
@@ -809,7 +1670,8 @@ struct RunOperationApplication {
     index: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RunReadout {
     id: String,
     lens: String,
@@ -823,7 +1685,8 @@ struct RunReadout {
     scores: Vec<RunScore>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RunScore {
     token_id: Option<i32>,
     row_id: usize,
@@ -936,7 +1799,7 @@ struct RunCandidateDifference {
     status: SelectedCandidateStatus,
     left_score: Option<f32>,
     right_score: Option<f32>,
-    score_delta: Option<f32>,
+    score_delta: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -1113,7 +1976,7 @@ fn compare_readout(
                 },
                 left_score: a,
                 right_score: b,
-                score_delta: a.zip(b).map(|(x, y)| y - x),
+                score_delta: a.zip(b).map(|(x, y)| f64::from(y) - f64::from(x)),
             })
         })
         .collect();
@@ -1341,7 +2204,420 @@ fn print_text(result: &ComparisonResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use serde_json::json;
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Parser)]
+    struct InspectSweepArgsParser {
+        #[command(flatten)]
+        args: InspectSweepArgs,
+    }
+
+    fn sweep_plan(coefficient: f32) -> LensPlan {
+        serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{"kind":"workspace_template","id":"t","weights":"w","labels":"l"}],
+            "directions": [{
+                "id":"d",
+                "lens":"t",
+                "row":{"kind":"template_row_id","template_row_id":0},
+                "normalization":"as_stored"
+            }],
+            "operations": [{
+                "id":"swept",
+                "scope":{"layers":{"kind":"values","values":[1]},"prefill":{"kind":"all"}},
+                "action":{"kind":"fixed_add","direction":"d","coefficient":coefficient}
+            }],
+            "readouts": [{
+                "id":"live",
+                "lens":"t",
+                "scope":{"layers":{"kind":"values","values":[1]},"prefill":{"kind":"all"}},
+                "top_k":1
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn sweep_run_document(coefficient: f32) -> RunDocument {
+        let plan = sweep_plan(coefficient);
+        let requested_live_readouts = serde_json::to_value(&plan.readouts)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        RunDocument {
+            schema: "qwen.lens.run".into(),
+            schema_version: 1,
+            runtime_kind: "ordinary_qwen".into(),
+            model_path: "/model.gguf".into(),
+            canonical_plan_path: "/source/plan.json".into(),
+            plan: serde_json::to_value(plan).unwrap(),
+            input_source: "token_ids".into(),
+            prompt_token_ids: vec![1, 2],
+            generated_token_ids: vec![3],
+            sampler: RunSampler {
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: 7,
+            },
+            max_new_tokens: 1,
+            decoded_text: "answer".into(),
+            stop_reason: "max_new_tokens".into(),
+            operation_applications: if coefficient == 0.0 {
+                Vec::new()
+            } else {
+                vec![RunOperationApplication {
+                    id: "swept".into(),
+                    layer: 1,
+                    phase: "prefill".into(),
+                    index: 0,
+                }]
+            },
+            requested_live_readouts,
+            live_readouts: vec![RunReadout {
+                id: "live".into(),
+                lens: "t".into(),
+                method: "workspace_template_cosine".into(),
+                score_kind: "cosine_similarity".into(),
+                candidate_universe: "workspace_template_rows".into(),
+                source_layer: 1,
+                target_layer: None,
+                phase: "prefill".into(),
+                index: 0,
+                scores: vec![RunScore {
+                    token_id: None,
+                    row_id: 0,
+                    word_id: Some(1),
+                    label: Some("candidate".into()),
+                    score: coefficient,
+                }],
+            }],
+            native_hyper_captures: Vec::new(),
+            execution_binding: None,
+        }
+    }
+
+    fn sweep_fixture(coefficients: &[f32], mutate: impl Fn(usize, &mut RunDocument)) -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-inspect-sweep-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let arms_root = root.join("arms");
+        std::fs::create_dir(&arms_root).unwrap();
+        let mut arms = Vec::new();
+        for (index, &coefficient) in coefficients.iter().enumerate() {
+            let arm_root = arms_root.join(format!("{index:06}"));
+            std::fs::create_dir(&arm_root).unwrap();
+            let mut document = sweep_run_document(coefficient);
+            mutate(index, &mut document);
+            let bytes = serde_json::to_vec(&document).unwrap();
+            std::fs::write(arm_root.join("run.json"), &bytes).unwrap();
+            arms.push(lens_run::CoefficientSweepArm {
+                index,
+                coefficient,
+                artifact: format!("arms/{index:06}/run.json"),
+                byte_length: bytes.len() as u64,
+                blake3: blake3::hash(&bytes).to_hex().to_string(),
+            });
+        }
+        let manifest = CoefficientSweepManifest {
+            schema: "qwen.lens.coefficient_sweep".into(),
+            schema_version: 1,
+            producer: lens_run::SweepProducer {
+                build_commit: "a".repeat(40),
+                build_dirty: "0".into(),
+                build_source_state: format!("git-source-sha256-v2:{}", "b".repeat(64)),
+            },
+            canonical_source_plan_path: "/source/plan.json".into(),
+            operation_id: "swept".into(),
+            coefficients: coefficients.to_vec(),
+            arms,
+        };
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        root
+    }
+
+    fn rewrite_sweep_manifest(root: &Path, mutate: impl FnOnce(&mut CoefficientSweepManifest)) {
+        let path = root.join("manifest.json");
+        let mut manifest: CoefficientSweepManifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        mutate(&mut manifest);
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    fn rewrite_sweep_child(root: &Path, index: usize, mutate: impl FnOnce(&mut serde_json::Value)) {
+        let path = root.join(format!("arms/{index:06}/run.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        mutate(&mut value);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        rewrite_sweep_manifest(root, |manifest| {
+            manifest.arms[index].byte_length = bytes.len() as u64;
+            manifest.arms[index].blake3 = blake3::hash(&bytes).to_hex().to_string();
+        });
+    }
+
+    #[test]
+    fn inspect_sweep_cli_accepts_reference_limit_and_json() {
+        let args = InspectSweepArgsParser::try_parse_from([
+            "test",
+            "sweep",
+            "--reference-arm",
+            "2",
+            "--limit",
+            "7",
+            "--format",
+            "json",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(args.sweep, PathBuf::from("sweep"));
+        assert_eq!(args.reference_arm, Some(2));
+        assert_eq!(args.limit, 7);
+        assert!(matches!(args.format, InspectSweepFormat::Json));
+    }
+
+    #[test]
+    fn inspect_sweep_verifies_controls_groups_and_exact_deltas() {
+        let root = sweep_fixture(&[0.0, 0.1, 0.0], |_, _| {});
+        let loaded = load_sweep(&root).unwrap();
+        assert_eq!(loaded.arms.len(), 3);
+        assert_eq!(loaded.arms[0].blake3, loaded.arms[2].blake3);
+        let duplicate = duplicate_coefficient_groups(&loaded.arms);
+        assert_eq!(duplicate.len(), 1);
+        assert_eq!(duplicate[0].arm_indices, vec![0, 2]);
+        assert!(duplicate[0].byte_identical);
+        let (generations, by_arm) = sweep_generation_groups(&loaded.arms);
+        assert_eq!(generations.len(), 1);
+        assert_eq!(by_arm, vec![0, 0, 0]);
+        let mut detail_budget = 10;
+        let comparison = compare_sweep_runs(
+            &loaded.arms[0].document,
+            &loaded.arms[1].document,
+            &mut detail_budget,
+        )
+        .unwrap();
+        assert_eq!(comparison.changed_readout_count, 1);
+        assert_eq!(comparison.candidate_difference_count, 1);
+        assert_eq!(comparison.arm_operation_application_count, 1);
+        assert_eq!(comparison.changed_readouts.len(), 1);
+        assert_eq!(
+            comparison.changed_readouts[0].candidate_differences.len(),
+            1
+        );
+        assert_eq!(detail_budget, 8);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_detail_budget_is_global_across_arms() {
+        let root = sweep_fixture(&[0.0, 0.1, 0.2], |_, _| {});
+        let loaded = load_sweep(&root).unwrap();
+        let mut detail_budget = 1;
+        let first = compare_sweep_runs(
+            &loaded.arms[0].document,
+            &loaded.arms[1].document,
+            &mut detail_budget,
+        )
+        .unwrap();
+        assert_eq!(first.changed_readouts.len(), 1);
+        assert!(first.changed_readouts[0].candidate_differences.is_empty());
+        assert_eq!(detail_budget, 0);
+        let second = compare_sweep_runs(
+            &loaded.arms[0].document,
+            &loaded.arms[2].document,
+            &mut detail_budget,
+        )
+        .unwrap();
+        assert_eq!(second.changed_readout_count, 1);
+        assert!(second.changed_readouts.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_preserves_distinct_signed_zero_bits() {
+        let root = sweep_fixture(&[0.0, -0.0], |_, _| {});
+        let loaded = load_sweep(&root).unwrap();
+        assert_eq!(loaded.arms[0].coefficient.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(loaded.arms[1].coefficient.to_bits(), (-0.0_f32).to_bits());
+        assert!(duplicate_coefficient_groups(&loaded.arms).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_rejects_child_digest_drift() {
+        let root = sweep_fixture(&[0.0], |_, _| {});
+        let path = root.join("arms/000000/run.json");
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(path, bytes).unwrap();
+        assert!(load_sweep(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_rejects_missing_children_and_declared_length_drift() {
+        let missing_root = sweep_fixture(&[0.0], |_, _| {});
+        std::fs::remove_file(missing_root.join("arms/000000/run.json")).unwrap();
+        assert!(load_sweep(&missing_root).is_err());
+        std::fs::remove_dir_all(missing_root).unwrap();
+
+        let length_root = sweep_fixture(&[0.0], |_, _| {});
+        rewrite_sweep_manifest(&length_root, |manifest| {
+            manifest.arms[0].byte_length += 1;
+        });
+        assert!(load_sweep(&length_root).is_err());
+        std::fs::remove_dir_all(length_root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_rejects_symlinked_children_and_extra_entries() {
+        let symlink_root = sweep_fixture(&[0.0], |_, _| {});
+        let run = symlink_root.join("arms/000000/run.json");
+        let target = symlink_root.with_extension("target.json");
+        std::fs::rename(&run, &target).unwrap();
+        symlink(&target, &run).unwrap();
+        assert!(load_sweep(&symlink_root).is_err());
+        std::fs::remove_dir_all(symlink_root).unwrap();
+        std::fs::remove_file(target).unwrap();
+
+        let extra_root = sweep_fixture(&[0.0], |_, _| {});
+        std::fs::write(extra_root.join("unexpected"), b"x").unwrap();
+        assert!(load_sweep(&extra_root).is_err());
+        std::fs::remove_dir_all(extra_root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_rejects_wrong_coefficient_and_unrelated_plan_mutation() {
+        let coefficient_root = sweep_fixture(&[0.0, 0.1], |index, document| {
+            if index == 1 {
+                document.plan["operations"][0]["action"]["coefficient"] = json!(0.2);
+            }
+        });
+        assert!(load_sweep(&coefficient_root).is_err());
+        std::fs::remove_dir_all(coefficient_root).unwrap();
+
+        let plan_root = sweep_fixture(&[0.0, 0.1], |index, document| {
+            if index == 1 {
+                document.plan["readouts"][0]["top_k"] = json!(2);
+                document.requested_live_readouts =
+                    document.plan["readouts"].as_array().unwrap().clone();
+            }
+        });
+        assert!(load_sweep(&plan_root).is_err());
+        std::fs::remove_dir_all(plan_root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_rejects_cross_arm_context_drift() {
+        let root = sweep_fixture(&[0.0, 0.1], |index, document| {
+            if index == 1 {
+                document.sampler.seed = 8;
+            }
+        });
+        assert!(load_sweep(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+
+        let semantics_root = sweep_fixture(&[0.0, 0.1], |index, document| {
+            if index == 1 {
+                document.live_readouts[0].score_kind = "different_kind".into();
+            }
+        });
+        assert!(load_sweep(&semantics_root).is_err());
+        std::fs::remove_dir_all(semantics_root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_rejects_unknown_fields_and_malformed_run_semantics() {
+        let unknown_root = sweep_fixture(&[0.0], |_, _| {});
+        rewrite_sweep_child(&unknown_root, 0, |value| {
+            value["unknown"] = json!(true);
+        });
+        assert!(load_sweep(&unknown_root).is_err());
+        std::fs::remove_dir_all(unknown_root).unwrap();
+
+        let token_root = sweep_fixture(&[0.0], |_, document| {
+            document.prompt_token_ids[0] = -1;
+        });
+        assert!(load_sweep(&token_root).is_err());
+        std::fs::remove_dir_all(token_root).unwrap();
+
+        let stop_root = sweep_fixture(&[0.0], |_, document| {
+            document.stop_reason = "unknown".into();
+        });
+        assert!(load_sweep(&stop_root).is_err());
+        std::fs::remove_dir_all(stop_root).unwrap();
+
+        let length_root = sweep_fixture(&[0.0], |_, document| {
+            document.generated_token_ids.push(4);
+        });
+        assert!(load_sweep(&length_root).is_err());
+        std::fs::remove_dir_all(length_root).unwrap();
+
+        let sampler_root = sweep_fixture(&[0.0], |_, document| {
+            document.sampler.top_p = 0.0;
+        });
+        assert!(load_sweep(&sampler_root).is_err());
+        std::fs::remove_dir_all(sampler_root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_rejects_out_of_scope_applications_and_readouts() {
+        let application_root = sweep_fixture(&[0.1], |_, document| {
+            document.operation_applications[0].index = 99;
+        });
+        assert!(load_sweep(&application_root).is_err());
+        std::fs::remove_dir_all(application_root).unwrap();
+
+        let readout_root = sweep_fixture(&[0.0], |_, document| {
+            document.live_readouts[0].phase = "decode".into();
+        });
+        assert!(load_sweep(&readout_root).is_err());
+        std::fs::remove_dir_all(readout_root).unwrap();
+
+        let unknown_root = sweep_fixture(&[0.0], |_, document| {
+            document.live_readouts[0].id = "unknown".into();
+        });
+        assert!(load_sweep(&unknown_root).is_err());
+        std::fs::remove_dir_all(unknown_root).unwrap();
+
+        let duplicate_root = sweep_fixture(&[0.0], |_, document| {
+            let mut duplicate = document.live_readouts[0].clone();
+            duplicate.method = "contradictory_method".into();
+            document.live_readouts.push(duplicate);
+        });
+        assert!(load_sweep(&duplicate_root).is_err());
+        std::fs::remove_dir_all(duplicate_root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_rejects_applications_from_disabled_zero_operation() {
+        let root = sweep_fixture(&[0.0], |_, document| {
+            document
+                .operation_applications
+                .push(RunOperationApplication {
+                    id: "swept".into(),
+                    layer: 1,
+                    phase: "prefill".into(),
+                    index: 0,
+                });
+        });
+        assert!(load_sweep(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn trace(top_k: serde_json::Value, vectors: Option<serde_json::Value>) -> TraceDocument {
         let scores = top_k.as_array().unwrap();
@@ -1448,14 +2724,15 @@ mod tests {
     }
 
     fn run_document(generated: Vec<i32>, scores: Vec<RunScore>) -> RunDocument {
+        let max_new_tokens = generated.len().max(1);
         RunDocument {
             schema: "qwen.lens.run".into(),
             schema_version: 1,
             runtime_kind: "ordinary_qwen".into(),
             model_path: "model.gguf".into(),
-            _canonical_plan_path: "/plan.json".into(),
+            canonical_plan_path: "/plan.json".into(),
             plan: serde_json::from_value(json!({"version": 1, "lenses": [], "directions": [], "operations": [], "readouts": []})).unwrap(),
-            _input_source: "token_ids".into(),
+            input_source: "token_ids".into(),
             prompt_token_ids: vec![1, 2],
             generated_token_ids: generated,
             sampler: RunSampler {
@@ -1465,11 +2742,11 @@ mod tests {
                 min_p: 0.0,
                 seed: 7,
             },
-            _max_new_tokens: 2,
+            max_new_tokens,
             decoded_text: "text".into(),
             stop_reason: "max_new_tokens".into(),
             operation_applications: Vec::new(),
-            _requested_live_readouts: Vec::new(),
+            requested_live_readouts: Vec::new(),
             live_readouts: vec![RunReadout {
                 id: "readout".into(),
                 lens: "lens".into(),

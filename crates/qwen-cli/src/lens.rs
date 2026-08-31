@@ -78,6 +78,9 @@ enum Command {
     Compare(lens_compare::CompareArgs),
     /// Inspect a bounded qwen.lens.trace artifact without loading a model.
     Inspect(lens_inspect::InspectArgs),
+    /// Verify and inspect one coefficient-sweep bundle without loading a model.
+    #[command(name = "inspect-sweep")]
+    InspectSweep(lens_compare::InspectSweepArgs),
     /// Run one bounded serial Lens plan and emit a summary or versioned JSON.
     #[command(name = "run")]
     LensRun(lens_run::LensRunArgs),
@@ -521,6 +524,7 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Compare(args) => lens_compare::run(args),
         Command::Inspect(args) => lens_inspect::run(args),
+        Command::InspectSweep(args) => lens_compare::inspect_sweep(args),
         Command::LensRun(args) => lens_run::run(args),
         Command::CoefficientSweep(args) => lens_run::run_coefficient_sweep(args),
         Command::FitRows(args) => fit_rows(args),

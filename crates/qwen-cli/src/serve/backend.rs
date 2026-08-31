@@ -10,7 +10,7 @@
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{QwenTemplate, ServeError, ServeRequest};
-use super::utf8::Utf8Assembler;
+use super::output_partition::{GenerationEnd, OutputProtocol};
 use anyhow::Context as _;
 use objc2_metal::MTLBuffer;
 use qwen_llm::gguf::GgufFile;
@@ -482,8 +482,11 @@ impl GenerationBackend for EngineBackend {
         &self.model_id
     }
 
-    fn preopens_reasoning(&self, request: &ServeRequest) -> bool {
-        preopens(self.template, request)
+    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
+        OutputProtocol::Qwen {
+            preopened_reasoning: preopens(self.template, request),
+            parse_tools: true,
+        }
     }
 
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
@@ -985,7 +988,6 @@ impl GenerationBackend for EngineBackend {
             .map_err(|error| ServeError::server_error(format!("stop tokens: {error}")))?;
 
         let mut abort: Option<io::Error> = None;
-        let mut assembler = Utf8Assembler::new();
         let tokenizer = &self.tokenizer;
         // Speculative path: seed the drafter cross-context from the captured
         // prompt hiddens, then verify greedy or sampled proposals with the
@@ -1085,11 +1087,7 @@ impl GenerationBackend for EngineBackend {
                             let bytes = tokenizer
                                 .try_decode_piece_bytes_exact(token)
                                 .with_context(|| format!("decode token {token}"))?;
-                            let piece = assembler.push(bytes);
-                            if piece.is_empty() {
-                                return Ok(());
-                            }
-                            sink.piece(&piece).map_err(|error| {
+                            sink.piece(bytes).map_err(|error| {
                                 *abort = Some(error);
                                 anyhow::anyhow!("client disconnected during decode")
                             })
@@ -1110,10 +1108,6 @@ impl GenerationBackend for EngineBackend {
                 let generation = result.generation;
                 let sequence = result.sequence;
                 let stats = result.stats;
-                let tail = assembler.finish();
-                if !tail.is_empty() {
-                    sink.piece(&tail).map_err(BackendFailure::Aborted)?;
-                }
                 return self.finish_generation(
                     generation,
                     Some(stats),
@@ -1142,17 +1136,10 @@ impl GenerationBackend for EngineBackend {
                 &stop_tokens,
                 &mut sampler,
                 |token| {
-                    // Exact bytes + incremental UTF-8 assembly: per-token
-                    // lossy decode corrupts multibyte characters split
-                    // across tokens (k3 R1.6).
                     let bytes = tokenizer
                         .try_decode_piece_bytes_exact(token)
                         .with_context(|| format!("decode token {token}"))?;
-                    let piece = assembler.push(bytes);
-                    if piece.is_empty() {
-                        return Ok(());
-                    }
-                    sink.piece(&piece).map_err(|error| {
+                    sink.piece(bytes).map_err(|error| {
                         *abort = Some(error);
                         anyhow::anyhow!("client disconnected during decode")
                     })
@@ -1205,11 +1192,6 @@ impl GenerationBackend for EngineBackend {
                 });
             }
         };
-        let tail = assembler.finish();
-        if !tail.is_empty() {
-            sink.piece(&tail).map_err(BackendFailure::Aborted)?;
-        }
-
         self.finish_generation(
             generation,
             None,
@@ -1383,9 +1365,17 @@ impl EngineBackend {
             );
         }
 
-        let stop_reason = match generation.stop_reason {
-            crate::StopReason::Eos => StopReason::Eos,
-            crate::StopReason::TokenLimit => StopReason::TokenLimit,
+        let (stop_reason, end) = match generation.stop_reason {
+            crate::StopReason::Eos => (
+                StopReason::Eos,
+                GenerationEnd::StopToken(
+                    *generation
+                        .tokens
+                        .last()
+                        .expect("EOS generation includes its terminal token"),
+                ),
+            ),
+            crate::StopReason::TokenLimit => (StopReason::TokenLimit, GenerationEnd::TokenLimit),
         };
         let decode_tps = if generation.wall_ms > 0.0 {
             generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
@@ -1432,7 +1422,7 @@ impl EngineBackend {
             );
         }
         Ok(GenerationOutcome {
-            stop_reason,
+            end,
             usage: Usage {
                 input_tokens: prompt_ids.len(),
                 output_tokens: generation.tokens.len(),

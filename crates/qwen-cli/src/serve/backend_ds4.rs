@@ -23,8 +23,8 @@
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
+use super::output_partition::{GenerationEnd, OutputProtocol};
 use super::render_ds4;
-use super::utf8::Utf8Assembler;
 use crate::DeepSeekV4MultigroupSelectorPlan;
 use anyhow::Context as _;
 use objc2_metal::MTLDevice;
@@ -251,8 +251,11 @@ impl GenerationBackend for DeepSeekV4Backend {
         &self.model_id
     }
 
-    fn preopens_reasoning(&self, request: &ServeRequest) -> bool {
-        render_ds4::preopens_reasoning(request).unwrap_or(false)
+    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
+        OutputProtocol::Qwen {
+            preopened_reasoning: render_ds4::preopens_reasoning(request).unwrap_or(false),
+            parse_tools: false,
+        }
     }
 
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
@@ -459,7 +462,6 @@ impl DeepSeekV4Backend {
             )?;
         }
         let mut abort: Option<io::Error> = None;
-        let mut assembler = Utf8Assembler::new();
         let tokenizer = &self.tokenizer;
         let ctx = &self.ctx;
         let vocab_size = self.vocab_size;
@@ -474,11 +476,7 @@ impl DeepSeekV4Backend {
                     let bytes = tokenizer
                         .try_decode_piece_bytes_exact(token)
                         .with_context(|| format!("decode token {token}"))?;
-                    let piece = assembler.push(bytes);
-                    if piece.is_empty() {
-                        return Ok(());
-                    }
-                    sink.piece(&piece).map_err(|error| {
+                    sink.piece(bytes).map_err(|error| {
                         *abort = Some(error);
                         anyhow::anyhow!("client disconnected during decode")
                     })
@@ -502,11 +500,6 @@ impl DeepSeekV4Backend {
                 });
             }
         };
-        let tail = assembler.finish();
-        if !tail.is_empty() {
-            sink.piece(&tail).map_err(BackendFailure::Aborted)?;
-        }
-
         // Completed-turn capture: the next turn's history extends this exact
         // token prefix (render_ds4 preserves reasoning verbatim for that
         // reason), so cache it under prompt + consumed generated tokens.
@@ -536,9 +529,17 @@ impl DeepSeekV4Backend {
             }
         }
 
-        let stop_reason = match generation.stop_reason {
-            crate::StopReason::Eos => StopReason::Eos,
-            crate::StopReason::TokenLimit => StopReason::TokenLimit,
+        let (stop_reason, end) = match generation.stop_reason {
+            crate::StopReason::Eos => (
+                StopReason::Eos,
+                GenerationEnd::StopToken(
+                    *generation
+                        .tokens
+                        .last()
+                        .expect("EOS generation includes its terminal token"),
+                ),
+            ),
+            crate::StopReason::TokenLimit => (StopReason::TokenLimit, GenerationEnd::TokenLimit),
         };
         tracing::info!(
             target: "qwen_diag",
@@ -562,7 +563,7 @@ impl DeepSeekV4Backend {
             },
         );
         Ok(GenerationOutcome {
-            stop_reason,
+            end,
             usage: Usage {
                 input_tokens: prompt_ids.len(),
                 output_tokens: generation.tokens.len(),

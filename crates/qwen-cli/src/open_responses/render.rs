@@ -634,7 +634,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
                         None,
                     );
                     output.push(
-                        result,
+                        &result.output,
                         QwenServePromptSpanKind::ToolResultContent,
                         context.tool_call(result_index),
                         pending_tool_labels.get(result_index).cloned(),

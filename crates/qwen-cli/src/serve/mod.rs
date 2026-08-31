@@ -15,10 +15,14 @@
 
 pub(crate) mod backend;
 pub(crate) mod backend_ds4;
+pub(crate) mod backend_muse;
 pub(crate) mod events;
 pub(crate) mod http;
+pub(crate) mod output_partition;
 pub(crate) mod partition;
+pub(crate) mod partition_muse;
 pub(crate) mod render_ds4;
+pub(crate) mod render_muse;
 pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
@@ -39,6 +43,7 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) const DEFAULT_SERVE_MAX_CONTEXT_TOKENS: usize = 262_144;
+pub(crate) const DEFAULT_SERVE_MAX_TOKENS: usize = 65_536;
 pub(crate) const DEFAULT_SNAPSHOT_CACHE_MIB: u64 = 4096;
 pub(crate) const DEFAULT_SNAPSHOT_CACHE_BYTES: u64 = DEFAULT_SNAPSHOT_CACHE_MIB * 1024 * 1024;
 const SNAPSHOT_CAPTURE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
@@ -92,16 +97,46 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
     )
 }
 
+fn muse_serve_limits(
+    has_drafter: bool,
+    max_context_tokens: Option<usize>,
+    max_tokens: Option<usize>,
+) -> Result<(usize, usize)> {
+    ensure!(
+        !has_drafter,
+        "--drafter is not supported for Muse Glimmer serve"
+    );
+    let context_limit = max_context_tokens.context(
+        "Muse Glimmer serve requires --max-context-tokens because its resident session capacity is fixed at startup",
+    )?;
+    ensure!(
+        context_limit
+            <= qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
+        "Muse Glimmer serve supports --max-context-tokens at most {}, got {context_limit}",
+        qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY,
+    );
+    let default_max_tokens = max_tokens.context(
+        "Muse Glimmer serve requires explicit --max-tokens; the generic 65536-token default exceeds its reference session capacity",
+    )?;
+    ensure!(
+        default_max_tokens <= context_limit,
+        "Muse Glimmer --max-tokens {default_max_tokens} exceeds --max-context-tokens {context_limit}"
+    );
+    Ok((context_limit, default_max_tokens))
+}
+
 /// `qwen serve` entry: resident model, serial accept loop.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
     let snapshot_cache_bytes = snapshot_cache_bytes(invocation.snapshot_cache_mib)?;
     let gguf = GgufFile::open(&invocation.model)
         .with_context(|| format!("open model {}", invocation.model.display()))?;
+    let muse_glimmer =
+        gguf.architecture().as_deref() == Some(qwen_llm::muse_glimmer::ARCHITECTURE_NAME);
     let family = ModelFamily::detect(&gguf);
     ensure!(
-        supports_serve_family(family),
-        "qwen serve supports Qwen3.5/3.6-family and DeepSeek V4 models (docs/SERVE.md)"
+        muse_glimmer || supports_serve_family(family),
+        "qwen serve supports Qwen3.5/3.6-family, DeepSeek V4, and Muse Glimmer models (docs/SERVE.md)"
     );
     let mut trace = invocation
         .trace_sse
@@ -115,6 +150,35 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .and_then(|stem| stem.to_str())
         .context("model path has no printable file stem")?
         .to_owned();
+
+    if muse_glimmer {
+        let (context_limit, default_max_tokens) = muse_serve_limits(
+            invocation.drafter.is_some(),
+            invocation.max_context_tokens,
+            invocation.max_tokens,
+        )?;
+        crate::shutdown::checkpoint()?;
+        let ctx = qwen_llm::metal::MetalContext::new().context("initialize Metal context")?;
+        let load_t0 = Instant::now();
+        let mut backend = backend_muse::MuseGlimmerBackend::new(
+            ctx,
+            gguf,
+            &invocation.model,
+            model_id.clone(),
+            default_max_tokens,
+            context_limit,
+        )?;
+        let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+        tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0", context_limit, default_max_tokens);
+        crate::shutdown::checkpoint()?;
+        return accept_loop(
+            &invocation.addr,
+            &model_id,
+            load_ms,
+            &mut backend,
+            &mut trace,
+        );
+    }
 
     if family == Some(ModelFamily::DeepSeek4) {
         ensure!(
@@ -134,7 +198,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             ctx,
             gguf,
             model_id.clone(),
-            invocation.max_tokens,
+            invocation.max_tokens.unwrap_or(DEFAULT_SERVE_MAX_TOKENS),
             forward_limit,
             crate::DeepSeekV4MultigroupSelectorArg::Auto,
             snapshot_cache_bytes,
@@ -172,7 +236,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     let mut backend = backend::EngineBackend::new(
         loaded,
         model_id.clone(),
-        invocation.max_tokens,
+        invocation.max_tokens.unwrap_or(DEFAULT_SERVE_MAX_TOKENS),
         invocation.max_context_tokens,
         invocation.drafter.as_deref(),
         template,
@@ -362,6 +426,19 @@ mod tests {
         assert!(supports_serve_family(Some(ModelFamily::DeepSeek4)));
         assert!(!supports_serve_family(Some(ModelFamily::Qwen4Exp)));
         assert!(!supports_serve_family(None));
+    }
+
+    #[test]
+    fn muse_limits_require_explicit_bounded_capacity_and_output_default() {
+        assert_eq!(
+            muse_serve_limits(false, Some(7168), Some(2048)).unwrap(),
+            (7168, 2048)
+        );
+        assert!(muse_serve_limits(true, Some(7168), Some(2048)).is_err());
+        assert!(muse_serve_limits(false, None, Some(2048)).is_err());
+        assert!(muse_serve_limits(false, Some(7168), None).is_err());
+        assert!(muse_serve_limits(false, Some(7169), Some(2048)).is_err());
+        assert!(muse_serve_limits(false, Some(1024), Some(2048)).is_err());
     }
 
     #[test]

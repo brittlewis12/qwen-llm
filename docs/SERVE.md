@@ -111,6 +111,8 @@ One new subcommand:
 qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   [--max-context-tokens N] [--snapshot-cache-mib 4096] [--drafter GGUF]
 # DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
+# Muse Glimmer requires both --max-context-tokens and --max-tokens; its current
+# resident text session is capped at 7,168 forwards.
 ```
 
 The listener rejects every resolved non-loopback address. Request bodies are
@@ -133,7 +135,11 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   currently re-prefills (closing k3 review, D3).
   Durable checkpoints remain the intended cross-restart substrate. The finite
   default Qwen context ceiling is 262,144 tokens; an omitted limit sizes each
-  request to need without making the ceiling unbounded.
+  request to need without making the ceiling unbounded. Muse keeps one fixed
+  resident session, resets it between requests, and currently reports no cache
+  hits or restores. Its synthesized system prompt is stamped with the current
+  UTC date for each request; when callers provide `instructions` or a system
+  item, that explicit system text owns any date policy instead.
 - **Speculative decode (`--drafter`, v0.77 DFlash):** a request
   speculates after a cold prefill or when a restored RAM-cache entry carries a
   compatible target-hidden capture tail. Missing or malformed tails fall back
@@ -180,13 +186,13 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   `Retry-After: 1`. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
-- **Qwen3.5/3.6-family (including validated Qwen3.8 identities) and DeepSeek
-  V4.** DS4 runs its own session and
+- **Qwen3.5/3.6-family (including validated Qwen3.8 identities), DeepSeek V4,
+  and Muse Glimmer.** DS4 runs its own session and
   snapshot stack (`serve/backend_ds4.rs`) with a startup-fixed forward
   budget, a serve-owned byte-bounded snapshot LRU (DS4 has no engine-side RAM
   prefix cache), and no tool support — tool definitions fail closed there.
-  `--snapshot-cache-mib` configures both family cache implementations and
-  defaults to 4096 MiB.
+  `--snapshot-cache-mib` configures the Qwen and DS4 cache implementations and
+  defaults to 4096 MiB. Muse does not claim snapshot reuse yet.
 - **Stdout is never written.** All diagnostics via the existing stderr
   tracing surface; per-request `qwen_diag` stats line retained and
   extended with `matched_tokens` and `restore_ms` (the S2/S3 gates are
@@ -213,8 +219,9 @@ tool-channel spans. Lens does not emulate HTTP routing or response filtering:
 its `--model` and sampler flags remain authoritative, so request sampling fields
 and narrowed `allowed_tools` fail closed there.
 
-`POST /v1/responses` accepting. If `max_output_tokens` is omitted, serve
-defaults to 65536 tokens unless overridden with `--max-tokens` at startup:
+`POST /v1/responses` accepting. For Qwen and DS4, omitted
+`max_output_tokens` defaults to 65536 unless overridden with `--max-tokens` at
+startup. Muse requires an explicit startup default:
 
 - Supported non-null fields are type-checked strictly. Known standard controls
   outside this subset (including `max_tool_calls`, `text`, `metadata`, and
@@ -241,22 +248,25 @@ defaults to 65536 tokens unless overridden with `--max-tokens` at startup:
 - `max_output_tokens`, `temperature`, `top_p` — standard.
 - `reasoning.effort` — validated Qwen3.8 identities accept `none`, `low`,
   `medium`, and `xhigh`; absent defaults to `xhigh`. It is rejected on generic
-  Qwen identities. DS4 applies its separate renderer rules.
+  Qwen identities. DS4 applies its separate renderer rules. Muse accepts
+  `low`, `medium`, `high`, and `xhigh`, defaulting to `high`.
 - `x_qwen` extension object — `seed`, `top_k`, and `min_p` are generation
   controls for every served family. `no_thinking` is accepted only for the same
   validated Qwen3.6 no-thinking and Qwen3.8 identities as `qwen run`; DS4 uses
-  `reasoning.effort` instead. This is a documented implementor extension.
+  `reasoning.effort` instead, while Muse directs callers to effort `low`.
+  This is a documented implementor extension.
 - `stream` — SSE when true, single JSON response otherwise.
 - `store` — `false`, `null`, or absent; `true` → `invalid_request`.
 - `previous_response_id` — → error code `previous_response_not_found`.
 - `truncation` — only `"disabled"` (default). The engine already fails
   closed on context overflow (S0 F3); serve maps that to the spec error
   instead of a process exit.
-- `tools` — uniquely named function tools are supported on Qwen families (S2);
+- `tools` — uniquely named function tools are supported on Qwen families (S2)
+  and Muse Glimmer's ATEM protocol;
   known definition fields have strict types, and `strict:true` is rejected
   because schema enforcement is unsupported. DeepSeek V4 fails closed on any
   tool definition; hosted tool types fail closed. Definitions render into the
-  family template's `# Tools` system block, byte-pinned to the template oracle.
+  selected family tool block, byte-pinned to its renderer contract.
   Function names must match `[A-Za-z0-9_-]{1,64}`; replay `call_id` values are
   limited to 64 bytes.
 - `tool_choice` — `"auto"` (default) or an `allowed_tools` object.
@@ -285,8 +295,14 @@ Provenance notes: `top_k`/`min_p` pass through normal sampling semantics;
 `stream: false` exists for the stock provider's `doGenerate` path in S2,
 not for S1's consumer.
 
-Output items: `reasoning` (when the model emits thinking; split at the
-existing `</think>` partition seam) then `message` with `output_text`.
+Output items: `reasoning` (when the model emits thinking) then `message` with
+`output_text`, followed by typed function calls when present. Qwen/DS4 use the
+`</think>` seam; Muse parses exact `to=self`, `to=user`, and ATEM recipient
+segments from generated bytes. Family parsers own all model syntax, so ATEM or
+Qwen-looking text in another family's visible response cannot become a call.
+Muse rejects undeclared recipients, malformed controls, invalid UTF-8, and tool
+values that cannot be rendered back into ATEM history without changing
+structure; partial controls and calls are discarded on truncation or abort.
 Truncated thinking (S0 F4) yields `reasoning` with `status:
 "incomplete"` and `response.status = "incomplete"` with
 `incomplete_details.reason = "max_output_tokens"`.
@@ -337,6 +353,9 @@ because client model-pickers probe it).
   Capture is best-effort and admitted against cache bytes plus Metal/process
   headroom; denial or failure is logged and generation continues. Both family
   caches enforce the configured byte budget.
+  Muse currently performs a fresh scalar prefill into its reset resident
+  session for every request and reports `cached_tokens=0`, `matched_tokens=0`,
+  and `restore_ms=0`.
   Durable publication keeps the existing completed-else-prompt shadowing
   policy. **Durable publication remains parked**: current serve is RAM-only,
   so cross-restart warmth still re-prefills. `--durable-dual-publish` is
@@ -355,6 +374,7 @@ because client model-pickers probe it).
   G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 uses
   its preclosed-history renderer. DS4 rejects strip mode and preserves reasoning
   history whenever the current request selects a non-`none` thinking tier.
+  Muse rejects strip mode and preserves structured ATEM reasoning/tool history.
 
 ## Cancellation
 
@@ -366,7 +386,7 @@ does not require a connection to wake the listener. Active-request shutdown is
 bounded by the next checkpoint rather than immediate preemption.
 
 For streaming requests, a disconnect is observed on an SSE write or a prefill
-chunk heartbeat. UTF-8 assembly and reasoning/tool partitioning can buffer token
+chunk heartbeat. Byte-oriented reasoning/tool partitioning can buffer token
 boundaries that do not produce a write, so cancellation is write/chunk bounded,
 not universally token- or time-bounded. The S1 cell measured 24 ms to the
 following admission in its tested mid-decode case, but serve makes no universal

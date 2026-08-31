@@ -83,7 +83,7 @@ pub(crate) enum Turn {
     },
     /// One or more tool results; consecutive results coalesce into a
     /// single user block per the template oracle.
-    ToolResults(Vec<String>),
+    ToolResults(Vec<ToolResult>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +92,13 @@ pub(crate) struct ToolCall {
     pub(crate) name: String,
     /// Raw `arguments` JSON string exactly as the provider replayed it.
     pub(crate) arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolResult {
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) output: String,
 }
 
 /// One declared function tool (`tools[]` entry).
@@ -617,7 +624,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
     }
     let mut pending_reasoning: Option<String> = None;
     let mut head = true;
-    let mut pending_calls = Vec::new();
+    let mut pending_calls = Vec::<(String, String)>::new();
     let mut pending_outputs = std::collections::BTreeMap::new();
     let mut seen_calls = BTreeSet::new();
     let mut seen_outputs = BTreeSet::new();
@@ -779,7 +786,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                     name,
                     arguments,
                 };
-                pending_calls.push(call_id);
+                pending_calls.push((call_id, call.name.clone()));
                 head = false;
                 match request.turns.last_mut() {
                     // Attach to the assistant turn opened by this same
@@ -826,7 +833,10 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                         format!("item {index}: output references unknown call_id {call_id:?}"),
                     ));
                 }
-                if !pending_calls.contains(&call_id) {
+                if !pending_calls
+                    .iter()
+                    .any(|(pending_call_id, _)| pending_call_id == &call_id)
+                {
                     return Err(ServeError::invalid_request(
                         Some("input"),
                         format!("item {index}: output references unknown call_id {call_id:?}"),
@@ -852,10 +862,12 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                 }
                 let results = pending_calls
                     .drain(..)
-                    .map(|call_id| {
-                        pending_outputs
+                    .map(|(call_id, name)| ToolResult {
+                        output: pending_outputs
                             .remove(&call_id)
-                            .expect("known output for every pending call")
+                            .expect("known output for every pending call"),
+                        call_id,
+                        name,
                     })
                     .collect();
                 head = false;
@@ -875,7 +887,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
             "trailing reasoning item has no assistant message",
         ));
     }
-    if let Some(call_id) = pending_calls.first() {
+    if let Some((call_id, _)) = pending_calls.first() {
         return Err(ServeError::invalid_request(
             Some("input"),
             format!("function call {call_id:?} has no function_call_output"),
@@ -1499,7 +1511,11 @@ mod tests {
         }
         assert_eq!(
             request.turns[2],
-            Turn::ToolResults(vec!["{\"entries\":[\"a.txt\"],\"path\":\"/tmp\"}".into()])
+            Turn::ToolResults(vec![ToolResult {
+                call_id: "call_abc123".into(),
+                name: "fs_list".into(),
+                output: "{\"entries\":[\"a.txt\"],\"path\":\"/tmp\"}".into(),
+            }])
         );
     }
 
@@ -1612,7 +1628,18 @@ mod tests {
         }
         assert_eq!(
             request.turns[2],
-            Turn::ToolResults(vec!["r1".into(), "r2".into()])
+            Turn::ToolResults(vec![
+                ToolResult {
+                    call_id: "c1".into(),
+                    name: "a".into(),
+                    output: "r1".into(),
+                },
+                ToolResult {
+                    call_id: "c2".into(),
+                    name: "b".into(),
+                    output: "r2".into(),
+                },
+            ])
         );
     }
 
@@ -1752,7 +1779,18 @@ mod tests {
         .expect("parallel outputs may arrive in arbitrary order");
         assert_eq!(
             request.turns.last(),
-            Some(&Turn::ToolResults(vec!["r1".into(), "r2".into()]))
+            Some(&Turn::ToolResults(vec![
+                ToolResult {
+                    call_id: "c1".into(),
+                    name: "a".into(),
+                    output: "r1".into(),
+                },
+                ToolResult {
+                    call_id: "c2".into(),
+                    name: "b".into(),
+                    output: "r2".into(),
+                },
+            ]))
         );
         let rendered = crate::open_responses::render::render_qwen_serve_prompt(&request);
         assert!(rendered.find("r1").unwrap() < rendered.find("r2").unwrap());

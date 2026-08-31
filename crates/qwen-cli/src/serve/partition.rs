@@ -21,10 +21,11 @@ enum Phase {
     Visible,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PartitionEvent {
     Reasoning(String),
     Visible(String),
+    FunctionCall(super::tool_parse::ParsedCall),
     /// The `</think>` boundary was crossed this push.
     ReasoningClosed,
 }
@@ -158,6 +159,7 @@ mod tests {
             match event {
                 PartitionEvent::Reasoning(text) => reasoning.push_str(&text),
                 PartitionEvent::Visible(text) => visible.push_str(&text),
+                PartitionEvent::FunctionCall(_) => panic!("reasoning splitter emitted a call"),
                 PartitionEvent::ReasoningClosed => {}
             }
         }

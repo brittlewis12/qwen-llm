@@ -47,7 +47,7 @@ pub struct MuseGlimmerRuntimeAdmission {
 
 pub struct MuseGlimmerLoadedModel {
     weights: MuseGlimmerMetalWeights,
-    session: Option<MuseGlimmerTextSession>,
+    session: MuseGlimmerTextSession,
     capacity: usize,
     admission: MuseGlimmerRuntimeAdmission,
     observed_weight_bytes: u64,
@@ -103,7 +103,7 @@ impl MuseGlimmerLoadedModel {
 
         Ok(Self {
             weights,
-            session: Some(session),
+            session,
             capacity,
             admission: MuseGlimmerRuntimeAdmission {
                 aggregate,
@@ -132,9 +132,7 @@ impl MuseGlimmerLoadedModel {
     }
 
     pub fn observed_session_bytes(&self) -> u64 {
-        self.session
-            .as_ref()
-            .map_or(0, MuseGlimmerTextSession::observed_allocation_delta)
+        self.session.observed_allocation_delta()
     }
 
     pub fn selected_token_lens_covectors(
@@ -183,17 +181,17 @@ impl MuseGlimmerLoadedModel {
                 ctx.device.registryID()
             ));
         }
-        let forward = MuseGlimmerTextForward::new(ctx, &self.weights)?;
-        let session = self.session.take().ok_or_else(|| {
-            MuseGlimmerRuntimeError::Invalid("loaded model session was consumed".into())
-        })?;
+        let Self {
+            weights, session, ..
+        } = self;
+        let forward = MuseGlimmerTextForward::new(ctx, weights)?;
         Ok(MuseGlimmerTextRunner { forward, session })
     }
 }
 
 pub struct MuseGlimmerTextRunner<'ctx, 'model> {
     forward: MuseGlimmerTextForward<'ctx, 'model>,
-    session: MuseGlimmerTextSession,
+    session: &'model mut MuseGlimmerTextSession,
 }
 
 impl MuseGlimmerTextRunner<'_, '_> {
@@ -210,7 +208,7 @@ impl MuseGlimmerTextRunner<'_, '_> {
     }
 
     pub fn forward_token(&mut self, token: u32) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
-        Ok(self.forward.forward_token(token, &mut self.session)?)
+        Ok(self.forward.forward_token(token, self.session)?)
     }
 
     /// Apply the resident deployed output norm, projection, scale, and softcap
@@ -221,7 +219,7 @@ impl MuseGlimmerTextRunner<'_, '_> {
     ) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
         Ok(self
             .forward
-            .deployed_logits_from_post_block_residual(residual, &mut self.session)?)
+            .deployed_logits_from_post_block_residual(residual, self.session)?)
     }
 
     /// Apply one row-major F16 hidden-to-hidden transport to a post-block
@@ -267,7 +265,7 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self.forward.forward_token_with_post_block_interventions(
             token,
             interventions,
-            &mut self.session,
+            self.session,
         )?)
     }
 
@@ -280,7 +278,7 @@ impl MuseGlimmerTextRunner<'_, '_> {
     ) -> Result<MuseGlimmerPostBlockForward, MuseGlimmerRuntimeError> {
         Ok(self
             .forward
-            .forward_token_capture_post_blocks(token, layer_ids, &mut self.session)?)
+            .forward_token_capture_post_blocks(token, layer_ids, self.session)?)
     }
 
     pub fn forward_token_capture_post_blocks_with_interventions(
@@ -295,12 +293,12 @@ impl MuseGlimmerTextRunner<'_, '_> {
                 token,
                 layer_ids,
                 interventions,
-                &mut self.session,
+                self.session,
             )?)
     }
 
     pub fn prefill(&mut self, tokens: &[u32]) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
-        Ok(self.forward.prefill(tokens, &mut self.session)?)
+        Ok(self.forward.prefill(tokens, self.session)?)
     }
 
     /// Run a bounded scalar prompt from a fresh session and capture one
@@ -312,7 +310,7 @@ impl MuseGlimmerTextRunner<'_, '_> {
     ) -> Result<MuseGlimmerLensCapture, MuseGlimmerRuntimeError> {
         Ok(self
             .forward
-            .capture_fresh_lens_prompt(tokens, target_block, &mut self.session)?)
+            .capture_fresh_lens_prompt(tokens, target_block, self.session)?)
     }
 
     /// Capture block input, post-attention, and post-block coordinates for a
@@ -322,11 +320,9 @@ impl MuseGlimmerTextRunner<'_, '_> {
         tokens: &[u32],
         target_blocks: &[u32],
     ) -> Result<MuseGlimmerLensCaptureBank, MuseGlimmerRuntimeError> {
-        Ok(self.forward.capture_fresh_lens_prompt_blocks(
-            tokens,
-            target_blocks,
-            &mut self.session,
-        )?)
+        Ok(self
+            .forward
+            .capture_fresh_lens_prompt_blocks(tokens, target_blocks, self.session)?)
     }
 
     /// Reverse one `[T,H]` cotangent through the selected full-attention block's
@@ -502,7 +498,7 @@ impl MuseGlimmerTextRunner<'_, '_> {
     {
         Ok(self
             .forward
-            .prefill_with_command_checkpoint(tokens, &mut self.session, || {
+            .prefill_with_command_checkpoint(tokens, self.session, || {
                 checkpoint().map_err(MuseGlimmerTextSessionError::Checkpoint)
             })?)
     }

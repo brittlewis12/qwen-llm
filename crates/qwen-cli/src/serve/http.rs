@@ -8,7 +8,7 @@
 
 use super::events::{EventWrite, ResponseStream, ServeStats, SseWriter, StopReason, Usage};
 use super::items::{ServeError, ServeRequest, parse_request};
-use super::partition::StreamPartition;
+use super::output_partition::{GenerationEnd, OutputPartition, OutputProtocol};
 use super::render::render_qwen_serve_prompt;
 use serde_json::{Value, json};
 use std::fs::OpenOptions;
@@ -33,23 +33,29 @@ const TRACE_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// `tick` is called between prefill chunks so the transport can heartbeat
 /// and detect disconnects (cancellation = the returned error).
 pub(crate) trait GenerationSink {
-    fn piece(&mut self, text: &str) -> io::Result<()>;
+    fn piece(&mut self, bytes: &[u8]) -> io::Result<()>;
     fn tick(&mut self) -> io::Result<()>;
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct GenerationOutcome {
-    pub(crate) stop_reason: StopReason,
+    pub(crate) end: GenerationEnd,
     pub(crate) usage: Usage,
     pub(crate) stats: Option<ServeStats>,
 }
 
 pub(crate) trait GenerationBackend {
     fn model_id(&self) -> &str;
-    /// True when the rendered prompt leaves `<think>` open, so generated
-    /// bytes arrive headless (DeepSeek V4 thinking tiers). Default false.
-    fn preopens_reasoning(&self, _request: &ServeRequest) -> bool {
-        false
+    /// Resolve family defaults before prompt rendering and response echoes.
+    fn normalize_request(&self, _request: &mut ServeRequest) -> Result<(), ServeError> {
+        Ok(())
+    }
+    /// Family-owned grammar for exact generated token bytes.
+    fn output_protocol(&self, _request: &ServeRequest) -> OutputProtocol {
+        OutputProtocol::Qwen {
+            preopened_reasoning: false,
+            parse_tools: true,
+        }
     }
     /// Family-specific prompt rendering. Defaults to the Qwen ChatML path.
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
@@ -613,15 +619,15 @@ fn shutdown_checkpoint() -> io::Result<()> {
 }
 
 struct CollectSink<'a> {
-    pieces: Vec<String>,
+    pieces: Vec<Vec<u8>>,
     stream: &'a TcpStream,
 }
 
 impl GenerationSink for CollectSink<'_> {
-    fn piece(&mut self, text: &str) -> io::Result<()> {
+    fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
         shutdown_checkpoint()?;
         probe_peer(self.stream)?;
-        self.pieces.push(text.to_owned());
+        self.pieces.push(bytes.to_owned());
         Ok(())
     }
     fn tick(&mut self) -> io::Result<()> {
@@ -632,14 +638,14 @@ impl GenerationSink for CollectSink<'_> {
 
 struct StreamingSink<'a, 'b, W: EventWrite> {
     stream: &'a mut ResponseStream<'b, W>,
-    partition: StreamPartition,
+    partition: OutputPartition,
 }
 
 impl<W: EventWrite> GenerationSink for StreamingSink<'_, '_, W> {
-    fn piece(&mut self, text: &str) -> io::Result<()> {
+    fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
         shutdown_checkpoint()?;
         let mut events = Vec::new();
-        self.partition.push(text, &mut events);
+        self.partition.push(bytes, &mut events);
         for event in &events {
             self.stream.on_partition(event)?;
         }
@@ -741,7 +747,7 @@ fn handle_responses(
             );
         }
     };
-    let request = match parse_request(&parsed) {
+    let mut request = match parse_request(&parsed) {
         Ok(request) => request,
         Err(error) => return write_serve_error(&mut writer, &error),
     };
@@ -751,6 +757,9 @@ fn handle_responses(
             &ServeError::model_not_found(&request.model, backend.model_id()),
         );
     }
+    if let Err(error) = backend.normalize_request(&mut request) {
+        return write_serve_error(&mut writer, &error);
+    }
     let prompt = match backend.render_prompt(&request) {
         Ok(prompt) => prompt,
         Err(error) => return write_serve_error(&mut writer, &error),
@@ -759,14 +768,7 @@ fn handle_responses(
     let created_at = now_unix();
 
     // Resolved before the mutable generate borrow.
-    let preopened = backend.preopens_reasoning(&request);
-    let partition_mode = move || {
-        if preopened {
-            StreamPartition::with_preopened_reasoning()
-        } else {
-            StreamPartition::new()
-        }
-    };
+    let output_protocol = backend.output_protocol(&request);
     if !request.stream {
         let mut sink = CollectSink {
             pieces: Vec::new(),
@@ -774,18 +776,20 @@ fn handle_responses(
         };
         match backend.generate(&request, &prompt, &mut sink) {
             Ok(outcome) => {
-                let mut partition = partition_mode();
+                let mut partition = OutputPartition::new(output_protocol);
                 let mut partition_events = Vec::new();
                 for piece in &sink.pieces {
                     partition.push(piece, &mut partition_events);
                 }
-                partition.finish(&mut partition_events);
+                if let Err(error) = partition.finish(outcome.end, &mut partition_events) {
+                    return write_serve_error(&mut writer, &error);
+                }
                 let envelope = super::events::build_response_object(
                     &request,
                     response_id,
                     created_at,
                     &partition_events,
-                    outcome.stop_reason,
+                    response_stop_reason(outcome.end),
                     outcome.usage,
                     outcome.stats.as_ref().filter(|_| request.echo_stats),
                 )?;
@@ -814,30 +818,45 @@ fn handle_responses(
         response.set_allowed_tools(request.allowed_tools.clone());
         let mut sink = StreamingSink {
             stream: &mut response,
-            partition: partition_mode(),
+            partition: OutputPartition::new(output_protocol),
         };
         let outcome = backend.generate(&request, &prompt, &mut sink);
         let StreamingSink { partition, .. } = sink;
-        let mut events = Vec::new();
-        partition.finish(&mut events);
-        for event in &events {
-            response.on_partition(event)?;
-        }
         match outcome {
             Ok(outcome) => {
+                let mut events = Vec::new();
+                if let Err(error) = partition.finish(outcome.end, &mut events) {
+                    response.fail(&error)?;
+                    return sse.done();
+                }
+                for event in &events {
+                    response.on_partition(event)?;
+                }
                 response.finish(
-                    outcome.stop_reason,
+                    response_stop_reason(outcome.end),
                     outcome.usage,
                     outcome.stats.as_ref().filter(|_| request.echo_stats),
                 )?;
                 sse.done()
             }
             Err(BackendFailure::Serve(error)) => {
+                let mut events = Vec::new();
+                partition.abort(&mut events);
+                for event in &events {
+                    response.on_partition(event)?;
+                }
                 response.fail(&error)?;
                 sse.done()
             }
             Err(BackendFailure::Aborted(error)) => Err(error),
         }
+    }
+}
+
+fn response_stop_reason(end: GenerationEnd) -> StopReason {
+    match end {
+        GenerationEnd::StopToken(_) => StopReason::Eos,
+        GenerationEnd::TokenLimit => StopReason::TokenLimit,
     }
 }
 
@@ -850,7 +869,8 @@ mod tests {
     struct MockBackend {
         model: String,
         pieces: Vec<String>,
-        stop_reason: StopReason,
+        end: GenerationEnd,
+        protocol: OutputProtocol,
         fail_with: Option<ServeError>,
     }
 
@@ -859,15 +879,36 @@ mod tests {
             Self {
                 model: "qwen-test".into(),
                 pieces: pieces.iter().map(|s| s.to_string()).collect(),
-                stop_reason,
+                end: match stop_reason {
+                    StopReason::Eos => GenerationEnd::StopToken(0),
+                    StopReason::TokenLimit => GenerationEnd::TokenLimit,
+                },
+                protocol: OutputProtocol::Qwen {
+                    preopened_reasoning: false,
+                    parse_tools: true,
+                },
                 fail_with: None,
             }
+        }
+
+        fn muse(pieces: &[&str], end: GenerationEnd) -> Self {
+            let mut backend = Self::new(pieces, StopReason::Eos);
+            backend.end = end;
+            backend.protocol = OutputProtocol::MuseAtem {
+                eos_token_id: 1,
+                eot_token_id: 2,
+                declared_tools: vec!["weather_lookup".into()],
+            };
+            backend
         }
     }
 
     impl GenerationBackend for MockBackend {
         fn model_id(&self) -> &str {
             &self.model
+        }
+        fn output_protocol(&self, _request: &ServeRequest) -> OutputProtocol {
+            self.protocol.clone()
         }
         fn generate(
             &mut self,
@@ -880,10 +921,11 @@ mod tests {
             }
             sink.tick().map_err(BackendFailure::Aborted)?;
             for piece in &self.pieces {
-                sink.piece(piece).map_err(BackendFailure::Aborted)?;
+                sink.piece(piece.as_bytes())
+                    .map_err(BackendFailure::Aborted)?;
             }
             Ok(GenerationOutcome {
-                stop_reason: self.stop_reason,
+                end: self.end,
                 usage: Usage {
                     input_tokens: 7,
                     output_tokens: 3,
@@ -922,6 +964,89 @@ mod tests {
 
     fn body_of(response: &str) -> &str {
         response.split("\r\n\r\n").nth(1).unwrap()
+    }
+
+    fn sse_payload(response: &str, event_type: &str) -> Value {
+        let block = body_of(response)
+            .split("\n\n")
+            .find(|block| block.starts_with(&format!("event: {event_type}\n")))
+            .unwrap_or_else(|| panic!("missing SSE event {event_type}"));
+        let data = block
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE event has data");
+        serde_json::from_str(data).expect("SSE event data is JSON")
+    }
+
+    #[test]
+    fn muse_non_stream_partitions_reasoning_visible_and_calls() {
+        let backend = MockBackend::muse(
+            &[
+                " to=self<|message|>check<|eom|><|start|>assistant ",
+                "to=weather_lookup<|message|><atem:function_calls>\n",
+                "<atem:invoke name=\"weather_lookup\">\n<atem:parameter name=\"city\">Paris</atem:parameter>\n</atem:invoke>\n</atem:function_calls>",
+            ],
+            GenerationEnd::StopToken(2),
+        );
+        let body = json!({
+            "model":"qwen-test",
+            "input":"weather",
+            "tools":[{"type":"function","name":"weather_lookup","parameters":{"type":"object"}}]
+        });
+        let response = roundtrip(backend, &post("/v1/responses", &body.to_string()));
+        assert!(response.starts_with("HTTP/1.1 200"));
+        let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
+        let output = envelope["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(output[0]["content"][0]["text"], "check");
+        assert_eq!(output[1]["type"], "function_call");
+        assert_eq!(output[1]["name"], "weather_lookup");
+        assert_eq!(output[1]["arguments"], "{\"city\":\"Paris\"}");
+        assert!(!body_of(&response).contains("<atem:"));
+        assert!(!body_of(&response).contains("<|message|>"));
+    }
+
+    #[test]
+    fn muse_malformed_completion_fails_and_truncated_header_stays_hidden() {
+        let malformed = MockBackend::muse(&["raw answer"], GenerationEnd::StopToken(2));
+        let body = json!({"model":"qwen-test","input":"hi"}).to_string();
+        let response = roundtrip(malformed, &post("/v1/responses", &body));
+        assert!(response.starts_with("HTTP/1.1 500"));
+        assert!(body_of(&response).contains("invalid Muse ATEM model output"));
+
+        let truncated = MockBackend::muse(&[" to=self<|mess"], GenerationEnd::TokenLimit);
+        let response = roundtrip(truncated, &post("/v1/responses", &body));
+        assert!(response.starts_with("HTTP/1.1 200"));
+        let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
+        assert_eq!(envelope["status"], "incomplete");
+        assert!(envelope["output"].as_array().unwrap().is_empty());
+        assert!(!body_of(&response).contains("<|mess"));
+    }
+
+    #[test]
+    fn muse_stream_protocol_failure_emits_failed_terminal_and_done() {
+        let backend = MockBackend::muse(
+            &[concat!(
+                " to=self<|message|>finished plan<|eom|>",
+                "<|start|>assistant to=user<|message|>safe<|bad|>"
+            )],
+            GenerationEnd::StopToken(2),
+        );
+        let body = json!({"model":"qwen-test","input":"hi","stream":true}).to_string();
+        let response = roundtrip(backend, &post("/v1/responses", &body));
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("event: response.failed"));
+        assert!(response.contains("data: [DONE]"));
+        assert!(!response.contains("<|bad|>"));
+        let failed = sse_payload(&response, "response.failed");
+        let output = failed["response"]["output"].as_array().unwrap();
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(output[0]["status"], "completed");
+        assert_eq!(output[0]["content"][0]["text"], "finished plan");
+        assert_eq!(output[1]["type"], "message");
+        assert_eq!(output[1]["status"], "incomplete");
+        assert_eq!(output[1]["content"][0]["text"], "safe");
     }
 
     #[test]

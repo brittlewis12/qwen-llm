@@ -13,14 +13,14 @@ pub(crate) enum Command {
     Run(RunArgs),
     /// Serve the Open Responses subset over loopback HTTP (docs/SERVE.md).
     #[command(
-        after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 65536\n  qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
+        after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 65536\n  qwen serve -m Muse-Glimmer.gguf --max-context-tokens 7168 --max-tokens 2048\n  qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
     )]
     Serve(ServeArgs),
 }
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct ServeArgs {
-    /// Path to a Qwen-family GGUF file (DeepSeek V4 serve lands in S3).
+    /// Path to a supported Qwen, DeepSeek V4, or Muse Glimmer GGUF file.
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -28,15 +28,15 @@ pub(crate) struct ServeArgs {
     #[arg(long, default_value = "127.0.0.1:8737")]
     addr: String,
 
-    /// Default max_output_tokens when a request omits it.
-    #[arg(long = "max-tokens", default_value_t = 65_536, value_parser = parse_positive_usize)]
-    max_tokens: usize,
+    /// Default max_output_tokens when a request omits it; required for Muse.
+    #[arg(long = "max-tokens", value_parser = parse_positive_usize)]
+    max_tokens: Option<usize>,
 
-    /// Fixed sequence capacity; omitted caps at 262144 and sizes each request to need.
+    /// Fixed sequence capacity; required for DS4 and Muse, request-shaped for Qwen.
     #[arg(long, value_parser = parse_positive_usize)]
     max_context_tokens: Option<usize>,
 
-    /// RAM snapshot-cache budget in MiB.
+    /// Qwen/DS4 RAM snapshot-cache budget in MiB; Muse currently reports no cache.
     #[arg(long, default_value_t = crate::serve::DEFAULT_SNAPSHOT_CACHE_MIB)]
     snapshot_cache_mib: u64,
 
@@ -78,7 +78,7 @@ pub(crate) enum Invocation {
 pub(crate) struct ServeInvocation {
     pub(crate) model: PathBuf,
     pub(crate) addr: String,
-    pub(crate) max_tokens: usize,
+    pub(crate) max_tokens: Option<usize>,
     pub(crate) max_context_tokens: Option<usize>,
     pub(crate) snapshot_cache_mib: u64,
     pub(crate) drafter: Option<PathBuf>,
@@ -390,6 +390,21 @@ mod tests {
                 Args::try_parse_from(["qwen", "serve", "-m", "model.gguf", option, "0"]).is_err()
             );
         }
+    }
+
+    #[test]
+    fn serve_preserves_whether_max_tokens_was_explicit() {
+        let (_, invocation) = parse(&["qwen", "serve", "-m", "model.gguf"]);
+        let Invocation::Serve(defaults) = invocation else {
+            panic!("expected serve invocation")
+        };
+        assert_eq!(defaults.max_tokens, None);
+
+        let (_, invocation) = parse(&["qwen", "serve", "-m", "model.gguf", "--max-tokens", "2048"]);
+        let Invocation::Serve(explicit) = invocation else {
+            panic!("expected serve invocation")
+        };
+        assert_eq!(explicit.max_tokens, Some(2048));
     }
 
     #[test]

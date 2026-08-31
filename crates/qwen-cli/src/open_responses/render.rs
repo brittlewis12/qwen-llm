@@ -24,7 +24,7 @@ use super::tool_parse::{ParsedCall, render_calls};
 use crate::messages::{Qwen38GenerationMode, Qwen38ReasoningEffort};
 
 const IM_START: &str = "<|im_start|>";
-const IM_END: &str = "<|im_end|>\n";
+const IM_END: &str = "<|im_end|>";
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
 const PRECLOSED_THINK: &str = "<think>\n\n</think>\n\n";
@@ -91,11 +91,6 @@ pub(crate) fn split_reasoning(full: &str) -> SplitReasoning<'_> {
 /// by `serve_generic_matches_cli_renderer` /
 /// `serve_qwen38_matches_cli_renderer` below, which assert byte equality
 /// against those CLI renderers on every non-tool case.
-fn render_qwen38_assistant_body(visible: &str, output: &mut String) {
-    output.push_str(PRECLOSED_THINK);
-    output.push_str(visible.trim());
-}
-
 fn render_assistant_body(
     reasoning: Option<&str>,
     visible: &str,
@@ -122,6 +117,179 @@ fn render_assistant_body(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QwenServePromptSpanKind {
+    MessageStartMarker,
+    Role,
+    ContentSeparator,
+    MessageContent,
+    MessageEndMarker,
+    GeneratedAssistantStartMarker,
+    GeneratedAssistantRole,
+    ThinkingChannelStartMarker,
+    ThinkingChannelEndMarker,
+    ReasoningInstructionContent,
+    ToolDefinitionContent,
+    AssistantReasoningContent,
+    ToolCallContent,
+    ToolResultContent,
+}
+
+impl QwenServePromptSpanKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::MessageStartMarker => "message_start_marker",
+            Self::Role => "role",
+            Self::ContentSeparator => "content_separator",
+            Self::MessageContent => "message_content",
+            Self::MessageEndMarker => "message_end_marker",
+            Self::GeneratedAssistantStartMarker => "generated_assistant_start_marker",
+            Self::GeneratedAssistantRole => "generated_assistant_role",
+            Self::ThinkingChannelStartMarker => "thinking_channel_start_marker",
+            Self::ThinkingChannelEndMarker => "thinking_channel_end_marker",
+            Self::ReasoningInstructionContent => "reasoning_instruction_content",
+            Self::ToolDefinitionContent => "tool_definition_content",
+            Self::AssistantReasoningContent => "assistant_reasoning_content",
+            Self::ToolCallContent => "tool_call_content",
+            Self::ToolResultContent => "tool_result_content",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QwenServePromptRole {
+    System,
+    User,
+    Assistant,
+}
+
+impl QwenServePromptRole {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QwenServePromptChannel {
+    Thinking,
+    ToolCall,
+    ToolResult,
+}
+
+impl QwenServePromptChannel {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Thinking => "thinking",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QwenServePromptSpan {
+    pub(crate) kind: QwenServePromptSpanKind,
+    pub(crate) message_index: Option<usize>,
+    pub(crate) tool_call_index: Option<usize>,
+    pub(crate) role: Option<QwenServePromptRole>,
+    pub(crate) channel: Option<QwenServePromptChannel>,
+    pub(crate) label: Option<String>,
+    pub(crate) byte_start: usize,
+    pub(crate) byte_end: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AnnotatedQwenServePrompt {
+    pub(crate) text: String,
+    pub(crate) spans: Vec<QwenServePromptSpan>,
+}
+
+#[derive(Clone, Copy)]
+struct SpanContext {
+    message_index: Option<usize>,
+    tool_call_index: Option<usize>,
+    role: Option<QwenServePromptRole>,
+    channel: Option<QwenServePromptChannel>,
+}
+
+impl SpanContext {
+    const fn message(
+        message_index: usize,
+        role: QwenServePromptRole,
+        channel: Option<QwenServePromptChannel>,
+    ) -> Self {
+        Self {
+            message_index: Some(message_index),
+            tool_call_index: None,
+            role: Some(role),
+            channel,
+        }
+    }
+
+    const fn generated(channel: Option<QwenServePromptChannel>) -> Self {
+        Self {
+            message_index: None,
+            tool_call_index: None,
+            role: Some(QwenServePromptRole::Assistant),
+            channel,
+        }
+    }
+
+    const fn tool_call(self, tool_call_index: usize) -> Self {
+        Self {
+            tool_call_index: Some(tool_call_index),
+            ..self
+        }
+    }
+
+    const fn channel(self, channel: Option<QwenServePromptChannel>) -> Self {
+        Self { channel, ..self }
+    }
+}
+
+#[derive(Default)]
+struct AnnotatedPromptBuilder {
+    text: String,
+    spans: Vec<QwenServePromptSpan>,
+}
+
+impl AnnotatedPromptBuilder {
+    fn push(
+        &mut self,
+        text: &str,
+        kind: QwenServePromptSpanKind,
+        context: SpanContext,
+        label: Option<String>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let byte_start = self.text.len();
+        self.text.push_str(text);
+        self.spans.push(QwenServePromptSpan {
+            kind,
+            message_index: context.message_index,
+            tool_call_index: context.tool_call_index,
+            role: context.role,
+            channel: context.channel,
+            label,
+            byte_start,
+            byte_end: self.text.len(),
+        });
+    }
+
+    fn finish(self) -> AnnotatedQwenServePrompt {
+        AnnotatedQwenServePrompt {
+            text: self.text,
+            spans: self.spans,
+        }
+    }
+}
+
 const TOOLS_FORMAT_INSTRUCTION: &str = concat!(
     "\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n",
     "<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n",
@@ -139,12 +307,19 @@ const TOOLS_FORMAT_INSTRUCTION: &str = concat!(
 /// Tools block, byte-pinned to the template oracle
 /// (`qwen36_tools_system_block_with_system`): the tools system message
 /// absorbs the caller's system text after `</IMPORTANT>`.
-fn render_tools_system_block(tools: &[ToolDefinition], system: Option<&str>, output: &mut String) {
-    output.push_str(IM_START);
-    output.push_str("system\n");
-    output.push_str("# Tools\n\nYou have access to the following functions:\n\n<tools>");
+fn render_tools_system_block(
+    tools: &[ToolDefinition],
+    system: Option<&str>,
+    system_source: Option<&str>,
+    message_index: usize,
+    output: &mut AnnotatedPromptBuilder,
+) {
+    let context = SpanContext::message(message_index, QwenServePromptRole::System, None);
+    push_message_header(output, context, false);
+    let mut tools_content =
+        String::from("# Tools\n\nYou have access to the following functions:\n\n<tools>");
     for tool in tools {
-        output.push('\n');
+        tools_content.push('\n');
         let mut entry = serde_json::Map::new();
         entry.insert("type".into(), serde_json::json!("function"));
         entry.insert("name".into(), serde_json::json!(tool.name));
@@ -157,116 +332,349 @@ fn render_tools_system_block(tools: &[ToolDefinition], system: Option<&str>, out
         if let Some(strict) = tool.strict {
             entry.insert("strict".into(), serde_json::json!(strict));
         }
-        output.push_str(
+        tools_content.push_str(
             &serde_json::to_string(&serde_json::Value::Object(entry))
                 .expect("serialize tool definition"),
         );
     }
-    output.push_str("\n</tools>");
-    output.push_str(TOOLS_FORMAT_INSTRUCTION);
+    tools_content.push_str("\n</tools>");
+    tools_content.push_str(TOOLS_FORMAT_INSTRUCTION);
+    output.push(
+        &tools_content,
+        QwenServePromptSpanKind::ToolDefinitionContent,
+        context,
+        None,
+    );
     if let Some(system) = system.filter(|text| !text.trim().is_empty()) {
-        output.push_str("\n\n");
-        output.push_str(system);
+        output.push(
+            "\n\n",
+            QwenServePromptSpanKind::ContentSeparator,
+            context,
+            None,
+        );
+        output.push(
+            system,
+            QwenServePromptSpanKind::MessageContent,
+            context,
+            system_source.map(str::to_owned),
+        );
     }
-    output.push_str(IM_END);
+    push_message_end(output, context);
+}
+
+fn push_message_header(output: &mut AnnotatedPromptBuilder, context: SpanContext, generated: bool) {
+    output.push(
+        IM_START,
+        if generated {
+            QwenServePromptSpanKind::GeneratedAssistantStartMarker
+        } else {
+            QwenServePromptSpanKind::MessageStartMarker
+        },
+        context,
+        None,
+    );
+    let role = context.role.expect("message header requires role");
+    output.push(
+        role.as_str(),
+        if generated {
+            QwenServePromptSpanKind::GeneratedAssistantRole
+        } else {
+            QwenServePromptSpanKind::Role
+        },
+        context,
+        None,
+    );
+    output.push(
+        "\n",
+        QwenServePromptSpanKind::ContentSeparator,
+        context,
+        None,
+    );
+}
+
+fn push_message_end(output: &mut AnnotatedPromptBuilder, context: SpanContext) {
+    output.push(
+        IM_END,
+        QwenServePromptSpanKind::MessageEndMarker,
+        context,
+        None,
+    );
+    output.push(
+        "\n",
+        QwenServePromptSpanKind::ContentSeparator,
+        context,
+        None,
+    );
+}
+
+fn push_preclosed_thinking(output: &mut AnnotatedPromptBuilder, context: SpanContext) {
+    let thinking = context.channel(Some(QwenServePromptChannel::Thinking));
+    output.push(
+        THINK_OPEN,
+        QwenServePromptSpanKind::ThinkingChannelStartMarker,
+        thinking,
+        None,
+    );
+    output.push(
+        "\n\n",
+        QwenServePromptSpanKind::ContentSeparator,
+        thinking,
+        None,
+    );
+    output.push(
+        THINK_CLOSE,
+        QwenServePromptSpanKind::ThinkingChannelEndMarker,
+        thinking,
+        None,
+    );
+    output.push(
+        "\n\n",
+        QwenServePromptSpanKind::ContentSeparator,
+        context,
+        None,
+    );
+}
+
+fn push_visible_and_calls(
+    output: &mut AnnotatedPromptBuilder,
+    context: SpanContext,
+    visible: &str,
+    calls: &[crate::open_responses::items::ToolCall],
+) {
+    output.push(
+        visible,
+        QwenServePromptSpanKind::MessageContent,
+        context,
+        None,
+    );
+    for (call_index, call) in calls.iter().enumerate() {
+        let separator = if call_index == 0 {
+            (!visible.trim().is_empty()).then_some("\n\n")
+        } else {
+            Some("\n")
+        };
+        if let Some(separator) = separator {
+            output.push(
+                separator,
+                QwenServePromptSpanKind::ContentSeparator,
+                context,
+                None,
+            );
+        }
+        let parsed = ParsedCall {
+            name: call.name.clone(),
+            arguments: serde_json::from_str(&call.arguments)
+                .expect("validated function_call arguments object"),
+        };
+        output.push(
+            &render_calls("", &[parsed]),
+            QwenServePromptSpanKind::ToolCallContent,
+            context.tool_call(call_index),
+            Some(call.name.clone()),
+        );
+    }
+}
+
+fn push_assistant_body(
+    output: &mut AnnotatedPromptBuilder,
+    context: SpanContext,
+    reasoning: Option<&str>,
+    visible: &str,
+    calls: &[crate::open_responses::items::ToolCall],
+    no_thinking: bool,
+    strip_history_thinking: bool,
+) {
+    if no_thinking {
+        push_preclosed_thinking(output, context);
+    } else if let Some(reasoning) = reasoning.filter(|_| !strip_history_thinking) {
+        let thinking = context.channel(Some(QwenServePromptChannel::Thinking));
+        output.push(
+            THINK_OPEN,
+            QwenServePromptSpanKind::ThinkingChannelStartMarker,
+            thinking,
+            None,
+        );
+        output.push(
+            reasoning,
+            QwenServePromptSpanKind::AssistantReasoningContent,
+            thinking,
+            None,
+        );
+        output.push(
+            THINK_CLOSE,
+            QwenServePromptSpanKind::ThinkingChannelEndMarker,
+            thinking,
+            None,
+        );
+    }
+    push_visible_and_calls(output, context, visible, calls);
 }
 
 /// Render the full prompt for a validated request, including the
 /// generation suffix.
 pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
-    let mut output = String::new();
+    render_qwen_serve_prompt_annotated(request).text
+}
+
+pub(crate) fn render_qwen_serve_prompt_annotated(
+    request: &ServeRequest,
+) -> AnnotatedQwenServePrompt {
+    let mut output = AnnotatedPromptBuilder::default();
     let qwen38_mode = qwen38_generation_mode(request);
     let effort_instruction = qwen38_mode.and_then(|mode| match mode {
         Qwen38GenerationMode::Thinking(effort) => effort.instruction(),
         Qwen38GenerationMode::NoThinking => None,
     });
+    let mut message_index = 0;
     if !request.tools.is_empty() {
-        render_tools_system_block(&request.tools, request.system.as_deref(), &mut output);
+        render_tools_system_block(
+            &request.tools,
+            request.system.as_deref(),
+            request.system_source.map(|source| source.as_str()),
+            message_index,
+            &mut output,
+        );
+        message_index += 1;
     } else if effort_instruction.is_some() || request.system.is_some() {
         let system = request.system.as_deref().unwrap_or("").trim();
         if effort_instruction.is_some() || !system.is_empty() {
-            output.push_str(IM_START);
-            output.push_str("system\n");
+            let context = SpanContext::message(message_index, QwenServePromptRole::System, None);
+            push_message_header(&mut output, context, false);
             if let Some(instruction) = effort_instruction {
-                output.push_str(instruction);
+                output.push(
+                    instruction,
+                    QwenServePromptSpanKind::ReasoningInstructionContent,
+                    context.channel(Some(QwenServePromptChannel::Thinking)),
+                    None,
+                );
                 if !system.is_empty() {
-                    output.push_str("\n\n");
+                    output.push(
+                        "\n\n",
+                        QwenServePromptSpanKind::ContentSeparator,
+                        context,
+                        None,
+                    );
                 }
             }
-            output.push_str(if qwen38_mode.is_some() {
-                system
-            } else {
-                request.system.as_deref().unwrap_or("")
-            });
-            output.push_str(IM_END);
+            output.push(
+                if qwen38_mode.is_some() {
+                    system
+                } else {
+                    request.system.as_deref().unwrap_or("")
+                },
+                QwenServePromptSpanKind::MessageContent,
+                context,
+                request
+                    .system_source
+                    .map(|source| source.as_str().to_owned()),
+            );
+            push_message_end(&mut output, context);
+            message_index += 1;
         }
     }
+    let mut pending_tool_labels = Vec::new();
     for turn in &request.turns {
         match turn {
             Turn::User(text) => {
-                output.push_str(IM_START);
-                output.push_str("user\n");
-                output.push_str(text);
-                output.push_str(IM_END);
+                let context = SpanContext::message(message_index, QwenServePromptRole::User, None);
+                push_message_header(&mut output, context, false);
+                output.push(text, QwenServePromptSpanKind::MessageContent, context, None);
+                push_message_end(&mut output, context);
             }
             Turn::Assistant {
                 reasoning,
                 visible,
                 calls,
             } => {
-                output.push_str(IM_START);
-                output.push_str("assistant\n");
+                let channel = (!calls.is_empty()).then_some(QwenServePromptChannel::ToolCall);
+                let context =
+                    SpanContext::message(message_index, QwenServePromptRole::Assistant, channel);
+                push_message_header(&mut output, context, false);
                 if qwen38_mode.is_some() && calls.is_empty() {
-                    render_qwen38_assistant_body(visible, &mut output);
-                    output.push_str(IM_END);
-                    continue;
-                }
-                let body = if calls.is_empty() {
-                    visible.clone()
+                    push_preclosed_thinking(&mut output, context);
+                    output.push(
+                        visible.trim(),
+                        QwenServePromptSpanKind::MessageContent,
+                        context,
+                        None,
+                    );
                 } else {
-                    let parsed: Vec<ParsedCall> = calls
-                        .iter()
-                        .map(|call| ParsedCall {
-                            name: call.name.clone(),
-                            arguments: serde_json::from_str(&call.arguments)
-                                .expect("validated function_call arguments object"),
-                        })
-                        .collect();
-                    render_calls(visible, &parsed)
-                };
-                render_assistant_body(
-                    reasoning.as_deref(),
-                    &body,
-                    request.no_thinking
-                        || matches!(qwen38_mode, Some(Qwen38GenerationMode::NoThinking)),
-                    request.strip_history_thinking,
-                    &mut output,
-                );
-                output.push_str(IM_END);
+                    push_assistant_body(
+                        &mut output,
+                        context,
+                        reasoning.as_deref(),
+                        visible,
+                        calls,
+                        request.no_thinking
+                            || matches!(qwen38_mode, Some(Qwen38GenerationMode::NoThinking)),
+                        request.strip_history_thinking,
+                    );
+                }
+                pending_tool_labels = calls.iter().map(|call| call.name.clone()).collect();
+                push_message_end(&mut output, context);
             }
             // Coalesced tool results in one user block, each wrapped per
             // the template oracle.
             Turn::ToolResults(results) => {
-                output.push_str(IM_START);
-                output.push_str("user");
-                for result in results {
-                    output.push_str("\n<tool_response>\n");
-                    output.push_str(result);
-                    output.push_str("\n</tool_response>");
+                let context = SpanContext::message(
+                    message_index,
+                    QwenServePromptRole::User,
+                    Some(QwenServePromptChannel::ToolResult),
+                );
+                push_message_header(&mut output, context, false);
+                for (result_index, result) in results.iter().enumerate() {
+                    output.push(
+                        if result_index == 0 {
+                            "<tool_response>\n"
+                        } else {
+                            "\n<tool_response>\n"
+                        },
+                        QwenServePromptSpanKind::ContentSeparator,
+                        context,
+                        None,
+                    );
+                    output.push(
+                        result,
+                        QwenServePromptSpanKind::ToolResultContent,
+                        context.tool_call(result_index),
+                        pending_tool_labels.get(result_index).cloned(),
+                    );
+                    output.push(
+                        "\n</tool_response>",
+                        QwenServePromptSpanKind::ContentSeparator,
+                        context,
+                        None,
+                    );
                 }
-                output.push_str(IM_END);
+                pending_tool_labels.clear();
+                push_message_end(&mut output, context);
             }
         }
+        message_index += 1;
     }
-    output.push_str(IM_START);
-    output.push_str("assistant\n");
+    let generated = SpanContext::generated(None);
+    push_message_header(&mut output, generated, true);
     match qwen38_mode {
-        Some(Qwen38GenerationMode::Thinking(_)) => output.push_str("<think>\n"),
-        Some(Qwen38GenerationMode::NoThinking) => output.push_str(PRECLOSED_THINK),
-        None if request.no_thinking => output.push_str(PRECLOSED_THINK),
+        Some(Qwen38GenerationMode::Thinking(_)) => {
+            let thinking = generated.channel(Some(QwenServePromptChannel::Thinking));
+            output.push(
+                THINK_OPEN,
+                QwenServePromptSpanKind::ThinkingChannelStartMarker,
+                thinking,
+                None,
+            );
+            output.push(
+                "\n",
+                QwenServePromptSpanKind::ContentSeparator,
+                thinking,
+                None,
+            );
+        }
+        Some(Qwen38GenerationMode::NoThinking) => push_preclosed_thinking(&mut output, generated),
+        None if request.no_thinking => push_preclosed_thinking(&mut output, generated),
         None => {}
     }
-    output
+    output.finish()
 }
 
 /// Qwen3.8 generation mode from the request, or `None` for generic Qwen.
@@ -284,6 +692,17 @@ fn qwen38_generation_mode(request: &ServeRequest) -> Option<Qwen38GenerationMode
         Some("medium") => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
         _ => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh),
     })
+}
+
+pub(crate) fn qwen_serve_generation_mode_name(request: &ServeRequest) -> &'static str {
+    match qwen38_generation_mode(request) {
+        Some(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low)) => "thinking_low",
+        Some(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium)) => "thinking_medium",
+        Some(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh)) => "thinking_xhigh",
+        Some(Qwen38GenerationMode::NoThinking) => "no_thinking",
+        None if request.no_thinking => "no_thinking",
+        None => "auto",
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +723,18 @@ mod tests {
             .find(|case| case["name"].as_str() == Some(name))
             .unwrap_or_else(|| panic!("missing fixture case {name}"))
             .clone()
+    }
+
+    fn assert_complete_annotations(prompt: &AnnotatedQwenServePrompt) {
+        let mut byte_end = 0;
+        for span in &prompt.spans {
+            assert_eq!(span.byte_start, byte_end);
+            assert!(span.byte_start < span.byte_end);
+            assert!(prompt.text.is_char_boundary(span.byte_start));
+            assert!(prompt.text.is_char_boundary(span.byte_end));
+            byte_end = span.byte_end;
+        }
+        assert_eq!(byte_end, prompt.text.len());
     }
 
     #[test]
@@ -349,6 +780,51 @@ mod tests {
             render_qwen_serve_prompt(&request),
             case["prompt"].as_str().expect("case prompt"),
             "serve items render diverged from frozen fixture bytes"
+        );
+    }
+
+    #[test]
+    fn developer_and_system_compile_identically_but_retain_source_labels() {
+        let developer = parse_request(&json!({
+            "model": "m",
+            "input": [
+                {"role": "developer", "content": "policy"},
+                {"role": "user", "content": "request"}
+            ]
+        }))
+        .unwrap();
+        let system = parse_request(&json!({
+            "model": "m",
+            "input": [
+                {"role": "system", "content": "policy"},
+                {"role": "user", "content": "request"}
+            ]
+        }))
+        .unwrap();
+        let developer = render_qwen_serve_prompt_annotated(&developer);
+        let system = render_qwen_serve_prompt_annotated(&system);
+        assert_eq!(developer.text, system.text);
+        assert_eq!(
+            developer
+                .spans
+                .iter()
+                .find(|span| {
+                    span.kind == QwenServePromptSpanKind::MessageContent
+                        && span.role == Some(QwenServePromptRole::System)
+                })
+                .and_then(|span| span.label.as_deref()),
+            Some("developer")
+        );
+        assert_eq!(
+            system
+                .spans
+                .iter()
+                .find(|span| {
+                    span.kind == QwenServePromptSpanKind::MessageContent
+                        && span.role == Some(QwenServePromptRole::System)
+                })
+                .and_then(|span| span.label.as_deref()),
+            Some("system")
         );
     }
 
@@ -481,6 +957,73 @@ mod tests {
                 "<|im_end|>\n",
                 "<|im_start|>assistant\n",
             ),
+        );
+        let annotated = render_qwen_serve_prompt_annotated(&request);
+        assert_eq!(annotated.text, rendered);
+        assert_complete_annotations(&annotated);
+        let call = annotated
+            .spans
+            .iter()
+            .find(|span| span.kind == QwenServePromptSpanKind::ToolCallContent)
+            .unwrap();
+        assert_eq!(call.message_index, Some(2));
+        assert_eq!(call.tool_call_index, Some(0));
+        assert_eq!(call.role, Some(QwenServePromptRole::Assistant));
+        assert_eq!(call.channel, Some(QwenServePromptChannel::ToolCall));
+        assert_eq!(call.label.as_deref(), Some("fs_list"));
+        let result = annotated
+            .spans
+            .iter()
+            .find(|span| span.kind == QwenServePromptSpanKind::ToolResultContent)
+            .unwrap();
+        assert_eq!(result.message_index, Some(3));
+        assert_eq!(result.tool_call_index, Some(0));
+        assert_eq!(result.role, Some(QwenServePromptRole::User));
+        assert_eq!(result.channel, Some(QwenServePromptChannel::ToolResult));
+        assert_eq!(result.label.as_deref(), Some("fs_list"));
+        assert!(annotated.spans.iter().any(|span| {
+            span.kind == QwenServePromptSpanKind::AssistantReasoningContent
+                && span.channel == Some(QwenServePromptChannel::Thinking)
+        }));
+        assert!(annotated.spans.iter().any(|span| {
+            span.kind == QwenServePromptSpanKind::GeneratedAssistantStartMarker
+                && span.message_index.is_none()
+        }));
+    }
+
+    #[test]
+    fn parallel_same_name_results_retain_call_order_and_unicode_byte_spans() {
+        let request = parse_request(&json!({
+            "model": "m",
+            "tools": [{"type": "function", "name": "fetch"}],
+            "input": [
+                {"role": "user", "content": "Inspect λ."},
+                {"type": "function_call", "call_id": "c1", "name": "fetch",
+                 "arguments": "{\"id\":1}"},
+                {"type": "function_call", "call_id": "c2", "name": "fetch",
+                 "arguments": "{\"id\":2}"},
+                {"type": "function_call_output", "call_id": "c2", "output": "β"},
+                {"type": "function_call_output", "call_id": "c1", "output": "α"}
+            ]
+        }))
+        .unwrap();
+        let annotated = render_qwen_serve_prompt_annotated(&request);
+        assert_complete_annotations(&annotated);
+        let results = annotated
+            .spans
+            .iter()
+            .filter(|span| span.kind == QwenServePromptSpanKind::ToolResultContent)
+            .map(|span| {
+                (
+                    span.tool_call_index,
+                    span.label.as_deref(),
+                    &annotated.text[span.byte_start..span.byte_end],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results,
+            vec![(Some(0), Some("fetch"), "α"), (Some(1), Some("fetch"), "β")]
         );
     }
 

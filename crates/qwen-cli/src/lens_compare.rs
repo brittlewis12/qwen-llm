@@ -1074,6 +1074,12 @@ fn compare_traces(
     ensure!(left_score == right_score, "trace score semantics differ");
     if left.schema_version == 3 {
         ensure!(
+            left.input_source == right.input_source
+                && left.add_special_tokens == right.add_special_tokens
+                && left.rendering == right.rendering,
+            "v3 input rendering provenance differs"
+        );
+        ensure!(
             left.deployed_model
                 .as_ref()
                 .and_then(|model| model.locator_id.as_ref())
@@ -1568,7 +1574,7 @@ impl RunDocument {
         ensure!(
             matches!(
                 self.input_source.as_str(),
-                "prompt" | "token_ids" | "messages"
+                "prompt" | "token_ids" | "messages" | "open_responses"
             ) && !self.prompt_token_ids.is_empty()
                 && self.prompt_token_ids.len() <= lens_run::MAX_NEW_TOKENS * 16
                 && self.max_new_tokens > 0
@@ -1667,6 +1673,24 @@ impl RunDocument {
                     && rendering.generation_mode.is_none()
                     && rendering.spans.is_empty(),
                 "literal-token rendering metadata is inconsistent"
+            ),
+            "open_responses" => ensure!(
+                self.runtime_kind == "ordinary_qwen"
+                    && self.add_special_tokens == Some(false)
+                    && rendering.renderer == "qwen_open_responses_annotated_v1"
+                    && rendering
+                        .generation_mode
+                        .as_deref()
+                        .is_some_and(|mode| matches!(
+                            mode,
+                            "auto"
+                                | "thinking_low"
+                                | "thinking_medium"
+                                | "thinking_xhigh"
+                                | "no_thinking"
+                        ))
+                    && !rendering.spans.is_empty(),
+                "Open Responses rendering metadata is inconsistent"
             ),
             "messages" => {
                 let mode = rendering
@@ -2809,6 +2833,134 @@ mod tests {
     }
 
     #[test]
+    fn run_v3_accepts_only_bound_annotated_open_responses_rendering() {
+        let mut document = sweep_run_document(0.0);
+        document.input_source = "open_responses".into();
+        document.add_special_tokens = Some(false);
+        document.prompt_token_ids = vec![1, 2, 3];
+        document.rendering = Some(LensInputRendering {
+            renderer: "qwen_open_responses_annotated_v1".into(),
+            generation_mode: Some("auto".into()),
+            spans: vec![
+                LensRenderedSpan {
+                    kind: "message_start_marker".into(),
+                    message_index: Some(0),
+                    tool_call_index: None,
+                    role: Some("user".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 0,
+                    byte_end: 1,
+                    token_start: Some(0),
+                    token_end: Some(1),
+                },
+                LensRenderedSpan {
+                    kind: "role".into(),
+                    message_index: Some(0),
+                    tool_call_index: None,
+                    role: Some("user".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 1,
+                    byte_end: 2,
+                    token_start: None,
+                    token_end: None,
+                },
+                LensRenderedSpan {
+                    kind: "content_separator".into(),
+                    message_index: Some(0),
+                    tool_call_index: None,
+                    role: Some("user".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 2,
+                    byte_end: 3,
+                    token_start: None,
+                    token_end: None,
+                },
+                LensRenderedSpan {
+                    kind: "message_content".into(),
+                    message_index: Some(0),
+                    tool_call_index: None,
+                    role: Some("user".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 3,
+                    byte_end: 4,
+                    token_start: None,
+                    token_end: None,
+                },
+                LensRenderedSpan {
+                    kind: "message_end_marker".into(),
+                    message_index: Some(0),
+                    tool_call_index: None,
+                    role: Some("user".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 4,
+                    byte_end: 5,
+                    token_start: Some(1),
+                    token_end: Some(2),
+                },
+                LensRenderedSpan {
+                    kind: "content_separator".into(),
+                    message_index: Some(0),
+                    tool_call_index: None,
+                    role: Some("user".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 5,
+                    byte_end: 6,
+                    token_start: None,
+                    token_end: None,
+                },
+                LensRenderedSpan {
+                    kind: "generated_assistant_start_marker".into(),
+                    message_index: None,
+                    tool_call_index: None,
+                    role: Some("assistant".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 6,
+                    byte_end: 7,
+                    token_start: Some(2),
+                    token_end: Some(3),
+                },
+                LensRenderedSpan {
+                    kind: "generated_assistant_role".into(),
+                    message_index: None,
+                    tool_call_index: None,
+                    role: Some("assistant".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 7,
+                    byte_end: 8,
+                    token_start: None,
+                    token_end: None,
+                },
+                LensRenderedSpan {
+                    kind: "content_separator".into(),
+                    message_index: None,
+                    tool_call_index: None,
+                    role: Some("assistant".into()),
+                    channel: None,
+                    label: None,
+                    byte_start: 8,
+                    byte_end: 9,
+                    token_start: None,
+                    token_end: None,
+                },
+            ],
+        });
+        document.validate().unwrap();
+        document.runtime_kind = "muse_glimmer".into();
+        assert!(document.validate().is_err());
+        document.runtime_kind = "ordinary_qwen".into();
+        document.rendering.as_mut().unwrap().generation_mode = Some("reasoning_high".into());
+        assert!(document.validate().is_err());
+    }
+
+    #[test]
     fn inspect_sweep_rejects_child_digest_drift() {
         let root = sweep_fixture(&[0.0], |_, _| {});
         let path = root.join("arms/000000/run.json");
@@ -2996,14 +3148,15 @@ mod tests {
             "schema": "qwen.lens.trace",
             "schema_version": 3,
             "producer": {},
-            "deployed_model": {"locator_id": "model", "vocab_size": 100},
+            "deployed_model": {"locator_id": "model", "vocab_size": 100, "architecture": "qwen35"},
             "tokenizer": {"metadata_id": "tokenizer"},
             "lens": {"kind": "published_full_transport", "method": "J", "payload_blake3": "artifact"},
             "score_semantics": {"kind": "logit", "normalization": "rmsnorm", "candidate_universe": "full_model_vocabulary", "softmax_applied": false},
             "execution_mode": "passive",
+            "input_source": "token_ids",
             "input_token_ids": [10],
             "input_tokens": [{"position": 0, "token_id": 10, "token_display_lossy": "a"}],
-            "rendering": {"renderer": "test", "spans": []},
+            "rendering": {"renderer": "literal_token_ids", "spans": []},
             "selected_layers": [2],
             "top_k": 2,
             "cells": [{"source_layer": 2, "source_position": 0, "source_token_id": 10, "predicts_position": 1, "top_k": top_k}],
@@ -3038,6 +3191,20 @@ mod tests {
         let left = trace(scores(7, 8, 2.0), None);
         let mut right = trace(scores(7, 8, 2.0), None);
         right.selected_layers = vec![3];
+        assert!(compare_traces(&left, &right, 10).is_err());
+    }
+
+    #[test]
+    fn rejects_same_token_trace_with_different_rendering_provenance() {
+        let left = trace(scores(7, 8, 2.0), None);
+        let mut right = trace(scores(7, 8, 2.0), None);
+        right.input_source = Some("prompt".into());
+        right.add_special_tokens = Some(false);
+        right.rendering = Some(LensInputRendering {
+            renderer: "tokenizer_text".into(),
+            generation_mode: None,
+            spans: Vec::new(),
+        });
         assert!(compare_traces(&left, &right, 10).is_err());
     }
 

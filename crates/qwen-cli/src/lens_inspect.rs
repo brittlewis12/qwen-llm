@@ -85,10 +85,14 @@ pub(crate) struct TraceDocument {
     pub(crate) score_semantics: Option<ScoreSemantics>,
     #[serde(default)]
     execution_mode: Option<String>,
+    #[serde(default)]
+    pub(crate) input_source: Option<String>,
+    #[serde(default)]
+    pub(crate) add_special_tokens: Option<bool>,
     pub(crate) input_token_ids: Vec<i32>,
     input_tokens: Vec<InputToken>,
     #[serde(default)]
-    rendering: Option<Rendering>,
+    pub(crate) rendering: Option<Rendering>,
     pub(crate) selected_layers: Vec<u32>,
     pub(crate) top_k: usize,
     pub(crate) cells: Vec<Cell>,
@@ -257,6 +261,8 @@ struct SummaryView {
     producer: Option<ProducerView>,
     tokenizer: Option<TokenizerView>,
     execution_mode: Option<String>,
+    input_source: Option<String>,
+    add_special_tokens: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -528,6 +534,10 @@ fn validate_trace(document: &TraceDocument) -> Result<()> {
             document.rendering.is_some(),
             "v3 trace is missing rendering"
         );
+        ensure!(
+            document.input_source.is_some(),
+            "v3 trace is missing input_source"
+        );
     }
     ensure!(
         !document.selected_layers.is_empty(),
@@ -635,6 +645,9 @@ fn validate_trace(document: &TraceDocument) -> Result<()> {
             valid_lens_rendering_topology(rendering),
             "rendering spans have an invalid record topology"
         );
+        if document.schema_version == 3 {
+            validate_trace_input_rendering(document, rendering)?;
+        }
     }
     let expected_cells = document
         .selected_layers
@@ -903,7 +916,97 @@ fn summary_view(document: &TraceDocument) -> SummaryView {
             pretokenizer: tokenizer.pretokenizer.clone(),
         }),
         execution_mode: document.execution_mode.clone(),
+        input_source: document.input_source.clone(),
+        add_special_tokens: document.add_special_tokens,
     }
+}
+
+fn validate_trace_input_rendering(document: &TraceDocument, rendering: &Rendering) -> Result<()> {
+    let source = document
+        .input_source
+        .as_deref()
+        .expect("v3 input source checked");
+    let architecture = document
+        .deployed_model
+        .as_ref()
+        .and_then(|model| model.architecture.as_deref());
+    let ordinary_qwen = matches!(architecture, Some("qwen35" | "qwen35moe"));
+    let muse = architecture == Some("muse-glimmer");
+    let valid = match source {
+        "prompt" => {
+            document.add_special_tokens.is_some()
+                && (ordinary_qwen && rendering.renderer == "tokenizer_text"
+                    || muse && rendering.renderer == "muse_tokenizer_raw_prompt")
+                && rendering.generation_mode.is_none()
+                && rendering.spans.is_empty()
+        }
+        "token_ids" => {
+            (ordinary_qwen || muse)
+                && document.add_special_tokens.is_none()
+                && rendering.renderer == "literal_token_ids"
+                && rendering.generation_mode.is_none()
+                && rendering.spans.is_empty()
+        }
+        "messages" => {
+            document.add_special_tokens == Some(false)
+                && match rendering.renderer.as_str() {
+                    "qwen_chatml_messages_v1" if ordinary_qwen => {
+                        rendering.generation_mode.as_deref() == Some("auto")
+                    }
+                    "qwen3.6_messages_v1" if ordinary_qwen => rendering
+                        .generation_mode
+                        .as_deref()
+                        .is_some_and(|mode| matches!(mode, "auto" | "thinking" | "no_thinking")),
+                    "qwen3.8_messages_v1" if ordinary_qwen => {
+                        rendering.generation_mode.as_deref().is_some_and(|mode| {
+                            matches!(
+                                mode,
+                                "thinking_low"
+                                    | "thinking_medium"
+                                    | "thinking_xhigh"
+                                    | "no_thinking"
+                            )
+                        })
+                    }
+                    "muse_glimmer_atem_v1" if muse => {
+                        rendering.generation_mode.as_deref().is_some_and(|mode| {
+                            matches!(
+                                mode,
+                                "reasoning_low" | "reasoning_medium" | "reasoning_high"
+                            )
+                        }) && rendering.spans.is_empty()
+                    }
+                    "muse_glimmer_atem_annotated_v1" if muse => {
+                        rendering.generation_mode.as_deref().is_some_and(|mode| {
+                            matches!(
+                                mode,
+                                "reasoning_low" | "reasoning_medium" | "reasoning_high"
+                            )
+                        }) && !rendering.spans.is_empty()
+                    }
+                    _ => false,
+                }
+        }
+        "open_responses" => {
+            ordinary_qwen
+                && document.add_special_tokens == Some(false)
+                && rendering.renderer == "qwen_open_responses_annotated_v1"
+                && rendering.generation_mode.as_deref().is_some_and(|mode| {
+                    matches!(
+                        mode,
+                        "auto"
+                            | "thinking_low"
+                            | "thinking_medium"
+                            | "thinking_xhigh"
+                            | "no_thinking"
+                    )
+                })
+                && !rendering.spans.is_empty()
+        }
+        _ => false,
+    };
+    ensure!(valid, "trace input rendering metadata is inconsistent");
+    Ok(())
 }
 
 fn display_map(document: &TraceDocument) -> HashMap<u32, String> {
@@ -1595,6 +1698,14 @@ fn print_summary(view: &SummaryView) {
         "{} tokens x {} layers = {} cells | captured top-k {}",
         view.token_count, view.layer_count, view.cell_count, view.captured_top_k
     );
+    if let Some(source) = &view.input_source {
+        println!(
+            "input {source} | add_special_tokens {}",
+            view.add_special_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".into())
+        );
+    }
     if view.score.legacy_unknown {
         println!("score legacy unknown | softmax unknown");
     } else {
@@ -1851,7 +1962,7 @@ mod tests {
 
     fn fixture(version: u32, rendering: bool) -> TraceDocument {
         let rendering = rendering.then(|| Rendering {
-            renderer: "test_messages".into(),
+            renderer: "qwen3.6_messages_v1".into(),
             generation_mode: Some("thinking".into()),
             spans: vec![
                 RenderedSpan {
@@ -1923,7 +2034,7 @@ mod tests {
             deployed_model: (version == 3).then(|| DeployedModel {
                 name: Some("test".into()),
                 base_model_name: None,
-                architecture: Some("test".into()),
+                architecture: Some("qwen35moe".into()),
                 locator_id: Some("test".into()),
                 vocab_size: Some(32),
             }),
@@ -1948,6 +2059,8 @@ mod tests {
                 softmax_applied: false,
             }),
             execution_mode: (version == 3).then(|| "test".into()),
+            input_source: (version == 3).then(|| "messages".into()),
+            add_special_tokens: (version == 3).then_some(false),
             input_token_ids: vec![10, 11, 12],
             input_tokens: vec![input(0, 10, "a"), input(1, 11, "b"), input(2, 12, "c")],
             rendering,
@@ -2224,6 +2337,7 @@ mod tests {
     #[test]
     fn v3_muse_message_records_resolve_role_and_channel_boundaries() {
         let mut document = fixture(3, true);
+        document.deployed_model.as_mut().unwrap().architecture = Some("muse-glimmer".into());
         let rendering = document.rendering.as_mut().unwrap();
         rendering.renderer = "muse_glimmer_atem_annotated_v1".into();
         rendering.generation_mode = Some("reasoning_high".into());
@@ -2483,42 +2597,29 @@ mod tests {
         }));
 
         let rendering = document.rendering.as_mut().unwrap();
-        rendering.renderer = "test_messages".into();
-        rendering.generation_mode = Some("thinking".into());
-        document.rendering.as_mut().unwrap().spans = vec![
-            RenderedSpan {
-                kind: "bos_marker".into(),
-                message_index: None,
-                tool_call_index: None,
-                role: None,
-                channel: None,
-                label: None,
-                byte_start: 0,
-                byte_end: 1,
-                token_start: Some(0),
-                token_end: Some(1),
-            },
-            RenderedSpan {
-                kind: "reasoning_instruction_content".into(),
-                message_index: None,
-                tool_call_index: None,
-                role: Some("system".into()),
-                channel: Some("thinking".into()),
-                label: None,
-                byte_start: 1,
-                byte_end: 3,
-                token_start: Some(1),
-                token_end: Some(3),
-            },
-        ];
+        rendering.renderer = "qwen3.8_messages_v1".into();
+        rendering.generation_mode = Some("thinking_xhigh".into());
+        document.deployed_model.as_mut().unwrap().architecture = Some("qwen35".into());
+        document.rendering.as_mut().unwrap().spans = vec![RenderedSpan {
+            kind: "reasoning_instruction_content".into(),
+            message_index: None,
+            tool_call_index: None,
+            role: Some("system".into()),
+            channel: Some("thinking".into()),
+            label: None,
+            byte_start: 0,
+            byte_end: 2,
+            token_start: Some(0),
+            token_end: Some(2),
+        }];
         validate_trace(&document).unwrap();
         assert_eq!(
             resolve_position(&document, "channel:thinking:start").unwrap(),
-            1
+            0
         );
         assert_eq!(
             resolve_position(&document, "channel:thinking:end").unwrap(),
-            2
+            1
         );
     }
 
@@ -2534,5 +2635,18 @@ mod tests {
         );
 
         validate_trace(&fixture(2, false)).unwrap();
+    }
+
+    #[test]
+    fn v3_rejects_cross_family_rendering_metadata() {
+        let mut document = fixture(3, true);
+        validate_trace(&document).unwrap();
+        document.deployed_model.as_mut().unwrap().architecture = Some("muse-glimmer".into());
+        assert!(
+            validate_trace(&document)
+                .unwrap_err()
+                .to_string()
+                .contains("input rendering metadata")
+        );
     }
 }

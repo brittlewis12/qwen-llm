@@ -11,11 +11,24 @@ cargo run -q -p qwen-cli --bin qwen-lens -- run \
   --max-new-tokens 32
 ```
 
-Use exactly one of `--prompt`, `--token-ids`, or `--messages`. Raw prompts use
-the tokenizer's configured special-token insertion unless
-`--no-special-tokens` is set. Message input is a strict system/user/assistant
-array (or `{"messages": [...]}`) ending in a user turn. Literal token IDs are
-passed unchanged.
+Use exactly one of `--prompt`, `--token-ids`, `--user`, `--messages`, or
+`--open-responses`. Raw prompts use the tokenizer's configured special-token
+insertion unless `--no-special-tokens` is set, and literal token IDs are passed
+unchanged. `--user` and `--messages` use the same strict
+system/user/assistant renderer as normal model runs.
+
+`--open-responses FILE|-` (alias `--responses-input`) is ordinary-Qwen-only. It
+uses the exact parser, model capability gates, and prompt renderer shared with
+`qwen serve`, including `instructions`, head system/developer messages,
+server-normalized reasoning history, tool definitions, function calls, and
+function outputs. Qwen3.8 history follows its server contract and may become a
+preclosed empty thinking block rather than preserving supplied reasoning. The
+current server deliberately compiles system and developer messages to the same
+model-visible `system` record; span metadata retains the source label so this
+equivalence remains auditable. Request generation/sampling fields and narrowed
+`allowed_tools` are rejected because Lens CLI flags own execution. The request
+`model`, streaming, and response-envelope fields do not alter prompt bytes;
+`--model` selects the actual local model.
 
 Sampling defaults to greedy. `--temperature`, `--top-k`, `--top-p`, `--min-p`,
 and `--seed` expose the existing deterministic native sampler.
@@ -26,15 +39,12 @@ stdout defaults to a compact summary while the document is persisted. An
 explicit `--format json` always prints JSON; explicit `--format summary` is also
 allowed without an output file when discarding the full artifact is intentional.
 `--output PATH` atomically replaces a regular run file in an existing parent
-directory; symlink leaves are rejected. The common ordinary-Qwen, Flash-Next, and Muse
-envelope records the runtime and model path, canonical plan path and parsed plan,
-input source and exact token IDs, sampler settings, decoded text and stop reason,
-operation applications, requested and emitted live readouts, and native captures
-when produced. Existing runs remain schema version 1. Published Muse runs emit
-version 2 with the deployed model content identity, canonical lens-manifest and
-source/payload identities, explicit transfer status, selected token IDs, and the
-exact selected matrix digests. Rendered message-role spans remain reserved for a
-later schema increment.
+directory; symlink leaves are rejected. Run schema v3 records the runtime and
+model path, canonical plan path and parsed plan, input source, exact token IDs,
+resolved renderer/mode, authored byte/token spans, sampler settings, decoded
+text and stop reason, operation applications, requested and emitted live
+readouts, and native captures. Published Muse runs additionally bind the model
+content identity and exact selected lens matrices.
 
 ## Coefficient Sweep
 
@@ -64,7 +74,7 @@ operation application is recorded.
 
 Every arm gets a fresh sequence and a fresh sampler initialized with the same
 requested seed. Arms execute serially; no KV state, sampler state, or generated
-tokens cross arm boundaries. Each child remains an ordinary `qwen.lens.run` v1
+tokens cross arm boundaries. Each child remains an ordinary `qwen.lens.run` v3
 artifact containing its exact effective plan. The command writes all children
 to a private sibling staging directory and exclusively publishes a new output
 directory only after every arm and the manifest are synced:
@@ -91,7 +101,7 @@ qwen-lens inspect-sweep new-sweep --format json
 
 It requires the exact manifest/arms directory topology with no extra entries or
 symlinks, checks every declared child length and BLAKE3, parses ordinary
-`qwen.lens.run` v1 children, and rejects cross-arm runtime, model path, prompt,
+`qwen.lens.run` children, and rejects cross-arm runtime, model path, prompt,
 sampler, generation-bound, source-plan-path, or effective-plan drift. Only the
 selected operation coefficient may differ. Coefficient matching is bit-exact,
 so `0` and `-0` remain distinct; zero arms must not record the disabled
@@ -170,21 +180,23 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- trace-full \
   --output trace.json
 ```
 
-Use exactly one of `--prompt`, `--token-ids`, or `--messages`. `--message-mode`
-is accepted only with messages. For Qwen3.6 J/R, omission or `auto` preserves
+Use exactly one of `--prompt`, `--token-ids`, `--user`, `--messages`, or
+`--open-responses`. `--message-mode` is accepted only with user/messages. For
+Qwen3.6 J/R, omission or `auto` preserves
 the existing Auto transition, while `thinking` and `no-thinking` select those
 exact transitions; effort tiers are rejected. For Qwen3.8 J, omission,
-`medium`, or `thinking` selects the exact medium transition, `low` and `xhigh`
+`xhigh`, or `thinking` selects the normal xhigh transition, `low` and `medium`
 select their exact effort tiers, and `no-thinking` selects the exact closed
-thinking transition; `auto` is rejected. `rendering.generation_mode` records
+thinking transition; `auto` is rejected. Open Responses takes its rendering
+mode from `reasoning.effort` / `x_qwen.no_thinking`. `rendering.generation_mode` records
 the resolved mode (`auto`, `thinking`, `no_thinking`, or a `thinking_*` tier).
 Inputs are never truncated and are bounded at 128 tokens. Omit `--layers` to
 trace all 63 published source layers.
 
 Qwen performs one packed prompt forward, streams only the selected F16 transport
 matrices, and keeps full logits on Metal. Published Muse tracing currently
-accepts raw `--prompt` or literal `--token-ids`; exact annotated ATEM message
-spans are not yet available, so `--messages` fails closed. Muse additionally
+accepts raw, literal-token, and exact annotated ATEM system/user/assistant
+inputs; Open Responses remains Qwen-only. Muse additionally
 requires `--identity-cache` and `--allow-unvalidated-transfer`. It captures the
 scalar prefill once, uploads each selected 88.6 MB matrix once, and reuses it
 across positions; `execution_mode` records this rather than claiming packed
@@ -205,8 +217,8 @@ geometry and byte length without rescanning the 3.3 GiB payload. Muse verifies
 each selected matrix and resolves a declared/cached GGUF identity without
 hashing model weights.
 
-For `--messages`, the renderer authors byte spans while constructing the exact
-prompt. Exact token boundaries are recorded when the full tokenization has them;
+For structured messages and Open Responses, the renderer authors byte spans
+while constructing the exact prompt. Exact token boundaries are recorded when the full tokenization has them;
 nonstructural role, content, separator, and reasoning spans use null token bounds
 when an authored boundary falls inside a BPE token. Structural selector markers
 must always have a nonempty exact token range or trace creation fails. This
@@ -274,9 +286,9 @@ qwen-lens compare left.json right.json --format json --limit 25
 ```
 
 It accepts only validated, same-version `qwen.lens.trace` v2 or v3 pairs, or
-`qwen.lens.run` v1 or v2 pairs. Each input must be a regular non-symlink file no
+`qwen.lens.run` v1, v2, or v3 pairs. Each input must be a regular non-symlink file no
 larger than 256 MiB. Mixed schemas, unknown versions, incompatible trace
-geometry or score semantics, and runs with different prompt IDs, runtime, model
+geometry, score semantics, input rendering provenance, and runs with different prompt IDs, runtime, model
 path, stable execution identities, or sampler settings are rejected. Cache-state
 outcomes remain recorded but do not make identical content identities incomparable.
 

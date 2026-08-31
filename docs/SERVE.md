@@ -206,6 +206,13 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
 
 ## Wire subset (Open Responses)
 
+The parser, Qwen capability binding, and prompt renderer are one shared pure
+module. `qwen-lens --open-responses FILE|-` uses that same path for offline
+readout/intervention prompts and records renderer-authored role, reasoning, and
+tool-channel spans. Lens does not emulate HTTP routing or response filtering:
+its `--model` and sampler flags remain authoritative, so request sampling fields
+and narrowed `allowed_tools` fail closed there.
+
 `POST /v1/responses` accepting. If `max_output_tokens` is omitted, serve
 defaults to 65536 tokens unless overridden with `--max-tokens` at startup:
 

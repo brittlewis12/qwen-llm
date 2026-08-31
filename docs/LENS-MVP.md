@@ -24,11 +24,16 @@ UI, generic plugin systems, and production hardening are out of scope.
   optional `--system`, or strict `--messages`, use the same release Qwen or Muse
   renderer as normal model runs; model-valid reasoning modes remain explicit.
   Omitted Qwen3.8 mode now resolves to the normal run default, `xhigh`.
+- Ordinary Qwen also accepts bounded `--open-responses` request JSON through the
+  exact parser, capability gates, and prompt renderer shared with `qwen serve`.
+  Developer/system instructions, server-normalized reasoning history, tool
+  calls, and tool results remain represented without translating through the
+  strict message subset. Qwen3.8 history retains its server preclosure rules.
 - Qwen and Muse message traces retain renderer-authored byte spans and exact
   token spans where BPE boundaries permit them; structural selector markers
-  remain exact. The Muse ATEM renderer annotates roles, recipients, reasoning,
-  tool-call/result channels, synthetic system metadata, per-call records, and
-  EOM/EOT boundaries. Trace and run stdout remains JSON by default unless
+  remain exact. Open Responses annotates compiled roles, instruction source,
+  reasoning, tool-call/result channels, and per-call identity; Muse ATEM adds
+  recipients, synthetic system metadata, and EOM/EOT records. Trace and run stdout remains JSON by default unless
   `--output` selects a compact summary; either format can be requested
   explicitly.
 - Native selected-token J/R artifacts support live readout and intervention.
@@ -80,8 +85,8 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes with 155 tests and three model-bound
-  tests intentionally ignored.
+- The active `qwen-lens` unit suite passes 202 tests with four model-bound
+  qualification tests intentionally ignored by default.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
 - The exact 4.52 GB eyes-ml Muse source imports to 51 pinned F16 matrices. On the
@@ -94,6 +99,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 - The real Muse Q8 tokenizer reconstructs an ATEM system/user prompt exactly;
   BOS, start, message, EOT, and generated-assistant markers all align to exact
   nonempty token ranges.
+- The real Qwen3.8 Q8 tokenizer reconstructs a tool-loop Open Responses prompt
+  exactly; role, thinking, tool-call/result, and generated structural markers
+  align to exact nonempty token ranges.
 - A real Qwen3.8 Q8 published-J `[0,0.1,0]` resident sweep produces byte-identical
   zero controls with no operation applications. The active L31 arm records five
   applications and raises the selected `lightning` score at every prompt site.
@@ -115,10 +123,12 @@ UI, generic plugin systems, and production hardening are out of scope.
   its separate real template asset.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
-- Structured Lens messages currently match the normal run lane's strict
-  system/user/assistant subset. The server's developer/tool item grammar is not
-  yet a Lens input schema; raw text and literal IDs simulate malformed or forged
-  structures but do not claim genuine channel provenance.
+- Strict Lens messages match the normal run lane's system/user/assistant subset;
+  Open Responses supplies the server's genuine developer/tool grammar for
+  ordinary Qwen. The current server intentionally compiles developer and system
+  input to one model-visible system role, while artifact labels retain the input
+  source. Raw text and literal IDs remain the path for malformed or forged
+  structure and make no genuine-channel claim.
 - The published Muse J lens was fitted on 900 text-only BF16 prompts. Q8 use and
   image-token positions remain explicitly unvalidated transfers. No published
   Muse R profile is accepted until its final asset and recipe are pinned.

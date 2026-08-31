@@ -3,6 +3,7 @@ use blake3::Hasher as Blake3Hasher;
 use clap::{ArgGroup, Args, ValueEnum};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
+use qwen_llm::model_family::ModelFamily;
 use qwen_llm::research::{MAX_RESEARCH_PACKED_READOUT_POSITIONS, RESEARCH_IDENTITY_SCHEME};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
 use crate::lens_input::{
-    LensInputRendering, LensInputSpec, LensMessageMode, QwenMessageProtocol, prepare_qwen_input,
+    LensInputRendering, LensInputSpec, LensMessageMode, prepare_qwen_model_input,
     validate_lens_input_spec,
 };
 
@@ -240,7 +241,7 @@ pub(crate) struct ReadFullArgs {
     ArgGroup::new("trace_full_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "user", "messages"])
+        .args(["prompt", "token_ids", "user", "messages", "open_responses"])
 ))]
 pub(crate) struct TraceFullArgs {
     /// Matching Qwen3.6, Qwen3.8, or Muse Glimmer GGUF used for capture and readout.
@@ -271,11 +272,15 @@ pub(crate) struct TraceFullArgs {
     #[arg(long, value_name = "FILE|-")]
     pub(crate) messages: Option<PathBuf>,
 
+    /// Open Responses request JSON rendered by the exact qwen serve prompt path.
+    #[arg(long, visible_alias = "responses-input", value_name = "FILE|-")]
+    pub(crate) open_responses: Option<PathBuf>,
+
     /// Generation transition for --user/--messages; supported values depend on the lens model.
     #[arg(
         long,
         value_enum,
-        conflicts_with_all = ["prompt", "token_ids"]
+        conflicts_with_all = ["prompt", "token_ids", "open_responses"]
     )]
     pub(crate) message_mode: Option<LensMessageMode>,
 
@@ -283,7 +288,7 @@ pub(crate) struct TraceFullArgs {
     #[arg(
         long,
         requires = "prompt",
-        conflicts_with_all = ["token_ids", "user", "messages"]
+        conflicts_with_all = ["token_ids", "user", "messages", "open_responses"]
     )]
     pub(crate) no_special_tokens: bool,
 
@@ -328,6 +333,7 @@ impl TraceFullArgs {
             user: self.user.as_deref(),
             system: self.system.as_deref(),
             messages: self.messages.as_deref(),
+            open_responses: self.open_responses.as_deref(),
             no_special_tokens: self.no_special_tokens,
             message_mode: self.message_mode,
         }
@@ -1616,7 +1622,6 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let manifest_path = args.full_lens.join(FULL_MANIFEST_NAME);
     let manifest: FullLensManifest = read_json_file(&manifest_path)?;
     validate_trace_full_manifest(&manifest)?;
-    let profile = profile_for_manifest(&manifest)?;
     let layers = if args.layers.is_empty() {
         manifest.transport.source_layers.clone()
     } else {
@@ -1664,11 +1669,9 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             .map(str::to_owned),
     };
     let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
-    let protocol = match profile.id {
-        PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => QwenMessageProtocol::Qwen36,
-        PublishedProfileId::Qwen38J => QwenMessageProtocol::Qwen38,
-    };
-    let prepared_input = prepare_qwen_input(args.input_spec(), protocol, &tokenizer)?;
+    let family = ModelFamily::detect(loaded.gguf()).context("detect trace-full Qwen family")?;
+    let prepared_input =
+        prepare_qwen_model_input(args.input_spec(), family, loaded.gguf(), &tokenizer)?;
     let input_source = prepared_input.source;
     let add_special_tokens = prepared_input.add_special_tokens;
     let token_ids = prepared_input.token_ids;
@@ -2941,6 +2944,7 @@ mod tests {
             user: None,
             system: None,
             messages: None,
+            open_responses: None,
             message_mode: None,
             no_special_tokens: false,
             layers: vec![0, 31, 62],

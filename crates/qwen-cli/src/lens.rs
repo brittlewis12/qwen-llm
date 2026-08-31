@@ -560,6 +560,10 @@ fn read_full(args: ReadFullArgs) -> Result<()> {
 
 fn trace_full(args: TraceFullArgs) -> Result<()> {
     if muse_full_lens::is_artifact(&args.full_lens)? {
+        ensure!(
+            args.open_responses.is_none(),
+            "--open-responses supports ordinary Qwen only; Muse Glimmer is not supported"
+        );
         muse_full_lens::trace_full(args)
     } else {
         trace_qwen_full(args)
@@ -3101,6 +3105,19 @@ mod tests {
         .unwrap();
         assert!(matches!(messages.command, Command::TraceFull(_)));
 
+        let responses = Cli::try_parse_from([
+            "qwen-lens",
+            "trace-full",
+            "--model",
+            "model.gguf",
+            "--full-lens",
+            "full-lens",
+            "--open-responses",
+            "request.json",
+        ])
+        .unwrap();
+        assert!(matches!(responses.command, Command::TraceFull(_)));
+
         let user = Cli::try_parse_from([
             "qwen-lens",
             "trace-full",
@@ -3130,6 +3147,21 @@ mod tests {
                 "hello",
                 "--message-mode",
                 "thinking",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "qwen-lens",
+                "trace-full",
+                "--model",
+                "model.gguf",
+                "--full-lens",
+                "full-lens",
+                "--open-responses",
+                "request.json",
+                "--messages",
+                "messages.json",
             ])
             .is_err()
         );

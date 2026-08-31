@@ -993,6 +993,7 @@ mod tests {
             user: None,
             system: None,
             messages: None,
+            open_responses: None,
             message_mode: None,
             no_special_tokens: false,
             max_new_tokens: 1,

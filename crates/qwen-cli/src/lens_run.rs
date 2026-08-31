@@ -52,7 +52,7 @@ const MAX_SWEEP_ARMS: usize = 64;
     ArgGroup::new("lens_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "user", "messages"])
+        .args(["prompt", "token_ids", "user", "messages", "open_responses"])
 ))]
 pub(crate) struct LensRunArgs {
     /// Ordinary Qwen, Qwen3.8-Flash-Next, or Muse Glimmer GGUF model.
@@ -87,15 +87,23 @@ pub(crate) struct LensRunArgs {
     #[arg(long, value_name = "FILE|-")]
     pub(crate) messages: Option<PathBuf>,
 
+    /// Open Responses request JSON rendered by the exact qwen serve prompt path.
+    #[arg(long, visible_alias = "responses-input", value_name = "FILE|-")]
+    pub(crate) open_responses: Option<PathBuf>,
+
     /// Generation transition for --user/--messages; supported values depend on the model.
-    #[arg(long, value_enum, conflicts_with_all = ["prompt", "token_ids"])]
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with_all = ["prompt", "token_ids", "open_responses"]
+    )]
     pub(crate) message_mode: Option<LensMessageMode>,
 
     /// Disable tokenizer-configured specials for --prompt.
     #[arg(
         long,
         requires = "prompt",
-        conflicts_with_all = ["token_ids", "user", "messages"]
+        conflicts_with_all = ["token_ids", "user", "messages", "open_responses"]
     )]
     pub(crate) no_special_tokens: bool,
 
@@ -140,6 +148,7 @@ impl LensRunArgs {
             user: self.user.as_deref(),
             system: self.system.as_deref(),
             messages: self.messages.as_deref(),
+            open_responses: self.open_responses.as_deref(),
             no_special_tokens: self.no_special_tokens,
             message_mode: self.message_mode,
         }
@@ -151,7 +160,7 @@ impl LensRunArgs {
     ArgGroup::new("sweep_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "user", "messages"])
+        .args(["prompt", "token_ids", "user", "messages", "open_responses"])
 ))]
 pub(crate) struct CoefficientSweepArgs {
     /// Ordinary dense or MoE Qwen GGUF model, loaded once for every arm.
@@ -195,15 +204,23 @@ pub(crate) struct CoefficientSweepArgs {
     #[arg(long, value_name = "FILE|-")]
     messages: Option<PathBuf>,
 
+    /// Open Responses request JSON rendered by the exact qwen serve prompt path.
+    #[arg(long, visible_alias = "responses-input", value_name = "FILE|-")]
+    open_responses: Option<PathBuf>,
+
     /// Generation transition for --user/--messages; supported values depend on the model.
-    #[arg(long, value_enum, conflicts_with_all = ["prompt", "token_ids"])]
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with_all = ["prompt", "token_ids", "open_responses"]
+    )]
     message_mode: Option<LensMessageMode>,
 
     /// Disable tokenizer-configured specials for --prompt.
     #[arg(
         long,
         requires = "prompt",
-        conflicts_with_all = ["token_ids", "user", "messages"]
+        conflicts_with_all = ["token_ids", "user", "messages", "open_responses"]
     )]
     no_special_tokens: bool,
 
@@ -247,6 +264,7 @@ impl CoefficientSweepArgs {
             user: self.user.clone(),
             system: self.system.clone(),
             messages: self.messages.clone(),
+            open_responses: self.open_responses.clone(),
             message_mode: self.message_mode,
             no_special_tokens: self.no_special_tokens,
             max_new_tokens: self.max_new_tokens,
@@ -927,6 +945,10 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
     if crate::muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
+        ensure!(
+            args.open_responses.is_none(),
+            "--open-responses supports ordinary Qwen only; Muse Glimmer is not supported"
+        );
         return crate::muse_lens_run::run(
             &args,
             plan,
@@ -938,6 +960,10 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     }
     let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
     if family == ModelFamily::Qwen4Exp {
+        ensure!(
+            args.open_responses.is_none(),
+            "--open-responses supports ordinary Qwen only; Flash-Next is not supported"
+        );
         return run_qwen4exp(
             &args,
             plan,
@@ -3100,6 +3126,23 @@ mod tests {
         assert_eq!(structured.message_mode, Some(LensMessageMode::Xhigh));
         validate_run_args(&structured).unwrap();
 
+        let responses = RunArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--open-responses",
+            "request.json",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(
+            responses.open_responses.as_deref(),
+            Some(Path::new("request.json"))
+        );
+        validate_run_args(&responses).unwrap();
+
         let raw = RunArgsParser::try_parse_from([
             "test",
             "--model",
@@ -3127,6 +3170,20 @@ mod tests {
                 "plan.json",
                 "--token-ids",
                 "1,2",
+                "--message-mode",
+                "thinking",
+            ])
+            .is_err()
+        );
+        assert!(
+            RunArgsParser::try_parse_from([
+                "test",
+                "--model",
+                "model.gguf",
+                "--plan",
+                "plan.json",
+                "--open-responses",
+                "request.json",
                 "--message-mode",
                 "thinking",
             ])
@@ -3166,6 +3223,29 @@ mod tests {
         );
         assert_eq!(parsed.arm_run_args().seed, 0);
         validate_coefficient_sweep_args(&parsed).unwrap();
+
+        let responses = SweepArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--operation",
+            "steer",
+            "--coefficients",
+            "0,0.1",
+            "--open-responses",
+            "request.json",
+            "--output",
+            "sweep",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(
+            responses.arm_run_args().open_responses.as_deref(),
+            Some(Path::new("request.json"))
+        );
+        validate_coefficient_sweep_args(&responses).unwrap();
 
         let mut excessive = parsed;
         excessive.coefficients = vec![1.0; MAX_SWEEP_ARMS + 1];

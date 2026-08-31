@@ -113,12 +113,30 @@ pub(crate) enum QwenTemplate {
     Qwen38,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SystemSource {
+    Instructions,
+    System,
+    Developer,
+}
+
+impl SystemSource {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Instructions => "instructions",
+            Self::System => "system",
+            Self::Developer => "developer",
+        }
+    }
+}
+
 /// Validated transcript plus generation controls, ready for rendering.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ServeRequest {
     pub(crate) model: String,
     pub(crate) instructions: Option<String>,
     pub(crate) system: Option<String>,
+    pub(crate) system_source: Option<SystemSource>,
     pub(crate) turns: Vec<Turn>,
     pub(crate) tools: Vec<ToolDefinition>,
     /// Exact executable set. Empty means no calls are executable; narrowing
@@ -154,6 +172,7 @@ impl Default for ServeRequest {
             model: String::new(),
             instructions: None,
             system: None,
+            system_source: None,
             turns: Vec::new(),
             tools: Vec::new(),
             allowed_tools: Vec::new(),
@@ -575,6 +594,7 @@ fn validate_input(
     request: &mut ServeRequest,
 ) -> Result<(), ServeError> {
     request.system = instructions;
+    request.system_source = request.system.as_ref().map(|_| SystemSource::Instructions);
     match input {
         Value::String(text) => {
             if text.is_empty() {
@@ -657,6 +677,11 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                             ));
                         }
                         request.system = Some(text);
+                        request.system_source = Some(if role == "developer" {
+                            SystemSource::Developer
+                        } else {
+                            SystemSource::System
+                        });
                     }
                     "user" => {
                         if pending_reasoning.is_some() {
@@ -1257,6 +1282,7 @@ mod tests {
         ]}))
         .unwrap();
         assert_eq!(request.system.as_deref(), Some("be terse"));
+        assert_eq!(request.system_source, Some(SystemSource::Developer));
 
         let error = parse(json!({"model": "m", "input": [
             {"role": "user", "content": "q"},

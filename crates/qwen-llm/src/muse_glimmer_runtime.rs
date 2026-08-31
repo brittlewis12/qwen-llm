@@ -4,7 +4,7 @@ use crate::gguf::GgufFile;
 use crate::metal::{
     MetalContext, MetalMemoryAdmission, PostBlockIntervention, evaluate_metal_memory_admission,
 };
-use crate::muse_glimmer::MuseGlimmerConfig;
+use crate::muse_glimmer::{MuseGlimmerArtifactProfile, MuseGlimmerConfig};
 use crate::muse_glimmer_lens::{
     MuseGlimmerLensCapture, MuseGlimmerLensCaptureBank, MuseGlimmerLensError, MuseGlimmerLensRule,
     MuseGlimmerSelectedTokenCovectors, muse_glimmer_selected_token_covectors,
@@ -117,6 +117,10 @@ impl MuseGlimmerLoadedModel {
 
     pub fn config(&self) -> &MuseGlimmerConfig {
         self.weights.config()
+    }
+
+    pub fn artifact_profile(&self) -> MuseGlimmerArtifactProfile {
+        self.weights.artifact_profile()
     }
 
     pub fn capacity(&self) -> usize {

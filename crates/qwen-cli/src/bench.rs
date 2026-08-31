@@ -38,6 +38,7 @@ mod integrated_grammar_row;
 mod lm_head_screening_oracle;
 mod messages;
 mod moe_gdn_repair;
+mod muse_glimmer_request_bench;
 mod prefix_cache_vt_ab;
 mod q4_mma_ceiling;
 mod response_shape_runtime;
@@ -513,6 +514,9 @@ enum Cmd {
     /// Packed prefill is the default no-spec path. `--sequential-prefill`
     /// keeps the legacy token-by-token prompt replay loop for A/B work.
     Decode(DecodeArgs),
+    /// Benchmark one resident Muse Glimmer ATEM request without claiming
+    /// llama-bench pp/tg comparability.
+    MuseRequest(muse_glimmer_request_bench::MuseRequestArgs),
     /// Prompt-only prefill benchmark aligned with llama-bench pp semantics.
     Pp(PpArgs),
     /// Profile native DeepSeek V4 packed prefill with production policy.
@@ -3090,6 +3094,7 @@ fn run() -> Result<()> {
         }
         Cmd::VocabAudit(a) => run_vocab_audit(a),
         Cmd::Decode(a) => run_decode(a),
+        Cmd::MuseRequest(a) => muse_glimmer_request_bench::run(a),
         Cmd::Pp(a) => run_pp(a),
         #[cfg(feature = "dsv4-diagnostics")]
         Cmd::Dsv4Prefill(a) => {

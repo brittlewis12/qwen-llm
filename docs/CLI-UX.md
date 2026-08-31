@@ -115,6 +115,31 @@ Contract:
   now resolve after family detection, so Muse flat and modern invocations both
   receive its released preset while explicit values remain unchanged.
 
+Muse also has a request-native benchmark surface:
+
+```sh
+qwen-bench muse-request -m Muse-Glimmer.gguf \
+  --prompt "Explain the result" --reasoning-strength high --tokens 64
+qwen-bench muse-request -m Muse-Glimmer.gguf \
+  --messages request.json --runs 3 -o json
+```
+
+`muse-request` uses the same strict `MuseGlimmerRequest` ATEM renderer and all
+four reasoning strengths as run and Lens. Its sampler uses the released preset
+shared by normal run and resident serve; Lens keeps its deterministic greedy
+default. The benchmark loads one resident model and session, performs one
+full-request warmup by default, then resets the resident position and
+reconstructs the sampler for every timed run. Its versioned JSON object keeps
+prompt forwards, sampled tokens, emitted tokens, and generation transitions as
+separate denominators. It is intentionally not a `pp<N>`/`tg<N>` row: those
+commands retain their llama-bench synthetic meaning and still use the ordinary
+Qwen runtime. `workload_qualified` means only canonical source identity plus a
+consistent warmup/timed token shape; raw rates do not claim an optimized build
+profile or statistical confidence. The report validates annotated ATEM input
+but marks output ATEM validation `not_performed`; a stop token alone is not
+reported as proof of grammatical closure. Provenance records existing metadata
+identities and tensor byte counts without hashing model weight payloads.
+
 The short root help should lead with commands and copy-ready examples. The long
 help may retain the expanded documented legacy/research flag surface.
 

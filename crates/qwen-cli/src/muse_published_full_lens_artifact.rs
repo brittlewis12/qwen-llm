@@ -10,6 +10,7 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
 pub(crate) const MANIFEST_NAME: &str = "lens.json";
 pub(crate) const PAYLOAD_NAME: &str = "transport.f16le";
 pub(crate) const PROFILE_NAME: &str = "eyes_ml_muse_glimmer_30b_j_v1";
+const R_PROFILE_NAME: &str = "brittlewis12_muse_glimmer_30b_r_pile10k25_v1";
 
 const SOURCE_REPOSITORY: &str = "eyes-ml/Muse-Glimmer-30B_jacobian-lens";
 const SOURCE_REVISION: &str = "71d8434fbd38c8b5d70e1ff1ff2095d5da926c34";
@@ -20,6 +21,16 @@ const DATA_PICKLE_SHA256: &str = "f187e6221a2c5540769e3af89d4e0ea81159a1c98a7a1d
 const SERIALIZATION_ID: &str = "1371680345541892666311410627619629120835";
 const ARCHIVE_ROOT: &str = "Muse-Glimmer-30B_jacobian_lens";
 const PAYLOAD_BLAKE3: &str = "64f50f387a56a4533631e62789a896e759f0ebbdb3a9fdbae45898a5dc8a2794";
+const R_SOURCE_REPOSITORY: &str = "brittlewis12/muse-glimmer-30b-r-lens-checkpoints";
+const R_SOURCE_REVISION: &str = "b406c8465c9a49657e30af07753cd08ae7f96f56";
+const R_SOURCE_FILENAME: &str = "muse-glimmer-30b-r-lens.pt";
+const R_SOURCE_BYTES: u64 = 4_518_856_794;
+const R_SOURCE_SHA256: &str = "3675c1371e0d0e97153364b15b38ab169fedc2a392e80c3e4e2e0586d62b068c";
+const R_DATA_PICKLE_SHA256: &str =
+    "24879bfdc435edefb27dc989245dcd07ec237a5d5e23448c61f06227a4298a7f";
+const R_SERIALIZATION_ID: &str = "1371680345541892666304555400842477132771";
+const R_ARCHIVE_ROOT: &str = ".muse-glimmer-30b-r-lens.pt.tmp";
+const R_PAYLOAD_BLAKE3: &str = "31f9cbadfb0ab969a18cf8dcf3a48be4070645240189e1135e87d513a0b1acf8";
 const IDENTITY_MATRIX_BLAKE3: &str =
     "e29104d17d84e4be7d4cac32ccc8470eb46475733e387c6ad12d6a49feaf9574";
 const HIDDEN_SIZE: usize = 6_656;
@@ -82,9 +93,64 @@ const MATRIX_BLAKE3: [&str; SOURCE_LAYER_COUNT] = [
     "ca84caa1dbcf0af8bdf9242b56ebb2eba548201cf60b8fad460c5d88b9e36027",
 ];
 
+const R_MATRIX_BLAKE3: [&str; SOURCE_LAYER_COUNT] = [
+    "ebb330b82ddd4c7159d67c6134465463ddbfee662cbce2b6d55e62544a649a32",
+    "f342b8fa4bb8ee583ad63da237d1a8fbf0ce7c6678b55a4f5531e3419389ff57",
+    "5b9c25e3ec77b5899a5a9ff7f6c4c6fe54a268c9f96189e10e35a44528d398b1",
+    "993b99fa7e40e0ecc18e5a58a8b5ffff59e55d49de7b8c466efcb9ea1ff436be",
+    "0461b68acb47b5be0007560d74d47bec828f45f13387e09ad1d4f315ee0b301c",
+    "2da050cc3067c4686b88a69402f8b21f76e56d48724f35af0707d45ed44c61a5",
+    "46be89c23b34b15b9068d42a490961ce5f5107354f5b78f9b0c9bd3259ff46f5",
+    "06d3d245d06e8e4eab5eb26a6025d8afcfcdd4af1b87aac93189bb160667619f",
+    "e4a1bda242de9e8d3b88194a446dd68dea1f1332f0997e1b335dc721ac9c6bcf",
+    "988ccfe7c29504114d249fa4578ec9b6596a8e610065c9952fa969f27c543b14",
+    "602c8804fafee29d9dc079de6a118b2d41fffa098a338795d526dcb7ec2c2b67",
+    "22f2ceecc7326d4e2598241a8b4d79ee6065db6944d6efc4ef02ab177279799b",
+    "435ea91fbfae99dd8b8936402d6560e9e2e74f317ef97dfee7fc638bfe8c3e8d",
+    "6ea9a3e7c00cad988acecb51179f69d189476cae4d0497082fc18b72d56edfe1",
+    "265e31639439f9d630dbdf2894738d9611a8591ccb090745ebe0de12e9e4f757",
+    "9473a24b2723c800017047b2f483d242d347a1102b1b27dc1debf8507f137a0f",
+    "ee08300e26ee1afb62d42942b5954b26ce040fbb6b09226fefbf49cc94fc1a99",
+    "7672a321c149c8657b849b6cd578f785bd9ed9a1596b60a3ccd8fc22c29d8eb5",
+    "1fd71757b093b9e30ccf87d2b54e5d37a0772a98c0e579ce6eb66da1e61c8a4d",
+    "a9fa49abd019cd4cad11e1230cf7b40d17adc8e942f68453274194d84ce44fb2",
+    "572f110f472535f5f0351b651f92e214ae09d6a751818fed101ec7b49aa05a82",
+    "1fcef10654220a301b1da64c150021120f9182bffe09b64eb2c716fcc0f4df65",
+    "769c06619fedf1d80b9d1eefc6d7833e5e610a59ea233c5f74ce3ec7498c0999",
+    "09504fb56ef3503325f4b9324ee5c5e84b11019de50ea7746d7d141a95f7922e",
+    "4871e75f38c02f13d0a86f1288776fff34ef45906b9e95257e6d247274477e05",
+    "8793103818f3304dcf5d8dd46044f1fb3a605e21903341377ccd26cb645127a3",
+    "e48b68f87d9cfa146ec3a9adb442eb5d8d396a8600c7b6b5e2ef3b9ec7957c5c",
+    "abaa062ee12e4828830f3cf8df7aff67058970fa10976d709bd433c399e09980",
+    "f2c33820902b5052db96b0399e8ef4b8b27f89f66145c9cc991e7af364097eaa",
+    "738ab01008d9371f1af86f243ff46005989ce48babdfca6e2bcd03c1cbb31019",
+    "7e192ee002924b5a2ab88b297635d81a1fbf43b5db6f0e5533e67dd240fd3cde",
+    "cf8234536ae9d12f4f20db948def6edb7584a24d3c8fd95d07e99a528bf112a7",
+    "403b5365836740eb3fd45206f21733177e949835eb2265aca7998244b45c654e",
+    "76ca08dfdaa80f4186dae657745aabf9ddd42dd1a593dcf1bdab376dfa4956a8",
+    "f37e5d4998ae5b5f1e1dbb2c36e4f48cb415937c85eb5a9664b8cac3f0a89220",
+    "a7d18e8faab6a9d4361cb5255d91fc1288981dda24c89ddabe891ab835fbdabe",
+    "660c3f4490f172e304509a9f8333a62b9f67de1fba7f057066b35e5b23ede25c",
+    "9c981817ee3079e8cef7a8c1813a42f76333f5136804dd5df708aa7a26d0b0ff",
+    "6a2f77bb21815693725cc07fe24d758a1a6aee8b9633db3ad1d8ff8c18cb8553",
+    "d69dca04573853a60a9e7b51838fe2c69d0e1e455634f10a32a31cb0b3e51b06",
+    "21ee7298c64e2fa47cc4384d65f3550d947bd8739be303e67fc48433ef68ce65",
+    "b7fabaccb6f68841cfed1331ed5c3c2a08eabb11b749c9c5750d6d46acdb3c12",
+    "07000c3e6398d390eb508ab58fa8cb0d9ec42b6236ec171c85f394786dfd184b",
+    "e65ad0d8477a257eb58f50d1b8324d560865041dae761354a4e0d8b5ea5e620c",
+    "d6c206036ce1826f81c14ba93f74c6def3272a88b42028d8b0edfdd9d26fab29",
+    "0ca982ec51ac3c39adc99778ac5e127152efdcdb08f4f0f98f70aed518595d66",
+    "adae2ff6c0dc48030334f209588ed15a11aa498721a3c01ceab23425e1401bd6",
+    "c975e476f1342326bd6c11e71adf1c6b4aaab4857af239c8dfda735a2f3dabba",
+    "888a50e0be1f40417026964aba885412172b9dc73f57094e3800eb7eec961a9b",
+    "5fa0c5df711c937bdb8d67effe12a64864cf03acdce89fe229170558403b594f",
+    IDENTITY_MATRIX_BLAKE3,
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProfileId {
     EyesMlMuseGlimmer30bJ,
+    BrittLewisMuseGlimmer30bR,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -166,71 +232,148 @@ pub(crate) struct Profile {
     transfer: TransferClaims,
 }
 
-const PROFILES: [Profile; 1] = [Profile {
-    id: ProfileId::EyesMlMuseGlimmer30bJ,
-    name: PROFILE_NAME,
-    method: "J",
-    rule_contract: "published_standard_jacobian_lens_v1",
-    target_layer: TARGET_LAYER,
-    source_repository: SOURCE_REPOSITORY,
-    source_revision: SOURCE_REVISION,
-    source_filename: SOURCE_FILENAME,
-    source_bytes: SOURCE_BYTES,
-    source_sha256: SOURCE_SHA256,
-    source_license: "Apache-2.0",
-    archive: ArchiveClaims {
-        root: ARCHIVE_ROOT,
-        layout: ArchiveLayout::LayerStorages,
-        data_pickle_sha256: DATA_PICKLE_SHA256,
-        serialization_id: Some(SERIALIZATION_ID),
-        identity_layer_index: None,
+const PROFILES: [Profile; 2] = [
+    Profile {
+        id: ProfileId::EyesMlMuseGlimmer30bJ,
+        name: PROFILE_NAME,
+        method: "J",
+        rule_contract: "published_standard_jacobian_lens_v1",
+        target_layer: TARGET_LAYER,
+        source_repository: SOURCE_REPOSITORY,
+        source_revision: SOURCE_REVISION,
+        source_filename: SOURCE_FILENAME,
+        source_bytes: SOURCE_BYTES,
+        source_sha256: SOURCE_SHA256,
+        source_license: "Apache-2.0",
+        archive: ArchiveClaims {
+            root: ARCHIVE_ROOT,
+            layout: ArchiveLayout::LayerStorages,
+            data_pickle_sha256: DATA_PICKLE_SHA256,
+            serialization_id: Some(SERIALIZATION_ID),
+            identity_layer_index: None,
+        },
+        expected_payload_blake3: PAYLOAD_BLAKE3,
+        matrix_blake3: &MATRIX_BLAKE3,
+        model: ModelClaims {
+            base_model: "meta-models/Muse-Glimmer-30B",
+            fitted_checkpoint: "eyes-ml/Muse-Glimmer-30B",
+            fitted_checkpoint_revision: "97e6fe0a8d8d221b100cd67f53fccf0744950abf",
+            tokenizer_checkpoint: None,
+            tokenizer_revision: None,
+            output_rmsnorm_epsilon: 1e-5,
+            output_multiplier: 0.19611613513818404,
+            final_logit_softcap: 20.0,
+        },
+        fit: FitClaims {
+            claims_basis: "pinned_repository_model_card_not_embedded_in_pt",
+            embedded_provenance: false,
+            fitter: "neuronpedia_utils/jlens/fit_lens.py",
+            fitter_revision: "7724688596eb734a0662f911bf183151a5c66b2f",
+            transformers_revision: "a61d9a57c1ca1018fd84acabbf2104fdf468e143",
+            recipe_id: None,
+            dataset: "Salesforce/wikitext:wikitext-103-raw-v1",
+            dataset_revision: None,
+            split: "train",
+            corpus_preparation: "streamed_rechunked_approximately_2000_char_prompts",
+            corpus_selection: None,
+            corpus_text_sha256: None,
+            corpus_token_ids_sha256: None,
+            estimator_contract: None,
+            arithmetic_contract: None,
+            n_prompts: 900,
+            max_sequence_length: 128,
+            skip_first: 16,
+            valid_positions_per_prompt: Some(111),
+            dim_batch: 8,
+            model_execution_dtype: "bfloat16",
+            serialized_dtype: "float16",
+            stop_rule: "smoothed_delta_mean_below_1e-3_after_at_least_100_prompts",
+            convergence_status: "not_reached_at_900_prompts_final_smoothed_delta_approximately_1.5e-3",
+            modality: "text_only",
+        },
+        transfer: TransferClaims {
+            binding: "published_checkpoint_geometry_transfer",
+            deployed_checkpoint_policy: "supported_muse_release_geometry_and_output_contract_requires_explicit_acknowledgement",
+            validation_status: "unvalidated",
+            image_token_status: "unvalidated_text_only_fit",
+        },
     },
-    expected_payload_blake3: PAYLOAD_BLAKE3,
-    matrix_blake3: &MATRIX_BLAKE3,
-    model: ModelClaims {
-        base_model: "meta-models/Muse-Glimmer-30B",
-        fitted_checkpoint: "eyes-ml/Muse-Glimmer-30B",
-        fitted_checkpoint_revision: "97e6fe0a8d8d221b100cd67f53fccf0744950abf",
-        tokenizer_checkpoint: None,
-        tokenizer_revision: None,
-        output_rmsnorm_epsilon: 1e-5,
-        output_multiplier: 0.19611613513818404,
-        final_logit_softcap: 20.0,
+    Profile {
+        id: ProfileId::BrittLewisMuseGlimmer30bR,
+        name: R_PROFILE_NAME,
+        method: "R",
+        rule_contract: "jlens.relp.muse_glimmer.residual_branch_rms_detached_scale.swiglu_identity_half.attention_jacobian.v1",
+        target_layer: 50,
+        source_repository: R_SOURCE_REPOSITORY,
+        source_revision: R_SOURCE_REVISION,
+        source_filename: R_SOURCE_FILENAME,
+        source_bytes: R_SOURCE_BYTES,
+        source_sha256: R_SOURCE_SHA256,
+        source_license: "no_separate_license_declared_private_research_asset",
+        archive: ArchiveClaims {
+            root: R_ARCHIVE_ROOT,
+            layout: ArchiveLayout::LayerStorages,
+            data_pickle_sha256: R_DATA_PICKLE_SHA256,
+            serialization_id: Some(R_SERIALIZATION_ID),
+            identity_layer_index: Some(50),
+        },
+        expected_payload_blake3: R_PAYLOAD_BLAKE3,
+        matrix_blake3: &R_MATRIX_BLAKE3,
+        model: ModelClaims {
+            base_model: "meta-models/Muse-Glimmer-30B",
+            fitted_checkpoint: "meta-models/Muse-Glimmer-30B",
+            fitted_checkpoint_revision: "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+            tokenizer_checkpoint: Some("meta-models/Muse-Glimmer-30B"),
+            tokenizer_revision: Some("a4e59da52a7bc87ae7251dd5545c0dd437c44b68"),
+            output_rmsnorm_epsilon: 1e-5,
+            output_multiplier: 0.19611613513818404,
+            final_logit_softcap: 20.0,
+        },
+        fit: FitClaims {
+            claims_basis: "pinned_source_and_opaque_data_pickle_sha256_with_audited_embedded_provenance",
+            embedded_provenance: true,
+            fitter: "anthropics/jacobian-lens/jlens",
+            fitter_revision: "6ca15db1bfe166ea2261da24bae3c0e83e5d8495",
+            transformers_revision: "42ca97014c85d71a88ad60d55f08cb9fb4d26e2c",
+            recipe_id: Some(
+                "blank-bhatia-nanda.muse_glimmer_30b.r_lens.pile10k25.penultimate.skip4.t128.v1",
+            ),
+            dataset: "NeelNanda/pile-10k",
+            dataset_revision: Some("127bfedcd5047750df5ccf3a12979a47bfa0bafa"),
+            split: "train",
+            corpus_preparation: "raw_text_add_bos_right_truncate_to_128_tokens",
+            corpus_selection: Some("dataset_order_rows_0_through_24_unfiltered_unshuffled"),
+            corpus_text_sha256: Some(
+                "c026d7b8d3382f740a34cb3f00339ac16dd4854a81cf5eb19c7f604ee96f8632",
+            ),
+            corpus_token_ids_sha256: Some(
+                "86146f01f323971a9bde07767b3f2e6bda241be3bc36c095d8e90f15d1c4734e",
+            ),
+            estimator_contract: Some(
+                "jlens.causal_all_valid_targets.mean_valid_source_positions.exclude_final_position.v2",
+            ),
+            arithmetic_contract: Some(
+                "jlens.model_dtype_forward_and_cotangent.fp32_cpu_rows_and_accumulator.v1",
+            ),
+            n_prompts: 25,
+            max_sequence_length: 128,
+            skip_first: 4,
+            valid_positions_per_prompt: None,
+            dim_batch: 4,
+            model_execution_dtype: "bfloat16",
+            serialized_dtype: "float16",
+            stop_rule: "fixed_25_prompt_recipe_require_all_prompts_no_early_stop",
+            convergence_status: "complete_fixed_recipe_not_convergence_measured",
+            modality: "text_only",
+        },
+        transfer: TransferClaims {
+            binding: "published_checkpoint_geometry_transfer",
+            deployed_checkpoint_policy: "supported_muse_release_geometry_and_output_contract_requires_explicit_acknowledgement",
+            validation_status: "unvalidated",
+            image_token_status: "unvalidated_text_only_fit",
+        },
     },
-    fit: FitClaims {
-        claims_basis: "pinned_repository_model_card_not_embedded_in_pt",
-        embedded_provenance: false,
-        fitter: "neuronpedia_utils/jlens/fit_lens.py",
-        fitter_revision: "7724688596eb734a0662f911bf183151a5c66b2f",
-        transformers_revision: "a61d9a57c1ca1018fd84acabbf2104fdf468e143",
-        recipe_id: None,
-        dataset: "Salesforce/wikitext:wikitext-103-raw-v1",
-        dataset_revision: None,
-        split: "train",
-        corpus_preparation: "streamed_rechunked_approximately_2000_char_prompts",
-        corpus_selection: None,
-        corpus_text_sha256: None,
-        corpus_token_ids_sha256: None,
-        estimator_contract: None,
-        arithmetic_contract: None,
-        n_prompts: 900,
-        max_sequence_length: 128,
-        skip_first: 16,
-        valid_positions_per_prompt: Some(111),
-        dim_batch: 8,
-        model_execution_dtype: "bfloat16",
-        serialized_dtype: "float16",
-        stop_rule: "smoothed_delta_mean_below_1e-3_after_at_least_100_prompts",
-        convergence_status: "not_reached_at_900_prompts_final_smoothed_delta_approximately_1.5e-3",
-        modality: "text_only",
-    },
-    transfer: TransferClaims {
-        binding: "published_checkpoint_geometry_transfer",
-        deployed_checkpoint_policy: "supported_muse_release_geometry_and_output_contract_requires_explicit_acknowledgement",
-        validation_status: "unvalidated",
-        image_token_status: "unvalidated_text_only_fit",
-    },
-}];
+];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -735,30 +878,12 @@ fn canonical_transfer(profile: Profile) -> Transfer {
 mod tests {
     use super::*;
 
-    static TEST_R_MATRIX_BLAKE3: [&str; SOURCE_LAYER_COUNT] =
-        [IDENTITY_MATRIX_BLAKE3; SOURCE_LAYER_COUNT];
-
-    fn complete_r_candidate() -> Profile {
-        let mut candidate = PROFILES[0];
-        candidate.method = "R";
-        candidate.rule_contract = "jlens.relp.muse_glimmer.residual_branch_rms_detached_scale.swiglu_identity_half.attention_jacobian.v1";
-        candidate.target_layer = 50;
-        candidate.archive.identity_layer_index = Some(50);
-        candidate.matrix_blake3 = &TEST_R_MATRIX_BLAKE3;
-        candidate.model.tokenizer_checkpoint = Some("meta-models/Muse-Glimmer-30B");
-        candidate.model.tokenizer_revision = Some("a4e59da52a7bc87ae7251dd5545c0dd437c44b68");
-        candidate.fit.embedded_provenance = true;
-        candidate.fit.recipe_id =
-            Some("blank-bhatia-nanda.muse_glimmer_30b.r_lens.pile10k25.penultimate.skip4.t128.v1");
-        candidate.fit.dataset_revision = Some("127bfedcd5047750df5ccf3a12979a47bfa0bafa");
-        candidate.fit.corpus_selection = Some("first_25_documents_unfiltered_unshuffled");
-        candidate.fit.corpus_text_sha256 =
-            Some("c026d7b8d3382f740a34cb3f00339ac16dd4854a81cf5eb19c7f604ee96f8632");
-        candidate.fit.corpus_token_ids_sha256 =
-            Some("86146f01f323971a9bde07767b3f2e6bda241be3bc36c095d8e90f15d1c4734e");
-        candidate.fit.estimator_contract = Some("average_prompt_jacobian_v1");
-        candidate.fit.arithmetic_contract = Some("float32_accumulate_then_float16_serialize");
-        candidate
+    fn profile(id: ProfileId) -> Profile {
+        PROFILES
+            .iter()
+            .copied()
+            .find(|profile| profile.id == id)
+            .unwrap()
     }
 
     fn canonical_payload(profile: Profile) -> Payload {
@@ -783,8 +908,8 @@ mod tests {
     }
 
     #[test]
-    fn canonical_profile_binds_publication_geometry_and_digests() {
-        let profile = PROFILES[0];
+    fn canonical_j_profile_binds_publication_geometry_and_digests() {
+        let profile = profile(ProfileId::EyesMlMuseGlimmer30bJ);
         assert!(valid_profile_definition(profile));
         let manifest = canonical_manifest(profile, canonical_payload(profile));
         validate_manifest(&manifest).unwrap();
@@ -804,34 +929,74 @@ mod tests {
     }
 
     #[test]
+    fn canonical_r_profile_binds_recipe_identity_and_payload() {
+        let profile = profile(ProfileId::BrittLewisMuseGlimmer30bR);
+        assert!(valid_profile_definition(profile));
+        assert_eq!(
+            profile_for_source(R_SOURCE_BYTES, R_SOURCE_SHA256)
+                .unwrap()
+                .id,
+            ProfileId::BrittLewisMuseGlimmer30bR
+        );
+        assert_eq!(profile.archive_spec().root, R_ARCHIVE_ROOT);
+        assert_eq!(profile.archive_spec().identity_layer_index, Some(50));
+
+        let manifest = canonical_manifest(profile, canonical_payload(profile));
+        validate_manifest(&manifest).unwrap();
+        assert_eq!(manifest.profile, R_PROFILE_NAME);
+        assert_eq!(manifest.transport.method, "R");
+        assert_eq!(manifest.transport.target_layer, 50);
+        assert_eq!(
+            manifest.transport.source_layers,
+            (0..51).collect::<Vec<_>>()
+        );
+        assert_eq!(manifest.payload.blake3, R_PAYLOAD_BLAKE3);
+        assert_eq!(manifest.payload.matrices[50].blake3, IDENTITY_MATRIX_BLAKE3);
+        assert_eq!(
+            manifest.model.fitted_checkpoint_revision,
+            "a4e59da52a7bc87ae7251dd5545c0dd437c44b68"
+        );
+        assert_eq!(manifest.fit.n_prompts, 25);
+        assert_eq!(manifest.fit.skip_first, 4);
+        assert_eq!(manifest.fit.dim_batch, 4);
+        assert!(manifest.fit.embedded_provenance);
+        assert_eq!(
+            manifest.fit.estimator_contract.as_deref(),
+            Some(
+                "jlens.causal_all_valid_targets.mean_valid_source_positions.exclude_final_position.v2"
+            )
+        );
+    }
+
+    #[test]
     fn embedded_r_profile_cannot_activate_without_complete_recipe_provenance() {
-        let mut candidate = complete_r_candidate();
+        let mut candidate = profile(ProfileId::BrittLewisMuseGlimmer30bR);
         assert!(valid_profile_definition(candidate));
 
         candidate.fit.arithmetic_contract = None;
         assert!(!valid_profile_definition(candidate));
 
-        let mut unembedded = complete_r_candidate();
+        let mut unembedded = profile(ProfileId::BrittLewisMuseGlimmer30bR);
         unembedded.fit.embedded_provenance = false;
         assert!(!valid_profile_definition(unembedded));
 
-        let mut missing_tokenizer = complete_r_candidate();
+        let mut missing_tokenizer = profile(ProfileId::BrittLewisMuseGlimmer30bR);
         missing_tokenizer.model.tokenizer_revision = None;
         assert!(!valid_profile_definition(missing_tokenizer));
 
-        let mut wrong_target = complete_r_candidate();
+        let mut wrong_target = profile(ProfileId::BrittLewisMuseGlimmer30bR);
         wrong_target.target_layer = 49;
         wrong_target.archive.identity_layer_index = Some(49);
         assert!(!valid_profile_definition(wrong_target));
 
-        let mut wrong_identity_digest = complete_r_candidate();
+        let mut wrong_identity_digest = profile(ProfileId::BrittLewisMuseGlimmer30bR);
         wrong_identity_digest.matrix_blake3 = &MATRIX_BLAKE3;
         assert!(!valid_profile_definition(wrong_identity_digest));
     }
 
     #[test]
     fn extracted_payload_requires_every_pinned_matrix_digest() {
-        let profile = PROFILES[0];
+        let profile = profile(ProfileId::EyesMlMuseGlimmer30bJ);
         let extracted = ExtractedPayload {
             byte_length: PAYLOAD_BYTES,
             blake3: PAYLOAD_BLAKE3.into(),

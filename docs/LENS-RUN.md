@@ -134,10 +134,11 @@ qwen-lens compare new-sweep/arms/000000/run.json \
 
 `read-full` dispatches imported Qwen, assembled model-bound Muse, and imported
 published Muse transports by manifest schema. It captures one selected prompt
-position and returns deployed full-vocabulary logits for caller-ordered source
-layers. Muse reads use an exact cached or fresh Hugging Face-declared GGUF
-identity and verify each selected F16 matrix. Muse fails closed if that identity
-is unavailable; it never falls back to hashing model weights.
+position and returns full-vocabulary lens logits for caller-ordered source
+layers, using the deployed model's output norm and head after transport. Muse
+reads use an exact cached or fresh Hugging Face-declared GGUF identity and verify
+each selected F16 matrix. Muse fails closed if that identity is unavailable; it
+never falls back to hashing model weights.
 
 Import the exact pinned eyes-ml J asset without interpreting or executing its
 pickle metadata:
@@ -152,39 +153,46 @@ The importer pins the source SHA-256, exact ZIP inventory, opaque `data.pkl`,
 whole extracted payload, and all 51 matrix digests. Published Muse reads require
 `--allow-unvalidated-transfer`; model-bound locally assembled Muse assets do not.
 
-The active published profile is currently the pinned eyes-ml J asset above.
-Import is profile-driven rather than shape-driven: an arbitrary `.pt` with the
-same dimensions is rejected. The pickle is never interpreted. Profiles may
-declare either 51 separate F16 matrix storages or one contiguous rank-3 F16
-storage; both normalize to matrix-major `transport.f16le` with orientation
+The active published profiles are the pinned eyes-ml J asset above and the Muse
+R asset described next. Import is profile-driven rather than shape-driven: an
+arbitrary `.pt` with the same dimensions is rejected. The pickle is never
+interpreted. Profiles may declare either 51 separate F16 matrix storages or one
+contiguous rank-3 F16 storage; both normalize to matrix-major
+`transport.f16le` with orientation
 `[source_layer, target_output_coordinate, source_coordinate]`.
 
-### Muse R intake
+### Muse R asset
 
-The expected CUDA-produced Muse R asset has logical shape `[51,6656,6656]`.
-It fits post-block residuals 0 through 49 into target block 50 and appends an
-exact identity at source/target block 50; block 51 is not present. Its pinned
-recipe is the first 25 unfiltered, unshuffled documents from
+The active CUDA-produced Muse R profile pins
+`brittlewis12/muse-glimmer-30b-r-lens-checkpoints` at immutable revision
+`b406c8465c9a49657e30af07753cd08ae7f96f56`. Its logical shape is
+`[51,6656,6656]`: post-block residuals 0 through 49 map into target block 50,
+with an exact F16 identity at source/target block 50; block 51 is not present.
+Its recipe uses the first 25 unfiltered, unshuffled documents from
 `NeelNanda/pile-10k`, `max_seq_len=128`, and `skip_first=4`.
 
-R activation remains fail-closed until the completed source supplies all of:
+Import it with the same command surface:
 
-- immutable repository revision, filename, byte length, source SHA-256, and
-  license;
-- archive root/layout, opaque `data.pkl` SHA-256, serialization ID, serialized
-  dtype, and exact matrix orientation;
-- whole canonical payload BLAKE3 and all 51 matrix BLAKE3 values, with matrix 50
-  verified as bit-exact F16 identity;
-- fitted checkpoint and tokenizer revisions, fitter and Transformers revisions,
-  recipe/method/estimator/arithmetic contracts, dataset revision and selection,
-  and raw-text/token-ID corpus SHA-256 values;
-- explicit BF16-checkpoint-to-GGUF and text-only/image-token transfer status.
+```sh
+cargo run -q --release -p qwen-cli --bin qwen-lens -- import-muse-full \
+  --source /path/to/muse-glimmer-30b-r-lens.pt \
+  --output /path/to/Muse-Glimmer-30B-rlens-published-v1
+```
 
-The importer already owns these facts per profile and supports both likely Torch
-storage layouts, but no Muse R profile is active until those immutable final
-asset values are pinned. The companion JSON report is provenance input, not an
-integrity manifest. A completed source is normalized into the published
-artifact schema rather than mislabeled as a locally fitted/assembled artifact.
+The profile pins the immutable source and opaque `data.pkl` SHA-256, Torch ZIP
+inventory, serialization ID, whole payload and every matrix digest, fitted model
+and tokenizer revisions, exact method/estimator/arithmetic contracts, corpus
+revision and selection, and raw-text/token-ID digests. Import verifies every F16
+value is finite and matrix 50 is bit-exact positive-zero identity without
+executing pickle. The companion JSON report is provenance input, not an
+integrity manifest. BF16-checkpoint-to-GGUF and image-token transfer remain
+explicitly unvalidated and require `--allow-unvalidated-transfer`.
+
+The R fit targets post-block 50 and its fitter decodes that target residual by
+applying the final output norm and LM head directly. The local reader does the
+same: block 51 is intentionally not executed after transport. These are
+target-50 R-lens logits, not claims about the model's unperturbed continuation
+logits after its remaining block.
 
 `assemble-muse-full` remains the separate model-bound local J/R path: it accepts
 authenticated row-shard artifacts and emits `muse_glimmer.full_transport` v3.
@@ -210,7 +218,7 @@ hidden size, shape, and values. Omit it for compact top-k output.
 ## Full-Transport Trace
 
 `trace-full` reads an imported Qwen3.6 27B J/R, Qwen3.8 27B J, or published Muse
-Glimmer J transport across every requested prompt position and source layer:
+Glimmer J/R transport across every requested prompt position and source layer:
 
 ```sh
 cargo run -q --release -p qwen-cli --bin qwen-lens -- trace-full \
@@ -244,8 +252,8 @@ inputs; Open Responses remains Qwen-only. Muse additionally
 requires `--identity-cache` and `--allow-unvalidated-transfer`. It captures the
 scalar prefill once, uploads each selected 88.6 MB matrix once, and reuses it
 across positions; `execution_mode` records this rather than claiming packed
-prefill. Muse logits apply the deployed output RMSNorm, native head, output
-multiplier, and final softcap, with no softmax.
+prefill. Muse lens logits apply the deployed output RMSNorm, native head, output
+multiplier, and final softcap, with no softmax or post-target blocks.
 
 Without `--output`, stdout
 defaults to the complete JSON document. With `--output`, stdout defaults to a

@@ -81,6 +81,9 @@ enum Command {
     /// Run one bounded serial Lens plan and emit a summary or versioned JSON.
     #[command(name = "run")]
     LensRun(lens_run::LensRunArgs),
+    /// Sweep one operation coefficient with one resident ordinary-Qwen model load.
+    #[command(name = "sweep")]
+    CoefficientSweep(lens_run::CoefficientSweepArgs),
     /// Fit a resumable contiguous shard of J-lens or R-lens transport rows.
     FitRows(FitRowsArgs),
     /// Fit resumable projected J-lens or R-lens selected-token readouts.
@@ -519,6 +522,7 @@ fn main() -> Result<()> {
         Command::Compare(args) => lens_compare::run(args),
         Command::Inspect(args) => lens_inspect::run(args),
         Command::LensRun(args) => lens_run::run(args),
+        Command::CoefficientSweep(args) => lens_run::run_coefficient_sweep(args),
         Command::FitRows(args) => fit_rows(args),
         Command::FitTokens(args) => fit_tokens(args),
         Command::AssembleMuseFull(args) => muse_full_lens::assemble(args),

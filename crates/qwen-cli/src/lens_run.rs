@@ -22,8 +22,13 @@ use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::CString;
+use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_PLAN_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LENSES: usize = 64;
@@ -38,6 +43,10 @@ const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
 const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 const RUN_SCHEMA: &str = "qwen.lens.run";
 const RUN_SCHEMA_VERSION: u32 = 1;
+const SWEEP_SCHEMA: &str = "qwen.lens.coefficient_sweep";
+const SWEEP_SCHEMA_VERSION: u32 = 1;
+const SWEEP_MANIFEST_NAME: &str = "manifest.json";
+const MAX_SWEEP_ARMS: usize = 64;
 
 #[derive(Debug, Args)]
 #[command(group(
@@ -106,6 +115,102 @@ pub(crate) struct LensRunArgs {
     /// Compact summary or the complete JSON run artifact on stdout.
     #[arg(long, value_enum)]
     pub(crate) format: Option<RunStdoutFormat>,
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("sweep_input")
+        .required(true)
+        .multiple(false)
+        .args(["prompt", "token_ids", "messages"])
+))]
+pub(crate) struct CoefficientSweepArgs {
+    /// Ordinary dense or MoE Qwen GGUF model, loaded once for every arm.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+
+    /// Strict Lens plan JSON file whose authored coefficients remain unchanged.
+    #[arg(long)]
+    plan: PathBuf,
+
+    /// Exact operation ID whose coefficient is replaced in each arm.
+    #[arg(long)]
+    operation: String,
+
+    /// Ordered finite coefficients; duplicates and zero controls are preserved.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        required = true,
+        allow_hyphen_values = true
+    )]
+    coefficients: Vec<f32>,
+
+    /// Raw text prompt; tokenizer-configured specials are enabled by default.
+    #[arg(long)]
+    prompt: Option<String>,
+
+    /// Literal comma-separated token IDs; no specials are added.
+    #[arg(long, value_delimiter = ',')]
+    token_ids: Option<Vec<i32>>,
+
+    /// JSON message array or wrapper with a `messages` array.
+    #[arg(long)]
+    messages: Option<PathBuf>,
+
+    /// Disable tokenizer-configured specials for --prompt.
+    #[arg(long)]
+    no_special_tokens: bool,
+
+    /// Maximum number of generated tokens per fresh arm.
+    #[arg(long, default_value_t = 32)]
+    max_new_tokens: usize,
+
+    /// Native sampler temperature; each arm restarts from the same seed.
+    #[arg(long, default_value_t = 0.0)]
+    temperature: f32,
+
+    /// Native sampler top-k; zero disables the filter.
+    #[arg(long, default_value_t = 0)]
+    top_k: usize,
+
+    /// Native sampler nucleus threshold.
+    #[arg(long, default_value_t = 1.0)]
+    top_p: f32,
+
+    /// Native sampler minimum probability threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_p: f32,
+
+    /// Native sampler seed, reset for every arm.
+    #[arg(long, default_value_t = 0)]
+    seed: u64,
+
+    /// New immutable sweep directory, published only after every arm succeeds.
+    #[arg(long)]
+    output: PathBuf,
+}
+
+impl CoefficientSweepArgs {
+    fn arm_run_args(&self) -> LensRunArgs {
+        LensRunArgs {
+            model: self.model.clone(),
+            plan: self.plan.clone(),
+            identity_cache: None,
+            prompt: self.prompt.clone(),
+            token_ids: self.token_ids.clone(),
+            messages: self.messages.clone(),
+            no_special_tokens: self.no_special_tokens,
+            max_new_tokens: self.max_new_tokens,
+            temperature: self.temperature,
+            top_k: self.top_k,
+            top_p: self.top_p,
+            min_p: self.min_p,
+            seed: self.seed,
+            output: None,
+            format: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -281,6 +386,16 @@ impl Action {
         }
     }
 
+    fn set_coefficient(&mut self, value: f32) {
+        match self {
+            Self::FixedAdd { coefficient, .. }
+            | Self::ResidualL2Fraction { coefficient, .. }
+            | Self::ProjectionAblate { coefficient, .. }
+            | Self::SourceToTarget { coefficient, .. }
+            | Self::CoordinateSwap { coefficient, .. } => *coefficient = value,
+        }
+    }
+
     pub(crate) fn direction_ids<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
         match self {
             Self::FixedAdd { direction, .. }
@@ -425,7 +540,46 @@ pub(crate) struct RunOutput {
     execution_binding: Option<RunExecutionBinding>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SweepProducer {
+    build_commit: String,
+    build_dirty: String,
+    build_source_state: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CoefficientSweepArm {
+    index: usize,
+    coefficient: f32,
+    artifact: String,
+    byte_length: u64,
+    blake3: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CoefficientSweepManifest {
+    schema: String,
+    schema_version: u32,
+    producer: SweepProducer,
+    canonical_source_plan_path: PathBuf,
+    operation_id: String,
+    coefficients: Vec<f32>,
+    arms: Vec<CoefficientSweepArm>,
+}
+
+struct SweepArmSummary {
+    index: usize,
+    coefficient: f32,
+    decoded_text: String,
+    stop_reason: String,
+    operation_application_count: usize,
+    live_readout_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
 struct RunSampler {
     temperature: f32,
     top_k: usize,
@@ -534,45 +688,17 @@ pub(crate) fn emit_run_output(
     execution_binding: Option<RunExecutionBinding>,
     output_path: Option<&Path>,
 ) -> Result<()> {
-    let artifact = RunOutput {
-        schema: RUN_SCHEMA,
-        schema_version: if execution_binding.is_some() {
-            2
-        } else {
-            RUN_SCHEMA_VERSION
-        },
+    let artifact = build_run_output(
+        args,
         runtime_kind,
-        model_path: args.model.clone(),
-        canonical_plan_path: plan_path.to_path_buf(),
-        requested_live_readouts: plan.readouts.clone(),
+        plan_path,
         plan,
-        input_source: input_source(args),
-        prompt_token_ids: result.prompt_token_ids,
-        generated_token_ids: result.generated_token_ids,
-        sampler: RunSampler {
-            temperature: args.temperature,
-            top_k: args.top_k,
-            top_p: args.top_p,
-            min_p: args.min_p,
-            seed: args.seed,
-        },
-        max_new_tokens: args.max_new_tokens,
-        decoded_text: result.decoded_text,
-        stop_reason: result.stop_reason,
-        operation_applications: result.operation_applications,
-        live_readouts: result.live_readouts,
-        native_hyper_captures: result.native_hyper_captures,
+        result,
         execution_binding,
-    };
+    );
     let stdout_format = effective_run_stdout_format(args.format, output_path.is_some());
     let bytes = if output_path.is_some() || stdout_format == RunStdoutFormat::Json {
-        let bytes = serde_json::to_vec(&artifact).context("serialize Lens run artifact")?;
-        ensure!(
-            bytes.len() <= MAX_RUN_ARTIFACT_BYTES,
-            "serialized Lens run artifact is {} bytes; limit is {MAX_RUN_ARTIFACT_BYTES}",
-            bytes.len()
-        );
-        Some(bytes)
+        Some(serialize_run_output(&artifact)?)
     } else {
         None
     };
@@ -591,6 +717,60 @@ pub(crate) fn emit_run_output(
         }
     }
     Ok(())
+}
+
+fn build_run_output(
+    args: &LensRunArgs,
+    runtime_kind: &'static str,
+    plan_path: &Path,
+    plan: LensPlan,
+    result: RunResult,
+    execution_binding: Option<RunExecutionBinding>,
+) -> RunOutput {
+    RunOutput {
+        schema: RUN_SCHEMA,
+        schema_version: if execution_binding.is_some() {
+            2
+        } else {
+            RUN_SCHEMA_VERSION
+        },
+        runtime_kind,
+        model_path: args.model.clone(),
+        canonical_plan_path: plan_path.to_path_buf(),
+        requested_live_readouts: plan.readouts.clone(),
+        plan,
+        input_source: input_source(args),
+        prompt_token_ids: result.prompt_token_ids,
+        generated_token_ids: result.generated_token_ids,
+        sampler: run_sampler(args),
+        max_new_tokens: args.max_new_tokens,
+        decoded_text: result.decoded_text,
+        stop_reason: result.stop_reason,
+        operation_applications: result.operation_applications,
+        live_readouts: result.live_readouts,
+        native_hyper_captures: result.native_hyper_captures,
+        execution_binding,
+    }
+}
+
+fn serialize_run_output(artifact: &RunOutput) -> Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(artifact).context("serialize Lens run artifact")?;
+    ensure!(
+        bytes.len() <= MAX_RUN_ARTIFACT_BYTES,
+        "serialized Lens run artifact is {} bytes; limit is {MAX_RUN_ARTIFACT_BYTES}",
+        bytes.len()
+    );
+    Ok(bytes)
+}
+
+fn run_sampler(args: &LensRunArgs) -> RunSampler {
+    RunSampler {
+        temperature: args.temperature,
+        top_k: args.top_k,
+        top_p: args.top_p,
+        min_p: args.min_p,
+        seed: args.seed,
+    }
 }
 
 fn effective_run_stdout_format(
@@ -686,18 +866,7 @@ struct Qwen4ExpExecutionPlan {
 }
 
 pub(crate) fn run(args: LensRunArgs) -> Result<()> {
-    ensure!(
-        args.max_new_tokens > 0 && args.max_new_tokens <= MAX_NEW_TOKENS,
-        "--max-new-tokens must be in 1..={MAX_NEW_TOKENS}"
-    );
-    ensure!(
-        args.prompt.is_some() || args.token_ids.is_some() || args.messages.is_some(),
-        "exactly one prompt input is required"
-    );
-    ensure!(
-        !args.no_special_tokens || args.prompt.is_some(),
-        "--no-special-tokens is supported only with --prompt"
-    );
+    validate_run_args(&args)?;
     let output_path = args
         .output
         .as_deref()
@@ -743,9 +912,9 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     let loaded = runtime
         .load_opened_gguf(gguf, args.model.clone())
         .with_context(|| format!("load model {}", args.model.display()))?;
-    validate_runtime(&loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
+    validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
     let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
-    let prompt_token_ids = input_token_ids(&args, family, &loaded.gguf(), &tokenizer)?;
+    let prompt_token_ids = input_token_ids(&args, family, loaded.gguf(), &tokenizer)?;
     ensure!(
         !prompt_token_ids.is_empty(),
         "prompt must encode to at least one token"
@@ -761,30 +930,75 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         "prompt contains a token outside the model vocabulary"
     );
 
-    let mut execution = prepare_execution_plan(&plan, plan_dir, &loaded)?;
+    let execution = prepare_execution_plan(&plan, plan_dir, &loaded)?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
+    let stop_tokens: HashSet<i32> = loaded.gguf().stop_token_ids()?.into_iter().collect();
+    let result = execute_ordinary_arm(
+        &loaded,
+        &tokenizer,
+        &execution,
+        &prompt_token_ids,
+        args.max_new_tokens,
+        run_sampler(&args),
+        &stop_tokens,
+    )?;
+    emit_run_output(
+        &args,
+        "ordinary_qwen",
+        &plan_path,
+        plan,
+        result,
+        None,
+        output_path.as_deref(),
+    )
+}
+
+fn validate_run_args(args: &LensRunArgs) -> Result<()> {
+    ensure!(
+        args.max_new_tokens > 0 && args.max_new_tokens <= MAX_NEW_TOKENS,
+        "--max-new-tokens must be in 1..={MAX_NEW_TOKENS}"
+    );
+    ensure!(
+        args.prompt.is_some() || args.token_ids.is_some() || args.messages.is_some(),
+        "exactly one prompt input is required"
+    );
+    ensure!(
+        !args.no_special_tokens || args.prompt.is_some(),
+        "--no-special-tokens is supported only with --prompt"
+    );
+    Ok(())
+}
+
+fn execute_ordinary_arm(
+    loaded: &qwen_llm::runtime::LoadedModel,
+    tokenizer: &Tokenizer,
+    execution: &ExecutionPlan,
+    prompt_token_ids: &[i32],
+    max_new_tokens: usize,
+    sampler_config: RunSampler,
+    stop_tokens: &HashSet<i32>,
+) -> Result<RunResult> {
     let mut sequence = loaded.create_sequence(SequenceConfig::new(
         prompt_token_ids
             .len()
-            .checked_add(args.max_new_tokens)
+            .checked_add(max_new_tokens)
             .context("sequence capacity overflow")?,
     ))?;
     let forward = loaded.forward();
     let mut sampler = Sampler::new(SamplingConfig {
-        temperature: args.temperature,
-        top_k: args.top_k,
-        top_p: args.top_p,
-        min_p: args.min_p,
-        seed: args.seed,
+        temperature: sampler_config.temperature,
+        top_k: sampler_config.top_k,
+        top_p: sampler_config.top_p,
+        min_p: sampler_config.min_p,
+        seed: sampler_config.seed,
     })?;
-    let stop_tokens: HashSet<i32> = loaded.gguf().stop_token_ids()?.into_iter().collect();
     let mut operation_applications = Vec::new();
     let mut live_readouts = Vec::new();
     let mut logits = Vec::new();
 
     for (index, &token) in prompt_token_ids.iter().enumerate() {
         logits = forward_event(
-            &mut execution,
+            execution,
             &forward,
             token,
             index as u32,
@@ -796,18 +1010,18 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     }
     let mut generated_token_ids = Vec::new();
     let mut stop_reason = String::from("max_new_tokens");
-    for generated_index in 0..args.max_new_tokens {
+    for generated_index in 0..max_new_tokens {
         let sampled = sampler.sample(&logits)?.token;
         generated_token_ids.push(sampled);
         if stop_tokens.contains(&sampled) {
             stop_reason = String::from("stop_token");
             break;
         }
-        if generated_index + 1 == args.max_new_tokens {
+        if generated_index + 1 == max_new_tokens {
             break;
         }
         logits = forward_event(
-            &mut execution,
+            execution,
             &forward,
             sampled,
             (prompt_token_ids.len() + generated_index) as u32,
@@ -817,25 +1031,395 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
             &mut live_readouts,
         )?;
     }
-    let decoded_text = tokenizer.decode(&generated_token_ids);
-    let result = RunResult {
-        prompt_token_ids,
+    Ok(RunResult {
+        prompt_token_ids: prompt_token_ids.to_vec(),
+        decoded_text: tokenizer.decode(&generated_token_ids),
         generated_token_ids,
-        decoded_text,
         stop_reason,
         operation_applications,
         live_readouts,
         native_hyper_captures: Vec::new(),
-    };
-    emit_run_output(
-        &args,
-        "ordinary_qwen",
+    })
+}
+
+pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
+    validate_coefficient_sweep_args(&args)?;
+    let arm_args = args.arm_run_args();
+    validate_run_args(&arm_args)?;
+    let output_path = super::resolve_output_path(&args.output)?;
+    ensure_new_sweep_output(&output_path)?;
+
+    let plan_path = std::fs::canonicalize(&args.plan)
+        .with_context(|| format!("resolve plan {}", args.plan.display()))?;
+    let source_plan = parse_plan_bytes(&super::read_regular_file_bounded(
         &plan_path,
-        plan,
-        result,
-        None,
-        output_path.as_deref(),
-    )
+        MAX_PLAN_BYTES,
+    )?)
+    .with_context(|| format!("parse Lens plan {}", plan_path.display()))?;
+    validate_plan(&source_plan)?;
+    validate_ordinary_plan(&source_plan)?;
+    ensure!(
+        source_plan
+            .operations
+            .iter()
+            .any(|operation| operation.id == args.operation),
+        "Lens plan has no operation {:?}",
+        args.operation
+    );
+    for &coefficient in &args.coefficients {
+        let effective =
+            plan_with_operation_coefficient(&source_plan, &args.operation, coefficient)?;
+        validate_ordinary_plan(&effective)?;
+    }
+    let plan_dir = plan_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    ensure!(
+        !crate::muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()),
+        "qwen-lens sweep supports ordinary Qwen only; Muse Glimmer is not supported"
+    );
+    let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
+    ensure!(
+        family != ModelFamily::Qwen4Exp,
+        "qwen-lens sweep supports ordinary Qwen only; Flash-Next is not supported"
+    );
+
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let loaded = runtime
+        .load_opened_gguf(gguf, args.model.clone())
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
+    let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
+    let prompt_token_ids = input_token_ids(&arm_args, family, loaded.gguf(), &tokenizer)?;
+    ensure!(
+        !prompt_token_ids.is_empty(),
+        "prompt must encode to at least one token"
+    );
+    ensure!(
+        prompt_token_ids.len() <= MAX_NEW_TOKENS * 16,
+        "prompt is too long for the bounded Lens runner"
+    );
+    ensure!(
+        prompt_token_ids
+            .iter()
+            .all(|&token| token >= 0 && (token as u32) < loaded.arch().vocab_size),
+        "prompt contains a token outside the model vocabulary"
+    );
+
+    let mut execution = prepare_execution_plan(&source_plan, plan_dir, &loaded)?;
+    validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
+    let stop_tokens = loaded
+        .gguf()
+        .stop_token_ids()?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let sampler = run_sampler(&arm_args);
+    let summaries = stage_and_publish_sweep(&output_path, |staging| {
+        let arms_path = staging.join("arms");
+        create_sweep_directory(&arms_path)?;
+        super::sync_directory(staging)?;
+
+        let mut arms = Vec::with_capacity(args.coefficients.len());
+        let mut summaries = Vec::with_capacity(args.coefficients.len());
+        for (index, &coefficient) in args.coefficients.iter().enumerate() {
+            let effective_plan =
+                plan_with_operation_coefficient(&source_plan, &args.operation, coefficient)?;
+            execution.plan = effective_plan.clone();
+            let result = execute_ordinary_arm(
+                &loaded,
+                &tokenizer,
+                &execution,
+                &prompt_token_ids,
+                args.max_new_tokens,
+                sampler,
+                &stop_tokens,
+            )?;
+            let summary = SweepArmSummary {
+                index,
+                coefficient,
+                decoded_text: result.decoded_text.clone(),
+                stop_reason: result.stop_reason.clone(),
+                operation_application_count: result.operation_applications.len(),
+                live_readout_count: result.live_readouts.len(),
+            };
+            let artifact = build_run_output(
+                &arm_args,
+                "ordinary_qwen",
+                &plan_path,
+                effective_plan,
+                result,
+                None,
+            );
+            let bytes = serialize_run_output(&artifact)?;
+            let relative = format!("arms/{index:06}/run.json");
+            let arm_path = arms_path.join(format!("{index:06}"));
+            create_sweep_directory(&arm_path)?;
+            write_new_sweep_file(&arm_path.join("run.json"), &bytes)?;
+            super::sync_directory(&arm_path)?;
+            arms.push(CoefficientSweepArm {
+                index,
+                coefficient,
+                artifact: relative,
+                byte_length: bytes.len() as u64,
+                blake3: blake3::hash(&bytes).to_hex().to_string(),
+            });
+            summaries.push(summary);
+        }
+        super::sync_directory(&arms_path)?;
+
+        let manifest = CoefficientSweepManifest {
+            schema: SWEEP_SCHEMA.into(),
+            schema_version: SWEEP_SCHEMA_VERSION,
+            producer: SweepProducer {
+                build_commit: env!("QWEN_BUILD_COMMIT").into(),
+                build_dirty: env!("QWEN_BUILD_DIRTY").into(),
+                build_source_state: env!("QWEN_BUILD_SOURCE_STATE").into(),
+            },
+            canonical_source_plan_path: plan_path.clone(),
+            operation_id: args.operation.clone(),
+            coefficients: args.coefficients.clone(),
+            arms,
+        };
+        let manifest_bytes = serialize_sweep_manifest(&manifest)?;
+        write_new_sweep_file(&staging.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
+        super::sync_directory(staging)?;
+        Ok(summaries)
+    })?;
+    print_sweep_summary(&args, &output_path, &summaries);
+    Ok(())
+}
+
+fn validate_coefficient_sweep_args(args: &CoefficientSweepArgs) -> Result<()> {
+    ensure!(
+        !args.coefficients.is_empty() && args.coefficients.len() <= MAX_SWEEP_ARMS,
+        "--coefficients requires 1..={MAX_SWEEP_ARMS} values"
+    );
+    ensure!(
+        args.coefficients.iter().all(|value| value.is_finite()),
+        "--coefficients values must be finite"
+    );
+    ensure!(!args.operation.is_empty(), "--operation must not be empty");
+    Ok(())
+}
+
+fn ensure_new_sweep_output(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => bail!("sweep output {} already exists", path.display()),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect sweep output {}", path.display()))
+        }
+    }
+}
+
+fn create_sweep_directory(path: &Path) -> Result<()> {
+    DirBuilder::new()
+        .mode(0o700)
+        .create(path)
+        .with_context(|| format!("create sweep directory {}", path.display()))
+}
+
+fn write_new_sweep_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("create sweep file {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write sweep file {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync sweep file {}", path.display()))
+}
+
+fn stage_and_publish_sweep<T>(output: &Path, build: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    let parent = output.parent().context("sweep output has no parent")?;
+    let leaf = output.file_name().context("sweep output has no leaf")?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before Unix epoch")?
+        .as_nanos();
+    let staging = parent.join(format!(
+        ".{}.stage.{}.{}",
+        leaf.to_string_lossy(),
+        std::process::id(),
+        nonce
+    ));
+    create_sweep_directory(&staging)?;
+    if let Err(error) = super::sync_directory(parent) {
+        if let Err(cleanup_error) = std::fs::remove_dir(&staging) {
+            return Err(error.context(format!(
+                "also failed to remove empty sweep staging directory {}: {cleanup_error}",
+                staging.display()
+            )));
+        }
+        return Err(error);
+    }
+    let result = build(&staging).and_then(|value| {
+        publish_sweep_directory_exclusive(&staging, output)?;
+        Ok(value)
+    });
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            match std::fs::symlink_metadata(&staging) {
+                Ok(_) => {
+                    if let Err(cleanup_error) = std::fs::remove_dir_all(&staging) {
+                        return Err(error.context(format!(
+                            "also failed to remove sweep staging directory {}: {cleanup_error}",
+                            staging.display()
+                        )));
+                    }
+                    if let Err(sync_error) = super::sync_directory(parent) {
+                        return Err(error.context(format!(
+                            "removed sweep staging directory, but failed to sync {}: {sync_error}",
+                            parent.display()
+                        )));
+                    }
+                }
+                Err(inspect_error) if inspect_error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(inspect_error) => {
+                    return Err(error.context(format!(
+                        "also failed to inspect sweep staging directory {}: {inspect_error}",
+                        staging.display()
+                    )));
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn publish_sweep_directory_exclusive(staging: &Path, output: &Path) -> Result<()> {
+    let old = CString::new(staging.as_os_str().as_bytes())?;
+    let new = CString::new(output.as_os_str().as_bytes())?;
+    let renamed = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            old.as_ptr(),
+            libc::AT_FDCWD,
+            new.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if renamed != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "publish sweep directory {} to {}",
+                staging.display(),
+                output.display()
+            )
+        });
+    }
+    let parent = output.parent().context("sweep output has no parent")?;
+    if let Err(error) = super::sync_directory(parent) {
+        eprintln!(
+            "warning: sweep {} is published, but its parent directory could not be synced: {error:#}",
+            output.display()
+        );
+    }
+    Ok(())
+}
+
+fn serialize_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<Vec<u8>> {
+    validate_sweep_manifest(manifest)?;
+    let bytes = serde_json::to_vec(manifest).context("serialize coefficient sweep manifest")?;
+    ensure!(
+        bytes.len() <= MAX_PLAN_BYTES,
+        "coefficient sweep manifest exceeds {MAX_PLAN_BYTES} bytes"
+    );
+    let decoded: CoefficientSweepManifest =
+        serde_json::from_slice(&bytes).context("reparse coefficient sweep manifest")?;
+    validate_sweep_manifest(&decoded)?;
+    ensure!(
+        serde_json::to_vec(&decoded)? == bytes,
+        "coefficient sweep manifest failed canonical JSON round trip"
+    );
+    Ok(bytes)
+}
+
+fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
+    ensure!(
+        manifest.schema == SWEEP_SCHEMA && manifest.schema_version == SWEEP_SCHEMA_VERSION,
+        "unsupported coefficient sweep manifest schema"
+    );
+    ensure!(
+        !manifest.producer.build_commit.is_empty()
+            && matches!(manifest.producer.build_dirty.as_str(), "0" | "1")
+            && !manifest.producer.build_source_state.is_empty(),
+        "coefficient sweep producer metadata is invalid"
+    );
+    ensure!(
+        manifest.canonical_source_plan_path.is_absolute(),
+        "coefficient sweep source plan path must be absolute"
+    );
+    ensure!(
+        !manifest.operation_id.is_empty(),
+        "coefficient sweep operation ID must not be empty"
+    );
+    ensure!(
+        !manifest.coefficients.is_empty() && manifest.coefficients.len() <= MAX_SWEEP_ARMS,
+        "coefficient sweep requires 1..={MAX_SWEEP_ARMS} coefficients"
+    );
+    ensure!(
+        manifest.coefficients.iter().all(|value| value.is_finite()),
+        "coefficient sweep contains a non-finite coefficient"
+    );
+    ensure!(
+        manifest.arms.len() == manifest.coefficients.len(),
+        "coefficient sweep arm count differs from coefficient count"
+    );
+    for (index, (arm, coefficient)) in manifest.arms.iter().zip(&manifest.coefficients).enumerate()
+    {
+        ensure!(
+            arm.index == index,
+            "coefficient sweep arm index is not ordered"
+        );
+        ensure!(
+            arm.coefficient.to_bits() == coefficient.to_bits(),
+            "coefficient sweep arm coefficient differs from its ordered coefficient"
+        );
+        ensure!(
+            arm.artifact == format!("arms/{index:06}/run.json"),
+            "coefficient sweep arm path is not canonical"
+        );
+        ensure!(
+            arm.byte_length > 0 && arm.byte_length <= MAX_RUN_ARTIFACT_BYTES as u64,
+            "coefficient sweep arm byte length is invalid"
+        );
+        ensure!(
+            arm.blake3.len() == 64
+                && arm
+                    .blake3
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "coefficient sweep arm BLAKE3 is invalid"
+        );
+    }
+    Ok(())
+}
+
+fn print_sweep_summary(args: &CoefficientSweepArgs, output: &Path, summaries: &[SweepArmSummary]) {
+    println!(
+        "runtime=ordinary_qwen model={} operation={} arms={}",
+        args.model.display(),
+        args.operation,
+        summaries.len()
+    );
+    for summary in summaries {
+        println!(
+            "arm={} coefficient={} generated_text={} stop_reason={} operation_applications={} live_readouts={}",
+            summary.index,
+            summary.coefficient,
+            serde_json::to_string(&summary.decoded_text).expect("string serialization cannot fail"),
+            summary.stop_reason,
+            summary.operation_application_count,
+            summary.live_readout_count
+        );
+    }
+    println!("artifact={}", output.display());
 }
 
 fn run_qwen4exp(
@@ -1204,6 +1788,13 @@ fn parse_plan_bytes(bytes: &[u8]) -> Result<LensPlan> {
 }
 
 fn validate_plan(plan: &LensPlan) -> Result<()> {
+    validate_plan_with_zero_operation(plan, None)
+}
+
+fn validate_plan_with_zero_operation(
+    plan: &LensPlan,
+    zero_operation_id: Option<&str>,
+) -> Result<()> {
     ensure!(plan.version == 1, "Lens plan version must be 1");
     ensure!(
         !plan.lenses.is_empty()
@@ -1315,10 +1906,16 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
         operation
             .scope
             .validate(&format!("operation {} scope", operation.id))?;
+        let coefficient = operation.action.coefficient();
         ensure!(
-            operation.action.coefficient().is_finite() && operation.action.coefficient() != 0.0,
-            "operation {} coefficient must be finite and nonzero",
-            operation.id
+            coefficient.is_finite(),
+            "operation {} coefficient must be finite",
+            operation.id,
+        );
+        ensure!(
+            coefficient != 0.0 || zero_operation_id == Some(operation.id.as_str()),
+            "operation {} coefficient must be nonzero",
+            operation.id,
         );
         if let Action::CoordinateSwap {
             source,
@@ -1386,6 +1983,23 @@ fn unique_ids<'a>(ids: impl Iterator<Item = &'a str>, kind: &str) -> Result<()> 
         ensure!(seen.insert(id), "duplicate {kind} id {id:?}");
     }
     Ok(())
+}
+
+fn plan_with_operation_coefficient(
+    source: &LensPlan,
+    operation_id: &str,
+    coefficient: f32,
+) -> Result<LensPlan> {
+    ensure!(coefficient.is_finite(), "sweep coefficient must be finite");
+    let mut plan = source.clone();
+    let operation = plan
+        .operations
+        .iter_mut()
+        .find(|operation| operation.id == operation_id)
+        .with_context(|| format!("Lens plan has no operation {operation_id:?}"))?;
+    operation.action.set_coefficient(coefficient);
+    validate_plan_with_zero_operation(&plan, Some(operation_id))?;
+    Ok(plan)
 }
 
 fn validate_ordinary_plan(plan: &LensPlan) -> Result<()> {
@@ -2089,7 +2703,7 @@ fn forward_event(
     let mut interventions = Vec::new();
     for layer in 0..execution.n_layer {
         for operation in &execution.plan.operations {
-            if scope_matches(&operation.scope, phase, layer)? {
+            if operation_enabled(operation) && scope_matches(&operation.scope, phase, layer)? {
                 let intervention = action_to_intervention(
                     &operation.id,
                     &operation.action,
@@ -2166,6 +2780,10 @@ fn forward_event(
         }
     }
     Ok(logits)
+}
+
+fn operation_enabled(operation: &OperationDefinition) -> bool {
+    operation.action.coefficient() != 0.0
 }
 
 fn scope_matches(scope: &Scope, phase: Phase, layer: u32) -> Result<bool> {
@@ -2367,6 +2985,12 @@ mod tests {
         args: LensRunArgs,
     }
 
+    #[derive(Debug, Parser)]
+    struct SweepArgsParser {
+        #[command(flatten)]
+        args: CoefficientSweepArgs,
+    }
+
     fn minimal_plan() -> LensPlan {
         serde_json::from_value(json!({
             "version": 1,
@@ -2379,6 +3003,33 @@ mod tests {
                 "scope":{"layers":{"kind":"values","values":[1]},"prefill":{"kind":"all"}},
                 "top_k":1
             }]
+        }))
+        .unwrap()
+    }
+
+    fn sweep_plan() -> LensPlan {
+        serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{"kind":"workspace_template","id":"t","weights":"w","labels":"l"}],
+            "directions": [{
+                "id":"d",
+                "lens":"t",
+                "row":{"kind":"template_row_id","template_row_id":0},
+                "normalization":"unit_l2"
+            }],
+            "operations": [
+                {
+                    "id":"swept",
+                    "scope":{"layers":{"kind":"values","values":[1]},"prefill":{"kind":"all"}},
+                    "action":{"kind":"residual_l2_fraction","direction":"d","coefficient":0.25}
+                },
+                {
+                    "id":"fixed",
+                    "scope":{"layers":{"kind":"values","values":[2]},"prefill":{"kind":"all"}},
+                    "action":{"kind":"fixed_add","direction":"d","coefficient":0.5}
+                }
+            ],
+            "readouts": []
         }))
         .unwrap()
     }
@@ -2432,6 +3083,193 @@ mod tests {
             effective_run_stdout_format(Some(RunStdoutFormat::Summary), false),
             RunStdoutFormat::Summary
         );
+    }
+
+    #[test]
+    fn sweep_cli_preserves_order_duplicates_signed_zero_and_negative_values() {
+        let parsed = SweepArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--operation",
+            "steer",
+            "--coefficients",
+            "0,0.25,-0,-0.5,0.25",
+            "--prompt",
+            "hello",
+            "--output",
+            "sweep",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(
+            parsed
+                .coefficients
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [0.0_f32, 0.25, -0.0, -0.5, 0.25]
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(parsed.arm_run_args().seed, 0);
+        validate_coefficient_sweep_args(&parsed).unwrap();
+
+        let mut excessive = parsed;
+        excessive.coefficients = vec![1.0; MAX_SWEEP_ARMS + 1];
+        assert!(validate_coefficient_sweep_args(&excessive).is_err());
+        excessive.coefficients = vec![f32::NAN];
+        assert!(validate_coefficient_sweep_args(&excessive).is_err());
+    }
+
+    #[test]
+    fn every_action_coefficient_can_be_overridden() {
+        let mut actions = vec![
+            Action::FixedAdd {
+                direction: "a".into(),
+                coefficient: 1.0,
+            },
+            Action::ResidualL2Fraction {
+                direction: "a".into(),
+                coefficient: 1.0,
+            },
+            Action::ProjectionAblate {
+                direction: "a".into(),
+                coefficient: 1.0,
+            },
+            Action::SourceToTarget {
+                source: "a".into(),
+                target: "b".into(),
+                coefficient: 1.0,
+            },
+            Action::CoordinateSwap {
+                source: "a".into(),
+                target: "b".into(),
+                coefficient: 1.0,
+            },
+        ];
+        for action in &mut actions {
+            action.set_coefficient(-0.125);
+            assert_eq!(action.coefficient().to_bits(), (-0.125_f32).to_bits());
+        }
+    }
+
+    #[test]
+    fn sweep_changes_only_the_selected_operation_and_disables_zero() {
+        let source = sweep_plan();
+        validate_plan(&source).unwrap();
+        let zero = plan_with_operation_coefficient(&source, "swept", -0.0).unwrap();
+        assert_eq!(source.operations[0].action.coefficient(), 0.25);
+        assert_eq!(
+            zero.operations[0].action.coefficient().to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert_eq!(zero.operations[1], source.operations[1]);
+        assert!(!operation_enabled(&zero.operations[0]));
+        assert!(operation_enabled(&zero.operations[1]));
+        assert!(validate_plan(&zero).is_err());
+        validate_plan_with_zero_operation(&zero, Some("swept")).unwrap();
+
+        let mut wrong_zero = source.clone();
+        wrong_zero.operations[1].action.set_coefficient(0.0);
+        assert!(validate_plan_with_zero_operation(&wrong_zero, Some("swept")).is_err());
+        assert!(plan_with_operation_coefficient(&source, "missing", 1.0).is_err());
+
+        let first = plan_with_operation_coefficient(&source, "swept", 0.0).unwrap();
+        let middle = plan_with_operation_coefficient(&source, "swept", 0.75).unwrap();
+        let last = plan_with_operation_coefficient(&source, "swept", 0.0).unwrap();
+        assert_eq!(first, last);
+        assert_ne!(first, middle);
+    }
+
+    #[test]
+    fn sweep_manifest_is_ordered_bounded_and_preserves_signed_zero() {
+        let coefficients = vec![0.0, 0.5, -0.0];
+        let arms = coefficients
+            .iter()
+            .enumerate()
+            .map(|(index, &coefficient)| CoefficientSweepArm {
+                index,
+                coefficient,
+                artifact: format!("arms/{index:06}/run.json"),
+                byte_length: 10,
+                blake3: "0".repeat(64),
+            })
+            .collect();
+        let manifest = CoefficientSweepManifest {
+            schema: SWEEP_SCHEMA.into(),
+            schema_version: SWEEP_SCHEMA_VERSION,
+            producer: SweepProducer {
+                build_commit: "a".repeat(40),
+                build_dirty: "0".into(),
+                build_source_state: "clean".into(),
+            },
+            canonical_source_plan_path: "/tmp/plan.json".into(),
+            operation_id: "swept".into(),
+            coefficients,
+            arms,
+        };
+        let bytes = serialize_sweep_manifest(&manifest).unwrap();
+        let decoded: CoefficientSweepManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.coefficients[2].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(decoded.arms[2].coefficient.to_bits(), (-0.0_f32).to_bits());
+
+        let mut malformed = decoded;
+        malformed.arms[1].artifact = "../run.json".into();
+        assert!(validate_sweep_manifest(&malformed).is_err());
+    }
+
+    #[test]
+    fn sweep_staging_publishes_exclusively_and_cleans_its_failures() {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-sweep-stage-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        DirBuilder::new().mode(0o700).create(&root).unwrap();
+
+        let published = root.join("published");
+        stage_and_publish_sweep(&published, |staging| {
+            write_new_sweep_file(&staging.join("marker"), b"complete")?;
+            super::super::sync_directory(staging)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(published.join("marker")).unwrap(),
+            b"complete"
+        );
+
+        let failed = root.join("failed");
+        assert!(
+            stage_and_publish_sweep(&failed, |_staging| -> Result<()> {
+                bail!("injected failure")
+            })
+            .is_err()
+        );
+        assert!(!failed.exists());
+
+        let raced = root.join("raced");
+        assert!(
+            stage_and_publish_sweep(&raced, |staging| {
+                write_new_sweep_file(&staging.join("marker"), b"ours")?;
+                create_sweep_directory(&raced)?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(raced.is_dir());
+        let leftovers = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".stage."))
+            .count();
+        assert_eq!(leftovers, 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

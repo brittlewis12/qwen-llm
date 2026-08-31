@@ -36,6 +36,59 @@ source/payload identities, explicit transfer status, selected token IDs, and the
 exact selected matrix digests. Rendered message-role spans remain reserved for a
 later schema increment.
 
+## Coefficient Sweep
+
+`qwen-lens sweep` runs an ordered coefficient sweep without reloading the model,
+tokenizer, lenses, uploaded directions, or readout buffers:
+
+```sh
+cargo run -q --release -p qwen-cli --bin qwen-lens -- sweep \
+  --model /path/to/Qwen.gguf \
+  --plan /path/to/plan.json \
+  --operation prefill-add \
+  --coefficients 0,0.025,0.05,0.1,0 \
+  --prompt "The capital of France is" \
+  --max-new-tokens 8 \
+  --seed 17 \
+  --output /path/to/new-sweep
+```
+
+The source plan must be an ordinary dense or MoE Qwen plan with finite, nonzero
+authored coefficients. Muse Glimmer and Flash-Next are rejected. The command
+changes only the exact `--operation` coefficient, preserves coefficient order
+and duplicates, and accepts at most 64 values that pass the selected action's
+finite-scale validation (`coordinate_swap` also validates `2 * coefficient`).
+Positive, negative, and signed-zero values are retained in the artifacts. A
+zero-valued selected operation is disabled: no intervention kernel runs and no
+operation application is recorded.
+
+Every arm gets a fresh sequence and a fresh sampler initialized with the same
+requested seed. Arms execute serially; no KV state, sampler state, or generated
+tokens cross arm boundaries. Each child remains an ordinary `qwen.lens.run` v1
+artifact containing its exact effective plan. The command writes all children
+to a private sibling staging directory and exclusively publishes a new output
+directory only after every arm and the manifest are synced:
+
+```text
+new-sweep/
+  manifest.json
+  arms/000000/run.json
+  arms/000001/run.json
+```
+
+The `qwen.lens.coefficient_sweep` v1 manifest records producer build identity,
+the canonical source-plan path, selected operation, ordered coefficients, and
+each child path, byte length, and BLAKE3 digest. Existing output paths are never
+replaced. Repeated controls and active arms can be checked with the normal
+offline comparator:
+
+```sh
+qwen-lens compare new-sweep/arms/000000/run.json \
+  new-sweep/arms/000004/run.json
+qwen-lens compare new-sweep/arms/000000/run.json \
+  new-sweep/arms/000003/run.json
+```
+
 ## Full Readout
 
 `read-full` dispatches imported Qwen, assembled model-bound Muse, and imported

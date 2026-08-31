@@ -61,8 +61,10 @@ qwen run -m Muse-Glimmer-30B-Q8_0.gguf --reasoning-effort xhigh --user "Explain 
 qwen run -m MODEL --user -
 ```
 
-Structured messages accept a strict bare array or `{ "messages": [...] }`;
-`-` reads one complete JSON document from stdin:
+Non-Muse structured messages accept a strict bare array or
+`{ "messages": [...] }`. Muse accepts the shared ATEM wrapper with tools,
+reasoning history, and tool results. `-` reads one complete JSON document from
+stdin:
 
 ```sh
 qwen run -m MODEL --messages messages.json

@@ -17,10 +17,9 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile;
 use qwen_llm::muse_glimmer_prompt::{
-    AnnotatedMuseGlimmerPrompt, MuseGlimmerMessage, MuseGlimmerPromptOptions,
-    MuseGlimmerPromptSpanKind, MuseGlimmerReasoningStrength,
-    render_muse_glimmer_atem_prompt_annotated,
+    AnnotatedMuseGlimmerPrompt, MuseGlimmerPromptSpanKind, MuseGlimmerReasoningStrength,
 };
+use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1009,9 +1008,9 @@ pub(crate) fn prepare_muse_input(
             })
         }
         (None, None, user, messages_path) => {
-            let messages = acquire_structured_messages(user, spec.system, messages_path)?;
+            let request = acquire_muse_request(user, spec.system, messages_path)?;
             let (rendered, mode) =
-                render_muse_structured_messages(messages, profile, spec.message_mode)?;
+                render_muse_structured_request(&request, profile, spec.message_mode)?;
             let token_ids = tokenizer
                 .encode(&rendered.text, false)
                 .context("tokenize exact Muse Glimmer ATEM prompt")?;
@@ -1061,33 +1060,42 @@ fn render_qwen_structured_messages(
     Ok((rendered, renderer, mode))
 }
 
-fn render_muse_structured_messages(
-    messages: Vec<ChatMessage>,
+fn render_muse_structured_request(
+    request: &MuseGlimmerRequest,
     profile: MuseGlimmerChatTemplateProfile,
     requested: Option<LensMessageMode>,
 ) -> Result<(AnnotatedMuseGlimmerPrompt, ResolvedMessageMode)> {
-    let messages = messages
-        .into_iter()
-        .enumerate()
-        .map(|(index, message)| match message.role.as_str() {
-            "system" => Ok(MuseGlimmerMessage::system(message.content)),
-            "user" => Ok(MuseGlimmerMessage::user(message.content)),
-            "assistant" => Ok(MuseGlimmerMessage::assistant(message.content)),
-            role => bail!("Muse Glimmer message {index} has unsupported role {role:?}"),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mode = resolve_muse_message_mode(requested)?;
+    let requested = resolve_muse_requested_reasoning(requested)?;
+    let reasoning_strength = request
+        .resolved_reasoning_strength(requested)
+        .context("resolve Muse Glimmer Lens reasoning strength")?;
+    let mode = ResolvedMessageMode::Muse(reasoning_strength);
     let ResolvedMessageMode::Muse(reasoning_strength) = mode else {
         unreachable!()
     };
-    let options = MuseGlimmerPromptOptions {
-        profile,
-        reasoning_strength,
-        ..MuseGlimmerPromptOptions::default()
-    };
-    let rendered = render_muse_glimmer_atem_prompt_annotated(&messages, &options)
+    let rendered = request
+        .render_annotated(profile, Some(reasoning_strength))
         .context("render Muse Glimmer ATEM Lens messages")?;
     Ok((rendered, mode))
+}
+
+fn acquire_muse_request(
+    user: Option<&str>,
+    system: Option<&str>,
+    messages_path: Option<&Path>,
+) -> Result<MuseGlimmerRequest> {
+    match (user, messages_path) {
+        (Some(user), None) => Ok(MuseGlimmerRequest::single_turn(
+            read_stdin_sentinel(user, "user message")?,
+            system.map(str::to_owned),
+        )),
+        (None, Some(path)) => {
+            let raw = read_messages_document(path)?;
+            MuseGlimmerRequest::from_json(&raw)
+                .with_context(|| format!("parse Muse Glimmer messages {}", path.display()))
+        }
+        _ => bail!("structured Muse Lens input requires exactly one of --user or --messages"),
+    }
 }
 
 fn acquire_structured_messages(
@@ -1115,19 +1123,22 @@ fn acquire_structured_messages(
         }
         (None, Some(path)) => {
             let source = path.display().to_string();
-            let raw = if path == Path::new("-") {
-                let mut raw = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut raw)
-                    .context("read messages from stdin")?;
-                raw
-            } else {
-                std::fs::read_to_string(path)
-                    .with_context(|| format!("read messages {}", path.display()))?
-            };
+            let raw = read_messages_document(path)?;
             parse_strict_messages_input(&raw, &source)
         }
         _ => bail!("structured Lens input requires exactly one of --user or --messages"),
+    }
+}
+
+fn read_messages_document(path: &Path) -> Result<String> {
+    if path == Path::new("-") {
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .context("read messages from stdin")?;
+        Ok(raw)
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("read messages {}", path.display()))
     }
 }
 
@@ -1196,20 +1207,17 @@ fn resolve_qwen_message_mode(
     }
 }
 
-fn resolve_muse_message_mode(requested: Option<LensMessageMode>) -> Result<ResolvedMessageMode> {
+fn resolve_muse_requested_reasoning(
+    requested: Option<LensMessageMode>,
+) -> Result<Option<MuseGlimmerReasoningStrength>> {
     match requested {
-        None | Some(LensMessageMode::Thinking | LensMessageMode::High) => Ok(
-            ResolvedMessageMode::Muse(MuseGlimmerReasoningStrength::High),
-        ),
-        Some(LensMessageMode::Low) => {
-            Ok(ResolvedMessageMode::Muse(MuseGlimmerReasoningStrength::Low))
+        None => Ok(None),
+        Some(LensMessageMode::Thinking | LensMessageMode::High) => {
+            Ok(Some(MuseGlimmerReasoningStrength::High))
         }
-        Some(LensMessageMode::Medium) => Ok(ResolvedMessageMode::Muse(
-            MuseGlimmerReasoningStrength::Medium,
-        )),
-        Some(LensMessageMode::Xhigh) => Ok(ResolvedMessageMode::Muse(
-            MuseGlimmerReasoningStrength::Xhigh,
-        )),
+        Some(LensMessageMode::Low) => Ok(Some(MuseGlimmerReasoningStrength::Low)),
+        Some(LensMessageMode::Medium) => Ok(Some(MuseGlimmerReasoningStrength::Medium)),
+        Some(LensMessageMode::Xhigh) => Ok(Some(MuseGlimmerReasoningStrength::Xhigh)),
         Some(LensMessageMode::Auto | LensMessageMode::NoThinking) => bail!(
             "Muse Glimmer supports message modes thinking, low, medium, high, or xhigh; it declares no auto or no-thinking ATEM profile"
         ),
@@ -1508,7 +1516,10 @@ fn is_structural_render_span(kind: MessageRenderSpanKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qwen_llm::muse_glimmer_prompt::render_muse_glimmer_atem_prompt;
+    use qwen_llm::muse_glimmer_prompt::{
+        MuseGlimmerMessage, MuseGlimmerPromptOptions, MuseGlimmerToolDefinition,
+        render_muse_glimmer_atem_prompt, render_muse_glimmer_atem_prompt_annotated,
+    };
 
     fn open_responses_rendering(request: &ServeRequest) -> LensInputRendering {
         let rendered = render_qwen_serve_prompt_annotated(request);
@@ -1603,8 +1614,17 @@ mod tests {
             )
         );
 
-        let (muse, mode) = render_muse_structured_messages(
-            messages.clone(),
+        let request = MuseGlimmerRequest::from_json(
+            r#"{
+                "messages":[
+                    {"role":"system","content":"policy"},
+                    {"role":"user","content":"request"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let (muse, mode) = render_muse_structured_request(
+            &request,
             MuseGlimmerChatTemplateProfile::UnslothLaunch,
             None,
         )
@@ -1616,7 +1636,7 @@ mod tests {
         ];
         assert_eq!(
             muse.text,
-            render_muse_glimmer_atem_prompt(&muse_messages, &MuseGlimmerPromptOptions::default(),)
+            render_muse_glimmer_atem_prompt(&muse_messages, &MuseGlimmerPromptOptions::default())
                 .unwrap()
         );
         assert!(muse.spans.iter().any(|span| {
@@ -1649,13 +1669,25 @@ mod tests {
                 arguments: serde_json::json!({"y": 2}),
             },
         ];
+        let options = MuseGlimmerPromptOptions {
+            tools: ["first", "second"]
+                .into_iter()
+                .map(|name| MuseGlimmerToolDefinition {
+                    name: name.into(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object"}),
+                })
+                .collect(),
+            ..MuseGlimmerPromptOptions::default()
+        };
         let rendered = render_muse_glimmer_atem_prompt_annotated(
             &[
                 MuseGlimmerMessage::user("go"),
                 assistant,
+                MuseGlimmerMessage::tool("first", "done"),
                 MuseGlimmerMessage::tool("second", "done"),
             ],
-            &MuseGlimmerPromptOptions::default(),
+            &options,
         )
         .unwrap();
         let spans = rendered
@@ -1718,28 +1750,66 @@ mod tests {
             resolve_qwen_message_mode(QwenMessageProtocol::Qwen36, Some(LensMessageMode::Low))
                 .is_err()
         );
-        assert!(resolve_muse_message_mode(Some(LensMessageMode::NoThinking)).is_err());
-        assert!(resolve_muse_message_mode(Some(LensMessageMode::Auto)).is_err());
+        assert!(resolve_muse_requested_reasoning(Some(LensMessageMode::NoThinking)).is_err());
+        assert!(resolve_muse_requested_reasoning(Some(LensMessageMode::Auto)).is_err());
+        let request = MuseGlimmerRequest::single_turn("request", None);
         assert_eq!(
-            resolve_muse_message_mode(None).unwrap().artifact_name(),
+            render_muse_structured_request(
+                &request,
+                MuseGlimmerChatTemplateProfile::UnslothLaunch,
+                None,
+            )
+            .unwrap()
+            .1
+            .artifact_name(),
             "reasoning_high"
         );
         assert_eq!(
-            resolve_muse_message_mode(Some(LensMessageMode::Medium))
-                .unwrap()
-                .artifact_name(),
+            render_muse_structured_request(
+                &request,
+                MuseGlimmerChatTemplateProfile::UnslothLaunch,
+                Some(LensMessageMode::Medium),
+            )
+            .unwrap()
+            .1
+            .artifact_name(),
             "reasoning_medium"
         );
         assert_eq!(
-            resolve_muse_message_mode(Some(LensMessageMode::High))
-                .unwrap()
-                .artifact_name(),
+            render_muse_structured_request(
+                &request,
+                MuseGlimmerChatTemplateProfile::UnslothLaunch,
+                Some(LensMessageMode::High),
+            )
+            .unwrap()
+            .1
+            .artifact_name(),
             "reasoning_high"
         );
         assert_eq!(
-            resolve_muse_message_mode(Some(LensMessageMode::Xhigh))
-                .unwrap()
-                .artifact_name(),
+            render_muse_structured_request(
+                &request,
+                MuseGlimmerChatTemplateProfile::UnslothLaunch,
+                Some(LensMessageMode::Xhigh),
+            )
+            .unwrap()
+            .1
+            .artifact_name(),
+            "reasoning_xhigh"
+        );
+        let document = MuseGlimmerRequest::from_json(
+            r#"{"messages":[{"role":"user","content":"request"}],"reasoning_strength":"xhigh"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            render_muse_structured_request(
+                &document,
+                MuseGlimmerChatTemplateProfile::UnslothLaunch,
+                None,
+            )
+            .unwrap()
+            .1
+            .artifact_name(),
             "reasoning_xhigh"
         );
         assert!(

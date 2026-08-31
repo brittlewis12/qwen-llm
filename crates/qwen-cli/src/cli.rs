@@ -161,7 +161,7 @@ pub(crate) struct RunArgs {
     )]
     system: Option<String>,
 
-    /// Render a strict bare array or {"messages":[...]} JSON document; '-' reads stdin.
+    /// Render family-validated messages JSON (strict chat or Muse ATEM); '-' reads stdin.
     #[arg(long, value_name = "FILE|-")]
     messages: Option<PathBuf>,
 

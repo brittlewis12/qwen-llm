@@ -1,8 +1,9 @@
 //! Byte-explicit Muse Glimmer ATEM prompt rendering.
 
 use crate::muse_glimmer::MuseGlimmerChatTemplateProfile;
+use serde::Deserialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MUSE_GLIMMER_BOS: &str = "<|begin_of_text|>";
 pub const MUSE_GLIMMER_START: &str = "<|start|>";
@@ -10,7 +11,8 @@ pub const MUSE_GLIMMER_MESSAGE: &str = "<|message|>";
 pub const MUSE_GLIMMER_EOM: &str = "<|eom|>";
 pub const MUSE_GLIMMER_EOT: &str = "<|eot|>";
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum MuseGlimmerReasoningStrength {
     Low,
     Medium,
@@ -271,6 +273,8 @@ pub enum MuseGlimmerPromptError {
         field: &'static str,
         detail: String,
     },
+    #[error("Muse Glimmer prompt options have invalid {field}: {detail}")]
+    InvalidOptions { field: &'static str, detail: String },
     #[error("failed to serialize Muse Glimmer tool JSON: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -303,7 +307,7 @@ pub fn render_muse_glimmer_atem_prompt_annotated(
         return Err(MuseGlimmerPromptError::EmptyMessages);
     }
     validate_options(options)?;
-    validate_messages(messages)?;
+    validate_messages(messages, options)?;
 
     let mut output = AnnotatedMuseGlimmerPromptBuilder::default();
     output.push(
@@ -724,19 +728,28 @@ fn validate_options(options: &MuseGlimmerPromptOptions) -> Result<(), MuseGlimme
         ("current_date", options.current_date.as_str()),
     ] {
         if value.is_empty() {
-            return Err(MuseGlimmerPromptError::InvalidTool {
-                index: 0,
+            return Err(MuseGlimmerPromptError::InvalidOptions {
                 field,
                 detail: "must not be empty".into(),
             });
         }
     }
+    let mut names = BTreeSet::new();
     for (index, tool) in options.tools.iter().enumerate() {
-        if tool.name.is_empty() {
+        if !is_atem_path(&tool.name)
+            || (!tool.name.contains('.') && matches!(tool.name.as_str(), "self" | "user"))
+        {
             return Err(MuseGlimmerPromptError::InvalidTool {
                 index,
                 field: "name",
-                detail: "must not be empty".into(),
+                detail: "must be a non-reserved, dot-separated ATEM identifier".into(),
+            });
+        }
+        if !names.insert(tool.name.as_str()) {
+            return Err(MuseGlimmerPromptError::InvalidTool {
+                index,
+                field: "name",
+                detail: "must be unique".into(),
             });
         }
         if !tool.parameters.is_object() {
@@ -747,11 +760,30 @@ fn validate_options(options: &MuseGlimmerPromptOptions) -> Result<(), MuseGlimme
             });
         }
     }
+    let namespaces = tool_namespaces(&options.tools);
+    for namespace in options.tool_namespace_descriptions.keys() {
+        if !namespaces.contains(&namespace.as_str()) {
+            return Err(MuseGlimmerPromptError::InvalidOptions {
+                field: "tool_namespace_descriptions",
+                detail: format!("contains unknown namespace {namespace:?}"),
+            });
+        }
+    }
     Ok(())
 }
 
-fn validate_messages(messages: &[MuseGlimmerMessage]) -> Result<(), MuseGlimmerPromptError> {
+fn validate_messages(
+    messages: &[MuseGlimmerMessage],
+    options: &MuseGlimmerPromptOptions,
+) -> Result<(), MuseGlimmerPromptError> {
+    let declared_tools = options
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<BTreeSet<_>>();
     let mut saw_system = false;
+    let mut saw_conversation = false;
+    let mut pending_tool_results = Vec::<&str>::new();
     for (index, message) in messages.iter().enumerate() {
         if matches!(message.role, MuseGlimmerMessageRole::System) {
             if saw_system || index != 0 {
@@ -776,25 +808,182 @@ fn validate_messages(messages: &[MuseGlimmerMessage]) -> Result<(), MuseGlimmerP
             });
         }
         if let MuseGlimmerMessageRole::Tool { name } = &message.role
-            && name.is_empty()
+            && !is_atem_path(name)
         {
             return Err(MuseGlimmerPromptError::InvalidMessage {
                 index,
                 field: "tool name",
-                detail: "must not be empty".into(),
+                detail: "must be a safe ATEM path".into(),
+            });
+        }
+        if matches!(message.role, MuseGlimmerMessageRole::Assistant)
+            && !message.tool_calls.is_empty()
+            && (!message.content.is_empty()
+                || message.recipient.is_some()
+                || message.end_turn.is_some())
+        {
+            return Err(MuseGlimmerPromptError::InvalidMessage {
+                index,
+                field: "tool_calls",
+                detail: "cannot be combined with content, recipient, or end_turn".into(),
+            });
+        }
+        if matches!(message.role, MuseGlimmerMessageRole::Assistant)
+            && message.tool_calls.is_empty()
+            && !matches!(
+                message.recipient.as_deref(),
+                None | Some("self") | Some("user")
+            )
+        {
+            return Err(MuseGlimmerPromptError::InvalidMessage {
+                index,
+                field: "recipient",
+                detail: "plain assistant history supports only self or user".into(),
             });
         }
         for call in &message.tool_calls {
-            if call.name.is_empty() || !call.arguments.is_object() {
+            if !is_atem_path(&call.name)
+                || !declared_tools.contains(call.name.as_str())
+                || !call.arguments.is_object()
+                || call
+                    .arguments
+                    .as_object()
+                    .is_some_and(|arguments| arguments.keys().any(|name| !is_atem_segment(name)))
+            {
                 return Err(MuseGlimmerPromptError::InvalidMessage {
                     index,
                     field: "tool_calls",
-                    detail: "each call requires a name and object arguments".into(),
+                    detail: "each call requires a declared safe name and safe object arguments"
+                        .into(),
                 });
             }
         }
+
+        let previous = index.checked_sub(1).and_then(|index| messages.get(index));
+        match &message.role {
+            MuseGlimmerMessageRole::System => {}
+            MuseGlimmerMessageRole::User => {
+                if !pending_tool_results.is_empty()
+                    || (saw_conversation
+                        && !matches!(
+                            previous,
+                            Some(MuseGlimmerMessage {
+                                role: MuseGlimmerMessageRole::Assistant,
+                                ..
+                            }) | Some(MuseGlimmerMessage {
+                                role: MuseGlimmerMessageRole::Tool { .. },
+                                ..
+                            })
+                        ))
+                {
+                    return Err(invalid_history(index, "user message is out of turn"));
+                }
+                if let Some(previous) = previous
+                    && matches!(previous.role, MuseGlimmerMessageRole::Assistant)
+                    && !assistant_ends_turn(previous)
+                {
+                    return Err(invalid_history(
+                        index,
+                        "user message follows an unfinished assistant segment",
+                    ));
+                }
+                saw_conversation = true;
+            }
+            MuseGlimmerMessageRole::Assistant => {
+                let extends_segmented_tool_calls = !message.tool_calls.is_empty()
+                    && previous.is_some_and(|previous| {
+                        matches!(previous.role, MuseGlimmerMessageRole::Assistant)
+                            && !previous.tool_calls.is_empty()
+                    });
+                let follows_valid_turn = matches!(
+                    previous,
+                    Some(MuseGlimmerMessage {
+                        role: MuseGlimmerMessageRole::User,
+                        ..
+                    }) | Some(MuseGlimmerMessage {
+                        role: MuseGlimmerMessageRole::Tool { .. },
+                        ..
+                    })
+                ) || previous.is_some_and(|previous| {
+                    matches!(previous.role, MuseGlimmerMessageRole::Assistant)
+                        && previous.tool_calls.is_empty()
+                        && !assistant_ends_turn(previous)
+                }) || extends_segmented_tool_calls;
+                if !saw_conversation
+                    || (!pending_tool_results.is_empty() && !extends_segmented_tool_calls)
+                    || !follows_valid_turn
+                {
+                    return Err(invalid_history(index, "assistant message is out of turn"));
+                }
+                pending_tool_results
+                    .extend(message.tool_calls.iter().map(|call| call.name.as_str()));
+            }
+            MuseGlimmerMessageRole::Tool { name } => {
+                if !declared_tools.contains(name.as_str()) {
+                    return Err(invalid_history(
+                        index,
+                        "tool result names an undeclared function",
+                    ));
+                }
+                let Some(pending_index) = pending_tool_results
+                    .iter()
+                    .position(|pending| *pending == name)
+                else {
+                    return Err(invalid_history(
+                        index,
+                        "tool result has no matching pending call",
+                    ));
+                };
+                pending_tool_results.remove(pending_index);
+            }
+        }
+    }
+    if options.add_generation_prompt && !pending_tool_results.is_empty() {
+        return Err(invalid_history(
+            messages.len().saturating_sub(1),
+            "assistant tool calls are missing results",
+        ));
+    }
+    if options.add_generation_prompt {
+        let ready = messages.last().is_some_and(|message| match message.role {
+            MuseGlimmerMessageRole::User | MuseGlimmerMessageRole::Tool { .. } => true,
+            MuseGlimmerMessageRole::Assistant => {
+                message.tool_calls.is_empty() && !assistant_ends_turn(message)
+            }
+            MuseGlimmerMessageRole::System => false,
+        });
+        if !ready {
+            return Err(invalid_history(
+                messages.len().saturating_sub(1),
+                "history is not awaiting an assistant continuation",
+            ));
+        }
     }
     Ok(())
+}
+
+fn invalid_history(index: usize, detail: impl Into<String>) -> MuseGlimmerPromptError {
+    MuseGlimmerPromptError::InvalidMessage {
+        index,
+        field: "history",
+        detail: detail.into(),
+    }
+}
+
+fn assistant_ends_turn(message: &MuseGlimmerMessage) -> bool {
+    let recipient = message.recipient.as_deref().unwrap_or("user");
+    message.end_turn.unwrap_or(recipient == "user")
+}
+
+fn is_atem_path(value: &str) -> bool {
+    !value.is_empty() && value.split('.').all(is_atem_segment)
+}
+
+fn is_atem_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn render_tool_definitions(
@@ -843,10 +1032,10 @@ fn render_tool_definitions(
 
 fn render_system_meta(output: &mut String, options: &MuseGlimmerPromptOptions) {
     output.push_str("# Valid recipients: \"self\"");
-    for namespace in tool_namespaces(&options.tools) {
+    for recipient in tool_recipient_patterns(&options.tools) {
         output.push_str(", \"");
-        output.push_str(namespace);
-        output.push_str(".*\"");
+        output.push_str(&recipient);
+        output.push('"');
     }
     output.push_str(", \"user\".");
 }
@@ -891,6 +1080,20 @@ fn tool_namespaces(tools: &[MuseGlimmerToolDefinition]) -> Vec<&str> {
         }
     }
     namespaces
+}
+
+fn tool_recipient_patterns(tools: &[MuseGlimmerToolDefinition]) -> Vec<String> {
+    let mut recipients = Vec::new();
+    for tool in tools {
+        let recipient = match tool.name.split_once('.') {
+            Some((namespace, _)) => format!("{namespace}.*"),
+            None => tool.name.clone(),
+        };
+        if !recipients.contains(&recipient) {
+            recipients.push(recipient);
+        }
+    }
+    recipients
 }
 
 struct NormalizedSystemContent {
@@ -1213,6 +1416,126 @@ mod tests {
     }
 
     #[test]
+    fn renders_unqualified_tool_as_an_exact_recipient() {
+        let options = MuseGlimmerPromptOptions {
+            tools: vec![MuseGlimmerToolDefinition {
+                name: "lookup".into(),
+                description: "Lookup".into(),
+                parameters: json!({"type":"object"}),
+            }],
+            ..MuseGlimmerPromptOptions::default()
+        };
+        let prompt =
+            render_muse_glimmer_atem_prompt(&[MuseGlimmerMessage::user("Lookup this")], &options)
+                .unwrap();
+        assert!(prompt.contains("# Valid recipients: \"self\", \"lookup\", \"user\"."));
+        assert!(!prompt.contains("\"lookup.*\""));
+    }
+
+    #[test]
+    fn preserves_segmented_multi_tool_calls_before_results() {
+        let options = MuseGlimmerPromptOptions {
+            tools: ["weather.lookup", "calendar.lookup"]
+                .into_iter()
+                .map(|name| MuseGlimmerToolDefinition {
+                    name: name.into(),
+                    description: String::new(),
+                    parameters: json!({"type":"object"}),
+                })
+                .collect(),
+            ..MuseGlimmerPromptOptions::default()
+        };
+        let mut weather = MuseGlimmerMessage::assistant("");
+        weather.reasoning_content = Some("Check both sources.".into());
+        weather.tool_calls.push(MuseGlimmerToolCall {
+            name: "weather.lookup".into(),
+            arguments: json!({"city":"Paris"}),
+        });
+        let mut calendar = MuseGlimmerMessage::assistant("");
+        calendar.tool_calls.push(MuseGlimmerToolCall {
+            name: "calendar.lookup".into(),
+            arguments: json!({"date":"2026-08-31"}),
+        });
+        let prompt = render_muse_glimmer_atem_prompt(
+            &[
+                MuseGlimmerMessage::user("Plan tomorrow"),
+                weather,
+                calendar,
+                MuseGlimmerMessage::tool("weather.lookup", "Sunny"),
+                MuseGlimmerMessage::tool("calendar.lookup", "Open"),
+            ],
+            &options,
+        )
+        .unwrap();
+        assert!(prompt.contains("<atem:invoke name=\"weather.lookup\">"));
+        assert!(prompt.contains("<atem:invoke name=\"calendar.lookup\">"));
+        assert!(prompt.ends_with("<|start|>assistant"));
+    }
+
+    #[test]
+    fn rejects_malformed_atem_names_and_incomplete_histories() {
+        let mut options = MuseGlimmerPromptOptions {
+            tools: vec![MuseGlimmerToolDefinition {
+                name: "weather.lookup".into(),
+                description: "Weather".into(),
+                parameters: json!({"type":"object"}),
+            }],
+            ..MuseGlimmerPromptOptions::default()
+        };
+        for messages in [
+            vec![
+                MuseGlimmerMessage::user("one"),
+                MuseGlimmerMessage::user("two"),
+            ],
+            vec![
+                MuseGlimmerMessage::user("one"),
+                MuseGlimmerMessage::assistant("done"),
+            ],
+            vec![MuseGlimmerMessage::tool("weather.lookup", "orphan")],
+        ] {
+            assert!(render_muse_glimmer_atem_prompt(&messages, &options).is_err());
+        }
+
+        let mut call = MuseGlimmerMessage::assistant("");
+        call.tool_calls.push(MuseGlimmerToolCall {
+            name: "weather.lookup".into(),
+            arguments: json!({"city":"Paris"}),
+        });
+        assert!(
+            render_muse_glimmer_atem_prompt(
+                &[MuseGlimmerMessage::user("Weather?"), call.clone()],
+                &options,
+            )
+            .is_err()
+        );
+        call.recipient = Some("weather.lookup".into());
+        assert!(
+            render_muse_glimmer_atem_prompt(
+                &[
+                    MuseGlimmerMessage::user("Weather?"),
+                    call,
+                    MuseGlimmerMessage::tool("weather.lookup", "Sunny"),
+                ],
+                &options,
+            )
+            .is_err()
+        );
+
+        options.tools[0].name = "weather\" bad".into();
+        assert!(
+            render_muse_glimmer_atem_prompt(&[MuseGlimmerMessage::user("Weather?")], &options,)
+                .is_err()
+        );
+        for reserved in ["self", "user"] {
+            options.tools[0].name = reserved.into();
+            assert!(
+                render_muse_glimmer_atem_prompt(&[MuseGlimmerMessage::user("Weather?")], &options,)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn annotated_recipients_and_end_markers_preserve_multi_record_atem_boundaries() {
         let mut assistant = MuseGlimmerMessage::assistant("");
         assistant.reasoning_content = Some("reason".into());
@@ -1227,35 +1550,41 @@ mod tests {
             },
         ];
         let messages = [MuseGlimmerMessage::user("go"), assistant];
-        let mut options = MuseGlimmerPromptOptions::default();
-        options.add_generation_prompt = false;
+        let options = MuseGlimmerPromptOptions {
+            tools: ["first", "second"]
+                .into_iter()
+                .map(|name| MuseGlimmerToolDefinition {
+                    name: name.into(),
+                    description: String::new(),
+                    parameters: json!({"type": "object"}),
+                })
+                .collect(),
+            add_generation_prompt: false,
+            ..MuseGlimmerPromptOptions::default()
+        };
         let annotated = render_muse_glimmer_atem_prompt_annotated(&messages, &options).unwrap();
         assert_valid_spans(&annotated);
-        assert_eq!(
-            annotated.text,
-            concat!(
-                "<|begin_of_text|><|start|>system<|message|>",
-                "You are a helpful AI assistant.\n",
-                "Knowledge cutoff: 2026-01-04.\n",
-                "Current date: 2026-08-29.\n\n",
-                "Reasoning strength: high.\n\n",
-                "# Valid recipients: \"self\", \"user\".<|eot|>",
-                "<|start|>user<|message|>go<|eot|>",
-                "<|start|>assistant to=self<|message|>reason<|eom|>",
-                "<|start|>assistant to=first<|message|>",
-                "<atem:function_calls>\n",
-                "<atem:invoke name=\"first\">\n",
-                "<atem:parameter name=\"x\">1</atem:parameter>\n",
-                "</atem:invoke>\n",
-                "</atem:function_calls><|eom|>",
-                "<|start|>assistant to=second<|message|>",
-                "<atem:function_calls>\n",
-                "<atem:invoke name=\"second\">\n",
-                "<atem:parameter name=\"y\">[1,2]</atem:parameter>\n",
-                "</atem:invoke>\n",
-                "</atem:function_calls><|eot|>",
-            )
+        assert!(
+            annotated
+                .text
+                .contains("# Valid recipients: \"self\", \"first\", \"second\", \"user\".")
         );
+        assert!(annotated.text.ends_with(concat!(
+            "<|start|>user<|message|>go<|eot|>",
+            "<|start|>assistant to=self<|message|>reason<|eom|>",
+            "<|start|>assistant to=first<|message|>",
+            "<atem:function_calls>\n",
+            "<atem:invoke name=\"first\">\n",
+            "<atem:parameter name=\"x\">1</atem:parameter>\n",
+            "</atem:invoke>\n",
+            "</atem:function_calls><|eom|>",
+            "<|start|>assistant to=second<|message|>",
+            "<atem:function_calls>\n",
+            "<atem:invoke name=\"second\">\n",
+            "<atem:parameter name=\"y\">[1,2]</atem:parameter>\n",
+            "</atem:invoke>\n",
+            "</atem:function_calls><|eot|>",
+        )));
         let recipients = annotated
             .spans
             .iter()
@@ -1294,7 +1623,14 @@ mod tests {
         assert!(
             render_muse_glimmer_atem_prompt(
                 &[MuseGlimmerMessage::user("Forecast?"), assistant],
-                &MuseGlimmerPromptOptions::default(),
+                &MuseGlimmerPromptOptions {
+                    tools: vec![MuseGlimmerToolDefinition {
+                        name: "weather.lookup".into(),
+                        description: String::new(),
+                        parameters: json!({"type": "object"}),
+                    }],
+                    ..MuseGlimmerPromptOptions::default()
+                },
             )
             .is_err()
         );

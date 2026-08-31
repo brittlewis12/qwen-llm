@@ -66,10 +66,8 @@ use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::moe_batch16::MOE_BATCH16_WIDTH;
 use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, MuseGlimmerConfig};
-use qwen_llm::muse_glimmer_prompt::{
-    MuseGlimmerMessage, MuseGlimmerPromptOptions, MuseGlimmerReasoningStrength,
-    render_muse_glimmer_atem_prompt, render_muse_glimmer_single_turn,
-};
+use qwen_llm::muse_glimmer_prompt::MuseGlimmerReasoningStrength;
+use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
 use qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_REFERENCE_ATTENTION_CAPACITY;
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
@@ -2915,12 +2913,9 @@ fn prepare_muse_glimmer_prompt(
                 !run.no_thinking,
                 "Muse Glimmer does not declare a no-thinking ATEM profile; use --reasoning-effort low for the lightest supported reasoning mode"
             );
-            let reasoning_strength = resolve_muse_glimmer_reasoning_strength(run.reasoning_effort);
-            let options = MuseGlimmerPromptOptions {
-                profile: config.chat_template_profile,
-                reasoning_strength,
-                ..MuseGlimmerPromptOptions::default()
-            };
+            let reasoning_strength = run
+                .reasoning_effort
+                .map(resolve_muse_glimmer_reasoning_strength);
             match run.acquire_input()? {
                 cli::AcquiredRunInput::RawPrompt(text) => Ok(MuseGlimmerPreparedPrompt {
                     text,
@@ -2928,7 +2923,8 @@ fn prepare_muse_glimmer_prompt(
                     add_special_tokens: !args.no_special_tokens,
                 }),
                 cli::AcquiredRunInput::User { system, user } => {
-                    let text = render_muse_glimmer_single_turn(&user, system.as_deref(), &options)
+                    let text = MuseGlimmerRequest::single_turn(user, system)
+                        .render(config.chat_template_profile, reasoning_strength)
                         .context("render Muse Glimmer ATEM user request")?;
                     Ok(MuseGlimmerPreparedPrompt {
                         text,
@@ -2937,10 +2933,10 @@ fn prepare_muse_glimmer_prompt(
                     })
                 }
                 cli::AcquiredRunInput::Messages { document, source } => {
-                    let messages = parse_strict_messages_input(&document, &source)?;
-                    let messages = convert_muse_glimmer_messages(messages)?;
-                    let text = render_muse_glimmer_atem_prompt(&messages, &options)
-                        .context("render strict Muse Glimmer ATEM messages")?;
+                    let text = MuseGlimmerRequest::from_json(&document)
+                        .with_context(|| format!("parse Muse Glimmer messages from {source}"))?
+                        .render(config.chat_template_profile, reasoning_strength)
+                        .context("render Muse Glimmer ATEM messages")?;
                     Ok(MuseGlimmerPreparedPrompt {
                         text,
                         source: PromptSource::Messages,
@@ -2966,29 +2962,14 @@ fn prepare_muse_glimmer_prompt(
 }
 
 fn resolve_muse_glimmer_reasoning_strength(
-    requested: Option<cli::RunReasoningEffort>,
+    requested: cli::RunReasoningEffort,
 ) -> MuseGlimmerReasoningStrength {
     match requested {
-        None | Some(cli::RunReasoningEffort::High) => MuseGlimmerReasoningStrength::High,
-        Some(cli::RunReasoningEffort::Low) => MuseGlimmerReasoningStrength::Low,
-        Some(cli::RunReasoningEffort::Medium) => MuseGlimmerReasoningStrength::Medium,
-        Some(cli::RunReasoningEffort::Xhigh) => MuseGlimmerReasoningStrength::Xhigh,
+        cli::RunReasoningEffort::Low => MuseGlimmerReasoningStrength::Low,
+        cli::RunReasoningEffort::Medium => MuseGlimmerReasoningStrength::Medium,
+        cli::RunReasoningEffort::High => MuseGlimmerReasoningStrength::High,
+        cli::RunReasoningEffort::Xhigh => MuseGlimmerReasoningStrength::Xhigh,
     }
-}
-
-fn convert_muse_glimmer_messages(
-    messages: Vec<messages::ChatMessage>,
-) -> Result<Vec<MuseGlimmerMessage>> {
-    messages
-        .into_iter()
-        .enumerate()
-        .map(|(index, message)| match message.role.as_str() {
-            "system" => Ok(MuseGlimmerMessage::system(message.content)),
-            "user" => Ok(MuseGlimmerMessage::user(message.content)),
-            "assistant" => Ok(MuseGlimmerMessage::assistant(message.content)),
-            role => bail!("Muse Glimmer message {index} has unsupported role {role:?}"),
-        })
-        .collect()
 }
 
 fn resolve_qwen38_generation_mode(
@@ -12308,23 +12289,80 @@ mod tests {
     }
 
     #[test]
+    fn muse_glimmer_messages_use_the_shared_structured_atem_contract() {
+        let path = std::env::temp_dir().join(format!(
+            "qwen-muse-messages-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            r#"{
+                "messages":[
+                    {"role":"user","content":"Weather?"},
+                    {"role":"assistant","content":"","tool_calls":[{"name":"weather.lookup","arguments":{"city":"Paris"}}]},
+                    {"role":"tool","name":"weather.lookup","content":"Sunny"}
+                ],
+                "tools":[{"name":"weather.lookup","description":"Weather","parameters":{"type":"object"}}]
+            }"#,
+        )
+        .unwrap();
+        let mut args = Args::try_parse_from([
+            "qwen",
+            "run",
+            "-m",
+            "model.gguf",
+            "--messages",
+            path.to_str().unwrap(),
+            "--reasoning-effort",
+            "medium",
+        ])
+        .unwrap();
+        let invocation = cli::normalize(&mut args);
+        invocation.apply_option_overrides(&mut args);
+        let prepared = prepare_muse_glimmer_prompt(
+            invocation,
+            &MuseGlimmerConfig::unsloth_release_reference(),
+            &args,
+        )
+        .unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(prepared.source, PromptSource::Messages);
+        assert!(!prepared.add_special_tokens);
+        assert!(prepared.text.contains("Reasoning strength: medium."));
+        assert!(
+            prepared
+                .text
+                .contains("<atem:invoke name=\"weather.lookup\">")
+        );
+        assert!(
+            prepared
+                .text
+                .contains("<tool_output name=\"weather.lookup\">\nSunny")
+        );
+        assert!(prepared.text.ends_with("<|start|>assistant"));
+    }
+
+    #[test]
     fn muse_glimmer_reasoning_strength_preserves_all_released_levels() {
         for (requested, expected) in [
-            (None, MuseGlimmerReasoningStrength::High),
             (
-                Some(cli::RunReasoningEffort::Low),
+                cli::RunReasoningEffort::Low,
                 MuseGlimmerReasoningStrength::Low,
             ),
             (
-                Some(cli::RunReasoningEffort::Medium),
+                cli::RunReasoningEffort::Medium,
                 MuseGlimmerReasoningStrength::Medium,
             ),
             (
-                Some(cli::RunReasoningEffort::High),
+                cli::RunReasoningEffort::High,
                 MuseGlimmerReasoningStrength::High,
             ),
             (
-                Some(cli::RunReasoningEffort::Xhigh),
+                cli::RunReasoningEffort::Xhigh,
                 MuseGlimmerReasoningStrength::Xhigh,
             ),
         ] {

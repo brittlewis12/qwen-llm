@@ -55,6 +55,7 @@ pub mod muse_glimmer_lens;
 pub mod muse_glimmer_lens_fit;
 pub mod muse_glimmer_metal;
 pub mod muse_glimmer_prompt;
+pub mod muse_glimmer_request;
 pub mod muse_glimmer_residency;
 pub mod muse_glimmer_runtime;
 pub mod muse_glimmer_text_session;

@@ -14,8 +14,9 @@ cargo run -q -p qwen-cli --bin qwen-lens -- run \
 Use exactly one of `--prompt`, `--token-ids`, `--user`, `--messages`, or
 `--open-responses`. Raw prompts use the tokenizer's configured special-token
 insertion unless `--no-special-tokens` is set, and literal token IDs are passed
-unchanged. `--user` and `--messages` use the same strict
-system/user/assistant renderer as normal model runs.
+unchanged. Ordinary Qwen `--user` and `--messages` inputs use the same strict
+system/user/assistant renderer as normal model runs. Muse accepts the shared
+structured ATEM request described below.
 
 `--open-responses FILE|-` (alias `--responses-input`) is ordinary-Qwen-only. It
 uses the exact parser, model capability gates, and prompt renderer shared with
@@ -242,6 +243,9 @@ select their exact effort tiers, and `no-thinking` selects the exact closed
 thinking transition; `auto` is rejected. Open Responses takes its rendering
 mode from `reasoning.effort` / `x_qwen.no_thinking`. `rendering.generation_mode` records
 the resolved mode (`auto`, `thinking`, `no_thinking`, or a `thinking_*` tier).
+Muse accepts `thinking`, `low`, `medium`, `high`, or `xhigh`; `thinking` is an
+alias for its released `high` default. A command-line mode overrides an omitted
+document value and conflicts fail closed.
 Inputs are never truncated and are bounded at 128 tokens. Omit `--layers` to
 trace all 63 published source layers.
 
@@ -581,6 +585,43 @@ source layers and require `allow_unvalidated_transfer: true`. Template lenses,
 native-hyper directions, and Open Responses remain unsupported for Muse. Raw
 text, literal token IDs, and exact ATEM-rendered `--user`/`--messages` inputs are
 supported.
+
+Muse `--messages` accepts either a bare message array or a wrapper containing
+`messages`, `tools`, `tool_namespace_descriptions`, `reasoning_strength`, and
+`current_date`. Assistant history can preserve `reasoning_content`, `recipient`,
+and `end_turn`; structured calls use `tool_calls`, whose routing and turn
+boundary derive from their declared function names. Tool results use role
+`tool` plus their exact function `name`. Calls and results must match, names
+must be safe ATEM identifiers, and the history must await an assistant
+continuation. `current_date` customizes the synthesized system message; with an
+explicit system message, put the date in that content instead. The rendered
+prompt retains exact role, channel, tool-call, and tool-result spans for
+semantic Lens selectors and is tokenized without adding special tokens again.
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "Check Paris weather"},
+    {
+      "role": "assistant",
+      "content": "",
+      "reasoning_content": "I should query the forecast.",
+      "tool_calls": [
+        {"name": "weather.lookup", "arguments": {"city": "Paris"}}
+      ]
+    },
+    {"role": "tool", "name": "weather.lookup", "content": "Sunny"}
+  ],
+  "tools": [
+    {
+      "name": "weather.lookup",
+      "description": "Read a city forecast",
+      "parameters": {"type": "object"}
+    }
+  ],
+  "reasoning_strength": "high"
+}
+```
 
 ```json
 {

@@ -101,10 +101,13 @@ Contract:
 - Muse Glimmer uses the released `temperature=1`, `top_p=.95`, `top_k=64`,
   `min_p=0` preset. Each explicitly supplied sampling flag overrides only its
   corresponding field; the request seed remains explicit and deterministic.
-- Modern messages accept only the strict ordinary-chat subset: optional leading
-  system, alternating user/assistant turns, and a final user turn. Unknown
-  fields, wrapper metadata, unsupported roles, and structured assistant
+- Non-Muse modern messages accept only the strict ordinary-chat subset: optional
+  leading system, alternating user/assistant turns, and a final user turn.
+  Unknown fields, wrapper metadata, unsupported roles, and structured assistant
   thinking are rejected rather than ignored.
+- Muse modern messages use the shared ATEM request contract. They preserve
+  validated reasoning and tool history, require declared calls and matching
+  tool results, and accept only histories awaiting an assistant continuation.
 - The Qwen3.8 surface is text-only. Image content arrays, developer/tool roles,
   structured calls/results, response formats, and projector execution remain
   outside this contract.

@@ -180,7 +180,7 @@ mod tests {
         let case = case("qwen36_raw_echo_identity");
         let emission = case["emission"].as_str().unwrap();
         // The reasoning split runs first in the pipeline.
-        let split = crate::serve::render::split_reasoning(emission);
+        let split = crate::open_responses::render::split_reasoning(emission);
         assert_eq!(split.reasoning, case["expect_parse"]["reasoning"].as_str(),);
         let parsed = parse_emission(split.visible);
         assert_eq!(

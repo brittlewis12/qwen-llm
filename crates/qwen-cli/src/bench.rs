@@ -1904,11 +1904,20 @@ mod stop_token_cli_tests {
             ("serve/backend_ds4.rs", include_str!("serve/backend_ds4.rs")),
             ("serve/events.rs", include_str!("serve/events.rs")),
             ("serve/http.rs", include_str!("serve/http.rs")),
-            ("serve/items.rs", include_str!("serve/items.rs")),
+            (
+                "open_responses/items.rs",
+                include_str!("open_responses/items.rs"),
+            ),
             ("serve/partition.rs", include_str!("serve/partition.rs")),
-            ("serve/render.rs", include_str!("serve/render.rs")),
+            (
+                "open_responses/render.rs",
+                include_str!("open_responses/render.rs"),
+            ),
             ("serve/render_ds4.rs", include_str!("serve/render_ds4.rs")),
-            ("serve/tool_parse.rs", include_str!("serve/tool_parse.rs")),
+            (
+                "open_responses/tool_parse.rs",
+                include_str!("open_responses/tool_parse.rs"),
+            ),
             ("serve/utf8.rs", include_str!("serve/utf8.rs")),
             (
                 "qwen-llm/runtime.rs",

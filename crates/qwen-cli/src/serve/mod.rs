@@ -17,12 +17,11 @@ pub(crate) mod backend;
 pub(crate) mod backend_ds4;
 pub(crate) mod events;
 pub(crate) mod http;
-pub(crate) mod items;
 pub(crate) mod partition;
-pub(crate) mod render;
 pub(crate) mod render_ds4;
-pub(crate) mod tool_parse;
 pub(crate) mod utf8;
+
+pub(crate) use crate::open_responses::{items, render, tool_parse};
 
 use anyhow::{Context, Result, ensure};
 use qwen_llm::gguf::GgufFile;

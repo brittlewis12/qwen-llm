@@ -1502,8 +1502,8 @@ mod tests {
         // rendered prompt, so prior prefixes (and their checkpoints) stay
         // valid across a narrowing change.
         assert_eq!(
-            crate::serve::render::render_qwen_serve_prompt(&unrestricted),
-            crate::serve::render::render_qwen_serve_prompt(&narrowed),
+            crate::open_responses::render::render_qwen_serve_prompt(&unrestricted),
+            crate::open_responses::render::render_qwen_serve_prompt(&narrowed),
             "allowed_tools must not change rendered bytes"
         );
     }
@@ -1728,7 +1728,7 @@ mod tests {
             request.turns.last(),
             Some(&Turn::ToolResults(vec!["r1".into(), "r2".into()]))
         );
-        let rendered = crate::serve::render::render_qwen_serve_prompt(&request);
+        let rendered = crate::open_responses::render::render_qwen_serve_prompt(&request);
         assert!(rendered.find("r1").unwrap() < rendered.find("r2").unwrap());
 
         let error = parse(json!({"model":"m", "input":[

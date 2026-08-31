@@ -487,39 +487,11 @@ impl GenerationBackend for EngineBackend {
     }
 
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
-        let mut request = request.clone();
-        request.template = self.template;
-        if request.no_thinking && !self.no_thinking_supported {
-            return Err(ServeError::invalid_request(
-                Some("x_qwen.no_thinking"),
-                "x_qwen.no_thinking is not validated for the loaded model identity",
-            ));
-        }
-        if self.template != QwenTemplate::Qwen38 && request.reasoning_effort.is_some() {
-            return Err(ServeError::invalid_request(
-                Some("reasoning.effort"),
-                "reasoning.effort is only supported for validated Qwen3.8 identities",
-            ));
-        }
-        if self.template == QwenTemplate::Qwen38 {
-            match (request.no_thinking, request.reasoning_effort.as_deref()) {
-                (true, Some(_)) => {
-                    return Err(ServeError::invalid_request(
-                        Some("reasoning.effort"),
-                        "reasoning.effort cannot be combined with x_qwen.no_thinking",
-                    ));
-                }
-                (_, None | Some("none" | "low" | "medium" | "xhigh")) => {}
-                (_, Some(other)) => {
-                    return Err(ServeError::invalid_request(
-                        Some("reasoning.effort"),
-                        format!(
-                            "Qwen3.8 supports reasoning.effort none|low|medium|xhigh; got {other:?}"
-                        ),
-                    ));
-                }
-            }
-        }
+        let request = crate::open_responses::bind_qwen_request(
+            request,
+            self.template,
+            self.no_thinking_supported,
+        )?;
         Ok(super::render::render_qwen_serve_prompt(&request))
     }
 

@@ -31,6 +31,7 @@ mod muse_lens_rows_fit;
 mod muse_lens_run;
 mod muse_published_full_lens;
 mod muse_published_full_lens_artifact;
+mod open_responses;
 mod published_pt;
 #[allow(dead_code)]
 mod template_lens;

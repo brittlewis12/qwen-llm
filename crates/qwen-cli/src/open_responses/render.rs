@@ -289,7 +289,7 @@ fn qwen38_generation_mode(request: &ServeRequest) -> Option<Qwen38GenerationMode
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serve::items::parse_request;
+    use crate::open_responses::items::parse_request;
     use serde_json::{Value, json};
 
     fn fixture_case(name: &str) -> Value {
@@ -547,7 +547,7 @@ mod tests {
     }
 
     fn serve_request(
-        template: crate::serve::items::QwenTemplate,
+        template: crate::open_responses::items::QwenTemplate,
         effort: Option<&str>,
         turns: &[(&str, Option<&str>, &str)],
         system: Option<&str>,
@@ -580,7 +580,7 @@ mod tests {
             ("user", None, "Now add 4."),
         ];
         let request = serve_request(
-            crate::serve::items::QwenTemplate::Generic,
+            crate::open_responses::items::QwenTemplate::Generic,
             None,
             &turns,
             Some("You are terse."),
@@ -626,7 +626,7 @@ mod tests {
             ),
         ] {
             let request = serve_request(
-                crate::serve::items::QwenTemplate::Qwen38,
+                crate::open_responses::items::QwenTemplate::Qwen38,
                 effort,
                 &turns,
                 Some("You are terse."),
@@ -653,13 +653,13 @@ mod tests {
             ("user", None, "again"),
         ];
         let generic = render_qwen_serve_prompt(&serve_request(
-            crate::serve::items::QwenTemplate::Generic,
+            crate::open_responses::items::QwenTemplate::Generic,
             None,
             &turns,
             None,
         ));
         let qwen38 = render_qwen_serve_prompt(&serve_request(
-            crate::serve::items::QwenTemplate::Qwen38,
+            crate::open_responses::items::QwenTemplate::Qwen38,
             None,
             &turns,
             None,

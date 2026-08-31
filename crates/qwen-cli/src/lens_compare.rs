@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use super::lens_input::LensInputRendering;
+#[cfg(test)]
+use super::lens_input::LensRenderedSpan;
 use super::lens_inspect::{self, Cell, TraceDocument, VectorCell};
 use super::lens_run::{self, CoefficientSweepManifest, LensPlan};
 use super::{read_regular_file_bounded, read_regular_file_exact};
@@ -99,9 +102,9 @@ pub(crate) fn run(args: CompareArgs) -> Result<()> {
         }
         "qwen.lens.run" => {
             ensure!(
-                matches!(left_envelope.schema_version, 1 | 2)
+                matches!(left_envelope.schema_version, 1 | 2 | 3)
                     && left_envelope.schema_version == right_envelope.schema_version,
-                "run comparison supports same-version schema 1 or 2 pairs only"
+                "run comparison supports same-version schema 1, 2, or 3 pairs only"
             );
             let left = parse_run_bytes(&left_bytes, &args.left)?;
             let right = parse_run_bytes(&right_bytes, &args.right)?;
@@ -263,7 +266,11 @@ pub(crate) fn inspect_sweep(args: InspectSweepArgs) -> Result<()> {
         inspection_kind: "coefficient_sweep",
         sweep_schema_version: loaded.manifest.schema_version,
         bundle_integrity: "verified",
-        run_validation: "strict_known_qwen_lens_run_v1",
+        run_validation: match reference.schema_version {
+            1 => "strict_known_qwen_lens_run_v1",
+            3 => "strict_known_qwen_lens_run_v3",
+            _ => unreachable!("validated sweep children use run schema v1 or v3"),
+        },
         source_plan_identity: "unverifiable_manifest_v1",
         sweep_root: loaded.root,
         manifest_blake3: loaded.manifest_blake3,
@@ -396,11 +403,11 @@ fn validate_sweep_child(
     arm: &lens_run::CoefficientSweepArm,
 ) -> Result<LensPlan> {
     ensure!(
-        document.schema_version == 1
+        matches!(document.schema_version, 1 | 3)
             && document.runtime_kind == "ordinary_qwen"
             && document.execution_binding.is_none()
             && document.native_hyper_captures.is_empty(),
-        "sweep child {} must be an ordinary qwen.lens.run v1 without native captures",
+        "sweep child {} must be an ordinary qwen.lens.run v1 or v3 without native captures",
         arm.index
     );
     ensure!(
@@ -616,6 +623,8 @@ fn ensure_sweep_run_context(reference: &RunDocument, candidate: &RunDocument) ->
     ensure!(
         reference.schema_version == candidate.schema_version
             && reference.input_source == candidate.input_source
+            && reference.add_special_tokens == candidate.add_special_tokens
+            && reference.rendering == candidate.rendering
             && reference.max_new_tokens == candidate.max_new_tokens,
         "sweep child run schema or input/generation context differs"
     );
@@ -1455,6 +1464,10 @@ struct RunDocument {
     canonical_plan_path: PathBuf,
     plan: serde_json::Value,
     input_source: String,
+    #[serde(default)]
+    add_special_tokens: Option<bool>,
+    #[serde(default)]
+    rendering: Option<LensInputRendering>,
     prompt_token_ids: Vec<i32>,
     generated_token_ids: Vec<i32>,
     sampler: RunSampler,
@@ -1519,14 +1532,24 @@ struct RunPublishedMatrixBinding {
 impl RunDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "qwen.lens.run" && matches!(self.schema_version, 1 | 2),
+            self.schema == "qwen.lens.run" && matches!(self.schema_version, 1 | 2 | 3),
             "unsupported run schema/version"
         );
         match (self.schema_version, &self.execution_binding) {
             (1, None) => {}
             (2, Some(binding)) => binding.validate()?,
+            (3, Some(binding)) => binding.validate()?,
+            (3, None) => {}
             (1, Some(_)) => bail!("run schema version 1 must not contain execution_binding"),
             (2, None) => bail!("run schema version 2 requires execution_binding"),
+            _ => unreachable!(),
+        }
+        match self.schema_version {
+            1 | 2 => ensure!(
+                self.add_special_tokens.is_none() && self.rendering.is_none(),
+                "run schema versions 1 and 2 must not contain input-rendering metadata"
+            ),
+            3 => self.validate_input_rendering()?,
             _ => unreachable!(),
         }
         ensure!(
@@ -1548,6 +1571,14 @@ impl RunDocument {
                 && self.max_new_tokens > 0
                 && self.max_new_tokens <= lens_run::MAX_NEW_TOKENS,
             "run input source, prompt, or generation bound is invalid"
+        );
+        ensure!(
+            matches!(
+                self.runtime_kind.as_str(),
+                "ordinary_qwen" | "flash_next" | "muse_glimmer"
+            ),
+            "run has unsupported runtime kind {:?}",
+            self.runtime_kind
         );
         ensure!(
             !self.model_path.as_os_str().is_empty()
@@ -1599,6 +1630,136 @@ impl RunDocument {
         }
         Ok(())
     }
+
+    fn validate_input_rendering(&self) -> Result<()> {
+        let rendering = self
+            .rendering
+            .as_ref()
+            .context("run schema version 3 requires rendering metadata")?;
+        ensure!(
+            !rendering.renderer.is_empty()
+                && rendering.renderer.len() <= RUN_METADATA_STRING_MAX_BYTES
+                && rendering.generation_mode.as_ref().is_none_or(|mode| {
+                    !mode.is_empty() && mode.len() <= RUN_METADATA_STRING_MAX_BYTES
+                }),
+            "run rendering identity is empty or too long"
+        );
+        match self.input_source.as_str() {
+            "prompt" => ensure!(
+                self.add_special_tokens.is_some()
+                    && match self.runtime_kind.as_str() {
+                        "ordinary_qwen" | "flash_next" => {
+                            rendering.renderer == "tokenizer_text"
+                        }
+                        "muse_glimmer" => rendering.renderer == "muse_tokenizer_raw_prompt",
+                        _ => false,
+                    }
+                    && rendering.generation_mode.is_none()
+                    && rendering.spans.is_empty(),
+                "raw prompt rendering metadata is inconsistent"
+            ),
+            "token_ids" => ensure!(
+                self.add_special_tokens.is_none()
+                    && rendering.renderer == "literal_token_ids"
+                    && rendering.generation_mode.is_none()
+                    && rendering.spans.is_empty(),
+                "literal-token rendering metadata is inconsistent"
+            ),
+            "messages" => {
+                let mode = rendering
+                    .generation_mode
+                    .as_deref()
+                    .context("structured-message rendering requires a generation mode")?;
+                let renderer_mode_valid =
+                    match (self.runtime_kind.as_str(), rendering.renderer.as_str()) {
+                        ("ordinary_qwen", "qwen_chatml_messages_v1") => mode == "auto",
+                        ("ordinary_qwen", "qwen3.6_messages_v1") => {
+                            matches!(mode, "auto" | "thinking" | "no_thinking")
+                        }
+                        ("ordinary_qwen" | "flash_next", "qwen3.8_messages_v1") => matches!(
+                            mode,
+                            "thinking_low" | "thinking_medium" | "thinking_xhigh" | "no_thinking"
+                        ),
+                        ("muse_glimmer", "muse_glimmer_atem_v1") => {
+                            matches!(
+                                mode,
+                                "reasoning_low" | "reasoning_medium" | "reasoning_high"
+                            ) && rendering.spans.is_empty()
+                        }
+                        _ => false,
+                    };
+                ensure!(
+                    self.add_special_tokens == Some(false) && renderer_mode_valid,
+                    "structured-message rendering metadata is inconsistent"
+                );
+                ensure!(
+                    rendering.renderer == "muse_glimmer_atem_v1" || !rendering.spans.is_empty(),
+                    "Qwen structured-message rendering requires renderer-authored spans"
+                );
+            }
+            _ => bail!("run has unsupported input source {:?}", self.input_source),
+        }
+        let mut previous_byte_end = 0usize;
+        let mut previous_token_end = 0usize;
+        for span in &rendering.spans {
+            let token_range_valid = match (span.token_start, span.token_end) {
+                (None, None) => !is_structural_run_span(&span.kind),
+                (Some(start), Some(end)) => {
+                    let valid = start < end
+                        && start >= previous_token_end
+                        && end <= self.prompt_token_ids.len();
+                    previous_token_end = end;
+                    valid
+                }
+                _ => false,
+            };
+            ensure!(
+                is_known_run_span(&span.kind)
+                    && span.role.as_ref().is_none_or(|role| matches!(
+                        role.as_str(),
+                        "system" | "user" | "assistant"
+                    ))
+                    && span
+                        .channel
+                        .as_ref()
+                        .is_none_or(|channel| channel == "thinking")
+                    && span.byte_start < span.byte_end
+                    && span.byte_start >= previous_byte_end
+                    && span.byte_end <= lens_run::MAX_RUN_ARTIFACT_BYTES
+                    && token_range_valid,
+                "run rendering contains an invalid or unordered span"
+            );
+            previous_byte_end = span.byte_end;
+        }
+        Ok(())
+    }
+}
+
+fn is_structural_run_span(kind: &str) -> bool {
+    matches!(
+        kind,
+        "message_start_marker"
+            | "message_end_marker"
+            | "generated_assistant_start_marker"
+            | "thinking_channel_start_marker"
+            | "thinking_channel_end_marker"
+    )
+}
+
+fn is_known_run_span(kind: &str) -> bool {
+    matches!(
+        kind,
+        "message_start_marker"
+            | "role"
+            | "message_content"
+            | "message_end_marker"
+            | "generated_assistant_start_marker"
+            | "generated_assistant_role"
+            | "thinking_channel_start_marker"
+            | "thinking_channel_end_marker"
+            | "reasoning_instruction_content"
+            | "content_separator"
+    )
 }
 
 impl RunExecutionBinding {
@@ -1827,6 +1988,12 @@ struct UnmatchedReadout {
 }
 
 fn compare_runs(left: &RunDocument, right: &RunDocument, limit: usize) -> Result<RunComparison> {
+    ensure!(
+        left.input_source == right.input_source
+            && left.add_special_tokens == right.add_special_tokens
+            && left.rendering == right.rendering,
+        "run input rendering context differs"
+    );
     ensure!(
         left.prompt_token_ids == right.prompt_token_ids,
         "run prompt token IDs differ"
@@ -2249,12 +2416,18 @@ mod tests {
             .clone();
         RunDocument {
             schema: "qwen.lens.run".into(),
-            schema_version: 1,
+            schema_version: 3,
             runtime_kind: "ordinary_qwen".into(),
             model_path: "/model.gguf".into(),
             canonical_plan_path: "/source/plan.json".into(),
             plan: serde_json::to_value(plan).unwrap(),
             input_source: "token_ids".into(),
+            add_special_tokens: None,
+            rendering: Some(LensInputRendering {
+                renderer: "literal_token_ids".into(),
+                generation_mode: None,
+                spans: Vec::new(),
+            }),
             prompt_token_ids: vec![1, 2],
             generated_token_ids: vec![3],
             sampler: RunSampler {
@@ -2457,6 +2630,50 @@ mod tests {
     }
 
     #[test]
+    fn run_v3_rendering_rejects_partial_overlapping_and_out_of_bounds_spans() {
+        let mut document = sweep_run_document(0.0);
+        document.input_source = "messages".into();
+        document.add_special_tokens = Some(false);
+        document.rendering = Some(LensInputRendering {
+            renderer: "qwen_chatml_messages_v1".into(),
+            generation_mode: Some("auto".into()),
+            spans: vec![LensRenderedSpan {
+                kind: "message_start_marker".into(),
+                message_index: Some(0),
+                role: Some("user".into()),
+                channel: None,
+                byte_start: 0,
+                byte_end: 1,
+                token_start: Some(0),
+                token_end: Some(1),
+            }],
+        });
+        document.validate().unwrap();
+
+        document.rendering.as_mut().unwrap().spans[0].token_end = None;
+        assert!(document.validate().is_err());
+        document.rendering.as_mut().unwrap().spans[0].token_end = Some(3);
+        assert!(document.validate().is_err());
+        document.rendering.as_mut().unwrap().spans[0].token_end = Some(1);
+        document
+            .rendering
+            .as_mut()
+            .unwrap()
+            .spans
+            .push(LensRenderedSpan {
+                kind: "role".into(),
+                message_index: Some(0),
+                role: Some("user".into()),
+                channel: None,
+                byte_start: 0,
+                byte_end: 2,
+                token_start: Some(1),
+                token_end: Some(2),
+            });
+        assert!(document.validate().is_err());
+    }
+
+    #[test]
     fn inspect_sweep_rejects_child_digest_drift() {
         let root = sweep_fixture(&[0.0], |_, _| {});
         let path = root.join("arms/000000/run.json");
@@ -2538,6 +2755,14 @@ mod tests {
         });
         assert!(load_sweep(&semantics_root).is_err());
         std::fs::remove_dir_all(semantics_root).unwrap();
+
+        let rendering_root = sweep_fixture(&[0.0, 0.1], |index, document| {
+            if index == 1 {
+                document.rendering.as_mut().unwrap().renderer = "different_renderer".into();
+            }
+        });
+        assert!(load_sweep(&rendering_root).is_err());
+        std::fs::remove_dir_all(rendering_root).unwrap();
     }
 
     #[test]
@@ -2733,6 +2958,8 @@ mod tests {
             canonical_plan_path: "/plan.json".into(),
             plan: serde_json::from_value(json!({"version": 1, "lenses": [], "directions": [], "operations": [], "readouts": []})).unwrap(),
             input_source: "token_ids".into(),
+            add_special_tokens: None,
+            rendering: None,
             prompt_token_ids: vec![1, 2],
             generated_token_ids: generated,
             sampler: RunSampler {

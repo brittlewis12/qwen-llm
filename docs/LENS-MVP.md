@@ -20,10 +20,14 @@ UI, generic plugin systems, and production hardening are out of scope.
   inspected offline by summary, token/anchor map, aggregate frequency, semantic
   or numeric position, exact token-ID trajectory, and strict paired comparison
   without loading a model.
-- Message traces retain renderer-authored byte spans and exact token spans where
-  BPE boundaries permit them; structural selector markers remain exact. Trace
-  and run stdout remains JSON by default unless `--output` selects a compact
-  summary; either format can be requested explicitly.
+- Lens run, sweep, and trace workflows share one input contract. `--user` plus
+  optional `--system`, or strict `--messages`, use the same release Qwen or Muse
+  renderer as normal model runs; model-valid reasoning modes remain explicit.
+  Omitted Qwen3.8 mode now resolves to the normal run default, `xhigh`.
+- Qwen message traces retain renderer-authored byte spans and exact token spans
+  where BPE boundaries permit them; structural selector markers remain exact.
+  Trace and run stdout remains JSON by default unless `--output` selects a
+  compact summary; either format can be requested explicitly.
 - Native selected-token J/R artifacts support live readout and intervention.
 - Ordinary dense Qwen native J/R fitting supports the published T128 sequence
   length for row shards and selected-token artifacts.
@@ -39,7 +43,12 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Model-free sweep inspection verifies complete bundle topology, child hashes,
   effective-plan isolation, and shared run context, then groups controls and
   reports exact reference-arm readout differences.
-- Raw prompts, literal token IDs, and strict message JSON control rendering.
+- Raw `--prompt` (`--raw-prompt` alias) bypasses chat templating, while literal
+  `--token-ids` bypasses both rendering and tokenization. Both accept deliberate
+  malformed or simulated forged structure without normalizing it.
+- Run artifacts use schema v3 to bind the input source, automatic-special-token
+  policy, resolved renderer/mode, Qwen role/channel spans, and exact prompt IDs.
+  Sweep verification treats this rendering metadata as shared arm context.
 - Ordinary dense and MoE inference paths run interventions. Muse supports native
   selected and published full-transport directions; Flash-Next exposes only raw
   native hyper control.
@@ -67,7 +76,7 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes with 146 tests and two model-bound
+- The active `qwen-lens` unit suite passes with 151 tests and two model-bound
   tests intentionally ignored.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
@@ -99,6 +108,13 @@ UI, generic plugin systems, and production hardening are out of scope.
   its separate real template asset.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
+- Muse strict ordinary messages now use the exact ATEM renderer, but ATEM
+  role/recipient spans are not yet annotated in trace or run artifacts. The
+  empty span list is explicit rather than inferred from delimiter text.
+- Structured Lens messages currently match the normal run lane's strict
+  system/user/assistant subset. The server's developer/tool item grammar is not
+  yet a Lens input schema; raw text and literal IDs simulate malformed or forged
+  structures but do not claim genuine channel provenance.
 - The published Muse J lens was fitted on 900 text-only BF16 prompts. Q8 use and
   image-token positions remain explicitly unvalidated transfers. No published
   Muse R profile is accepted until its final asset and recipe are pinned.

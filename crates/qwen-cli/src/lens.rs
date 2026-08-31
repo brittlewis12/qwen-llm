@@ -17,6 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod full_lens;
 mod lens_compare;
+mod lens_input;
 mod lens_inspect;
 mod lens_run;
 #[allow(dead_code)]
@@ -3098,6 +3099,23 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(messages.command, Command::TraceFull(_)));
+
+        let user = Cli::try_parse_from([
+            "qwen-lens",
+            "trace-full",
+            "--model",
+            "model.gguf",
+            "--full-lens",
+            "full-lens",
+            "--system",
+            "policy",
+            "--user",
+            "request",
+            "--message-mode",
+            "xhigh",
+        ])
+        .unwrap();
+        assert!(matches!(user.command, Command::TraceFull(_)));
 
         assert!(
             Cli::try_parse_from([

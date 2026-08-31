@@ -3003,30 +3003,12 @@ fn resolve_qwen38_generation_mode(
 }
 
 pub(crate) fn supports_qwen_no_thinking_prompt(family: ModelFamily, gguf: &GgufFile) -> bool {
-    validated_qwen36_no_thinking_identity(
-        family,
-        gguf.get_str("general.base_model.0.name"),
-        gguf.get_str("tokenizer.ggml.model"),
-        gguf.get_str("tokenizer.ggml.pre"),
-    ) || supports_qwen38_prompt_protocol(family, gguf)
+    messages::supports_qwen36_no_thinking_prompt_protocol(family, gguf)
+        || supports_qwen38_prompt_protocol(family, gguf)
 }
 
 pub(crate) fn supports_qwen38_prompt_protocol(family: ModelFamily, gguf: &GgufFile) -> bool {
-    if family == ModelFamily::Qwen4Exp {
-        return qwen4exp_prompt_capability_failure(family, gguf).is_none();
-    }
-    validated_qwen38_prompt_identity(
-        family,
-        gguf.get_str("general.name"),
-        gguf.get_str("general.base_model.0.name"),
-        gguf.get_str("tokenizer.ggml.model"),
-        gguf.get_str("tokenizer.ggml.pre"),
-        gguf.get_u64("qwen35.context_length"),
-        gguf.get_u64("qwen35.block_count"),
-        gguf.get_u64("qwen35.nextn_predict_layers"),
-        gguf.get_u64("qwen35.embedding_length"),
-        gguf.get_u64("qwen35.feed_forward_length"),
-    )
+    messages::supports_qwen38_release_prompt_protocol(family, gguf)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3086,6 +3068,7 @@ fn qwen4exp_chat_template_matches(template: &str) -> bool {
     messages::qwen4exp_chat_template_matches(template)
 }
 
+#[cfg(test)]
 fn validated_qwen38_prompt_identity(
     family: ModelFamily,
     general_name: Option<&str>,
@@ -3098,34 +3081,33 @@ fn validated_qwen38_prompt_identity(
     embedding_length: Option<u64>,
     feed_forward_length: Option<u64>,
 ) -> bool {
-    let named_qwen38_27b = [general_name, base_model_name]
-        .into_iter()
-        .flatten()
-        .any(|name| {
-            let name = name.to_ascii_lowercase();
-            name.contains("qwen3.8") && name.contains("27b")
-        });
-    family == ModelFamily::Qwen35
-        && named_qwen38_27b
-        && tokenizer_model == Some("gpt2")
-        && tokenizer_pre == Some("qwen35")
-        && context_length == Some(262_144)
-        && block_count == Some(65)
-        && nextn_predict_layers == Some(1)
-        && embedding_length == Some(5_120)
-        && feed_forward_length == Some(17_408)
+    messages::validated_qwen38_prompt_identity(
+        family,
+        general_name,
+        base_model_name,
+        tokenizer_model,
+        tokenizer_pre,
+        context_length,
+        block_count,
+        nextn_predict_layers,
+        embedding_length,
+        feed_forward_length,
+    )
 }
 
+#[cfg(test)]
 fn validated_qwen36_no_thinking_identity(
     family: ModelFamily,
     base_model_name: Option<&str>,
     tokenizer_model: Option<&str>,
     tokenizer_pre: Option<&str>,
 ) -> bool {
-    family == ModelFamily::Qwen35Moe
-        && base_model_name == Some("Qwen3.6 35B A3B")
-        && tokenizer_model == Some("gpt2")
-        && tokenizer_pre == Some("qwen35")
+    messages::validated_qwen36_no_thinking_identity(
+        family,
+        base_model_name,
+        tokenizer_model,
+        tokenizer_pre,
+    )
 }
 
 fn prompt_text(args: &Args) -> Result<(String, PromptSource, bool)> {

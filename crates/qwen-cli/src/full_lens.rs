@@ -5,7 +5,6 @@ use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::research::{MAX_RESEARCH_PACKED_READOUT_POSITIONS, RESEARCH_IDENTITY_SCHEME};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
-use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{DirBuilder, OpenOptions};
@@ -16,11 +15,9 @@ use std::str::FromStr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
-use crate::messages::{
-    AnnotatedMessageRender, MessageRenderSpanKind, Qwen38GenerationMode, Qwen38ReasoningEffort,
-    QwenGenerationMode, parse_strict_messages_input,
-    render_qwen_messages_prompt_with_generation_annotated,
-    render_qwen38_messages_prompt_with_generation_annotated,
+use crate::lens_input::{
+    LensInputRendering, LensInputSpec, LensMessageMode, QwenMessageProtocol, prepare_qwen_input,
+    validate_lens_input_spec,
 };
 
 use super::published_pt::{ArchiveSpec, ensure_finite_f16, hash_sha256, validate_archive};
@@ -243,7 +240,7 @@ pub(crate) struct ReadFullArgs {
     ArgGroup::new("trace_full_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "messages"])
+        .args(["prompt", "token_ids", "user", "messages"])
 ))]
 pub(crate) struct TraceFullArgs {
     /// Matching Qwen3.6, Qwen3.8, or Muse Glimmer GGUF used for capture and readout.
@@ -254,32 +251,39 @@ pub(crate) struct TraceFullArgs {
     #[arg(long)]
     pub(crate) full_lens: PathBuf,
 
-    /// Raw text prompt; tokenizer-configured specials are enabled by default.
-    #[arg(long, allow_hyphen_values = true)]
+    /// Raw untemplated text; tokenizer-configured specials are enabled by default.
+    #[arg(long, visible_alias = "raw-prompt", allow_hyphen_values = true)]
     pub(crate) prompt: Option<String>,
 
     /// Literal comma-separated token IDs; no specials are added.
     #[arg(long, value_delimiter = ',')]
     pub(crate) token_ids: Option<Vec<i32>>,
 
+    /// One user message rendered with the model-family template; '-' reads stdin.
+    #[arg(long, value_name = "TEXT|-")]
+    pub(crate) user: Option<String>,
+
+    /// Add one system message before --user.
+    #[arg(long, requires = "user")]
+    pub(crate) system: Option<String>,
+
     /// Strict system/user/assistant message array or wrapper JSON.
-    #[arg(long)]
+    #[arg(long, value_name = "FILE|-")]
     pub(crate) messages: Option<PathBuf>,
 
-    /// Generation transition for --messages; supported values depend on the lens model.
+    /// Generation transition for --user/--messages; supported values depend on the lens model.
     #[arg(
         long,
         value_enum,
-        requires = "messages",
         conflicts_with_all = ["prompt", "token_ids"]
     )]
-    pub(crate) message_mode: Option<TraceFullMessageMode>,
+    pub(crate) message_mode: Option<LensMessageMode>,
 
     /// Disable tokenizer-configured special insertion for --prompt.
     #[arg(
         long,
         requires = "prompt",
-        conflicts_with_all = ["token_ids", "messages"]
+        conflicts_with_all = ["token_ids", "user", "messages"]
     )]
     pub(crate) no_special_tokens: bool,
 
@@ -316,46 +320,24 @@ pub(crate) struct TraceFullArgs {
     pub(crate) format: Option<TraceFullStdoutFormat>,
 }
 
+impl TraceFullArgs {
+    pub(crate) fn input_spec(&self) -> LensInputSpec<'_> {
+        LensInputSpec {
+            prompt: self.prompt.as_deref(),
+            token_ids: self.token_ids.as_deref(),
+            user: self.user.as_deref(),
+            system: self.system.as_deref(),
+            messages: self.messages.as_deref(),
+            no_special_tokens: self.no_special_tokens,
+            message_mode: self.message_mode,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TraceFullStdoutFormat {
     Summary,
     Json,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum TraceFullMessageMode {
-    Auto,
-    Thinking,
-    NoThinking,
-    Low,
-    Medium,
-    Xhigh,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ResolvedTraceFullMessageMode {
-    Qwen36(QwenGenerationMode),
-    Qwen38(Qwen38GenerationMode),
-}
-
-impl ResolvedTraceFullMessageMode {
-    const fn artifact_name(self) -> &'static str {
-        match self {
-            Self::Qwen36(QwenGenerationMode::Auto) => "auto",
-            Self::Qwen36(QwenGenerationMode::Thinking) => "thinking",
-            Self::Qwen36(QwenGenerationMode::NoThinking) => "no_thinking",
-            Self::Qwen38(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low)) => {
-                "thinking_low"
-            }
-            Self::Qwen38(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium)) => {
-                "thinking_medium"
-            }
-            Self::Qwen38(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh)) => {
-                "thinking_xhigh"
-            }
-            Self::Qwen38(Qwen38GenerationMode::NoThinking) => "no_thinking",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -777,27 +759,7 @@ struct TraceFullScoreSemantics {
     softmax_applied: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct TraceFullRendering {
-    renderer: &'static str,
-    generation_mode: Option<&'static str>,
-    spans: Vec<TraceFullRenderedSpan>,
-}
-
-#[derive(Debug, Serialize)]
-struct TraceFullRenderedSpan {
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message_index: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    channel: Option<&'static str>,
-    byte_start: usize,
-    byte_end: usize,
-    token_start: Option<usize>,
-    token_end: Option<usize>,
-}
+type TraceFullRendering = LensInputRendering;
 
 #[derive(Debug, Serialize)]
 struct TraceFullLens {
@@ -1702,79 +1664,15 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             .map(str::to_owned),
     };
     let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
-    let (input_source, add_special_tokens, token_ids, rendering) =
-        match (&args.prompt, &args.token_ids, &args.messages) {
-            (Some(prompt), None, None) => {
-                let token_ids = tokenizer
-                    .encode(prompt, !args.no_special_tokens)
-                    .context("tokenize trace-full prompt")?;
-                (
-                    "prompt",
-                    Some(!args.no_special_tokens),
-                    token_ids,
-                    TraceFullRendering {
-                        renderer: "tokenizer_text",
-                        generation_mode: None,
-                        spans: Vec::new(),
-                    },
-                )
-            }
-            (None, Some(token_ids), None) => {
-                ensure!(!token_ids.is_empty(), "--token-ids must not be empty");
-                ensure!(
-                    token_ids
-                        .iter()
-                        .all(|&token_id| token_id >= 0 && (token_id as u32) < arch.vocab_size),
-                    "--token-ids contains an ID outside vocabulary {}",
-                    arch.vocab_size
-                );
-                (
-                    "token_ids",
-                    None,
-                    token_ids.clone(),
-                    TraceFullRendering {
-                        renderer: "literal_token_ids",
-                        generation_mode: None,
-                        spans: Vec::new(),
-                    },
-                )
-            }
-            (None, None, Some(path)) => {
-                let raw = std::fs::read_to_string(path)
-                    .with_context(|| format!("read messages {}", path.display()))?;
-                let messages = parse_strict_messages_input(&raw, &path.display().to_string())?;
-                let resolved_mode = resolve_trace_full_message_mode(profile.id, args.message_mode)?;
-                let (rendered, renderer) = match resolved_mode {
-                    ResolvedTraceFullMessageMode::Qwen38(mode) => (
-                        render_qwen38_messages_prompt_with_generation_annotated(
-                            &messages, true, mode,
-                        ),
-                        "qwen3.8_messages_v1",
-                    ),
-                    ResolvedTraceFullMessageMode::Qwen36(mode) => (
-                        render_qwen_messages_prompt_with_generation_annotated(
-                            &messages, false, true, mode,
-                        ),
-                        "qwen3.6_messages_v1",
-                    ),
-                };
-                let token_ids = tokenizer
-                    .encode(&rendered.text, false)
-                    .context("tokenize exact rendered messages prompt")?;
-                let spans = align_rendered_message_spans(&tokenizer, &rendered, &token_ids)?;
-                (
-                    "messages",
-                    Some(false),
-                    token_ids,
-                    TraceFullRendering {
-                        renderer,
-                        generation_mode: Some(resolved_mode.artifact_name()),
-                        spans,
-                    },
-                )
-            }
-            _ => anyhow::bail!("specify exactly one of --prompt, --token-ids, or --messages"),
-        };
+    let protocol = match profile.id {
+        PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => QwenMessageProtocol::Qwen36,
+        PublishedProfileId::Qwen38J => QwenMessageProtocol::Qwen38,
+    };
+    let prepared_input = prepare_qwen_input(args.input_spec(), protocol, &tokenizer)?;
+    let input_source = prepared_input.source;
+    let add_special_tokens = prepared_input.add_special_tokens;
+    let token_ids = prepared_input.token_ids;
+    let rendering = prepared_input.rendering;
     ensure!(
         !token_ids.is_empty(),
         "trace-full input tokenized to no tokens"
@@ -2066,48 +1964,6 @@ fn print_trace_full_summary(document: &TraceFullDocument, output: Option<&Path>)
     }
 }
 
-fn resolve_trace_full_message_mode(
-    profile: PublishedProfileId,
-    requested: Option<TraceFullMessageMode>,
-) -> Result<ResolvedTraceFullMessageMode> {
-    match profile {
-        PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => match requested {
-            None | Some(TraceFullMessageMode::Auto) => Ok(ResolvedTraceFullMessageMode::Qwen36(
-                QwenGenerationMode::Auto,
-            )),
-            Some(TraceFullMessageMode::Thinking) => Ok(ResolvedTraceFullMessageMode::Qwen36(
-                QwenGenerationMode::Thinking,
-            )),
-            Some(TraceFullMessageMode::NoThinking) => Ok(ResolvedTraceFullMessageMode::Qwen36(
-                QwenGenerationMode::NoThinking,
-            )),
-            Some(mode) => anyhow::bail!(
-                "--message-mode {} is not supported by Qwen3.6 J/R; use auto, thinking, or no-thinking",
-                mode.to_possible_value().unwrap().get_name()
-            ),
-        },
-        PublishedProfileId::Qwen38J => match requested {
-            None | Some(TraceFullMessageMode::Medium | TraceFullMessageMode::Thinking) => {
-                Ok(ResolvedTraceFullMessageMode::Qwen38(
-                    Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
-                ))
-            }
-            Some(TraceFullMessageMode::Low) => Ok(ResolvedTraceFullMessageMode::Qwen38(
-                Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low),
-            )),
-            Some(TraceFullMessageMode::Xhigh) => Ok(ResolvedTraceFullMessageMode::Qwen38(
-                Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh),
-            )),
-            Some(TraceFullMessageMode::NoThinking) => Ok(ResolvedTraceFullMessageMode::Qwen38(
-                Qwen38GenerationMode::NoThinking,
-            )),
-            Some(TraceFullMessageMode::Auto) => anyhow::bail!(
-                "--message-mode auto is not supported by Qwen3.8 J; use thinking, no-thinking, low, medium, or xhigh"
-            ),
-        },
-    }
-}
-
 fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
     ensure!(
         (1..=MAX_FULL_READOUT_TOP_K).contains(&args.top_k),
@@ -2117,13 +1973,7 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
         (1..=MAX_RESEARCH_PACKED_READOUT_POSITIONS).contains(&args.max_tokens),
         "--max-tokens must be in 1..={MAX_RESEARCH_PACKED_READOUT_POSITIONS}"
     );
-    let input_count = usize::from(args.prompt.is_some())
-        + usize::from(args.token_ids.is_some())
-        + usize::from(args.messages.is_some());
-    ensure!(
-        input_count == 1,
-        "specify exactly one of --prompt, --token-ids, or --messages"
-    );
+    validate_lens_input_spec(args.input_spec())?;
     ensure!(
         args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
         "--prompt must not be empty"
@@ -2133,14 +1983,6 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
             .as_ref()
             .is_none_or(|token_ids| !token_ids.is_empty() && token_ids.len() <= args.max_tokens),
         "--token-ids must be nonempty and contain at most --max-tokens entries"
-    );
-    ensure!(
-        args.prompt.is_some() || !args.no_special_tokens,
-        "--no-special-tokens only applies to --prompt"
-    );
-    ensure!(
-        args.messages.is_some() || args.message_mode.is_none(),
-        "--message-mode only applies to --messages"
     );
     ensure!(
         args.vectors.len() <= MAX_TRACE_FULL_VECTOR_CELLS,
@@ -2181,96 +2023,6 @@ fn group_trace_full_vector_cells(
         positions.sort_unstable();
     }
     Ok(grouped)
-}
-
-fn align_rendered_message_spans(
-    tokenizer: &Tokenizer,
-    rendered: &AnnotatedMessageRender,
-    full_token_ids: &[i32],
-) -> Result<Vec<TraceFullRenderedSpan>> {
-    let token_pieces = full_token_ids
-        .iter()
-        .map(|&token_id| {
-            tokenizer
-                .try_decode_piece_bytes_exact(token_id)
-                .with_context(|| format!("decode rendered token {token_id}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    map_rendered_message_spans(rendered, &token_pieces)
-}
-
-fn map_rendered_message_spans(
-    rendered: &AnnotatedMessageRender,
-    token_pieces: &[&[u8]],
-) -> Result<Vec<TraceFullRenderedSpan>> {
-    let mut decoded = Vec::new();
-    decoded
-        .try_reserve_exact(rendered.text.len())
-        .context("allocate rendered token byte validation")?;
-    let mut token_boundaries = BTreeMap::from([(0usize, 0usize)]);
-    for (token_index, piece) in token_pieces.iter().enumerate() {
-        decoded.extend_from_slice(piece);
-        token_boundaries.insert(decoded.len(), token_index + 1);
-    }
-    ensure!(
-        decoded == rendered.text.as_bytes(),
-        "decoded rendered tokens do not reproduce the renderer-authored bytes"
-    );
-
-    for span in &rendered.spans {
-        ensure!(
-            span.byte_start < span.byte_end
-                && span.byte_end <= rendered.text.len()
-                && rendered.text.is_char_boundary(span.byte_start)
-                && rendered.text.is_char_boundary(span.byte_end),
-            "renderer produced an invalid byte span {}..{} for {} bytes",
-            span.byte_start,
-            span.byte_end,
-            rendered.text.len()
-        );
-    }
-
-    rendered
-        .spans
-        .iter()
-        .map(|span| {
-            let token_range = token_boundaries
-                .get(&span.byte_start)
-                .zip(token_boundaries.get(&span.byte_end))
-                .filter(|(start, end)| start < end)
-                .map(|(&start, &end)| (start, end));
-            if is_structural_render_span(span.kind) {
-                ensure!(
-                    token_range.is_some(),
-                    "renderer structural {} span {}..{} is not a nonempty exact token range",
-                    span.kind.as_str(),
-                    span.byte_start,
-                    span.byte_end
-                );
-            }
-            Ok(TraceFullRenderedSpan {
-                kind: span.kind.as_str(),
-                message_index: span.message_index,
-                role: span.role.clone(),
-                channel: span.channel.map(|channel| channel.as_str()),
-                byte_start: span.byte_start,
-                byte_end: span.byte_end,
-                token_start: token_range.map(|range| range.0),
-                token_end: token_range.map(|range| range.1),
-            })
-        })
-        .collect()
-}
-
-fn is_structural_render_span(kind: MessageRenderSpanKind) -> bool {
-    matches!(
-        kind,
-        MessageRenderSpanKind::MessageStartMarker
-            | MessageRenderSpanKind::MessageEndMarker
-            | MessageRenderSpanKind::GeneratedAssistantStartMarker
-            | MessageRenderSpanKind::ThinkingChannelStartMarker
-            | MessageRenderSpanKind::ThinkingChannelEndMarker
-    )
 }
 
 fn validate_trace_full_manifest(manifest: &FullLensManifest) -> Result<()> {
@@ -3186,6 +2938,8 @@ mod tests {
             full_lens: "full-lens".into(),
             prompt: Some("hello".into()),
             token_ids: None,
+            user: None,
+            system: None,
             messages: None,
             message_mode: None,
             no_special_tokens: false,
@@ -3228,56 +2982,6 @@ mod tests {
             token_piece_hex: format!("{token_id:02x}"),
             logit: -(rank as f32),
         }
-    }
-
-    #[test]
-    fn rendered_span_mapping_keeps_newline_leading_content_with_null_bpe_boundaries() {
-        let rendered = render_qwen_messages_prompt_with_generation_annotated(
-            &[crate::messages::ChatMessage {
-                role: "user".into(),
-                content: "\n\nhello".into(),
-                ..Default::default()
-            }],
-            false,
-            true,
-            QwenGenerationMode::Auto,
-        );
-        let mut owned_pieces = Vec::<Vec<u8>>::new();
-        let mut span_index = 0;
-        while span_index < rendered.spans.len() {
-            let start = rendered.spans[span_index].byte_start;
-            let mut end = rendered.spans[span_index].byte_end;
-            if !is_structural_render_span(rendered.spans[span_index].kind) {
-                while span_index + 1 < rendered.spans.len()
-                    && !is_structural_render_span(rendered.spans[span_index + 1].kind)
-                {
-                    span_index += 1;
-                    end = rendered.spans[span_index].byte_end;
-                }
-            }
-            owned_pieces.push(rendered.text.as_bytes()[start..end].to_vec());
-            span_index += 1;
-        }
-        let pieces = owned_pieces.iter().map(Vec::as_slice).collect::<Vec<_>>();
-
-        let spans = map_rendered_message_spans(&rendered, &pieces).unwrap();
-        let content = rendered
-            .spans
-            .iter()
-            .position(|span| span.kind == MessageRenderSpanKind::MessageContent)
-            .unwrap();
-        assert_eq!(
-            &rendered.text[rendered.spans[content].byte_start..rendered.spans[content].byte_end],
-            "\n\nhello"
-        );
-        assert_eq!(
-            (spans[content].token_start, spans[content].token_end),
-            (None, None)
-        );
-        assert!(spans.iter().zip(&rendered.spans).all(|(mapped, authored)| {
-            !is_structural_render_span(authored.kind)
-                || matches!((mapped.token_start, mapped.token_end), (Some(start), Some(end)) if start < end)
-        }));
     }
 
     #[test]
@@ -3499,59 +3203,6 @@ mod tests {
         validate_trace_full_args(&args).unwrap();
         args.prompt = Some("also set".into());
         assert!(validate_trace_full_args(&args).is_err());
-    }
-
-    #[test]
-    fn trace_message_modes_are_model_compatible_and_record_resolved_modes() {
-        for profile in [PublishedProfileId::Qwen36J, PublishedProfileId::Qwen36R] {
-            assert_eq!(
-                resolve_trace_full_message_mode(profile, None)
-                    .unwrap()
-                    .artifact_name(),
-                "auto"
-            );
-            assert_eq!(
-                resolve_trace_full_message_mode(profile, Some(TraceFullMessageMode::Thinking))
-                    .unwrap()
-                    .artifact_name(),
-                "thinking"
-            );
-            assert_eq!(
-                resolve_trace_full_message_mode(profile, Some(TraceFullMessageMode::NoThinking))
-                    .unwrap()
-                    .artifact_name(),
-                "no_thinking"
-            );
-            for invalid in [
-                TraceFullMessageMode::Low,
-                TraceFullMessageMode::Medium,
-                TraceFullMessageMode::Xhigh,
-            ] {
-                assert!(resolve_trace_full_message_mode(profile, Some(invalid)).is_err());
-            }
-        }
-        for (requested, expected) in [
-            (None, "thinking_medium"),
-            (Some(TraceFullMessageMode::Thinking), "thinking_medium"),
-            (Some(TraceFullMessageMode::Medium), "thinking_medium"),
-            (Some(TraceFullMessageMode::Low), "thinking_low"),
-            (Some(TraceFullMessageMode::Xhigh), "thinking_xhigh"),
-            (Some(TraceFullMessageMode::NoThinking), "no_thinking"),
-        ] {
-            assert_eq!(
-                resolve_trace_full_message_mode(PublishedProfileId::Qwen38J, requested)
-                    .unwrap()
-                    .artifact_name(),
-                expected
-            );
-        }
-        assert!(
-            resolve_trace_full_message_mode(
-                PublishedProfileId::Qwen38J,
-                Some(TraceFullMessageMode::Auto)
-            )
-            .is_err()
-        );
     }
 
     #[test]

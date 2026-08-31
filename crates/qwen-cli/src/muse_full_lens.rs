@@ -1,4 +1,5 @@
 use super::full_lens::{ReadFullArgs, TraceFullArgs, TraceFullStdoutFormat};
+use super::lens_input::{LensInputRendering, prepare_muse_input, validate_lens_input_spec};
 use super::muse_full_lens_artifact as artifact;
 use super::muse_lens_artifact;
 use super::muse_lens_rows_artifact as rows;
@@ -331,12 +332,7 @@ struct MuseTraceInputToken {
     token_piece_hex: String,
 }
 
-#[derive(Debug, Serialize)]
-struct MuseTraceRendering {
-    renderer: &'static str,
-    generation_mode: Option<&'static str>,
-    spans: Vec<serde_json::Value>,
-}
+type MuseTraceRendering = LensInputRendering;
 
 #[derive(Debug, Serialize)]
 struct MuseTraceCoordinates {
@@ -805,8 +801,23 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
         .context("load Muse tokenizer for full trace")?;
     muse_lens_artifact::validate_tokenizer(&tokenizer, &bound.config)?;
-    let (input_source, renderer, add_special_tokens, token_ids) =
-        prepare_trace_input(&args, &tokenizer, bound.config.vocab_size)?;
+    let prepared_input = prepare_muse_input(
+        args.input_spec(),
+        bound.config.chat_template_profile,
+        &tokenizer,
+        bound.config.vocab_size,
+    )?;
+    let input_source = prepared_input.source;
+    let add_special_tokens = prepared_input.add_special_tokens;
+    let token_ids = prepared_input.token_ids;
+    let rendering = prepared_input.rendering;
+    ensure!(!token_ids.is_empty(), "Muse trace input has no tokens");
+    ensure!(
+        token_ids.len() <= args.max_tokens,
+        "Muse trace input has {} tokens, exceeding --max-tokens {}",
+        token_ids.len(),
+        args.max_tokens
+    );
     let vector_requests = validate_trace_vector_requests(&args, &layers, token_ids.len())?;
 
     let mut capture_layers = layers.clone();
@@ -1042,11 +1053,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         add_special_tokens,
         input_token_ids: token_ids,
         input_tokens,
-        rendering: MuseTraceRendering {
-            renderer,
-            generation_mode: None,
-            spans: Vec::new(),
-        },
+        rendering,
         coordinates: MuseTraceCoordinates {
             source_layer: "zero_based_post_block_layer_id",
             source_position: "zero_based_tokenized_input_position",
@@ -1094,21 +1101,10 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
 }
 
 fn validate_trace_args(args: &TraceFullArgs) -> Result<()> {
-    ensure!(
-        args.messages.is_none() && args.message_mode.is_none(),
-        "Muse trace-full currently supports --prompt or --token-ids, not --messages"
-    );
-    ensure!(
-        args.prompt.is_some() ^ args.token_ids.is_some(),
-        "Muse trace-full requires exactly one of --prompt or --token-ids"
-    );
+    validate_lens_input_spec(args.input_spec())?;
     ensure!(
         args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
         "--prompt must not be empty"
-    );
-    ensure!(
-        args.prompt.is_some() || !args.no_special_tokens,
-        "--no-special-tokens only applies to --prompt"
     );
     ensure!(
         args.top_k > 0 && args.top_k <= 16,
@@ -1127,46 +1123,6 @@ fn validate_trace_args(args: &TraceFullArgs) -> Result<()> {
         "Muse trace-full requires --identity-cache"
     );
     Ok(())
-}
-
-fn prepare_trace_input(
-    args: &TraceFullArgs,
-    tokenizer: &LlamaCppTokenizer,
-    vocab_size: u32,
-) -> Result<(&'static str, &'static str, Option<bool>, Vec<i32>)> {
-    let (input_source, renderer, add_special_tokens, token_ids) = if let Some(prompt) = &args.prompt
-    {
-        let add_special_tokens = !args.no_special_tokens;
-        (
-            "prompt",
-            "muse_tokenizer_raw_prompt",
-            Some(add_special_tokens),
-            tokenizer
-                .encode(prompt, add_special_tokens)
-                .context("tokenize Muse trace prompt")?,
-        )
-    } else {
-        (
-            "token_ids",
-            "literal_token_ids",
-            None,
-            args.token_ids.clone().unwrap_or_default(),
-        )
-    };
-    ensure!(!token_ids.is_empty(), "Muse trace input has no tokens");
-    ensure!(
-        token_ids.len() <= args.max_tokens,
-        "Muse trace input has {} tokens, exceeding --max-tokens {}",
-        token_ids.len(),
-        args.max_tokens
-    );
-    ensure!(
-        token_ids
-            .iter()
-            .all(|token| *token >= 0 && (*token as u32) < vocab_size),
-        "Muse trace input contains a token outside vocabulary {vocab_size}"
-    );
-    Ok((input_source, renderer, add_special_tokens, token_ids))
 }
 
 fn validate_trace_vector_requests(

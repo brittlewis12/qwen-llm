@@ -1,3 +1,4 @@
+use super::lens_input::prepare_muse_input;
 use super::lens_run::{
     Action, DirectionDefinition, DirectionRow, LensDefinition, LensPlan, LensRunArgs, LiveReadout,
     LiveScore, OperationApplication, RunExecutionBinding, RunPublishedLensBinding,
@@ -15,7 +16,7 @@ use qwen_llm::muse_glimmer::{MuseGlimmerArtifactProfile, MuseGlimmerConfig, Muse
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use qwen_llm::tensor::GgmlType;
-use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenize};
+use qwen_llm::tokenizer::LlamaCppTokenizer;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -83,7 +84,13 @@ pub(crate) fn run(
     let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
         .context("load Muse llama.cpp tokenizer")?;
     artifact::validate_tokenizer(&tokenizer, &config)?;
-    let prompt_ids = input_tokens(args, &tokenizer)?;
+    let prepared_input = prepare_muse_input(
+        args.input_spec(),
+        config.chat_template_profile,
+        &tokenizer,
+        config.vocab_size,
+    )?;
+    let prompt_ids = &prepared_input.token_ids;
     ensure!(
         !prompt_ids.is_empty(),
         "prompt must encode to at least one token"
@@ -219,8 +226,9 @@ pub(crate) fn run(
         "muse_glimmer",
         plan_path,
         plan,
+        &prepared_input,
         RunResult {
-            prompt_token_ids: prompt_ids,
+            prompt_token_ids: prompt_ids.to_vec(),
             generated_token_ids: generated.clone(),
             decoded_text: tokenizer.decode(&generated),
             stop_reason,
@@ -641,10 +649,7 @@ fn validate_readout_source_subset(
 }
 
 fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
-    ensure!(
-        args.messages.is_none(),
-        "Muse Lens run does not support --messages"
-    );
+    let _ = args;
     ensure!(
         !plan.operations.is_empty() || !plan.readouts.is_empty(),
         "Muse Lens plans require at least one operation or readout"
@@ -667,17 +672,6 @@ fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn input_tokens(args: &LensRunArgs, tokenizer: &impl Tokenize) -> Result<Vec<i32>> {
-    match (&args.prompt, &args.token_ids, &args.messages) {
-        (Some(text), None, None) => Ok(tokenizer.encode(text, !args.no_special_tokens)?),
-        (None, Some(ids), None) => {
-            ensure!(!ids.is_empty(), "--token-ids must not be empty");
-            Ok(ids.clone())
-        }
-        _ => bail!("Muse Lens run requires exactly one of --prompt or --token-ids"),
-    }
 }
 
 fn resolve(base: &Path, path: &Path) -> PathBuf {
@@ -996,7 +990,10 @@ mod tests {
             identity_cache: Some("c".into()),
             prompt: Some("x".into()),
             token_ids: None,
+            user: None,
+            system: None,
             messages: None,
+            message_mode: None,
             no_special_tokens: false,
             max_new_tokens: 1,
             temperature: 0.0,

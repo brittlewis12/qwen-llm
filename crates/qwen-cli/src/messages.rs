@@ -85,6 +85,86 @@ pub(crate) fn supports_qwen4exp_prompt_protocol(family: ModelFamily, gguf: &Gguf
             .get_str("tokenizer.chat_template")
             .is_some_and(qwen4exp_chat_template_matches)
 }
+
+#[allow(dead_code)]
+pub(crate) fn supports_qwen38_release_prompt_protocol(
+    family: ModelFamily,
+    gguf: &GgufFile,
+) -> bool {
+    if family == ModelFamily::Qwen4Exp {
+        return supports_qwen4exp_prompt_protocol(family, gguf);
+    }
+    validated_qwen38_prompt_identity(
+        family,
+        gguf.get_str("general.name"),
+        gguf.get_str("general.base_model.0.name"),
+        gguf.get_str("tokenizer.ggml.model"),
+        gguf.get_str("tokenizer.ggml.pre"),
+        gguf.get_u64("qwen35.context_length"),
+        gguf.get_u64("qwen35.block_count"),
+        gguf.get_u64("qwen35.nextn_predict_layers"),
+        gguf.get_u64("qwen35.embedding_length"),
+        gguf.get_u64("qwen35.feed_forward_length"),
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn supports_qwen36_no_thinking_prompt_protocol(
+    family: ModelFamily,
+    gguf: &GgufFile,
+) -> bool {
+    validated_qwen36_no_thinking_identity(
+        family,
+        gguf.get_str("general.base_model.0.name"),
+        gguf.get_str("tokenizer.ggml.model"),
+        gguf.get_str("tokenizer.ggml.pre"),
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn validated_qwen38_prompt_identity(
+    family: ModelFamily,
+    general_name: Option<&str>,
+    base_model_name: Option<&str>,
+    tokenizer_model: Option<&str>,
+    tokenizer_pre: Option<&str>,
+    context_length: Option<u64>,
+    block_count: Option<u64>,
+    nextn_predict_layers: Option<u64>,
+    embedding_length: Option<u64>,
+    feed_forward_length: Option<u64>,
+) -> bool {
+    let named_qwen38_27b = [general_name, base_model_name]
+        .into_iter()
+        .flatten()
+        .any(|name| {
+            let name = name.to_ascii_lowercase();
+            name.contains("qwen3.8") && name.contains("27b")
+        });
+    family == ModelFamily::Qwen35
+        && named_qwen38_27b
+        && tokenizer_model == Some("gpt2")
+        && tokenizer_pre == Some("qwen35")
+        && context_length == Some(262_144)
+        && block_count == Some(65)
+        && nextn_predict_layers == Some(1)
+        && embedding_length == Some(5_120)
+        && feed_forward_length == Some(17_408)
+}
+
+#[allow(dead_code)]
+pub(crate) fn validated_qwen36_no_thinking_identity(
+    family: ModelFamily,
+    base_model_name: Option<&str>,
+    tokenizer_model: Option<&str>,
+    tokenizer_pre: Option<&str>,
+) -> bool {
+    family == ModelFamily::Qwen35Moe
+        && base_model_name == Some("Qwen3.6 35B A3B")
+        && tokenizer_model == Some("gpt2")
+        && tokenizer_pre == Some("qwen35")
+}
+
 /// Byte-exact "high" effort instruction from the 0731 release contract
 /// (vLLM `REASONING_EFFORT_PROMPTS["high"]` at `77434861`; identical bytes
 /// appeared as the max-tier text in the earlier two-tier encoders, e.g. the
@@ -177,6 +257,7 @@ pub(crate) enum MessageRenderSpanKind {
 }
 
 impl MessageRenderSpanKind {
+    #[allow(dead_code)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::MessageStartMarker => "message_start_marker",
@@ -199,6 +280,7 @@ pub(crate) enum MessageRenderChannel {
 }
 
 impl MessageRenderChannel {
+    #[allow(dead_code)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Thinking => "thinking",

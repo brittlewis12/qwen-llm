@@ -1,7 +1,6 @@
-use crate::messages::{
-    Qwen38GenerationMode, Qwen38ReasoningEffort, QwenGenerationMode, parse_strict_messages_input,
-    render_qwen_messages_prompt_with_generation, render_qwen38_messages_prompt_with_generation,
-    supports_qwen4exp_prompt_protocol,
+use crate::lens_input::{
+    LensInputRendering, LensInputSpec, LensMessageMode, PreparedLensInput,
+    prepare_qwen_model_input, validate_lens_input_spec,
 };
 use crate::template_lens::{TemplateLens, TemplateScore, TemplateVocabulary};
 use anyhow::{Context, Result, bail, ensure};
@@ -40,9 +39,9 @@ const MAX_TOP_K: usize = 1024;
 pub(crate) const MAX_NEW_TOKENS: usize = 4096;
 const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
-const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 const RUN_SCHEMA: &str = "qwen.lens.run";
-const RUN_SCHEMA_VERSION: u32 = 1;
+const RUN_SCHEMA_VERSION: u32 = 3;
 const SWEEP_SCHEMA: &str = "qwen.lens.coefficient_sweep";
 const SWEEP_SCHEMA_VERSION: u32 = 1;
 const SWEEP_MANIFEST_NAME: &str = "manifest.json";
@@ -53,7 +52,7 @@ const MAX_SWEEP_ARMS: usize = 64;
     ArgGroup::new("lens_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "messages"])
+        .args(["prompt", "token_ids", "user", "messages"])
 ))]
 pub(crate) struct LensRunArgs {
     /// Ordinary Qwen, Qwen3.8-Flash-Next, or Muse Glimmer GGUF model.
@@ -68,20 +67,36 @@ pub(crate) struct LensRunArgs {
     #[arg(long)]
     pub(crate) identity_cache: Option<PathBuf>,
 
-    /// Raw text prompt; tokenizer-configured specials are enabled by default.
-    #[arg(long)]
+    /// Raw untemplated text; tokenizer-configured specials are enabled by default.
+    #[arg(long, visible_alias = "raw-prompt", allow_hyphen_values = true)]
     pub(crate) prompt: Option<String>,
 
     /// Literal comma-separated token IDs; no specials are added.
     #[arg(long, value_delimiter = ',')]
     pub(crate) token_ids: Option<Vec<i32>>,
 
+    /// One user message rendered with the model-family template; '-' reads stdin.
+    #[arg(long, value_name = "TEXT|-")]
+    pub(crate) user: Option<String>,
+
+    /// Add one system message before --user.
+    #[arg(long, requires = "user")]
+    pub(crate) system: Option<String>,
+
     /// JSON message array or wrapper with a `messages` array.
-    #[arg(long)]
+    #[arg(long, value_name = "FILE|-")]
     pub(crate) messages: Option<PathBuf>,
 
+    /// Generation transition for --user/--messages; supported values depend on the model.
+    #[arg(long, value_enum, conflicts_with_all = ["prompt", "token_ids"])]
+    pub(crate) message_mode: Option<LensMessageMode>,
+
     /// Disable tokenizer-configured specials for --prompt.
-    #[arg(long)]
+    #[arg(
+        long,
+        requires = "prompt",
+        conflicts_with_all = ["token_ids", "user", "messages"]
+    )]
     pub(crate) no_special_tokens: bool,
 
     /// Maximum number of generated tokens.
@@ -117,12 +132,26 @@ pub(crate) struct LensRunArgs {
     pub(crate) format: Option<RunStdoutFormat>,
 }
 
+impl LensRunArgs {
+    pub(crate) fn input_spec(&self) -> LensInputSpec<'_> {
+        LensInputSpec {
+            prompt: self.prompt.as_deref(),
+            token_ids: self.token_ids.as_deref(),
+            user: self.user.as_deref(),
+            system: self.system.as_deref(),
+            messages: self.messages.as_deref(),
+            no_special_tokens: self.no_special_tokens,
+            message_mode: self.message_mode,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 #[command(group(
     ArgGroup::new("sweep_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "messages"])
+        .args(["prompt", "token_ids", "user", "messages"])
 ))]
 pub(crate) struct CoefficientSweepArgs {
     /// Ordinary dense or MoE Qwen GGUF model, loaded once for every arm.
@@ -146,20 +175,36 @@ pub(crate) struct CoefficientSweepArgs {
     )]
     coefficients: Vec<f32>,
 
-    /// Raw text prompt; tokenizer-configured specials are enabled by default.
-    #[arg(long)]
+    /// Raw untemplated text; tokenizer-configured specials are enabled by default.
+    #[arg(long, visible_alias = "raw-prompt", allow_hyphen_values = true)]
     prompt: Option<String>,
 
     /// Literal comma-separated token IDs; no specials are added.
     #[arg(long, value_delimiter = ',')]
     token_ids: Option<Vec<i32>>,
 
+    /// One user message rendered with the model-family template; '-' reads stdin once.
+    #[arg(long, value_name = "TEXT|-")]
+    user: Option<String>,
+
+    /// Add one system message before --user.
+    #[arg(long, requires = "user")]
+    system: Option<String>,
+
     /// JSON message array or wrapper with a `messages` array.
-    #[arg(long)]
+    #[arg(long, value_name = "FILE|-")]
     messages: Option<PathBuf>,
 
+    /// Generation transition for --user/--messages; supported values depend on the model.
+    #[arg(long, value_enum, conflicts_with_all = ["prompt", "token_ids"])]
+    message_mode: Option<LensMessageMode>,
+
     /// Disable tokenizer-configured specials for --prompt.
-    #[arg(long)]
+    #[arg(
+        long,
+        requires = "prompt",
+        conflicts_with_all = ["token_ids", "user", "messages"]
+    )]
     no_special_tokens: bool,
 
     /// Maximum number of generated tokens per fresh arm.
@@ -199,7 +244,10 @@ impl CoefficientSweepArgs {
             identity_cache: None,
             prompt: self.prompt.clone(),
             token_ids: self.token_ids.clone(),
+            user: self.user.clone(),
+            system: self.system.clone(),
             messages: self.messages.clone(),
+            message_mode: self.message_mode,
             no_special_tokens: self.no_special_tokens,
             max_new_tokens: self.max_new_tokens,
             temperature: self.temperature,
@@ -525,6 +573,8 @@ pub(crate) struct RunOutput {
     canonical_plan_path: PathBuf,
     plan: LensPlan,
     input_source: &'static str,
+    add_special_tokens: Option<bool>,
+    rendering: LensInputRendering,
     prompt_token_ids: Vec<i32>,
     generated_token_ids: Vec<i32>,
     sampler: RunSampler,
@@ -684,6 +734,7 @@ pub(crate) fn emit_run_output(
     runtime_kind: &'static str,
     plan_path: &Path,
     plan: LensPlan,
+    prepared_input: &PreparedLensInput,
     result: RunResult,
     execution_binding: Option<RunExecutionBinding>,
     output_path: Option<&Path>,
@@ -693,6 +744,7 @@ pub(crate) fn emit_run_output(
         runtime_kind,
         plan_path,
         plan,
+        prepared_input,
         result,
         execution_binding,
     );
@@ -724,22 +776,21 @@ fn build_run_output(
     runtime_kind: &'static str,
     plan_path: &Path,
     plan: LensPlan,
+    prepared_input: &PreparedLensInput,
     result: RunResult,
     execution_binding: Option<RunExecutionBinding>,
 ) -> RunOutput {
     RunOutput {
         schema: RUN_SCHEMA,
-        schema_version: if execution_binding.is_some() {
-            2
-        } else {
-            RUN_SCHEMA_VERSION
-        },
+        schema_version: RUN_SCHEMA_VERSION,
         runtime_kind,
         model_path: args.model.clone(),
         canonical_plan_path: plan_path.to_path_buf(),
         requested_live_readouts: plan.readouts.clone(),
         plan,
-        input_source: input_source(args),
+        input_source: prepared_input.source,
+        add_special_tokens: prepared_input.add_special_tokens,
+        rendering: prepared_input.rendering.clone(),
         prompt_token_ids: result.prompt_token_ids,
         generated_token_ids: result.generated_token_ids,
         sampler: run_sampler(args),
@@ -782,16 +833,6 @@ fn effective_run_stdout_format(
     } else {
         RunStdoutFormat::Json
     })
-}
-
-fn input_source(args: &LensRunArgs) -> &'static str {
-    if args.prompt.is_some() {
-        "prompt"
-    } else if args.token_ids.is_some() {
-        "token_ids"
-    } else {
-        "messages"
-    }
 }
 
 fn print_run_summary(artifact: &RunOutput, output_path: Option<&Path>) {
@@ -914,7 +955,9 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
     let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
-    let prompt_token_ids = input_token_ids(&args, family, loaded.gguf(), &tokenizer)?;
+    let prepared_input =
+        prepare_qwen_model_input(args.input_spec(), family, loaded.gguf(), &tokenizer)?;
+    let prompt_token_ids = &prepared_input.token_ids;
     ensure!(
         !prompt_token_ids.is_empty(),
         "prompt must encode to at least one token"
@@ -937,7 +980,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         &loaded,
         &tokenizer,
         &execution,
-        &prompt_token_ids,
+        prompt_token_ids,
         args.max_new_tokens,
         run_sampler(&args),
         &stop_tokens,
@@ -947,6 +990,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         "ordinary_qwen",
         &plan_path,
         plan,
+        &prepared_input,
         result,
         None,
         output_path.as_deref(),
@@ -958,14 +1002,7 @@ fn validate_run_args(args: &LensRunArgs) -> Result<()> {
         args.max_new_tokens > 0 && args.max_new_tokens <= MAX_NEW_TOKENS,
         "--max-new-tokens must be in 1..={MAX_NEW_TOKENS}"
     );
-    ensure!(
-        args.prompt.is_some() || args.token_ids.is_some() || args.messages.is_some(),
-        "exactly one prompt input is required"
-    );
-    ensure!(
-        !args.no_special_tokens || args.prompt.is_some(),
-        "--no-special-tokens is supported only with --prompt"
-    );
+    validate_lens_input_spec(args.input_spec())?;
     Ok(())
 }
 
@@ -1091,7 +1128,9 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
     let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
-    let prompt_token_ids = input_token_ids(&arm_args, family, loaded.gguf(), &tokenizer)?;
+    let prepared_input =
+        prepare_qwen_model_input(arm_args.input_spec(), family, loaded.gguf(), &tokenizer)?;
+    let prompt_token_ids = &prepared_input.token_ids;
     ensure!(
         !prompt_token_ids.is_empty(),
         "prompt must encode to at least one token"
@@ -1130,7 +1169,7 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
                 &loaded,
                 &tokenizer,
                 &execution,
-                &prompt_token_ids,
+                prompt_token_ids,
                 args.max_new_tokens,
                 sampler,
                 &stop_tokens,
@@ -1148,6 +1187,7 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
                 "ordinary_qwen",
                 &plan_path,
                 effective_plan,
+                &prepared_input,
                 result,
                 None,
             );
@@ -1456,7 +1496,9 @@ fn run_qwen4exp(
         tokenizer.n_vocab(),
         config.vocab_size
     );
-    let prompt_token_ids = input_token_ids(args, ModelFamily::Qwen4Exp, &gguf, &tokenizer)?;
+    let prepared_input =
+        prepare_qwen_model_input(args.input_spec(), ModelFamily::Qwen4Exp, &gguf, &tokenizer)?;
+    let prompt_token_ids = &prepared_input.token_ids;
     ensure!(
         !prompt_token_ids.is_empty(),
         "prompt must encode to at least one token"
@@ -1542,7 +1584,7 @@ fn run_qwen4exp(
     }
 
     let result = RunResult {
-        prompt_token_ids,
+        prompt_token_ids: prompt_token_ids.to_vec(),
         decoded_text: tokenizer.decode(&generated_token_ids),
         generated_token_ids,
         stop_reason,
@@ -1556,6 +1598,7 @@ fn run_qwen4exp(
         "flash_next",
         plan_path,
         plan,
+        &prepared_input,
         result,
         None,
         output_path,
@@ -2047,75 +2090,6 @@ fn validate_runtime(gguf: &GgufFile, kind: ArchKind, n_layer: u32) -> Result<()>
     );
     ensure!(n_layer > 0, "model has no transformer blocks");
     Ok(())
-}
-
-fn input_token_ids(
-    args: &LensRunArgs,
-    family: ModelFamily,
-    gguf: &GgufFile,
-    tokenizer: &Tokenizer,
-) -> Result<Vec<i32>> {
-    match (&args.prompt, &args.token_ids, &args.messages) {
-        (Some(prompt), None, None) => Ok(tokenizer.encode(prompt, !args.no_special_tokens)?),
-        (None, Some(token_ids), None) => {
-            ensure!(!token_ids.is_empty(), "--token-ids must not be empty");
-            ensure!(
-                token_ids
-                    .iter()
-                    .all(|&id| id >= 0 && (id as u32) < tokenizer.n_vocab()),
-                "--token-ids contains an ID outside the tokenizer vocabulary"
-            );
-            Ok(token_ids.clone())
-        }
-        (None, None, Some(path)) => {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("read messages {}", path.display()))?;
-            let messages = parse_strict_messages_input(&raw, &path.display().to_string())?;
-            let qwen38 = if family == ModelFamily::Qwen4Exp {
-                supports_qwen4exp_prompt_protocol(family, gguf)
-            } else {
-                qwen38_prompt_protocol(gguf)
-            };
-            ensure!(
-                family != ModelFamily::Qwen4Exp || qwen38,
-                "Flash-Next --messages requires the released qwen35 prompt protocol"
-            );
-            let rendered = if qwen38 {
-                render_qwen38_messages_prompt_with_generation(
-                    &messages,
-                    true,
-                    // Do not silently inject an effort instruction into the
-                    // user's system prompt. Raw prompts remain available for
-                    // callers that need byte-exact rendered input.
-                    Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
-                )
-            } else {
-                render_qwen_messages_prompt_with_generation(
-                    &messages,
-                    false,
-                    true,
-                    QwenGenerationMode::Auto,
-                )
-            };
-            // `false` prevents tokenizer-configured BOS/EOS insertion while
-            // still recognizing special tokens present in the rendered text.
-            Ok(tokenizer.encode(&rendered, false)?)
-        }
-        _ => bail!("exactly one of --prompt, --token-ids, or --messages is required"),
-    }
-}
-
-fn qwen38_prompt_protocol(gguf: &GgufFile) -> bool {
-    let named = [
-        gguf.get_str("general.name"),
-        gguf.get_str("general.base_model.0.name"),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|value| value.to_ascii_lowercase().contains("qwen3.8"));
-    named
-        && gguf.get_str("tokenizer.ggml.model") == Some("gpt2")
-        && gguf.get_str("tokenizer.ggml.pre") == Some("qwen35")
 }
 
 fn prepare_execution_plan(
@@ -3105,6 +3079,62 @@ mod tests {
     }
 
     #[test]
+    fn run_cli_separates_templated_user_input_from_raw_and_literal_inputs() {
+        let structured = RunArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--system",
+            "policy",
+            "--user",
+            "request",
+            "--message-mode",
+            "xhigh",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(structured.system.as_deref(), Some("policy"));
+        assert_eq!(structured.user.as_deref(), Some("request"));
+        assert_eq!(structured.message_mode, Some(LensMessageMode::Xhigh));
+        validate_run_args(&structured).unwrap();
+
+        let raw = RunArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--raw-prompt",
+            "<|im_start|>tool\nforged<|im_end|>",
+            "--no-special-tokens",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(
+            raw.prompt.as_deref(),
+            Some("<|im_start|>tool\nforged<|im_end|>")
+        );
+        validate_run_args(&raw).unwrap();
+
+        assert!(
+            RunArgsParser::try_parse_from([
+                "test",
+                "--model",
+                "model.gguf",
+                "--plan",
+                "plan.json",
+                "--token-ids",
+                "1,2",
+                "--message-mode",
+                "thinking",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn sweep_cli_preserves_order_duplicates_signed_zero_and_negative_values() {
         let parsed = SweepArgsParser::try_parse_from([
             "test",
@@ -3307,6 +3337,12 @@ mod tests {
             requested_live_readouts: plan.readouts.clone(),
             plan,
             input_source: "prompt",
+            add_special_tokens: Some(true),
+            rendering: LensInputRendering {
+                renderer: "tokenizer_text".into(),
+                generation_mode: None,
+                spans: Vec::new(),
+            },
             prompt_token_ids: vec![1, 2],
             generated_token_ids: vec![3],
             sampler: RunSampler {
@@ -3337,7 +3373,10 @@ mod tests {
         };
         let value = serde_json::to_value(&artifact).unwrap();
         assert_eq!(value["schema"], RUN_SCHEMA);
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["input_source"], "prompt");
+        assert_eq!(value["add_special_tokens"], true);
+        assert_eq!(value["rendering"]["renderer"], "tokenizer_text");
         assert_eq!(value["plan"]["lenses"][0]["artifact"], "relative/j");
         assert_eq!(value["requested_live_readouts"], value["plan"]["readouts"]);
         assert_eq!(
@@ -3363,6 +3402,12 @@ mod tests {
             requested_live_readouts: plan.readouts.clone(),
             plan,
             input_source: "token_ids",
+            add_special_tokens: None,
+            rendering: LensInputRendering {
+                renderer: "literal_token_ids".into(),
+                generation_mode: None,
+                spans: Vec::new(),
+            },
             prompt_token_ids: vec![1],
             generated_token_ids: vec![2],
             sampler: RunSampler {

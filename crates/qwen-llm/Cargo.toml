@@ -21,6 +21,7 @@ dsv4-diagnostics = []
 objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-metal.workspace = true
+objc2-metal-performance-shaders.workspace = true
 rayon.workspace = true
 block2.workspace = true
 

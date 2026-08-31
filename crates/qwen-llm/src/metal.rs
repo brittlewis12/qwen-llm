@@ -30,6 +30,7 @@
 
 use block2::RcBlock;
 use memmap2::Mmap;
+use objc2::AnyThread;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSRange, NSString, NSURL};
@@ -40,6 +41,9 @@ use objc2_metal::{
     MTLCounterSamplingPoint, MTLCounterSet, MTLCreateSystemDefaultDevice, MTLDevice,
     MTLDispatchType, MTLFence, MTLLibrary, MTLResource, MTLResourceOptions, MTLSize,
     MTLStorageMode,
+};
+use objc2_metal_performance_shaders::{
+    MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixFindTopK,
 };
 use parking_lot::{Mutex, ReentrantMutex, ReentrantMutexGuard, const_reentrant_mutex};
 use std::cell::Cell;
@@ -16309,6 +16313,161 @@ pub fn encode_topk16_f32(
     Ok(())
 }
 
+/// Encode Apple's optimized per-row top-16 matrix selection into an existing
+/// command buffer. Index outputs are UInt32 bit patterns stored in an I32
+/// tensor.
+pub fn encode_mps_topk16_f32(
+    ctx: &MetalContext,
+    command: &ProtocolObject<dyn MTLCommandBuffer>,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_val: &MetalTensor,
+    n_rows: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    const TOP_K: usize = 16;
+    if x.dtype != GgmlType::F32 || x.n_elements() as usize != n_rows * n {
+        return Err(MetalError::BadShape {
+            kernel: "mps_topk16",
+            detail: format!(
+                "input dtype/size {:?}/{} != F32/{}",
+                x.dtype,
+                x.n_elements(),
+                n_rows * n
+            ),
+        });
+    }
+    validate_i32_output("mps_topk16", out_idx, n_rows * TOP_K)?;
+    if out_val.dtype != GgmlType::F32 || out_val.n_elements() as usize != n_rows * TOP_K {
+        return Err(MetalError::BadShape {
+            kernel: "mps_topk16",
+            detail: format!(
+                "value output dtype/size {:?}/{} != F32/{}",
+                out_val.dtype,
+                out_val.n_elements(),
+                n_rows * TOP_K
+            ),
+        });
+    }
+
+    let input_descriptor = unsafe {
+        MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
+            n_rows,
+            n,
+            n * std::mem::size_of::<f32>(),
+            MPSDataType::Float32,
+        )
+    };
+    let index_descriptor = unsafe {
+        MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
+            n_rows,
+            TOP_K,
+            TOP_K * std::mem::size_of::<u32>(),
+            MPSDataType::UInt32,
+        )
+    };
+    let value_descriptor = unsafe {
+        MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
+            n_rows,
+            TOP_K,
+            TOP_K * std::mem::size_of::<f32>(),
+            MPSDataType::Float32,
+        )
+    };
+    let input = unsafe {
+        MPSMatrix::initWithBuffer_offset_descriptor(
+            MPSMatrix::alloc(),
+            &x.buffer,
+            x.offset as usize,
+            &input_descriptor,
+        )
+    };
+    let indices = unsafe {
+        MPSMatrix::initWithBuffer_offset_descriptor(
+            MPSMatrix::alloc(),
+            &out_idx.buffer,
+            out_idx.offset as usize,
+            &index_descriptor,
+        )
+    };
+    let values = unsafe {
+        MPSMatrix::initWithBuffer_offset_descriptor(
+            MPSMatrix::alloc(),
+            &out_val.buffer,
+            out_val.offset as usize,
+            &value_descriptor,
+        )
+    };
+    let topk = unsafe {
+        MPSMatrixFindTopK::initWithDevice_numberOfTopKValues(
+            MPSMatrixFindTopK::alloc(),
+            &ctx.device,
+            TOP_K,
+        )
+    };
+    unsafe {
+        topk.setSourceRows(n_rows);
+        topk.setSourceColumns(n);
+        topk.encodeToCommandBuffer_inputMatrix_resultIndexMatrix_resultValueMatrix(
+            command, &input, &indices, &values,
+        );
+    }
+    Ok(())
+}
+
+/// Replace one fixed-width set of selected indices per row with negative
+/// infinity so a second selection pass returns the next disjoint set.
+pub fn encode_mask_row_indices_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    values: &MetalTensor,
+    indices: &MetalTensor,
+    n_rows: usize,
+    row_width: usize,
+    index_count: usize,
+) -> Result<(), MetalError> {
+    values.assert_writable("mask row indices");
+    if values.dtype != GgmlType::F32 || values.n_elements() as usize != n_rows * row_width {
+        return Err(MetalError::BadShape {
+            kernel: "mask_row_indices",
+            detail: "value matrix shape or dtype mismatch".into(),
+        });
+    }
+    validate_i32_output("mask_row_indices", indices, n_rows * index_count)?;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_width: u32,
+        index_count: u32,
+    }
+    let pso = ctx.pipeline("kernel_mask_row_indices_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            row_width: row_width as u32,
+            index_count: index_count as u32,
+        },
+    );
+    enc.set_tensor(1, values);
+    enc.set_tensor(2, indices);
+    let total = n_rows * index_count;
+    let threads = pso.maxTotalThreadsPerThreadgroup().min(256);
+    enc.dispatch(
+        MTLSize {
+            width: total.div_ceil(threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// GPU-side greedy selection matching the sampler's `f32::total_cmp` order.
 /// Equal bit patterns choose the LOWEST token id (2026-08-22 tie-inversion
 /// unification). Any NaN is encoded as the negative value `~token_id`, with
@@ -28428,6 +28587,121 @@ mod tests {
         assert_eq!(rows[1].buffer_length, second.length() as u64);
         assert_eq!(rows[1].storage_mode, "shared");
         assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn mps_two_pass_topk_matches_cpu_at_full_vocabulary_width() {
+        const ROWS: usize = 128;
+        const COLUMNS: usize = 248_320;
+        const PASS_K: usize = 16;
+        const RESULT_K: usize = 25;
+        const PRIME: usize = 1_000_003;
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("initialize Metal: {error}"),
+        };
+        let mut host = Vec::with_capacity(ROWS * COLUMNS);
+        for row in 0..ROWS {
+            for column in 0..COLUMNS {
+                host.push(((column * 48_271 + row * 17) % PRIME) as f32);
+            }
+        }
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&host),
+            vec![ROWS as u64, COLUMNS as u64],
+            GgmlType::F32,
+        )
+        .expect("input tensor");
+        let first_ids =
+            MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, PASS_K as u64]).expect("first IDs");
+        let first_values =
+            MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, PASS_K as u64]).expect("first values");
+        let second_ids =
+            MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, PASS_K as u64]).expect("second IDs");
+        let second_values =
+            MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, PASS_K as u64]).expect("second values");
+        let command = ctx.queue.commandBuffer().expect("command buffer");
+        let started = std::time::Instant::now();
+        encode_mps_topk16_f32(
+            &ctx,
+            &command,
+            &input,
+            &first_ids,
+            &first_values,
+            ROWS,
+            COLUMNS,
+        )
+        .expect("first top-k pass");
+        let encoder = KernelEncoder::begin(&command);
+        encode_mask_row_indices_f32(&ctx, &encoder, &input, &first_ids, ROWS, COLUMNS, PASS_K)
+            .expect("mask first-pass IDs");
+        encoder.end();
+        encode_mps_topk16_f32(
+            &ctx,
+            &command,
+            &input,
+            &second_ids,
+            &second_values,
+            ROWS,
+            COLUMNS,
+        )
+        .expect("second top-k pass");
+        command.commit();
+        command.waitUntilCompleted();
+        let elapsed = started.elapsed();
+        assert_eq!(
+            command.status(),
+            objc2_metal::MTLCommandBufferStatus::Completed,
+            "MPS top-k command failed: {:?}",
+            command.error()
+        );
+
+        let read_ids = |tensor: &MetalTensor| unsafe {
+            std::slice::from_raw_parts(
+                tensor.buffer.contents().as_ptr().cast::<i32>(),
+                ROWS * PASS_K,
+            )
+            .to_vec()
+        };
+        let first_ids = read_ids(&first_ids);
+        let second_ids = read_ids(&second_ids);
+        let first_values = read_back_f32(&first_values.buffer, ROWS * PASS_K);
+        let second_values = read_back_f32(&second_values.buffer, ROWS * PASS_K);
+        for row in 0..ROWS {
+            let mut candidates = Vec::with_capacity(2 * PASS_K);
+            for (ids, values) in [(&first_ids, &first_values), (&second_ids, &second_values)] {
+                for column in 0..PASS_K {
+                    let offset = row * PASS_K + column;
+                    candidates.push((ids[offset] as usize, values[offset]));
+                }
+            }
+            candidates.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            let mut expected = Vec::<(usize, f32)>::with_capacity(RESULT_K);
+            for column in 0..COLUMNS {
+                let value = host[row * COLUMNS + column];
+                let insertion = expected.partition_point(|&(id, score)| {
+                    score > value || (score == value && id < column)
+                });
+                if insertion < RESULT_K {
+                    expected.insert(insertion, (column, value));
+                    if expected.len() > RESULT_K {
+                        expected.pop();
+                    }
+                }
+            }
+            assert_eq!(&candidates[..RESULT_K], expected.as_slice(), "row {row}");
+        }
+        eprintln!(
+            "MPS two-pass top-25 rows={ROWS} columns={COLUMNS} wall_ms={:.3}",
+            elapsed.as_secs_f64() * 1e3
+        );
     }
 
     fn offset_tensor(

@@ -33,6 +33,15 @@ objc2-metal = { version = "0.3", features = [
     "MTLArgumentEncoder",
     "block2",
 ] }
+objc2-metal-performance-shaders = { version = "0.3", default-features = false, features = [
+    "std",
+    "MPSCore",
+    "MPSCoreTypes",
+    "MPSKernel",
+    "MPSMatrix",
+    "MPSMatrixFindTopK",
+    "MPSMatrixTypes",
+] }
 block2 = "0.6"
 
 # loader / codec

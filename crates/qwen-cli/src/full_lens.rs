@@ -47,7 +47,7 @@ const PAYLOAD_BYTES: u64 = MATRIX_BYTES * (SOURCE_LAYER_COUNT as u64);
 const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROJECTED_FULL_TOKENS: usize = 32;
 const MAX_FULL_READOUT_PROMPT_TOKENS: usize = 4_096;
-const MAX_FULL_READOUT_TOP_K: usize = 16;
+const MAX_FULL_READOUT_TOP_K: usize = 25;
 const MAX_TRACE_FULL_VECTOR_CELLS: usize = 32;
 const MAX_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
 
@@ -3161,7 +3161,7 @@ mod tests {
         );
         args.allow_unvalidated_transfer = true;
 
-        args.top_k = 17;
+        args.top_k = 26;
         assert!(validate_read_full_args(&args).is_err());
         args.top_k = 10;
 
@@ -3192,7 +3192,7 @@ mod tests {
         let mut args = test_trace_full_args();
         validate_trace_full_args(&args).unwrap();
 
-        args.top_k = 17;
+        args.top_k = 26;
         assert!(validate_trace_full_args(&args).is_err());
         args.top_k = 8;
         args.max_tokens = MAX_RESEARCH_PACKED_READOUT_POSITIONS + 1;

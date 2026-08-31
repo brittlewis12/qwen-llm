@@ -10,12 +10,12 @@ use crate::metal::{
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_vjp_f32,
     encode_gdn_prep_packed_ckpt_f32, encode_gdn_step_decay_packed_ckpt_f32,
     encode_gdn_step_decay_packed_vjp_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_l2_norm_vjp_batched_f32, encode_mat_mat_f16_f32, encode_mat_vec_f16_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32,
-    encode_rms_norm_mul_vjp_broadcast_f32, encode_rms_norm_mul_vjp_rows_f32,
-    encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32, encode_sigmoid_f32,
-    encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32, encode_silu_mul_vjp_f32,
-    encode_split_q_gate_f32, encode_ssm_conv_silu_split_packed_vjp_f32, encode_topk16_f32,
+    encode_l2_norm_vjp_batched_f32, encode_mask_row_indices_f32, encode_mat_mat_f16_f32,
+    encode_mat_vec_f16_f32, encode_mps_topk16_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_broadcast_f32,
+    encode_rms_norm_mul_vjp_rows_f32, encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32,
+    encode_sigmoid_f32, encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32,
+    encode_silu_mul_vjp_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_split_packed_vjp_f32,
 };
 use crate::metal_dflash::{
     DFlashError, MetalDFlashLayerMajorScratch,
@@ -40,7 +40,9 @@ pub const MAX_RESEARCH_WORKSPACE_TOKENS: usize = 128;
 pub const MAX_RESEARCH_WORKSPACE_DIM_BATCH: usize = 32;
 pub const MAX_RESEARCH_PACKED_READOUT_POSITIONS: usize = 128;
 const PACKED_FULL_READOUT_CHUNK_SIZE: usize = 16;
-const MAX_FULL_READOUT_TOP_K: usize = 16;
+const MPS_FULL_READOUT_TOP_K: usize = 16;
+const FULL_READOUT_CANDIDATE_COUNT: usize = 2 * MPS_FULL_READOUT_TOP_K;
+const MAX_FULL_READOUT_TOP_K: usize = 25;
 /// Maximum peak host bytes attributable to a newly materialized research
 /// result and its immediate fitting/readout workspaces. 256 MiB keeps selected
 /// experimental banks practical while preventing accidental multi-GiB jobs.
@@ -1460,7 +1462,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         )?;
         let hidden_elements = checked_product(position_count, hidden_size)?;
         let logits_elements = checked_product(position_count, vocab_size)?;
-        let compact_elements = checked_product(position_count, MAX_FULL_READOUT_TOP_K)?;
+        let compact_elements = checked_product(position_count, FULL_READOUT_CANDIDATE_COUNT)?;
         let hidden_bytes = checked_product(hidden_elements, std::mem::size_of::<f32>())?;
         let logits_bytes = checked_product(logits_elements, std::mem::size_of::<f32>())?;
         let compact_bytes = checked_product(compact_elements, 2 * std::mem::size_of::<u32>())?;
@@ -1493,13 +1495,21 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             MetalTensor::zeros_f32(context, vec![position_count as u64, hidden_size as u64])?;
         let logits =
             MetalTensor::zeros_f32(context, vec![position_count as u64, vocab_size as u64])?;
-        let top_ids = MetalTensor::zeros_i32(
+        let first_ids = MetalTensor::zeros_i32(
             context,
-            vec![position_count as u64, MAX_FULL_READOUT_TOP_K as u64],
+            vec![position_count as u64, MPS_FULL_READOUT_TOP_K as u64],
         )?;
-        let top_values = MetalTensor::zeros_f32(
+        let first_values = MetalTensor::zeros_f32(
             context,
-            vec![position_count as u64, MAX_FULL_READOUT_TOP_K as u64],
+            vec![position_count as u64, MPS_FULL_READOUT_TOP_K as u64],
+        )?;
+        let second_ids = MetalTensor::zeros_i32(
+            context,
+            vec![position_count as u64, MPS_FULL_READOUT_TOP_K as u64],
+        )?;
+        let second_values = MetalTensor::zeros_f32(
+            context,
+            vec![position_count as u64, MPS_FULL_READOUT_TOP_K as u64],
         )?;
 
         let readout_started = Instant::now();
@@ -1560,35 +1570,70 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 vocab_size,
                 position_count,
             )?;
-            encode_topk16_f32(
-                context,
-                &encoder,
-                &logits,
-                &top_ids,
-                &top_values,
-                position_count,
-                vocab_size,
-            )?;
             Ok(())
         })();
         encoder.end();
         encode_result?;
+        encode_mps_topk16_f32(
+            context,
+            &command,
+            &logits,
+            &first_ids,
+            &first_values,
+            position_count,
+            vocab_size,
+        )?;
+        let mask_encoder = KernelEncoder::begin(&command);
+        let mask_result = encode_mask_row_indices_f32(
+            context,
+            &mask_encoder,
+            &logits,
+            &first_ids,
+            position_count,
+            vocab_size,
+            MPS_FULL_READOUT_TOP_K,
+        );
+        mask_encoder.end();
+        mask_result?;
+        encode_mps_topk16_f32(
+            context,
+            &command,
+            &logits,
+            &second_ids,
+            &second_values,
+            position_count,
+            vocab_size,
+        )?;
         command.commit();
         command.waitUntilCompleted();
         validate_completed_command(&command)?;
         let readout_wall_ms = readout_started.elapsed().as_secs_f64() * 1e3;
         let readout_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
 
-        let ids = read_i32_fallible(&top_ids, compact_elements, "packed readout top-k IDs")?;
-        let values =
-            read_f32_fallible(&top_values, compact_elements, "packed readout top-k logits")?;
+        let pass_elements = checked_product(position_count, MPS_FULL_READOUT_TOP_K)?;
+        let first_ids =
+            read_i32_fallible(&first_ids, pass_elements, "packed readout first-pass IDs")?;
+        let first_values = read_f32_fallible(
+            &first_values,
+            pass_elements,
+            "packed readout first-pass logits",
+        )?;
+        let second_ids =
+            read_i32_fallible(&second_ids, pass_elements, "packed readout second-pass IDs")?;
+        let second_values = read_f32_fallible(
+            &second_values,
+            pass_elements,
+            "packed readout second-pass logits",
+        )?;
         let positions = build_packed_vocabulary_positions(
             capture.token_ids(),
             capture.start_position(),
             top_k,
             arch.vocab_size,
-            &ids,
-            &values,
+            &first_ids,
+            &first_values,
+            &second_ids,
+            &second_values,
         )?;
         let transported_vectors = read_packed_transported_vectors(
             &transported,
@@ -1633,11 +1678,10 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         source_residual: &[f32],
         top_k: usize,
     ) -> Result<ResearchFullVocabularyReadoutWithVector, ResearchError> {
-        const TOP_K_MAX: usize = 16;
-        if top_k == 0 || top_k > TOP_K_MAX {
+        if top_k == 0 || top_k > MAX_FULL_READOUT_TOP_K {
             return Err(ResearchError::InvalidFullReadoutTopK {
                 got: top_k,
-                max: TOP_K_MAX,
+                max: MAX_FULL_READOUT_TOP_K,
             });
         }
         let arch = self.arch();
@@ -1695,7 +1739,6 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(5)?))
             .and_then(|bytes| bytes.checked_add(logits_bytes.checked_mul(2)?))
-            .and_then(|bytes| bytes.checked_add(TOP_K_MAX * 8))
             .ok_or(ResearchError::SizeOverflow)?;
         enforce_research_byte_budget("full-vocabulary F16 transport readout", peak_bytes)?;
 
@@ -1715,8 +1758,6 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let transported = MetalTensor::zeros_f32(context, vec![hidden_size as u64])?;
         let normalized = MetalTensor::zeros_f32(context, vec![hidden_size as u64])?;
         let logits = MetalTensor::zeros_f32(context, vec![vocab_size as u64])?;
-        let top_ids = MetalTensor::zeros_i32(context, vec![TOP_K_MAX as u64])?;
-        let top_values = MetalTensor::zeros_f32(context, vec![TOP_K_MAX as u64])?;
         let command = context
             .queue
             .commandBuffer()
@@ -1747,15 +1788,6 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 &normalized,
                 &logits,
                 hidden_size,
-                vocab_size,
-            )?;
-            encode_topk16_f32(
-                context,
-                &encoder,
-                &logits,
-                &top_ids,
-                &top_values,
-                1,
                 vocab_size,
             )?;
             Ok(())
@@ -1794,33 +1826,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 index,
             });
         }
-        let ids = read_i32_fallible(&top_ids, TOP_K_MAX, "full readout top-k IDs")?;
-        let values = read_f32_fallible(&top_values, TOP_K_MAX, "full readout top-k logits")?;
-        let mut scores = Vec::new();
-        scores.try_reserve_exact(top_k).map_err(|_| {
-            ResearchError::ResearchHostAllocationFailed {
-                name: "full readout top-k scores",
-                elements: top_k,
-            }
-        })?;
-        for (&token_id, &logit) in ids.iter().zip(&values).take(top_k) {
-            if token_id < 0 || token_id as u32 >= arch.vocab_size {
-                return Err(ResearchError::InvalidFullReadoutToken {
-                    token_id,
-                    vocab_size: arch.vocab_size,
-                });
-            }
-            if !logit.is_finite() {
-                return Err(ResearchError::NonFiniteTokenReadoutData {
-                    name: "full readout top-k logits",
-                    index: scores.len(),
-                });
-            }
-            scores.push(ResearchVocabularyScore {
-                token_id: token_id as u32,
-                logit,
-            });
-        }
+        let scores = exact_vocabulary_top_k(&full_logits, top_k)?;
         Ok(ResearchFullVocabularyReadoutWithVector {
             readout: ResearchFullVocabularyReadout {
                 rms_denominator_f64_recomputed,
@@ -6567,24 +6573,60 @@ fn read_packed_transported_vectors(
     Ok(vectors)
 }
 
+fn exact_vocabulary_top_k(
+    logits: &[f32],
+    top_k: usize,
+) -> Result<Vec<ResearchVocabularyScore>, ResearchError> {
+    let mut scores = Vec::new();
+    scores
+        .try_reserve_exact(top_k)
+        .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+            name: "full-vocabulary top-k scores",
+            elements: top_k,
+        })?;
+    for (token_id, &logit) in logits.iter().enumerate() {
+        if !logit.is_finite() {
+            return Err(ResearchError::NonFiniteTokenReadoutData {
+                name: "full readout logits",
+                index: token_id,
+            });
+        }
+        let token_id = token_id as u32;
+        let insertion = scores.partition_point(|existing: &ResearchVocabularyScore| {
+            existing.logit > logit || (existing.logit == logit && existing.token_id < token_id)
+        });
+        if insertion < top_k {
+            scores.insert(insertion, ResearchVocabularyScore { token_id, logit });
+            if scores.len() > top_k {
+                scores.pop();
+            }
+        }
+    }
+    Ok(scores)
+}
+
 fn build_packed_vocabulary_positions(
     token_ids: &[i32],
     start_position: usize,
     top_k: usize,
     vocab_size: u32,
-    ids: &[i32],
-    values: &[f32],
+    first_ids: &[i32],
+    first_values: &[f32],
+    second_ids: &[i32],
+    second_values: &[f32],
 ) -> Result<Vec<ResearchPackedVocabularyPosition>, ResearchError> {
-    let compact_elements = checked_product(token_ids.len(), MAX_FULL_READOUT_TOP_K)?;
+    let pass_elements = checked_product(token_ids.len(), MPS_FULL_READOUT_TOP_K)?;
     for (name, got) in [
-        ("packed readout top-k IDs", ids.len()),
-        ("packed readout top-k logits", values.len()),
+        ("packed readout first-pass IDs", first_ids.len()),
+        ("packed readout first-pass logits", first_values.len()),
+        ("packed readout second-pass IDs", second_ids.len()),
+        ("packed readout second-pass logits", second_values.len()),
     ] {
-        if got != compact_elements {
+        if got != pass_elements {
             return Err(ResearchError::ActivationSize {
                 name,
                 got,
-                expected: compact_elements,
+                expected: pass_elements,
             });
         }
     }
@@ -6602,7 +6644,53 @@ fn build_packed_vocabulary_positions(
         let predicts_position = source_position
             .checked_add(1)
             .ok_or(ResearchError::SizeOverflow)?;
-        let row_base = checked_product(row, MAX_FULL_READOUT_TOP_K)?;
+        let row_base = checked_product(row, MPS_FULL_READOUT_TOP_K)?;
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve_exact(FULL_READOUT_CANDIDATE_COUNT)
+            .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+                name: "packed full-vocabulary candidates",
+                elements: FULL_READOUT_CANDIDATE_COUNT,
+            })?;
+        for (ids, values, name) in [
+            (first_ids, first_values, "packed first-pass logits"),
+            (second_ids, second_values, "packed second-pass logits"),
+        ] {
+            for offset in 0..MPS_FULL_READOUT_TOP_K {
+                let index = row_base
+                    .checked_add(offset)
+                    .ok_or(ResearchError::SizeOverflow)?;
+                let token_id = ids[index];
+                let logit = values[index];
+                if token_id < 0 || token_id as u32 >= vocab_size {
+                    return Err(ResearchError::InvalidFullReadoutToken {
+                        token_id,
+                        vocab_size,
+                    });
+                }
+                if !logit.is_finite() {
+                    return Err(ResearchError::NonFiniteTokenReadoutData { name, index });
+                }
+                if candidates
+                    .iter()
+                    .any(|score: &ResearchVocabularyScore| score.token_id == token_id as u32)
+                {
+                    return Err(ResearchError::DuplicateTokenReadoutId {
+                        token_id: token_id as u32,
+                    });
+                }
+                candidates.push(ResearchVocabularyScore {
+                    token_id: token_id as u32,
+                    logit,
+                });
+            }
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .logit
+                .total_cmp(&left.logit)
+                .then_with(|| left.token_id.cmp(&right.token_id))
+        });
         let mut scores = Vec::new();
         scores.try_reserve_exact(top_k).map_err(|_| {
             ResearchError::ResearchHostAllocationFailed {
@@ -6610,29 +6698,7 @@ fn build_packed_vocabulary_positions(
                 elements: top_k,
             }
         })?;
-        for rank in 0..top_k {
-            let index = row_base
-                .checked_add(rank)
-                .ok_or(ResearchError::SizeOverflow)?;
-            let token_id = ids[index];
-            let logit = values[index];
-            if token_id < 0 || token_id as u32 >= vocab_size {
-                return Err(ResearchError::InvalidFullReadoutToken {
-                    token_id,
-                    vocab_size,
-                });
-            }
-            if !logit.is_finite() {
-                return Err(ResearchError::NonFiniteTokenReadoutData {
-                    name: "packed full-vocabulary top-k logits",
-                    index,
-                });
-            }
-            scores.push(ResearchVocabularyScore {
-                token_id: token_id as u32,
-                logit,
-            });
-        }
+        scores.extend(candidates.into_iter().take(top_k));
         positions.push(ResearchPackedVocabularyPosition {
             source_position,
             source_token_id,
@@ -7756,19 +7822,38 @@ mod tests {
 
     #[test]
     fn packed_vocabulary_positions_preserve_absolute_next_position_semantics() {
-        let mut ids = vec![0i32; 2 * MAX_FULL_READOUT_TOP_K];
-        let mut values = vec![0.0f32; 2 * MAX_FULL_READOUT_TOP_K];
-        ids[0] = 9;
-        ids[1] = 4;
-        values[0] = 3.5;
-        values[1] = 2.25;
-        ids[MAX_FULL_READOUT_TOP_K] = 7;
-        ids[MAX_FULL_READOUT_TOP_K + 1] = 3;
-        values[MAX_FULL_READOUT_TOP_K] = 4.0;
-        values[MAX_FULL_READOUT_TOP_K + 1] = 1.5;
+        let mut first_ids = vec![0i32; 2 * MPS_FULL_READOUT_TOP_K];
+        let mut first_values = vec![-10.0f32; 2 * MPS_FULL_READOUT_TOP_K];
+        let mut second_ids = vec![0i32; 2 * MPS_FULL_READOUT_TOP_K];
+        let second_values = vec![-20.0f32; 2 * MPS_FULL_READOUT_TOP_K];
+        for row in 0..2 {
+            for column in 0..MPS_FULL_READOUT_TOP_K {
+                let index = row * MPS_FULL_READOUT_TOP_K + column;
+                first_ids[index] = column as i32;
+                second_ids[index] = (MPS_FULL_READOUT_TOP_K + column) as i32;
+            }
+        }
+        first_ids.swap(0, 9);
+        first_ids.swap(1, 4);
+        first_values[0] = 3.5;
+        first_values[1] = 2.25;
+        let second_row = MPS_FULL_READOUT_TOP_K;
+        first_ids.swap(second_row, second_row + 7);
+        first_ids.swap(second_row + 1, second_row + 3);
+        first_values[second_row] = 4.0;
+        first_values[second_row + 1] = 1.5;
 
-        let positions =
-            build_packed_vocabulary_positions(&[101, 102], 41, 2, 128, &ids, &values).unwrap();
+        let positions = build_packed_vocabulary_positions(
+            &[101, 102],
+            41,
+            2,
+            128,
+            &first_ids,
+            &first_values,
+            &second_ids,
+            &second_values,
+        )
+        .unwrap();
         assert_eq!(positions.len(), 2);
         assert_eq!(positions[0].source_position, 41);
         assert_eq!(positions[0].source_token_id, 101);

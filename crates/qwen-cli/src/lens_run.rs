@@ -29,6 +29,10 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod event_schedule;
+
+use event_schedule::{BoundEventSchedule, CompiledEvent, CompiledEventSchedule};
+
 const MAX_PLAN_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LENSES: usize = 64;
 const MAX_DIRECTIONS: usize = 4096;
@@ -1352,11 +1356,14 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     let bound_plan = bind_plan_positions(&plan, &prepared_input.rendering, prompt_token_ids.len())?;
     let execution = prepare_execution_plan(&bound_plan.resolved, plan_dir, &loaded)?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
+    let schedule = CompiledEventSchedule::compile(&execution.plan, execution.n_layer)?;
     let stop_tokens: HashSet<i32> = loaded.gguf().stop_token_ids()?.into_iter().collect();
     let result = execute_ordinary_arm(
         &loaded,
         &tokenizer,
         &execution,
+        &execution.plan,
+        &schedule,
         prompt_token_ids,
         args.max_new_tokens,
         run_sampler(&args),
@@ -1387,11 +1394,15 @@ fn execute_ordinary_arm(
     loaded: &qwen_llm::runtime::LoadedModel,
     tokenizer: &Tokenizer,
     execution: &ExecutionPlan,
+    plan: &LensPlan,
+    schedule: &CompiledEventSchedule,
     prompt_token_ids: &[i32],
     max_new_tokens: usize,
     sampler_config: RunSampler,
     stop_tokens: &HashSet<i32>,
 ) -> Result<RunResult> {
+    let schedule = schedule.bind(plan)?;
+    let mut event = schedule.new_event()?;
     let mut sequence = loaded.create_sequence(SequenceConfig::new(
         prompt_token_ids
             .len()
@@ -1411,13 +1422,17 @@ fn execute_ordinary_arm(
     let mut logits = Vec::new();
 
     for (index, &token) in prompt_token_ids.iter().enumerate() {
+        let phase = Phase::Prefill(index);
+        schedule.populate(phase, &mut event)?;
         logits = forward_event(
             execution,
+            &schedule,
             &forward,
             token,
             index as u32,
             &mut sequence,
-            Phase::Prefill(index),
+            phase,
+            &event,
             &mut operation_applications,
             &mut live_readouts,
         )?;
@@ -1434,13 +1449,17 @@ fn execute_ordinary_arm(
         if generated_index + 1 == max_new_tokens {
             break;
         }
+        let phase = Phase::Decode(generated_index);
+        schedule.populate(phase, &mut event)?;
         logits = forward_event(
             execution,
+            &schedule,
             &forward,
             sampled,
             (prompt_token_ids.len() + generated_index) as u32,
             &mut sequence,
-            Phase::Decode(generated_index),
+            phase,
+            &event,
             &mut operation_applications,
             &mut live_readouts,
         )?;
@@ -1528,8 +1547,9 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
         &prepared_input.rendering,
         prompt_token_ids.len(),
     )?;
-    let mut execution = prepare_execution_plan(&source_bound_plan.resolved, plan_dir, &loaded)?;
+    let execution = prepare_execution_plan(&source_bound_plan.resolved, plan_dir, &loaded)?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
+    let schedule = CompiledEventSchedule::compile(&execution.plan, execution.n_layer)?;
     let stop_tokens = loaded
         .gguf()
         .stop_token_ids()?
@@ -1555,11 +1575,12 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
                 effective_bound_plan.position_bindings == source_bound_plan.position_bindings,
                 "coefficient sweep changed semantic position bindings"
             );
-            execution.plan = effective_bound_plan.resolved.clone();
             let result = execute_ordinary_arm(
                 &loaded,
                 &tokenizer,
                 &execution,
+                &effective_bound_plan.resolved,
+                &schedule,
                 prompt_token_ids,
                 args.max_new_tokens,
                 sampler,
@@ -3215,27 +3236,31 @@ impl Phase {
 
 fn forward_event(
     execution: &ExecutionPlan,
+    schedule: &BoundEventSchedule<'_, '_>,
     forward: &qwen_llm::metal_forward::MetalForward<'_>,
     token: i32,
     position: u32,
     sequence: &mut qwen_llm::runtime::Sequence,
     phase: Phase,
+    event: &CompiledEvent,
     operation_applications: &mut Vec<OperationApplication>,
     live_readouts: &mut Vec<LiveReadout>,
 ) -> Result<Vec<f32>> {
     let mut interventions = Vec::new();
     for layer in 0..execution.n_layer {
-        for operation in &execution.plan.operations {
-            if operation_enabled(operation) && scope_matches(&operation.scope, phase, layer)? {
-                let intervention = action_to_intervention(
-                    &operation.id,
-                    &operation.action,
-                    layer,
-                    &execution.directions,
-                    &execution.coordinate_swaps,
-                )?;
-                interventions.push((operation.id.clone(), layer, intervention));
+        for &definition_index in event.operation_indices() {
+            if !schedule.operation_selects_layer(definition_index, layer) {
+                continue;
             }
+            let operation = &schedule.plan().operations[definition_index];
+            let intervention = action_to_intervention(
+                &operation.id,
+                &operation.action,
+                layer,
+                &execution.directions,
+                &execution.coordinate_swaps,
+            )?;
+            interventions.push((operation.id.clone(), layer, intervention));
         }
     }
     let borrowed = interventions
@@ -3277,9 +3302,10 @@ fn forward_event(
             capture,
             execution.capture_layers.len() * execution.hidden_size,
         );
-        for readout in &execution.plan.readouts {
+        for &definition_index in event.readout_indices() {
+            let readout = &schedule.plan().readouts[definition_index];
             for &layer in &execution.capture_layers {
-                if !scope_matches(&readout.scope, phase, layer)? {
+                if !schedule.readout_selects_layer(definition_index, layer) {
                     continue;
                 }
                 let slot = execution.layer_slots[&layer];

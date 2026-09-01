@@ -40,6 +40,7 @@ mod template_lens;
 use full_lens::{
     CompareTransferArgs, ImportFullArgs, ReadFullArgs, TraceFullArgs, compare_transfer,
     import_full, read_full as read_qwen_full, trace_full as trace_qwen_full,
+    trace_full_batch as trace_qwen_full_batch,
 };
 
 const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
@@ -565,7 +566,15 @@ fn read_full(args: ReadFullArgs) -> Result<()> {
 }
 
 fn trace_full(args: TraceFullArgs) -> Result<()> {
-    if muse_full_lens::is_artifact(&args.full_lens)? {
+    let muse = muse_full_lens::is_artifact(&args.full_lens)?;
+    if args.requests_jsonl.is_some() {
+        ensure!(
+            !muse,
+            "--requests-jsonl currently supports ordinary Qwen full lenses"
+        );
+        return trace_qwen_full_batch(args);
+    }
+    if muse {
         ensure!(
             args.open_responses.is_none(),
             "--open-responses supports ordinary Qwen only; Muse Glimmer is not supported"

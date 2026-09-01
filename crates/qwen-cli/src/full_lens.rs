@@ -4,14 +4,17 @@ use clap::{ArgGroup, Args, ValueEnum};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
-use qwen_llm::runtime::{LoadedModelConfig, ModelLoadIntent, Runtime, SequenceConfig};
+use qwen_llm::runtime::{LoadedModel, LoadedModelConfig, ModelLoadIntent, Runtime, SequenceConfig};
+use qwen_llm::tokenizer::Tokenizer;
 use qwen_llm::workspace_lens::{
-    MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS, WORKSPACE_LENS_IDENTITY_SCHEME, WorkspaceLensError,
+    MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS, WORKSPACE_LENS_IDENTITY_SCHEME,
+    WorkspaceLensError, WorkspaceLensPackedPostBlockCapture, WorkspaceLensPackedTransportedVector,
+    WorkspaceLensPackedVocabularyPosition,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{DirBuilder, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -30,9 +33,9 @@ use super::{
     FitMethod, ORIENTATION, SCHEMA_VERSION, TOKEN_ARTIFACT_MAX_BYTES, TOKEN_ID_ARGUMENT_MAX_COUNT,
     TOKEN_MANIFEST_NAME, TOKEN_ORIENTATION, TOKEN_PAYLOAD_NAME, TOKEN_READOUT_SCHEMA,
     TokenReadoutManifest, decode_f32_le, digest_json, hex, open_regular_file, publish_immutable,
-    read_json_file, resolve_output_file_path, resolve_output_path, serialize_json_pretty_bounded,
-    sync_directory, token_covector_digest, validate_token_build_identity,
-    validate_token_readout_spec, write_atomic_replace,
+    read_bounded_jsonl_record, read_json_file, resolve_output_file_path, resolve_output_path,
+    serialize_json_pretty_bounded, sync_directory, token_covector_digest,
+    validate_token_build_identity, validate_token_readout_spec, write_atomic_replace,
 };
 
 const FULL_SCHEMA: &str = "qwen.workspace_lens_full_transport";
@@ -52,6 +55,9 @@ const MAX_FULL_READOUT_PROMPT_TOKENS: usize = 4_096;
 const MAX_FULL_READOUT_TOP_K: usize = 25;
 const MAX_TRACE_FULL_VECTOR_CELLS: usize = 32;
 const MAX_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
+const MAX_TRACE_FULL_BATCH_REQUESTS: usize = 8;
+const MAX_TRACE_FULL_BATCH_RECORD_BYTES: usize = 1024 * 1024;
+const TRACE_FULL_BATCH_MANIFEST_NAME: &str = "manifest.json";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublishedProfileId {
@@ -245,7 +251,14 @@ pub(crate) struct ReadFullArgs {
     ArgGroup::new("trace_full_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "user", "messages", "open_responses"])
+        .args([
+            "prompt",
+            "token_ids",
+            "user",
+            "messages",
+            "open_responses",
+            "requests_jsonl",
+        ])
 ))]
 pub(crate) struct TraceFullArgs {
     /// Matching Qwen3.6, Qwen3.8, or Muse Glimmer GGUF used for capture and readout.
@@ -280,11 +293,15 @@ pub(crate) struct TraceFullArgs {
     #[arg(long, visible_alias = "responses-input", value_name = "FILE|-")]
     pub(crate) open_responses: Option<PathBuf>,
 
+    /// Strict JSONL prompt cohort; paths inside records are relative to this file.
+    #[arg(long, value_name = "FILE", requires = "output_dir")]
+    pub(crate) requests_jsonl: Option<PathBuf>,
+
     /// Generation transition for --user/--messages; supported values depend on the lens model.
     #[arg(
         long,
         value_enum,
-        conflicts_with_all = ["prompt", "token_ids", "open_responses"]
+        conflicts_with_all = ["prompt", "token_ids", "open_responses", "requests_jsonl"]
     )]
     pub(crate) message_mode: Option<LensMessageMode>,
 
@@ -309,7 +326,11 @@ pub(crate) struct TraceFullArgs {
     pub(crate) max_tokens: usize,
 
     /// Transported target-space vectors to include as layer:position cells.
-    #[arg(long = "vectors", value_delimiter = ',')]
+    #[arg(
+        long = "vectors",
+        value_delimiter = ',',
+        conflicts_with = "requests_jsonl"
+    )]
     pub(crate) vectors: Vec<TraceFullVectorCell>,
 
     /// Muse only: private cache for a declared GGUF content identity.
@@ -321,11 +342,15 @@ pub(crate) struct TraceFullArgs {
     pub(crate) allow_unvalidated_transfer: bool,
 
     /// Replace this JSON result file atomically after a successful trace.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "requests_jsonl")]
     pub(crate) output: Option<PathBuf>,
 
+    /// Cohort output directory containing one ordinary trace per request.
+    #[arg(long, requires = "requests_jsonl")]
+    pub(crate) output_dir: Option<PathBuf>,
+
     /// Human summary or the complete JSON document on stdout.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, conflicts_with = "requests_jsonl")]
     pub(crate) format: Option<TraceFullStdoutFormat>,
 }
 
@@ -350,10 +375,69 @@ pub(crate) enum TraceFullStdoutFormat {
     Json,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TraceFullVectorCell {
     pub(crate) source_layer: u32,
     pub(crate) source_position: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceFullBatchRequest {
+    id: String,
+    prompt: Option<String>,
+    token_ids: Option<Vec<i32>>,
+    user: Option<String>,
+    system: Option<String>,
+    messages: Option<PathBuf>,
+    open_responses: Option<PathBuf>,
+    #[serde(default)]
+    no_special_tokens: bool,
+    message_mode: Option<LensMessageMode>,
+    #[serde(default)]
+    vectors: Vec<TraceFullVectorCell>,
+}
+
+impl TraceFullBatchRequest {
+    fn input_spec(&self) -> LensInputSpec<'_> {
+        LensInputSpec {
+            prompt: self.prompt.as_deref(),
+            token_ids: self.token_ids.as_deref(),
+            user: self.user.as_deref(),
+            system: self.system.as_deref(),
+            messages: self.messages.as_deref(),
+            open_responses: self.open_responses.as_deref(),
+            no_special_tokens: self.no_special_tokens,
+            message_mode: self.message_mode,
+        }
+    }
+}
+
+struct PreparedTraceFullBatchPrompt<'model> {
+    line_number: usize,
+    request_id: String,
+    input_source: &'static str,
+    add_special_tokens: Option<bool>,
+    token_ids: Vec<i32>,
+    input_tokens: Vec<TraceFullInputToken>,
+    rendering: TraceFullRendering,
+    vector_positions_by_layer: BTreeMap<u32, Vec<usize>>,
+    capture: WorkspaceLensPackedPostBlockCapture<'model>,
+    cells: Vec<TraceFullCell>,
+    transported_vectors: Vec<TraceFullVector>,
+}
+
+struct PreparedTraceFullBatchInput {
+    line_number: usize,
+    request_id: String,
+    input_source: &'static str,
+    add_special_tokens: Option<bool>,
+    token_ids: Vec<i32>,
+    input_tokens: Vec<TraceFullInputToken>,
+    rendering: TraceFullRendering,
+    vector_positions_by_layer: BTreeMap<u32, Vec<usize>>,
+    vector_count: usize,
 }
 
 pub(crate) struct ProjectedFullTokenDirections {
@@ -731,16 +815,18 @@ struct TraceFullDocument {
     vectors: Option<TraceFullVectors>,
     timing: TraceFullTiming,
     occurrences: TraceFullOccurrences,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch: Option<TraceFullBatchAttribution>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct TraceFullProducer {
     build_commit: &'static str,
     build_dirty: &'static str,
     build_source_state: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct TraceFullModel {
     path: PathBuf,
     locator_scheme: &'static str,
@@ -754,14 +840,14 @@ struct TraceFullModel {
     vocab_size: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct TraceFullTokenizer {
     metadata_id: String,
     model: Option<String>,
     pretokenizer: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct TraceFullScoreSemantics {
     kind: &'static str,
     normalization: &'static str,
@@ -771,7 +857,7 @@ struct TraceFullScoreSemantics {
 
 type TraceFullRendering = LensInputRendering;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct TraceFullLens {
     kind: &'static str,
     method: String,
@@ -792,7 +878,7 @@ struct TraceFullInputToken {
     token_piece_hex: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct TraceFullCoordinates {
     source_layer: &'static str,
     source_position: &'static str,
@@ -847,6 +933,54 @@ struct TraceFullTiming {
     readout_gpu_ms: f64,
     readout_command_wall_ms: f64,
     trace_execution_wall_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullBatchAttribution {
+    batch_schema: &'static str,
+    request_id: String,
+    request_index: usize,
+    request_count: usize,
+    aggregate_rows: usize,
+    shared_timing_fields: [&'static str; 4],
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullBatchManifest {
+    schema: &'static str,
+    schema_version: u32,
+    producer: TraceFullProducer,
+    execution_mode: &'static str,
+    requests_jsonl: PathBuf,
+    deployed_model: TraceFullModel,
+    lens: TraceFullLens,
+    selected_layers: Vec<u32>,
+    top_k: usize,
+    request_count: usize,
+    aggregate_rows: usize,
+    artifacts: Vec<TraceFullBatchArtifact>,
+    timing: TraceFullBatchTiming,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullBatchArtifact {
+    request_id: String,
+    request_index: usize,
+    source_line: usize,
+    input_tokens: usize,
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceFullBatchTiming {
+    model_load_wall_ms: f64,
+    packed_prefill_gpu_ms: f64,
+    packed_prefill_wall_ms: f64,
+    matrix_read_wall_ms: f64,
+    readout_gpu_ms: f64,
+    readout_command_wall_ms: f64,
+    batch_execution_wall_ms: f64,
+    total_wall_ms: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1641,6 +1775,56 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     Ok(())
 }
 
+fn trace_full_runtime_summaries(
+    model_path: &Path,
+    loaded: &LoadedModel,
+) -> (TraceFullModel, TraceFullTokenizer) {
+    let arch = loaded.arch();
+    let identity = loaded.workspace_lens_identity();
+    (
+        TraceFullModel {
+            path: model_path.to_path_buf(),
+            locator_scheme: WORKSPACE_LENS_IDENTITY_SCHEME,
+            locator_id: format!("{:016x}", identity.model_locator_id),
+            content_authenticated: identity.content_authenticated,
+            architecture: loaded.gguf().architecture(),
+            name: loaded.gguf().get_str("general.name").map(str::to_owned),
+            base_model_name: loaded
+                .gguf()
+                .get_str("general.base_model.0.name")
+                .map(str::to_owned),
+            n_layers: arch.n_layer,
+            hidden_size: arch.hidden_size,
+            vocab_size: arch.vocab_size,
+        },
+        TraceFullTokenizer {
+            metadata_id: format!("{:016x}", identity.tokenizer_metadata_id),
+            model: loaded
+                .gguf()
+                .get_str("tokenizer.ggml.model")
+                .map(str::to_owned),
+            pretokenizer: loaded
+                .gguf()
+                .get_str("tokenizer.ggml.pre")
+                .map(str::to_owned),
+        },
+    )
+}
+
+fn trace_full_lens_summary(manifest: &FullLensManifest) -> TraceFullLens {
+    TraceFullLens {
+        kind: "published_full_transport",
+        method: manifest.transport.method.clone(),
+        target_layer: manifest.transport.target_layer,
+        source_site: manifest.transport.capture_site.clone(),
+        source_repository: manifest.source.repository.clone(),
+        source_revision: manifest.source.revision.clone(),
+        source_filename: manifest.source.filename.clone(),
+        payload_blake3: manifest.payload.blake3.clone(),
+        scoring: "deployed_output_rmsnorm_and_lm_head_full_vocabulary_logits_no_softmax",
+    }
+}
+
 pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     validate_trace_full_args(&args)?;
     let output = args
@@ -1675,33 +1859,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_deployed_model(&manifest, &loaded)?;
     let arch = loaded.arch();
-    let runtime_identity = loaded.workspace_lens_identity();
-    let deployed_model = TraceFullModel {
-        path: args.model.clone(),
-        locator_scheme: WORKSPACE_LENS_IDENTITY_SCHEME,
-        locator_id: format!("{:016x}", runtime_identity.model_locator_id),
-        content_authenticated: runtime_identity.content_authenticated,
-        architecture: loaded.gguf().architecture(),
-        name: loaded.gguf().get_str("general.name").map(str::to_owned),
-        base_model_name: loaded
-            .gguf()
-            .get_str("general.base_model.0.name")
-            .map(str::to_owned),
-        n_layers: arch.n_layer,
-        hidden_size: arch.hidden_size,
-        vocab_size: arch.vocab_size,
-    };
-    let tokenizer_summary = TraceFullTokenizer {
-        metadata_id: format!("{:016x}", runtime_identity.tokenizer_metadata_id),
-        model: loaded
-            .gguf()
-            .get_str("tokenizer.ggml.model")
-            .map(str::to_owned),
-        pretokenizer: loaded
-            .gguf()
-            .get_str("tokenizer.ggml.pre")
-            .map(str::to_owned),
-    };
+    let (deployed_model, tokenizer_summary) = trace_full_runtime_summaries(&args.model, &loaded);
     let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
     let family = ModelFamily::detect(loaded.gguf()).context("detect trace-full Qwen family")?;
     let prepared_input =
@@ -1908,17 +2066,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         },
         deployed_model,
         tokenizer: tokenizer_summary,
-        lens: TraceFullLens {
-            kind: "published_full_transport",
-            method: manifest.transport.method,
-            target_layer: manifest.transport.target_layer,
-            source_site: manifest.transport.capture_site,
-            source_repository: manifest.source.repository,
-            source_revision: manifest.source.revision,
-            source_filename: manifest.source.filename,
-            payload_blake3: manifest.payload.blake3,
-            scoring: "deployed_output_rmsnorm_and_lm_head_full_vocabulary_logits_no_softmax",
-        },
+        lens: trace_full_lens_summary(&manifest),
         score_semantics: TraceFullScoreSemantics {
             kind: "logit",
             normalization: "deployed_output_rmsnorm",
@@ -1951,6 +2099,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             trace_execution_wall_ms: trace_started.elapsed().as_secs_f64() * 1e3,
         },
         occurrences,
+        batch: None,
     };
     let artifact_bytes = if output.is_some() || stdout_format == TraceFullStdoutFormat::Json {
         let bytes = serde_json::to_vec(&document).context("serialize trace artifact")?;
@@ -1982,6 +2131,569 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
+    validate_trace_full_args(&args)?;
+    let requests_path = args
+        .requests_jsonl
+        .as_deref()
+        .context("--requests-jsonl is required")?;
+    let output_dir = resolve_output_path(
+        args.output_dir
+            .as_deref()
+            .context("--output-dir is required")?,
+    )?;
+    ensure!(
+        !output_dir.exists(),
+        "trace-full batch output {} must not already exist",
+        output_dir.display()
+    );
+    let requests = read_trace_full_batch_requests(requests_path)?;
+    ensure!(
+        requests.len() >= 2,
+        "trace-full batching requires at least two requests"
+    );
+
+    let manifest_path = args.full_lens.join(FULL_MANIFEST_NAME);
+    let manifest: FullLensManifest = read_json_file(&manifest_path)?;
+    validate_trace_full_manifest(&manifest)?;
+    let layers = if args.layers.is_empty() {
+        manifest.transport.source_layers.clone()
+    } else {
+        args.layers.clone()
+    };
+    let mut unique_layers = BTreeSet::new();
+    ensure!(
+        !layers.is_empty()
+            && layers.iter().all(|layer| unique_layers.insert(*layer)
+                && manifest.transport.source_layers.contains(layer)),
+        "--layers must be unique source layers present in the full lens"
+    );
+
+    let batch_started = Instant::now();
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let model_load_started = Instant::now();
+    let loaded = runtime
+        .load_model_with_intent(
+            &args.model,
+            LoadedModelConfig::default(),
+            ModelLoadIntent::SinglePassAnalysis,
+        )
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    let model_load_wall_ms = model_load_started.elapsed().as_secs_f64() * 1e3;
+    validate_deployed_model(&manifest, &loaded)?;
+    let arch = loaded.arch();
+    let (deployed_model, tokenizer_summary) = trace_full_runtime_summaries(&args.model, &loaded);
+    let lens_summary = trace_full_lens_summary(&manifest);
+    let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
+    let family = ModelFamily::detect(loaded.gguf()).context("detect trace-full Qwen family")?;
+
+    let mut prepared_inputs = Vec::new();
+    prepared_inputs
+        .try_reserve_exact(requests.len())
+        .context("allocate trace-full prepared inputs")?;
+    let mut aggregate_rows = 0usize;
+    for (line_number, request) in requests {
+        let vector_count = request.vectors.len();
+        let prepared =
+            prepare_qwen_model_input(request.input_spec(), family, loaded.gguf(), &tokenizer)
+                .with_context(|| format!("prepare trace-full request on line {line_number}"))?;
+        ensure!(
+            !prepared.token_ids.is_empty(),
+            "trace-full request on line {line_number} tokenized to no tokens"
+        );
+        ensure!(
+            prepared.token_ids.len() <= args.max_tokens,
+            "trace-full request on line {line_number} has {} tokens, exceeding --max-tokens {}; input is not truncated",
+            prepared.token_ids.len(),
+            args.max_tokens
+        );
+        aggregate_rows = aggregate_rows
+            .checked_add(prepared.token_ids.len())
+            .context("trace-full aggregate row count overflow")?;
+        ensure!(
+            aggregate_rows <= MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS,
+            "trace-full request cohort has {aggregate_rows} aggregate rows, exceeding {MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS}"
+        );
+        let vector_positions_by_layer =
+            group_trace_full_vector_cells(&request.vectors, &layers, prepared.token_ids.len())?;
+        let input_tokens = decode_trace_full_input_tokens(&tokenizer, &prepared.token_ids)?;
+        prepared_inputs.push(PreparedTraceFullBatchInput {
+            line_number,
+            request_id: request.id,
+            input_source: prepared.source,
+            add_special_tokens: prepared.add_special_tokens,
+            token_ids: prepared.token_ids,
+            input_tokens,
+            rendering: prepared.rendering,
+            vector_positions_by_layer,
+            vector_count,
+        });
+    }
+
+    let execution_started = Instant::now();
+    let mut prompts = Vec::new();
+    prompts
+        .try_reserve_exact(prepared_inputs.len())
+        .context("allocate trace-full captured prompts")?;
+    for input in prepared_inputs {
+        let mut sequence = loaded
+            .create_sequence(SequenceConfig::new(input.token_ids.len()))
+            .with_context(|| {
+                format!(
+                    "create trace-full sequence for request {:?}",
+                    input.request_id
+                )
+            })?;
+        let capture = {
+            let mut workspace_lens =
+                loaded
+                    .workspace_lens_session(&mut sequence)
+                    .with_context(|| {
+                        format!("open trace-full session for request {:?}", input.request_id)
+                    })?;
+            workspace_lens
+                .forward_packed_post_block_capture(&input.token_ids, &layers)
+                .with_context(|| {
+                    format!("capture packed trace-full request {:?}", input.request_id)
+                })?
+        };
+        ensure!(
+            capture.start_position() == 0
+                && capture.token_ids() == input.token_ids.as_slice()
+                && capture.layer_ids() == layers.as_slice()
+                && capture.hidden_size() == arch.hidden_size as usize,
+            "packed trace-full capture metadata is inconsistent for request {:?}",
+            input.request_id
+        );
+        let expected_cells = layers
+            .len()
+            .checked_mul(input.token_ids.len())
+            .context("trace-full request cell count overflow")?;
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(expected_cells)
+            .context("allocate trace-full request cells")?;
+        let mut transported_vectors = Vec::new();
+        transported_vectors
+            .try_reserve_exact(input.vector_count)
+            .context("allocate trace-full request vectors")?;
+        prompts.push(PreparedTraceFullBatchPrompt {
+            line_number: input.line_number,
+            request_id: input.request_id,
+            input_source: input.input_source,
+            add_special_tokens: input.add_special_tokens,
+            token_ids: input.token_ids,
+            input_tokens: input.input_tokens,
+            rendering: input.rendering,
+            vector_positions_by_layer: input.vector_positions_by_layer,
+            capture,
+            cells,
+            transported_vectors,
+        });
+    }
+    let mut readout_owner = loaded
+        .create_sequence(SequenceConfig::new(1))
+        .context("create trace-full readout owner")?;
+
+    let payload_path = args.full_lens.join(&manifest.payload.path);
+    let (mut payload_file, payload_length) = open_regular_file(&payload_path)?;
+    ensure!(
+        payload_length as u64 == manifest.payload.byte_length,
+        "full lens payload length does not match its manifest"
+    );
+    let matrix_bytes = transport_matrix_bytes(&manifest)?;
+    let matrix_len = usize::try_from(matrix_bytes).context("full-lens matrix byte count")?;
+    let mut matrix = Vec::new();
+    matrix
+        .try_reserve_exact(matrix_len)
+        .context("allocate reusable full-lens transport matrix")?;
+    matrix.resize(matrix_len, 0);
+
+    let max_prompt_rows = prompts
+        .iter()
+        .map(|prompt| prompt.token_ids.len())
+        .max()
+        .context("trace-full prompt cohort is empty")?;
+    let mut prompt_workspace = None;
+    let execution_mode;
+    {
+        let workspace_lens = loaded
+            .workspace_lens_session(&mut readout_owner)
+            .context("open trace-full cohort workspace owner")?;
+        match workspace_lens.full_readout_workspace(max_prompt_rows) {
+            Ok(workspace) => {
+                prompt_workspace = Some(workspace);
+                execution_mode = "resident_layer_major_prompt_local_readout_no_interventions";
+            }
+            Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
+                reason,
+                requested_bytes,
+                working_set_headroom_bytes,
+                process_remaining_bytes,
+            }) => {
+                eprintln!(
+                    "trace-full prompt workspace unavailable ({reason:?}, requested={requested_bytes}, working_set_headroom={working_set_headroom_bytes:?}, process_remaining={process_remaining_bytes:?}); falling back to established per-prompt allocations"
+                );
+                execution_mode =
+                    "resident_layer_major_established_allocation_fallback_no_interventions";
+            }
+            Err(error) => {
+                return Err(error).context("allocate prompt-local trace-full GPU workspace");
+            }
+        }
+    }
+
+    let mut matrix_read_wall_ms = 0.0f64;
+    let mut readout_gpu_ms = 0.0f64;
+    let mut readout_wall_ms = 0.0f64;
+    for &layer in &layers {
+        let layer_slot = manifest
+            .transport
+            .source_layers
+            .iter()
+            .position(|&candidate| candidate == layer)
+            .with_context(|| format!("full lens has no payload slot for layer {layer}"))?;
+        let matrix_offset = (layer_slot as u64)
+            .checked_mul(matrix_bytes)
+            .context("full-lens matrix offset overflow")?;
+        let read_started = Instant::now();
+        payload_file
+            .seek(SeekFrom::Start(matrix_offset))
+            .with_context(|| format!("seek full-lens source layer {layer}"))?;
+        payload_file
+            .read_exact(&mut matrix)
+            .with_context(|| format!("read full-lens source layer {layer}"))?;
+        matrix_read_wall_ms += read_started.elapsed().as_secs_f64() * 1e3;
+
+        for prompt_index in 0..prompts.len() {
+            let vector_positions = prompts[prompt_index]
+                .vector_positions_by_layer
+                .get(&layer)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let readout = if let Some(workspace) = prompt_workspace.as_mut() {
+                workspace.apply_packed_capture_f16_transport_topk_with_vectors(
+                    &prompts[prompt_index].capture,
+                    layer,
+                    &matrix,
+                    args.top_k,
+                    vector_positions,
+                )
+            } else {
+                let workspace_lens = loaded
+                    .workspace_lens_session(&mut readout_owner)
+                    .with_context(|| {
+                        format!(
+                            "open fallback trace-full session for request {:?}",
+                            prompts[prompt_index].request_id
+                        )
+                    })?;
+                workspace_lens.apply_packed_capture_f16_transport_topk_with_vectors(
+                    &prompts[prompt_index].capture,
+                    layer,
+                    &matrix,
+                    args.top_k,
+                    vector_positions,
+                )
+            }
+            .with_context(|| {
+                format!(
+                    "apply prompt-local full-lens source layer {layer} for request {:?}",
+                    prompts[prompt_index].request_id
+                )
+            })?;
+            readout_gpu_ms += readout.readout_gpu_ms;
+            readout_wall_ms += readout.readout_wall_ms;
+            append_trace_full_prompt_readout(
+                &tokenizer,
+                layer,
+                readout.positions,
+                readout.transported_vectors,
+                &mut prompts[prompt_index],
+            )?;
+        }
+    }
+
+    let packed_prefill_gpu_ms = prompts
+        .iter()
+        .map(|prompt| prompt.capture.packed_prefill_gpu_ms())
+        .sum::<f64>();
+    let packed_prefill_wall_ms = prompts
+        .iter()
+        .map(|prompt| prompt.capture.packed_prefill_wall_ms())
+        .sum::<f64>();
+    let batch_execution_wall_ms = execution_started.elapsed().as_secs_f64() * 1e3;
+    let request_count = prompts.len();
+    let mut serialized_documents = Vec::new();
+    serialized_documents
+        .try_reserve_exact(request_count)
+        .context("allocate serialized trace-full batch")?;
+    let mut artifacts = Vec::new();
+    artifacts
+        .try_reserve_exact(request_count)
+        .context("allocate trace-full batch manifest entries")?;
+    for (request_index, prompt) in prompts.into_iter().enumerate() {
+        let expected_cells = layers
+            .len()
+            .checked_mul(prompt.token_ids.len())
+            .context("trace-full request cell count overflow")?;
+        ensure!(
+            prompt.cells.len() == expected_cells,
+            "trace-full request {:?} produced {} cells, expected {expected_cells}",
+            prompt.request_id,
+            prompt.cells.len()
+        );
+        let occurrences = aggregate_trace_full_occurrences(&prompt.cells, &layers);
+        let vectors = (!prompt.transported_vectors.is_empty()).then(|| TraceFullVectors {
+            operation: "row_major_f16_transport_times_f32_post_block_residual",
+            stage: "transported_target_coordinate_before_output_rmsnorm_and_lm_head",
+            value_dtype: "f32",
+            hidden_coordinate: "zero_based_target_layer_residual_coordinate",
+            hidden_size: arch.hidden_size as usize,
+            shape: [prompt.transported_vectors.len(), arch.hidden_size as usize],
+            cell_order: "selected_layers_order_then_source_position_ascending",
+            cells: prompt.transported_vectors,
+        });
+        let input_tokens = prompt.token_ids.len();
+        let request_id = prompt.request_id;
+        let document = TraceFullDocument {
+            schema: "qwen.lens.trace",
+            schema_version: 3,
+            producer: TraceFullProducer {
+                build_commit: env!("QWEN_BUILD_COMMIT"),
+                build_dirty: env!("QWEN_BUILD_DIRTY"),
+                build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
+            },
+            deployed_model: deployed_model.clone(),
+            tokenizer: tokenizer_summary.clone(),
+            lens: lens_summary.clone(),
+            score_semantics: TraceFullScoreSemantics {
+                kind: "logit",
+                normalization: "deployed_output_rmsnorm",
+                candidate_universe: "full_model_vocabulary",
+                softmax_applied: false,
+            },
+            execution_mode,
+            input_source: prompt.input_source,
+            add_special_tokens: prompt.add_special_tokens,
+            input_token_ids: prompt.token_ids,
+            input_tokens: prompt.input_tokens,
+            rendering: prompt.rendering,
+            coordinates: TraceFullCoordinates {
+                source_layer: "zero_based_transformer_block_index_at_post_block_residual",
+                source_position: "zero_based_input_token_position",
+                predicts_position: "source_position_plus_one",
+                rank: "zero_based_full_vocabulary_logit_rank",
+            },
+            selected_layers: layers.clone(),
+            top_k: args.top_k,
+            occurrence_definition: "one_token_id_appearing_in_one_returned_top_k_list",
+            cells: prompt.cells,
+            vectors,
+            timing: TraceFullTiming {
+                packed_prefill_gpu_ms: prompt.capture.packed_prefill_gpu_ms(),
+                packed_prefill_wall_ms: prompt.capture.packed_prefill_wall_ms(),
+                matrix_read_wall_ms,
+                readout_gpu_ms,
+                readout_command_wall_ms: readout_wall_ms,
+                trace_execution_wall_ms: batch_execution_wall_ms,
+            },
+            occurrences,
+            batch: Some(TraceFullBatchAttribution {
+                batch_schema: "qwen.lens.trace_batch",
+                request_id: request_id.clone(),
+                request_index,
+                request_count,
+                aggregate_rows,
+                shared_timing_fields: [
+                    "matrix_read_wall_ms",
+                    "readout_gpu_ms",
+                    "readout_command_wall_ms",
+                    "trace_execution_wall_ms",
+                ],
+            }),
+        };
+        let bytes = serde_json::to_vec(&document).context("serialize batched trace artifact")?;
+        ensure!(
+            bytes.len() <= MAX_TRACE_DOCUMENT_BYTES,
+            "serialized trace artifact for request {request_id:?} is {} bytes; limit is {MAX_TRACE_DOCUMENT_BYTES}",
+            bytes.len()
+        );
+        let artifact_path = format!("trace-{request_index:04}.json");
+        artifacts.push(TraceFullBatchArtifact {
+            request_id,
+            request_index,
+            source_line: prompt.line_number,
+            input_tokens,
+            path: artifact_path.clone(),
+        });
+        serialized_documents.push((artifact_path, bytes));
+    }
+
+    let batch_manifest = TraceFullBatchManifest {
+        schema: "qwen.lens.trace_batch",
+        schema_version: 1,
+        producer: TraceFullProducer {
+            build_commit: env!("QWEN_BUILD_COMMIT"),
+            build_dirty: env!("QWEN_BUILD_DIRTY"),
+            build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
+        },
+        execution_mode,
+        requests_jsonl: requests_path.to_path_buf(),
+        deployed_model,
+        lens: lens_summary,
+        selected_layers: layers,
+        top_k: args.top_k,
+        request_count,
+        aggregate_rows,
+        artifacts,
+        timing: TraceFullBatchTiming {
+            model_load_wall_ms,
+            packed_prefill_gpu_ms,
+            packed_prefill_wall_ms,
+            matrix_read_wall_ms,
+            readout_gpu_ms,
+            readout_command_wall_ms: readout_wall_ms,
+            batch_execution_wall_ms,
+            total_wall_ms: batch_started.elapsed().as_secs_f64() * 1e3,
+        },
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&batch_manifest)
+        .context("serialize trace-full batch manifest")?;
+    publish_trace_full_batch_directory(&output_dir, &serialized_documents, &manifest_bytes)?;
+    println!(
+        "trace-full batch {} requests, {} aggregate rows, {} layers | {:.1} ms execution ({:.1} ms readout GPU) | {}",
+        request_count,
+        aggregate_rows,
+        batch_manifest.selected_layers.len(),
+        batch_execution_wall_ms,
+        readout_gpu_ms,
+        output_dir.display()
+    );
+    Ok(())
+}
+
+fn decode_trace_full_input_tokens(
+    tokenizer: &Tokenizer,
+    token_ids: &[i32],
+) -> Result<Vec<TraceFullInputToken>> {
+    token_ids
+        .iter()
+        .enumerate()
+        .map(|(position, &token_id)| {
+            let piece = tokenizer
+                .try_decode_piece_bytes_exact(token_id)
+                .with_context(|| format!("decode trace-full input token {token_id}"))?;
+            Ok(TraceFullInputToken {
+                position,
+                token_id,
+                token_display_lossy: String::from_utf8_lossy(piece).into_owned(),
+                token_piece_hex: hex(piece),
+            })
+        })
+        .collect()
+}
+
+fn append_trace_full_prompt_readout(
+    tokenizer: &Tokenizer,
+    source_layer: u32,
+    positions: Vec<WorkspaceLensPackedVocabularyPosition>,
+    vectors: Vec<WorkspaceLensPackedTransportedVector>,
+    prompt: &mut PreparedTraceFullBatchPrompt<'_>,
+) -> Result<()> {
+    for vector in vectors {
+        prompt.transported_vectors.push(TraceFullVector {
+            source_layer,
+            source_position: vector.source_position,
+            source_token_id: vector.source_token_id,
+            predicts_position: vector.predicts_position,
+            values: vector.values,
+        });
+    }
+    for position in positions {
+        let mut top_k = Vec::new();
+        top_k
+            .try_reserve_exact(position.scores.len())
+            .context("allocate decoded trace-full top-k")?;
+        for (rank, score) in position.scores.into_iter().enumerate() {
+            let token_id =
+                i32::try_from(score.token_id).context("decode trace-full vocabulary token ID")?;
+            let piece = tokenizer
+                .try_decode_piece_bytes_exact(token_id)
+                .with_context(|| format!("decode trace-full token {}", score.token_id))?;
+            top_k.push(TraceFullTokenScore {
+                rank,
+                token_id: score.token_id,
+                token_display_lossy: String::from_utf8_lossy(piece).into_owned(),
+                token_piece_hex: hex(piece),
+                logit: score.logit,
+            });
+        }
+        prompt.cells.push(TraceFullCell {
+            source_layer,
+            source_position: position.source_position,
+            source_token_id: position.source_token_id,
+            predicts_position: position.predicts_position,
+            top_k,
+        });
+    }
+    Ok(())
+}
+
+fn publish_trace_full_batch_directory(
+    output: &Path,
+    documents: &[(String, Vec<u8>)],
+    manifest: &[u8],
+) -> Result<()> {
+    ensure!(
+        !output.exists(),
+        "trace-full batch output {} must not already exist",
+        output.display()
+    );
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let leaf = output
+        .file_name()
+        .context("trace-full batch output has no directory name")?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before Unix epoch")?
+        .as_nanos();
+    let staging = parent.join(format!(
+        ".{}.stage.{}.{}",
+        leaf.to_string_lossy(),
+        std::process::id(),
+        nonce
+    ));
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&staging)
+        .with_context(|| format!("create trace-full batch staging {}", staging.display()))?;
+    let publish = (|| {
+        for (path, bytes) in documents {
+            write_atomic_replace(&staging.join(path), bytes)?;
+        }
+        write_atomic_replace(&staging.join(TRACE_FULL_BATCH_MANIFEST_NAME), manifest)?;
+        sync_directory(&staging)?;
+        ensure!(
+            !output.exists(),
+            "trace-full batch output {} appeared during publication",
+            output.display()
+        );
+        std::fs::rename(&staging, output).with_context(|| {
+            format!(
+                "publish trace-full batch staging {} to {}",
+                staging.display(),
+                output.display()
+            )
+        })?;
+        sync_directory(parent)
+    })();
+    if publish.is_err() && staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    publish
 }
 
 fn effective_trace_stdout_format(
@@ -2034,6 +2746,22 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
         (1..=MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS).contains(&args.max_tokens),
         "--max-tokens must be in 1..={MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS}"
     );
+    if args.requests_jsonl.is_some() {
+        ensure!(
+            args.output_dir.is_some()
+                && args.output.is_none()
+                && args.format.is_none()
+                && args.vectors.is_empty()
+                && args.identity_cache.is_none()
+                && !args.allow_unvalidated_transfer,
+            "--requests-jsonl requires --output-dir and does not accept single-trace or Muse-only options"
+        );
+        return Ok(());
+    }
+    ensure!(
+        args.output_dir.is_none(),
+        "--output-dir requires --requests-jsonl"
+    );
     validate_lens_input_spec(args.input_spec())?;
     ensure!(
         args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
@@ -2056,6 +2784,89 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
         "--vectors cells must be unique"
     );
     Ok(())
+}
+
+fn read_trace_full_batch_requests(path: &Path) -> Result<Vec<(usize, TraceFullBatchRequest)>> {
+    let (file, length) = open_regular_file(path)?;
+    ensure!(
+        length <= MAX_TRACE_FULL_BATCH_REQUESTS * MAX_TRACE_FULL_BATCH_RECORD_BYTES,
+        "trace-full request file exceeds {} bytes",
+        MAX_TRACE_FULL_BATCH_REQUESTS * MAX_TRACE_FULL_BATCH_RECORD_BYTES
+    );
+    let request_root = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut reader = BufReader::new(file);
+    let mut line_bytes = Vec::new();
+    let mut line_number = 0usize;
+    let mut requests = Vec::new();
+    let mut ids = BTreeSet::new();
+    while read_bounded_jsonl_record(
+        &mut reader,
+        &mut line_bytes,
+        MAX_TRACE_FULL_BATCH_RECORD_BYTES,
+        path,
+        line_number + 1,
+    )? {
+        line_number += 1;
+        let line = std::str::from_utf8(&line_bytes)
+            .with_context(|| format!("read {} line {line_number} as UTF-8", path.display()))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        ensure!(
+            requests.len() < MAX_TRACE_FULL_BATCH_REQUESTS,
+            "trace-full request cohort exceeds {MAX_TRACE_FULL_BATCH_REQUESTS} records"
+        );
+        let mut request: TraceFullBatchRequest = serde_json::from_str(trimmed)
+            .with_context(|| format!("parse {} line {line_number}", path.display()))?;
+        ensure!(
+            !request.id.is_empty() && request.id.len() <= 128,
+            "trace-full request ID on line {line_number} must contain 1..=128 bytes"
+        );
+        ensure!(
+            ids.insert(request.id.clone()),
+            "trace-full request ID {:?} is duplicated",
+            request.id
+        );
+        for input_path in [&mut request.messages, &mut request.open_responses] {
+            if let Some(input_path) = input_path {
+                ensure!(
+                    input_path != Path::new("-"),
+                    "trace-full batch records cannot read structured input from stdin"
+                );
+                if input_path.is_relative() {
+                    *input_path = request_root.join(&*input_path);
+                }
+            }
+        }
+        validate_lens_input_spec(request.input_spec())
+            .with_context(|| format!("validate trace-full request on line {line_number}"))?;
+        ensure!(
+            request
+                .prompt
+                .as_ref()
+                .is_none_or(|prompt| !prompt.is_empty()),
+            "trace-full request prompt on line {line_number} is empty"
+        );
+        ensure!(
+            request.vectors.len() <= MAX_TRACE_FULL_VECTOR_CELLS,
+            "trace-full request on line {line_number} selects too many vectors"
+        );
+        let mut vector_cells = BTreeSet::new();
+        ensure!(
+            request
+                .vectors
+                .iter()
+                .all(|cell| vector_cells.insert(*cell)),
+            "trace-full request on line {line_number} has duplicate vector cells"
+        );
+        requests.push((line_number, request));
+    }
+    ensure!(!requests.is_empty(), "trace-full request cohort is empty");
+    Ok(requests)
 }
 
 fn group_trace_full_vector_cells(
@@ -3003,6 +3814,7 @@ mod tests {
             system: None,
             messages: None,
             open_responses: None,
+            requests_jsonl: None,
             message_mode: None,
             no_special_tokens: false,
             layers: vec![0, 31, 62],
@@ -3012,8 +3824,94 @@ mod tests {
             identity_cache: None,
             allow_unvalidated_transfer: false,
             output: None,
+            output_dir: None,
             format: None,
         }
+    }
+
+    #[test]
+    fn trace_batch_args_replace_single_input_without_changing_shared_bounds() {
+        let mut args = test_trace_full_args();
+        args.prompt = None;
+        args.requests_jsonl = Some("requests.jsonl".into());
+        args.output_dir = Some("traces".into());
+        validate_trace_full_args(&args).unwrap();
+
+        args.output = Some("single.json".into());
+        assert!(validate_trace_full_args(&args).is_err());
+    }
+
+    #[test]
+    fn trace_batch_jsonl_is_bounded_strict_and_resolves_structured_inputs() {
+        let root = std::env::temp_dir().join(format!(
+            "qwen-trace-batch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("messages.json"), "[]").unwrap();
+        let requests_path = root.join("requests.jsonl");
+        std::fs::write(
+            &requests_path,
+            concat!(
+                "{\"id\":\"literal\",\"token_ids\":[1,2],\"vectors\":[{\"source_layer\":0,\"source_position\":1}]}\n",
+                "{\"id\":\"chat\",\"messages\":\"messages.json\",\"message_mode\":\"thinking\"}\n"
+            ),
+        )
+        .unwrap();
+        let requests = read_trace_full_batch_requests(&requests_path).unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1.id, "literal");
+        assert_eq!(
+            requests[1].1.messages.as_deref(),
+            Some(root.join("messages.json").as_path())
+        );
+
+        std::fs::write(
+            &requests_path,
+            "{\"id\":\"bad\",\"prompt\":\"x\",\"unknown\":true}\n",
+        )
+        .unwrap();
+        assert!(read_trace_full_batch_requests(&requests_path).is_err());
+        std::fs::write(&requests_path, "# comments are not JSON records\n").unwrap();
+        assert!(read_trace_full_batch_requests(&requests_path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn trace_batch_publication_exposes_only_one_complete_fresh_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "qwen-trace-publish-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let output = root.join("cohort");
+        let documents = vec![
+            ("trace-0000.json".into(), b"first".to_vec()),
+            ("trace-0001.json".into(), b"second".to_vec()),
+        ];
+        publish_trace_full_batch_directory(&output, &documents, b"manifest").unwrap();
+        assert_eq!(
+            std::fs::read(output.join("trace-0000.json")).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            std::fs::read(output.join(TRACE_FULL_BATCH_MANIFEST_NAME)).unwrap(),
+            b"manifest"
+        );
+        assert!(publish_trace_full_batch_directory(&output, &documents, b"new").is_err());
+        assert_eq!(
+            std::fs::read(output.join(TRACE_FULL_BATCH_MANIFEST_NAME)).unwrap(),
+            b"manifest"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

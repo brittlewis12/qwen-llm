@@ -30,7 +30,8 @@ use std::path::Path;
 
 const MAX_OPEN_RESPONSES_BYTES: usize = 16 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum LensMessageMode {
     Auto,
     Thinking,

@@ -100,6 +100,18 @@ pub(crate) struct TraceDocument {
     pub(crate) vectors: Option<Vectors>,
     timing: BTreeMap<String, f64>,
     occurrences: Occurrences,
+    #[serde(default)]
+    batch: Option<TraceBatchAttribution>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceBatchAttribution {
+    batch_schema: String,
+    request_id: String,
+    request_index: usize,
+    request_count: usize,
+    aggregate_rows: usize,
+    shared_timing_fields: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,6 +275,16 @@ struct SummaryView {
     execution_mode: Option<String>,
     input_source: Option<String>,
     add_special_tokens: Option<bool>,
+    batch: Option<TraceBatchView>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceBatchView {
+    request_id: String,
+    request_index: usize,
+    request_count: usize,
+    aggregate_rows: usize,
+    shared_timing_fields: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -537,6 +559,40 @@ fn validate_trace(document: &TraceDocument) -> Result<()> {
         ensure!(
             document.input_source.is_some(),
             "v3 trace is missing input_source"
+        );
+    }
+    if let Some(batch) = &document.batch {
+        ensure!(
+            batch.batch_schema == "qwen.lens.trace_batch",
+            "unknown trace batch schema {:?}",
+            batch.batch_schema
+        );
+        ensure!(
+            !batch.request_id.is_empty()
+                && batch.request_count >= 2
+                && batch.request_index < batch.request_count
+                && batch.aggregate_rows >= document.input_token_ids.len(),
+            "trace batch attribution is inconsistent"
+        );
+        let expected = [
+            "matrix_read_wall_ms",
+            "readout_gpu_ms",
+            "readout_command_wall_ms",
+            "trace_execution_wall_ms",
+        ];
+        ensure!(
+            batch
+                .shared_timing_fields
+                .iter()
+                .map(String::as_str)
+                .eq(expected),
+            "trace batch shared timing contract is not canonical"
+        );
+        ensure!(
+            expected
+                .iter()
+                .all(|field| document.timing.contains_key(*field)),
+            "trace batch omits one or more shared timing fields"
         );
     }
     ensure!(
@@ -918,6 +974,13 @@ fn summary_view(document: &TraceDocument) -> SummaryView {
         execution_mode: document.execution_mode.clone(),
         input_source: document.input_source.clone(),
         add_special_tokens: document.add_special_tokens,
+        batch: document.batch.as_ref().map(|batch| TraceBatchView {
+            request_id: batch.request_id.clone(),
+            request_index: batch.request_index,
+            request_count: batch.request_count,
+            aggregate_rows: batch.aggregate_rows,
+            shared_timing_fields: batch.shared_timing_fields.clone(),
+        }),
     }
 }
 
@@ -1748,6 +1811,16 @@ fn print_summary(view: &SummaryView) {
                 .unwrap_or_default()
         );
     }
+    if let Some(batch) = &view.batch {
+        println!(
+            "batch request {} ({}/{}) | aggregate rows {} | shared timings {}",
+            batch.request_id,
+            batch.request_index + 1,
+            batch.request_count,
+            batch.aggregate_rows,
+            batch.shared_timing_fields.join(",")
+        );
+    }
     if !view.timings_ms.is_empty() {
         println!(
             "timings {}",
@@ -2085,6 +2158,7 @@ mod tests {
                     })
                     .collect(),
             },
+            batch: None,
         }
     }
 
@@ -2122,6 +2196,35 @@ mod tests {
             vec![3, 0]
         );
         assert_eq!(view.rows[2].intensity_stripe, "@ ");
+    }
+
+    #[test]
+    fn batch_attribution_scopes_every_shared_trace_timing() {
+        let mut document = fixture(3, true);
+        let shared = [
+            "matrix_read_wall_ms",
+            "readout_gpu_ms",
+            "readout_command_wall_ms",
+            "trace_execution_wall_ms",
+        ];
+        for field in shared {
+            document.timing.insert(field.into(), 1.0);
+        }
+        document.batch = Some(TraceBatchAttribution {
+            batch_schema: "qwen.lens.trace_batch".into(),
+            request_id: "fixture".into(),
+            request_index: 0,
+            request_count: 2,
+            aggregate_rows: 6,
+            shared_timing_fields: shared.into_iter().map(str::to_owned).collect(),
+        });
+        validate_trace(&document).unwrap();
+        let view = summary_view(&document).batch.unwrap();
+        assert_eq!(view.request_id, "fixture");
+        assert_eq!(view.shared_timing_fields.len(), 4);
+
+        document.timing.remove("readout_gpu_ms");
+        assert!(validate_trace(&document).is_err());
     }
 
     #[test]

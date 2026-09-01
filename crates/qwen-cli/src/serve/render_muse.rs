@@ -1,6 +1,7 @@
 //! Muse Glimmer Open Responses items to the shared ATEM prompt contract.
 
-use super::items::{ServeError, ServeRequest, Turn};
+use super::items::{ServeError, ServeRequest};
+use crate::model_request::Turn;
 use qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile;
 use qwen_llm::muse_glimmer_prompt::{
     MuseGlimmerMessage, MuseGlimmerReasoningStrength, MuseGlimmerToolCall,
@@ -71,6 +72,7 @@ pub(crate) fn render_muse_glimmer_serve_prompt(
     }
     let strength = reasoning_strength(request)?;
     let tools = request
+        .model_request
         .tools
         .iter()
         .enumerate()
@@ -102,13 +104,14 @@ pub(crate) fn render_muse_glimmer_serve_prompt(
         })
         .collect::<Result<Vec<_>, ServeError>>()?;
 
-    let mut messages =
-        Vec::with_capacity(request.turns.len() + usize::from(request.system.is_some()));
-    if let Some(system) = request.system.as_deref() {
+    let mut messages = Vec::with_capacity(
+        request.model_request.turns.len() + usize::from(request.model_request.system.is_some()),
+    );
+    if let Some(system) = request.model_request.system.as_deref() {
         validate_content("input", "system content", system, &[])?;
         messages.push(MuseGlimmerMessage::system(system));
     }
-    for (index, turn) in request.turns.iter().enumerate() {
+    for (index, turn) in request.model_request.turns.iter().enumerate() {
         match turn {
             Turn::User(text) => {
                 validate_content("input", &format!("turn {index} user content"), text, &[])?;
@@ -180,7 +183,7 @@ pub(crate) fn render_muse_glimmer_serve_prompt(
         tools,
         tool_namespace_descriptions: BTreeMap::new(),
         reasoning_strength: None,
-        current_date: if request.system.is_none() {
+        current_date: if request.model_request.system.is_none() {
             Some(current_utc_date()?)
         } else {
             None

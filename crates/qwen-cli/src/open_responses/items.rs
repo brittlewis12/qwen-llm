@@ -15,6 +15,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
 
+use crate::model_request::{
+    ModelRequest, SystemSource, ToolCall, ToolDefinition, ToolResult, Turn,
+};
+
 /// Spec error envelope. Serialized as `{"error": {...}}`; streamed inside
 /// `response.failed` by the HTTP layer.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,47 +73,6 @@ impl ServeError {
     }
 }
 
-/// One validated conversation turn, post item-sequence validation.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Turn {
-    User(String),
-    Assistant {
-        reasoning: Option<String>,
-        visible: String,
-        /// Tool calls emitted in this assistant turn, in wire order
-        /// (provider_capture_v1: `function_call` items follow the
-        /// assistant message / reasoning within one logical turn).
-        calls: Vec<ToolCall>,
-    },
-    /// One or more tool results; consecutive results coalesce into a
-    /// single user block per the template oracle.
-    ToolResults(Vec<ToolResult>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ToolCall {
-    pub(crate) call_id: String,
-    pub(crate) name: String,
-    /// Raw `arguments` JSON string exactly as the provider replayed it.
-    pub(crate) arguments: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ToolResult {
-    pub(crate) call_id: String,
-    pub(crate) name: String,
-    pub(crate) output: String,
-}
-
-/// One declared function tool (`tools[]` entry).
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ToolDefinition {
-    pub(crate) name: String,
-    pub(crate) description: Option<String>,
-    pub(crate) parameters: Value,
-    pub(crate) strict: Option<bool>,
-}
-
 /// Which family template renders this request. Resolved from the loaded
 /// GGUF identity, mirroring the CLI's dispatch — serve must not render a
 /// Qwen3.8 model with the generic ChatML contract.
@@ -120,32 +83,12 @@ pub(crate) enum QwenTemplate {
     Qwen38,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SystemSource {
-    Instructions,
-    System,
-    Developer,
-}
-
-impl SystemSource {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Instructions => "instructions",
-            Self::System => "system",
-            Self::Developer => "developer",
-        }
-    }
-}
-
 /// Validated transcript plus generation controls, ready for rendering.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ServeRequest {
     pub(crate) model: String,
     pub(crate) instructions: Option<String>,
-    pub(crate) system: Option<String>,
-    pub(crate) system_source: Option<SystemSource>,
-    pub(crate) turns: Vec<Turn>,
-    pub(crate) tools: Vec<ToolDefinition>,
+    pub(crate) model_request: ModelRequest,
     /// Exact executable set. Empty means no calls are executable; narrowing
     /// does not alter the rendered tools block or invalidate prompt prefixes.
     pub(crate) allowed_tools: Vec<String>,
@@ -178,10 +121,7 @@ impl Default for ServeRequest {
         Self {
             model: String::new(),
             instructions: None,
-            system: None,
-            system_source: None,
-            turns: Vec::new(),
-            tools: Vec::new(),
+            model_request: ModelRequest::default(),
             allowed_tools: Vec::new(),
             tool_choice: Value::String("auto".into()),
             reasoning: None,
@@ -434,7 +374,10 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
 
     let mut request = ServeRequest {
         model,
-        tools,
+        model_request: ModelRequest {
+            tools,
+            ..ModelRequest::default()
+        },
         allowed_tools,
         tool_choice: choice.echo,
         reasoning,
@@ -600,14 +543,18 @@ fn validate_input(
     instructions: Option<String>,
     request: &mut ServeRequest,
 ) -> Result<(), ServeError> {
-    request.system = instructions;
-    request.system_source = request.system.as_ref().map(|_| SystemSource::Instructions);
+    request.model_request.system = instructions;
+    request.model_request.system_source = request
+        .model_request
+        .system
+        .as_ref()
+        .map(|_| SystemSource::Instructions);
     match input {
         Value::String(text) => {
             if text.is_empty() {
                 return Err(ServeError::invalid_request(Some("input"), "input is empty"));
             }
-            request.turns.push(Turn::User(text.clone()));
+            request.model_request.turns.push(Turn::User(text.clone()));
             Ok(())
         }
         Value::Array(items) => validate_items(items, request),
@@ -675,7 +622,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                                 ),
                             ));
                         }
-                        if request.system.is_some() {
+                        if request.model_request.system.is_some() {
                             return Err(ServeError::invalid_request(
                                 Some("input"),
                                 format!(
@@ -683,8 +630,8 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                                 ),
                             ));
                         }
-                        request.system = Some(text);
-                        request.system_source = Some(if role == "developer" {
+                        request.model_request.system = Some(text);
+                        request.model_request.system_source = Some(if role == "developer" {
                             SystemSource::Developer
                         } else {
                             SystemSource::System
@@ -700,7 +647,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                             ));
                         }
                         head = false;
-                        request.turns.push(Turn::User(text));
+                        request.model_request.turns.push(Turn::User(text));
                     }
                     "assistant" => {
                         if text.contains("<think>") {
@@ -720,7 +667,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                             ));
                         }
                         head = false;
-                        request.turns.push(Turn::Assistant {
+                        request.model_request.turns.push(Turn::Assistant {
                             reasoning: pending_reasoning.take(),
                             visible: text,
                             calls: Vec::new(),
@@ -788,7 +735,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                 };
                 pending_calls.push((call_id, call.name.clone()));
                 head = false;
-                match request.turns.last_mut() {
+                match request.model_request.turns.last_mut() {
                     // Attach to the assistant turn opened by this same
                     // logical turn (no intervening user/tool item).
                     Some(Turn::Assistant {
@@ -803,7 +750,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                         }
                         calls.push(call);
                     }
-                    _ => request.turns.push(Turn::Assistant {
+                    _ => request.model_request.turns.push(Turn::Assistant {
                         reasoning: pending_reasoning.take(),
                         visible: String::new(),
                         calls: vec![call],
@@ -871,7 +818,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                     })
                     .collect();
                 head = false;
-                request.turns.push(Turn::ToolResults(results));
+                request.model_request.turns.push(Turn::ToolResults(results));
             }
             other => {
                 return Err(ServeError::invalid_request(
@@ -893,7 +840,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
             format!("function call {call_id:?} has no function_call_output"),
         ));
     }
-    match request.turns.last() {
+    match request.model_request.turns.last() {
         // A tool loop resumes generation after tool results, so
         // function_call_output is a legal terminal item (capture F-S2.3).
         Some(Turn::User(_) | Turn::ToolResults(_)) => Ok(()),
@@ -1248,8 +1195,11 @@ mod tests {
     #[test]
     fn string_input_is_one_user_turn() {
         let request = parse(json!({"model": "m", "input": "hello"})).unwrap();
-        assert_eq!(request.turns, vec![Turn::User("hello".into())]);
-        assert!(request.system.is_none());
+        assert_eq!(
+            request.model_request.turns,
+            vec![Turn::User("hello".into())]
+        );
+        assert!(request.model_request.system.is_none());
         assert!(!request.stream);
     }
 
@@ -1261,7 +1211,7 @@ mod tests {
         ]}))
         .unwrap();
         assert_eq!(
-            request.turns,
+            request.model_request.turns,
             vec![Turn::User("first".into()), Turn::User("second".into())]
         );
     }
@@ -1277,7 +1227,7 @@ mod tests {
         ]}))
         .unwrap();
         assert_eq!(
-            request.turns[1],
+            request.model_request.turns[1],
             Turn::Assistant {
                 reasoning: Some("\nplan\n".into()),
                 visible: "a".into(),
@@ -1293,8 +1243,11 @@ mod tests {
             {"role": "user", "content": "q"},
         ]}))
         .unwrap();
-        assert_eq!(request.system.as_deref(), Some("be terse"));
-        assert_eq!(request.system_source, Some(SystemSource::Developer));
+        assert_eq!(request.model_request.system.as_deref(), Some("be terse"));
+        assert_eq!(
+            request.model_request.system_source,
+            Some(SystemSource::Developer)
+        );
 
         let error = parse(json!({"model": "m", "input": [
             {"role": "user", "content": "q"},
@@ -1393,9 +1346,12 @@ mod tests {
             ],
         }))
         .expect("stock provider chat replay must parse");
-        assert_eq!(request.system.as_deref(), Some("You are terse."));
         assert_eq!(
-            request.turns[1],
+            request.model_request.system.as_deref(),
+            Some("You are terse.")
+        );
+        assert_eq!(
+            request.model_request.turns[1],
             Turn::Assistant {
                 reasoning: Some("\nplan the answer\n".into()),
                 visible: "It is 5.".into(),
@@ -1492,10 +1448,10 @@ mod tests {
             ],
         }))
         .expect("stock provider tool-loop replay must parse");
-        assert_eq!(request.tools.len(), 1);
-        assert_eq!(request.tools[0].name, "fs_list");
-        assert_eq!(request.turns.len(), 3);
-        match &request.turns[1] {
+        assert_eq!(request.model_request.tools.len(), 1);
+        assert_eq!(request.model_request.tools[0].name, "fs_list");
+        assert_eq!(request.model_request.turns.len(), 3);
+        match &request.model_request.turns[1] {
             Turn::Assistant {
                 reasoning,
                 visible,
@@ -1510,7 +1466,7 @@ mod tests {
             other => panic!("expected assistant turn with call, got {other:?}"),
         }
         assert_eq!(
-            request.turns[2],
+            request.model_request.turns[2],
             Turn::ToolResults(vec![ToolResult {
                 call_id: "call_abc123".into(),
                 name: "fs_list".into(),
@@ -1618,8 +1574,8 @@ mod tests {
             {"type": "function_call_output", "call_id": "c2", "output": "r2"},
         ]}))
         .expect("parallel calls and coalesced outputs must parse");
-        assert_eq!(request.turns.len(), 3);
-        match &request.turns[1] {
+        assert_eq!(request.model_request.turns.len(), 3);
+        match &request.model_request.turns[1] {
             Turn::Assistant { visible, calls, .. } => {
                 assert_eq!(visible, "Checking both.");
                 assert_eq!(calls.len(), 2);
@@ -1627,7 +1583,7 @@ mod tests {
             other => panic!("expected assistant turn, got {other:?}"),
         }
         assert_eq!(
-            request.turns[2],
+            request.model_request.turns[2],
             Turn::ToolResults(vec![
                 ToolResult {
                     call_id: "c1".into(),
@@ -1761,7 +1717,7 @@ mod tests {
         .expect("explicit null optionals are absent");
         assert!(request.instructions.is_none());
         assert!(request.reasoning.is_none());
-        assert!(request.tools.is_empty());
+        assert!(request.model_request.tools.is_empty());
         assert!(request.allowed_tools.is_empty());
         assert!(!request.stream);
         assert!(request.parallel_tool_calls);
@@ -1778,7 +1734,7 @@ mod tests {
         ]}))
         .expect("parallel outputs may arrive in arbitrary order");
         assert_eq!(
-            request.turns.last(),
+            request.model_request.turns.last(),
             Some(&Turn::ToolResults(vec![
                 ToolResult {
                     call_id: "c1".into(),
@@ -1812,7 +1768,7 @@ mod tests {
             "type":"function", "name":"a", "strict":false
         }]}))
         .expect("strict:false is supported");
-        assert_eq!(request.tools[0].strict, Some(false));
+        assert_eq!(request.model_request.tools[0].strict, Some(false));
 
         let error = parse(json!({"model":"m", "input":"q", "tools":[{
             "type":"function", "name":"a", "strict":true

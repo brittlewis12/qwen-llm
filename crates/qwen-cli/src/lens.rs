@@ -22,6 +22,7 @@ mod lens_inspect;
 mod lens_run;
 #[allow(dead_code)]
 mod messages;
+mod model_request;
 mod muse_full_lens;
 mod muse_full_lens_artifact;
 mod muse_lens_artifact;

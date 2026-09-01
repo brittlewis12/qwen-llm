@@ -19,9 +19,10 @@
 //! it); the bespoke Qwen3.8 pre-closed-history renderer remains a modern
 //! `qwen run` surface and is out of S1 serve scope.
 
-use super::items::{QwenTemplate, ServeRequest, ToolDefinition, Turn};
+use super::items::{QwenTemplate, ServeRequest};
 use super::tool_parse::{ParsedCall, render_calls};
 use crate::messages::{Qwen38GenerationMode, Qwen38ReasoningEffort};
+use crate::model_request::{ToolCall, ToolDefinition, Turn};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
@@ -439,7 +440,7 @@ fn push_visible_and_calls(
     output: &mut AnnotatedPromptBuilder,
     context: SpanContext,
     visible: &str,
-    calls: &[crate::open_responses::items::ToolCall],
+    calls: &[ToolCall],
 ) {
     output.push(
         visible,
@@ -480,7 +481,7 @@ fn push_assistant_body(
     context: SpanContext,
     reasoning: Option<&str>,
     visible: &str,
-    calls: &[crate::open_responses::items::ToolCall],
+    calls: &[ToolCall],
     no_thinking: bool,
     strip_history_thinking: bool,
 ) {
@@ -526,17 +527,20 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
         Qwen38GenerationMode::NoThinking => None,
     });
     let mut message_index = 0;
-    if !request.tools.is_empty() {
+    if !request.model_request.tools.is_empty() {
         render_tools_system_block(
-            &request.tools,
-            request.system.as_deref(),
-            request.system_source.map(|source| source.as_str()),
+            &request.model_request.tools,
+            request.model_request.system.as_deref(),
+            request
+                .model_request
+                .system_source
+                .map(|source| source.as_str()),
             message_index,
             &mut output,
         );
         message_index += 1;
-    } else if effort_instruction.is_some() || request.system.is_some() {
-        let system = request.system.as_deref().unwrap_or("").trim();
+    } else if effort_instruction.is_some() || request.model_request.system.is_some() {
+        let system = request.model_request.system.as_deref().unwrap_or("").trim();
         if effort_instruction.is_some() || !system.is_empty() {
             let context = SpanContext::message(message_index, QwenServePromptRole::System, None);
             push_message_header(&mut output, context, false);
@@ -560,11 +564,12 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
                 if qwen38_mode.is_some() {
                     system
                 } else {
-                    request.system.as_deref().unwrap_or("")
+                    request.model_request.system.as_deref().unwrap_or("")
                 },
                 QwenServePromptSpanKind::MessageContent,
                 context,
                 request
+                    .model_request
                     .system_source
                     .map(|source| source.as_str().to_owned()),
             );
@@ -573,7 +578,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
         }
     }
     let mut pending_tool_labels = Vec::new();
-    for turn in &request.turns {
+    for turn in &request.model_request.turns {
         match turn {
             Turn::User(text) => {
                 let context = SpanContext::message(message_index, QwenServePromptRole::User, None);
@@ -1098,11 +1103,11 @@ mod tests {
         let mut request = ServeRequest {
             template,
             reasoning_effort: effort.map(str::to_owned),
-            system: system.map(str::to_owned),
             ..ServeRequest::default()
         };
+        request.model_request.system = system.map(str::to_owned);
         for (role, reasoning, content) in turns {
-            request.turns.push(match *role {
+            request.model_request.turns.push(match *role {
                 "user" => Turn::User((*content).into()),
                 "assistant" => Turn::Assistant {
                     reasoning: reasoning.map(str::to_owned),

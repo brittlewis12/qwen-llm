@@ -114,7 +114,12 @@ impl GenerationBackend for MuseGlimmerBackend {
         OutputProtocol::MuseAtem {
             eos_token_id: self.eos_token_id,
             eot_token_id: self.eot_token_id,
-            declared_tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
+            declared_tools: request
+                .model_request
+                .tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect(),
         }
     }
 

@@ -952,6 +952,7 @@ fn validate_open_responses_execution_controls(request: &ServeRequest) -> Result<
         "--open-responses owns prompt rendering only; omit request generation/sampling controls and use qwen-lens --max-new-tokens/--temperature/--top-k/--top-p/--min-p/--seed"
     );
     let declared_tools = request
+        .model_request
         .tools
         .iter()
         .map(|tool| tool.name.as_str())

@@ -7,6 +7,7 @@ mod dsv4_temporal;
 mod execution_selector;
 mod fixed_cohort_jsonl;
 mod messages;
+mod model_request;
 mod open_responses;
 mod qwen_file_root;
 mod serve;

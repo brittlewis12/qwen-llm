@@ -668,6 +668,7 @@ pub(crate) fn build_response_object(
 /// Envelope echo derived from a validated request.
 pub(crate) fn envelope_echo(request: &ServeRequest) -> EnvelopeEcho {
     let tools = request
+        .model_request
         .tools
         .iter()
         .map(|tool| {

@@ -12,11 +12,12 @@
 //!   headless (`reasoning</think>visible`). [`preopens_reasoning`] tells
 //!   the transport which partition mode to use.
 
-use super::items::{ServeError, ServeRequest, Turn};
+use super::items::{ServeError, ServeRequest};
 use crate::messages::{
     ChatMessage, DeepSeekV4EncodeOptions, DeepSeekV4Reasoning,
     render_deepseek_v4_0731_messages_prompt,
 };
+use crate::model_request::Turn;
 
 /// Map the spec's `reasoning.effort` onto DeepSeek V4 release tiers.
 /// Absent effort is ordinary chat (no thinking), matching the CLI default.
@@ -67,7 +68,7 @@ pub(crate) fn render_deepseek_v4_serve_prompt(
         ));
     }
     let options = encode_options(request)?;
-    if !request.tools.is_empty() {
+    if !request.model_request.tools.is_empty() {
         // Fail closed rather than dropping definitions the model never sees
         // (k3 R1.7); DS4 tool support is not implemented.
         return Err(ServeError::invalid_request(
@@ -75,15 +76,15 @@ pub(crate) fn render_deepseek_v4_serve_prompt(
             "DeepSeek V4 serve does not support tools yet",
         ));
     }
-    let mut messages = Vec::with_capacity(request.turns.len() + 1);
-    if let Some(system) = request.system.as_deref() {
+    let mut messages = Vec::with_capacity(request.model_request.turns.len() + 1);
+    if let Some(system) = request.model_request.system.as_deref() {
         messages.push(ChatMessage {
             role: "system".into(),
             content: system.to_owned(),
             ..Default::default()
         });
     }
-    for turn in &request.turns {
+    for turn in &request.model_request.turns {
         match turn {
             Turn::User(text) => messages.push(ChatMessage {
                 role: "user".into(),

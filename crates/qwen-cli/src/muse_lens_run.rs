@@ -673,8 +673,9 @@ fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
                 direction,
                 DirectionDefinition::LensRow(definition)
                     if matches!(&definition.row, DirectionRow::TokenId { .. })
+                        && definition.target_covector.is_none()
             ),
-            "Muse directions require a selected token row"
+            "Muse directions require a selected token row without target_covector overrides"
         );
     }
     Ok(())
@@ -1061,6 +1062,32 @@ mod tests {
         .unwrap();
         validate_plan(&published, &args).unwrap();
         assert_eq!(required_lens_layers(&published, "p", 52).unwrap(), [25, 50]);
+
+        let unsupported_covector: LensPlan = serde_json::from_value(json!({
+            "version": 1,
+            "lenses": [{
+                "kind":"published_full_transport",
+                "id":"p",
+                "artifact":"published",
+                "token_ids":[7],
+                "allow_unvalidated_transfer":true
+            }],
+            "directions": [{
+                "id":"p7",
+                "lens":"p",
+                "row":{"kind":"token_id","token_id":7},
+                "target_covector":"raw_lm_head",
+                "normalization":"unit_l2"
+            }],
+            "operations": [{
+                "id":"steer",
+                "scope":{"layers":{"kind":"values","values":[25]},"prefill":{"kind":"all"}},
+                "action":{"kind":"fixed_add","direction":"p7","coefficient":1.0}
+            }],
+            "readouts": []
+        }))
+        .unwrap();
+        assert!(validate_plan(&unsupported_covector, &args).is_err());
 
         let template: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"workspace_template","id":"x","weights":"w","labels":"l"}],"directions":[],"operations":[],"readouts":[{"id":"r","lens":"x","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"top_k":1}]})).unwrap();
         assert!(validate_plan(&template, &args).is_err());

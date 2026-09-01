@@ -62,6 +62,7 @@ const TRACE_FULL_BATCH_MANIFEST_NAME: &str = "manifest.json";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublishedProfileId {
     Qwen38J,
+    Qwen36NeuronpediaJ1000,
     Qwen36J,
     Qwen36R,
 }
@@ -87,7 +88,7 @@ struct PublishedProfile {
     license: &'static str,
 }
 
-const PUBLISHED_PROFILES: [PublishedProfile; 3] = [
+const PUBLISHED_PROFILES: [PublishedProfile; 4] = [
     PublishedProfile {
         id: PublishedProfileId::Qwen38J,
         method: "j",
@@ -106,6 +107,25 @@ const PUBLISHED_PROFILES: [PublishedProfile; 3] = [
         fitted_checkpoint_revision: FITTED_CHECKPOINT_REVISION,
         model_name_fragment: "qwen3.8",
         license: "Apache-2.0",
+    },
+    PublishedProfile {
+        id: PublishedProfileId::Qwen36NeuronpediaJ1000,
+        method: "j",
+        source_repository: "neuronpedia/jacobian-lens",
+        source_revision: "0731326edff4ae730ffc5356fe1a4728c748b3a6",
+        source_filename: "qwen3.6-27b/jlens/Salesforce-wikitext/Qwen3.6-27B_jacobian_lens_n1000.pt",
+        source_bytes: 3_303_032_772,
+        source_sha256: "1718c8c52dd8a9dad03738d4d625937c1fbba10be325b872ed446c7290fc11e1",
+        data_pickle_sha256: "3e58341435e2178dc78af9689fab7dd872661063e5087848b0099f436aa7d448",
+        expected_payload_blake3: "2251a5872df8ddb53bfd72339f6f13440836f071a1bbeb8033b4f6c2be5244c7",
+        archive_root: "jacobian_lens",
+        target_layer: 63,
+        identity_anchor_layer: None,
+        base_model: "Qwen/Qwen3.6-27B",
+        fitted_checkpoint: "Qwen/Qwen3.6-27B",
+        fitted_checkpoint_revision: "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+        model_name_fragment: "qwen3.6",
+        license: "MIT",
     },
     PublishedProfile {
         id: PublishedProfileId::Qwen36J,
@@ -447,6 +467,12 @@ pub(crate) struct ProjectedFullTokenDirections {
     pub(crate) token_ids: Vec<i32>,
     pub(crate) hidden_size: usize,
     pub(crate) values: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FullTokenTargetCovector {
+    DeployedLogitNumerator,
+    RawLmHead,
 }
 
 impl FromStr for TraceFullVectorCell {
@@ -1368,6 +1394,7 @@ pub(crate) fn project_full_token_directions(
     token_ids: &[u32],
     source_layers: &[u32],
     loaded: &qwen_llm::runtime::LoadedModel,
+    target_covector: FullTokenTargetCovector,
 ) -> Result<ProjectedFullTokenDirections> {
     validate_artifact_directory(artifact, "published full transport lens")?;
     let manifest: FullLensManifest = read_json_file(&artifact.join(FULL_MANIFEST_NAME))?;
@@ -1401,9 +1428,14 @@ pub(crate) fn project_full_token_directions(
     let workspace_lens = loaded
         .workspace_lens_session(&mut sequence)
         .context("open published full transport projection session")?;
-    let selected = workspace_lens
-        .selected_token_readouts(token_ids)
-        .context("derive deployed-model selected-token covectors")?;
+    let selected = match target_covector {
+        FullTokenTargetCovector::DeployedLogitNumerator => workspace_lens
+            .selected_token_readouts(token_ids)
+            .context("derive deployed-model selected-token score covectors")?,
+        FullTokenTargetCovector::RawLmHead => workspace_lens
+            .selected_token_raw_lm_head_rows(token_ids)
+            .context("derive deployed-model raw LM-head token covectors")?,
+    };
     let hidden_size = selected.hidden_size;
     let projected_values = source_layers
         .len()
@@ -1459,8 +1491,14 @@ pub(crate) fn project_full_token_directions(
 
     Ok(ProjectedFullTokenDirections {
         method: format!(
-            "published_{}_selected_token_numerator",
-            manifest.transport.method
+            "published_{}_{}",
+            manifest.transport.method,
+            match target_covector {
+                FullTokenTargetCovector::DeployedLogitNumerator => {
+                    "selected_token_numerator"
+                }
+                FullTokenTargetCovector::RawLmHead => "raw_lm_head_token_direction",
+            }
         ),
         target_layer: manifest.transport.target_layer,
         source_layers: source_layers.to_vec(),
@@ -3445,6 +3483,25 @@ fn canonical_fit(profile: PublishedProfile) -> PublishedFit {
             weighting: None,
             corpus_mode: None,
         },
+        PublishedProfileId::Qwen36NeuronpediaJ1000 => PublishedFit {
+            fitter: "anthropics/jacobian-lens".into(),
+            fitter_revision: "not_recorded_in_published_artifact".into(),
+            dataset: "Salesforce/wikitext".into(),
+            split: "not_recorded_in_published_artifact".into(),
+            n_prompts: 1_000,
+            max_sequence_length: 128,
+            skip_first: 16,
+            valid_positions_per_prompt: Some(111),
+            dim_batch: None,
+            model_execution_dtype: Some("bfloat16".into()),
+            accumulator_dtype: Some("float32".into()),
+            serialized_dtype: "float16".into(),
+            docs_consumed: None,
+            n_positions: None,
+            config_json: None,
+            weighting: None,
+            corpus_mode: None,
+        },
         PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => PublishedFit {
             fitter: "jlens.fit".into(),
             fitter_revision: "modal".into(),
@@ -3463,7 +3520,9 @@ fn canonical_fit(profile: PublishedProfile) -> PublishedFit {
             config_json: Some(match profile.id {
                 PublishedProfileId::Qwen36J => r#"{"estimator": "standard"}"#.into(),
                 PublishedProfileId::Qwen36R => r#"{"estimator": "relp", "rules": {"ln_rule": true, "identity_rule": true, "half_rule": true, "include_qk_norms": false}}"#.into(),
-                PublishedProfileId::Qwen38J => unreachable!(),
+                PublishedProfileId::Qwen38J | PublishedProfileId::Qwen36NeuronpediaJ1000 => {
+                    unreachable!()
+                }
             }),
             weighting: Some("uniform".into()),
             corpus_mode: Some("pretrain".into()),
@@ -3487,9 +3546,9 @@ fn canonical_transfer_policy(profile: PublishedProfile) -> TransferPolicy {
     TransferPolicy {
         fitted_weight_precision: match profile.id {
             PublishedProfileId::Qwen38J => "bfloat16",
-            PublishedProfileId::Qwen36J | PublishedProfileId::Qwen36R => {
-                "bfloat16_model_float16_serialized_transport"
-            }
+            PublishedProfileId::Qwen36NeuronpediaJ1000
+            | PublishedProfileId::Qwen36J
+            | PublishedProfileId::Qwen36R => "bfloat16_model_float16_serialized_transport",
         }
         .into(),
         deployed_checkpoint_policy: "geometry_preserving_transfer_requires_validation".into(),
@@ -4009,8 +4068,14 @@ mod tests {
 
     #[test]
     fn released_qwen36_pair_has_matched_recipe_and_distinct_methods() {
-        let j_profile = PUBLISHED_PROFILES[1];
-        let r_profile = PUBLISHED_PROFILES[2];
+        let j_profile = *PUBLISHED_PROFILES
+            .iter()
+            .find(|profile| profile.id == PublishedProfileId::Qwen36J)
+            .unwrap();
+        let r_profile = *PUBLISHED_PROFILES
+            .iter()
+            .find(|profile| profile.id == PublishedProfileId::Qwen36R)
+            .unwrap();
         let j = published_manifest(
             j_profile,
             FullPayload {
@@ -4034,6 +4099,37 @@ mod tests {
         assert_eq!(j.fit.max_sequence_length, 128);
         assert_eq!(j.fit.skip_first, 4);
         assert_eq!(j.fit.dataset, r.fit.dataset);
+    }
+
+    #[test]
+    fn neuronpedia_qwen36_j_preserves_its_distinct_fit_identity() {
+        let profile = *PUBLISHED_PROFILES
+            .iter()
+            .find(|profile| profile.id == PublishedProfileId::Qwen36NeuronpediaJ1000)
+            .unwrap();
+        let manifest = published_manifest(
+            profile,
+            FullPayload {
+                blake3: profile.expected_payload_blake3.into(),
+                ..canonical_payload()
+            },
+        );
+        validate_manifest(&manifest).unwrap();
+        assert_eq!(manifest.transport.target_layer, 63);
+        assert_eq!(manifest.fit.n_prompts, 1_000);
+        assert_eq!(manifest.fit.dataset, "Salesforce/wikitext");
+        assert_eq!(
+            manifest.source.sha256,
+            "1718c8c52dd8a9dad03738d4d625937c1fbba10be325b872ed446c7290fc11e1"
+        );
+        assert_ne!(
+            manifest.payload.blake3,
+            PUBLISHED_PROFILES
+                .iter()
+                .find(|candidate| candidate.id == PublishedProfileId::Qwen36J)
+                .unwrap()
+                .expected_payload_blake3
+        );
     }
 
     #[test]

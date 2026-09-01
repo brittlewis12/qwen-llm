@@ -1,6 +1,7 @@
 use crate::lens_input::{
     LensInputRendering, LensInputSpec, LensMessageMode, LensRenderedSpan, PreparedLensInput,
-    is_known_lens_span, prepare_qwen_model_input, validate_lens_input_spec,
+    is_known_lens_span, prepare_qwen_model_input, prepare_qwen_model_messages_bytes,
+    validate_lens_input_spec,
 };
 use crate::template_lens::{TemplateLens, TemplateScore, TemplateVocabulary};
 use anyhow::{Context, Result, bail, ensure};
@@ -55,6 +56,18 @@ const SWEEP_SCHEMA: &str = "qwen.lens.coefficient_sweep";
 const SWEEP_SCHEMA_VERSION: u32 = 3;
 const SWEEP_MANIFEST_NAME: &str = "manifest.json";
 const MAX_SWEEP_ARMS: usize = 64;
+const SWEEP_COHORT_SCHEMA: &str = "qwen.lens.coefficient_sweep_cohort";
+const SWEEP_COHORT_SCHEMA_VERSION: u32 = 1;
+const MIN_SWEEP_COHORT_REQUESTS: usize = 2;
+const MAX_SWEEP_COHORT_REQUESTS: usize = 32;
+const MAX_SWEEP_COHORT_RECORD_BYTES: usize = 1024 * 1024;
+const MAX_SWEEP_COHORT_FILE_BYTES: usize =
+    MAX_SWEEP_COHORT_REQUESTS * MAX_SWEEP_COHORT_RECORD_BYTES;
+const MAX_SWEEP_COHORT_ID_BYTES: usize = 128;
+const MAX_SWEEP_COHORT_MESSAGES_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SWEEP_COHORT_TOTAL_ARMS: usize = 96;
+const MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND: u64 = 1_000_000;
+const MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES: u64 = 512 * 1024 * 1024;
 const PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS: usize = 65;
 const PACKED_PREFILL_CHUNK_CAP_TOKENS: usize = 1024;
 
@@ -182,7 +195,14 @@ impl LensRunArgs {
     ArgGroup::new("sweep_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "user", "messages", "open_responses"])
+        .args([
+            "prompt",
+            "token_ids",
+            "user",
+            "messages",
+            "open_responses",
+            "requests_jsonl",
+        ])
 ))]
 pub(crate) struct CoefficientSweepArgs {
     /// Ordinary dense or MoE Qwen GGUF model, loaded once for every arm.
@@ -230,11 +250,28 @@ pub(crate) struct CoefficientSweepArgs {
     #[arg(long, visible_alias = "responses-input", value_name = "FILE|-")]
     open_responses: Option<PathBuf>,
 
+    /// Strict message-file-only JSONL cohort; record paths are relative to this file.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = [
+            "prompt",
+            "token_ids",
+            "user",
+            "system",
+            "messages",
+            "open_responses",
+            "message_mode",
+            "no_special_tokens"
+        ]
+    )]
+    requests_jsonl: Option<PathBuf>,
+
     /// Generation transition for --user/--messages; supported values depend on the model.
     #[arg(
         long,
         value_enum,
-        conflicts_with_all = ["prompt", "token_ids", "open_responses"]
+        conflicts_with_all = ["prompt", "token_ids", "open_responses", "requests_jsonl"]
     )]
     message_mode: Option<LensMessageMode>,
 
@@ -242,7 +279,13 @@ pub(crate) struct CoefficientSweepArgs {
     #[arg(
         long,
         requires = "prompt",
-        conflicts_with_all = ["token_ids", "user", "messages", "open_responses"]
+        conflicts_with_all = [
+            "token_ids",
+            "user",
+            "messages",
+            "open_responses",
+            "requests_jsonl"
+        ]
     )]
     no_special_tokens: bool,
 
@@ -367,7 +410,17 @@ pub(crate) struct LensRowDirectionDefinition {
     pub(crate) id: String,
     pub(crate) lens: String,
     pub(crate) row: DirectionRow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) target_covector: Option<DirectionTargetCovector>,
     pub(crate) normalization: Normalization,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DirectionTargetCovector {
+    DeployedLogitNumerator,
+    RawLmHead,
+    RawLmHeadOrthogonalToDeployedLogitNumerator,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -407,6 +460,13 @@ impl DirectionDefinition {
 
     fn normalization(&self) -> Option<Normalization> {
         self.lens_row().map(|direction| direction.normalization)
+    }
+}
+
+impl LensRowDirectionDefinition {
+    fn effective_target_covector(&self) -> DirectionTargetCovector {
+        self.target_covector
+            .unwrap_or(DirectionTargetCovector::DeployedLogitNumerator)
     }
 }
 
@@ -1309,6 +1369,112 @@ pub(crate) struct CoefficientSweepManifest {
     pub(crate) arms: Vec<CoefficientSweepArm>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SweepCohortRequestRecord {
+    id: String,
+    messages: PathBuf,
+    message_mode: Option<LensMessageMode>,
+}
+
+struct LoadedSweepCohortRequests {
+    canonical_path: PathBuf,
+    blake3: String,
+    records: Vec<(usize, SweepCohortRequestRecord)>,
+}
+
+struct PreparedSweepCohortRequest {
+    source_line: usize,
+    id: String,
+    messages_path: PathBuf,
+    messages_blake3: String,
+    arm_args: LensRunArgs,
+    prepared_input: PreparedLensInput,
+    source_bound_plan: BoundLensPlan,
+    schedule: CompiledEventSchedule,
+    prefill: PreparedOrdinaryPrefill,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SweepCohortManifest {
+    schema: String,
+    schema_version: u32,
+    producer: SweepProducer,
+    requests_jsonl_path: PathBuf,
+    requests_jsonl_blake3: String,
+    canonical_source_plan_path: PathBuf,
+    source_plan: LensPlan,
+    source_plan_canonical_json_blake3: String,
+    model_path: PathBuf,
+    operation_id: String,
+    coefficients: Vec<f32>,
+    sampler: RunSampler,
+    max_new_tokens: usize,
+    prefill_execution: PrefillExecution,
+    execution_policy: String,
+    planned_request_count: usize,
+    planned_total_arm_count: usize,
+    transition_upper_bound: u64,
+    cumulative_serialized_child_bytes: u64,
+    sweeps: Vec<SweepCohortChild>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SweepCohortChild {
+    index: usize,
+    id: String,
+    source_line: usize,
+    path: String,
+    prompt_token_count: usize,
+    messages_path: PathBuf,
+    messages_blake3: String,
+    serialized_byte_length: u64,
+    manifest_byte_length: u64,
+    manifest_blake3: String,
+}
+
+struct BuiltSweepBundle {
+    summaries: Vec<SweepArmSummary>,
+    serialized_byte_length: u64,
+    manifest_byte_length: u64,
+    manifest_blake3: String,
+}
+
+struct CapturedSweepMessages {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    blake3: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SweepCohortPlanBounds {
+    request_count: usize,
+    total_arm_count: usize,
+    transition_upper_bound: u64,
+}
+
+struct SweepCohortOutputBudget {
+    consumed: u64,
+}
+
+impl SweepCohortOutputBudget {
+    fn charge(&mut self, byte_length: usize) -> Result<()> {
+        self.consumed = self
+            .consumed
+            .checked_add(u64::try_from(byte_length).context("serialized child byte length")?)
+            .context("cohort serialized child byte count overflow")?;
+        ensure!(
+            self.consumed <= MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES,
+            "cohort serialized child bytes {} exceed limit {}",
+            self.consumed,
+            MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES
+        );
+        Ok(())
+    }
+}
+
 struct SweepArmSummary {
     index: usize,
     coefficient: f32,
@@ -1318,7 +1484,8 @@ struct SweepArmSummary {
     live_readout_count: usize,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RunSampler {
     temperature: f32,
     top_k: usize,
@@ -1589,6 +1756,7 @@ enum LoadedLens {
 struct PreparedLens {
     id: String,
     lens: LoadedLens,
+    raw_lm_head: Option<NativeLens>,
 }
 
 struct PreparedDirection {
@@ -1972,6 +2140,13 @@ fn execute_ordinary_arm(
 
 pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
     validate_coefficient_sweep_args(&args)?;
+    if args.requests_jsonl.is_some() {
+        return run_coefficient_sweep_cohort(args);
+    }
+    run_single_coefficient_sweep(args)
+}
+
+fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
     let arm_args = args.arm_run_args();
     validate_run_args(&arm_args)?;
     let output_path = super::resolve_output_path(&args.output)?;
@@ -2065,97 +2240,733 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
         .into_iter()
         .collect::<HashSet<_>>();
     let sampler = run_sampler(&arm_args);
-    let summaries = stage_and_publish_sweep(&output_path, |staging| {
-        let arms_path = staging.join("arms");
-        create_sweep_directory(&arms_path)?;
-        super::sync_directory(staging)?;
+    let built = stage_and_publish_sweep(&output_path, |staging| {
+        build_sweep_bundle(
+            staging,
+            &args,
+            &arm_args,
+            &plan_path,
+            &source_plan,
+            &source_bound_plan,
+            &prepared_input,
+            &loaded,
+            &tokenizer,
+            &execution,
+            &schedule,
+            &stop_tokens,
+            sampler,
+            &mut prefill,
+            None,
+        )
+    })?;
+    print_sweep_summary(&args, &output_path, &built.summaries);
+    Ok(())
+}
 
-        let mut arms = Vec::with_capacity(args.coefficients.len());
-        let mut summaries = Vec::with_capacity(args.coefficients.len());
-        for (index, &coefficient) in args.coefficients.iter().enumerate() {
-            let effective_authored_plan =
-                plan_with_operation_coefficient(&source_plan, &args.operation, coefficient)?;
-            let effective_bound_plan = bind_plan_positions(
-                &effective_authored_plan,
-                &prepared_input.rendering,
-                prompt_token_ids.len(),
-            )?;
-            ensure!(
-                effective_bound_plan.position_bindings == source_bound_plan.position_bindings,
-                "coefficient sweep changed semantic position bindings"
-            );
-            let result = execute_ordinary_arm(
+#[allow(clippy::too_many_arguments)]
+fn build_sweep_bundle(
+    root: &Path,
+    args: &CoefficientSweepArgs,
+    arm_args: &LensRunArgs,
+    plan_path: &Path,
+    source_plan: &LensPlan,
+    source_bound_plan: &BoundLensPlan,
+    prepared_input: &PreparedLensInput,
+    loaded: &qwen_llm::runtime::LoadedModel,
+    tokenizer: &Tokenizer,
+    execution: &ExecutionPlan,
+    schedule: &CompiledEventSchedule,
+    stop_tokens: &HashSet<i32>,
+    sampler: RunSampler,
+    prefill: &mut PreparedOrdinaryPrefill,
+    mut output_budget: Option<&mut SweepCohortOutputBudget>,
+) -> Result<BuiltSweepBundle> {
+    let arms_path = root.join("arms");
+    create_sweep_directory(&arms_path)?;
+    super::sync_directory(root)?;
+
+    let prompt_token_ids = &prepared_input.token_ids;
+    let mut arms = Vec::with_capacity(args.coefficients.len());
+    let mut summaries = Vec::with_capacity(args.coefficients.len());
+    let mut serialized_byte_length = 0u64;
+    for (index, &coefficient) in args.coefficients.iter().enumerate() {
+        let effective_authored_plan =
+            plan_with_operation_coefficient(source_plan, &args.operation, coefficient)?;
+        let effective_bound_plan = bind_plan_positions(
+            &effective_authored_plan,
+            &prepared_input.rendering,
+            prompt_token_ids.len(),
+        )?;
+        ensure!(
+            effective_bound_plan.position_bindings == source_bound_plan.position_bindings,
+            "coefficient sweep changed semantic position bindings"
+        );
+        let result = execute_ordinary_arm(
+            loaded,
+            tokenizer,
+            execution,
+            &effective_bound_plan.resolved,
+            schedule,
+            prompt_token_ids,
+            args.max_new_tokens,
+            sampler,
+            stop_tokens,
+            prefill,
+        )?;
+        let summary = SweepArmSummary {
+            index,
+            coefficient,
+            decoded_text: result.decoded_text.clone(),
+            stop_reason: result.stop_reason.clone(),
+            operation_application_count: result.operation_applications.len(),
+            live_readout_count: result.live_readouts.len(),
+        };
+        let artifact = build_run_output(
+            arm_args,
+            "ordinary_qwen",
+            plan_path,
+            effective_bound_plan,
+            prepared_input,
+            result,
+            prefill.execution.clone(),
+            None,
+        );
+        let bytes = serialize_run_output(&artifact)?;
+        serialized_byte_length = charge_sweep_bundle_bytes(
+            serialized_byte_length,
+            bytes.len(),
+            output_budget.as_deref_mut(),
+        )?;
+        let relative = format!("arms/{index:06}/run.json");
+        let arm_path = arms_path.join(format!("{index:06}"));
+        create_sweep_directory(&arm_path)?;
+        write_new_sweep_file(&arm_path.join("run.json"), &bytes)?;
+        super::sync_directory(&arm_path)?;
+        arms.push(CoefficientSweepArm {
+            index,
+            coefficient,
+            artifact: relative,
+            byte_length: bytes.len() as u64,
+            blake3: blake3::hash(&bytes).to_hex().to_string(),
+        });
+        summaries.push(summary);
+    }
+    super::sync_directory(&arms_path)?;
+
+    let manifest = CoefficientSweepManifest {
+        schema: SWEEP_SCHEMA.into(),
+        schema_version: SWEEP_SCHEMA_VERSION,
+        producer: current_sweep_producer(),
+        canonical_source_plan_path: plan_path.to_path_buf(),
+        source_plan: Some(source_plan.clone()),
+        source_plan_canonical_json_blake3: Some(
+            source_bound_plan
+                .authored_plan_canonical_json_blake3
+                .clone(),
+        ),
+        operation_id: args.operation.clone(),
+        coefficients: args.coefficients.clone(),
+        arms,
+    };
+    let manifest_bytes = serialize_sweep_manifest(&manifest)?;
+    serialized_byte_length = charge_sweep_bundle_bytes(
+        serialized_byte_length,
+        manifest_bytes.len(),
+        output_budget.as_deref_mut(),
+    )?;
+    write_new_sweep_file(&root.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
+    super::sync_directory(root)?;
+    Ok(BuiltSweepBundle {
+        summaries,
+        serialized_byte_length,
+        manifest_byte_length: manifest_bytes.len() as u64,
+        manifest_blake3: blake3::hash(&manifest_bytes).to_hex().to_string(),
+    })
+}
+
+fn charge_sweep_bundle_bytes(
+    current: u64,
+    byte_length: usize,
+    output_budget: Option<&mut SweepCohortOutputBudget>,
+) -> Result<u64> {
+    let byte_length = u64::try_from(byte_length).context("serialized sweep byte length")?;
+    let next = current
+        .checked_add(byte_length)
+        .context("serialized sweep bundle byte count overflow")?;
+    if let Some(output_budget) = output_budget {
+        output_budget
+            .charge(usize::try_from(byte_length).context("serialized sweep byte length")?)?;
+    }
+    Ok(next)
+}
+
+fn current_sweep_producer() -> SweepProducer {
+    SweepProducer {
+        build_commit: env!("QWEN_BUILD_COMMIT").into(),
+        build_dirty: env!("QWEN_BUILD_DIRTY").into(),
+        build_source_state: env!("QWEN_BUILD_SOURCE_STATE").into(),
+    }
+}
+
+fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
+    ensure!(
+        args.prefill_execution == PrefillExecution::Serial,
+        "--requests-jsonl requires --prefill-execution serial"
+    );
+    let requests = read_sweep_cohort_requests(
+        args.requests_jsonl
+            .as_deref()
+            .context("--requests-jsonl is required in cohort mode")?,
+    )?;
+    validate_sweep_cohort_child_count(requests.records.len(), args.coefficients.len())?;
+    let output_path = super::resolve_output_path(&args.output)?;
+    ensure_new_sweep_output(&output_path)?;
+
+    let plan_path = std::fs::canonicalize(&args.plan)
+        .with_context(|| format!("resolve plan {}", args.plan.display()))?;
+    let source_plan = parse_plan_bytes(&super::read_regular_file_bounded(
+        &plan_path,
+        MAX_PLAN_BYTES,
+    )?)
+    .with_context(|| format!("parse Lens plan {}", plan_path.display()))?;
+    validate_plan(&source_plan)?;
+    validate_ordinary_plan(&source_plan)?;
+    ensure!(
+        source_plan
+            .operations
+            .iter()
+            .any(|operation| operation.id == args.operation),
+        "Lens plan has no operation {:?}",
+        args.operation
+    );
+    for &coefficient in &args.coefficients {
+        let effective =
+            plan_with_operation_coefficient(&source_plan, &args.operation, coefficient)?;
+        validate_ordinary_plan(&effective)?;
+    }
+    let source_plan_blake3 = canonical_plan_blake3(&source_plan)?;
+    let plan_dir = plan_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    ensure!(
+        !crate::muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()),
+        "qwen-lens sweep supports ordinary Qwen only; Muse Glimmer is not supported"
+    );
+    let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
+    ensure!(
+        family != ModelFamily::Qwen4Exp,
+        "qwen-lens sweep supports ordinary Qwen only; Flash-Next is not supported"
+    );
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let loaded = runtime
+        .load_opened_gguf(gguf, args.model.clone())
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
+    let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
+
+    let mut prepared_requests = Vec::with_capacity(requests.records.len());
+    for (source_line, request) in requests.records {
+        let captured = capture_sweep_cohort_messages(&request.messages)
+            .with_context(|| format!("capture sweep cohort request {:?} messages", request.id))?;
+        let mut arm_args = args.arm_run_args();
+        arm_args.messages = Some(captured.path.clone());
+        arm_args.message_mode = request.message_mode;
+        validate_run_args(&arm_args)
+            .with_context(|| format!("validate sweep cohort request {:?}", request.id))?;
+        let source = captured.path.display().to_string();
+        let prepared_input = prepare_qwen_model_messages_bytes(
+            &captured.bytes,
+            &source,
+            request.message_mode,
+            family,
+            loaded.gguf(),
+            &tokenizer,
+        )
+        .with_context(|| format!("render sweep cohort request {:?}", request.id))?;
+        validate_sweep_prompt(&prepared_input.token_ids, loaded.arch().vocab_size)
+            .with_context(|| format!("preflight sweep cohort request {:?}", request.id))?;
+        let source_bound_plan = bind_plan_positions(
+            &source_plan,
+            &prepared_input.rendering,
+            prepared_input.token_ids.len(),
+        )
+        .with_context(|| format!("bind sweep cohort request {:?}", request.id))?;
+        validate_reachable_scopes(
+            &source_bound_plan.resolved,
+            prepared_input.token_ids.len(),
+            args.max_new_tokens,
+        )?;
+        let schedule =
+            CompiledEventSchedule::compile(&source_bound_plan.resolved, loaded.arch().n_layer)?;
+        let prefill = prepare_ordinary_prefill(
+            &loaded,
+            &schedule,
+            &source_bound_plan.resolved,
+            PrefillExecution::Serial,
+            RunExecutionScheduleBasis::SweepSourcePlan,
+            prepared_input.token_ids.len(),
+            args.max_new_tokens,
+        )?;
+        prefill.execution.validate_against_plan(
+            "ordinary_qwen",
+            &source_bound_plan.resolved,
+            prepared_input.token_ids.len(),
+        )?;
+        prepared_requests.push(PreparedSweepCohortRequest {
+            source_line,
+            id: request.id,
+            messages_path: captured.path,
+            messages_blake3: captured.blake3,
+            arm_args,
+            prepared_input,
+            source_bound_plan,
+            schedule,
+            prefill,
+        });
+    }
+
+    let plan_bounds = plan_sweep_cohort_bounds(
+        &prepared_requests
+            .iter()
+            .map(|request| request.prepared_input.token_ids.len())
+            .collect::<Vec<_>>(),
+        args.coefficients.len(),
+        args.max_new_tokens,
+    )?;
+
+    let execution = prepare_execution_plan(
+        &prepared_requests
+            .first()
+            .context("sweep cohort has no prepared requests")?
+            .source_bound_plan
+            .resolved,
+        plan_dir,
+        &loaded,
+    )?;
+    let stop_tokens = loaded
+        .gguf()
+        .stop_token_ids()?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let sampler = run_sampler(&prepared_requests[0].arm_args);
+    let request_count = prepared_requests.len();
+    stage_and_publish_sweep(&output_path, |staging| {
+        let sweeps_root = staging.join("sweeps");
+        create_sweep_directory(&sweeps_root)?;
+        super::sync_directory(staging)?;
+        let mut children = Vec::with_capacity(prepared_requests.len());
+        let mut output_budget = SweepCohortOutputBudget { consumed: 0 };
+        for (index, request) in prepared_requests.iter_mut().enumerate() {
+            let child_path = sweeps_root.join(format!("{index:06}"));
+            create_sweep_directory(&child_path)?;
+            let child = build_sweep_bundle(
+                &child_path,
+                &args,
+                &request.arm_args,
+                &plan_path,
+                &source_plan,
+                &request.source_bound_plan,
+                &request.prepared_input,
                 &loaded,
                 &tokenizer,
                 &execution,
-                &effective_bound_plan.resolved,
-                &schedule,
-                prompt_token_ids,
-                args.max_new_tokens,
-                sampler,
+                &request.schedule,
                 &stop_tokens,
-                &mut prefill,
+                sampler,
+                &mut request.prefill,
+                Some(&mut output_budget),
             )?;
-            let summary = SweepArmSummary {
+            children.push(SweepCohortChild {
                 index,
-                coefficient,
-                decoded_text: result.decoded_text.clone(),
-                stop_reason: result.stop_reason.clone(),
-                operation_application_count: result.operation_applications.len(),
-                live_readout_count: result.live_readouts.len(),
-            };
-            let artifact = build_run_output(
-                &arm_args,
-                "ordinary_qwen",
-                &plan_path,
-                effective_bound_plan,
-                &prepared_input,
-                result,
-                prefill.execution.clone(),
-                None,
-            );
-            let bytes = serialize_run_output(&artifact)?;
-            let relative = format!("arms/{index:06}/run.json");
-            let arm_path = arms_path.join(format!("{index:06}"));
-            create_sweep_directory(&arm_path)?;
-            write_new_sweep_file(&arm_path.join("run.json"), &bytes)?;
-            super::sync_directory(&arm_path)?;
-            arms.push(CoefficientSweepArm {
-                index,
-                coefficient,
-                artifact: relative,
-                byte_length: bytes.len() as u64,
-                blake3: blake3::hash(&bytes).to_hex().to_string(),
+                id: request.id.clone(),
+                source_line: request.source_line,
+                path: format!("sweeps/{index:06}"),
+                prompt_token_count: request.prepared_input.token_ids.len(),
+                messages_path: request.messages_path.clone(),
+                messages_blake3: request.messages_blake3.clone(),
+                serialized_byte_length: child.serialized_byte_length,
+                manifest_byte_length: child.manifest_byte_length,
+                manifest_blake3: child.manifest_blake3,
             });
-            summaries.push(summary);
         }
-        super::sync_directory(&arms_path)?;
-
-        let manifest = CoefficientSweepManifest {
-            schema: SWEEP_SCHEMA.into(),
-            schema_version: SWEEP_SCHEMA_VERSION,
-            producer: SweepProducer {
-                build_commit: env!("QWEN_BUILD_COMMIT").into(),
-                build_dirty: env!("QWEN_BUILD_DIRTY").into(),
-                build_source_state: env!("QWEN_BUILD_SOURCE_STATE").into(),
-            },
+        super::sync_directory(&sweeps_root)?;
+        for child in &children {
+            verify_sweep_cohort_child_manifest(staging, child)?;
+        }
+        let manifest = SweepCohortManifest {
+            schema: SWEEP_COHORT_SCHEMA.into(),
+            schema_version: SWEEP_COHORT_SCHEMA_VERSION,
+            producer: current_sweep_producer(),
+            requests_jsonl_path: requests.canonical_path.clone(),
+            requests_jsonl_blake3: requests.blake3.clone(),
             canonical_source_plan_path: plan_path.clone(),
-            source_plan: Some(source_plan.clone()),
-            source_plan_canonical_json_blake3: Some(
-                source_bound_plan
-                    .authored_plan_canonical_json_blake3
-                    .clone(),
-            ),
+            source_plan: source_plan.clone(),
+            source_plan_canonical_json_blake3: source_plan_blake3.clone(),
+            model_path: args.model.clone(),
             operation_id: args.operation.clone(),
             coefficients: args.coefficients.clone(),
-            arms,
+            sampler,
+            max_new_tokens: args.max_new_tokens,
+            prefill_execution: PrefillExecution::Serial,
+            execution_policy:
+                "serial_prompts_serial_arms_fresh_sequence_and_sampler_no_batched_generation".into(),
+            planned_request_count: plan_bounds.request_count,
+            planned_total_arm_count: plan_bounds.total_arm_count,
+            transition_upper_bound: plan_bounds.transition_upper_bound,
+            cumulative_serialized_child_bytes: output_budget.consumed,
+            sweeps: children,
         };
-        let manifest_bytes = serialize_sweep_manifest(&manifest)?;
+        let manifest_bytes = serialize_sweep_cohort_manifest(&manifest)?;
+        output_budget.charge(manifest_bytes.len())?;
         write_new_sweep_file(&staging.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
         super::sync_directory(staging)?;
-        Ok(summaries)
+        Ok(())
     })?;
-    print_sweep_summary(&args, &output_path, &summaries);
+    println!(
+        "runtime=ordinary_qwen model={} operation={} requests={} arms_per_request={} prefill_execution=serial\nartifact={}",
+        args.model.display(),
+        args.operation,
+        request_count,
+        args.coefficients.len(),
+        output_path.display()
+    );
+    Ok(())
+}
+
+fn validate_sweep_prompt(token_ids: &[i32], vocab_size: u32) -> Result<()> {
+    ensure!(
+        !token_ids.is_empty(),
+        "prompt must encode to at least one token"
+    );
+    ensure!(
+        token_ids.len() <= MAX_NEW_TOKENS * 16,
+        "prompt is too long for the bounded Lens runner"
+    );
+    ensure!(
+        token_ids
+            .iter()
+            .all(|&token| token >= 0 && (token as u32) < vocab_size),
+        "prompt contains a token outside the model vocabulary"
+    );
+    Ok(())
+}
+
+fn validate_sweep_cohort_child_count(request_count: usize, arm_count: usize) -> Result<usize> {
+    let total_arm_count = request_count
+        .checked_mul(arm_count)
+        .context("cohort prompt/arm child count overflow")?;
+    ensure!(
+        total_arm_count <= MAX_SWEEP_COHORT_TOTAL_ARMS,
+        "cohort plans {total_arm_count} prompt/arm children, exceeding limit {MAX_SWEEP_COHORT_TOTAL_ARMS}"
+    );
+    Ok(total_arm_count)
+}
+
+fn plan_sweep_cohort_bounds(
+    prompt_token_counts: &[usize],
+    arm_count: usize,
+    max_new_tokens: usize,
+) -> Result<SweepCohortPlanBounds> {
+    let total_arm_count = validate_sweep_cohort_child_count(prompt_token_counts.len(), arm_count)?;
+    let transitions_per_arm = prompt_token_counts
+        .iter()
+        .try_fold(0u64, |total, &prompt| {
+            let prompt = u64::try_from(prompt).context("cohort prompt token count")?;
+            let generation = u64::try_from(max_new_tokens).context("cohort generation bound")?;
+            total
+                .checked_add(
+                    prompt
+                        .checked_add(generation)
+                        .context("cohort request transition bound overflow")?,
+                )
+                .context("cohort transition bound overflow")
+        })?;
+    let transition_upper_bound = transitions_per_arm
+        .checked_mul(u64::try_from(arm_count).context("cohort arm count")?)
+        .context("cohort transition bound overflow")?;
+    ensure!(
+        transition_upper_bound <= MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND,
+        "cohort transition upper bound {transition_upper_bound} exceeds limit {MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND}"
+    );
+    Ok(SweepCohortPlanBounds {
+        request_count: prompt_token_counts.len(),
+        total_arm_count,
+        transition_upper_bound,
+    })
+}
+
+fn read_sweep_cohort_requests(path: &Path) -> Result<LoadedSweepCohortRequests> {
+    let canonical_path = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve sweep request file {}", path.display()))?;
+    let bytes = super::read_regular_file_bounded(&canonical_path, MAX_SWEEP_COHORT_FILE_BYTES)?;
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("read {} as UTF-8", canonical_path.display()))?;
+    let request_root = canonical_path
+        .parent()
+        .context("sweep request file has no parent")?;
+    let mut records = Vec::new();
+    let mut ids = BTreeSet::new();
+    for (line_index, line) in text.split('\n').enumerate() {
+        let source_line = line_index + 1;
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        ensure!(
+            line.len() <= MAX_SWEEP_COHORT_RECORD_BYTES,
+            "{} line {} exceeds JSONL record limit of {} bytes",
+            canonical_path.display(),
+            source_line,
+            MAX_SWEEP_COHORT_RECORD_BYTES
+        );
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        ensure!(
+            records.len() < MAX_SWEEP_COHORT_REQUESTS,
+            "sweep request cohort exceeds {MAX_SWEEP_COHORT_REQUESTS} nonblank records"
+        );
+        let mut request: SweepCohortRequestRecord = serde_json::from_str(trimmed)
+            .with_context(|| format!("parse {} line {source_line}", canonical_path.display()))?;
+        validate_sweep_cohort_id(&request.id, source_line)?;
+        ensure!(
+            ids.insert(request.id.clone()),
+            "sweep request ID {:?} is duplicated",
+            request.id
+        );
+        ensure!(
+            request.messages != Path::new("-"),
+            "sweep request messages on line {source_line} cannot read stdin"
+        );
+        if request.messages.is_relative() {
+            request.messages = request_root.join(&request.messages);
+        }
+        records.push((source_line, request));
+    }
+    ensure!(
+        (MIN_SWEEP_COHORT_REQUESTS..=MAX_SWEEP_COHORT_REQUESTS).contains(&records.len()),
+        "sweep request cohort requires {MIN_SWEEP_COHORT_REQUESTS}..={MAX_SWEEP_COHORT_REQUESTS} nonblank records"
+    );
+    Ok(LoadedSweepCohortRequests {
+        canonical_path,
+        blake3: blake3::hash(&bytes).to_hex().to_string(),
+        records,
+    })
+}
+
+fn capture_sweep_cohort_messages(path: &Path) -> Result<CapturedSweepMessages> {
+    capture_sweep_cohort_messages_with(path, |path| {
+        super::read_regular_file_bounded(path, MAX_SWEEP_COHORT_MESSAGES_BYTES)
+    })
+}
+
+fn capture_sweep_cohort_messages_with(
+    path: &Path,
+    read: impl FnOnce(&Path) -> Result<Vec<u8>>,
+) -> Result<CapturedSweepMessages> {
+    let bytes = read(path)?;
+    Ok(CapturedSweepMessages {
+        path: path.to_path_buf(),
+        blake3: blake3::hash(&bytes).to_hex().to_string(),
+        bytes,
+    })
+}
+
+fn validate_sweep_cohort_id(id: &str, source_line: usize) -> Result<()> {
+    ensure!(
+        !id.is_empty() && id.len() <= MAX_SWEEP_COHORT_ID_BYTES,
+        "sweep request ID on line {source_line} must contain 1..={MAX_SWEEP_COHORT_ID_BYTES} bytes"
+    );
+    let mut bytes = id.bytes();
+    ensure!(
+        bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')),
+        "sweep request ID on line {source_line} must start with an ASCII alphanumeric and contain only ASCII alphanumerics, '.', '_', or '-'"
+    );
+    Ok(())
+}
+
+fn serialize_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<Vec<u8>> {
+    validate_sweep_cohort_manifest(manifest)?;
+    let bytes =
+        serde_json::to_vec(manifest).context("serialize coefficient sweep cohort manifest")?;
+    ensure!(
+        bytes.len() <= MAX_PLAN_BYTES,
+        "coefficient sweep cohort manifest exceeds {MAX_PLAN_BYTES} bytes"
+    );
+    let decoded = parse_sweep_cohort_manifest_bytes(&bytes)
+        .context("reparse coefficient sweep cohort manifest")?;
+    ensure!(
+        serde_json::to_vec(&decoded)? == bytes,
+        "coefficient sweep cohort manifest failed canonical JSON round trip"
+    );
+    Ok(bytes)
+}
+
+fn verify_sweep_cohort_child_manifest(root: &Path, child: &SweepCohortChild) -> Result<()> {
+    let length = usize::try_from(child.manifest_byte_length)
+        .context("sweep cohort child manifest length does not fit this platform")?;
+    let path = root.join(&child.path).join(SWEEP_MANIFEST_NAME);
+    let bytes = super::read_regular_file_exact(&path, length)?;
+    ensure!(
+        blake3::hash(&bytes).to_hex().as_str() == child.manifest_blake3,
+        "sweep cohort child {} manifest BLAKE3 does not match",
+        child.index
+    );
+    let manifest = parse_sweep_manifest_bytes(&bytes)
+        .with_context(|| format!("validate sweep cohort child {} manifest", child.index))?;
+    let expected_serialized_byte_length =
+        manifest
+            .arms
+            .iter()
+            .try_fold(child.manifest_byte_length, |total, arm| {
+                total
+                    .checked_add(arm.byte_length)
+                    .context("sweep cohort child serialized byte count overflow")
+            })?;
+    ensure!(
+        expected_serialized_byte_length == child.serialized_byte_length,
+        "sweep cohort child {} serialized byte length does not match its manifest",
+        child.index
+    );
+    Ok(())
+}
+
+fn parse_sweep_cohort_manifest_bytes(bytes: &[u8]) -> Result<SweepCohortManifest> {
+    ensure!(
+        bytes.len() <= MAX_PLAN_BYTES,
+        "coefficient sweep cohort manifest exceeds {MAX_PLAN_BYTES} bytes"
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).context("parse coefficient sweep cohort manifest JSON")?;
+    let manifest: SweepCohortManifest =
+        serde_json::from_value(value).context("bind coefficient sweep cohort manifest")?;
+    validate_sweep_cohort_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> {
+    ensure!(
+        manifest.schema == SWEEP_COHORT_SCHEMA
+            && manifest.schema_version == SWEEP_COHORT_SCHEMA_VERSION,
+        "unsupported coefficient sweep cohort manifest schema"
+    );
+    validate_sweep_producer(&manifest.producer)?;
+    ensure!(
+        manifest.requests_jsonl_path.is_absolute()
+            && manifest.canonical_source_plan_path.is_absolute(),
+        "coefficient sweep cohort source paths must be absolute"
+    );
+    ensure!(
+        manifest.requests_jsonl_blake3.len() == 64 && is_lower_hex(&manifest.requests_jsonl_blake3),
+        "coefficient sweep cohort JSONL digest is invalid"
+    );
+    validate_plan(&manifest.source_plan)?;
+    validate_ordinary_plan(&manifest.source_plan)?;
+    ensure!(
+        canonical_plan_blake3(&manifest.source_plan)? == manifest.source_plan_canonical_json_blake3,
+        "coefficient sweep cohort source-plan digest is invalid"
+    );
+    ensure!(
+        manifest
+            .source_plan
+            .operations
+            .iter()
+            .any(|operation| operation.id == manifest.operation_id),
+        "coefficient sweep cohort source plan lacks the selected operation"
+    );
+    ensure!(
+        !manifest.coefficients.is_empty()
+            && manifest.coefficients.len() <= MAX_SWEEP_ARMS
+            && manifest.coefficients.iter().all(|value| value.is_finite()),
+        "coefficient sweep cohort coefficients are invalid"
+    );
+    ensure!(
+        manifest.max_new_tokens > 0
+            && manifest.max_new_tokens <= MAX_NEW_TOKENS
+            && manifest.prefill_execution == PrefillExecution::Serial
+            && manifest.execution_policy
+                == "serial_prompts_serial_arms_fresh_sequence_and_sampler_no_batched_generation",
+        "coefficient sweep cohort execution policy is invalid"
+    );
+    SamplingConfig {
+        temperature: manifest.sampler.temperature,
+        top_k: manifest.sampler.top_k,
+        top_p: manifest.sampler.top_p,
+        min_p: manifest.sampler.min_p,
+        seed: manifest.sampler.seed,
+    }
+    .validate()
+    .context("coefficient sweep cohort sampler is invalid")?;
+    ensure!(
+        manifest.planned_request_count == manifest.sweeps.len()
+            && (MIN_SWEEP_COHORT_REQUESTS..=MAX_SWEEP_COHORT_REQUESTS)
+                .contains(&manifest.planned_request_count),
+        "coefficient sweep cohort planned request count is invalid"
+    );
+    let planned = plan_sweep_cohort_bounds(
+        &manifest
+            .sweeps
+            .iter()
+            .map(|child| child.prompt_token_count)
+            .collect::<Vec<_>>(),
+        manifest.coefficients.len(),
+        manifest.max_new_tokens,
+    )?;
+    ensure!(
+        manifest.planned_total_arm_count == planned.total_arm_count
+            && manifest.transition_upper_bound == planned.transition_upper_bound,
+        "coefficient sweep cohort planned aggregate bounds are inconsistent"
+    );
+    let mut ids = BTreeSet::new();
+    let mut cumulative_serialized_child_bytes = 0u64;
+    for (index, child) in manifest.sweeps.iter().enumerate() {
+        validate_sweep_cohort_id(&child.id, child.source_line)?;
+        ensure!(
+            ids.insert(child.id.clone()),
+            "coefficient sweep cohort child IDs repeat"
+        );
+        ensure!(
+            child.index == index
+                && child.source_line > 0
+                && child.path == format!("sweeps/{index:06}")
+                && child.prompt_token_count > 0
+                && child.prompt_token_count <= MAX_NEW_TOKENS * 16
+                && child.messages_path.is_absolute()
+                && child.messages_blake3.len() == 64
+                && is_lower_hex(&child.messages_blake3)
+                && child.serialized_byte_length >= child.manifest_byte_length
+                && child.serialized_byte_length <= MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES
+                && child.manifest_byte_length > 0
+                && child.manifest_byte_length <= MAX_PLAN_BYTES as u64
+                && child.manifest_blake3.len() == 64
+                && is_lower_hex(&child.manifest_blake3),
+            "coefficient sweep cohort child {index} metadata is invalid"
+        );
+        cumulative_serialized_child_bytes = cumulative_serialized_child_bytes
+            .checked_add(child.serialized_byte_length)
+            .context("coefficient sweep cohort serialized child byte count overflow")?;
+    }
+    ensure!(
+        cumulative_serialized_child_bytes == manifest.cumulative_serialized_child_bytes
+            && cumulative_serialized_child_bytes <= MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES,
+        "coefficient sweep cohort cumulative serialized child bytes are invalid"
+    );
+    Ok(())
+}
+
+fn validate_sweep_producer(producer: &SweepProducer) -> Result<()> {
+    ensure!(
+        matches!(producer.build_commit.len(), 40 | 64)
+            && is_lower_hex(&producer.build_commit)
+            && matches!(producer.build_dirty.as_str(), "0" | "1")
+            && producer
+                .build_source_state
+                .strip_prefix("git-source-sha256-v2:")
+                .is_some_and(|digest| digest.len() == 64 && is_lower_hex(digest)),
+        "coefficient sweep producer metadata is invalid"
+    );
     Ok(())
 }
 
@@ -2169,6 +2980,23 @@ fn validate_coefficient_sweep_args(args: &CoefficientSweepArgs) -> Result<()> {
         "--coefficients values must be finite"
     );
     ensure!(!args.operation.is_empty(), "--operation must not be empty");
+    if args.requests_jsonl.is_some() {
+        ensure!(
+            args.prompt.is_none()
+                && args.token_ids.is_none()
+                && args.user.is_none()
+                && args.system.is_none()
+                && args.messages.is_none()
+                && args.open_responses.is_none()
+                && args.message_mode.is_none()
+                && !args.no_special_tokens,
+            "--requests-jsonl conflicts with all single-prompt input flags"
+        );
+        ensure!(
+            args.prefill_execution == PrefillExecution::Serial,
+            "--requests-jsonl requires --prefill-execution serial"
+        );
+    }
     Ok(())
 }
 
@@ -2913,6 +3741,14 @@ fn validate_plan_with_zero_operation(
                     direction.id,
                     direction.lens
                 );
+                if direction.target_covector.is_some() {
+                    ensure!(
+                        published_full_tokens.contains_key(direction.lens.as_str())
+                            && matches!(direction.row, DirectionRow::TokenId { .. }),
+                        "direction {} target_covector is supported only for published full transport token rows",
+                        direction.id
+                    );
+                }
                 if let Some(token_ids) = published_full_tokens.get(direction.lens.as_str()) {
                     let DirectionRow::TokenId { token_id } = direction.row else {
                         bail!(
@@ -3081,8 +3917,9 @@ fn validate_muse_artifact_plan(plan: &LensPlan) -> Result<()> {
             direction,
             DirectionDefinition::LensRow(definition)
                 if matches!(definition.row, DirectionRow::TokenId { .. })
+                    && definition.target_covector.is_none()
         )),
-        "Muse run artifact plan requires selected-token directions"
+        "Muse run artifact plan requires selected-token directions without target_covector overrides"
     );
     Ok(())
 }
@@ -3171,6 +4008,7 @@ fn prepare_execution_plan(
         .collect::<HashMap<_, _>>();
     let mut direction_layers: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
     let mut required_lens_layers: HashMap<&str, BTreeSet<u32>> = HashMap::new();
+    let mut raw_lens_layers: HashMap<&str, BTreeSet<u32>> = HashMap::new();
     for operation in &plan.operations {
         let layers = operation
             .scope
@@ -3188,6 +4026,14 @@ fn prepare_execution_plan(
                 .entry(direction.lens.as_str())
                 .or_default()
                 .extend(layers.iter().copied());
+            if direction.effective_target_covector()
+                != DirectionTargetCovector::DeployedLogitNumerator
+            {
+                raw_lens_layers
+                    .entry(direction.lens.as_str())
+                    .or_default()
+                    .extend(layers.iter().copied());
+            }
         }
     }
     let mut readout_layers = BTreeSet::new();
@@ -3214,6 +4060,7 @@ fn prepare_execution_plan(
                     arch.hidden_size as usize,
                     arch.vocab_size,
                 )?),
+                raw_lm_head: None,
             },
             LensDefinition::PublishedFullTransport {
                 id,
@@ -3232,17 +4079,25 @@ fn prepare_execution_plan(
                     token_ids,
                     &layers,
                     loaded,
+                    super::full_lens::FullTokenTargetCovector::DeployedLogitNumerator,
                 )?;
+                let raw_lm_head = raw_lens_layers
+                    .get(id.as_str())
+                    .map(|raw_layers| {
+                        super::full_lens::project_full_token_directions(
+                            &resolve_plan_path(plan_dir, artifact),
+                            token_ids,
+                            &raw_layers.iter().copied().collect::<Vec<_>>(),
+                            loaded,
+                            super::full_lens::FullTokenTargetCovector::RawLmHead,
+                        )
+                        .map(native_lens_from_projected_full)
+                    })
+                    .transpose()?;
                 PreparedLens {
                     id: id.clone(),
-                    lens: LoadedLens::Native(NativeLens {
-                        method: projected.method,
-                        target_layer: projected.target_layer,
-                        source_layers: projected.source_layers,
-                        token_ids: projected.token_ids,
-                        hidden_size: projected.hidden_size,
-                        values: projected.values,
-                    }),
+                    lens: LoadedLens::Native(native_lens_from_projected_full(projected)),
+                    raw_lm_head,
                 }
             }
             LensDefinition::WorkspaceTemplate {
@@ -3266,6 +4121,7 @@ fn prepare_execution_plan(
                 PreparedLens {
                     id: id.clone(),
                     lens: LoadedLens::Template { lens, vocabulary },
+                    raw_lm_head: None,
                 }
             }
         };
@@ -3299,7 +4155,7 @@ fn prepare_execution_plan(
         let prepared_lens = &lenses[&definition.lens];
         let mut rows = BTreeMap::new();
         for layer in layers {
-            let raw = lens_row(prepared_lens, &definition.row, layer)?;
+            let raw = direction_row(prepared_lens, definition, layer)?;
             let normalized = normalize_direction(raw, definition.normalization, direction_id)?;
             let tensor = MetalTensor::from_bytes(
                 loaded.context(),
@@ -3596,30 +4452,105 @@ fn load_native_lens(
     })
 }
 
+fn native_lens_from_projected_full(
+    projected: super::full_lens::ProjectedFullTokenDirections,
+) -> NativeLens {
+    NativeLens {
+        method: projected.method,
+        target_layer: projected.target_layer,
+        source_layers: projected.source_layers,
+        token_ids: projected.token_ids,
+        hidden_size: projected.hidden_size,
+        values: projected.values,
+    }
+}
+
+fn direction_row(
+    prepared: &PreparedLens,
+    definition: &LensRowDirectionDefinition,
+    layer: u32,
+) -> Result<Vec<f32>> {
+    match definition.effective_target_covector() {
+        DirectionTargetCovector::DeployedLogitNumerator => {
+            lens_row(prepared, &definition.row, layer)
+        }
+        DirectionTargetCovector::RawLmHead => {
+            raw_lm_head_direction_row(prepared, &definition.row, layer, &definition.id)
+        }
+        DirectionTargetCovector::RawLmHeadOrthogonalToDeployedLogitNumerator => {
+            let raw = raw_lm_head_direction_row(prepared, &definition.row, layer, &definition.id)?;
+            let deployed = lens_row(prepared, &definition.row, layer)?;
+            orthogonal_component(&raw, &deployed, &definition.id)
+        }
+    }
+}
+
+fn raw_lm_head_direction_row(
+    prepared: &PreparedLens,
+    selector: &DirectionRow,
+    layer: u32,
+    direction_id: &str,
+) -> Result<Vec<f32>> {
+    let raw = prepared
+        .raw_lm_head
+        .as_ref()
+        .with_context(|| format!("direction {direction_id} requires a raw LM-head projection"))?;
+    native_lens_row(raw, selector, layer, &prepared.id)
+}
+
+fn orthogonal_component(raw: &[f32], axis: &[f32], direction_id: &str) -> Result<Vec<f32>> {
+    ensure!(
+        !raw.is_empty() && raw.len() == axis.len(),
+        "direction {direction_id} orthogonal decomposition has incompatible rows"
+    );
+    ensure!(
+        raw.iter().chain(axis).all(|value| value.is_finite()),
+        "direction {direction_id} orthogonal decomposition has non-finite input"
+    );
+    let raw_norm_squared = raw
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>();
+    let axis_norm_squared = axis
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>();
+    let dot = raw
+        .iter()
+        .zip(axis)
+        .map(|(&left, &right)| f64::from(left) * f64::from(right))
+        .sum::<f64>();
+    ensure!(
+        raw_norm_squared.is_finite()
+            && raw_norm_squared > 0.0
+            && axis_norm_squared.is_finite()
+            && axis_norm_squared > 0.0
+            && dot.is_finite(),
+        "direction {direction_id} orthogonal decomposition has invalid geometry"
+    );
+    let scale = dot / axis_norm_squared;
+    let orthogonal = raw
+        .iter()
+        .zip(axis)
+        .map(|(&raw_value, &axis_value)| {
+            (f64::from(raw_value) - scale * f64::from(axis_value)) as f32
+        })
+        .collect::<Vec<_>>();
+    let orthogonal_norm_squared = orthogonal
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>();
+    ensure!(
+        orthogonal_norm_squared.is_finite() && orthogonal_norm_squared > raw_norm_squared * 1.0e-12,
+        "direction {direction_id} raw and deployed covectors are numerically collinear"
+    );
+    Ok(orthogonal)
+}
+
 fn lens_row(prepared: &PreparedLens, selector: &DirectionRow, layer: u32) -> Result<Vec<f32>> {
     match (&prepared.lens, selector) {
-        (LoadedLens::Native(native), DirectionRow::TokenId { token_id }) => {
-            let layer_slot = native
-                .source_layers
-                .iter()
-                .position(|&candidate| candidate == layer)
-                .with_context(|| {
-                    format!("native lens {} has no row for layer {layer}", prepared.id)
-                })?;
-            let token_slot = native
-                .token_ids
-                .iter()
-                .position(|&candidate| candidate == *token_id)
-                .with_context(|| {
-                    format!("native lens {} has no token row {token_id}", prepared.id)
-                })?;
-            let offset = native_payload_offset(
-                layer_slot,
-                token_slot,
-                native.token_ids.len(),
-                native.hidden_size,
-            );
-            Ok(native.values[offset..offset + native.hidden_size].to_vec())
+        (LoadedLens::Native(native), DirectionRow::TokenId { .. }) => {
+            native_lens_row(native, selector, layer, &prepared.id)
         }
         (
             LoadedLens::Template {
@@ -3642,6 +4573,34 @@ fn lens_row(prepared: &PreparedLens, selector: &DirectionRow, layer: u32) -> Res
             bail!("workspace-template directions require row.kind=template_row_id or label")
         }
     }
+}
+
+fn native_lens_row(
+    native: &NativeLens,
+    selector: &DirectionRow,
+    layer: u32,
+    lens_id: &str,
+) -> Result<Vec<f32>> {
+    let DirectionRow::TokenId { token_id } = selector else {
+        bail!("native selected directions require row.kind=token_id")
+    };
+    let layer_slot = native
+        .source_layers
+        .iter()
+        .position(|&candidate| candidate == layer)
+        .with_context(|| format!("native lens {lens_id} has no row for layer {layer}"))?;
+    let token_slot = native
+        .token_ids
+        .iter()
+        .position(|&candidate| candidate == *token_id)
+        .with_context(|| format!("native lens {lens_id} has no token row {token_id}"))?;
+    let offset = native_payload_offset(
+        layer_slot,
+        token_slot,
+        native.token_ids.len(),
+        native.hidden_size,
+    );
+    Ok(native.values[offset..offset + native.hidden_size].to_vec())
 }
 
 fn native_payload_offset(
@@ -4408,6 +5367,321 @@ mod tests {
     }
 
     #[test]
+    fn sweep_cohort_cli_is_message_file_only_and_requires_explicit_serial_prefill() {
+        let parsed = SweepArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--operation",
+            "steer",
+            "--coefficients",
+            "0,0.5",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--prefill-execution",
+            "serial",
+            "--output",
+            "cohort",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(
+            parsed.requests_jsonl.as_deref(),
+            Some(Path::new("requests.jsonl"))
+        );
+        validate_coefficient_sweep_args(&parsed).unwrap();
+
+        let auto = SweepArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--operation",
+            "steer",
+            "--coefficients",
+            "0",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--output",
+            "cohort",
+        ])
+        .unwrap()
+        .args;
+        assert!(validate_coefficient_sweep_args(&auto).is_err());
+        assert!(
+            SweepArgsParser::try_parse_from([
+                "test",
+                "--model",
+                "model.gguf",
+                "--plan",
+                "plan.json",
+                "--operation",
+                "steer",
+                "--coefficients",
+                "0",
+                "--requests-jsonl",
+                "requests.jsonl",
+                "--messages",
+                "one.json",
+                "--prefill-execution",
+                "serial",
+                "--output",
+                "cohort",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sweep_cohort_jsonl_is_strict_bounded_and_resolves_relative_message_paths() {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-sweep-cohort-jsonl-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("one.json"), "[]").unwrap();
+        std::fs::write(root.join("two.json"), "[]").unwrap();
+        let requests_path = root.join("requests.jsonl");
+        std::fs::write(
+            &requests_path,
+            concat!(
+                "{\"id\":\"first-safe\",\"messages\":\"one.json\"}\n",
+                "\n",
+                "{\"id\":\"second_safe\",\"messages\":\"two.json\",\"message_mode\":\"thinking\"}\n"
+            ),
+        )
+        .unwrap();
+        let loaded = read_sweep_cohort_requests(&requests_path).unwrap();
+        assert!(loaded.canonical_path.is_absolute());
+        assert_eq!(loaded.records.len(), 2);
+        assert_eq!(loaded.records[0].0, 1);
+        assert_eq!(loaded.records[1].0, 3);
+        assert_eq!(
+            loaded.records[0].1.messages,
+            loaded.canonical_path.parent().unwrap().join("one.json")
+        );
+        assert_eq!(
+            loaded.records[1].1.message_mode,
+            Some(LensMessageMode::Thinking)
+        );
+
+        std::fs::write(
+            &requests_path,
+            concat!(
+                "{\"id\":\"first\",\"messages\":\"one.json\",\"unknown\":true}\n",
+                "{\"id\":\"second\",\"messages\":\"two.json\"}\n"
+            ),
+        )
+        .unwrap();
+        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        std::fs::write(
+            &requests_path,
+            concat!(
+                "{\"id\":\"../unsafe\",\"messages\":\"one.json\"}\n",
+                "{\"id\":\"second\",\"messages\":\"two.json\"}\n"
+            ),
+        )
+        .unwrap();
+        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_cohort_jsonl_rejects_duplicate_ids_stdin_and_count_bounds() {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-sweep-cohort-bounds-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("messages.json"), "[]").unwrap();
+        let requests_path = root.join("requests.jsonl");
+        std::fs::write(
+            &requests_path,
+            concat!(
+                "{\"id\":\"same\",\"messages\":\"messages.json\"}\n",
+                "{\"id\":\"same\",\"messages\":\"messages.json\"}\n"
+            ),
+        )
+        .unwrap();
+        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        std::fs::write(
+            &requests_path,
+            concat!(
+                "{\"id\":\"one\",\"messages\":\"-\"}\n",
+                "{\"id\":\"two\",\"messages\":\"messages.json\"}\n"
+            ),
+        )
+        .unwrap();
+        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        std::fs::write(
+            &requests_path,
+            "{\"id\":\"one\",\"messages\":\"messages.json\"}\n",
+        )
+        .unwrap();
+        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        let excessive = (0..=MAX_SWEEP_COHORT_REQUESTS)
+            .map(|index| format!("{{\"id\":\"request-{index}\",\"messages\":\"messages.json\"}}\n"))
+            .collect::<String>();
+        std::fs::write(&requests_path, excessive).unwrap();
+        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_cohort_messages_are_single_read_no_follow_and_content_bound() {
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-sweep-cohort-capture-{}-{}",
+            std::process::id(),
+            READS.load(Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("messages.json");
+        let original = br#"[{"role":"user","content":"original"}]"#;
+        std::fs::write(&path, original).unwrap();
+        READS.store(0, Ordering::Relaxed);
+        let captured = capture_sweep_cohort_messages_with(&path, |path| {
+            READS.fetch_add(1, Ordering::Relaxed);
+            super::super::read_regular_file_bounded(path, MAX_SWEEP_COHORT_MESSAGES_BYTES)
+        })
+        .unwrap();
+        std::fs::write(&path, br#"[{"role":"user","content":"replacement"}]"#).unwrap();
+        assert_eq!(READS.load(Ordering::Relaxed), 1);
+        assert_eq!(captured.bytes, original);
+        assert_eq!(captured.blake3, blake3::hash(original).to_hex().to_string());
+        let parsed = crate::messages::parse_strict_messages_input(
+            std::str::from_utf8(&captured.bytes).unwrap(),
+            &captured.path.display().to_string(),
+        )
+        .unwrap();
+        assert_eq!(parsed[0].content, "original");
+
+        let symlink = root.join("messages-link.json");
+        std::os::unix::fs::symlink(&path, &symlink).unwrap();
+        assert!(capture_sweep_cohort_messages(&symlink).is_err());
+        let oversized = root.join("oversized.json");
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len((MAX_SWEEP_COHORT_MESSAGES_BYTES + 1) as u64)
+            .unwrap();
+        assert!(capture_sweep_cohort_messages(&oversized).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_cohort_aggregate_bounds_admit_campaign_and_reject_pathological_work() {
+        let admitted = plan_sweep_cohort_bounds(&vec![4_096; 32], 3, 64).unwrap();
+        assert_eq!(admitted.request_count, 32);
+        assert_eq!(admitted.total_arm_count, 96);
+        assert_eq!(admitted.transition_upper_bound, 399_360);
+
+        assert!(plan_sweep_cohort_bounds(&vec![1; 32], 64, 64).is_err());
+        assert!(plan_sweep_cohort_bounds(&vec![11_000; 32], 3, 64).is_err());
+    }
+
+    #[test]
+    fn sweep_cohort_output_budget_overflow_cleans_staging() {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-sweep-cohort-output-budget-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let output = root.join("cohort");
+        assert!(
+            stage_and_publish_sweep(&output, |staging| -> Result<()> {
+                write_new_sweep_file(&staging.join("partial"), b"partial")?;
+                let mut budget = SweepCohortOutputBudget {
+                    consumed: MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES - 1,
+                };
+                budget.charge(2)
+            })
+            .is_err()
+        );
+        assert!(!output.exists());
+        assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".stage.")
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a compatible local GGUF, Lens plan, operation ID, and two message fixtures"]
+    fn sweep_cohort_model_bound_children_are_inspectable() {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let model = std::env::var_os("QWEN_LENS_COHORT_MODEL").unwrap();
+        let plan = std::env::var_os("QWEN_LENS_COHORT_PLAN").unwrap();
+        let operation = std::env::var("QWEN_LENS_COHORT_OPERATION").unwrap();
+        let first_messages =
+            PathBuf::from(std::env::var_os("QWEN_LENS_COHORT_MESSAGES_FIRST").unwrap());
+        let second_messages =
+            PathBuf::from(std::env::var_os("QWEN_LENS_COHORT_MESSAGES_SECOND").unwrap());
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-sweep-cohort-model-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let requests_path = root.join("requests.jsonl");
+        let records = [
+            json!({"id":"first","messages":first_messages}),
+            json!({"id":"second","messages":second_messages}),
+        ];
+        std::fs::write(
+            &requests_path,
+            records
+                .iter()
+                .map(|record| serde_json::to_string(record).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let output = root.join("cohort");
+        run_coefficient_sweep(CoefficientSweepArgs {
+            model: model.into(),
+            plan: plan.into(),
+            operation,
+            coefficients: vec![0.0, 0.5],
+            prompt: None,
+            token_ids: None,
+            user: None,
+            system: None,
+            messages: None,
+            open_responses: None,
+            requests_jsonl: Some(requests_path),
+            message_mode: None,
+            no_special_tokens: false,
+            max_new_tokens: 1,
+            prefill_execution: PrefillExecution::Serial,
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 0,
+            output: output.clone(),
+        })
+        .unwrap();
+        let manifest_bytes = std::fs::read(output.join(SWEEP_MANIFEST_NAME)).unwrap();
+        let manifest = parse_sweep_cohort_manifest_bytes(&manifest_bytes).unwrap();
+        for child in &manifest.sweeps {
+            verify_sweep_cohort_child_manifest(&output, child).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn every_action_coefficient_can_be_overridden() {
         let mut actions = vec![
             Action::FixedAdd {
@@ -4512,6 +5786,124 @@ mod tests {
     }
 
     #[test]
+    fn sweep_cohort_manifest_roundtrips_and_verifies_child_manifest_integrity() {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let source_plan = sweep_plan();
+        let child_manifest = CoefficientSweepManifest {
+            schema: SWEEP_SCHEMA.into(),
+            schema_version: SWEEP_SCHEMA_VERSION,
+            producer: SweepProducer {
+                build_commit: "a".repeat(40),
+                build_dirty: "0".into(),
+                build_source_state: format!("git-source-sha256-v2:{}", "b".repeat(64)),
+            },
+            canonical_source_plan_path: "/tmp/plan.json".into(),
+            source_plan: Some(source_plan.clone()),
+            source_plan_canonical_json_blake3: Some(canonical_plan_blake3(&source_plan).unwrap()),
+            operation_id: "swept".into(),
+            coefficients: vec![0.0],
+            arms: vec![CoefficientSweepArm {
+                index: 0,
+                coefficient: 0.0,
+                artifact: "arms/000000/run.json".into(),
+                byte_length: 1,
+                blake3: "c".repeat(64),
+            }],
+        };
+        let child_bytes = serialize_sweep_manifest(&child_manifest).unwrap();
+        let child_digest = blake3::hash(&child_bytes).to_hex().to_string();
+        let children = (0..2)
+            .map(|index| SweepCohortChild {
+                index,
+                id: format!("request-{index}"),
+                source_line: index + 1,
+                path: format!("sweeps/{index:06}"),
+                prompt_token_count: 4,
+                messages_path: format!("/tmp/messages-{index}.json").into(),
+                messages_blake3: "e".repeat(64),
+                serialized_byte_length: child_bytes.len() as u64 + 1,
+                manifest_byte_length: child_bytes.len() as u64,
+                manifest_blake3: child_digest.clone(),
+            })
+            .collect::<Vec<_>>();
+        let manifest = SweepCohortManifest {
+            schema: SWEEP_COHORT_SCHEMA.into(),
+            schema_version: SWEEP_COHORT_SCHEMA_VERSION,
+            producer: child_manifest.producer.clone(),
+            requests_jsonl_path: "/tmp/requests.jsonl".into(),
+            requests_jsonl_blake3: "d".repeat(64),
+            canonical_source_plan_path: "/tmp/plan.json".into(),
+            source_plan: source_plan.clone(),
+            source_plan_canonical_json_blake3: canonical_plan_blake3(&source_plan).unwrap(),
+            model_path: "model.gguf".into(),
+            operation_id: "swept".into(),
+            coefficients: vec![0.0],
+            sampler: RunSampler {
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: 7,
+            },
+            max_new_tokens: 1,
+            prefill_execution: PrefillExecution::Serial,
+            execution_policy:
+                "serial_prompts_serial_arms_fresh_sequence_and_sampler_no_batched_generation".into(),
+            planned_request_count: 2,
+            planned_total_arm_count: 2,
+            transition_upper_bound: 10,
+            cumulative_serialized_child_bytes: 2 * (child_bytes.len() as u64 + 1),
+            sweeps: children,
+        };
+        let bytes = serialize_sweep_cohort_manifest(&manifest).unwrap();
+        assert_eq!(parse_sweep_cohort_manifest_bytes(&bytes).unwrap(), manifest);
+        let mut malformed_aggregate = manifest.clone();
+        malformed_aggregate.cumulative_serialized_child_bytes += 1;
+        assert!(validate_sweep_cohort_manifest(&malformed_aggregate).is_err());
+        let mut malformed_binding = manifest.clone();
+        malformed_binding.sweeps[0].messages_blake3 = "not-a-digest".into();
+        assert!(validate_sweep_cohort_manifest(&malformed_binding).is_err());
+
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-sweep-cohort-integrity-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join("sweeps/000000")).unwrap();
+        std::fs::write(root.join("sweeps/000000/manifest.json"), &child_bytes).unwrap();
+        verify_sweep_cohort_child_manifest(&root, &manifest.sweeps[0]).unwrap();
+        let mut drifted = manifest.sweeps[0].clone();
+        drifted.manifest_blake3 = "e".repeat(64);
+        assert!(verify_sweep_cohort_child_manifest(&root, &drifted).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_cohort_binds_semantic_positions_independently_per_prompt() {
+        let plan = semantic_readout_plan(json!({
+            "kind":"rendered_spans",
+            "selectors":[{"span_kind":"message_content","role":"user","edge":"end"}]
+        }));
+        let rendering = |range| LensInputRendering {
+            renderer: "qwen_chatml_messages_v1".into(),
+            generation_mode: Some("auto".into()),
+            spans: vec![rendered_span(
+                "message_content",
+                Some(0),
+                "user",
+                None,
+                Some(range),
+            )],
+        };
+        let first = bind_plan_positions(&plan, &rendering((1, 3)), 3).unwrap();
+        let second = bind_plan_positions(&plan, &rendering((4, 8)), 8).unwrap();
+        assert_eq!(first.position_bindings[0].resolved_index, 2);
+        assert_eq!(second.position_bindings[0].resolved_index, 7);
+        assert_ne!(first.resolved, second.resolved);
+        assert_eq!(first.authored, second.authored);
+    }
+
+    #[test]
     fn sweep_staging_publishes_exclusively_and_cleans_its_failures() {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -4535,7 +5927,10 @@ mod tests {
 
         let failed = root.join("failed");
         assert!(
-            stage_and_publish_sweep(&failed, |_staging| -> Result<()> {
+            stage_and_publish_sweep(&failed, |staging| -> Result<()> {
+                let nested = staging.join("sweeps");
+                create_sweep_directory(&nested)?;
+                write_new_sweep_file(&nested.join("partial"), b"partial")?;
                 bail!("injected failure")
             })
             .is_err()
@@ -5350,6 +6745,116 @@ mod tests {
             legacy.lenses[0],
             LensDefinition::PublishedFullTransport { .. }
         ));
+    }
+
+    #[test]
+    fn published_transport_direction_target_covectors_are_explicit_and_scoped() {
+        let plan = |target_covector: Option<&str>, lens: serde_json::Value| {
+            let mut direction = json!({
+                "id": "concept",
+                "lens": "j",
+                "row": {"kind": "token_id", "token_id": 42},
+                "normalization": "unit_l2"
+            });
+            if let Some(target_covector) = target_covector {
+                direction["target_covector"] = json!(target_covector);
+            }
+            serde_json::from_value::<LensPlan>(json!({
+                "version": 1,
+                "lenses": [lens],
+                "directions": [direction],
+                "operations": [{
+                    "id": "add",
+                    "scope": {"layers":{"kind":"values","values":[31]},"prefill":{"kind":"all"}},
+                    "action": {"kind":"residual_l2_fraction","direction":"concept","coefficient":0.1}
+                }],
+                "readouts": []
+            }))
+            .unwrap()
+        };
+        let published = || {
+            json!({
+                "kind": "published_full_transport",
+                "id": "j",
+                "artifact": "published",
+                "token_ids": [42],
+                "allow_unvalidated_transfer": true
+            })
+        };
+
+        let implicit = plan(None, published());
+        validate_plan(&implicit).unwrap();
+        let implicit_direction = implicit.directions[0].lens_row().unwrap();
+        assert_eq!(implicit_direction.target_covector, None);
+        assert_eq!(
+            implicit_direction.effective_target_covector(),
+            DirectionTargetCovector::DeployedLogitNumerator
+        );
+        assert!(
+            !serde_json::to_value(&implicit).unwrap()["directions"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("target_covector")
+        );
+
+        for (serialized, expected) in [
+            (
+                "deployed_logit_numerator",
+                DirectionTargetCovector::DeployedLogitNumerator,
+            ),
+            ("raw_lm_head", DirectionTargetCovector::RawLmHead),
+            (
+                "raw_lm_head_orthogonal_to_deployed_logit_numerator",
+                DirectionTargetCovector::RawLmHeadOrthogonalToDeployedLogitNumerator,
+            ),
+        ] {
+            let explicit = plan(Some(serialized), published());
+            validate_plan(&explicit).unwrap();
+            assert_eq!(
+                explicit.directions[0]
+                    .lens_row()
+                    .unwrap()
+                    .effective_target_covector(),
+                expected
+            );
+        }
+
+        let unsupported = plan(
+            Some("raw_lm_head"),
+            json!({"kind":"native_selected","id":"j","artifact":"native"}),
+        );
+        assert!(validate_plan(&unsupported).is_err());
+    }
+
+    #[test]
+    fn raw_direction_orthogonalization_removes_the_readout_axis() {
+        let orthogonal = orthogonal_component(&[2.0, 3.0, 4.0], &[1.0, 0.0, 0.0], "test").unwrap();
+        assert_eq!(orthogonal, [0.0, 3.0, 4.0]);
+        let dot = orthogonal
+            .iter()
+            .zip([1.0_f32, 0.0, 0.0])
+            .map(|(&left, right)| left * right)
+            .sum::<f32>();
+        assert_eq!(dot, 0.0);
+
+        let axis = [0.3_f32, -0.7, 1.1, 0.2];
+        let raw = [1.2_f32, 0.4, -0.5, 2.0];
+        let orthogonal = normalize_direction(
+            orthogonal_component(&raw, &axis, "test").unwrap(),
+            Normalization::UnitL2,
+            "test",
+        )
+        .unwrap();
+        let axis = normalize_direction(axis.to_vec(), Normalization::UnitL2, "axis").unwrap();
+        let normalized_dot = orthogonal
+            .iter()
+            .zip(axis)
+            .map(|(&left, right)| left * right)
+            .sum::<f32>();
+        assert!(normalized_dot.abs() < 1.0e-6, "dot={normalized_dot}");
+
+        assert!(orthogonal_component(&[1.0, 2.0], &[2.0, 4.0], "test").is_err());
+        assert!(orthogonal_component(&[f32::NAN], &[1.0], "test").is_err());
     }
 
     #[test]

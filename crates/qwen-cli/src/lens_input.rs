@@ -802,22 +802,7 @@ pub(crate) fn prepare_qwen_input(
         }
         (None, None, user, messages_path, None) => {
             let messages = acquire_structured_messages(user, spec.system, messages_path)?;
-            let (rendered, renderer, mode) =
-                render_qwen_structured_messages(&messages, protocol, spec.message_mode)?;
-            let token_ids = tokenizer
-                .encode(&rendered.text, false)
-                .context("tokenize exact rendered Lens messages")?;
-            let spans = align_rendered_message_spans(tokenizer, &rendered, &token_ids)?;
-            Ok(PreparedLensInput {
-                source: "messages",
-                add_special_tokens: Some(false),
-                token_ids,
-                rendering: LensInputRendering {
-                    renderer: renderer.into(),
-                    generation_mode: Some(mode.artifact_name().into()),
-                    spans,
-                },
-            })
+            prepare_qwen_messages(&messages, protocol, spec.message_mode, tokenizer)
         }
         (None, None, None, None, Some(_)) => {
             bail!("Open Responses input requires model-bound Qwen preparation")
@@ -842,6 +827,45 @@ pub(crate) fn prepare_qwen_model_input(
         QwenPromptTemplate::UnverifiedChatMl
     };
     prepare_qwen_input(spec, protocol, tokenizer)
+}
+
+pub(crate) fn prepare_qwen_model_messages_bytes(
+    bytes: &[u8],
+    source: &str,
+    message_mode: Option<LensMessageMode>,
+    family: ModelFamily,
+    gguf: &GgufFile,
+    tokenizer: &Tokenizer,
+) -> Result<PreparedLensInput> {
+    let raw = std::str::from_utf8(bytes)
+        .with_context(|| format!("read captured Lens messages {source} as UTF-8"))?;
+    let messages = parse_strict_messages_input(raw, source)?;
+    let protocol = detect_qwen_message_protocol(family, gguf)?;
+    prepare_qwen_messages(&messages, protocol, message_mode, tokenizer)
+}
+
+fn prepare_qwen_messages(
+    messages: &[ChatMessage],
+    protocol: QwenPromptTemplate,
+    message_mode: Option<LensMessageMode>,
+    tokenizer: &Tokenizer,
+) -> Result<PreparedLensInput> {
+    let (rendered, renderer, mode) =
+        render_qwen_structured_messages(messages, protocol, message_mode)?;
+    let token_ids = tokenizer
+        .encode(&rendered.text, false)
+        .context("tokenize exact rendered Lens messages")?;
+    let spans = align_rendered_message_spans(tokenizer, &rendered, &token_ids)?;
+    Ok(PreparedLensInput {
+        source: "messages",
+        add_special_tokens: Some(false),
+        token_ids,
+        rendering: LensInputRendering {
+            renderer: renderer.into(),
+            generation_mode: Some(mode.artifact_name().into()),
+            spans,
+        },
+    })
 }
 
 fn prepare_qwen_open_responses_input(

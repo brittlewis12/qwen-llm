@@ -539,10 +539,18 @@ impl WorkspaceLensReadouts {
     }
 }
 
-/// Selected vocabulary score numerators after folding the final RMSNorm gamma
-/// into resident LM-head rows. No RMS denominator or softmax is applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceLensTokenCovectorKind {
+    RawLmHead,
+    DeployedLogitNumerator,
+}
+
+/// Selected vocabulary target covectors gathered from resident LM-head rows.
+/// `covector_kind` records whether final RMSNorm gamma was folded into them.
+/// No RMS denominator or softmax is applied.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceLensTokenReadouts {
+    pub covector_kind: WorkspaceLensTokenCovectorKind,
     pub token_ids: Vec<u32>,
     pub hidden_size: usize,
     pub lm_head_dtype: GgmlType,
@@ -1180,6 +1188,26 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         &self,
         token_ids: &[u32],
     ) -> Result<WorkspaceLensTokenReadouts, WorkspaceLensError> {
+        self.selected_token_covectors(
+            token_ids,
+            WorkspaceLensTokenCovectorKind::DeployedLogitNumerator,
+        )
+    }
+
+    /// Extract raw selected LM-head rows without folding output RMSNorm gamma.
+    /// This matches the target covector used by Neuronpedia JLENS interventions.
+    pub fn selected_token_raw_lm_head_rows(
+        &self,
+        token_ids: &[u32],
+    ) -> Result<WorkspaceLensTokenReadouts, WorkspaceLensError> {
+        self.selected_token_covectors(token_ids, WorkspaceLensTokenCovectorKind::RawLmHead)
+    }
+
+    fn selected_token_covectors(
+        &self,
+        token_ids: &[u32],
+        covector_kind: WorkspaceLensTokenCovectorKind,
+    ) -> Result<WorkspaceLensTokenReadouts, WorkspaceLensError> {
         if token_ids.is_empty() {
             return Err(WorkspaceLensError::EmptyTokenReadoutSelection);
         }
@@ -1266,9 +1294,17 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
 
         let mut values =
             read_f32_fallible(&selected, selected_elements, "selected-token LM-head rows")?;
-        let gamma = read_f32_fallible(output_norm, hidden_size, "output norm gamma")?;
-        multiply_token_readout_gamma_in_place(&mut values, &gamma, token_ids.len(), hidden_size)?;
+        if covector_kind == WorkspaceLensTokenCovectorKind::DeployedLogitNumerator {
+            let gamma = read_f32_fallible(output_norm, hidden_size, "output norm gamma")?;
+            multiply_token_readout_gamma_in_place(
+                &mut values,
+                &gamma,
+                token_ids.len(),
+                hidden_size,
+            )?;
+        }
         Ok(WorkspaceLensTokenReadouts {
+            covector_kind,
             token_ids: try_clone_slice(token_ids, "selected-token IDs")?,
             hidden_size,
             lm_head_dtype: lm_head.dtype,
@@ -1282,8 +1318,8 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         })
     }
 
-    /// Project selected target-score covectors through one row-major F16
-    /// transport matrix. The result is query-major `[Q,H]` and computes
+    /// Project selected target covectors through one row-major F16 transport
+    /// matrix. The result is query-major `[Q,H]` and computes
     /// `transport^T * covector` for each selected token.
     pub fn project_f16_transport_readouts(
         &self,

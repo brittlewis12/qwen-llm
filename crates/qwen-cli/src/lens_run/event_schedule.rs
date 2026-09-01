@@ -137,6 +137,7 @@ struct ScheduledDefinition {
 pub(super) struct CompiledEvent {
     operation_indices: Vec<usize>,
     readout_indices: Vec<usize>,
+    capture_layers: Vec<u32>,
 }
 
 impl CompiledEvent {
@@ -147,11 +148,16 @@ impl CompiledEvent {
     pub(super) fn readout_indices(&self) -> &[usize] {
         &self.readout_indices
     }
+
+    pub(super) fn capture_layers(&self) -> &[u32] {
+        &self.capture_layers
+    }
 }
 
 pub(super) struct CompiledEventSchedule {
     operations: Vec<ScheduledDefinition>,
     readouts: Vec<ScheduledDefinition>,
+    layer_count: u32,
 }
 
 impl CompiledEventSchedule {
@@ -181,6 +187,7 @@ impl CompiledEventSchedule {
         Ok(Self {
             operations,
             readouts,
+            layer_count,
         })
     }
 
@@ -228,12 +235,20 @@ impl BoundEventSchedule<'_, '_> {
             .readout_indices
             .try_reserve_exact(self.schedule.readouts.len())
             .context("allocate Lens event readout indices")?;
+        event
+            .capture_layers
+            .try_reserve_exact(
+                usize::try_from(self.schedule.layer_count)
+                    .context("Lens layer count exceeds host address space")?,
+            )
+            .context("allocate Lens event capture layers")?;
         Ok(event)
     }
 
     pub(super) fn populate(&self, phase: Phase, event: &mut CompiledEvent) -> Result<()> {
         event.operation_indices.clear();
         event.readout_indices.clear();
+        event.capture_layers.clear();
 
         for (definition_index, compiled) in self.schedule.operations.iter().enumerate() {
             if operation_enabled(&self.plan.operations[definition_index])
@@ -245,6 +260,16 @@ impl BoundEventSchedule<'_, '_> {
         for (definition_index, compiled) in self.schedule.readouts.iter().enumerate() {
             if compiled.scope.phase_matches(phase)? {
                 event.readout_indices.push(definition_index);
+            }
+        }
+        for layer in 0..self.schedule.layer_count {
+            if event.readout_indices.iter().any(|&definition_index| {
+                self.schedule.readouts[definition_index]
+                    .scope
+                    .layers
+                    .contains(layer)
+            }) {
+                event.capture_layers.push(layer);
             }
         }
         Ok(())
@@ -368,11 +393,10 @@ mod tests {
     fn scheduled_readout_sites(
         schedule: &BoundEventSchedule<'_, '_>,
         event: &CompiledEvent,
-        layers: &[u32],
     ) -> Vec<(usize, u32)> {
         let mut sites = Vec::new();
         for &definition_index in event.readout_indices() {
-            for &layer in layers {
+            for &layer in event.capture_layers() {
                 if schedule.readout_selects_layer(definition_index, layer) {
                     sites.push((definition_index, layer));
                 }
@@ -421,9 +445,17 @@ mod tests {
                 }
             }
             assert_eq!(
-                scheduled_readout_sites(&schedule, &event, &[0, 1, 2]),
+                scheduled_readout_sites(&schedule, &event),
                 expected_readouts
             );
+            let expected_capture_layers = (0..3)
+                .filter(|layer| {
+                    expected_readouts
+                        .iter()
+                        .any(|(_, selected_layer)| selected_layer == layer)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(event.capture_layers(), expected_capture_layers);
         }
     }
 

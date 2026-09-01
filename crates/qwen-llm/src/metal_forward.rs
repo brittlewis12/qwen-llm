@@ -19874,7 +19874,7 @@ mod tests {
             },
         ];
         let read_capture = |tensor: &MetalTensor| {
-            let mut values = vec![0.0f32; capture_elements];
+            let mut values = vec![0.0f32; tensor.n_elements() as usize];
             unsafe {
                 let source = tensor
                     .buffer
@@ -19975,6 +19975,41 @@ mod tests {
         }
         assert_bits_equal("post-block captures", &captures_full, &captures_skip);
         assert_bits_equal("capture final logits", &logits_full, &logits_skip);
+
+        let narrow_storage =
+            MetalTensor::zeros_f32(&context, vec![capture_elements as u64]).unwrap();
+        let narrow_capture = narrow_storage.view_subrange(0, vec![hidden_size as u64]);
+        let mut narrow_session =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let mut narrow_captures = Vec::new();
+        let mut narrow_logits = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            narrow_logits = forward
+                .single_token_with_post_block_interventions(
+                    token_id,
+                    position as u32,
+                    &mut narrow_session,
+                    &[5],
+                    &narrow_capture,
+                    &interventions,
+                )
+                .expect("event-local narrow capture forward");
+            narrow_captures.extend(read_capture(&narrow_capture));
+        }
+        let expected_narrow = captures_full
+            .chunks_exact(capture_elements)
+            .flat_map(|capture| capture[hidden_size..2 * hidden_size].iter().copied())
+            .collect::<Vec<_>>();
+        assert_bits_equal(
+            "event-local narrowed captures",
+            &expected_narrow,
+            &narrow_captures,
+        );
+        assert_bits_equal(
+            "event-local narrowed final logits",
+            &logits_full,
+            &narrow_logits,
+        );
 
         let mut no_capture_full =
             MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();

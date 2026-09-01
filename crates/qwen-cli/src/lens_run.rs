@@ -1258,8 +1258,6 @@ struct ExecutionPlan {
     lenses: HashMap<String, PreparedLens>,
     directions: HashMap<String, PreparedDirection>,
     coordinate_swaps: HashMap<String, PreparedDirection>,
-    capture_layers: Vec<u32>,
-    layer_slots: HashMap<u32, usize>,
     n_layer: u32,
     hidden_size: usize,
     capture: Option<MetalTensor>,
@@ -2776,11 +2774,6 @@ fn prepare_execution_plan(
         }
     }
     let capture_layers: Vec<u32> = readout_layers.iter().copied().collect();
-    let layer_slots = capture_layers
-        .iter()
-        .enumerate()
-        .map(|(slot, &layer)| (layer, slot))
-        .collect::<HashMap<_, _>>();
 
     let mut directions = HashMap::new();
     for (direction_id, layers) in direction_layers {
@@ -2823,8 +2816,6 @@ fn prepare_execution_plan(
         lenses,
         directions,
         coordinate_swaps,
-        capture_layers,
-        layer_slots,
         n_layer: arch.n_layer,
         hidden_size: arch.hidden_size as usize,
         capture,
@@ -3322,15 +3313,38 @@ fn forward_event(
         has_readouts,
         !borrowed.is_empty(),
     );
-    let capture = execution.capture.as_ref().filter(|_| has_readouts);
+    let capture = if has_readouts {
+        ensure!(
+            !event.capture_layers().is_empty(),
+            "active Lens readout selected no capture layers"
+        );
+        let capture_elements = event
+            .capture_layers()
+            .len()
+            .checked_mul(execution.hidden_size)
+            .context("event-local Lens capture size overflow")?;
+        let capture_elements = u64::try_from(capture_elements)
+            .context("event-local Lens capture exceeds Metal addressing")?;
+        Some(
+            execution
+                .capture
+                .as_ref()
+                .context("active Lens readout has no capture storage")?
+                .view_subrange(0, vec![capture_elements]),
+        )
+    } else {
+        None
+    };
     let logits = match route {
         EventForwardRoute::SerialFullTailCapture => {
-            let capture = capture.context("active Lens readout has no capture storage")?;
+            let capture = capture
+                .as_ref()
+                .context("active Lens readout has no capture view")?;
             forward.single_token_with_post_block_interventions(
                 token,
                 position,
                 unsafe { sequence.metal_session_mut() },
-                &execution.capture_layers,
+                event.capture_layers(),
                 capture,
                 &borrowed,
             )?
@@ -3346,12 +3360,14 @@ fn forward_event(
             forward.single_token(token, position, unsafe { sequence.metal_session_mut() })?
         }
         EventForwardRoute::SerialNoTailCapture => {
-            let capture = capture.context("active Lens readout has no capture storage")?;
+            let capture = capture
+                .as_ref()
+                .context("active Lens readout has no capture view")?;
             forward.single_token_with_post_block_interventions_no_tail(
                 token,
                 position,
                 unsafe { sequence.metal_session_mut() },
-                &execution.capture_layers,
+                event.capture_layers(),
                 capture,
                 &borrowed,
             )?;
@@ -3381,18 +3397,17 @@ fn forward_event(
             index: phase.index(),
         });
     }
-    if let Some(capture) = capture {
+    if let Some(capture) = capture.as_ref() {
         let values = read_f32_tensor(
             capture,
-            execution.capture_layers.len() * execution.hidden_size,
+            event.capture_layers().len() * execution.hidden_size,
         );
         for &definition_index in event.readout_indices() {
             let readout = &schedule.plan().readouts[definition_index];
-            for &layer in &execution.capture_layers {
+            for (slot, &layer) in event.capture_layers().iter().enumerate() {
                 if !schedule.readout_selects_layer(definition_index, layer) {
                     continue;
                 }
-                let slot = execution.layer_slots[&layer];
                 let row = &values[slot * execution.hidden_size..(slot + 1) * execution.hidden_size];
                 let prepared = &execution.lenses[&readout.lens];
                 let (score_kind, candidate_universe) = readout_score_semantics(prepared);

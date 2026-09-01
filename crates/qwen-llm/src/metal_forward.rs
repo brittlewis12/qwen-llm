@@ -955,6 +955,24 @@ fn auto_parallel_copy_a3b_override_present(mut is_present: impl FnMut(&str) -> b
         .any(&mut is_present)
 }
 
+fn auto_retained_single_pass_enabled(
+    admission_enabled: bool,
+    unified_memory: bool,
+    no_copy_mode: GgufNoCopyMode,
+    owned_mode: GgufOwnedArenaMode,
+    parallel_mode: GgufParallelCopyMode,
+    prefault_mode: GgufNoCopyPrefaultMode,
+    explicit_override_present: bool,
+) -> bool {
+    admission_enabled
+        && unified_memory
+        && no_copy_mode == GgufNoCopyMode::Disabled
+        && owned_mode == GgufOwnedArenaMode::Disabled
+        && parallel_mode == GgufParallelCopyMode::Auto
+        && prefault_mode == GgufNoCopyPrefaultMode::Default
+        && !explicit_override_present
+}
+
 fn validate_parallel_copy_policy(
     parallel_mode: GgufParallelCopyMode,
     no_copy_mode: GgufNoCopyMode,
@@ -1622,6 +1640,7 @@ impl Drop for MetalModelResidencySetGuard {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MetalModelLoadOptions {
     pub auto_parallel_copy_a3b: bool,
+    pub auto_retained_single_pass: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1667,6 +1686,26 @@ enum PreparedAutoSelection {
     Selected(PreparedParallelCopiedProfile),
 }
 
+enum PreparedAutoRetainedSelection {
+    NotEligible,
+    NoMatch(String),
+    Selected(RetainedStoragePlan),
+}
+
+fn prepare_auto_retained_selection(
+    parallel_auto_selected: bool,
+    eligible: bool,
+    planner: impl FnOnce() -> Result<RetainedStoragePlan, MfError>,
+) -> PreparedAutoRetainedSelection {
+    if parallel_auto_selected || !eligible {
+        return PreparedAutoRetainedSelection::NotEligible;
+    }
+    match planner() {
+        Ok(plan) => PreparedAutoRetainedSelection::Selected(plan),
+        Err(error) => PreparedAutoRetainedSelection::NoMatch(error.to_string()),
+    }
+}
+
 impl PreparedAutoSelection {
     fn prefetch_advice(&self) -> MetalLoadPrefetchAdvice {
         match self {
@@ -1693,6 +1732,7 @@ pub(crate) struct PreparedMetalModelLoad<'ctx, 'gguf, 'model> {
     choices: ResolvedWeightLoadChoices,
     expected: Vec<ModelWeightStorageRequest<'gguf>>,
     auto: PreparedAutoSelection,
+    auto_retained: PreparedAutoRetainedSelection,
 }
 
 impl PreparedMetalModelLoad<'_, '_, '_> {
@@ -4806,12 +4846,11 @@ fn realize_parallel_copied_profile(
     })
 }
 
-fn planned_retained_storage_for_load(
+fn retained_storage_plan_for_load(
     ctx: &MetalContext,
     gguf: &GgufFile,
     expected: &[ModelWeightStorageRequest<'_>],
-    prefault_enabled: bool,
-) -> Result<PlannedRetainedStorage, MfError> {
+) -> Result<RetainedStoragePlan, MfError> {
     let direct = expected
         .iter()
         .filter(|request| request.kind == ModelWeightStorageKind::Direct)
@@ -4842,6 +4881,15 @@ fn planned_retained_storage_for_load(
         }
     }
 
+    Ok(plan)
+}
+
+fn realize_retained_storage_for_load(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    plan: RetainedStoragePlan,
+    prefault_enabled: bool,
+) -> Result<PlannedRetainedStorage, MfError> {
     let mut windows = Vec::with_capacity(plan.windows.len());
     let mut window_bytes = 0u64;
     let mut prefault_pages = 0usize;
@@ -4970,6 +5018,16 @@ fn planned_retained_storage_for_load(
     })
 }
 
+fn planned_retained_storage_for_load(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    expected: &[ModelWeightStorageRequest<'_>],
+    prefault_enabled: bool,
+) -> Result<PlannedRetainedStorage, MfError> {
+    let plan = retained_storage_plan_for_load(ctx, gguf, expected)?;
+    realize_retained_storage_for_load(ctx, gguf, plan, prefault_enabled)
+}
+
 fn direct_storage_for_load(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -4980,6 +5038,7 @@ fn direct_storage_for_load(
     owned_mode: GgufOwnedArenaMode,
     parallel_mode: GgufParallelCopyMode,
     prepared_auto: PreparedAutoSelection,
+    prepared_auto_retained: PreparedAutoRetainedSelection,
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<(DirectStorage, bool), MfError> {
     let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
@@ -5008,6 +5067,10 @@ fn direct_storage_for_load(
     if let PreparedAutoSelection::Selected(prepared) = prepared_auto {
         let storage = realize_parallel_copied_profile(ctx, gguf, expected, prepared)?;
         return Ok((DirectStorage::ForcedParallelCopied(storage), false));
+    }
+    if let PreparedAutoRetainedSelection::Selected(plan) = prepared_auto_retained {
+        let storage = realize_retained_storage_for_load(ctx, gguf, plan, false)?;
+        return Ok((DirectStorage::ForcedPlanned(storage), false));
     }
     if mode == GgufNoCopyMode::Disabled {
         return Ok((DirectStorage::Copied, exact_sentinel));
@@ -5229,6 +5292,35 @@ impl MetalModel {
         } else {
             PreparedAutoSelection::NotEligible
         };
+        let auto_retained_eligible = auto_retained_single_pass_enabled(
+            options.auto_retained_single_pass,
+            ctx.device.hasUnifiedMemory(),
+            no_copy_mode,
+            owned_mode,
+            parallel_mode,
+            prefault_mode,
+            explicit_override_present,
+        );
+        let auto_retained = prepare_auto_retained_selection(
+            matches!(&auto, PreparedAutoSelection::Selected(_)),
+            auto_retained_eligible,
+            || retained_storage_plan_for_load(ctx, gguf, &expected),
+        );
+        match &auto_retained {
+            PreparedAutoRetainedSelection::Selected(plan) => emit_metal_load_line(format_args!(
+                concat!(
+                    "[metal-gguf-retained-policy] mode=auto action=selected ",
+                    "windows={} view_bytes={} fallback_bytes={} prefault=disabled"
+                ),
+                plan.windows.len(),
+                plan.unique_view_bytes,
+                plan.unique_fallback_bytes,
+            )),
+            PreparedAutoRetainedSelection::NoMatch(reason) => emit_metal_load_line(format_args!(
+                "[metal-gguf-retained-policy] mode=auto action=fallback reason={reason}"
+            )),
+            PreparedAutoRetainedSelection::NotEligible => {}
+        }
         Ok(PreparedMetalModelLoad {
             ctx,
             gguf,
@@ -5246,6 +5338,7 @@ impl MetalModel {
             },
             expected,
             auto,
+            auto_retained,
         })
     }
 
@@ -5260,6 +5353,7 @@ impl MetalModel {
             choices,
             expected,
             auto,
+            auto_retained,
         } = prepared;
         let (direct_storage, exact_sentinel) = direct_storage_for_load(
             ctx,
@@ -5271,6 +5365,7 @@ impl MetalModel {
             storage.owned_mode,
             storage.parallel_mode,
             auto,
+            auto_retained,
             choices.embedding_selection,
         )?;
         Self::load_with_direct_storage(
@@ -5353,6 +5448,7 @@ impl MetalModel {
             owned_mode,
             parallel_mode,
             PreparedAutoSelection::NotEligible,
+            PreparedAutoRetainedSelection::NotEligible,
             embedding_selection,
         )?;
         Self::load_with_direct_storage(
@@ -15929,6 +16025,158 @@ mod tests {
             ));
         }
         assert!(!MetalModelLoadOptions::default().auto_parallel_copy_a3b);
+        assert!(!MetalModelLoadOptions::default().auto_retained_single_pass);
+    }
+
+    #[test]
+    fn automatic_retained_single_pass_is_general_and_override_safe() {
+        assert!(auto_retained_single_pass_enabled(
+            true,
+            true,
+            GgufNoCopyMode::Disabled,
+            GgufOwnedArenaMode::Disabled,
+            GgufParallelCopyMode::Auto,
+            GgufNoCopyPrefaultMode::Default,
+            false,
+        ));
+        let rejected = [
+            auto_retained_single_pass_enabled(
+                false,
+                true,
+                GgufNoCopyMode::Disabled,
+                GgufOwnedArenaMode::Disabled,
+                GgufParallelCopyMode::Auto,
+                GgufNoCopyPrefaultMode::Default,
+                false,
+            ),
+            auto_retained_single_pass_enabled(
+                true,
+                false,
+                GgufNoCopyMode::Disabled,
+                GgufOwnedArenaMode::Disabled,
+                GgufParallelCopyMode::Auto,
+                GgufNoCopyPrefaultMode::Default,
+                false,
+            ),
+            auto_retained_single_pass_enabled(
+                true,
+                true,
+                GgufNoCopyMode::Forced,
+                GgufOwnedArenaMode::Disabled,
+                GgufParallelCopyMode::Auto,
+                GgufNoCopyPrefaultMode::Default,
+                false,
+            ),
+            auto_retained_single_pass_enabled(
+                true,
+                true,
+                GgufNoCopyMode::Disabled,
+                GgufOwnedArenaMode::Forced,
+                GgufParallelCopyMode::Auto,
+                GgufNoCopyPrefaultMode::Default,
+                false,
+            ),
+            auto_retained_single_pass_enabled(
+                true,
+                true,
+                GgufNoCopyMode::Disabled,
+                GgufOwnedArenaMode::Disabled,
+                GgufParallelCopyMode::Disabled,
+                GgufNoCopyPrefaultMode::Default,
+                false,
+            ),
+            auto_retained_single_pass_enabled(
+                true,
+                true,
+                GgufNoCopyMode::Disabled,
+                GgufOwnedArenaMode::Disabled,
+                GgufParallelCopyMode::Auto,
+                GgufNoCopyPrefaultMode::Enabled,
+                false,
+            ),
+            auto_retained_single_pass_enabled(
+                true,
+                true,
+                GgufNoCopyMode::Disabled,
+                GgufOwnedArenaMode::Disabled,
+                GgufParallelCopyMode::Auto,
+                GgufNoCopyPrefaultMode::Default,
+                true,
+            ),
+        ];
+        assert!(rejected.into_iter().all(|selected| !selected));
+
+        let planner_called = std::cell::Cell::new(false);
+        let skipped = prepare_auto_retained_selection(true, true, || {
+            planner_called.set(true);
+            unreachable!()
+        });
+        assert!(matches!(
+            skipped,
+            PreparedAutoRetainedSelection::NotEligible
+        ));
+        assert!(!planner_called.get());
+
+        let fallback = prepare_auto_retained_selection(false, true, || {
+            Err(MfError::LoadPolicy("unsupported fixture".into()))
+        });
+        assert!(matches!(
+            fallback,
+            PreparedAutoRetainedSelection::NoMatch(reason)
+                if reason.contains("unsupported fixture")
+        ));
+
+        let selected = prepare_auto_retained_selection(false, true, || {
+            Ok(RetainedStoragePlan {
+                page_size: 16_384,
+                max_buffer_length: 1 << 30,
+                usable_window_length: 1 << 30,
+                required_alignment: GGUF_NO_COPY_ALIGNMENT,
+                windows: Vec::new(),
+                entries: Vec::new(),
+                unique_view_bytes: 0,
+                logical_view_bytes: 0,
+                unique_fallback_bytes: 0,
+                alias_bytes: 0,
+            })
+        });
+        assert!(matches!(
+            selected,
+            PreparedAutoRetainedSelection::Selected(_)
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires local Qwen3.6-27B BF16 fixture"]
+    fn automatic_retained_single_pass_plans_qwen36_bf16_without_realizing_weights() {
+        let path = "/Volumes/wdblack/weights-archive/qwen3.6-27b-bf16/Qwen3.6-27B-BF16.gguf";
+        let ctx = MetalContext::new().expect("Metal context");
+        let gguf = GgufFile::open(path).expect("open Qwen3.6 BF16 fixture");
+        let model = Model::from_gguf(&gguf).expect("bind Qwen3.6 BF16 fixture");
+        let prepared = MetalModel::prepare_load_with_options(
+            &ctx,
+            &gguf,
+            &model,
+            MetalModelLoadOptions {
+                auto_parallel_copy_a3b: false,
+                auto_retained_single_pass: true,
+            },
+        )
+        .expect("prepare BF16 single-pass load");
+        let PreparedAutoRetainedSelection::Selected(plan) = &prepared.auto_retained else {
+            panic!("Qwen3.6 BF16 did not select a retained single-pass plan")
+        };
+        assert!(!plan.windows.is_empty());
+        assert!(plan.unique_view_bytes > 0);
+        assert!(plan.entries.iter().all(|entry| !matches!(
+            entry.disposition,
+            RetainedStorageDisposition::CopyFallback { reason }
+                if reason != RetainedStorageFallback::FinalPartialPage
+        )));
+        assert_eq!(
+            prepared.prefetch_advice(),
+            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
+        );
     }
 
     #[test]
@@ -17924,6 +18172,7 @@ mod tests {
             GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Disabled,
             PreparedAutoSelection::NotEligible,
+            PreparedAutoRetainedSelection::NotEligible,
             NativeQuantEmbeddingSelection::AutoUnpromoted,
         ) {
             Ok(_) => panic!("exact 27B rollback must fail before resource realization"),

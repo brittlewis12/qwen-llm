@@ -4,7 +4,7 @@ use clap::{ArgGroup, Args, ValueEnum};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
-use qwen_llm::runtime::{Runtime, SequenceConfig};
+use qwen_llm::runtime::{LoadedModelConfig, ModelLoadIntent, Runtime, SequenceConfig};
 use qwen_llm::workspace_lens::{
     MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS, WORKSPACE_LENS_IDENTITY_SCHEME,
 };
@@ -1024,7 +1024,11 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
     let model_started = Instant::now();
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
-        .load_model(&args.model)
+        .load_model_with_intent(
+            &args.model,
+            LoadedModelConfig::default(),
+            ModelLoadIntent::SinglePassAnalysis,
+        )
         .with_context(|| format!("load model {}", args.model.display()))?;
     let arch = loaded.arch();
     ensure!(
@@ -1362,7 +1366,11 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
 
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
-        .load_model(&args.model)
+        .load_model_with_intent(
+            &args.model,
+            LoadedModelConfig::default(),
+            ModelLoadIntent::SinglePassAnalysis,
+        )
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_deployed_model(&manifest, &loaded)?;
     let arch = loaded.arch();
@@ -1642,7 +1650,11 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
 
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
-        .load_model(&args.model)
+        .load_model_with_intent(
+            &args.model,
+            LoadedModelConfig::default(),
+            ModelLoadIntent::SinglePassAnalysis,
+        )
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_deployed_model(&manifest, &loaded)?;
     let arch = loaded.arch();

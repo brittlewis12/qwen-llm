@@ -198,7 +198,7 @@ impl Runtime {
         path: impl AsRef<Path>,
         config: LoadedModelConfig,
     ) -> Result<LoadedModel, RuntimeError> {
-        self.load_model_with_intent(path, config, ModelLoadIntent::ForceOnly)
+        self.load_model_with_intent(path, config, ModelLoadIntent::Reusable)
     }
 
     /// Bind and load an already-opened GGUF without resolving its path again.
@@ -224,7 +224,7 @@ impl Runtime {
             gguf,
             diagnostic_path.into(),
             config,
-            ModelLoadIntent::ForceOnly,
+            ModelLoadIntent::Reusable,
         )
     }
 
@@ -235,7 +235,7 @@ impl Runtime {
         config: LoadedModelConfig,
     ) -> Result<LoadedModel, RuntimeError> {
         let diagnostic_path = opened_gguf_diagnostic_path(&gguf)?;
-        self.load_opened_gguf_with_intent(gguf, diagnostic_path, config, ModelLoadIntent::ForceOnly)
+        self.load_opened_gguf_with_intent(gguf, diagnostic_path, config, ModelLoadIntent::Reusable)
     }
 
     /// Load for a disposable single-turn request, permitting authenticated
@@ -245,7 +245,7 @@ impl Runtime {
         path: impl AsRef<Path>,
         config: LoadedModelConfig,
     ) -> Result<LoadedModel, RuntimeError> {
-        self.load_model_with_intent(path, config, ModelLoadIntent::DisposableSingleTurn)
+        self.load_model_with_intent(path, config, ModelLoadIntent::DisposableGeneration)
     }
 
     /// Load an already-opened GGUF for one disposable request without mapping
@@ -260,11 +260,17 @@ impl Runtime {
             gguf,
             diagnostic_path,
             config,
-            ModelLoadIntent::DisposableSingleTurn,
+            ModelLoadIntent::DisposableGeneration,
         )
     }
 
-    fn load_model_with_intent(
+    /// Load a model according to its expected execution lifetime.
+    ///
+    /// The intent is semantic: storage and population mechanisms remain
+    /// private loader decisions. Unqualified automatic fast paths fall back
+    /// to the reusable load topology; failures after a qualified topology
+    /// begins realization remain load errors.
+    pub fn load_model_with_intent(
         &self,
         path: impl AsRef<Path>,
         config: LoadedModelConfig,
@@ -275,13 +281,15 @@ impl Runtime {
         self.load_opened_gguf_with_intent(gguf, path.to_path_buf(), config, intent)
     }
 
-    fn load_opened_gguf_with_intent(
+    /// Configured intent-aware form of [`Runtime::load_opened_gguf`].
+    pub fn load_opened_gguf_with_intent(
         &self,
         gguf: GgufFile,
-        diagnostic_path: PathBuf,
+        diagnostic_path: impl Into<PathBuf>,
         config: LoadedModelConfig,
         intent: ModelLoadIntent,
     ) -> Result<LoadedModel, RuntimeError> {
+        let diagnostic_path = diagnostic_path.into();
         let bound = Model::from_gguf(&gguf)?;
         let prepared = MetalModel::prepare_load_with_options(
             self.context(),
@@ -664,16 +672,23 @@ mod tests {
     }
 
     #[test]
-    fn model_load_intent_scopes_parallel_copy_auto_admission() {
-        assert!(
-            !ModelLoadIntent::ForceOnly
-                .metal_options()
-                .auto_parallel_copy_a3b
-        );
-        assert!(
-            ModelLoadIntent::DisposableSingleTurn
-                .metal_options()
-                .auto_parallel_copy_a3b
+    fn model_load_intent_scopes_automatic_storage_admission() {
+        let reusable = ModelLoadIntent::Reusable.metal_options();
+        assert!(!reusable.auto_parallel_copy_a3b);
+        assert!(!reusable.auto_retained_single_pass);
+
+        let generation = ModelLoadIntent::DisposableGeneration.metal_options();
+        assert!(generation.auto_parallel_copy_a3b);
+        assert!(!generation.auto_retained_single_pass);
+
+        let analysis = ModelLoadIntent::SinglePassAnalysis.metal_options();
+        assert!(analysis.auto_parallel_copy_a3b);
+        assert!(analysis.auto_retained_single_pass);
+
+        let cold_only = PrefetchPolicy::cold_only(DEFAULT_COLD_ONLY_THRESHOLD).unwrap();
+        assert_eq!(
+            effective_prefetch_action(cold_only, MetalLoadPrefetchAdvice::PreserveConfiguredPolicy),
+            PrefetchAction::ConfiguredPolicy,
         );
     }
 
@@ -1028,16 +1043,29 @@ impl PrefetchOutcome {
     }
 }
 
+/// Expected lifetime and execution shape of one loaded model.
+///
+/// This deliberately describes caller intent rather than Metal storage. The
+/// loader may select a qualified fast path, or preserve the reusable copied
+/// topology when no automatic path is authorized for the opened checkpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ModelLoadIntent {
-    ForceOnly,
-    DisposableSingleTurn,
+pub enum ModelLoadIntent {
+    /// A model that may serve many sequences or sustained execution.
+    Reusable,
+    /// One generation request whose decode can still be long-running.
+    DisposableGeneration,
+    /// One bounded capture/readout pass with no sustained decode phase.
+    SinglePassAnalysis,
 }
 
 impl ModelLoadIntent {
     fn metal_options(self) -> MetalModelLoadOptions {
         MetalModelLoadOptions {
-            auto_parallel_copy_a3b: self == Self::DisposableSingleTurn,
+            auto_parallel_copy_a3b: matches!(
+                self,
+                Self::DisposableGeneration | Self::SinglePassAnalysis
+            ),
+            auto_retained_single_pass: self == Self::SinglePassAnalysis,
         }
     }
 }

@@ -15,7 +15,9 @@ use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpFixedHyperAdd, Qwen4ExpLoadedModel, Qwen4ExpPostLayerHyperRequest,
     Qwen4ExpSessionCapacity, Qwen4ExpTextRunner,
 };
-use qwen_llm::runtime::{PackedPrefillScratch, Runtime, SequenceConfig};
+use qwen_llm::runtime::{
+    LoadedModelConfig, ModelLoadIntent, PackedPrefillScratch, Runtime, SequenceConfig,
+};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
@@ -1687,7 +1689,12 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
 
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
-        .load_opened_gguf(gguf, args.model.clone())
+        .load_opened_gguf_with_intent(
+            gguf,
+            args.model.clone(),
+            LoadedModelConfig::default(),
+            ModelLoadIntent::DisposableGeneration,
+        )
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
     let tokenizer = loaded.tokenizer().context("load model tokenizer")?;

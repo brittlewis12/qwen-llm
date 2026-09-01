@@ -1433,6 +1433,7 @@ fn execute_ordinary_arm(
             &mut sequence,
             phase,
             &event,
+            phase_needs_logits(phase, prompt_token_ids.len()),
             &mut operation_applications,
             &mut live_readouts,
         )?;
@@ -1460,6 +1461,7 @@ fn execute_ordinary_arm(
             &mut sequence,
             phase,
             &event,
+            phase_needs_logits(phase, prompt_token_ids.len()),
             &mut operation_applications,
             &mut live_readouts,
         )?;
@@ -3234,6 +3236,49 @@ impl Phase {
     }
 }
 
+fn phase_needs_logits(phase: Phase, prompt_len: usize) -> bool {
+    match phase {
+        Phase::Prefill(index) => prompt_len.checked_sub(1) == Some(index),
+        Phase::Decode(_) => true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventForwardRoute {
+    ProductionFullTail,
+    ProductionFullTailDiscardLogits,
+    SerialFullTailCapture,
+    SerialFullTailNoCapture,
+    SerialNoTailCapture,
+    SerialNoTailNoCapture,
+}
+
+fn event_forward_route(
+    needs_logits: bool,
+    has_capture_plan: bool,
+    has_active_readouts: bool,
+    has_interventions: bool,
+) -> EventForwardRoute {
+    debug_assert!(!has_active_readouts || has_capture_plan);
+    if has_active_readouts {
+        if needs_logits {
+            EventForwardRoute::SerialFullTailCapture
+        } else {
+            EventForwardRoute::SerialNoTailCapture
+        }
+    } else if has_capture_plan || has_interventions {
+        if needs_logits {
+            EventForwardRoute::SerialFullTailNoCapture
+        } else {
+            EventForwardRoute::SerialNoTailNoCapture
+        }
+    } else if needs_logits {
+        EventForwardRoute::ProductionFullTail
+    } else {
+        EventForwardRoute::ProductionFullTailDiscardLogits
+    }
+}
+
 fn forward_event(
     execution: &ExecutionPlan,
     schedule: &BoundEventSchedule<'_, '_>,
@@ -3243,6 +3288,7 @@ fn forward_event(
     sequence: &mut qwen_llm::runtime::Sequence,
     phase: Phase,
     event: &CompiledEvent,
+    needs_logits: bool,
     operation_applications: &mut Vec<OperationApplication>,
     live_readouts: &mut Vec<LiveReadout>,
 ) -> Result<Vec<f32>> {
@@ -3267,25 +3313,63 @@ fn forward_event(
         .iter()
         .map(|(_, _, op)| *op)
         .collect::<Vec<_>>();
-    let capture = execution.capture.as_ref();
-    let logits = if let Some(capture) = capture {
-        forward.single_token_with_post_block_interventions(
-            token,
-            position,
-            unsafe { sequence.metal_session_mut() },
-            &execution.capture_layers,
-            capture,
-            &borrowed,
-        )?
-    } else if borrowed.is_empty() {
-        forward.single_token(token, position, unsafe { sequence.metal_session_mut() })?
-    } else {
-        forward.single_token_with_post_block_interventions_no_capture(
-            token,
-            position,
-            unsafe { sequence.metal_session_mut() },
-            &borrowed,
-        )?
+    sequence.check_position(position as usize)?;
+    sequence.ensure_can_append(1)?;
+    let has_readouts = !event.readout_indices().is_empty();
+    let route = event_forward_route(
+        needs_logits,
+        execution.capture.is_some(),
+        has_readouts,
+        !borrowed.is_empty(),
+    );
+    let capture = execution.capture.as_ref().filter(|_| has_readouts);
+    let logits = match route {
+        EventForwardRoute::SerialFullTailCapture => {
+            let capture = capture.context("active Lens readout has no capture storage")?;
+            forward.single_token_with_post_block_interventions(
+                token,
+                position,
+                unsafe { sequence.metal_session_mut() },
+                &execution.capture_layers,
+                capture,
+                &borrowed,
+            )?
+        }
+        EventForwardRoute::SerialFullTailNoCapture => forward
+            .single_token_with_post_block_interventions_no_capture(
+                token,
+                position,
+                unsafe { sequence.metal_session_mut() },
+                &borrowed,
+            )?,
+        EventForwardRoute::ProductionFullTail => {
+            forward.single_token(token, position, unsafe { sequence.metal_session_mut() })?
+        }
+        EventForwardRoute::SerialNoTailCapture => {
+            let capture = capture.context("active Lens readout has no capture storage")?;
+            forward.single_token_with_post_block_interventions_no_tail(
+                token,
+                position,
+                unsafe { sequence.metal_session_mut() },
+                &execution.capture_layers,
+                capture,
+                &borrowed,
+            )?;
+            Vec::new()
+        }
+        EventForwardRoute::SerialNoTailNoCapture => {
+            forward.single_token_with_post_block_interventions_no_capture_no_tail(
+                token,
+                position,
+                unsafe { sequence.metal_session_mut() },
+                &borrowed,
+            )?;
+            Vec::new()
+        }
+        EventForwardRoute::ProductionFullTailDiscardLogits => {
+            forward.single_token(token, position, unsafe { sequence.metal_session_mut() })?;
+            Vec::new()
+        }
     };
     sequence.advance_by(1)?;
 
@@ -4425,6 +4509,54 @@ mod tests {
             decode: None,
         };
         assert!(validate_scope_reachable(&scope, 2, 1, "x").is_ok());
+    }
+
+    #[test]
+    fn only_the_final_prefill_event_and_decode_events_need_logits() {
+        assert!(phase_needs_logits(Phase::Prefill(0), 1));
+        assert!(!phase_needs_logits(Phase::Prefill(0), 3));
+        assert!(!phase_needs_logits(Phase::Prefill(1), 3));
+        assert!(phase_needs_logits(Phase::Prefill(2), 3));
+        assert!(phase_needs_logits(Phase::Decode(0), 3));
+        assert!(phase_needs_logits(Phase::Decode(99), 3));
+    }
+
+    #[test]
+    fn event_forward_routes_preserve_serial_and_production_topology() {
+        use EventForwardRoute::*;
+
+        assert_eq!(
+            event_forward_route(true, false, false, false),
+            ProductionFullTail
+        );
+        assert_eq!(
+            event_forward_route(false, false, false, false),
+            ProductionFullTailDiscardLogits
+        );
+        assert_eq!(
+            event_forward_route(true, true, true, false),
+            SerialFullTailCapture
+        );
+        assert_eq!(
+            event_forward_route(false, true, true, true),
+            SerialNoTailCapture
+        );
+        assert_eq!(
+            event_forward_route(true, true, false, false),
+            SerialFullTailNoCapture
+        );
+        assert_eq!(
+            event_forward_route(false, true, false, false),
+            SerialNoTailNoCapture
+        );
+        assert_eq!(
+            event_forward_route(true, false, false, true),
+            SerialFullTailNoCapture
+        );
+        assert_eq!(
+            event_forward_route(false, false, false, true),
+            SerialNoTailNoCapture
+        );
     }
 
     #[test]

@@ -10473,6 +10473,60 @@ impl<'a> MetalForward<'a> {
         )
     }
 
+    /// Skip-tail counterpart of
+    /// [`single_token_with_post_block_interventions`]. Advances ordinary
+    /// dense or MoE state, applies caller-ordered post-block interventions,
+    /// and captures the requested post-block rows without running final
+    /// RMSNorm, the LM head, or logits readback.
+    pub fn single_token_with_post_block_interventions_no_tail(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        hidden_dst: &MetalTensor,
+        interventions: &[PostBlockIntervention<'_>],
+    ) -> Result<(), MfError> {
+        self.single_token_with_hidden_sites(
+            token_id,
+            position,
+            session,
+            target_layer_ids,
+            Some(hidden_dst),
+            None,
+            interventions,
+            true,
+            false,
+        )?;
+        Ok(())
+    }
+
+    /// Skip-tail counterpart of
+    /// [`single_token_with_post_block_interventions_no_capture`]. Advances
+    /// ordinary dense or MoE state and applies caller-ordered post-block
+    /// interventions without capture, final RMSNorm, LM-head work, or logits
+    /// readback.
+    pub fn single_token_with_post_block_interventions_no_capture_no_tail(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        interventions: &[PostBlockIntervention<'_>],
+    ) -> Result<(), MfError> {
+        self.single_token_with_hidden_sites(
+            token_id,
+            position,
+            session,
+            &[],
+            None,
+            None,
+            interventions,
+            true,
+            false,
+        )?;
+        Ok(())
+    }
+
     /// Skip-tail variant of [`single_token_with_dense_ffn_capture`]. Captures
     /// both residual sites but does not run final RMSNorm, the LM head, or a
     /// logits readback. The mutable sequence state advances exactly as in the
@@ -19771,6 +19825,211 @@ mod tests {
     }
 
     #[test]
+    fn dense_intervention_no_tail_matches_full_tail() {
+        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[dense-intervention-no-tail] skipped - fixture missing");
+            return;
+        }
+        let Some(context) = metal_test_context() else {
+            return;
+        };
+        let gguf = GgufFile::open(model_path).expect("open");
+        let model = Model::from_gguf(&gguf).expect("load");
+        let metal_model = MetalModel::load(&context, &gguf, &model).expect("metal load");
+        let forward = MetalForward::new(&context, &metal_model);
+        let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
+        let mut token_ids = tokenizer
+            .encode("Hello from the lens", false)
+            .expect("tokenize");
+        token_ids.truncate(3);
+        assert!(
+            token_ids.len() >= 2,
+            "test prompt needs at least two tokens"
+        );
+
+        let hidden_size = model.arch.hidden_size as usize;
+        let capture_layers = [4u32, 5, 5];
+        let capture_elements = hidden_size * capture_layers.len();
+        let direction_values: Vec<f32> = (0..hidden_size)
+            .map(|index| ((index * 11 + 5) % 23) as f32 / 23.0 - 0.5)
+            .collect();
+        let direction = MetalTensor::from_bytes(
+            &context,
+            bytemuck::cast_slice(&direction_values),
+            vec![hidden_size as u64],
+            GgmlType::F32,
+        )
+        .expect("direction");
+        let interventions = [
+            PostBlockIntervention::Fixed {
+                layer: 5,
+                direction: &direction,
+                coefficient: 0.125,
+            },
+            PostBlockIntervention::Projection {
+                layer: 5,
+                direction: &direction,
+                coefficient: 0.25,
+            },
+        ];
+        let read_capture = |tensor: &MetalTensor| {
+            let mut values = vec![0.0f32; capture_elements];
+            unsafe {
+                let source = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize)
+                    .cast::<f32>();
+                std::ptr::copy_nonoverlapping(source, values.as_mut_ptr(), values.len());
+            }
+            values
+        };
+        let assert_bits_equal = |label: &str, left: &[f32], right: &[f32]| {
+            assert_eq!(left.len(), right.len(), "{label} length");
+            if let Some((index, (left, right))) = left
+                .iter()
+                .zip(right)
+                .enumerate()
+                .find(|(_, (left, right))| left.to_bits() != right.to_bits())
+            {
+                panic!(
+                    "{label} differs at {index}: {left:?} ({:#010x}) != {right:?} ({:#010x})",
+                    left.to_bits(),
+                    right.to_bits()
+                );
+            }
+        };
+        let assert_logits_untouched = |label: &str, session: &MetalSession| {
+            let logits = unsafe {
+                let source = session
+                    .logits
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(session.logits.offset as usize)
+                    .cast::<f32>();
+                std::slice::from_raw_parts(source, model.arch.vocab_size as usize)
+            };
+            assert!(
+                logits.iter().all(|value| value.to_bits() == 0),
+                "{label} wrote the zero-initialized logits buffer"
+            );
+        };
+
+        let capture_full = MetalTensor::zeros_f32(&context, vec![capture_elements as u64]).unwrap();
+        let mut session_full =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let mut captures_full = Vec::new();
+        let mut logits_full = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            logits_full = forward
+                .single_token_with_post_block_interventions(
+                    token_id,
+                    position as u32,
+                    &mut session_full,
+                    &capture_layers,
+                    &capture_full,
+                    &interventions,
+                )
+                .expect("full-tail capture forward");
+            captures_full.extend(read_capture(&capture_full));
+        }
+
+        let capture_skip = MetalTensor::zeros_f32(&context, vec![capture_elements as u64]).unwrap();
+        let mut session_skip =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let mut captures_skip = Vec::new();
+        let mut logits_skip = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            if position + 1 == token_ids.len() {
+                logits_skip = forward
+                    .single_token_with_post_block_interventions(
+                        token_id,
+                        position as u32,
+                        &mut session_skip,
+                        &capture_layers,
+                        &capture_skip,
+                        &interventions,
+                    )
+                    .expect("final capture forward");
+            } else {
+                forward
+                    .single_token_with_post_block_interventions_no_tail(
+                        token_id,
+                        position as u32,
+                        &mut session_skip,
+                        &capture_layers,
+                        &capture_skip,
+                        &interventions,
+                    )
+                    .expect("no-tail capture forward");
+                if position == 0 {
+                    assert_logits_untouched("capture no-tail", &session_skip);
+                }
+            }
+            captures_skip.extend(read_capture(&capture_skip));
+        }
+        assert_bits_equal("post-block captures", &captures_full, &captures_skip);
+        assert_bits_equal("capture final logits", &logits_full, &logits_skip);
+
+        let mut no_capture_full =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let mut no_capture_full_logits = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            no_capture_full_logits = forward
+                .single_token_with_post_block_interventions_no_capture(
+                    token_id,
+                    position as u32,
+                    &mut no_capture_full,
+                    &interventions,
+                )
+                .expect("full-tail no-capture forward");
+        }
+        assert_bits_equal(
+            "capture elision final logits",
+            &logits_full,
+            &no_capture_full_logits,
+        );
+
+        let mut no_capture_skip =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let mut no_capture_skip_logits = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            if position + 1 == token_ids.len() {
+                no_capture_skip_logits = forward
+                    .single_token_with_post_block_interventions_no_capture(
+                        token_id,
+                        position as u32,
+                        &mut no_capture_skip,
+                        &interventions,
+                    )
+                    .expect("final no-capture forward");
+            } else {
+                forward
+                    .single_token_with_post_block_interventions_no_capture_no_tail(
+                        token_id,
+                        position as u32,
+                        &mut no_capture_skip,
+                        &interventions,
+                    )
+                    .expect("no-tail no-capture forward");
+                if position == 0 {
+                    assert_logits_untouched("no-capture no-tail", &no_capture_skip);
+                }
+            }
+        }
+        assert_bits_equal(
+            "no-capture final logits",
+            &no_capture_full_logits,
+            &no_capture_skip_logits,
+        );
+    }
+
+    #[test]
     fn ordinary_moe_serial_post_block_fixed_add_seam() {
         let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
         if !std::path::Path::new(model_path).exists() {
@@ -19894,6 +20153,128 @@ mod tests {
         assert!(
             max_logit_delta > 1e-4,
             "MoE fixed addition did not change downstream logits: max|delta|={max_logit_delta}"
+        );
+
+        let assert_bits_equal = |label: &str, left: &[f32], right: &[f32]| {
+            assert_eq!(left.len(), right.len(), "{label} length");
+            if let Some((index, (left, right))) = left
+                .iter()
+                .zip(right)
+                .enumerate()
+                .find(|(_, (left, right))| left.to_bits() != right.to_bits())
+            {
+                panic!(
+                    "{label} differs at {index}: {left:?} ({:#010x}) != {right:?} ({:#010x})",
+                    left.to_bits(),
+                    right.to_bits()
+                );
+            }
+        };
+        let token_ids = [9419, 198];
+        let mut full_session =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let full_dst =
+            MetalTensor::zeros_f32(&context, vec![(hidden_size * target_layers.len()) as u64])
+                .unwrap();
+        let mut full_captures = Vec::new();
+        let mut full_logits = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            full_logits = forward
+                .single_token_with_post_block_interventions(
+                    token_id,
+                    position as u32,
+                    &mut full_session,
+                    &target_layers,
+                    &full_dst,
+                    &interventions,
+                )
+                .expect("MoE full-tail capture forward");
+            full_captures.extend(read_capture(&full_dst));
+        }
+
+        let mut skip_session =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let skip_dst =
+            MetalTensor::zeros_f32(&context, vec![(hidden_size * target_layers.len()) as u64])
+                .unwrap();
+        let mut skip_captures = Vec::new();
+        let mut skip_logits = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            if position + 1 == token_ids.len() {
+                skip_logits = forward
+                    .single_token_with_post_block_interventions(
+                        token_id,
+                        position as u32,
+                        &mut skip_session,
+                        &target_layers,
+                        &skip_dst,
+                        &interventions,
+                    )
+                    .expect("MoE final capture forward");
+            } else {
+                forward
+                    .single_token_with_post_block_interventions_no_tail(
+                        token_id,
+                        position as u32,
+                        &mut skip_session,
+                        &target_layers,
+                        &skip_dst,
+                        &interventions,
+                    )
+                    .expect("MoE no-tail capture forward");
+            }
+            skip_captures.extend(read_capture(&skip_dst));
+        }
+        assert_bits_equal("MoE no-tail captures", &full_captures, &skip_captures);
+        assert_bits_equal("MoE no-tail final logits", &full_logits, &skip_logits);
+
+        let mut no_capture_full =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let mut no_capture_full_logits = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            no_capture_full_logits = forward
+                .single_token_with_post_block_interventions_no_capture(
+                    token_id,
+                    position as u32,
+                    &mut no_capture_full,
+                    &interventions,
+                )
+                .expect("MoE full-tail no-capture forward");
+        }
+        assert_bits_equal(
+            "MoE capture elision final logits",
+            &full_logits,
+            &no_capture_full_logits,
+        );
+
+        let mut no_capture_skip =
+            MetalSession::fresh(&context, &metal_model, token_ids.len() + 2).unwrap();
+        let mut no_capture_skip_logits = Vec::new();
+        for (position, &token_id) in token_ids.iter().enumerate() {
+            if position + 1 == token_ids.len() {
+                no_capture_skip_logits = forward
+                    .single_token_with_post_block_interventions_no_capture(
+                        token_id,
+                        position as u32,
+                        &mut no_capture_skip,
+                        &interventions,
+                    )
+                    .expect("MoE final no-capture forward");
+            } else {
+                forward
+                    .single_token_with_post_block_interventions_no_capture_no_tail(
+                        token_id,
+                        position as u32,
+                        &mut no_capture_skip,
+                        &interventions,
+                    )
+                    .expect("MoE no-tail no-capture forward");
+            }
+        }
+        assert_bits_equal(
+            "MoE no-capture final logits",
+            &no_capture_full_logits,
+            &no_capture_skip_logits,
         );
     }
 

@@ -84,13 +84,13 @@ pub mod qwen4exp_residency;
 pub mod qwen4exp_runtime;
 pub mod qwen4exp_text_session;
 mod qwen_queue2;
-pub mod research;
 pub mod runtime;
 pub mod sampling;
 pub mod tensor;
 pub mod tokenizer;
 pub mod trellis_ldlq;
 pub mod trellis_offline;
+pub mod workspace_lens;
 
 /// Bytes of the compiled `.metallib` produced by `build.rs` from
 /// `../../kernels/*.metal`. Empty until the first kernel is added.

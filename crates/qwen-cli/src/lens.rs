@@ -2,11 +2,11 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::model::Arch;
-use qwen_llm::research::{
-    MAX_RESEARCH_WORKSPACE_DIM_BATCH, MAX_RESEARCH_WORKSPACE_TOKENS, ResearchWorkspaceBlockKind,
-    ResearchWorkspaceReplayDiagnostic, WorkspaceLensRule,
-};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
+use qwen_llm::workspace_lens::{
+    MAX_WORKSPACE_LENS_DIM_BATCH, MAX_WORKSPACE_LENS_TOKENS, WorkspaceLensBlockKind,
+    WorkspaceLensReplayDiagnostic, WorkspaceLensRule,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{DirBuilder, File, OpenOptions};
@@ -173,7 +173,7 @@ struct FitRowsArgs {
     skip_first: usize,
 
     /// Tokenize/truncate each record to this bound (maximum 128).
-    #[arg(long, default_value_t = MAX_RESEARCH_WORKSPACE_TOKENS)]
+    #[arg(long, default_value_t = MAX_WORKSPACE_LENS_TOKENS)]
     max_tokens: usize,
 
     /// Consume at most this many non-comment JSONL records (maximum 10000).
@@ -236,7 +236,7 @@ struct FitTokensArgs {
     skip_first: usize,
 
     /// Tokenize/truncate each record to this bound (maximum 128).
-    #[arg(long, default_value_t = MAX_RESEARCH_WORKSPACE_TOKENS)]
+    #[arg(long, default_value_t = MAX_WORKSPACE_LENS_TOKENS)]
     max_tokens: usize,
 
     /// Consume at most this many non-comment JSONL records (maximum 10000).
@@ -374,7 +374,11 @@ struct ModelSummary {
     content_blake3: String,
     content_identity_outcome: String,
     content_bytes_hashed: u64,
-    research_identity_scheme: String,
+    #[serde(
+        rename = "research_identity_scheme",
+        alias = "workspace_lens_identity_scheme"
+    )]
+    workspace_lens_identity_scheme: String,
     model_locator_id: String,
     tokenizer_metadata_id: String,
     content_authenticated: bool,
@@ -610,7 +614,7 @@ fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
         arch.vocab_size,
     )?;
     let corpus_blake3 = corpus_digest(&prompts);
-    let identity = loaded.research_identity();
+    let identity = loaded.workspace_lens_identity();
     let content = checkpoint_content_identity(
         loaded.gguf(),
         &CheckpointIdentityCache::new(&args.identity_cache),
@@ -711,16 +715,16 @@ fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
         let mut sequence = loaded
             .create_sequence(SequenceConfig::new(prompt.token_ids.len()))
             .with_context(|| format!("create sequence for prompt {}", prompt.id))?;
-        let mut research = loaded
-            .research_session(&mut sequence)
-            .with_context(|| format!("open research session for prompt {}", prompt.id))?;
+        let mut workspace_lens = loaded
+            .workspace_lens_session(&mut sequence)
+            .with_context(|| format!("open workspace-lens session for prompt {}", prompt.id))?;
         let started = Instant::now();
-        let forward = research
+        let forward = workspace_lens
             .forward_prompt_with_workspace_capture(&prompt.token_ids)
             .with_context(|| format!("capture workspace prompt {}", prompt.id))?;
         active.forward_seconds += started.elapsed().as_secs_f64();
         let started = Instant::now();
-        let rows = research
+        let rows = workspace_lens
             .workspace_fit_rows_batched(
                 &forward,
                 args.target_layer,
@@ -789,7 +793,7 @@ fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
             content_blake3: model_content_blake3,
             content_identity_outcome: format!("{:?}", content.outcome),
             content_bytes_hashed: content.bytes_hashed,
-            research_identity_scheme: "qwen_llm_model_locator_v1".into(),
+            workspace_lens_identity_scheme: "qwen_llm_model_locator_v1".into(),
             model_locator_id: config.model_locator_id.clone(),
             tokenizer_metadata_id: config.tokenizer_metadata_id.clone(),
             content_authenticated: true,
@@ -894,7 +898,7 @@ fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
         arch.vocab_size,
     )?;
     let corpus_blake3 = corpus_digest(&prompts);
-    let identity = loaded.research_identity();
+    let identity = loaded.workspace_lens_identity();
     let content = checkpoint_content_identity(
         loaded.gguf(),
         &CheckpointIdentityCache::new(&args.identity_cache),
@@ -911,10 +915,10 @@ fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
         let mut sequence = loaded
             .create_sequence(SequenceConfig::new(1))
             .context("create selected-token readout sequence")?;
-        let research = loaded
-            .research_session(&mut sequence)
-            .context("open selected-token readout research session")?;
-        research
+        let workspace_lens = loaded
+            .workspace_lens_session(&mut sequence)
+            .context("open selected-token readout workspace-lens session")?;
+        workspace_lens
             .selected_token_readouts(&args.token_ids)
             .context("derive selected-token target covectors")?
     };
@@ -1017,16 +1021,16 @@ fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
         let mut sequence = loaded
             .create_sequence(SequenceConfig::new(prompt.token_ids.len()))
             .with_context(|| format!("create sequence for prompt {}", prompt.id))?;
-        let mut research = loaded
-            .research_session(&mut sequence)
-            .with_context(|| format!("open research session for prompt {}", prompt.id))?;
+        let mut workspace_lens = loaded
+            .workspace_lens_session(&mut sequence)
+            .with_context(|| format!("open workspace-lens session for prompt {}", prompt.id))?;
         let started = Instant::now();
-        let forward = research
+        let forward = workspace_lens
             .forward_prompt_with_workspace_capture(&prompt.token_ids)
             .with_context(|| format!("capture workspace prompt {}", prompt.id))?;
         active.forward_seconds += started.elapsed().as_secs_f64();
         let started = Instant::now();
-        let readouts = research
+        let readouts = workspace_lens
             .workspace_fit_readouts_batched(
                 &forward,
                 args.target_layer,
@@ -1099,7 +1103,7 @@ fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
             content_blake3: model_content_blake3,
             content_identity_outcome: format!("{:?}", content.outcome),
             content_bytes_hashed: content.bytes_hashed,
-            research_identity_scheme: "qwen_llm_model_locator_v1".into(),
+            workspace_lens_identity_scheme: "qwen_llm_model_locator_v1".into(),
             model_locator_id: config.model_locator_id.clone(),
             tokenizer_metadata_id: config.tokenizer_metadata_id.clone(),
             content_authenticated: true,
@@ -1196,17 +1200,17 @@ fn validate_args(args: &FitRowsArgs) -> Result<()> {
         "--records-this-run is supported only for Muse row fitting"
     );
     ensure!(
-        args.dim_batch <= MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+        args.dim_batch <= MAX_WORKSPACE_LENS_DIM_BATCH,
         "--dim-batch {} exceeds native workspace limit {}",
         args.dim_batch,
-        MAX_RESEARCH_WORKSPACE_DIM_BATCH
+        MAX_WORKSPACE_LENS_DIM_BATCH
     );
     ensure!(args.max_tokens > 0, "--max-tokens must be nonzero");
     ensure!(
-        args.max_tokens <= MAX_RESEARCH_WORKSPACE_TOKENS,
+        args.max_tokens <= MAX_WORKSPACE_LENS_TOKENS,
         "--max-tokens {} exceeds native workspace limit {}",
         args.max_tokens,
-        MAX_RESEARCH_WORKSPACE_TOKENS
+        MAX_WORKSPACE_LENS_TOKENS
     );
     ensure!(
         args.skip_first
@@ -1243,17 +1247,17 @@ fn validate_token_args(args: &FitTokensArgs) -> Result<()> {
     );
     ensure!(args.dim_batch > 0, "--dim-batch must be nonzero");
     ensure!(
-        args.dim_batch <= MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+        args.dim_batch <= MAX_WORKSPACE_LENS_DIM_BATCH,
         "--dim-batch {} exceeds native workspace limit {}",
         args.dim_batch,
-        MAX_RESEARCH_WORKSPACE_DIM_BATCH
+        MAX_WORKSPACE_LENS_DIM_BATCH
     );
     ensure!(args.max_tokens > 0, "--max-tokens must be nonzero");
     ensure!(
-        args.max_tokens <= MAX_RESEARCH_WORKSPACE_TOKENS,
+        args.max_tokens <= MAX_WORKSPACE_LENS_TOKENS,
         "--max-tokens {} exceeds native workspace limit {}",
         args.max_tokens,
-        MAX_RESEARCH_WORKSPACE_TOKENS
+        MAX_WORKSPACE_LENS_TOKENS
     );
     ensure!(
         args.skip_first
@@ -1542,7 +1546,7 @@ fn record_dim_batch_timing(
 ) -> Result<()> {
     ensure!(
         dim_batch > 0
-            && dim_batch <= MAX_RESEARCH_WORKSPACE_DIM_BATCH
+            && dim_batch <= MAX_WORKSPACE_LENS_DIM_BATCH
             && vjp_seconds.is_finite()
             && vjp_seconds >= 0.0,
         "invalid token dim-batch timing sample"
@@ -1585,7 +1589,7 @@ fn validate_dim_batch_timings(
     for timing in timings {
         ensure!(
             timing.dim_batch > 0
-                && timing.dim_batch <= MAX_RESEARCH_WORKSPACE_DIM_BATCH
+                && timing.dim_batch <= MAX_WORKSPACE_LENS_DIM_BATCH
                 && seen.insert(timing.dim_batch)
                 && timing.prompt_count > 0
                 && timing.vjp_seconds.is_finite()
@@ -1937,7 +1941,7 @@ fn validate_token_complete_manifest(
             && manifest.model.hidden_size == expected_config.hidden_size
             && manifest.model.vocab_size == expected_config.vocab_size
             && manifest.model.full_attention_interval == expected_config.full_attention_interval
-            && manifest.model.research_identity_scheme == "qwen_llm_model_locator_v1"
+            && manifest.model.workspace_lens_identity_scheme == "qwen_llm_model_locator_v1"
             && manifest.model.content_authenticated,
         "completed token readout model summary disagrees with its config"
     );
@@ -2454,7 +2458,7 @@ fn checkpoint_token_active(
 
 fn merge_diagnostics(
     aggregate: &mut Vec<ReplayDiagnostic>,
-    current: &[ResearchWorkspaceReplayDiagnostic],
+    current: &[WorkspaceLensReplayDiagnostic],
 ) -> Result<()> {
     if aggregate.is_empty() {
         aggregate.extend(current.iter().map(|diagnostic| ReplayDiagnostic {
@@ -2481,10 +2485,10 @@ fn merge_diagnostics(
     Ok(())
 }
 
-fn block_kind(kind: ResearchWorkspaceBlockKind) -> &'static str {
+fn block_kind(kind: WorkspaceLensBlockKind) -> &'static str {
     match kind {
-        ResearchWorkspaceBlockKind::Gdn => "gdn",
-        ResearchWorkspaceBlockKind::Attention => "attention",
+        WorkspaceLensBlockKind::Gdn => "gdn",
+        WorkspaceLensBlockKind::Attention => "attention",
     }
 }
 
@@ -2827,6 +2831,41 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn model_summary_keeps_the_historical_identity_wire_key() {
+        let summary = ModelSummary {
+            path: "model.gguf".into(),
+            content_blake3: "11".repeat(32),
+            content_identity_outcome: "computed".into(),
+            content_bytes_hashed: 42,
+            workspace_lens_identity_scheme: "qwen_llm_model_locator_v1".into(),
+            model_locator_id: "22".repeat(8),
+            tokenizer_metadata_id: "33".repeat(8),
+            content_authenticated: true,
+            architecture: "qwen35".into(),
+            n_layers: 64,
+            hidden_size: 5_120,
+            vocab_size: 248_320,
+            full_attention_interval: 4,
+        };
+        let encoded = serde_json::to_value(&summary).unwrap();
+        assert_eq!(
+            encoded["research_identity_scheme"],
+            "qwen_llm_model_locator_v1"
+        );
+        assert!(encoded.get("workspace_lens_identity_scheme").is_none());
+
+        let mut aliased = encoded;
+        let object = aliased.as_object_mut().unwrap();
+        let scheme = object.remove("research_identity_scheme").unwrap();
+        object.insert("workspace_lens_identity_scheme".into(), scheme);
+        let decoded: ModelSummary = serde_json::from_value(aliased).unwrap();
+        assert_eq!(
+            decoded.workspace_lens_identity_scheme,
+            "qwen_llm_model_locator_v1"
+        );
+    }
+
     fn test_config() -> FitConfig {
         FitConfig {
             estimator_version: ESTIMATOR_VERSION.into(),
@@ -2978,7 +3017,7 @@ mod tests {
     fn fit_args_bound_native_query_batch() {
         let mut args = test_fit_args();
         validate_args(&args).unwrap();
-        args.dim_batch = MAX_RESEARCH_WORKSPACE_DIM_BATCH + 1;
+        args.dim_batch = MAX_WORKSPACE_LENS_DIM_BATCH + 1;
         assert!(validate_args(&args).is_err());
         args.dim_batch = 1;
         args.max_prompts = MAX_PROMPT_RECORDS + 1;
@@ -3285,7 +3324,7 @@ mod tests {
         let config = test_token_config(&args);
         let digest = digest_json(&config).unwrap();
         let mut runtime_changed = args;
-        runtime_changed.dim_batch = MAX_RESEARCH_WORKSPACE_DIM_BATCH;
+        runtime_changed.dim_batch = MAX_WORKSPACE_LENS_DIM_BATCH;
         assert_eq!(
             digest,
             digest_json(&test_token_config(&runtime_changed)).unwrap()
@@ -3327,7 +3366,7 @@ mod tests {
         invalid[1].dim_batch = 2;
         assert!(validate_dim_batch_timings(&invalid, 3, 3.0).is_err());
         let mut invalid = valid.to_vec();
-        invalid[1].dim_batch = MAX_RESEARCH_WORKSPACE_DIM_BATCH + 1;
+        invalid[1].dim_batch = MAX_WORKSPACE_LENS_DIM_BATCH + 1;
         assert!(validate_dim_batch_timings(&invalid, 3, 3.0).is_err());
         assert!(validate_dim_batch_timings(&valid, 4, 3.0).is_err());
     }
@@ -3388,9 +3427,9 @@ mod tests {
 
     #[test]
     fn diagnostic_merge_is_schedule_strict_and_takes_maximum() {
-        let current = ResearchWorkspaceReplayDiagnostic {
+        let current = WorkspaceLensReplayDiagnostic {
             layer: 3,
-            kind: ResearchWorkspaceBlockKind::Attention,
+            kind: WorkspaceLensBlockKind::Attention,
             residual_replay_max_abs_error: 0.2,
         };
         let mut aggregate = Vec::new();

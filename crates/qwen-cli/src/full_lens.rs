@@ -4,8 +4,10 @@ use clap::{ArgGroup, Args, ValueEnum};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
-use qwen_llm::research::{MAX_RESEARCH_PACKED_READOUT_POSITIONS, RESEARCH_IDENTITY_SCHEME};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
+use qwen_llm::workspace_lens::{
+    MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS, WORKSPACE_LENS_IDENTITY_SCHEME,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{DirBuilder, OpenOptions};
@@ -303,7 +305,7 @@ pub(crate) struct TraceFullArgs {
     pub(crate) top_k: usize,
 
     /// Reject inputs above this bound without truncating them.
-    #[arg(long, default_value_t = MAX_RESEARCH_PACKED_READOUT_POSITIONS)]
+    #[arg(long, default_value_t = MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS)]
     pub(crate) max_tokens: usize,
 
     /// Transported target-space vectors to include as layer:position cells.
@@ -1038,7 +1040,7 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
             && arch.full_attention_interval == native_manifest.config.full_attention_interval,
         "deployed model geometry does not match the native selected-token artifact"
     );
-    let identity = loaded.research_identity();
+    let identity = loaded.workspace_lens_identity();
     let content = checkpoint_content_identity(
         loaded.gguf(),
         &CheckpointIdentityCache::new(&args.identity_cache),
@@ -1062,11 +1064,11 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
 
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(1))
-        .context("create transfer-comparison research sequence")?;
-    let research = loaded
-        .research_session(&mut sequence)
-        .context("open transfer-comparison research session")?;
-    let selected = research
+        .context("create transfer-comparison workspace-lens sequence")?;
+    let workspace_lens = loaded
+        .workspace_lens_session(&mut sequence)
+        .context("open transfer-comparison workspace-lens session")?;
+    let selected = workspace_lens
         .selected_token_readouts(&native_manifest.readouts.token_ids)
         .context("derive deployed-model selected-token covectors")?;
     ensure!(
@@ -1118,7 +1120,7 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
             "compare transfer source_layer={} tokens={}",
             layer, token_count
         );
-        let projected = research
+        let projected = workspace_lens
             .project_f16_transport_readouts(&matrix, &selected)
             .with_context(|| format!("project published transport layer {layer}"))?;
         ensure!(
@@ -1258,10 +1260,10 @@ pub(crate) fn project_full_token_directions(
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(1))
         .context("create published full transport projection sequence")?;
-    let research = loaded
-        .research_session(&mut sequence)
+    let workspace_lens = loaded
+        .workspace_lens_session(&mut sequence)
         .context("open published full transport projection session")?;
-    let selected = research
+    let selected = workspace_lens
         .selected_token_readouts(token_ids)
         .context("derive deployed-model selected-token covectors")?;
     let hidden_size = selected.hidden_size;
@@ -1303,7 +1305,7 @@ pub(crate) fn project_full_token_directions(
             .read_exact(&mut matrix)
             .with_context(|| format!("read published full transport source layer {layer}"))?;
         ensure_finite_f16(&matrix, layer as usize, 0)?;
-        let projected = research
+        let projected = workspace_lens
             .project_f16_transport_readouts(&matrix, &selected)
             .with_context(|| format!("project published full transport source layer {layer}"))?;
         ensure!(
@@ -1364,7 +1366,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_deployed_model(&manifest, &loaded)?;
     let arch = loaded.arch();
-    let identity = loaded.research_identity();
+    let identity = loaded.workspace_lens_identity();
     let content = checkpoint_content_identity(
         loaded.gguf(),
         &CheckpointIdentityCache::new(&args.identity_cache),
@@ -1419,10 +1421,10 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(prefix.len()))
         .context("create full-lens prompt sequence")?;
-    let mut research = loaded
-        .research_session(&mut sequence)
-        .context("open full-lens research session")?;
-    let capture = research
+    let mut workspace_lens = loaded
+        .workspace_lens_session(&mut sequence)
+        .context("open full-lens workspace-lens session")?;
+    let capture = workspace_lens
         .forward_prompt_last_post_block_residuals(prefix, &layers)
         .context("capture full-lens source residuals")?;
     ensure!(
@@ -1482,7 +1484,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             "read full lens source_layer={} position={} top_k={}",
             layer, selected_position, args.top_k
         );
-        let readout = research
+        let readout = workspace_lens
             .apply_f16_transport_topk_with_vector(&matrix, residual, args.top_k)
             .with_context(|| format!("apply full-lens source layer {layer}"))?;
         let mut top_k = Vec::new();
@@ -1644,10 +1646,10 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_deployed_model(&manifest, &loaded)?;
     let arch = loaded.arch();
-    let runtime_identity = loaded.research_identity();
+    let runtime_identity = loaded.workspace_lens_identity();
     let deployed_model = TraceFullModel {
         path: args.model.clone(),
-        locator_scheme: RESEARCH_IDENTITY_SCHEME,
+        locator_scheme: WORKSPACE_LENS_IDENTITY_SCHEME,
         locator_id: format!("{:016x}", runtime_identity.model_locator_id),
         content_authenticated: runtime_identity.content_authenticated,
         architecture: loaded.gguf().architecture(),
@@ -1724,10 +1726,10 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(token_ids.len()))
         .context("create trace-full prompt sequence")?;
-    let mut research = loaded
-        .research_session(&mut sequence)
-        .context("open trace-full research session")?;
-    let capture = research
+    let mut workspace_lens = loaded
+        .workspace_lens_session(&mut sequence)
+        .context("open trace-full workspace-lens session")?;
+    let capture = workspace_lens
         .forward_packed_post_block_capture(&token_ids, &layers)
         .context("capture packed trace-full post-block residuals")?;
     ensure!(
@@ -1777,7 +1779,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             .get(&layer)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let readout = research
+        let readout = workspace_lens
             .apply_packed_capture_f16_transport_topk_with_vectors(
                 &capture,
                 layer,
@@ -1976,8 +1978,8 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
         "--top-k must be in 1..={MAX_FULL_READOUT_TOP_K}"
     );
     ensure!(
-        (1..=MAX_RESEARCH_PACKED_READOUT_POSITIONS).contains(&args.max_tokens),
-        "--max-tokens must be in 1..={MAX_RESEARCH_PACKED_READOUT_POSITIONS}"
+        (1..=MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS).contains(&args.max_tokens),
+        "--max-tokens must be in 1..={MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS}"
     );
     validate_lens_input_spec(args.input_spec())?;
     ensure!(
@@ -2952,7 +2954,7 @@ mod tests {
             no_special_tokens: false,
             layers: vec![0, 31, 62],
             top_k: 8,
-            max_tokens: MAX_RESEARCH_PACKED_READOUT_POSITIONS,
+            max_tokens: MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS,
             vectors: Vec::new(),
             identity_cache: None,
             allow_unvalidated_transfer: false,
@@ -3195,9 +3197,9 @@ mod tests {
         args.top_k = 26;
         assert!(validate_trace_full_args(&args).is_err());
         args.top_k = 8;
-        args.max_tokens = MAX_RESEARCH_PACKED_READOUT_POSITIONS + 1;
+        args.max_tokens = MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS + 1;
         assert!(validate_trace_full_args(&args).is_err());
-        args.max_tokens = MAX_RESEARCH_PACKED_READOUT_POSITIONS;
+        args.max_tokens = MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS;
 
         args.prompt = None;
         args.messages = Some("messages.json".into());

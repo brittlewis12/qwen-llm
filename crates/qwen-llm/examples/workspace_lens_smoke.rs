@@ -1,10 +1,10 @@
 use qwen_llm::metal_forward::RMS_EPS;
-use qwen_llm::research::{
-    AttnBlockVjpRule, DenseFfnVjpRule, GdnBlockVjpRule, GdnMixerVjpRule, LinearRole,
-    RESEARCH_IDENTITY_SCHEME, ResearchLinear, ResearchWorkspaceBlockKind, WorkspaceLensRule,
-};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
 use qwen_llm::tensor::GgmlType;
+use qwen_llm::workspace_lens::{
+    AttnBlockVjpRule, DenseFfnVjpRule, GdnBlockVjpRule, GdnMixerVjpRule, LinearRole,
+    WORKSPACE_LENS_IDENTITY_SCHEME, WorkspaceLensBlockKind, WorkspaceLensLinear, WorkspaceLensRule,
+};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -27,11 +27,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loaded = runtime.load_model(&model)?;
     let arch = loaded.arch();
     let mut sequence = loaded.create_sequence(SequenceConfig::new(8))?;
-    let mut research = loaded.research_session(&mut sequence)?;
-    let identity = research.identity();
-    let linears = research.linears()?;
+    let mut workspace_lens = loaded.workspace_lens_session(&mut sequence)?;
+    let identity = workspace_lens.identity();
+    let linears = workspace_lens.linears()?;
     let capture_layers = [0, arch.n_layer.saturating_sub(2), arch.n_layer - 1];
-    let forward = research.forward_token_with_dense_ffn_capture(token_id, &capture_layers)?;
+    let forward = workspace_lens.forward_token_with_dense_ffn_capture(token_id, &capture_layers)?;
     let capture_norms: Vec<f64> = forward
         .capture
         .post_block_residuals
@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_by(|left, right| left.1.total_cmp(&right.1))
         .ok_or("model returned empty logits")?;
 
-    let lm_head = research.linear_info(ResearchLinear::LmHead)?;
+    let lm_head = workspace_lens.linear_info(WorkspaceLensLinear::LmHead)?;
     let mut selected_token_ids = vec![
         0,
         arch.vocab_size
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         selected_token_ids.pop();
     }
-    let selected_readouts = research.selected_token_readouts(&selected_token_ids)?;
+    let selected_readouts = workspace_lens.selected_token_readouts(&selected_token_ids)?;
     if selected_readouts.hidden_size != arch.hidden_size as usize
         || selected_readouts.lm_head_dtype != lm_head.dtype
         || selected_readouts.lm_head_shape != lm_head.shape
@@ -80,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut cotangent = vec![0.0f32; lm_head.shape[1]];
     cotangent[top_token] = 1.0;
-    let lm_head_vjp = research.frozen_linear_vjp(ResearchLinear::LmHead, &cotangent, 1)?;
+    let lm_head_vjp =
+        workspace_lens.frozen_linear_vjp(WorkspaceLensLinear::LmHead, &cotangent, 1)?;
     let lm_head_vjp_norm = lm_head_vjp
         .iter()
         .map(|&value| f64::from(value) * f64::from(value))
@@ -141,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut hidden_cotangent = vec![0.0f32; forward.capture.hidden_size];
     let hidden_coordinate = top_token % hidden_cotangent.len();
     hidden_cotangent[hidden_coordinate] = 1.0;
-    let dense_ffn_r_vjp = research.dense_ffn_vjp(
+    let dense_ffn_r_vjp = workspace_lens.dense_ffn_vjp(
         arch.n_layer - 1,
         last_pre_ffn,
         &hidden_cotangent,
@@ -156,21 +157,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sqrt();
     let gdn_layer = (1..arch.n_layer)
         .find(|&layer| {
-            research
-                .linear_info(ResearchLinear::Layer {
+            workspace_lens
+                .linear_info(WorkspaceLensLinear::Layer {
                     index: layer,
                     role: LinearRole::GdnQkv,
                 })
                 .is_ok()
         })
         .ok_or("model has no nonzero GDN layer")?;
-    let gdn_forward = research.forward_prompt_with_gdn_capture(&[token_id, token_id], gdn_layer)?;
+    let gdn_forward =
+        workspace_lens.forward_prompt_with_gdn_capture(&[token_id, token_id], gdn_layer)?;
     let mut gdn_cotangent = vec![0.0f32; 2 * gdn_forward.hidden_size()];
     for token in 0..2 {
         gdn_cotangent[token * gdn_forward.hidden_size()
             + (hidden_coordinate + token) % gdn_forward.hidden_size()] = 1.0;
     }
-    let gdn_r_vjp = research.gdn_mixer_vjp(&gdn_forward, &gdn_cotangent, GdnMixerVjpRule::Relp)?;
+    let gdn_r_vjp =
+        workspace_lens.gdn_mixer_vjp(&gdn_forward, &gdn_cotangent, GdnMixerVjpRule::Relp)?;
     let gdn_r_vjp_norm = gdn_r_vjp
         .values
         .iter()
@@ -178,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sum::<f64>()
         .sqrt();
     let gdn_block_r_vjp =
-        research.gdn_block_vjp(&gdn_forward, &gdn_cotangent, GdnBlockVjpRule::Relp)?;
+        workspace_lens.gdn_block_vjp(&gdn_forward, &gdn_cotangent, GdnBlockVjpRule::Relp)?;
     let gdn_block_r_vjp_norm = gdn_block_r_vjp
         .values
         .iter()
@@ -207,26 +210,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(sequence);
     let mut attn_sequence = loaded.create_sequence(SequenceConfig::new(8))?;
-    let mut attn_research = loaded.research_session(&mut attn_sequence)?;
+    let mut attn_workspace_lens = loaded.workspace_lens_session(&mut attn_sequence)?;
     let attn_layer = (1..arch.n_layer)
         .find(|&layer| {
-            attn_research
-                .linear_info(ResearchLinear::Layer {
+            attn_workspace_lens
+                .linear_info(WorkspaceLensLinear::Layer {
                     index: layer,
                     role: LinearRole::AttentionQAndGate,
                 })
                 .is_ok()
         })
         .ok_or("model has no nonzero full-attention layer")?;
-    let attn_forward = attn_research
+    let attn_forward = attn_workspace_lens
         .forward_prompt_with_attn_capture(&[token_id, token_id, token_id, token_id], attn_layer)?;
     let mut attn_cotangent = vec![0.0f32; 4 * attn_forward.hidden_size()];
     for token in 0..4 {
         attn_cotangent[token * attn_forward.hidden_size()
             + (hidden_coordinate + token) % attn_forward.hidden_size()] = 1.0;
     }
-    let attn_block_r_vjp =
-        attn_research.attn_block_vjp(&attn_forward, &attn_cotangent, AttnBlockVjpRule::Relp)?;
+    let attn_block_r_vjp = attn_workspace_lens.attn_block_vjp(
+        &attn_forward,
+        &attn_cotangent,
+        AttnBlockVjpRule::Relp,
+    )?;
     let attn_block_r_vjp_norm = attn_block_r_vjp
         .values
         .iter()
@@ -258,11 +264,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(attn_sequence);
     let mut workspace_sequence = loaded.create_sequence(SequenceConfig::new(8))?;
-    let mut workspace_research = loaded.research_session(&mut workspace_sequence)?;
-    let workspace_forward = workspace_research
+    let mut workspace_lens_session = loaded.workspace_lens_session(&mut workspace_sequence)?;
+    let workspace_forward = workspace_lens_session
         .forward_prompt_with_workspace_capture(&[token_id, token_id, token_id, token_id])?;
     let workspace_sources = [0, attn_layer.saturating_sub(2), attn_layer - 1];
-    let workspace_r_vjp = workspace_research.workspace_vjp(
+    let workspace_r_vjp = workspace_lens_session.workspace_vjp(
         &workspace_forward,
         attn_layer,
         &workspace_sources,
@@ -274,7 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         second_workspace_cotangent[token * workspace_forward.hidden_size()
             + (hidden_coordinate + token + 17) % workspace_forward.hidden_size()] = 1.0;
     }
-    let second_workspace_vjp = workspace_research.workspace_vjp(
+    let second_workspace_vjp = workspace_lens_session.workspace_vjp(
         &workspace_forward,
         attn_layer,
         &workspace_sources,
@@ -283,7 +289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let mut workspace_batch_cotangents = attn_cotangent.clone();
     workspace_batch_cotangents.extend_from_slice(&second_workspace_cotangent);
-    let workspace_batch_vjp = workspace_research.workspace_vjp_batch(
+    let workspace_batch_vjp = workspace_lens_session.workspace_vjp_batch(
         &workspace_forward,
         attn_layer,
         &workspace_sources,
@@ -330,7 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut workspace_fit_batch_errors = Vec::new();
     for rule in [WorkspaceLensRule::Jacobian, WorkspaceLensRule::Relp] {
-        let serial = workspace_research.workspace_fit_rows(
+        let serial = workspace_lens_session.workspace_fit_rows(
             &workspace_forward,
             attn_layer,
             &workspace_sources,
@@ -338,7 +344,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1,
             rule,
         )?;
-        let batched = workspace_research.workspace_fit_rows_batched(
+        let batched = workspace_lens_session.workspace_fit_rows_batched(
             &workspace_forward,
             attn_layer,
             &workspace_sources,
@@ -347,7 +353,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             2,
             rule,
         )?;
-        let arbitrary = workspace_research.workspace_fit_readouts_batched(
+        let arbitrary = workspace_lens_session.workspace_fit_readouts_batched(
             &workspace_forward,
             attn_layer,
             &workspace_sources,
@@ -449,9 +455,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|diagnostic| (diagnostic.layer, diagnostic.kind))
                 .collect::<Vec<_>>()
                 != [
-                    (3, ResearchWorkspaceBlockKind::Attention),
-                    (2, ResearchWorkspaceBlockKind::Gdn),
-                    (1, ResearchWorkspaceBlockKind::Gdn),
+                    (3, WorkspaceLensBlockKind::Attention),
+                    (2, WorkspaceLensBlockKind::Gdn),
+                    (1, WorkspaceLensBlockKind::Gdn),
                 ])
     {
         return Err(format!(
@@ -462,7 +468,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let workspace_full = if std::env::var_os("QWEN_WORKSPACE_FULL_CHAIN").is_some() {
         let target_layer = arch.n_layer - 1;
-        let full = workspace_research.workspace_vjp(
+        let full = workspace_lens_session.workspace_vjp(
             &workspace_forward,
             target_layer,
             &[0],
@@ -526,7 +532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "schema": "qwen.workspace_lens_smoke.v5",
             "model": model,
             "identity": {
-                "scheme": RESEARCH_IDENTITY_SCHEME,
+                "scheme": WORKSPACE_LENS_IDENTITY_SCHEME,
                 "model_locator_id": format!("{:016x}", identity.model_locator_id),
                 "tokenizer_metadata_id": format!("{:016x}", identity.tokenizer_metadata_id),
                 "content_authenticated": identity.content_authenticated,

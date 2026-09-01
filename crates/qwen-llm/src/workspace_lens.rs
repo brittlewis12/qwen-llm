@@ -1,4 +1,4 @@
-//! Safe, narrow instrumentation surface for workspace-lens research.
+//! Safe, narrow instrumentation surface for workspace lenses.
 //!
 //! This module deliberately returns owned CPU data and opaque linear IDs. It
 //! does not expose resident model buffers, command encoders, or mutable Metal
@@ -33,30 +33,30 @@ use std::time::Instant;
 
 /// Lightweight locator identity derived from model metadata, shard paths, and
 /// file stamps. It is useful within one machine, but is not a content digest.
-pub const RESEARCH_IDENTITY_SCHEME: &str = "qwen_llm_model_locator_v1";
-pub const MAX_RESEARCH_GDN_TOKENS: usize = 128;
-pub const MAX_RESEARCH_ATTN_TOKENS: usize = 128;
-pub const MAX_RESEARCH_WORKSPACE_TOKENS: usize = 128;
-pub const MAX_RESEARCH_WORKSPACE_DIM_BATCH: usize = 32;
-pub const MAX_RESEARCH_PACKED_READOUT_POSITIONS: usize = 128;
+pub const WORKSPACE_LENS_IDENTITY_SCHEME: &str = "qwen_llm_model_locator_v1";
+pub const MAX_WORKSPACE_LENS_GDN_TOKENS: usize = 128;
+pub const MAX_WORKSPACE_LENS_ATTN_TOKENS: usize = 128;
+pub const MAX_WORKSPACE_LENS_TOKENS: usize = 128;
+pub const MAX_WORKSPACE_LENS_DIM_BATCH: usize = 32;
+pub const MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS: usize = 128;
 const PACKED_FULL_READOUT_CHUNK_SIZE: usize = 16;
 const MPS_FULL_READOUT_TOP_K: usize = 16;
 const FULL_READOUT_CANDIDATE_COUNT: usize = 2 * MPS_FULL_READOUT_TOP_K;
 const MAX_FULL_READOUT_TOP_K: usize = 25;
-/// Maximum peak host bytes attributable to a newly materialized research
+/// Maximum peak host bytes attributable to a newly materialized workspace-lens
 /// result and its immediate fitting/readout workspaces. 256 MiB keeps selected
 /// experimental banks practical while preventing accidental multi-GiB jobs.
-pub const MAX_RESEARCH_OWNED_RESULT_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ResearchModelIdentity {
+pub struct WorkspaceLensModelIdentity {
     pub model_locator_id: u64,
     pub tokenizer_metadata_id: u64,
     pub content_authenticated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ResearchLinear {
+pub enum WorkspaceLensLinear {
     LmHead,
     Layer { index: u32, role: LinearRole },
 }
@@ -78,8 +78,8 @@ pub enum LinearRole {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResearchLinearInfo {
-    pub id: ResearchLinear,
+pub struct WorkspaceLensLinearInfo {
+    pub id: WorkspaceLensLinear,
     pub dtype: GgmlType,
     /// GGUF axis order: `[n_in, n_out]`.
     pub shape: [usize; 2],
@@ -94,7 +94,7 @@ pub struct ActivationCapture {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchForward {
+pub struct WorkspaceLensForward {
     pub position: usize,
     pub token_id: i32,
     pub logits: Vec<f32>,
@@ -113,7 +113,7 @@ pub struct DenseFfnActivationCapture {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchDenseFfnForward {
+pub struct WorkspaceLensDenseFfnForward {
     pub position: usize,
     pub token_id: i32,
     pub logits: Vec<f32>,
@@ -138,8 +138,8 @@ pub struct DenseFfnVjp {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchGdnForward {
-    identity: ResearchModelIdentity,
+pub struct WorkspaceLensGdnForward {
+    identity: WorkspaceLensModelIdentity,
     owner_token_id: u64,
     layer: u32,
     start_position: usize,
@@ -155,8 +155,8 @@ pub struct ResearchGdnForward {
     final_recurrence_state: Vec<f32>,
 }
 
-impl ResearchGdnForward {
-    pub fn identity(&self) -> ResearchModelIdentity {
+impl WorkspaceLensGdnForward {
+    pub fn identity(&self) -> WorkspaceLensModelIdentity {
         self.identity
     }
 
@@ -209,7 +209,7 @@ pub enum GdnMixerVjpRule {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchGdnVjp {
+pub struct WorkspaceLensGdnVjp {
     pub layer: u32,
     pub n_tokens: usize,
     pub hidden_size: usize,
@@ -235,7 +235,7 @@ pub enum GdnBlockVjpRule {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchGdnBlockVjp {
+pub struct WorkspaceLensGdnBlockVjp {
     pub layer: u32,
     pub n_tokens: usize,
     pub hidden_size: usize,
@@ -244,12 +244,12 @@ pub struct ResearchGdnBlockVjp {
     /// Cotangents after reversing the FFN residual update and before the mixer
     /// residual update, flattened `[T, H]`.
     pub grad_post_mixer_residuals: Vec<f32>,
-    pub mixer: ResearchGdnVjp,
+    pub mixer: WorkspaceLensGdnVjp,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchAttnForward {
-    identity: ResearchModelIdentity,
+pub struct WorkspaceLensAttnForward {
+    identity: WorkspaceLensModelIdentity,
     owner_token_id: u64,
     layer: u32,
     token_ids: Vec<i32>,
@@ -260,8 +260,8 @@ pub struct ResearchAttnForward {
     post_block_residuals: Vec<f32>,
 }
 
-impl ResearchAttnForward {
-    pub fn identity(&self) -> ResearchModelIdentity {
+impl WorkspaceLensAttnForward {
+    pub fn identity(&self) -> WorkspaceLensModelIdentity {
         self.identity
     }
 
@@ -308,7 +308,7 @@ pub enum AttnBlockVjpRule {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchAttnBlockVjp {
+pub struct WorkspaceLensAttnBlockVjp {
     pub layer: u32,
     pub n_tokens: usize,
     pub hidden_size: usize,
@@ -325,8 +325,8 @@ pub struct ResearchAttnBlockVjp {
 /// follow the Hugging Face hook convention: layer `l` is the output of block
 /// `l`, so fitting from target `t` to source `s` reverses blocks `t..s+1`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchWorkspaceForward {
-    identity: ResearchModelIdentity,
+pub struct WorkspaceLensPromptForward {
+    identity: WorkspaceLensModelIdentity,
     owner_token_id: u64,
     token_ids: Vec<i32>,
     n_layers: u32,
@@ -335,8 +335,8 @@ pub struct ResearchWorkspaceForward {
     post_block_residuals: Vec<f32>,
 }
 
-impl ResearchWorkspaceForward {
-    pub fn identity(&self) -> ResearchModelIdentity {
+impl WorkspaceLensPromptForward {
+    pub fn identity(&self) -> WorkspaceLensModelIdentity {
         self.identity
     }
 
@@ -395,15 +395,15 @@ pub enum WorkspaceLensRule {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResearchWorkspaceBlockKind {
+pub enum WorkspaceLensBlockKind {
     Gdn,
     Attention,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchWorkspaceReplayDiagnostic {
+pub struct WorkspaceLensReplayDiagnostic {
     pub layer: u32,
-    pub kind: ResearchWorkspaceBlockKind,
+    pub kind: WorkspaceLensBlockKind,
     /// Drift between replayed `input + mixer(input)` and the production
     /// residual. Attention replay is an F32 model-level oracle and therefore
     /// does not differentiate production F16/Q8 KV conversion.
@@ -411,7 +411,7 @@ pub struct ResearchWorkspaceReplayDiagnostic {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchWorkspaceVjp {
+pub struct WorkspaceLensVjp {
     pub target_layer: u32,
     /// Caller order, including duplicates.
     pub source_layers: Vec<u32>,
@@ -421,10 +421,10 @@ pub struct ResearchWorkspaceVjp {
     pub values: Vec<f32>,
     /// Reverse traversal order, from the target block toward the earliest
     /// requested source layer.
-    pub diagnostics: Vec<ResearchWorkspaceReplayDiagnostic>,
+    pub diagnostics: Vec<WorkspaceLensReplayDiagnostic>,
 }
 
-impl ResearchWorkspaceVjp {
+impl WorkspaceLensVjp {
     pub fn source_values(&self, slot: usize) -> Option<&[f32]> {
         let source_elements = self.n_tokens.checked_mul(self.hidden_size)?;
         let start = slot.checked_mul(source_elements)?;
@@ -433,7 +433,7 @@ impl ResearchWorkspaceVjp {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchWorkspaceVjpBatch {
+pub struct WorkspaceLensVjpBatch {
     pub target_layer: u32,
     /// Caller order, including duplicates.
     pub source_layers: Vec<u32>,
@@ -444,10 +444,10 @@ pub struct ResearchWorkspaceVjpBatch {
     pub values: Vec<f32>,
     /// Reverse traversal order, from the target block toward the earliest
     /// requested source layer.
-    pub diagnostics: Vec<ResearchWorkspaceReplayDiagnostic>,
+    pub diagnostics: Vec<WorkspaceLensReplayDiagnostic>,
 }
 
-impl ResearchWorkspaceVjpBatch {
+impl WorkspaceLensVjpBatch {
     pub fn source_values(&self, slot: usize) -> Option<&[f32]> {
         let trajectory_elements = self.n_tokens.checked_mul(self.hidden_size)?;
         let source_elements = self.n_query.checked_mul(trajectory_elements)?;
@@ -470,7 +470,7 @@ impl ResearchWorkspaceVjpBatch {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchWorkspaceRows {
+pub struct WorkspaceLensRows {
     pub target_layer: u32,
     pub source_layers: Vec<u32>,
     /// Target/output coordinates in caller order.
@@ -481,10 +481,10 @@ pub struct ResearchWorkspaceRows {
     /// Source-layer major, then output-row major: `[K,R,H]`.
     pub values: Vec<f32>,
     /// Maximum replay drift observed for each traversed block across all rows.
-    pub diagnostics: Vec<ResearchWorkspaceReplayDiagnostic>,
+    pub diagnostics: Vec<WorkspaceLensReplayDiagnostic>,
 }
 
-impl ResearchWorkspaceRows {
+impl WorkspaceLensRows {
     pub fn source_values(&self, slot: usize) -> Option<&[f32]> {
         let source_elements = self.output_rows.len().checked_mul(self.hidden_size)?;
         let start = slot.checked_mul(source_elements)?;
@@ -506,7 +506,7 @@ impl ResearchWorkspaceRows {
 /// Arbitrary target-covector workspace fits. Values are owned CPU F32 data in
 /// source-layer-major, query-major order `[K,Q,H]`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchWorkspaceReadouts {
+pub struct WorkspaceLensReadouts {
     pub target_layer: u32,
     pub source_layers: Vec<u32>,
     pub n_query: usize,
@@ -515,10 +515,10 @@ pub struct ResearchWorkspaceReadouts {
     pub hidden_size: usize,
     pub values: Vec<f32>,
     /// Maximum replay drift observed for each traversed block across all queries.
-    pub diagnostics: Vec<ResearchWorkspaceReplayDiagnostic>,
+    pub diagnostics: Vec<WorkspaceLensReplayDiagnostic>,
 }
 
-impl ResearchWorkspaceReadouts {
+impl WorkspaceLensReadouts {
     pub fn source_values(&self, source_slot: usize) -> Option<&[f32]> {
         let source_elements = self.n_query.checked_mul(self.hidden_size)?;
         let start = source_slot.checked_mul(source_elements)?;
@@ -540,7 +540,7 @@ impl ResearchWorkspaceReadouts {
 /// Selected vocabulary score numerators after folding the final RMSNorm gamma
 /// into resident LM-head rows. No RMS denominator or softmax is applied.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchTokenReadouts {
+pub struct WorkspaceLensTokenReadouts {
     pub token_ids: Vec<u32>,
     pub hidden_size: usize,
     pub lm_head_dtype: GgmlType,
@@ -552,7 +552,7 @@ pub struct ResearchTokenReadouts {
     pub values: Vec<f32>,
 }
 
-impl ResearchTokenReadouts {
+impl WorkspaceLensTokenReadouts {
     pub fn token_values(&self, slot: usize) -> Option<&[f32]> {
         let start = slot.checked_mul(self.hidden_size)?;
         self.values.get(start..start.checked_add(self.hidden_size)?)
@@ -560,36 +560,36 @@ impl ResearchTokenReadouts {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchPromptLastCapture {
+pub struct WorkspaceLensPromptLastCapture {
     pub position: usize,
     pub token_id: i32,
     pub capture: ActivationCapture,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchVocabularyScore {
+pub struct WorkspaceLensVocabularyScore {
     pub token_id: u32,
     pub logit: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchFullVocabularyReadout {
+pub struct WorkspaceLensFullVocabularyReadout {
     /// Diagnostic F64 host recomputation, rounded to F32. The deployed Metal
     /// RMSNorm performs its own F32 parallel reduction for the actual logits.
     pub rms_denominator_f64_recomputed: f32,
-    pub scores: Vec<ResearchVocabularyScore>,
+    pub scores: Vec<WorkspaceLensVocabularyScore>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchFullVocabularyReadoutWithVector {
-    pub readout: ResearchFullVocabularyReadout,
+pub struct WorkspaceLensFullVocabularyReadoutWithVector {
+    pub readout: WorkspaceLensFullVocabularyReadout,
     /// Transported target-coordinate residual before output RMSNorm.
     pub transported_values: Vec<f32>,
 }
 
 /// Opaque packed post-block residual capture owned by one loaded model.
 /// The resident `[T,K,H]` Metal tensor is intentionally private.
-pub struct ResearchPackedPostBlockCapture<'model> {
+pub struct WorkspaceLensPackedPostBlockCapture<'model> {
     model: &'model LoadedModel,
     start_position: usize,
     token_ids: Vec<i32>,
@@ -600,7 +600,7 @@ pub struct ResearchPackedPostBlockCapture<'model> {
     values: MetalTensor,
 }
 
-impl ResearchPackedPostBlockCapture<'_> {
+impl WorkspaceLensPackedPostBlockCapture<'_> {
     pub fn start_position(&self) -> usize {
         self.start_position
     }
@@ -639,10 +639,10 @@ impl ResearchPackedPostBlockCapture<'_> {
         &self,
         position_row: usize,
         source_layer: u32,
-    ) -> Result<Vec<f32>, ResearchError> {
+    ) -> Result<Vec<f32>, WorkspaceLensError> {
         let layer_slot = self.layer_slot(source_layer)?;
         if position_row >= self.position_count() {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "packed diagnostic capture row",
                 got: position_row,
                 expected: self.position_count(),
@@ -651,36 +651,36 @@ impl ResearchPackedPostBlockCapture<'_> {
         let offset = checked_product(
             checked_product(position_row, self.layer_ids.len())?
                 .checked_add(layer_slot)
-                .ok_or(ResearchError::SizeOverflow)?,
+                .ok_or(WorkspaceLensError::SizeOverflow)?,
             self.hidden_size,
         )?;
         let row = self.values.view_subrange(
-            u64::try_from(offset).map_err(|_| ResearchError::SizeOverflow)?,
+            u64::try_from(offset).map_err(|_| WorkspaceLensError::SizeOverflow)?,
             vec![self.hidden_size as u64],
         );
         read_f32_fallible(&row, self.hidden_size, "packed diagnostic capture row")
     }
 
-    fn layer_slot(&self, source_layer: u32) -> Result<usize, ResearchError> {
+    fn layer_slot(&self, source_layer: u32) -> Result<usize, WorkspaceLensError> {
         self.layer_ids
             .iter()
             .position(|&layer| layer == source_layer)
-            .ok_or(ResearchError::PackedCaptureLayerNotFound { source_layer })
+            .ok_or(WorkspaceLensError::PackedCaptureLayerNotFound { source_layer })
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchPackedVocabularyPosition {
+pub struct WorkspaceLensPackedVocabularyPosition {
     /// Zero-based absolute position of the captured prompt token.
     pub source_position: usize,
     pub source_token_id: i32,
     /// The transported residual at `source_position` predicts this position.
     pub predicts_position: usize,
-    pub scores: Vec<ResearchVocabularyScore>,
+    pub scores: Vec<WorkspaceLensVocabularyScore>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchPackedTransportedVector {
+pub struct WorkspaceLensPackedTransportedVector {
     /// Zero-based absolute position of the captured prompt token.
     pub source_position: usize,
     pub source_token_id: i32,
@@ -691,7 +691,7 @@ pub struct ResearchPackedTransportedVector {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResearchPackedFullVocabularyReadout {
+pub struct WorkspaceLensPackedFullVocabularyReadout {
     /// Zero-based block index captured after its second residual update.
     pub source_layer: u32,
     pub start_position: usize,
@@ -705,13 +705,13 @@ pub struct ResearchPackedFullVocabularyReadout {
     pub readout_gpu_ms: f64,
     /// Wall time through completion of the readout command buffer.
     pub readout_wall_ms: f64,
-    pub positions: Vec<ResearchPackedVocabularyPosition>,
+    pub positions: Vec<WorkspaceLensPackedVocabularyPosition>,
     /// Caller-selected transported rows in caller request order.
-    pub transported_vectors: Vec<ResearchPackedTransportedVector>,
+    pub transported_vectors: Vec<WorkspaceLensPackedTransportedVector>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ResearchError {
+pub enum WorkspaceLensError {
     #[error("runtime: {0}")]
     Runtime(#[from] RuntimeError),
     #[error("forward: {0}")]
@@ -720,18 +720,24 @@ pub enum ResearchError {
     Metal(#[from] MetalError),
     #[error("packed prefill: {0}")]
     PackedPrefill(#[from] DFlashError),
-    #[error("workspace-lens research currently requires a dense model, got {0:?}")]
+    #[error("workspace-lens operations currently require a dense model, got {0:?}")]
     UnsupportedArchitecture(ArchKind),
     #[error("layer {layer} is out of range for {n_layers} layers")]
     InvalidLayer { layer: u32, n_layers: u32 },
     #[error("linear role {role:?} is not present on layer {layer}")]
     InvalidLinearRole { layer: u32, role: LinearRole },
     #[error("linear {id:?} has shape {shape:?}, expected a two-dimensional row bank")]
-    InvalidLinearShape { id: ResearchLinear, shape: Vec<u64> },
+    InvalidLinearShape {
+        id: WorkspaceLensLinear,
+        shape: Vec<u64>,
+    },
     #[error(
         "linear {id:?} uses {dtype:?}; the native activation VJP supports Q8_0, BF16, F16, and F32"
     )]
-    UnsupportedLinearDtype { id: ResearchLinear, dtype: GgmlType },
+    UnsupportedLinearDtype {
+        id: WorkspaceLensLinear,
+        dtype: GgmlType,
+    },
     #[error("layer {layer} {role:?} has shape {got:?}, expected {expected:?}")]
     InvalidDenseFfnShape {
         layer: u32,
@@ -882,7 +888,7 @@ pub enum ResearchError {
         shape: Vec<u64>,
         expected: usize,
     },
-    #[error("research readout {name} contains a non-finite value at flat index {index}")]
+    #[error("workspace-lens readout {name} contains a non-finite value at flat index {index}")]
     NonFiniteTokenReadoutData { name: &'static str, index: usize },
     #[error("full-vocabulary lens readout requires at least one prompt token")]
     EmptyFullReadoutPrompt,
@@ -915,15 +921,15 @@ pub enum ResearchError {
     )]
     InvalidFullReadoutToken { token_id: i32, vocab_size: u32 },
     #[error(
-        "research allocation for {name} requires {requested_bytes} bytes, exceeding the {max_bytes}-byte budget"
+        "workspace-lens allocation for {name} requires {requested_bytes} bytes, exceeding the {max_bytes}-byte budget"
     )]
-    ResearchResultByteBudgetExceeded {
+    WorkspaceLensResultByteBudgetExceeded {
         name: &'static str,
         requested_bytes: usize,
         max_bytes: usize,
     },
     #[error("host allocation for {name} failed for {elements} elements")]
-    ResearchHostAllocationFailed { name: &'static str, elements: usize },
+    WorkspaceLensHostAllocationFailed { name: &'static str, elements: usize },
     #[error("{name} length {got} does not match expected length {expected}")]
     ActivationSize {
         name: &'static str,
@@ -939,7 +945,7 @@ pub enum ResearchError {
         n_query: usize,
         n_out: usize,
     },
-    #[error("research tensor size overflow")]
+    #[error("workspace-lens tensor size overflow")]
     SizeOverflow,
     #[error("sequence position {0} exceeds the ordinary-Qwen u32 position contract")]
     PositionOverflow(usize),
@@ -949,61 +955,66 @@ pub enum ResearchError {
     CommandBuffer { status: String, error: String },
 }
 
-pub struct ResearchSession<'model, 'sequence> {
+pub struct WorkspaceLensSession<'model, 'sequence> {
     model: &'model LoadedModel,
     sequence: &'sequence mut Sequence,
 }
 
 impl LoadedModel {
-    pub fn research_identity(&self) -> ResearchModelIdentity {
+    pub fn workspace_lens_identity(&self) -> WorkspaceLensModelIdentity {
         let (model_locator_id, tokenizer_metadata_id) = self.lightweight_identity_parts();
-        ResearchModelIdentity {
+        WorkspaceLensModelIdentity {
             model_locator_id,
             tokenizer_metadata_id,
             content_authenticated: false,
         }
     }
 
-    pub fn research_session<'model, 'sequence>(
+    pub fn workspace_lens_session<'model, 'sequence>(
         &'model self,
         sequence: &'sequence mut Sequence,
-    ) -> Result<ResearchSession<'model, 'sequence>, ResearchError> {
+    ) -> Result<WorkspaceLensSession<'model, 'sequence>, WorkspaceLensError> {
         self.ensure_owns(sequence)?;
         if self.arch().kind != ArchKind::Dense {
-            return Err(ResearchError::UnsupportedArchitecture(self.arch().kind));
+            return Err(WorkspaceLensError::UnsupportedArchitecture(
+                self.arch().kind,
+            ));
         }
-        Ok(ResearchSession {
+        Ok(WorkspaceLensSession {
             model: self,
             sequence,
         })
     }
 }
 
-impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
+impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
     pub fn arch(&self) -> Arch {
         self.model.arch()
     }
 
-    pub fn identity(&self) -> ResearchModelIdentity {
-        self.model.research_identity()
+    pub fn identity(&self) -> WorkspaceLensModelIdentity {
+        self.model.workspace_lens_identity()
     }
 
-    pub fn linear_info(&self, id: ResearchLinear) -> Result<ResearchLinearInfo, ResearchError> {
+    pub fn linear_info(
+        &self,
+        id: WorkspaceLensLinear,
+    ) -> Result<WorkspaceLensLinearInfo, WorkspaceLensError> {
         let tensor = self.resolve_linear(id)?;
         let shape = linear_shape(id, tensor)?;
-        Ok(ResearchLinearInfo {
+        Ok(WorkspaceLensLinearInfo {
             id,
             dtype: tensor.dtype,
             shape,
         })
     }
 
-    pub fn linears(&self) -> Result<Vec<ResearchLinearInfo>, ResearchError> {
-        let mut ids = vec![ResearchLinear::LmHead];
+    pub fn linears(&self) -> Result<Vec<WorkspaceLensLinearInfo>, WorkspaceLensError> {
+        let mut ids = vec![WorkspaceLensLinear::LmHead];
         for (index, block) in self.model.metal_model().blocks.iter().enumerate() {
-            let index = u32::try_from(index).map_err(|_| ResearchError::SizeOverflow)?;
+            let index = u32::try_from(index).map_err(|_| WorkspaceLensError::SizeOverflow)?;
             for role in [LinearRole::FfnGate, LinearRole::FfnUp, LinearRole::FfnDown] {
-                ids.push(ResearchLinear::Layer { index, role });
+                ids.push(WorkspaceLensLinear::Layer { index, role });
             }
             match block {
                 MetalBlock::Gdn(_) => {
@@ -1014,7 +1025,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                         LinearRole::GdnAlpha,
                         LinearRole::GdnOut,
                     ] {
-                        ids.push(ResearchLinear::Layer { index, role });
+                        ids.push(WorkspaceLensLinear::Layer { index, role });
                     }
                 }
                 MetalBlock::Attn(_) => {
@@ -1024,7 +1035,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                         LinearRole::AttentionV,
                         LinearRole::AttentionOut,
                     ] {
-                        ids.push(ResearchLinear::Layer { index, role });
+                        ids.push(WorkspaceLensLinear::Layer { index, role });
                     }
                 }
             }
@@ -1040,9 +1051,9 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     pub fn selected_token_readouts(
         &self,
         token_ids: &[u32],
-    ) -> Result<ResearchTokenReadouts, ResearchError> {
+    ) -> Result<WorkspaceLensTokenReadouts, WorkspaceLensError> {
         if token_ids.is_empty() {
-            return Err(ResearchError::EmptyTokenReadoutSelection);
+            return Err(WorkspaceLensError::EmptyTokenReadoutSelection);
         }
         let arch = self.arch();
         let hidden_size = arch.hidden_size as usize;
@@ -1054,8 +1065,8 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let model = self.model.metal_model();
         let lm_head = &model.lm_head;
         let expected_lm_head_shape = [hidden_size, vocab_size as usize];
-        if linear_shape(ResearchLinear::LmHead, lm_head).ok() != Some(expected_lm_head_shape) {
-            return Err(ResearchError::InvalidTokenReadoutLmHeadShape {
+        if linear_shape(WorkspaceLensLinear::LmHead, lm_head).ok() != Some(expected_lm_head_shape) {
+            return Err(WorkspaceLensError::InvalidTokenReadoutLmHeadShape {
                 got: lm_head.shape.clone(),
                 expected: expected_lm_head_shape,
             });
@@ -1070,7 +1081,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 | GgmlType::Q8_0
                 | GgmlType::IQ4_NL
         ) {
-            return Err(ResearchError::UnsupportedTokenReadoutLmHeadDtype {
+            return Err(WorkspaceLensError::UnsupportedTokenReadoutLmHeadDtype {
                 dtype: lm_head.dtype,
             });
         }
@@ -1078,7 +1089,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         if output_norm.dtype != GgmlType::F32
             || output_norm.shape.as_slice() != [hidden_size as u64]
         {
-            return Err(ResearchError::InvalidTokenReadoutOutputNorm {
+            return Err(WorkspaceLensError::InvalidTokenReadoutOutputNorm {
                 dtype: output_norm.dtype,
                 shape: output_norm.shape.clone(),
                 expected: hidden_size,
@@ -1087,7 +1098,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
 
         let mut ids = Vec::new();
         ids.try_reserve_exact(token_ids.len()).map_err(|_| {
-            ResearchError::ResearchHostAllocationFailed {
+            WorkspaceLensError::WorkspaceLensHostAllocationFailed {
                 name: "selected-token Metal IDs",
                 elements: token_ids.len(),
             }
@@ -1096,7 +1107,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let ids_tensor = MetalTensor::from_bytes(
             self.model.context(),
             bytemuck::cast_slice(&ids),
-            vec![u64::try_from(ids.len()).map_err(|_| ResearchError::SizeOverflow)?],
+            vec![u64::try_from(ids.len()).map_err(|_| WorkspaceLensError::SizeOverflow)?],
             GgmlType::I32,
         )?;
         let selected = MetalTensor::zeros_f32(
@@ -1108,7 +1119,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .context()
             .queue
             .commandBuffer()
-            .ok_or(ResearchError::MissingCommandBuffer)?;
+            .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
         let encoder = KernelEncoder::begin(&command);
         let encode_result = encode_get_rows_f32(
             self.model.context(),
@@ -1129,7 +1140,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             read_f32_fallible(&selected, selected_elements, "selected-token LM-head rows")?;
         let gamma = read_f32_fallible(output_norm, hidden_size, "output norm gamma")?;
         multiply_token_readout_gamma_in_place(&mut values, &gamma, token_ids.len(), hidden_size)?;
-        Ok(ResearchTokenReadouts {
+        Ok(WorkspaceLensTokenReadouts {
             token_ids: try_clone_slice(token_ids, "selected-token IDs")?,
             hidden_size,
             lm_head_dtype: lm_head.dtype,
@@ -1149,11 +1160,11 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     pub fn project_f16_transport_readouts(
         &self,
         transport_bytes: &[u8],
-        readouts: &ResearchTokenReadouts,
-    ) -> Result<Vec<f32>, ResearchError> {
+        readouts: &WorkspaceLensTokenReadouts,
+    ) -> Result<Vec<f32>, WorkspaceLensError> {
         let hidden_size = self.arch().hidden_size as usize;
         if readouts.hidden_size != hidden_size {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "transport readout hidden size",
                 got: readouts.hidden_size,
                 expected: hidden_size,
@@ -1161,13 +1172,13 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         }
         let n_query = readouts.token_ids.len();
         if n_query == 0 {
-            return Err(ResearchError::EmptyTokenReadoutSelection);
+            return Err(WorkspaceLensError::EmptyTokenReadoutSelection);
         }
         let expected_covectors = n_query
             .checked_mul(hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         if readouts.values.len() != expected_covectors {
-            return Err(ResearchError::CotangentSize {
+            return Err(WorkspaceLensError::CotangentSize {
                 got: readouts.values.len(),
                 expected: expected_covectors,
                 n_query,
@@ -1175,7 +1186,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             });
         }
         if let Some(index) = readouts.values.iter().position(|value| !value.is_finite()) {
-            return Err(ResearchError::NonFiniteTokenReadoutData {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
                 name: "transport target covectors",
                 index,
             });
@@ -1185,8 +1196,8 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .len()
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(covector_bytes.checked_mul(4)?))
-            .ok_or(ResearchError::SizeOverflow)?;
-        enforce_research_byte_budget("F16 transport readout projection", peak_bytes)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        enforce_workspace_lens_byte_budget("F16 transport readout projection", peak_bytes)?;
 
         let context = self.model.context();
         let transport = MetalTensor::from_bytes(
@@ -1205,7 +1216,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let command = context
             .queue
             .commandBuffer()
-            .ok_or(ResearchError::MissingCommandBuffer)?;
+            .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
         let encoder = KernelEncoder::begin(&command);
         let encode_result = encode_frozen_linear_vjp_f32(
             context,
@@ -1235,17 +1246,17 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         &mut self,
         token_ids: &[i32],
         capture_layers: &[u32],
-    ) -> Result<ResearchPromptLastCapture, ResearchError> {
+    ) -> Result<WorkspaceLensPromptLastCapture, WorkspaceLensError> {
         if token_ids.is_empty() {
-            return Err(ResearchError::EmptyFullReadoutPrompt);
+            return Err(WorkspaceLensError::EmptyFullReadoutPrompt);
         }
         if self.sequence.position() != 0 {
-            return Err(ResearchError::FullReadoutRequiresFreshSequence(
+            return Err(WorkspaceLensError::FullReadoutRequiresFreshSequence(
                 self.sequence.position(),
             ));
         }
         if capture_layers.is_empty() {
-            return Err(ResearchError::EmptyWorkspaceSourceLayers);
+            return Err(WorkspaceLensError::EmptyWorkspaceSourceLayers);
         }
         let arch = self.arch();
         validate_capture_layers(arch.n_layer, capture_layers)?;
@@ -1259,12 +1270,12 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let capture_len = checked_product(capture_layers.len(), hidden_size)?;
         let capture = MetalTensor::zeros_f32(
             self.model.context(),
-            vec![u64::try_from(capture_len).map_err(|_| ResearchError::SizeOverflow)?],
+            vec![u64::try_from(capture_len).map_err(|_| WorkspaceLensError::SizeOverflow)?],
         )?;
         let forward = self.model.forward();
         for (position, &token_id) in token_ids.iter().enumerate() {
-            let position_u32 =
-                u32::try_from(position).map_err(|_| ResearchError::PositionOverflow(position))?;
+            let position_u32 = u32::try_from(position)
+                .map_err(|_| WorkspaceLensError::PositionOverflow(position))?;
             let state = unsafe { self.sequence.metal_session_mut() };
             state.ensure_usable()?;
             let result = if position + 1 == token_ids.len() {
@@ -1285,7 +1296,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             self.sequence.advance_by(1)?;
         }
         let position = token_ids.len() - 1;
-        Ok(ResearchPromptLastCapture {
+        Ok(WorkspaceLensPromptLastCapture {
             position,
             token_id: token_ids[position],
             capture: ActivationCapture {
@@ -1306,15 +1317,15 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         &mut self,
         token_ids: &[i32],
         capture_layers: &[u32],
-    ) -> Result<ResearchPackedPostBlockCapture<'model>, ResearchError> {
+    ) -> Result<WorkspaceLensPackedPostBlockCapture<'model>, WorkspaceLensError> {
         let position_count = token_ids.len();
         if position_count == 0 {
-            return Err(ResearchError::EmptyFullReadoutPrompt);
+            return Err(WorkspaceLensError::EmptyFullReadoutPrompt);
         }
-        if position_count > MAX_RESEARCH_PACKED_READOUT_POSITIONS {
-            return Err(ResearchError::PackedFullReadoutTooLong {
+        if position_count > MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS {
+            return Err(WorkspaceLensError::PackedFullReadoutTooLong {
                 got: position_count,
-                max: MAX_RESEARCH_PACKED_READOUT_POSITIONS,
+                max: MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS,
             });
         }
         let arch = self.arch();
@@ -1328,10 +1339,11 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let start_position = self.sequence.position();
         let end_position = start_position
             .checked_add(position_count)
-            .ok_or(ResearchError::PositionOverflow(start_position))?;
+            .ok_or(WorkspaceLensError::PositionOverflow(start_position))?;
         let start_position_u32 = u32::try_from(start_position)
-            .map_err(|_| ResearchError::PositionOverflow(start_position))?;
-        u32::try_from(end_position).map_err(|_| ResearchError::PositionOverflow(end_position))?;
+            .map_err(|_| WorkspaceLensError::PositionOverflow(start_position))?;
+        u32::try_from(end_position)
+            .map_err(|_| WorkspaceLensError::PositionOverflow(end_position))?;
 
         let hidden_size = arch.hidden_size as usize;
         let model = self.model.metal_model();
@@ -1339,7 +1351,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             checked_product(position_count, capture_layers.len())?,
             hidden_size,
         )?;
-        enforce_research_byte_budget(
+        enforce_workspace_lens_byte_budget(
             "packed post-block capture",
             checked_product(capture_elements, std::mem::size_of::<f32>())?,
         )?;
@@ -1395,7 +1407,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             return Err(error.into());
         }
 
-        Ok(ResearchPackedPostBlockCapture {
+        Ok(WorkspaceLensPackedPostBlockCapture {
             model: self.model,
             start_position,
             token_ids: token_ids_owned,
@@ -1412,11 +1424,11 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// compact GPU top-k. Capture position `p` predicts `p + 1`.
     pub fn apply_packed_capture_f16_transport_topk(
         &self,
-        capture: &ResearchPackedPostBlockCapture<'_>,
+        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
         source_layer: u32,
         transport_bytes: &[u8],
         top_k: usize,
-    ) -> Result<ResearchPackedFullVocabularyReadout, ResearchError> {
+    ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
         self.apply_packed_capture_f16_transport_topk_with_vectors(
             capture,
             source_layer,
@@ -1431,17 +1443,17 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// are zero-based absolute positions and preserve caller request order.
     pub fn apply_packed_capture_f16_transport_topk_with_vectors(
         &self,
-        capture: &ResearchPackedPostBlockCapture<'_>,
+        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
         source_layer: u32,
         transport_bytes: &[u8],
         top_k: usize,
         transported_source_positions: &[usize],
-    ) -> Result<ResearchPackedFullVocabularyReadout, ResearchError> {
+    ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
         if !std::ptr::eq(self.model, capture.model) {
-            return Err(ResearchError::PackedCaptureModelMismatch);
+            return Err(WorkspaceLensError::PackedCaptureModelMismatch);
         }
         if top_k == 0 || top_k > MAX_FULL_READOUT_TOP_K {
-            return Err(ResearchError::InvalidFullReadoutTopK {
+            return Err(WorkspaceLensError::InvalidFullReadoutTopK {
                 got: top_k,
                 max: MAX_FULL_READOUT_TOP_K,
             });
@@ -1477,8 +1489,11 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .and_then(|bytes| bytes.checked_add(logits_bytes))
             .and_then(|bytes| bytes.checked_add(compact_bytes))
             .and_then(|bytes| bytes.checked_add(transported_vector_bytes))
-            .ok_or(ResearchError::SizeOverflow)?;
-        enforce_research_byte_budget("packed full-vocabulary F16 transport readout", peak_bytes)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        enforce_workspace_lens_byte_budget(
+            "packed full-vocabulary F16 transport readout",
+            peak_bytes,
+        )?;
 
         let context = self.model.context();
         let selected =
@@ -1516,19 +1531,19 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let command = context
             .queue
             .commandBuffer()
-            .ok_or(ResearchError::MissingCommandBuffer)?;
+            .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
         let encoder = KernelEncoder::begin(&command);
-        let encode_result = (|| -> Result<(), ResearchError> {
+        let encode_result = (|| -> Result<(), WorkspaceLensError> {
             for position_row in 0..position_count {
                 let source_offset = checked_product(
                     checked_product(position_row, capture.layer_ids.len())?
                         .checked_add(layer_slot)
-                        .ok_or(ResearchError::SizeOverflow)?,
+                        .ok_or(WorkspaceLensError::SizeOverflow)?,
                     hidden_size,
                 )?;
                 let destination = selected.view_subrange(
                     u64::try_from(checked_product(position_row, hidden_size)?)
-                        .map_err(|_| ResearchError::SizeOverflow)?,
+                        .map_err(|_| WorkspaceLensError::SizeOverflow)?,
                     vec![hidden_size as u64],
                 );
                 encode_copy_offset_f32(
@@ -1643,7 +1658,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             hidden_size,
         )?;
 
-        Ok(ResearchPackedFullVocabularyReadout {
+        Ok(WorkspaceLensPackedFullVocabularyReadout {
             source_layer,
             start_position: capture.start_position(),
             position_count,
@@ -1664,7 +1679,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         transport_bytes: &[u8],
         source_residual: &[f32],
         top_k: usize,
-    ) -> Result<ResearchFullVocabularyReadout, ResearchError> {
+    ) -> Result<WorkspaceLensFullVocabularyReadout, WorkspaceLensError> {
         Ok(self
             .apply_f16_transport_topk_with_vector(transport_bytes, source_residual, top_k)?
             .readout)
@@ -1677,9 +1692,9 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         transport_bytes: &[u8],
         source_residual: &[f32],
         top_k: usize,
-    ) -> Result<ResearchFullVocabularyReadoutWithVector, ResearchError> {
+    ) -> Result<WorkspaceLensFullVocabularyReadoutWithVector, WorkspaceLensError> {
         if top_k == 0 || top_k > MAX_FULL_READOUT_TOP_K {
-            return Err(ResearchError::InvalidFullReadoutTopK {
+            return Err(WorkspaceLensError::InvalidFullReadoutTopK {
                 got: top_k,
                 max: MAX_FULL_READOUT_TOP_K,
             });
@@ -1688,23 +1703,24 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let hidden_size = arch.hidden_size as usize;
         let vocab_size = arch.vocab_size as usize;
         if source_residual.len() != hidden_size {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "full readout source residual",
                 got: source_residual.len(),
                 expected: hidden_size,
             });
         }
         if let Some(index) = source_residual.iter().position(|value| !value.is_finite()) {
-            return Err(ResearchError::NonFiniteTokenReadoutData {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
                 name: "full readout source residual",
                 index,
             });
         }
         let model = self.model.metal_model();
         let expected_lm_head_shape = [hidden_size, vocab_size];
-        if linear_shape(ResearchLinear::LmHead, &model.lm_head).ok() != Some(expected_lm_head_shape)
+        if linear_shape(WorkspaceLensLinear::LmHead, &model.lm_head).ok()
+            != Some(expected_lm_head_shape)
         {
-            return Err(ResearchError::InvalidTokenReadoutLmHeadShape {
+            return Err(WorkspaceLensError::InvalidTokenReadoutLmHeadShape {
                 got: model.lm_head.shape.clone(),
                 expected: expected_lm_head_shape,
             });
@@ -1719,14 +1735,14 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 | GgmlType::Q8_0
                 | GgmlType::IQ4_NL
         ) {
-            return Err(ResearchError::UnsupportedTokenReadoutLmHeadDtype {
+            return Err(WorkspaceLensError::UnsupportedTokenReadoutLmHeadDtype {
                 dtype: model.lm_head.dtype,
             });
         }
         if model.output_norm.dtype != GgmlType::F32
             || model.output_norm.shape.as_slice() != [hidden_size as u64]
         {
-            return Err(ResearchError::InvalidTokenReadoutOutputNorm {
+            return Err(WorkspaceLensError::InvalidTokenReadoutOutputNorm {
                 dtype: model.output_norm.dtype,
                 shape: model.output_norm.shape.clone(),
                 expected: hidden_size,
@@ -1739,8 +1755,8 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(5)?))
             .and_then(|bytes| bytes.checked_add(logits_bytes.checked_mul(2)?))
-            .ok_or(ResearchError::SizeOverflow)?;
-        enforce_research_byte_budget("full-vocabulary F16 transport readout", peak_bytes)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        enforce_workspace_lens_byte_budget("full-vocabulary F16 transport readout", peak_bytes)?;
 
         let context = self.model.context();
         let transport = MetalTensor::from_bytes(
@@ -1761,9 +1777,9 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let command = context
             .queue
             .commandBuffer()
-            .ok_or(ResearchError::MissingCommandBuffer)?;
+            .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
         let encoder = KernelEncoder::begin(&command);
-        let encode_result = (|| -> Result<(), ResearchError> {
+        let encode_result = (|| -> Result<(), WorkspaceLensError> {
             encode_mat_vec_f16_f32(
                 context,
                 &encoder,
@@ -1807,7 +1823,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .iter()
             .position(|value| !value.is_finite())
         {
-            return Err(ResearchError::NonFiniteTokenReadoutData {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
                 name: "full readout transported residual",
                 index,
             });
@@ -1821,14 +1837,14 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         .sqrt() as f32;
         let full_logits = read_f32_fallible(&logits, vocab_size, "full readout logits")?;
         if let Some(index) = full_logits.iter().position(|value| !value.is_finite()) {
-            return Err(ResearchError::NonFiniteTokenReadoutData {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
                 name: "full readout logits",
                 index,
             });
         }
         let scores = exact_vocabulary_top_k(&full_logits, top_k)?;
-        Ok(ResearchFullVocabularyReadoutWithVector {
-            readout: ResearchFullVocabularyReadout {
+        Ok(WorkspaceLensFullVocabularyReadoutWithVector {
+            readout: WorkspaceLensFullVocabularyReadout {
                 rms_denominator_f64_recomputed,
                 scores,
             },
@@ -1841,17 +1857,17 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         &mut self,
         token_id: i32,
         capture_layers: &[u32],
-    ) -> Result<ResearchForward, ResearchError> {
+    ) -> Result<WorkspaceLensForward, WorkspaceLensError> {
         self.sequence.ensure_can_append(1)?;
         validate_capture_layers(self.arch().n_layer, capture_layers)?;
         let position = self.sequence.position();
         let position_u32 =
-            u32::try_from(position).map_err(|_| ResearchError::PositionOverflow(position))?;
+            u32::try_from(position).map_err(|_| WorkspaceLensError::PositionOverflow(position))?;
         let hidden_size = self.arch().hidden_size as usize;
         let capture_len = capture_layers
             .len()
             .checked_mul(hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
 
         let forward = self.model.forward();
         let state = unsafe { self.sequence.metal_session_mut() };
@@ -1874,7 +1890,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         };
         self.sequence.advance_by(1)?;
 
-        Ok(ResearchForward {
+        Ok(WorkspaceLensForward {
             position,
             token_id,
             logits,
@@ -1891,17 +1907,17 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         &mut self,
         token_id: i32,
         capture_layers: &[u32],
-    ) -> Result<ResearchDenseFfnForward, ResearchError> {
+    ) -> Result<WorkspaceLensDenseFfnForward, WorkspaceLensError> {
         self.sequence.ensure_can_append(1)?;
         validate_capture_layers(self.arch().n_layer, capture_layers)?;
         let position = self.sequence.position();
         let position_u32 =
-            u32::try_from(position).map_err(|_| ResearchError::PositionOverflow(position))?;
+            u32::try_from(position).map_err(|_| WorkspaceLensError::PositionOverflow(position))?;
         let hidden_size = self.arch().hidden_size as usize;
         let capture_len = capture_layers
             .len()
             .checked_mul(hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
 
         let forward = self.model.forward();
         let state = unsafe { self.sequence.metal_session_mut() };
@@ -1937,7 +1953,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         };
         self.sequence.advance_by(1)?;
 
-        Ok(ResearchDenseFfnForward {
+        Ok(WorkspaceLensDenseFfnForward {
             position,
             token_id,
             logits,
@@ -1954,12 +1970,12 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         &mut self,
         token_id: i32,
         capture_layers: &[u32],
-    ) -> Result<DenseFfnActivationCapture, ResearchError> {
+    ) -> Result<DenseFfnActivationCapture, WorkspaceLensError> {
         self.sequence.ensure_can_append(1)?;
         validate_capture_layers(self.arch().n_layer, capture_layers)?;
         let position = self.sequence.position();
         let position_u32 =
-            u32::try_from(position).map_err(|_| ResearchError::PositionOverflow(position))?;
+            u32::try_from(position).map_err(|_| WorkspaceLensError::PositionOverflow(position))?;
         let hidden_size = self.arch().hidden_size as usize;
         let capture_len = checked_product(capture_layers.len(), hidden_size)?;
         let forward = self.model.forward();
@@ -1997,12 +2013,12 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// Apply the exact activation VJP of a supported frozen resident linear map.
     pub fn frozen_linear_vjp(
         &mut self,
-        id: ResearchLinear,
+        id: WorkspaceLensLinear,
         grad_output: &[f32],
         n_query: usize,
-    ) -> Result<Vec<f32>, ResearchError> {
+    ) -> Result<Vec<f32>, WorkspaceLensError> {
         if n_query == 0 {
-            return Err(ResearchError::EmptyQueryBatch);
+            return Err(WorkspaceLensError::EmptyQueryBatch);
         }
         let weight = self.resolve_linear(id)?;
         let [n_in, n_out] = linear_shape(id, weight)?;
@@ -2010,16 +2026,16 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             weight.dtype,
             GgmlType::Q8_0 | GgmlType::BF16 | GgmlType::F16 | GgmlType::F32
         ) {
-            return Err(ResearchError::UnsupportedLinearDtype {
+            return Err(WorkspaceLensError::UnsupportedLinearDtype {
                 id,
                 dtype: weight.dtype,
             });
         }
         let expected = n_query
             .checked_mul(n_out)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         if grad_output.len() != expected {
-            return Err(ResearchError::CotangentSize {
+            return Err(WorkspaceLensError::CotangentSize {
                 got: grad_output.len(),
                 expected,
                 n_query,
@@ -2039,7 +2055,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .context()
             .queue
             .commandBuffer()
-            .ok_or(ResearchError::MissingCommandBuffer)?;
+            .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
         let encoder = KernelEncoder::begin(&command);
         let encode_result = encode_frozen_linear_vjp_f32(
             self.model.context(),
@@ -2058,14 +2074,14 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let status = command.status();
         let error = command.error();
         if status != MTLCommandBufferStatus::Completed || error.is_some() {
-            return Err(ResearchError::CommandBuffer {
+            return Err(WorkspaceLensError::CommandBuffer {
                 status: format!("{status:?}"),
                 error: format!("{error:?}"),
             });
         }
         let output_len = n_query
             .checked_mul(n_in)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         Ok(read_f32(&grad_input, output_len))
     }
 
@@ -2083,7 +2099,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         grad_output: &[f32],
         n_query: usize,
         rule: DenseFfnVjpRule,
-    ) -> Result<DenseFfnVjp, ResearchError> {
+    ) -> Result<DenseFfnVjp, WorkspaceLensError> {
         let (post_norm, gate, up, down) = self.resolve_dense_ffn(layer)?;
         let hidden_size = self.arch().hidden_size as usize;
         let intermediate_size = self.arch().intermediate_size as usize;
@@ -2114,23 +2130,23 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     ///
     /// The selected layer must be nonzero. A command failure after an earlier
     /// token succeeds can leave that successful prefix consumed, matching the
-    /// existing token-at-a-time research forward contract.
+    /// existing token-at-a-time workspace-lens forward contract.
     pub fn forward_prompt_with_gdn_capture(
         &mut self,
         token_ids: &[i32],
         layer: u32,
-    ) -> Result<ResearchGdnForward, ResearchError> {
+    ) -> Result<WorkspaceLensGdnForward, WorkspaceLensError> {
         if token_ids.is_empty() {
-            return Err(ResearchError::EmptyGdnPrompt);
+            return Err(WorkspaceLensError::EmptyGdnPrompt);
         }
-        if token_ids.len() > MAX_RESEARCH_GDN_TOKENS {
-            return Err(ResearchError::GdnPromptTooLong {
+        if token_ids.len() > MAX_WORKSPACE_LENS_GDN_TOKENS {
+            return Err(WorkspaceLensError::GdnPromptTooLong {
                 got: token_ids.len(),
-                max: MAX_RESEARCH_GDN_TOKENS,
+                max: MAX_WORKSPACE_LENS_GDN_TOKENS,
             });
         }
         if layer == 0 {
-            return Err(ResearchError::GdnCaptureRequiresPreviousLayer);
+            return Err(WorkspaceLensError::GdnCaptureRequiresPreviousLayer);
         }
         for &token_id in token_ids {
             if token_id < 0 || token_id as u32 >= self.arch().vocab_size {
@@ -2141,8 +2157,9 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let start_position = self.sequence.position();
         let last_position = start_position
             .checked_add(token_ids.len() - 1)
-            .ok_or(ResearchError::SizeOverflow)?;
-        u32::try_from(last_position).map_err(|_| ResearchError::PositionOverflow(last_position))?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        u32::try_from(last_position)
+            .map_err(|_| WorkspaceLensError::PositionOverflow(last_position))?;
         let (gdn_index, geometry) = {
             let (block, gdn_index, geometry) = self.resolve_gdn(layer)?;
             validate_gdn_weights(layer, block, geometry)?;
@@ -2154,11 +2171,11 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             let conv = state
                 .gdn_conv
                 .get(gdn_index)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             let recurrence = state
                 .gdn_state
                 .get(gdn_index)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             (
                 read_f32(conv, geometry.conv_state_elements),
                 read_f32(recurrence, geometry.state_elements),
@@ -2168,7 +2185,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         let hidden_elements = token_ids
             .len()
             .checked_mul(geometry.hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         let mut input_residuals = Vec::with_capacity(hidden_elements);
         let mut post_mixer_residuals = Vec::with_capacity(hidden_elements);
         let mut post_block_residuals = Vec::with_capacity(hidden_elements);
@@ -2200,7 +2217,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 read_f32(&state.gdn_state[gdn_index], geometry.state_elements),
             )
         };
-        Ok(ResearchGdnForward {
+        Ok(WorkspaceLensGdnForward {
             identity: self.identity(),
             owner_token_id: self.model.owner_token_id(),
             layer,
@@ -2226,21 +2243,21 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// sequences and cannot be stitched into a longer reverse pass.
     pub fn gdn_mixer_vjp(
         &self,
-        forward: &ResearchGdnForward,
+        forward: &WorkspaceLensGdnForward,
         grad_mixer_output: &[f32],
         rule: GdnMixerVjpRule,
-    ) -> Result<ResearchGdnVjp, ResearchError> {
+    ) -> Result<WorkspaceLensGdnVjp, WorkspaceLensError> {
         if forward.identity != self.identity() {
-            return Err(ResearchError::GdnCaptureModelMismatch);
+            return Err(WorkspaceLensError::GdnCaptureModelMismatch);
         }
         if forward.owner_token_id != self.model.owner_token_id() {
-            return Err(ResearchError::GdnCaptureOwnerMismatch);
+            return Err(WorkspaceLensError::GdnCaptureOwnerMismatch);
         }
         let (block, _, geometry) = self.resolve_gdn(forward.layer)?;
         validate_gdn_weights(forward.layer, block, geometry)?;
         let n_tokens = forward.n_tokens();
-        if n_tokens == 0 || n_tokens > MAX_RESEARCH_GDN_TOKENS {
-            return Err(ResearchError::ActivationSize {
+        if n_tokens == 0 || n_tokens > MAX_WORKSPACE_LENS_GDN_TOKENS {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "GDN capture token count",
                 got: n_tokens,
                 expected: 1,
@@ -2248,7 +2265,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         }
         let hidden_elements = n_tokens
             .checked_mul(geometry.hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         for (name, values, expected) in [
             (
                 "GDN captured input residuals",
@@ -2287,7 +2304,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             ),
         ] {
             if values.len() != expected {
-                return Err(ResearchError::ActivationSize {
+                return Err(WorkspaceLensError::ActivationSize {
                     name,
                     got: values.len(),
                     expected,
@@ -2295,14 +2312,14 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             }
         }
         if forward.hidden_size != geometry.hidden_size {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "GDN capture hidden size",
                 got: forward.hidden_size,
                 expected: geometry.hidden_size,
             });
         }
         if grad_mixer_output.len() != hidden_elements {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "GDN mixer cotangent",
                 got: grad_mixer_output.len(),
                 expected: hidden_elements,
@@ -2327,7 +2344,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .zip(&forward.post_mixer_residuals)
             .map(|((&input, &mixer), &observed)| finite_abs_difference(input + mixer, observed))
             .fold(0.0f32, f32::max);
-        Ok(ResearchGdnVjp {
+        Ok(WorkspaceLensGdnVjp {
             layer: forward.layer,
             n_tokens,
             hidden_size: geometry.hidden_size,
@@ -2352,28 +2369,28 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// temporal GDN mixer VJP, and the mixer residual identity.
     pub fn gdn_block_vjp(
         &self,
-        forward: &ResearchGdnForward,
+        forward: &WorkspaceLensGdnForward,
         grad_block_output: &[f32],
         rule: GdnBlockVjpRule,
-    ) -> Result<ResearchGdnBlockVjp, ResearchError> {
+    ) -> Result<WorkspaceLensGdnBlockVjp, WorkspaceLensError> {
         if forward.identity != self.identity() {
-            return Err(ResearchError::GdnCaptureModelMismatch);
+            return Err(WorkspaceLensError::GdnCaptureModelMismatch);
         }
         if forward.owner_token_id != self.model.owner_token_id() {
-            return Err(ResearchError::GdnCaptureOwnerMismatch);
+            return Err(WorkspaceLensError::GdnCaptureOwnerMismatch);
         }
         let n_tokens = forward.n_tokens();
         let hidden_size = self.arch().hidden_size as usize;
         let expected = checked_product(n_tokens, hidden_size)?;
         if grad_block_output.len() != expected {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "GDN block cotangent",
                 got: grad_block_output.len(),
                 expected,
             });
         }
         if forward.post_mixer_residuals.len() != expected {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "GDN captured post-mixer residuals",
                 got: forward.post_mixer_residuals.len(),
                 expected,
@@ -2395,7 +2412,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             rule,
             |grad_post_mixer, mixer_rule| self.gdn_mixer_vjp(forward, grad_post_mixer, mixer_rule),
         )?;
-        Ok(ResearchGdnBlockVjp {
+        Ok(WorkspaceLensGdnBlockVjp {
             layer: forward.layer,
             n_tokens,
             hidden_size,
@@ -2412,21 +2429,21 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         &mut self,
         token_ids: &[i32],
         layer: u32,
-    ) -> Result<ResearchAttnForward, ResearchError> {
+    ) -> Result<WorkspaceLensAttnForward, WorkspaceLensError> {
         if token_ids.is_empty() {
-            return Err(ResearchError::EmptyAttnPrompt);
+            return Err(WorkspaceLensError::EmptyAttnPrompt);
         }
-        if token_ids.len() > MAX_RESEARCH_ATTN_TOKENS {
-            return Err(ResearchError::AttnPromptTooLong {
+        if token_ids.len() > MAX_WORKSPACE_LENS_ATTN_TOKENS {
+            return Err(WorkspaceLensError::AttnPromptTooLong {
                 got: token_ids.len(),
-                max: MAX_RESEARCH_ATTN_TOKENS,
+                max: MAX_WORKSPACE_LENS_ATTN_TOKENS,
             });
         }
         if layer == 0 {
-            return Err(ResearchError::AttnCaptureRequiresPreviousLayer);
+            return Err(WorkspaceLensError::AttnCaptureRequiresPreviousLayer);
         }
         if self.sequence.position() != 0 {
-            return Err(ResearchError::AttnCaptureRequiresFreshSequence(
+            return Err(WorkspaceLensError::AttnCaptureRequiresFreshSequence(
                 self.sequence.position(),
             ));
         }
@@ -2465,7 +2482,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 .extend_from_slice(&forward.capture.post_block_residuals[hidden..2 * hidden]);
             final_logits = forward.logits;
         }
-        Ok(ResearchAttnForward {
+        Ok(WorkspaceLensAttnForward {
             identity: self.identity(),
             owner_token_id: self.model.owner_token_id(),
             layer,
@@ -2482,23 +2499,23 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// attention Jacobian and the selected residual-stream/FFN lens rule.
     pub fn attn_block_vjp(
         &self,
-        forward: &ResearchAttnForward,
+        forward: &WorkspaceLensAttnForward,
         grad_block_output: &[f32],
         rule: AttnBlockVjpRule,
-    ) -> Result<ResearchAttnBlockVjp, ResearchError> {
+    ) -> Result<WorkspaceLensAttnBlockVjp, WorkspaceLensError> {
         if forward.identity != self.identity() {
-            return Err(ResearchError::AttnCaptureModelMismatch);
+            return Err(WorkspaceLensError::AttnCaptureModelMismatch);
         }
         if forward.owner_token_id != self.model.owner_token_id() {
-            return Err(ResearchError::AttnCaptureOwnerMismatch);
+            return Err(WorkspaceLensError::AttnCaptureOwnerMismatch);
         }
         let (block, geometry) = self.resolve_attn(forward.layer)?;
         validate_attn_weights(forward.layer, block, geometry)?;
         let n_tokens = forward.n_tokens();
-        if n_tokens == 0 || n_tokens > MAX_RESEARCH_ATTN_TOKENS {
-            return Err(ResearchError::AttnPromptTooLong {
+        if n_tokens == 0 || n_tokens > MAX_WORKSPACE_LENS_ATTN_TOKENS {
+            return Err(WorkspaceLensError::AttnPromptTooLong {
                 got: n_tokens,
-                max: MAX_RESEARCH_ATTN_TOKENS,
+                max: MAX_WORKSPACE_LENS_ATTN_TOKENS,
             });
         }
         let hidden_elements = checked_product(n_tokens, geometry.hidden_size)?;
@@ -2518,7 +2535,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             ("attention block cotangent", grad_block_output),
         ] {
             if values.len() != hidden_elements {
-                return Err(ResearchError::ActivationSize {
+                return Err(WorkspaceLensError::ActivationSize {
                     name,
                     got: values.len(),
                     expected: hidden_elements,
@@ -2526,7 +2543,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             }
         }
         if forward.hidden_size != geometry.hidden_size {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "attention capture hidden size",
                 got: forward.hidden_size,
                 expected: geometry.hidden_size,
@@ -2570,7 +2587,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .zip(&forward.post_mixer_residuals)
             .map(|((&input, &mixer), &observed)| finite_abs_difference(input + mixer, observed))
             .fold(0.0f32, f32::max);
-        Ok(ResearchAttnBlockVjp {
+        Ok(WorkspaceLensAttnBlockVjp {
             layer: forward.layer,
             n_tokens,
             hidden_size: geometry.hidden_size,
@@ -2589,18 +2606,18 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     pub fn forward_prompt_with_workspace_capture(
         &mut self,
         token_ids: &[i32],
-    ) -> Result<ResearchWorkspaceForward, ResearchError> {
+    ) -> Result<WorkspaceLensPromptForward, WorkspaceLensError> {
         if token_ids.is_empty() {
-            return Err(ResearchError::EmptyWorkspacePrompt);
+            return Err(WorkspaceLensError::EmptyWorkspacePrompt);
         }
-        if token_ids.len() > MAX_RESEARCH_WORKSPACE_TOKENS {
-            return Err(ResearchError::WorkspacePromptTooLong {
+        if token_ids.len() > MAX_WORKSPACE_LENS_TOKENS {
+            return Err(WorkspaceLensError::WorkspacePromptTooLong {
                 got: token_ids.len(),
-                max: MAX_RESEARCH_WORKSPACE_TOKENS,
+                max: MAX_WORKSPACE_LENS_TOKENS,
             });
         }
         if self.sequence.position() != 0 {
-            return Err(ResearchError::WorkspaceCaptureRequiresFreshSequence(
+            return Err(WorkspaceLensError::WorkspaceCaptureRequiresFreshSequence(
                 self.sequence.position(),
             ));
         }
@@ -2612,10 +2629,12 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         }
         self.sequence.ensure_can_append(token_ids.len())?;
         let last_position = token_ids.len() - 1;
-        u32::try_from(last_position).map_err(|_| ResearchError::PositionOverflow(last_position))?;
+        u32::try_from(last_position)
+            .map_err(|_| WorkspaceLensError::PositionOverflow(last_position))?;
         self.validate_workspace_weights()?;
 
-        let n_layers = usize::try_from(arch.n_layer).map_err(|_| ResearchError::SizeOverflow)?;
+        let n_layers =
+            usize::try_from(arch.n_layer).map_err(|_| WorkspaceLensError::SizeOverflow)?;
         let hidden_size = arch.hidden_size as usize;
         let layer_elements = checked_product(token_ids.len(), hidden_size)?;
         let bank_elements = checked_product(n_layers, layer_elements)?;
@@ -2650,7 +2669,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 hidden_size,
             )?;
         }
-        Ok(ResearchWorkspaceForward {
+        Ok(WorkspaceLensPromptForward {
             identity: self.identity(),
             owner_token_id: self.model.owner_token_id(),
             token_ids: token_ids.to_vec(),
@@ -2667,16 +2686,16 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// paper's mean over valid positions) on the returned `[K,T,H]` values.
     pub fn workspace_vjp(
         &self,
-        forward: &ResearchWorkspaceForward,
+        forward: &WorkspaceLensPromptForward,
         target_layer: u32,
         source_layers: &[u32],
         target_cotangent: &[f32],
         rule: WorkspaceLensRule,
-    ) -> Result<ResearchWorkspaceVjp, ResearchError> {
+    ) -> Result<WorkspaceLensVjp, WorkspaceLensError> {
         let (arch, n_tokens, hidden_elements) =
             self.validate_workspace_vjp_forward(forward, target_layer)?;
         if target_cotangent.len() != hidden_elements {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "workspace target cotangent",
                 got: target_cotangent.len(),
                 expected: hidden_elements,
@@ -2689,23 +2708,22 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             target_cotangent,
             |layer, grad_output| {
                 let input = forward.input_residuals(layer).ok_or(
-                    ResearchError::WorkspaceSourceNotBeforeTarget {
+                    WorkspaceLensError::WorkspaceSourceNotBeforeTarget {
                         source_layer: layer,
                         target_layer,
                     },
                 )?;
-                let post_mixer =
-                    forward
-                        .post_mixer_residuals(layer)
-                        .ok_or(ResearchError::InvalidLayer {
-                            layer,
-                            n_layers: arch.n_layer,
-                        })?;
+                let post_mixer = forward.post_mixer_residuals(layer).ok_or(
+                    WorkspaceLensError::InvalidLayer {
+                        layer,
+                        n_layers: arch.n_layer,
+                    },
+                )?;
                 self.workspace_block_vjp(layer, input, post_mixer, grad_output, n_tokens, rule)
             },
         )?;
         validate_workspace_vjp_finite(&values, &diagnostics)?;
-        Ok(ResearchWorkspaceVjp {
+        Ok(WorkspaceLensVjp {
             target_layer,
             source_layers: try_clone_slice(source_layers, "workspace VJP source layers")?,
             n_tokens,
@@ -2720,27 +2738,27 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// use `[K,Q,T,H]` order.
     pub fn workspace_vjp_batch(
         &self,
-        forward: &ResearchWorkspaceForward,
+        forward: &WorkspaceLensPromptForward,
         target_layer: u32,
         source_layers: &[u32],
         target_cotangents: &[f32],
         n_query: usize,
         rule: WorkspaceLensRule,
-    ) -> Result<ResearchWorkspaceVjpBatch, ResearchError> {
+    ) -> Result<WorkspaceLensVjpBatch, WorkspaceLensError> {
         if n_query == 0 {
-            return Err(ResearchError::EmptyQueryBatch);
+            return Err(WorkspaceLensError::EmptyQueryBatch);
         }
-        if n_query > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
-            return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+        if n_query > MAX_WORKSPACE_LENS_DIM_BATCH {
+            return Err(WorkspaceLensError::WorkspaceQueryBatchTooLarge {
                 got: n_query,
-                max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+                max: MAX_WORKSPACE_LENS_DIM_BATCH,
             });
         }
         let (_arch, n_tokens, hidden_elements) =
             self.validate_workspace_vjp_forward(forward, target_layer)?;
         let query_elements = checked_product(n_query, hidden_elements)?;
         if target_cotangents.len() != query_elements {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "workspace target cotangent query bank",
                 got: target_cotangents.len(),
                 expected: query_elements,
@@ -2753,18 +2771,17 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             target_cotangents,
             |layer, grad_outputs| {
                 let input = forward.input_residuals(layer).ok_or(
-                    ResearchError::WorkspaceSourceNotBeforeTarget {
+                    WorkspaceLensError::WorkspaceSourceNotBeforeTarget {
                         source_layer: layer,
                         target_layer,
                     },
                 )?;
-                let post_mixer =
-                    forward
-                        .post_mixer_residuals(layer)
-                        .ok_or(ResearchError::InvalidLayer {
-                            layer,
-                            n_layers: forward.n_layers,
-                        })?;
+                let post_mixer = forward.post_mixer_residuals(layer).ok_or(
+                    WorkspaceLensError::InvalidLayer {
+                        layer,
+                        n_layers: forward.n_layers,
+                    },
+                )?;
                 self.workspace_block_vjp_batch(
                     layer,
                     input,
@@ -2777,7 +2794,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             },
         )?;
         validate_workspace_vjp_finite(&values, &diagnostics)?;
-        Ok(ResearchWorkspaceVjpBatch {
+        Ok(WorkspaceLensVjpBatch {
             target_layer,
             source_layers: try_clone_slice(source_layers, "workspace VJP batch source layers")?,
             n_query,
@@ -2797,22 +2814,22 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// with no second normalization over target positions.
     pub fn workspace_fit_rows(
         &self,
-        forward: &ResearchWorkspaceForward,
+        forward: &WorkspaceLensPromptForward,
         target_layer: u32,
         source_layers: &[u32],
         output_rows: &[u32],
         skip_first: usize,
         rule: WorkspaceLensRule,
-    ) -> Result<ResearchWorkspaceRows, ResearchError> {
+    ) -> Result<WorkspaceLensRows, WorkspaceLensError> {
         if output_rows.is_empty() {
-            return Err(ResearchError::EmptyWorkspaceOutputRows);
+            return Err(WorkspaceLensError::EmptyWorkspaceOutputRows);
         }
         if output_rows.windows(2).any(|rows| rows[0] >= rows[1]) {
-            return Err(ResearchError::WorkspaceOutputRowsNotStrict);
+            return Err(WorkspaceLensError::WorkspaceOutputRowsNotStrict);
         }
         let hidden_size = forward.hidden_size();
         if let Some(&row) = output_rows.iter().find(|&&row| row as usize >= hidden_size) {
-            return Err(ResearchError::WorkspaceOutputRowOutOfRange { row, hidden_size });
+            return Err(WorkspaceLensError::WorkspaceOutputRowOutOfRange { row, hidden_size });
         }
         let valid_positions = workspace_valid_position_range(forward.n_tokens(), skip_first)?;
         let n_valid_positions = valid_positions.len();
@@ -2827,7 +2844,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             for position in valid_positions.clone() {
                 let offset = checked_product(position, hidden_size)?
                     .checked_add(row as usize)
-                    .ok_or(ResearchError::SizeOverflow)?;
+                    .ok_or(WorkspaceLensError::SizeOverflow)?;
                 target_cotangent[offset] = 1.0;
             }
             let vjp = self.workspace_vjp(
@@ -2841,18 +2858,18 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             for source_slot in 0..source_layers.len() {
                 let source =
                     vjp.source_values(source_slot)
-                        .ok_or(ResearchError::ActivationSize {
+                        .ok_or(WorkspaceLensError::ActivationSize {
                             name: "workspace fitted source trajectory",
                             got: vjp.values.len(),
                             expected: checked_product(source_layers.len(), hidden_elements)?,
                         })?;
                 let destination_row = checked_product(source_slot, output_rows.len())?
                     .checked_add(row_slot)
-                    .ok_or(ResearchError::SizeOverflow)?;
+                    .ok_or(WorkspaceLensError::SizeOverflow)?;
                 let destination_start = checked_product(destination_row, hidden_size)?;
                 let destination_end = destination_start
                     .checked_add(hidden_size)
-                    .ok_or(ResearchError::SizeOverflow)?;
+                    .ok_or(WorkspaceLensError::SizeOverflow)?;
                 reduce_workspace_source_positions(
                     source,
                     forward.n_tokens(),
@@ -2862,7 +2879,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 )?;
             }
         }
-        Ok(ResearchWorkspaceRows {
+        Ok(WorkspaceLensRows {
             target_layer,
             source_layers: source_layers.to_vec(),
             output_rows: output_rows.to_vec(),
@@ -2878,32 +2895,32 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// row-shard orientation `[K,R,H]` and the reference estimator exactly.
     pub fn workspace_fit_rows_batched(
         &self,
-        forward: &ResearchWorkspaceForward,
+        forward: &WorkspaceLensPromptForward,
         target_layer: u32,
         source_layers: &[u32],
         output_rows: &[u32],
         skip_first: usize,
         dim_batch: usize,
         rule: WorkspaceLensRule,
-    ) -> Result<ResearchWorkspaceRows, ResearchError> {
+    ) -> Result<WorkspaceLensRows, WorkspaceLensError> {
         if dim_batch == 0 {
-            return Err(ResearchError::EmptyQueryBatch);
+            return Err(WorkspaceLensError::EmptyQueryBatch);
         }
-        if dim_batch > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
-            return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+        if dim_batch > MAX_WORKSPACE_LENS_DIM_BATCH {
+            return Err(WorkspaceLensError::WorkspaceQueryBatchTooLarge {
                 got: dim_batch,
-                max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+                max: MAX_WORKSPACE_LENS_DIM_BATCH,
             });
         }
         if output_rows.is_empty() {
-            return Err(ResearchError::EmptyWorkspaceOutputRows);
+            return Err(WorkspaceLensError::EmptyWorkspaceOutputRows);
         }
         if output_rows.windows(2).any(|rows| rows[0] >= rows[1]) {
-            return Err(ResearchError::WorkspaceOutputRowsNotStrict);
+            return Err(WorkspaceLensError::WorkspaceOutputRowsNotStrict);
         }
         let hidden_size = forward.hidden_size();
         if let Some(&row) = output_rows.iter().find(|&&row| row as usize >= hidden_size) {
-            return Err(ResearchError::WorkspaceOutputRowOutOfRange { row, hidden_size });
+            return Err(WorkspaceLensError::WorkspaceOutputRowOutOfRange { row, hidden_size });
         }
         let valid_positions = workspace_valid_position_range(forward.n_tokens(), skip_first)?;
         let n_valid_positions = valid_positions.len();
@@ -2922,7 +2939,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                     let offset = query_start
                         .checked_add(checked_product(position, hidden_size)?)
                         .and_then(|offset| offset.checked_add(row as usize))
-                        .ok_or(ResearchError::SizeOverflow)?;
+                        .ok_or(WorkspaceLensError::SizeOverflow)?;
                     target_cotangents[offset] = 1.0;
                 }
             }
@@ -2938,7 +2955,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             for source_slot in 0..source_layers.len() {
                 for query_slot in 0..n_query {
                     let source = vjp.source_query_values(source_slot, query_slot).ok_or(
-                        ResearchError::ActivationSize {
+                        WorkspaceLensError::ActivationSize {
                             name: "workspace fitted source trajectory query",
                             got: vjp.values.len(),
                             expected: checked_product(
@@ -2949,14 +2966,14 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                     )?;
                     let row_slot = first_row_slot
                         .checked_add(query_slot)
-                        .ok_or(ResearchError::SizeOverflow)?;
+                        .ok_or(WorkspaceLensError::SizeOverflow)?;
                     let destination_row = checked_product(source_slot, output_rows.len())?
                         .checked_add(row_slot)
-                        .ok_or(ResearchError::SizeOverflow)?;
+                        .ok_or(WorkspaceLensError::SizeOverflow)?;
                     let destination_start = checked_product(destination_row, hidden_size)?;
                     let destination_end = destination_start
                         .checked_add(hidden_size)
-                        .ok_or(ResearchError::SizeOverflow)?;
+                        .ok_or(WorkspaceLensError::SizeOverflow)?;
                     reduce_workspace_source_positions(
                         source,
                         forward.n_tokens(),
@@ -2968,9 +2985,9 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             }
             first_row_slot = first_row_slot
                 .checked_add(n_query)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
         }
-        Ok(ResearchWorkspaceRows {
+        Ok(WorkspaceLensRows {
             target_layer,
             source_layers: source_layers.to_vec(),
             output_rows: output_rows.to_vec(),
@@ -2987,39 +3004,39 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     /// positions are mean-reduced into owned `[K,Q,H]` values. Peak accounting
     /// includes caller covectors, fitting output, batched target/current/next
     /// gradients, and the batched VJP bank. Reduce `dim_batch` when that
-    /// conservative peak exceeds [`MAX_RESEARCH_OWNED_RESULT_BYTES`].
+    /// conservative peak exceeds [`MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES`].
     #[allow(clippy::too_many_arguments)]
     pub fn workspace_fit_readouts_batched(
         &self,
-        forward: &ResearchWorkspaceForward,
+        forward: &WorkspaceLensPromptForward,
         target_layer: u32,
         source_layers: &[u32],
         target_covectors: &[f32],
         skip_first: usize,
         dim_batch: usize,
         rule: WorkspaceLensRule,
-    ) -> Result<ResearchWorkspaceReadouts, ResearchError> {
+    ) -> Result<WorkspaceLensReadouts, WorkspaceLensError> {
         if dim_batch == 0 {
-            return Err(ResearchError::EmptyQueryBatch);
+            return Err(WorkspaceLensError::EmptyQueryBatch);
         }
-        if dim_batch > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
-            return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+        if dim_batch > MAX_WORKSPACE_LENS_DIM_BATCH {
+            return Err(WorkspaceLensError::WorkspaceQueryBatchTooLarge {
                 got: dim_batch,
-                max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+                max: MAX_WORKSPACE_LENS_DIM_BATCH,
             });
         }
         if target_covectors.is_empty() {
-            return Err(ResearchError::EmptyWorkspaceTargetCovectors);
+            return Err(WorkspaceLensError::EmptyWorkspaceTargetCovectors);
         }
         let hidden_size = forward.hidden_size();
         if hidden_size == 0 || !target_covectors.len().is_multiple_of(hidden_size) {
-            return Err(ResearchError::WorkspaceTargetCovectorSize {
+            return Err(WorkspaceLensError::WorkspaceTargetCovectorSize {
                 got: target_covectors.len(),
                 hidden_size,
             });
         }
         if let Some(index) = target_covectors.iter().position(|value| !value.is_finite()) {
-            return Err(ResearchError::NonFiniteWorkspaceTargetCovector { index });
+            return Err(WorkspaceLensError::NonFiniteWorkspaceTargetCovector { index });
         }
         let (_arch, n_tokens, hidden_elements) =
             self.validate_workspace_vjp_forward(forward, target_layer)?;
@@ -3039,15 +3056,15 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .and_then(|elements| elements.checked_add(chunk_target_elements))
             .and_then(|elements| elements.checked_add(chunk_target_elements))
             .and_then(|elements| elements.checked_add(chunk_vjp_elements))
-            .ok_or(ResearchError::SizeOverflow)?;
-        enforce_research_byte_budget(
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        enforce_workspace_lens_byte_budget(
             "workspace readout fit",
             checked_product(peak_elements, std::mem::size_of::<f32>())?
                 .checked_add(checked_product(
                     source_layers.len(),
                     std::mem::size_of::<u32>(),
                 )?)
-                .ok_or(ResearchError::SizeOverflow)?,
+                .ok_or(WorkspaceLensError::SizeOverflow)?,
         )?;
         let mut values = try_zeroed_f32(output_elements, "workspace readout result")?;
         let mut diagnostics = Vec::new();
@@ -3083,9 +3100,9 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             )?;
             first_query = first_query
                 .checked_add(chunk_queries)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
         }
-        Ok(ResearchWorkspaceReadouts {
+        Ok(WorkspaceLensReadouts {
             target_layer,
             source_layers: try_clone_slice(source_layers, "workspace readout source layers")?,
             n_query,
@@ -3099,38 +3116,38 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
 
     fn validate_workspace_vjp_forward(
         &self,
-        forward: &ResearchWorkspaceForward,
+        forward: &WorkspaceLensPromptForward,
         target_layer: u32,
-    ) -> Result<(Arch, usize, usize), ResearchError> {
+    ) -> Result<(Arch, usize, usize), WorkspaceLensError> {
         if forward.identity != self.identity() {
-            return Err(ResearchError::WorkspaceCaptureModelMismatch);
+            return Err(WorkspaceLensError::WorkspaceCaptureModelMismatch);
         }
         if forward.owner_token_id != self.model.owner_token_id() {
-            return Err(ResearchError::WorkspaceCaptureOwnerMismatch);
+            return Err(WorkspaceLensError::WorkspaceCaptureOwnerMismatch);
         }
         let arch = self.arch();
         if target_layer >= arch.n_layer {
-            return Err(ResearchError::InvalidLayer {
+            return Err(WorkspaceLensError::InvalidLayer {
                 layer: target_layer,
                 n_layers: arch.n_layer,
             });
         }
         let n_tokens = forward.n_tokens();
-        if n_tokens == 0 || n_tokens > MAX_RESEARCH_WORKSPACE_TOKENS {
-            return Err(ResearchError::WorkspacePromptTooLong {
+        if n_tokens == 0 || n_tokens > MAX_WORKSPACE_LENS_TOKENS {
+            return Err(WorkspaceLensError::WorkspacePromptTooLong {
                 got: n_tokens,
-                max: MAX_RESEARCH_WORKSPACE_TOKENS,
+                max: MAX_WORKSPACE_LENS_TOKENS,
             });
         }
         if forward.n_layers != arch.n_layer {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "workspace capture layer count",
                 got: forward.n_layers as usize,
                 expected: arch.n_layer as usize,
             });
         }
         if forward.hidden_size != arch.hidden_size as usize {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "workspace capture hidden size",
                 got: forward.hidden_size,
                 expected: arch.hidden_size as usize,
@@ -3149,7 +3166,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             ),
         ] {
             if values.len() != bank_elements {
-                return Err(ResearchError::ActivationSize {
+                return Err(WorkspaceLensError::ActivationSize {
                     name,
                     got: values.len(),
                     expected: bank_elements,
@@ -3159,17 +3176,17 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         Ok((arch, n_tokens, hidden_elements))
     }
 
-    fn validate_workspace_weights(&self) -> Result<(), ResearchError> {
+    fn validate_workspace_weights(&self) -> Result<(), WorkspaceLensError> {
         let arch = self.arch();
         if self.model.metal_model().blocks.len() != arch.n_layer as usize {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "resident workspace block schedule",
                 got: self.model.metal_model().blocks.len(),
                 expected: arch.n_layer as usize,
             });
         }
         for (layer, block) in self.model.metal_model().blocks.iter().enumerate() {
-            let layer = u32::try_from(layer).map_err(|_| ResearchError::SizeOverflow)?;
+            let layer = u32::try_from(layer).map_err(|_| WorkspaceLensError::SizeOverflow)?;
             let (post_norm, gate, up, down) = match block {
                 MetalBlock::Gdn(block) => (
                     &block.post_attn_norm,
@@ -3216,7 +3233,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         grad_block_output: &[f32],
         n_tokens: usize,
         rule: WorkspaceLensRule,
-    ) -> Result<(Vec<f32>, ResearchWorkspaceReplayDiagnostic), ResearchError> {
+    ) -> Result<(Vec<f32>, WorkspaceLensReplayDiagnostic), WorkspaceLensError> {
         let arch = self.arch();
         let hidden_size = arch.hidden_size as usize;
         let hidden_elements = checked_product(n_tokens, hidden_size)?;
@@ -3226,7 +3243,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             ("workspace block cotangent", grad_block_output),
         ] {
             if values.len() != hidden_elements {
-                return Err(ResearchError::ActivationSize {
+                return Err(WorkspaceLensError::ActivationSize {
                     name,
                     got: values.len(),
                     expected: hidden_elements,
@@ -3234,7 +3251,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             }
         }
         let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
-            ResearchError::InvalidLayer {
+            WorkspaceLensError::InvalidLayer {
                 layer,
                 n_layers: arch.n_layer,
             },
@@ -3294,7 +3311,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 (
                     replay.mixer_outputs,
                     replay.grad_input,
-                    ResearchWorkspaceBlockKind::Gdn,
+                    WorkspaceLensBlockKind::Gdn,
                 )
             }
             MetalBlock::Attn(block) => {
@@ -3315,7 +3332,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 (
                     replay.mixer_outputs,
                     replay.grad_input,
-                    ResearchWorkspaceBlockKind::Attention,
+                    WorkspaceLensBlockKind::Attention,
                 )
             }
         };
@@ -3326,7 +3343,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .map(|((&input, &mixer), &observed)| finite_abs_difference(input + mixer, observed))
             .fold(0.0f32, f32::max);
         if grad_mixer_input.len() != grad_post_mixer.len() {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "workspace mixer branch cotangent",
                 got: grad_mixer_input.len(),
                 expected: grad_post_mixer.len(),
@@ -3339,7 +3356,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .collect();
         Ok((
             values,
-            ResearchWorkspaceReplayDiagnostic {
+            WorkspaceLensReplayDiagnostic {
                 layer,
                 kind,
                 residual_replay_max_abs_error,
@@ -3357,9 +3374,9 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         n_tokens: usize,
         n_query: usize,
         rule: WorkspaceLensRule,
-    ) -> Result<(Vec<f32>, ResearchWorkspaceReplayDiagnostic), ResearchError> {
+    ) -> Result<(Vec<f32>, WorkspaceLensReplayDiagnostic), WorkspaceLensError> {
         if n_query == 0 {
-            return Err(ResearchError::EmptyQueryBatch);
+            return Err(WorkspaceLensError::EmptyQueryBatch);
         }
         let arch = self.arch();
         let hidden_size = arch.hidden_size as usize;
@@ -3379,7 +3396,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             ),
         ] {
             if values.len() != expected {
-                return Err(ResearchError::ActivationSize {
+                return Err(WorkspaceLensError::ActivationSize {
                     name,
                     got: values.len(),
                     expected,
@@ -3387,7 +3404,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             }
         }
         let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
-            ResearchError::InvalidLayer {
+            WorkspaceLensError::InvalidLayer {
                 layer,
                 n_layers: arch.n_layer,
             },
@@ -3456,7 +3473,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                     })
                     .fold(0.0f32, f32::max);
                 if replay.grad_input.len() != query_elements {
-                    return Err(ResearchError::ActivationSize {
+                    return Err(WorkspaceLensError::ActivationSize {
                         name: "workspace GDN mixer branch cotangent query bank",
                         got: replay.grad_input.len(),
                         expected: query_elements,
@@ -3465,7 +3482,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 (
                     replay.grad_input,
                     residual_replay_max_abs_error,
-                    ResearchWorkspaceBlockKind::Gdn,
+                    WorkspaceLensBlockKind::Gdn,
                 )
             }
             MetalBlock::Attn(block) => {
@@ -3493,7 +3510,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                     })
                     .fold(0.0f32, f32::max);
                 if replay.grad_input.len() != query_elements {
-                    return Err(ResearchError::ActivationSize {
+                    return Err(WorkspaceLensError::ActivationSize {
                         name: "workspace attention mixer branch cotangent query bank",
                         got: replay.grad_input.len(),
                         expected: query_elements,
@@ -3502,12 +3519,12 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
                 (
                     replay.grad_input,
                     residual_replay_max_abs_error,
-                    ResearchWorkspaceBlockKind::Attention,
+                    WorkspaceLensBlockKind::Attention,
                 )
             }
         };
         if grad_mixer_input.len() != query_elements {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "workspace mixer branch cotangent query bank",
                 got: grad_mixer_input.len(),
                 expected: query_elements,
@@ -3520,7 +3537,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             .collect();
         Ok((
             values,
-            ResearchWorkspaceReplayDiagnostic {
+            WorkspaceLensReplayDiagnostic {
                 layer,
                 kind,
                 residual_replay_max_abs_error,
@@ -3528,15 +3545,18 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         ))
     }
 
-    fn resolve_attn(&self, layer: u32) -> Result<(&MetalAttnBlock, AttnGeometry), ResearchError> {
+    fn resolve_attn(
+        &self,
+        layer: u32,
+    ) -> Result<(&MetalAttnBlock, AttnGeometry), WorkspaceLensError> {
         let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
-            ResearchError::InvalidLayer {
+            WorkspaceLensError::InvalidLayer {
                 layer,
                 n_layers: self.arch().n_layer,
             },
         )?;
         let MetalBlock::Attn(block) = block else {
-            return Err(ResearchError::NotAttentionLayer { layer });
+            return Err(WorkspaceLensError::NotAttentionLayer { layer });
         };
         Ok((block, AttnGeometry::new(self.arch())?))
     }
@@ -3544,15 +3564,15 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     fn resolve_gdn(
         &self,
         layer: u32,
-    ) -> Result<(&MetalGdnBlock, usize, GdnGeometry), ResearchError> {
+    ) -> Result<(&MetalGdnBlock, usize, GdnGeometry), WorkspaceLensError> {
         let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
-            ResearchError::InvalidLayer {
+            WorkspaceLensError::InvalidLayer {
                 layer,
                 n_layers: self.arch().n_layer,
             },
         )?;
         let MetalBlock::Gdn(block) = block else {
-            return Err(ResearchError::NotGdnLayer { layer });
+            return Err(WorkspaceLensError::NotGdnLayer { layer });
         };
         let gdn_index = self.model.metal_model().blocks[..layer as usize]
             .iter()
@@ -3564,9 +3584,9 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
     fn resolve_dense_ffn(
         &self,
         layer: u32,
-    ) -> Result<(&MetalTensor, &MetalTensor, &MetalTensor, &MetalTensor), ResearchError> {
+    ) -> Result<(&MetalTensor, &MetalTensor, &MetalTensor, &MetalTensor), WorkspaceLensError> {
         let block = self.model.metal_model().blocks.get(layer as usize).ok_or(
-            ResearchError::InvalidLayer {
+            WorkspaceLensError::InvalidLayer {
                 layer,
                 n_layers: self.arch().n_layer,
             },
@@ -3587,12 +3607,12 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
         })
     }
 
-    fn resolve_linear(&self, id: ResearchLinear) -> Result<&MetalTensor, ResearchError> {
-        let ResearchLinear::Layer { index, role } = id else {
+    fn resolve_linear(&self, id: WorkspaceLensLinear) -> Result<&MetalTensor, WorkspaceLensError> {
+        let WorkspaceLensLinear::Layer { index, role } = id else {
             return Ok(&self.model.metal_model().lm_head);
         };
         let block = self.model.metal_model().blocks.get(index as usize).ok_or(
-            ResearchError::InvalidLayer {
+            WorkspaceLensError::InvalidLayer {
                 layer: index,
                 n_layers: self.arch().n_layer,
             },
@@ -3613,7 +3633,7 @@ impl<'model, 'sequence> ResearchSession<'model, 'sequence> {
             (MetalBlock::Attn(block), LinearRole::AttentionK) => &block.k,
             (MetalBlock::Attn(block), LinearRole::AttentionV) => &block.v,
             (MetalBlock::Attn(block), LinearRole::AttentionOut) => &block.o,
-            _ => return Err(ResearchError::InvalidLinearRole { layer: index, role }),
+            _ => return Err(WorkspaceLensError::InvalidLinearRole { layer: index, role }),
         };
         Ok(tensor)
     }
@@ -3646,7 +3666,7 @@ struct AttnGeometry {
 }
 
 impl AttnGeometry {
-    fn new(arch: Arch) -> Result<Self, ResearchError> {
+    fn new(arch: Arch) -> Result<Self, WorkspaceLensError> {
         let hidden_size = arch.hidden_size as usize;
         let n_q_heads = arch.n_q_heads as usize;
         let n_kv_heads = arch.n_kv_heads as usize;
@@ -3663,7 +3683,7 @@ impl AttnGeometry {
             || !arch.rope_theta.is_finite()
             || arch.rope_theta <= 0.0
         {
-            return Err(ResearchError::SizeOverflow);
+            return Err(WorkspaceLensError::SizeOverflow);
         }
         let q_elements = checked_product(n_q_heads, head_dim)?;
         Ok(Self {
@@ -3701,7 +3721,7 @@ fn rope_neox_rows_in_place(
     start_position: u32,
     rope_theta: f32,
     transpose: bool,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let expected = checked_product(checked_product(n_tokens, n_heads)?, head_dim)?;
     if values.len() != expected
         || n_tokens == 0
@@ -3713,7 +3733,7 @@ fn rope_neox_rows_in_place(
         || !rope_theta.is_finite()
         || rope_theta <= 0.0
     {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "RoPE row bank",
             got: values.len(),
             expected,
@@ -3722,8 +3742,8 @@ fn rope_neox_rows_in_place(
     let half = n_rot / 2;
     for token in 0..n_tokens {
         let position = start_position
-            .checked_add(u32::try_from(token).map_err(|_| ResearchError::SizeOverflow)?)
-            .ok_or(ResearchError::SizeOverflow)? as f32;
+            .checked_add(u32::try_from(token).map_err(|_| WorkspaceLensError::SizeOverflow)?)
+            .ok_or(WorkspaceLensError::SizeOverflow)? as f32;
         for head in 0..n_heads {
             let base = (token * n_heads + head) * head_dim;
             for index in 0..half {
@@ -3753,7 +3773,7 @@ fn cpu_causal_gated_attention_forward(
     gate: &[f32],
     n_tokens: usize,
     geometry: AttnGeometry,
-) -> Result<CpuCausalAttentionForward, ResearchError> {
+) -> Result<CpuCausalAttentionForward, WorkspaceLensError> {
     let q_total = checked_product(n_tokens, geometry.q_elements)?;
     let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
     for (name, values, expected) in [
@@ -3763,7 +3783,7 @@ fn cpu_causal_gated_attention_forward(
         ("attention gate", gate, q_total),
     ] {
         if values.len() != expected {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name,
                 got: values.len(),
                 expected,
@@ -3824,7 +3844,7 @@ fn cpu_causal_gated_attention_vjp(
     grad_gated_output: &[f32],
     n_tokens: usize,
     geometry: AttnGeometry,
-) -> Result<CpuCausalAttentionVjp, ResearchError> {
+) -> Result<CpuCausalAttentionVjp, WorkspaceLensError> {
     let forward = cpu_causal_gated_attention_forward(q, k, v, gate, n_tokens, geometry)?;
     cpu_causal_gated_attention_vjp_with_forward(
         q,
@@ -3848,7 +3868,7 @@ fn cpu_causal_gated_attention_vjp_with_forward(
     n_tokens: usize,
     geometry: AttnGeometry,
     forward: &CpuCausalAttentionForward,
-) -> Result<CpuCausalAttentionVjp, ResearchError> {
+) -> Result<CpuCausalAttentionVjp, WorkspaceLensError> {
     let q_total = checked_product(n_tokens, geometry.q_elements)?;
     let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
     for (name, values, expected) in [
@@ -3858,7 +3878,7 @@ fn cpu_causal_gated_attention_vjp_with_forward(
         ("attention VJP gate", gate, q_total),
     ] {
         if values.len() != expected {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name,
                 got: values.len(),
                 expected,
@@ -3866,7 +3886,7 @@ fn cpu_causal_gated_attention_vjp_with_forward(
         }
     }
     if grad_gated_output.len() != q_total || forward.attention_output.len() != q_total {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "gated attention cotangent/shared forward",
             got: grad_gated_output.len().min(forward.attention_output.len()),
             expected: q_total,
@@ -3970,7 +3990,7 @@ fn validate_attn_weights(
     layer: u32,
     block: &MetalAttnBlock,
     geometry: AttnGeometry,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let weights = AttnMixerWeights::from(block);
     for (role, weight, expected) in [
         (
@@ -3994,10 +4014,10 @@ fn validate_attn_weights(
             [geometry.q_elements, geometry.hidden_size],
         ),
     ] {
-        let id = ResearchLinear::Layer { index: layer, role };
+        let id = WorkspaceLensLinear::Layer { index: layer, role };
         let got = linear_shape(id, weight)?;
         if got != expected {
-            return Err(ResearchError::InvalidAttnLinearShape {
+            return Err(WorkspaceLensError::InvalidAttnLinearShape {
                 layer,
                 role,
                 got,
@@ -4012,7 +4032,7 @@ fn validate_attn_weights(
         ("K norm", weights.k_norm, geometry.head_dim),
     ] {
         if tensor.dtype != GgmlType::F32 || tensor.n_elements() as usize != expected_elements {
-            return Err(ResearchError::InvalidAttnTensor {
+            return Err(WorkspaceLensError::InvalidAttnTensor {
                 layer,
                 name,
                 dtype: tensor.dtype,
@@ -4042,10 +4062,10 @@ impl AttnReplayFrontTensors {
         geometry: AttnGeometry,
         input: &[f32],
         n_tokens: usize,
-    ) -> Result<Self, ResearchError> {
+    ) -> Result<Self, WorkspaceLensError> {
         let hidden_total = checked_product(n_tokens, geometry.hidden_size)?;
         if input.len() != hidden_total {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "attention replay input",
                 got: input.len(),
                 expected: hidden_total,
@@ -4080,7 +4100,7 @@ impl AttnReplayFrontTensors {
         geometry: AttnGeometry,
         weights: AttnMixerWeights<'_>,
         n_tokens: usize,
-    ) -> Result<(), ResearchError> {
+    ) -> Result<(), WorkspaceLensError> {
         encode_rms_norm_mul_rows_f32(
             context,
             encoder,
@@ -4166,10 +4186,10 @@ fn cpu_weighted_rms_vjp_rows(
     n_rows: usize,
     width: usize,
     detach_scale: bool,
-) -> Result<Vec<f32>, ResearchError> {
+) -> Result<Vec<f32>, WorkspaceLensError> {
     let expected = checked_product(n_rows, width)?;
     if x.len() != expected || grad_output.len() != expected || weight.len() != width {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "CPU weighted RMSNorm VJP",
             got: x.len().min(grad_output.len()),
             expected,
@@ -4213,18 +4233,18 @@ fn attn_mixer_replay_vjp_readback(
     grad_mixer_output: &[f32],
     n_tokens: usize,
     rule: AttnBlockVjpRule,
-) -> Result<AttnMixerVjpReadback, ResearchError> {
-    if n_tokens == 0 || n_tokens > MAX_RESEARCH_ATTN_TOKENS {
-        return Err(ResearchError::AttnPromptTooLong {
+) -> Result<AttnMixerVjpReadback, WorkspaceLensError> {
+    if n_tokens == 0 || n_tokens > MAX_WORKSPACE_LENS_ATTN_TOKENS {
+        return Err(WorkspaceLensError::AttnPromptTooLong {
             got: n_tokens,
-            max: MAX_RESEARCH_ATTN_TOKENS,
+            max: MAX_WORKSPACE_LENS_ATTN_TOKENS,
         });
     }
     let hidden_total = checked_product(n_tokens, geometry.hidden_size)?;
     let q_total = checked_product(n_tokens, geometry.q_elements)?;
     let kv_total = checked_product(n_tokens, geometry.kv_elements)?;
     if input.len() != hidden_total || grad_mixer_output.len() != hidden_total {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "attention mixer input/cotangent",
             got: input.len().min(grad_mixer_output.len()),
             expected: hidden_total,
@@ -4234,7 +4254,7 @@ fn attn_mixer_replay_vjp_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
     let encode_result = front.encode(context, &encoder, geometry, weights, n_tokens);
     encoder.end();
@@ -4288,9 +4308,9 @@ fn attn_mixer_replay_vjp_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         for token in 0..n_tokens {
             let gated = row_view(&gated_output, token, geometry.q_elements);
             let mixer = row_view(&mixer_output, token, geometry.hidden_size);
@@ -4404,9 +4424,9 @@ fn attn_mixer_replay_vjp_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         for (weight, grad_output, grad_hidden, n_out) in [
             (
                 weights.q,
@@ -4480,20 +4500,20 @@ fn attn_mixer_replay_vjp_batch_readback(
     n_tokens: usize,
     n_query: usize,
     rule: AttnBlockVjpRule,
-) -> Result<AttnMixerVjpReadback, ResearchError> {
-    if n_tokens == 0 || n_tokens > MAX_RESEARCH_ATTN_TOKENS {
-        return Err(ResearchError::AttnPromptTooLong {
+) -> Result<AttnMixerVjpReadback, WorkspaceLensError> {
+    if n_tokens == 0 || n_tokens > MAX_WORKSPACE_LENS_ATTN_TOKENS {
+        return Err(WorkspaceLensError::AttnPromptTooLong {
             got: n_tokens,
-            max: MAX_RESEARCH_ATTN_TOKENS,
+            max: MAX_WORKSPACE_LENS_ATTN_TOKENS,
         });
     }
     if n_query == 0 {
-        return Err(ResearchError::EmptyQueryBatch);
+        return Err(WorkspaceLensError::EmptyQueryBatch);
     }
-    if n_query > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
-        return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+    if n_query > MAX_WORKSPACE_LENS_DIM_BATCH {
+        return Err(WorkspaceLensError::WorkspaceQueryBatchTooLarge {
             got: n_query,
-            max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+            max: MAX_WORKSPACE_LENS_DIM_BATCH,
         });
     }
     let hidden_total = checked_product(n_tokens, geometry.hidden_size)?;
@@ -4506,14 +4526,14 @@ fn attn_mixer_replay_vjp_batch_readback(
     let kv_query_total = checked_product(n_query, kv_total)?;
     let q_full_query_total = checked_product(n_query, q_full_total)?;
     if input.len() != hidden_total {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "attention mixer input",
             got: input.len(),
             expected: hidden_total,
         });
     }
     if grad_mixer_outputs.len() != hidden_query_total {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "attention mixer cotangent query bank",
             got: grad_mixer_outputs.len(),
             expected: hidden_query_total,
@@ -4524,7 +4544,7 @@ fn attn_mixer_replay_vjp_batch_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
     let encode_result = front.encode(context, &encoder, geometry, weights, n_tokens);
     encoder.end();
@@ -4578,9 +4598,9 @@ fn attn_mixer_replay_vjp_batch_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         for token in 0..n_tokens {
             let gated = row_view(&gated_output, token, geometry.q_elements);
             let mixer = row_view(&mixer_output, token, geometry.hidden_size);
@@ -4699,7 +4719,7 @@ fn attn_mixer_replay_vjp_batch_readback(
         ),
     ] {
         if got != expected {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name,
                 got,
                 expected,
@@ -4736,9 +4756,9 @@ fn attn_mixer_replay_vjp_batch_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         for (weight, grad_output, grad_hidden, n_out) in [
             (
                 weights.q,
@@ -4776,7 +4796,7 @@ fn attn_mixer_replay_vjp_batch_readback(
         )?;
         for query in 0..n_query {
             let offset = u64::try_from(checked_product(query, hidden_total)?)
-                .map_err(|_| ResearchError::SizeOverflow)?;
+                .map_err(|_| WorkspaceLensError::SizeOverflow)?;
             let grad_hidden_query = grad_hidden.view_subrange(offset, hidden_shape.clone());
             let grad_input_query = grad_input.view_subrange(offset, hidden_shape.clone());
             encode_rms_norm_mul_vjp_rows_f32(
@@ -4809,7 +4829,7 @@ fn attn_mixer_replay_vjp_batch_readback(
 }
 
 impl GdnGeometry {
-    fn new(layer: u32, arch: Arch) -> Result<Self, ResearchError> {
+    fn new(layer: u32, arch: Arch) -> Result<Self, WorkspaceLensError> {
         let hidden_size = arch.hidden_size as usize;
         let n_v_heads = arch.gdn_n_v_heads as usize;
         let n_k_heads = arch.gdn_n_k_heads as usize;
@@ -4820,7 +4840,7 @@ impl GdnGeometry {
             || n_k_heads == 0
             || !n_v_heads.is_multiple_of(n_k_heads)
         {
-            return Err(ResearchError::UnsupportedGdnGeometry {
+            return Err(WorkspaceLensError::UnsupportedGdnGeometry {
                 layer,
                 n_v: n_v_heads,
                 n_k: n_k_heads,
@@ -4829,18 +4849,20 @@ impl GdnGeometry {
         }
         let qk_elements = n_k_heads
             .checked_mul(head_dim)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         let v_elements = n_v_heads
             .checked_mul(head_dim)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         let conv_dim = qk_elements
             .checked_mul(2)
             .and_then(|value| value.checked_add(v_elements))
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         let state_elements = v_elements
             .checked_mul(head_dim)
-            .ok_or(ResearchError::SizeOverflow)?;
-        let conv_state_elements = conv_dim.checked_mul(3).ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        let conv_state_elements = conv_dim
+            .checked_mul(3)
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         Ok(Self {
             hidden_size,
             n_v_heads,
@@ -4890,7 +4912,7 @@ fn validate_gdn_weights(
     layer: u32,
     block: &MetalGdnBlock,
     geometry: GdnGeometry,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let weights = GdnMixerWeights::from(block);
     for (role, weight, expected) in [
         (
@@ -4919,10 +4941,10 @@ fn validate_gdn_weights(
             [geometry.v_elements, geometry.hidden_size],
         ),
     ] {
-        let id = ResearchLinear::Layer { index: layer, role };
+        let id = WorkspaceLensLinear::Layer { index: layer, role };
         let got = linear_shape(id, weight)?;
         if got != expected {
-            return Err(ResearchError::InvalidGdnLinearShape {
+            return Err(WorkspaceLensError::InvalidGdnLinearShape {
                 layer,
                 role,
                 got,
@@ -4941,12 +4963,12 @@ fn validate_gdn_weights(
             geometry
                 .conv_dim
                 .checked_mul(4)
-                .ok_or(ResearchError::SizeOverflow)?,
+                .ok_or(WorkspaceLensError::SizeOverflow)?,
         ),
         ("internal norm", weights.norm, geometry.head_dim),
     ] {
         if tensor.dtype != GgmlType::F32 || tensor.n_elements() as usize != expected_elements {
-            return Err(ResearchError::InvalidGdnTensor {
+            return Err(WorkspaceLensError::InvalidGdnTensor {
                 layer,
                 name,
                 dtype: tensor.dtype,
@@ -4991,7 +5013,7 @@ impl GdnReplayTensors {
         initial_conv_state: &[f32],
         initial_recurrence_state: &[f32],
         n_tokens: usize,
-    ) -> Result<Self, ResearchError> {
+    ) -> Result<Self, WorkspaceLensError> {
         let hidden_elements = checked_product(n_tokens, geometry.hidden_size)?;
         let qkv_elements = checked_product(n_tokens, geometry.conv_dim)?;
         let qk_elements = checked_product(n_tokens, geometry.qk_elements)?;
@@ -5013,7 +5035,7 @@ impl GdnReplayTensors {
             ),
         ] {
             if values.len() != expected {
-                return Err(ResearchError::ActivationSize {
+                return Err(WorkspaceLensError::ActivationSize {
                     name,
                     got: values.len(),
                     expected,
@@ -5059,7 +5081,7 @@ impl GdnReplayTensors {
         geometry: GdnGeometry,
         weights: GdnMixerWeights<'_>,
         n_tokens: usize,
-    ) -> Result<(), ResearchError> {
+    ) -> Result<(), WorkspaceLensError> {
         encode_rms_norm_mul_rows_f32(
             context,
             encoder,
@@ -5224,11 +5246,11 @@ fn gdn_mixer_replay_vjp_readback(
     n_tokens: usize,
     rule: GdnMixerVjpRule,
     read_state_diagnostics: bool,
-) -> Result<GdnReplayVjpReadback, ResearchError> {
-    if n_tokens == 0 || n_tokens > MAX_RESEARCH_GDN_TOKENS {
-        return Err(ResearchError::GdnPromptTooLong {
+) -> Result<GdnReplayVjpReadback, WorkspaceLensError> {
+    if n_tokens == 0 || n_tokens > MAX_WORKSPACE_LENS_GDN_TOKENS {
+        return Err(WorkspaceLensError::GdnPromptTooLong {
             got: n_tokens,
-            max: MAX_RESEARCH_GDN_TOKENS,
+            max: MAX_WORKSPACE_LENS_GDN_TOKENS,
         });
     }
     let hidden_elements = checked_product(n_tokens, geometry.hidden_size)?;
@@ -5237,7 +5259,7 @@ fn gdn_mixer_replay_vjp_readback(
     let v_elements = checked_product(n_tokens, geometry.v_elements)?;
     let scalar_elements = checked_product(n_tokens, geometry.n_v_heads)?;
     if grad_mixer_output.len() != hidden_elements {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "GDN mixer cotangent",
             got: grad_mixer_output.len(),
             expected: hidden_elements,
@@ -5293,9 +5315,9 @@ fn gdn_mixer_replay_vjp_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         replay.encode_forward(context, &encoder, geometry, weights, n_tokens)?;
         encode_frozen_linear_vjp_f32(
             context,
@@ -5543,20 +5565,20 @@ fn gdn_mixer_replay_vjp_batch_readback(
     n_query: usize,
     rule: GdnMixerVjpRule,
     read_state_diagnostics: bool,
-) -> Result<GdnReplayVjpReadback, ResearchError> {
-    if n_tokens == 0 || n_tokens > MAX_RESEARCH_GDN_TOKENS {
-        return Err(ResearchError::GdnPromptTooLong {
+) -> Result<GdnReplayVjpReadback, WorkspaceLensError> {
+    if n_tokens == 0 || n_tokens > MAX_WORKSPACE_LENS_GDN_TOKENS {
+        return Err(WorkspaceLensError::GdnPromptTooLong {
             got: n_tokens,
-            max: MAX_RESEARCH_GDN_TOKENS,
+            max: MAX_WORKSPACE_LENS_GDN_TOKENS,
         });
     }
     if n_query == 0 {
-        return Err(ResearchError::EmptyQueryBatch);
+        return Err(WorkspaceLensError::EmptyQueryBatch);
     }
-    if n_query > MAX_RESEARCH_WORKSPACE_DIM_BATCH {
-        return Err(ResearchError::WorkspaceQueryBatchTooLarge {
+    if n_query > MAX_WORKSPACE_LENS_DIM_BATCH {
+        return Err(WorkspaceLensError::WorkspaceQueryBatchTooLarge {
             got: n_query,
-            max: MAX_RESEARCH_WORKSPACE_DIM_BATCH,
+            max: MAX_WORKSPACE_LENS_DIM_BATCH,
         });
     }
     let hidden_elements = checked_product(n_tokens, geometry.hidden_size)?;
@@ -5573,7 +5595,7 @@ fn gdn_mixer_replay_vjp_batch_readback(
     let state_query_elements = checked_product(n_query, geometry.state_elements)?;
     let conv_state_query_elements = checked_product(n_query, geometry.conv_state_elements)?;
     if grad_mixer_outputs.len() != hidden_query_elements {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "GDN mixer cotangent query bank",
             got: grad_mixer_outputs.len(),
             expected: hidden_query_elements,
@@ -5630,9 +5652,9 @@ fn gdn_mixer_replay_vjp_batch_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         replay.encode_forward(context, &encoder, geometry, weights, n_tokens)?;
         encode_frozen_linear_vjp_f32(
             context,
@@ -5862,7 +5884,7 @@ fn gdn_mixer_replay_vjp_batch_readback(
         )?;
         for query in 0..n_query {
             let offset = u64::try_from(checked_product(query, hidden_elements)?)
-                .map_err(|_| ResearchError::SizeOverflow)?;
+                .map_err(|_| WorkspaceLensError::SizeOverflow)?;
             let grad_hidden_query = grad_hidden.view_subrange(offset, hidden_shape.clone());
             let grad_input_query = grad_input.view_subrange(offset, hidden_shape.clone());
             encode_rms_norm_mul_vjp_rows_f32(
@@ -5920,26 +5942,26 @@ fn copy_workspace_token_capture(
     n_tokens: usize,
     n_layers: usize,
     hidden_size: usize,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let token_elements = checked_product(n_layers, hidden_size)?;
     let layer_elements = checked_product(n_tokens, hidden_size)?;
     let bank_elements = checked_product(n_layers, layer_elements)?;
     if token_capture.len() != token_elements {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace token capture",
             got: token_capture.len(),
             expected: token_elements,
         });
     }
     if destination.len() != bank_elements {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace layer-major destination",
             got: destination.len(),
             expected: bank_elements,
         });
     }
     if token >= n_tokens {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace token index",
             got: token,
             expected: n_tokens,
@@ -5949,14 +5971,14 @@ fn copy_workspace_token_capture(
         let source = checked_product(layer, hidden_size)?;
         let source_end = source
             .checked_add(hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         let destination_row = checked_product(layer, n_tokens)?
             .checked_add(token)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         let destination_start = checked_product(destination_row, hidden_size)?;
         let destination_end = destination_start
             .checked_add(hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         destination[destination_start..destination_end]
             .copy_from_slice(&token_capture[source..source_end]);
     }
@@ -5972,13 +5994,13 @@ fn compose_workspace_vjp(
         u32,
         &[f32],
     ) -> Result<
-        (Vec<f32>, ResearchWorkspaceReplayDiagnostic),
-        ResearchError,
+        (Vec<f32>, WorkspaceLensReplayDiagnostic),
+        WorkspaceLensError,
     >,
-) -> Result<(Vec<f32>, Vec<ResearchWorkspaceReplayDiagnostic>), ResearchError> {
+) -> Result<(Vec<f32>, Vec<WorkspaceLensReplayDiagnostic>), WorkspaceLensError> {
     validate_workspace_source_layers(target_layer, source_layers)?;
     if target_cotangent.len() != hidden_elements {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace target cotangent",
             got: target_cotangent.len(),
             expected: hidden_elements,
@@ -5991,15 +6013,15 @@ fn compose_workspace_vjp(
         .iter()
         .copied()
         .min()
-        .ok_or(ResearchError::EmptyWorkspaceSourceLayers)?;
+        .ok_or(WorkspaceLensError::EmptyWorkspaceSourceLayers)?;
     let first_block = earliest_source
         .checked_add(1)
-        .ok_or(ResearchError::SizeOverflow)?;
+        .ok_or(WorkspaceLensError::SizeOverflow)?;
     let mut gradient = try_clone_slice(target_cotangent, "workspace VJP gradient")?;
     for layer in (first_block..=target_layer).rev() {
         let (next_gradient, diagnostic) = reverse_block(layer, &gradient)?;
         if next_gradient.len() != hidden_elements {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name: "workspace reversed block cotangent",
                 got: next_gradient.len(),
                 expected: hidden_elements,
@@ -6013,7 +6035,7 @@ fn compose_workspace_vjp(
                 let start = checked_product(slot, hidden_elements)?;
                 let end = start
                     .checked_add(hidden_elements)
-                    .ok_or(ResearchError::SizeOverflow)?;
+                    .ok_or(WorkspaceLensError::SizeOverflow)?;
                 values[start..end].copy_from_slice(&gradient);
             }
         }
@@ -6024,13 +6046,13 @@ fn compose_workspace_vjp(
 fn validate_workspace_source_layers(
     target_layer: u32,
     source_layers: &[u32],
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     if source_layers.is_empty() {
-        return Err(ResearchError::EmptyWorkspaceSourceLayers);
+        return Err(WorkspaceLensError::EmptyWorkspaceSourceLayers);
     }
     for &source in source_layers {
         if source >= target_layer {
-            return Err(ResearchError::WorkspaceSourceNotBeforeTarget {
+            return Err(WorkspaceLensError::WorkspaceSourceNotBeforeTarget {
                 source_layer: source,
                 target_layer,
             });
@@ -6041,16 +6063,16 @@ fn validate_workspace_source_layers(
 
 fn validate_workspace_vjp_finite(
     values: &[f32],
-    diagnostics: &[ResearchWorkspaceReplayDiagnostic],
-) -> Result<(), ResearchError> {
+    diagnostics: &[WorkspaceLensReplayDiagnostic],
+) -> Result<(), WorkspaceLensError> {
     if let Some(index) = values.iter().position(|value| !value.is_finite()) {
-        return Err(ResearchError::NonFiniteWorkspaceVjpTrajectory { index });
+        return Err(WorkspaceLensError::NonFiniteWorkspaceVjpTrajectory { index });
     }
     if let Some(diagnostic) = diagnostics
         .iter()
         .find(|diagnostic| !diagnostic.residual_replay_max_abs_error.is_finite())
     {
-        return Err(ResearchError::NonFiniteWorkspaceReplayDiagnostic {
+        return Err(WorkspaceLensError::NonFiniteWorkspaceReplayDiagnostic {
             layer: diagnostic.layer,
         });
     }
@@ -6060,12 +6082,12 @@ fn validate_workspace_vjp_finite(
 pub fn workspace_valid_position_range(
     n_tokens: usize,
     skip_first: usize,
-) -> Result<std::ops::Range<usize>, ResearchError> {
+) -> Result<std::ops::Range<usize>, WorkspaceLensError> {
     let minimum = skip_first
         .checked_add(2)
-        .ok_or(ResearchError::SizeOverflow)?;
+        .ok_or(WorkspaceLensError::SizeOverflow)?;
     if n_tokens < minimum {
-        return Err(ResearchError::WorkspaceNoValidPositions {
+        return Err(WorkspaceLensError::WorkspaceNoValidPositions {
             n_tokens,
             skip_first,
         });
@@ -6079,22 +6101,22 @@ fn build_workspace_target_bank(
     n_tokens: usize,
     hidden_size: usize,
     valid_positions: std::ops::Range<usize>,
-) -> Result<Vec<f32>, ResearchError> {
+) -> Result<Vec<f32>, WorkspaceLensError> {
     let covector_elements = checked_product(n_query, hidden_size)?;
     if covectors.len() != covector_elements {
-        return Err(ResearchError::WorkspaceTargetCovectorSize {
+        return Err(WorkspaceLensError::WorkspaceTargetCovectorSize {
             got: covectors.len(),
             hidden_size,
         });
     }
     if n_query == 0 {
-        return Err(ResearchError::EmptyWorkspaceTargetCovectors);
+        return Err(WorkspaceLensError::EmptyWorkspaceTargetCovectors);
     }
     if let Some(index) = covectors.iter().position(|value| !value.is_finite()) {
-        return Err(ResearchError::NonFiniteWorkspaceTargetCovector { index });
+        return Err(WorkspaceLensError::NonFiniteWorkspaceTargetCovector { index });
     }
     if valid_positions.is_empty() || valid_positions.end > n_tokens {
-        return Err(ResearchError::WorkspaceNoValidPositions {
+        return Err(WorkspaceLensError::WorkspaceNoValidPositions {
             n_tokens,
             skip_first: valid_positions.start,
         });
@@ -6108,14 +6130,14 @@ fn build_workspace_target_bank(
         let covector_start = checked_product(query, hidden_size)?;
         let covector_end = covector_start
             .checked_add(hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         for position in valid_positions.clone() {
             let destination_start = checked_product(query, trajectory_elements)?
                 .checked_add(checked_product(position, hidden_size)?)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             let destination_end = destination_start
                 .checked_add(hidden_size)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             bank[destination_start..destination_end]
                 .copy_from_slice(&covectors[covector_start..covector_end]);
         }
@@ -6134,12 +6156,12 @@ fn reduce_workspace_vjp_readouts(
     destination: &mut [f32],
     total_queries: usize,
     first_query: usize,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let trajectory_elements = checked_product(n_tokens, hidden_size)?;
     let source_elements = checked_product(chunk_queries, trajectory_elements)?;
     let expected = checked_product(n_sources, source_elements)?;
     if trajectories.len() != expected {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace readout source trajectory bank",
             got: trajectories.len(),
             expected,
@@ -6148,7 +6170,7 @@ fn reduce_workspace_vjp_readouts(
     let destination_expected =
         checked_product(n_sources, checked_product(total_queries, hidden_size)?)?;
     if destination.len() != destination_expected {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace readout destination bank",
             got: destination.len(),
             expected: destination_expected,
@@ -6156,9 +6178,9 @@ fn reduce_workspace_vjp_readouts(
     }
     let chunk_end = first_query
         .checked_add(chunk_queries)
-        .ok_or(ResearchError::SizeOverflow)?;
+        .ok_or(WorkspaceLensError::SizeOverflow)?;
     if chunk_end > total_queries {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace readout destination query range",
             got: chunk_end,
             expected: total_queries,
@@ -6168,18 +6190,18 @@ fn reduce_workspace_vjp_readouts(
         for query in 0..chunk_queries {
             let source_start = checked_product(source, source_elements)?
                 .checked_add(checked_product(query, trajectory_elements)?)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             let source_end = source_start
                 .checked_add(trajectory_elements)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             let destination_row = checked_product(source, total_queries)?
                 .checked_add(first_query)
                 .and_then(|row| row.checked_add(query))
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             let destination_start = checked_product(destination_row, hidden_size)?;
             let destination_end = destination_start
                 .checked_add(hidden_size)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             reduce_workspace_source_positions(
                 &trajectories[source_start..source_end],
                 n_tokens,
@@ -6198,17 +6220,17 @@ fn reduce_workspace_source_positions(
     hidden_size: usize,
     valid_positions: std::ops::Range<usize>,
     destination: &mut [f32],
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let expected = checked_product(n_tokens, hidden_size)?;
     if source.len() != expected {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace source trajectory reduction",
             got: source.len(),
             expected,
         });
     }
     if destination.len() != hidden_size {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "workspace fitted row destination",
             got: destination.len(),
             expected: hidden_size,
@@ -6216,7 +6238,7 @@ fn reduce_workspace_source_positions(
     }
     let count = valid_positions.len();
     if count == 0 || valid_positions.end > n_tokens {
-        return Err(ResearchError::WorkspaceNoValidPositions {
+        return Err(WorkspaceLensError::WorkspaceNoValidPositions {
             n_tokens,
             skip_first: valid_positions.start,
         });
@@ -6226,19 +6248,19 @@ fn reduce_workspace_source_positions(
         let start = checked_product(position, hidden_size)?;
         let end = start
             .checked_add(hidden_size)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         for (column, (sum, &value)) in destination.iter_mut().zip(&source[start..end]).enumerate() {
             let source_index = start
                 .checked_add(column)
-                .ok_or(ResearchError::SizeOverflow)?;
+                .ok_or(WorkspaceLensError::SizeOverflow)?;
             if !value.is_finite() {
-                return Err(ResearchError::NonFiniteWorkspaceVjpTrajectory {
+                return Err(WorkspaceLensError::NonFiniteWorkspaceVjpTrajectory {
                     index: source_index,
                 });
             }
             *sum += value;
             if !sum.is_finite() {
-                return Err(ResearchError::NonFiniteWorkspaceReduction {
+                return Err(WorkspaceLensError::NonFiniteWorkspaceReduction {
                     stage: "sum",
                     index: column,
                 });
@@ -6249,7 +6271,7 @@ fn reduce_workspace_source_positions(
     for (index, value) in destination.iter_mut().enumerate() {
         *value *= scale;
         if !value.is_finite() {
-            return Err(ResearchError::NonFiniteWorkspaceReduction {
+            return Err(WorkspaceLensError::NonFiniteWorkspaceReduction {
                 stage: "scaled output",
                 index,
             });
@@ -6259,9 +6281,9 @@ fn reduce_workspace_source_positions(
 }
 
 fn merge_workspace_diagnostics(
-    aggregate: &mut Vec<ResearchWorkspaceReplayDiagnostic>,
-    current: &[ResearchWorkspaceReplayDiagnostic],
-) -> Result<(), ResearchError> {
+    aggregate: &mut Vec<WorkspaceLensReplayDiagnostic>,
+    current: &[WorkspaceLensReplayDiagnostic],
+) -> Result<(), WorkspaceLensError> {
     validate_workspace_vjp_finite(&[], aggregate)?;
     validate_workspace_vjp_finite(&[], current)?;
     if aggregate.is_empty() {
@@ -6269,11 +6291,11 @@ fn merge_workspace_diagnostics(
         return Ok(());
     }
     if aggregate.len() != current.len() {
-        return Err(ResearchError::WorkspaceDiagnosticScheduleMismatch);
+        return Err(WorkspaceLensError::WorkspaceDiagnosticScheduleMismatch);
     }
     for (aggregate, current) in aggregate.iter_mut().zip(current) {
         if aggregate.layer != current.layer || aggregate.kind != current.kind {
-            return Err(ResearchError::WorkspaceDiagnosticScheduleMismatch);
+            return Err(WorkspaceLensError::WorkspaceDiagnosticScheduleMismatch);
         }
         aggregate.residual_replay_max_abs_error = aggregate
             .residual_replay_max_abs_error
@@ -6282,19 +6304,20 @@ fn merge_workspace_diagnostics(
     Ok(())
 }
 
-fn checked_product(left: usize, right: usize) -> Result<usize, ResearchError> {
-    left.checked_mul(right).ok_or(ResearchError::SizeOverflow)
+fn checked_product(left: usize, right: usize) -> Result<usize, WorkspaceLensError> {
+    left.checked_mul(right)
+        .ok_or(WorkspaceLensError::SizeOverflow)
 }
 
-fn enforce_research_byte_budget(
+fn enforce_workspace_lens_byte_budget(
     name: &'static str,
     requested_bytes: usize,
-) -> Result<(), ResearchError> {
-    if requested_bytes > MAX_RESEARCH_OWNED_RESULT_BYTES {
-        return Err(ResearchError::ResearchResultByteBudgetExceeded {
+) -> Result<(), WorkspaceLensError> {
+    if requested_bytes > MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES {
+        return Err(WorkspaceLensError::WorkspaceLensResultByteBudgetExceeded {
             name,
             requested_bytes,
-            max_bytes: MAX_RESEARCH_OWNED_RESULT_BYTES,
+            max_bytes: MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES,
         });
     }
     Ok(())
@@ -6304,15 +6327,15 @@ fn validate_selected_token_request_size(
     count: usize,
     vocab_size: u32,
     hidden_size: usize,
-) -> Result<usize, ResearchError> {
+) -> Result<usize, WorkspaceLensError> {
     if count > vocab_size as usize {
-        return Err(ResearchError::TokenReadoutCountExceedsVocabulary {
+        return Err(WorkspaceLensError::TokenReadoutCountExceedsVocabulary {
             got: count,
             vocab_size,
         });
     }
     let selected_elements = checked_product(count, hidden_size)?;
-    enforce_research_byte_budget(
+    enforce_workspace_lens_byte_budget(
         "selected-token readouts",
         selected_token_peak_bytes(count, hidden_size, selected_elements)?,
     )?;
@@ -6323,7 +6346,7 @@ fn selected_token_peak_bytes(
     count: usize,
     hidden_size: usize,
     selected_elements: usize,
-) -> Result<usize, ResearchError> {
+) -> Result<usize, WorkspaceLensError> {
     // Simultaneous peak: Metal gather + host readback/result, host gamma,
     // host/Metal/result ID copies, conservative HashSet buckets, and shape copy.
     const LIVE_SELECTED_BANKS: usize = 2;
@@ -6343,22 +6366,25 @@ fn selected_token_peak_bytes(
         .and_then(|bytes| bytes.checked_add(id_copy_bytes))
         .and_then(|bytes| bytes.checked_add(hashset_bytes))
         .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u64>()))
-        .ok_or(ResearchError::SizeOverflow)
+        .ok_or(WorkspaceLensError::SizeOverflow)
 }
 
-fn try_zeroed_f32(elements: usize, name: &'static str) -> Result<Vec<f32>, ResearchError> {
+fn try_zeroed_f32(elements: usize, name: &'static str) -> Result<Vec<f32>, WorkspaceLensError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(elements)
-        .map_err(|_| ResearchError::ResearchHostAllocationFailed { name, elements })?;
+        .map_err(|_| WorkspaceLensError::WorkspaceLensHostAllocationFailed { name, elements })?;
     values.resize(elements, 0.0);
     Ok(values)
 }
 
-fn try_clone_slice<T: Copy>(values: &[T], name: &'static str) -> Result<Vec<T>, ResearchError> {
+fn try_clone_slice<T: Copy>(
+    values: &[T],
+    name: &'static str,
+) -> Result<Vec<T>, WorkspaceLensError> {
     let mut output = Vec::new();
     output.try_reserve_exact(values.len()).map_err(|_| {
-        ResearchError::ResearchHostAllocationFailed {
+        WorkspaceLensError::WorkspaceLensHostAllocationFailed {
             name,
             elements: values.len(),
         }
@@ -6372,30 +6398,30 @@ fn multiply_token_readout_gamma_in_place(
     gamma: &[f32],
     n_rows: usize,
     hidden_size: usize,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let expected_rows = checked_product(n_rows, hidden_size)?;
     if rows.len() != expected_rows {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "selected LM-head rows",
             got: rows.len(),
             expected: expected_rows,
         });
     }
     if gamma.len() != hidden_size {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "selected-token output norm gamma",
             got: gamma.len(),
             expected: hidden_size,
         });
     }
     if let Some(index) = rows.iter().position(|value| !value.is_finite()) {
-        return Err(ResearchError::NonFiniteTokenReadoutData {
+        return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
             name: "LM-head rows",
             index,
         });
     }
     if let Some(index) = gamma.iter().position(|value| !value.is_finite()) {
-        return Err(ResearchError::NonFiniteTokenReadoutData {
+        return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
             name: "output norm gamma",
             index,
         });
@@ -6403,7 +6429,7 @@ fn multiply_token_readout_gamma_in_place(
     for (index, value) in rows.iter_mut().enumerate() {
         *value *= gamma[index % hidden_size];
         if !value.is_finite() {
-            return Err(ResearchError::NonFiniteTokenReadoutData {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
                 name: "gamma-folded LM-head rows",
                 index,
             });
@@ -6412,26 +6438,29 @@ fn multiply_token_readout_gamma_in_place(
     Ok(())
 }
 
-fn validate_selected_token_ids(token_ids: &[u32], vocab_size: u32) -> Result<(), ResearchError> {
+fn validate_selected_token_ids(
+    token_ids: &[u32],
+    vocab_size: u32,
+) -> Result<(), WorkspaceLensError> {
     if token_ids.is_empty() {
-        return Err(ResearchError::EmptyTokenReadoutSelection);
+        return Err(WorkspaceLensError::EmptyTokenReadoutSelection);
     }
     let mut unique = std::collections::HashSet::new();
     unique.try_reserve(token_ids.len()).map_err(|_| {
-        ResearchError::ResearchHostAllocationFailed {
+        WorkspaceLensError::WorkspaceLensHostAllocationFailed {
             name: "selected-token uniqueness set",
             elements: token_ids.len(),
         }
     })?;
     for &token_id in token_ids {
         if token_id >= vocab_size || token_id > i32::MAX as u32 {
-            return Err(ResearchError::TokenReadoutIdOutOfRange {
+            return Err(WorkspaceLensError::TokenReadoutIdOutOfRange {
                 token_id,
                 vocab_size,
             });
         }
         if !unique.insert(token_id) {
-            return Err(ResearchError::DuplicateTokenReadoutId { token_id });
+            return Err(WorkspaceLensError::DuplicateTokenReadoutId { token_id });
         }
     }
     Ok(())
@@ -6440,10 +6469,10 @@ fn validate_selected_token_ids(token_ids: &[u32], vocab_size: u32) -> Result<(),
 fn validate_full_readout_transport_size(
     transport_bytes: &[u8],
     hidden_size: usize,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let expected = checked_product(checked_product(hidden_size, hidden_size)?, 2)?;
     if transport_bytes.len() != expected {
-        return Err(ResearchError::InvalidFullReadoutTransportSize {
+        return Err(WorkspaceLensError::InvalidFullReadoutTransportSize {
             got: transport_bytes.len(),
             expected,
         });
@@ -6455,10 +6484,12 @@ fn validate_full_readout_tail(
     model: &crate::metal_forward::MetalModel,
     hidden_size: usize,
     vocab_size: usize,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let expected_lm_head_shape = [hidden_size, vocab_size];
-    if linear_shape(ResearchLinear::LmHead, &model.lm_head).ok() != Some(expected_lm_head_shape) {
-        return Err(ResearchError::InvalidTokenReadoutLmHeadShape {
+    if linear_shape(WorkspaceLensLinear::LmHead, &model.lm_head).ok()
+        != Some(expected_lm_head_shape)
+    {
+        return Err(WorkspaceLensError::InvalidTokenReadoutLmHeadShape {
             got: model.lm_head.shape.clone(),
             expected: expected_lm_head_shape,
         });
@@ -6473,14 +6504,14 @@ fn validate_full_readout_tail(
             | GgmlType::Q8_0
             | GgmlType::IQ4_NL
     ) {
-        return Err(ResearchError::UnsupportedTokenReadoutLmHeadDtype {
+        return Err(WorkspaceLensError::UnsupportedTokenReadoutLmHeadDtype {
             dtype: model.lm_head.dtype,
         });
     }
     if model.output_norm.dtype != GgmlType::F32
         || model.output_norm.shape.as_slice() != [hidden_size as u64]
     {
-        return Err(ResearchError::InvalidTokenReadoutOutputNorm {
+        return Err(WorkspaceLensError::InvalidTokenReadoutOutputNorm {
             dtype: model.output_norm.dtype,
             shape: model.output_norm.shape.clone(),
             expected: hidden_size,
@@ -6493,29 +6524,31 @@ fn validate_packed_transported_vector_positions(
     start_position: usize,
     position_count: usize,
     source_positions: &[usize],
-) -> Result<Vec<usize>, ResearchError> {
+) -> Result<Vec<usize>, WorkspaceLensError> {
     let end_position = start_position
         .checked_add(position_count)
-        .ok_or(ResearchError::PositionOverflow(start_position))?;
+        .ok_or(WorkspaceLensError::PositionOverflow(start_position))?;
     let mut position_rows = Vec::new();
     position_rows
         .try_reserve_exact(source_positions.len())
-        .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+        .map_err(|_| WorkspaceLensError::WorkspaceLensHostAllocationFailed {
             name: "packed transported-vector position rows",
             elements: source_positions.len(),
         })?;
     for (index, &source_position) in source_positions.iter().enumerate() {
         if source_position < start_position || source_position >= end_position {
-            return Err(ResearchError::PackedTransportedVectorPositionOutOfRange {
-                source_position,
-                start_position,
-                end_position,
-            });
+            return Err(
+                WorkspaceLensError::PackedTransportedVectorPositionOutOfRange {
+                    source_position,
+                    start_position,
+                    end_position,
+                },
+            );
         }
         if source_positions[..index].contains(&source_position) {
-            return Err(ResearchError::DuplicatePackedTransportedVectorPosition {
-                source_position,
-            });
+            return Err(
+                WorkspaceLensError::DuplicatePackedTransportedVectorPosition { source_position },
+            );
         }
         position_rows.push(source_position - start_position);
     }
@@ -6524,13 +6557,13 @@ fn validate_packed_transported_vector_positions(
 
 fn read_packed_transported_vectors(
     transported: &MetalTensor,
-    capture: &ResearchPackedPostBlockCapture<'_>,
+    capture: &WorkspaceLensPackedPostBlockCapture<'_>,
     source_positions: &[usize],
     position_rows: &[usize],
     hidden_size: usize,
-) -> Result<Vec<ResearchPackedTransportedVector>, ResearchError> {
+) -> Result<Vec<WorkspaceLensPackedTransportedVector>, WorkspaceLensError> {
     if source_positions.len() != position_rows.len() {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "packed transported-vector position rows",
             got: position_rows.len(),
             expected: source_positions.len(),
@@ -6539,7 +6572,7 @@ fn read_packed_transported_vectors(
     let mut vectors = Vec::new();
     vectors
         .try_reserve_exact(source_positions.len())
-        .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+        .map_err(|_| WorkspaceLensError::WorkspaceLensHostAllocationFailed {
             name: "packed transported vectors",
             elements: source_positions.len(),
         })?;
@@ -6548,22 +6581,22 @@ fn read_packed_transported_vectors(
     {
         let row_offset = checked_product(position_row, hidden_size)?;
         let row = transported.view_subrange(
-            u64::try_from(row_offset).map_err(|_| ResearchError::SizeOverflow)?,
+            u64::try_from(row_offset).map_err(|_| WorkspaceLensError::SizeOverflow)?,
             vec![hidden_size as u64],
         );
         let values = read_f32_fallible(&row, hidden_size, "packed transported-vector values")?;
         if let Some(component) = values.iter().position(|value| !value.is_finite()) {
-            return Err(ResearchError::NonFiniteTokenReadoutData {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
                 name: "packed transported-vector values",
                 index: checked_product(vector_index, hidden_size)?
                     .checked_add(component)
-                    .ok_or(ResearchError::SizeOverflow)?,
+                    .ok_or(WorkspaceLensError::SizeOverflow)?,
             });
         }
         let predicts_position = source_position
             .checked_add(1)
-            .ok_or(ResearchError::PositionOverflow(source_position))?;
-        vectors.push(ResearchPackedTransportedVector {
+            .ok_or(WorkspaceLensError::PositionOverflow(source_position))?;
+        vectors.push(WorkspaceLensPackedTransportedVector {
             source_position,
             source_token_id: capture.token_ids()[position_row],
             predicts_position,
@@ -6576,27 +6609,27 @@ fn read_packed_transported_vectors(
 fn exact_vocabulary_top_k(
     logits: &[f32],
     top_k: usize,
-) -> Result<Vec<ResearchVocabularyScore>, ResearchError> {
+) -> Result<Vec<WorkspaceLensVocabularyScore>, WorkspaceLensError> {
     let mut scores = Vec::new();
-    scores
-        .try_reserve_exact(top_k)
-        .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+    scores.try_reserve_exact(top_k).map_err(|_| {
+        WorkspaceLensError::WorkspaceLensHostAllocationFailed {
             name: "full-vocabulary top-k scores",
             elements: top_k,
-        })?;
+        }
+    })?;
     for (token_id, &logit) in logits.iter().enumerate() {
         if !logit.is_finite() {
-            return Err(ResearchError::NonFiniteTokenReadoutData {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
                 name: "full readout logits",
                 index: token_id,
             });
         }
         let token_id = token_id as u32;
-        let insertion = scores.partition_point(|existing: &ResearchVocabularyScore| {
+        let insertion = scores.partition_point(|existing: &WorkspaceLensVocabularyScore| {
             existing.logit > logit || (existing.logit == logit && existing.token_id < token_id)
         });
         if insertion < top_k {
-            scores.insert(insertion, ResearchVocabularyScore { token_id, logit });
+            scores.insert(insertion, WorkspaceLensVocabularyScore { token_id, logit });
             if scores.len() > top_k {
                 scores.pop();
             }
@@ -6614,7 +6647,7 @@ fn build_packed_vocabulary_positions(
     first_values: &[f32],
     second_ids: &[i32],
     second_values: &[f32],
-) -> Result<Vec<ResearchPackedVocabularyPosition>, ResearchError> {
+) -> Result<Vec<WorkspaceLensPackedVocabularyPosition>, WorkspaceLensError> {
     let pass_elements = checked_product(token_ids.len(), MPS_FULL_READOUT_TOP_K)?;
     for (name, got) in [
         ("packed readout first-pass IDs", first_ids.len()),
@@ -6623,7 +6656,7 @@ fn build_packed_vocabulary_positions(
         ("packed readout second-pass logits", second_values.len()),
     ] {
         if got != pass_elements {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name,
                 got,
                 expected: pass_elements,
@@ -6632,7 +6665,7 @@ fn build_packed_vocabulary_positions(
     }
     let mut positions = Vec::new();
     positions.try_reserve_exact(token_ids.len()).map_err(|_| {
-        ResearchError::ResearchHostAllocationFailed {
+        WorkspaceLensError::WorkspaceLensHostAllocationFailed {
             name: "packed full-vocabulary positions",
             elements: token_ids.len(),
         }
@@ -6640,15 +6673,15 @@ fn build_packed_vocabulary_positions(
     for (row, &source_token_id) in token_ids.iter().enumerate() {
         let source_position = start_position
             .checked_add(row)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         let predicts_position = source_position
             .checked_add(1)
-            .ok_or(ResearchError::SizeOverflow)?;
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
         let row_base = checked_product(row, MPS_FULL_READOUT_TOP_K)?;
         let mut candidates = Vec::new();
         candidates
             .try_reserve_exact(FULL_READOUT_CANDIDATE_COUNT)
-            .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+            .map_err(|_| WorkspaceLensError::WorkspaceLensHostAllocationFailed {
                 name: "packed full-vocabulary candidates",
                 elements: FULL_READOUT_CANDIDATE_COUNT,
             })?;
@@ -6659,27 +6692,27 @@ fn build_packed_vocabulary_positions(
             for offset in 0..MPS_FULL_READOUT_TOP_K {
                 let index = row_base
                     .checked_add(offset)
-                    .ok_or(ResearchError::SizeOverflow)?;
+                    .ok_or(WorkspaceLensError::SizeOverflow)?;
                 let token_id = ids[index];
                 let logit = values[index];
                 if token_id < 0 || token_id as u32 >= vocab_size {
-                    return Err(ResearchError::InvalidFullReadoutToken {
+                    return Err(WorkspaceLensError::InvalidFullReadoutToken {
                         token_id,
                         vocab_size,
                     });
                 }
                 if !logit.is_finite() {
-                    return Err(ResearchError::NonFiniteTokenReadoutData { name, index });
+                    return Err(WorkspaceLensError::NonFiniteTokenReadoutData { name, index });
                 }
                 if candidates
                     .iter()
-                    .any(|score: &ResearchVocabularyScore| score.token_id == token_id as u32)
+                    .any(|score: &WorkspaceLensVocabularyScore| score.token_id == token_id as u32)
                 {
-                    return Err(ResearchError::DuplicateTokenReadoutId {
+                    return Err(WorkspaceLensError::DuplicateTokenReadoutId {
                         token_id: token_id as u32,
                     });
                 }
-                candidates.push(ResearchVocabularyScore {
+                candidates.push(WorkspaceLensVocabularyScore {
                     token_id: token_id as u32,
                     logit,
                 });
@@ -6693,13 +6726,13 @@ fn build_packed_vocabulary_positions(
         });
         let mut scores = Vec::new();
         scores.try_reserve_exact(top_k).map_err(|_| {
-            ResearchError::ResearchHostAllocationFailed {
+            WorkspaceLensError::WorkspaceLensHostAllocationFailed {
                 name: "packed full-vocabulary top-k scores",
                 elements: top_k,
             }
         })?;
         scores.extend(candidates.into_iter().take(top_k));
-        positions.push(ResearchPackedVocabularyPosition {
+        positions.push(WorkspaceLensPackedVocabularyPosition {
             source_position,
             source_token_id,
             predicts_position,
@@ -6713,7 +6746,7 @@ fn read_f32_fallible(
     tensor: &MetalTensor,
     len: usize,
     name: &'static str,
-) -> Result<Vec<f32>, ResearchError> {
+) -> Result<Vec<f32>, WorkspaceLensError> {
     let mut output = try_zeroed_f32(len, name)?;
     unsafe {
         let source = tensor
@@ -6732,14 +6765,14 @@ fn read_i32_fallible(
     tensor: &MetalTensor,
     len: usize,
     name: &'static str,
-) -> Result<Vec<i32>, ResearchError> {
+) -> Result<Vec<i32>, WorkspaceLensError> {
     let mut output = Vec::new();
-    output
-        .try_reserve_exact(len)
-        .map_err(|_| ResearchError::ResearchHostAllocationFailed {
+    output.try_reserve_exact(len).map_err(|_| {
+        WorkspaceLensError::WorkspaceLensHostAllocationFailed {
             name,
             elements: len,
-        })?;
+        }
+    })?;
     output.resize(len, 0);
     unsafe {
         let source = tensor
@@ -6754,25 +6787,28 @@ fn read_i32_fallible(
     Ok(output)
 }
 
-fn row_shape(width: usize, rows: usize) -> Result<Vec<u64>, ResearchError> {
+fn row_shape(width: usize, rows: usize) -> Result<Vec<u64>, WorkspaceLensError> {
     Ok(vec![
-        u64::try_from(width).map_err(|_| ResearchError::SizeOverflow)?,
-        u64::try_from(rows).map_err(|_| ResearchError::SizeOverflow)?,
+        u64::try_from(width).map_err(|_| WorkspaceLensError::SizeOverflow)?,
+        u64::try_from(rows).map_err(|_| WorkspaceLensError::SizeOverflow)?,
     ])
 }
 
-fn flat_f32(context: &MetalContext, elements: usize) -> Result<MetalTensor, ResearchError> {
+fn flat_f32(context: &MetalContext, elements: usize) -> Result<MetalTensor, WorkspaceLensError> {
     Ok(MetalTensor::zeros_f32(
         context,
-        vec![u64::try_from(elements).map_err(|_| ResearchError::SizeOverflow)?],
+        vec![u64::try_from(elements).map_err(|_| WorkspaceLensError::SizeOverflow)?],
     )?)
 }
 
-fn f32_from_slice(context: &MetalContext, values: &[f32]) -> Result<MetalTensor, ResearchError> {
+fn f32_from_slice(
+    context: &MetalContext,
+    values: &[f32],
+) -> Result<MetalTensor, WorkspaceLensError> {
     Ok(MetalTensor::from_bytes(
         context,
         bytemuck::cast_slice(values),
-        vec![u64::try_from(values.len()).map_err(|_| ResearchError::SizeOverflow)?],
+        vec![u64::try_from(values.len()).map_err(|_| WorkspaceLensError::SizeOverflow)?],
         GgmlType::F32,
     )?)
 }
@@ -6785,20 +6821,20 @@ fn flat_query_view(
     tensor: &MetalTensor,
     query: usize,
     elements: usize,
-) -> Result<MetalTensor, ResearchError> {
+) -> Result<MetalTensor, WorkspaceLensError> {
     let offset = u64::try_from(checked_product(query, elements)?)
-        .map_err(|_| ResearchError::SizeOverflow)?;
-    let elements = u64::try_from(elements).map_err(|_| ResearchError::SizeOverflow)?;
+        .map_err(|_| WorkspaceLensError::SizeOverflow)?;
+    let elements = u64::try_from(elements).map_err(|_| WorkspaceLensError::SizeOverflow)?;
     Ok(tensor.view_subrange(offset, vec![elements]))
 }
 
 fn validate_completed_command(
     command: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn MTLCommandBuffer>>,
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     let status = command.status();
     let error = command.error();
     if status != MTLCommandBufferStatus::Completed || error.is_some() {
-        return Err(ResearchError::CommandBuffer {
+        return Err(WorkspaceLensError::CommandBuffer {
             status: format!("{status:?}"),
             error: format!("{error:?}"),
         });
@@ -6842,19 +6878,19 @@ fn dense_ffn_vjp_readback(
     grad_output: &[f32],
     n_query: usize,
     rule: DenseFfnVjpRule,
-) -> Result<Vec<f32>, ResearchError> {
+) -> Result<Vec<f32>, WorkspaceLensError> {
     if n_query == 0 {
-        return Err(ResearchError::EmptyQueryBatch);
+        return Err(WorkspaceLensError::EmptyQueryBatch);
     }
-    let gate_id = ResearchLinear::Layer {
+    let gate_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnGate,
     };
-    let up_id = ResearchLinear::Layer {
+    let up_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnUp,
     };
-    let down_id = ResearchLinear::Layer {
+    let down_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnDown,
     };
@@ -6877,7 +6913,7 @@ fn dense_ffn_vjp_readback(
         [intermediate_size, hidden_size],
     )?;
     if post_norm.dtype != GgmlType::F32 || post_norm.shape != [hidden_size as u64] {
-        return Err(ResearchError::InvalidDenseFfnNorm {
+        return Err(WorkspaceLensError::InvalidDenseFfnNorm {
             layer,
             dtype: post_norm.dtype,
             shape: post_norm.shape.clone(),
@@ -6892,7 +6928,7 @@ fn dense_ffn_vjp_readback(
         validate_vjp_dtype(id, weight)?;
     }
     if pre_ffn_residual.len() != hidden_size {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "pre-FFN residual",
             got: pre_ffn_residual.len(),
             expected: hidden_size,
@@ -6900,19 +6936,19 @@ fn dense_ffn_vjp_readback(
     }
     let hidden_query_elements = n_query
         .checked_mul(hidden_size)
-        .ok_or(ResearchError::SizeOverflow)?;
+        .ok_or(WorkspaceLensError::SizeOverflow)?;
     if grad_output.len() != hidden_query_elements {
-        return Err(ResearchError::CotangentSize {
+        return Err(WorkspaceLensError::CotangentSize {
             got: grad_output.len(),
             expected: hidden_query_elements,
             n_query,
             n_out: hidden_size,
         });
     }
-    let n_query_u64 = u64::try_from(n_query).map_err(|_| ResearchError::SizeOverflow)?;
-    let hidden_u64 = u64::try_from(hidden_size).map_err(|_| ResearchError::SizeOverflow)?;
+    let n_query_u64 = u64::try_from(n_query).map_err(|_| WorkspaceLensError::SizeOverflow)?;
+    let hidden_u64 = u64::try_from(hidden_size).map_err(|_| WorkspaceLensError::SizeOverflow)?;
     let intermediate_u64 =
-        u64::try_from(intermediate_size).map_err(|_| ResearchError::SizeOverflow)?;
+        u64::try_from(intermediate_size).map_err(|_| WorkspaceLensError::SizeOverflow)?;
 
     let pre_ffn_residual = MetalTensor::from_bytes(
         context,
@@ -6943,9 +6979,9 @@ fn dense_ffn_vjp_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         encode_rms_norm_mul_f32(
             context,
             &encoder,
@@ -7056,7 +7092,7 @@ fn dense_ffn_vjp_readback(
     let status = command.status();
     let error = command.error();
     if status != MTLCommandBufferStatus::Completed || error.is_some() {
-        return Err(ResearchError::CommandBuffer {
+        return Err(WorkspaceLensError::CommandBuffer {
             status: format!("{status:?}"),
             error: format!("{error:?}"),
         });
@@ -7078,19 +7114,19 @@ fn dense_ffn_vjp_rows_readback(
     grad_outputs: &[f32],
     n_rows: usize,
     rule: DenseFfnVjpRule,
-) -> Result<Vec<f32>, ResearchError> {
+) -> Result<Vec<f32>, WorkspaceLensError> {
     if n_rows == 0 {
-        return Err(ResearchError::EmptyQueryBatch);
+        return Err(WorkspaceLensError::EmptyQueryBatch);
     }
-    let gate_id = ResearchLinear::Layer {
+    let gate_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnGate,
     };
-    let up_id = ResearchLinear::Layer {
+    let up_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnUp,
     };
-    let down_id = ResearchLinear::Layer {
+    let down_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnDown,
     };
@@ -7113,7 +7149,7 @@ fn dense_ffn_vjp_rows_readback(
         [intermediate_size, hidden_size],
     )?;
     if post_norm.dtype != GgmlType::F32 || post_norm.shape != [hidden_size as u64] {
-        return Err(ResearchError::InvalidDenseFfnNorm {
+        return Err(WorkspaceLensError::InvalidDenseFfnNorm {
             layer,
             dtype: post_norm.dtype,
             shape: post_norm.shape.clone(),
@@ -7134,7 +7170,7 @@ fn dense_ffn_vjp_rows_readback(
         ("post-block cotangent rows", grad_outputs),
     ] {
         if values.len() != hidden_elements {
-            return Err(ResearchError::ActivationSize {
+            return Err(WorkspaceLensError::ActivationSize {
                 name,
                 got: values.len(),
                 expected: hidden_elements,
@@ -7170,9 +7206,9 @@ fn dense_ffn_vjp_rows_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         encode_rms_norm_mul_rows_f32(
             context,
             &encoder,
@@ -7306,19 +7342,19 @@ fn dense_ffn_vjp_query_rows_readback(
     n_rows: usize,
     n_query_batches: usize,
     rule: DenseFfnVjpRule,
-) -> Result<Vec<f32>, ResearchError> {
+) -> Result<Vec<f32>, WorkspaceLensError> {
     if n_rows == 0 || n_query_batches == 0 {
-        return Err(ResearchError::EmptyQueryBatch);
+        return Err(WorkspaceLensError::EmptyQueryBatch);
     }
-    let gate_id = ResearchLinear::Layer {
+    let gate_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnGate,
     };
-    let up_id = ResearchLinear::Layer {
+    let up_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnUp,
     };
-    let down_id = ResearchLinear::Layer {
+    let down_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnDown,
     };
@@ -7341,7 +7377,7 @@ fn dense_ffn_vjp_query_rows_readback(
         [intermediate_size, hidden_size],
     )?;
     if post_norm.dtype != GgmlType::F32 || post_norm.shape != [hidden_size as u64] {
-        return Err(ResearchError::InvalidDenseFfnNorm {
+        return Err(WorkspaceLensError::InvalidDenseFfnNorm {
             layer,
             dtype: post_norm.dtype,
             shape: post_norm.shape.clone(),
@@ -7362,14 +7398,14 @@ fn dense_ffn_vjp_query_rows_readback(
     let hidden_query_elements = checked_product(query_rows, hidden_size)?;
     checked_product(query_rows, intermediate_size)?;
     if pre_ffn_residuals.len() != hidden_elements {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "pre-FFN residual rows",
             got: pre_ffn_residuals.len(),
             expected: hidden_elements,
         });
     }
     if grad_outputs.len() != hidden_query_elements {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "post-block cotangent query rows",
             got: grad_outputs.len(),
             expected: hidden_query_elements,
@@ -7407,9 +7443,9 @@ fn dense_ffn_vjp_query_rows_readback(
     let command = context
         .queue
         .commandBuffer()
-        .ok_or(ResearchError::MissingCommandBuffer)?;
+        .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
     let encoder = KernelEncoder::begin(&command);
-    let encode_result = (|| -> Result<(), ResearchError> {
+    let encode_result = (|| -> Result<(), WorkspaceLensError> {
         encode_rms_norm_mul_rows_f32(
             context,
             &encoder,
@@ -7463,7 +7499,7 @@ fn dense_ffn_vjp_query_rows_readback(
         let intermediate_query_elements = checked_product(n_rows, intermediate_size)?;
         for query in 0..n_query_batches {
             let offset = u64::try_from(checked_product(query, intermediate_query_elements)?)
-                .map_err(|_| ResearchError::SizeOverflow)?;
+                .map_err(|_| WorkspaceLensError::SizeOverflow)?;
             let grad_inner_query = grad_inner.view_subrange(offset, intermediate_shape.clone());
             let grad_gate_query = grad_gate.view_subrange(offset, intermediate_shape.clone());
             let grad_up_query = grad_up.view_subrange(offset, intermediate_shape.clone());
@@ -7509,7 +7545,7 @@ fn dense_ffn_vjp_query_rows_readback(
         )?;
         for query in 0..n_query_batches {
             let offset = u64::try_from(checked_product(query, hidden_elements)?)
-                .map_err(|_| ResearchError::SizeOverflow)?;
+                .map_err(|_| WorkspaceLensError::SizeOverflow)?;
             let grad_norm_query = grad_norm.view_subrange(offset, hidden_shape.clone());
             let grad_ffn_input_query = grad_ffn_input.view_subrange(offset, hidden_shape.clone());
             encode_rms_norm_mul_vjp_rows_f32(
@@ -7545,7 +7581,7 @@ fn dense_ffn_vjp_query_rows_readback(
 struct GdnBlockComposition {
     values: Vec<f32>,
     grad_post_mixer_residuals: Vec<f32>,
-    mixer: ResearchGdnVjp,
+    mixer: WorkspaceLensGdnVjp,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7562,8 +7598,8 @@ fn compose_gdn_block_vjp(
     grad_block_output: &[f32],
     n_rows: usize,
     rule: GdnBlockVjpRule,
-    mixer_vjp: impl FnOnce(&[f32], GdnMixerVjpRule) -> Result<ResearchGdnVjp, ResearchError>,
-) -> Result<GdnBlockComposition, ResearchError> {
+    mixer_vjp: impl FnOnce(&[f32], GdnMixerVjpRule) -> Result<WorkspaceLensGdnVjp, WorkspaceLensError>,
+) -> Result<GdnBlockComposition, WorkspaceLensError> {
     let grad_post_mixer_residuals = dense_ffn_vjp_rows_readback(
         context,
         layer,
@@ -7589,7 +7625,7 @@ fn compose_gdn_block_vjp(
         },
     )?;
     if mixer.values.len() != grad_post_mixer_residuals.len() {
-        return Err(ResearchError::ActivationSize {
+        return Err(WorkspaceLensError::ActivationSize {
             name: "GDN mixer branch cotangent",
             got: mixer.values.len(),
             expected: grad_post_mixer_residuals.len(),
@@ -7616,16 +7652,16 @@ fn validate_dense_ffn_weights(
     gate_weight: &MetalTensor,
     up_weight: &MetalTensor,
     down_weight: &MetalTensor,
-) -> Result<(), ResearchError> {
-    let gate_id = ResearchLinear::Layer {
+) -> Result<(), WorkspaceLensError> {
+    let gate_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnGate,
     };
-    let up_id = ResearchLinear::Layer {
+    let up_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnUp,
     };
-    let down_id = ResearchLinear::Layer {
+    let down_id = WorkspaceLensLinear::Layer {
         index: layer,
         role: LinearRole::FfnDown,
     };
@@ -7648,7 +7684,7 @@ fn validate_dense_ffn_weights(
         [intermediate_size, hidden_size],
     )?;
     if post_norm.dtype != GgmlType::F32 || post_norm.shape != [hidden_size as u64] {
-        return Err(ResearchError::InvalidDenseFfnNorm {
+        return Err(WorkspaceLensError::InvalidDenseFfnNorm {
             layer,
             dtype: post_norm.dtype,
             shape: post_norm.shape.clone(),
@@ -7670,9 +7706,9 @@ fn validate_dense_ffn_shape(
     role: LinearRole,
     got: [usize; 2],
     expected: [usize; 2],
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     if got != expected {
-        return Err(ResearchError::InvalidDenseFfnShape {
+        return Err(WorkspaceLensError::InvalidDenseFfnShape {
             layer,
             role,
             got,
@@ -7682,12 +7718,15 @@ fn validate_dense_ffn_shape(
     Ok(())
 }
 
-fn validate_vjp_dtype(id: ResearchLinear, weight: &MetalTensor) -> Result<(), ResearchError> {
+fn validate_vjp_dtype(
+    id: WorkspaceLensLinear,
+    weight: &MetalTensor,
+) -> Result<(), WorkspaceLensError> {
     if !matches!(
         weight.dtype,
         GgmlType::Q8_0 | GgmlType::BF16 | GgmlType::F16 | GgmlType::F32
     ) {
-        return Err(ResearchError::UnsupportedLinearDtype {
+        return Err(WorkspaceLensError::UnsupportedLinearDtype {
             id,
             dtype: weight.dtype,
         });
@@ -7695,22 +7734,28 @@ fn validate_vjp_dtype(id: ResearchLinear, weight: &MetalTensor) -> Result<(), Re
     Ok(())
 }
 
-fn linear_shape(id: ResearchLinear, tensor: &MetalTensor) -> Result<[usize; 2], ResearchError> {
+fn linear_shape(
+    id: WorkspaceLensLinear,
+    tensor: &MetalTensor,
+) -> Result<[usize; 2], WorkspaceLensError> {
     let [n_in, n_out] = tensor.shape.as_slice() else {
-        return Err(ResearchError::InvalidLinearShape {
+        return Err(WorkspaceLensError::InvalidLinearShape {
             id,
             shape: tensor.shape.clone(),
         });
     };
     Ok([
-        usize::try_from(*n_in).map_err(|_| ResearchError::SizeOverflow)?,
-        usize::try_from(*n_out).map_err(|_| ResearchError::SizeOverflow)?,
+        usize::try_from(*n_in).map_err(|_| WorkspaceLensError::SizeOverflow)?,
+        usize::try_from(*n_out).map_err(|_| WorkspaceLensError::SizeOverflow)?,
     ])
 }
 
-fn validate_capture_layers(n_layers: u32, capture_layers: &[u32]) -> Result<(), ResearchError> {
+fn validate_capture_layers(
+    n_layers: u32,
+    capture_layers: &[u32],
+) -> Result<(), WorkspaceLensError> {
     if let Some(&layer) = capture_layers.iter().find(|&&layer| layer >= n_layers) {
-        return Err(ResearchError::InvalidLayer { layer, n_layers });
+        return Err(WorkspaceLensError::InvalidLayer { layer, n_layers });
     }
     Ok(())
 }
@@ -7718,14 +7763,14 @@ fn validate_capture_layers(n_layers: u32, capture_layers: &[u32]) -> Result<(), 
 fn validate_packed_capture_layers(
     n_layers: u32,
     capture_layers: &[u32],
-) -> Result<(), ResearchError> {
+) -> Result<(), WorkspaceLensError> {
     if capture_layers.is_empty() {
-        return Err(ResearchError::EmptyWorkspaceSourceLayers);
+        return Err(WorkspaceLensError::EmptyWorkspaceSourceLayers);
     }
     validate_capture_layers(n_layers, capture_layers)?;
     for (index, &layer) in capture_layers.iter().enumerate() {
         if capture_layers[..index].contains(&layer) {
-            return Err(ResearchError::DuplicatePackedCaptureLayer { layer });
+            return Err(WorkspaceLensError::DuplicatePackedCaptureLayer { layer });
         }
     }
     Ok(())
@@ -7758,7 +7803,7 @@ mod tests {
 
         assert!(matches!(
             validate_full_readout_transport_size(&transport[..6], 2).unwrap_err(),
-            ResearchError::InvalidFullReadoutTransportSize {
+            WorkspaceLensError::InvalidFullReadoutTransportSize {
                 got: 6,
                 expected: 8
             }
@@ -7770,11 +7815,11 @@ mod tests {
         validate_packed_capture_layers(8, &[5, 1, 7]).unwrap();
         assert!(matches!(
             validate_packed_capture_layers(8, &[]).unwrap_err(),
-            ResearchError::EmptyWorkspaceSourceLayers
+            WorkspaceLensError::EmptyWorkspaceSourceLayers
         ));
         assert!(matches!(
             validate_packed_capture_layers(8, &[5, 1, 5]).unwrap_err(),
-            ResearchError::DuplicatePackedCaptureLayer { layer: 5 }
+            WorkspaceLensError::DuplicatePackedCaptureLayer { layer: 5 }
         ));
     }
 
@@ -7794,7 +7839,7 @@ mod tests {
     fn packed_transported_vector_positions_reject_out_of_range_values() {
         assert!(matches!(
             validate_packed_transported_vector_positions(41, 3, &[40]).unwrap_err(),
-            ResearchError::PackedTransportedVectorPositionOutOfRange {
+            WorkspaceLensError::PackedTransportedVectorPositionOutOfRange {
                 source_position: 40,
                 start_position: 41,
                 end_position: 44,
@@ -7802,7 +7847,7 @@ mod tests {
         ));
         assert!(matches!(
             validate_packed_transported_vector_positions(41, 3, &[44]).unwrap_err(),
-            ResearchError::PackedTransportedVectorPositionOutOfRange {
+            WorkspaceLensError::PackedTransportedVectorPositionOutOfRange {
                 source_position: 44,
                 start_position: 41,
                 end_position: 44,
@@ -7814,7 +7859,7 @@ mod tests {
     fn packed_transported_vector_positions_reject_duplicates() {
         assert!(matches!(
             validate_packed_transported_vector_positions(41, 3, &[42, 41, 42]).unwrap_err(),
-            ResearchError::DuplicatePackedTransportedVectorPosition {
+            WorkspaceLensError::DuplicatePackedTransportedVectorPosition {
                 source_position: 42
             }
         ));
@@ -7873,11 +7918,15 @@ mod tests {
         use crate::runtime::{Runtime, SequenceConfig};
         use std::io::{Read, Seek, SeekFrom};
 
-        let model_path = std::env::var("QWEN_RESEARCH_MODEL").expect("QWEN_RESEARCH_MODEL");
-        let payload_path = std::env::var("QWEN_RESEARCH_TRANSPORT_PAYLOAD")
-            .expect("QWEN_RESEARCH_TRANSPORT_PAYLOAD");
-        let source_layer: u32 = std::env::var("QWEN_RESEARCH_SOURCE_LAYER")
-            .expect("QWEN_RESEARCH_SOURCE_LAYER")
+        let model_path = std::env::var("QWEN_WORKSPACE_LENS_MODEL")
+            .or_else(|_| std::env::var("QWEN_RESEARCH_MODEL"))
+            .expect("QWEN_WORKSPACE_LENS_MODEL");
+        let payload_path = std::env::var("QWEN_WORKSPACE_LENS_TRANSPORT_PAYLOAD")
+            .or_else(|_| std::env::var("QWEN_RESEARCH_TRANSPORT_PAYLOAD"))
+            .expect("QWEN_WORKSPACE_LENS_TRANSPORT_PAYLOAD");
+        let source_layer: u32 = std::env::var("QWEN_WORKSPACE_LENS_SOURCE_LAYER")
+            .or_else(|_| std::env::var("QWEN_RESEARCH_SOURCE_LAYER"))
+            .expect("QWEN_WORKSPACE_LENS_SOURCE_LAYER")
             .parse()
             .expect("numeric source layer");
 
@@ -7898,18 +7947,19 @@ mod tests {
             .read_exact(&mut transport)
             .expect("read source-layer matrix");
 
-        let token_ids = (1..=MAX_RESEARCH_PACKED_READOUT_POSITIONS as i32).collect::<Vec<_>>();
+        let token_ids =
+            (1..=MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS as i32).collect::<Vec<_>>();
         let mut sequence = loaded
             .create_sequence(SequenceConfig::new(token_ids.len()))
             .expect("create sequence");
-        let mut research = loaded
-            .research_session(&mut sequence)
-            .expect("open research session");
+        let mut workspace_lens = loaded
+            .workspace_lens_session(&mut sequence)
+            .expect("open workspace-lens session");
         let other_layer = if source_layer == 0 { 1 } else { 0 };
-        let capture = research
+        let capture = workspace_lens
             .forward_packed_post_block_capture(&token_ids, &[other_layer, source_layer])
             .expect("packed post-block capture");
-        let packed = research
+        let packed = workspace_lens
             .apply_packed_capture_f16_transport_topk_with_vectors(
                 &capture,
                 source_layer,
@@ -7930,7 +7980,7 @@ mod tests {
             let captured_residual = capture
                 .row_for_test(capture_row, source_layer)
                 .expect("read exact packed capture row");
-            let serial = research
+            let serial = workspace_lens
                 .apply_f16_transport_topk(&transport, &captured_residual, MAX_FULL_READOUT_TOP_K)
                 .expect("serial full-vocabulary readout");
             let packed_row = &packed.positions[capture_row];
@@ -8074,7 +8124,7 @@ mod tests {
         let error = validate_capture_layers(8, &[1, 8, 9]).unwrap_err();
         assert!(matches!(
             error,
-            ResearchError::InvalidLayer {
+            WorkspaceLensError::InvalidLayer {
                 layer: 8,
                 n_layers: 8
             }
@@ -8106,7 +8156,7 @@ mod tests {
 
     #[test]
     fn workspace_batch_accessors_preserve_source_then_query_layout() {
-        let batch = ResearchWorkspaceVjpBatch {
+        let batch = WorkspaceLensVjpBatch {
             target_layer: 3,
             source_layers: vec![0, 2],
             n_query: 3,
@@ -8145,7 +8195,7 @@ mod tests {
         reduce_workspace_vjp_readouts(&trajectories, 2, 2, 4, 2, 1..3, &mut values, 2, 0).unwrap();
         assert_eq!(values, [3.0, 4.0, 11.0, 12.0, 103.0, 104.0, 111.0, 112.0]);
 
-        let readouts = ResearchWorkspaceReadouts {
+        let readouts = WorkspaceLensReadouts {
             target_layer: 4,
             source_layers: vec![0, 2],
             n_query: 2,
@@ -8188,34 +8238,34 @@ mod tests {
     fn readout_helpers_reject_bad_sizes_non_finite_values_and_token_ids() {
         assert!(matches!(
             build_workspace_target_bank(&[1.0, 2.0, 3.0], 1, 3, 2, 0..2).unwrap_err(),
-            ResearchError::WorkspaceTargetCovectorSize { .. }
+            WorkspaceLensError::WorkspaceTargetCovectorSize { .. }
         ));
         assert!(matches!(
             build_workspace_target_bank(&[1.0, f32::NAN], 1, 3, 2, 0..2).unwrap_err(),
-            ResearchError::NonFiniteWorkspaceTargetCovector { index: 1 }
+            WorkspaceLensError::NonFiniteWorkspaceTargetCovector { index: 1 }
         ));
         assert!(matches!(
             validate_selected_token_ids(&[], 10).unwrap_err(),
-            ResearchError::EmptyTokenReadoutSelection
+            WorkspaceLensError::EmptyTokenReadoutSelection
         ));
         assert!(matches!(
             validate_selected_token_ids(&[2, 2], 10).unwrap_err(),
-            ResearchError::DuplicateTokenReadoutId { token_id: 2 }
+            WorkspaceLensError::DuplicateTokenReadoutId { token_id: 2 }
         ));
         assert!(matches!(
             validate_selected_token_ids(&[10], 10).unwrap_err(),
-            ResearchError::TokenReadoutIdOutOfRange { token_id: 10, .. }
+            WorkspaceLensError::TokenReadoutIdOutOfRange { token_id: 10, .. }
         ));
         assert!(matches!(
             validate_selected_token_request_size(11, 10, 4).unwrap_err(),
-            ResearchError::TokenReadoutCountExceedsVocabulary {
+            WorkspaceLensError::TokenReadoutCountExceedsVocabulary {
                 got: 11,
                 vocab_size: 10
             }
         ));
         assert!(matches!(
             validate_selected_token_request_size(70_000_000, u32::MAX, 1).unwrap_err(),
-            ResearchError::ResearchResultByteBudgetExceeded { .. }
+            WorkspaceLensError::WorkspaceLensResultByteBudgetExceeded { .. }
         ));
     }
 
@@ -8227,12 +8277,12 @@ mod tests {
         let mut bad_size = [1.0, 2.0];
         assert!(matches!(
             multiply_token_readout_gamma_in_place(&mut bad_size, &[1.0], 1, 2).unwrap_err(),
-            ResearchError::ActivationSize { .. }
+            WorkspaceLensError::ActivationSize { .. }
         ));
         let mut non_finite = [f32::INFINITY];
         assert!(matches!(
             multiply_token_readout_gamma_in_place(&mut non_finite, &[1.0], 1, 1).unwrap_err(),
-            ResearchError::NonFiniteTokenReadoutData { .. }
+            WorkspaceLensError::NonFiniteTokenReadoutData { .. }
         ));
     }
 
@@ -8241,7 +8291,7 @@ mod tests {
         assert_eq!(workspace_valid_position_range(8, 4).unwrap(), 4..7);
         assert!(matches!(
             workspace_valid_position_range(5, 4).unwrap_err(),
-            ResearchError::WorkspaceNoValidPositions {
+            WorkspaceLensError::WorkspaceNoValidPositions {
                 n_tokens: 5,
                 skip_first: 4
             }
@@ -8255,16 +8305,16 @@ mod tests {
 
     #[test]
     fn workspace_row_diagnostics_merge_by_schedule_and_maximum() {
-        let mut aggregate = vec![ResearchWorkspaceReplayDiagnostic {
+        let mut aggregate = vec![WorkspaceLensReplayDiagnostic {
             layer: 3,
-            kind: ResearchWorkspaceBlockKind::Attention,
+            kind: WorkspaceLensBlockKind::Attention,
             residual_replay_max_abs_error: 0.1,
         }];
         merge_workspace_diagnostics(
             &mut aggregate,
-            &[ResearchWorkspaceReplayDiagnostic {
+            &[WorkspaceLensReplayDiagnostic {
                 layer: 3,
-                kind: ResearchWorkspaceBlockKind::Attention,
+                kind: WorkspaceLensBlockKind::Attention,
                 residual_replay_max_abs_error: 0.2,
             }],
         )
@@ -8273,42 +8323,45 @@ mod tests {
         assert!(matches!(
             merge_workspace_diagnostics(
                 &mut aggregate,
-                &[ResearchWorkspaceReplayDiagnostic {
+                &[WorkspaceLensReplayDiagnostic {
                     layer: 2,
-                    kind: ResearchWorkspaceBlockKind::Gdn,
+                    kind: WorkspaceLensBlockKind::Gdn,
                     residual_replay_max_abs_error: 0.0,
                 }],
             )
             .unwrap_err(),
-            ResearchError::WorkspaceDiagnosticScheduleMismatch
+            WorkspaceLensError::WorkspaceDiagnosticScheduleMismatch
         ));
         assert!(matches!(
             merge_workspace_diagnostics(
                 &mut aggregate,
-                &[ResearchWorkspaceReplayDiagnostic {
+                &[WorkspaceLensReplayDiagnostic {
                     layer: 3,
-                    kind: ResearchWorkspaceBlockKind::Attention,
+                    kind: WorkspaceLensBlockKind::Attention,
                     residual_replay_max_abs_error: f32::NAN,
                 }],
             )
             .unwrap_err(),
-            ResearchError::NonFiniteWorkspaceReplayDiagnostic { layer: 3 }
+            WorkspaceLensError::NonFiniteWorkspaceReplayDiagnostic { layer: 3 }
         ));
     }
 
     #[test]
     fn workspace_readout_budget_and_non_finite_reductions_fail_closed() {
         assert!(matches!(
-            enforce_research_byte_budget("test result", MAX_RESEARCH_OWNED_RESULT_BYTES + 1)
-                .unwrap_err(),
-            ResearchError::ResearchResultByteBudgetExceeded { .. }
+            enforce_workspace_lens_byte_budget(
+                "test result",
+                MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES + 1
+            )
+            .unwrap_err(),
+            WorkspaceLensError::WorkspaceLensResultByteBudgetExceeded { .. }
         ));
 
         let mut destination = [0.0f32; 1];
         assert!(matches!(
             reduce_workspace_source_positions(&[0.0, f32::NAN, 1.0], 3, 1, 0..2, &mut destination,)
                 .unwrap_err(),
-            ResearchError::NonFiniteWorkspaceVjpTrajectory { index: 1 }
+            WorkspaceLensError::NonFiniteWorkspaceVjpTrajectory { index: 1 }
         ));
         assert!(matches!(
             reduce_workspace_source_positions(
@@ -8319,7 +8372,7 @@ mod tests {
                 &mut destination,
             )
             .unwrap_err(),
-            ResearchError::NonFiniteWorkspaceReduction {
+            WorkspaceLensError::NonFiniteWorkspaceReduction {
                 stage: "sum",
                 index: 0
             }
@@ -8327,14 +8380,14 @@ mod tests {
         assert!(matches!(
             validate_workspace_vjp_finite(
                 &[0.0, f32::INFINITY],
-                &[ResearchWorkspaceReplayDiagnostic {
+                &[WorkspaceLensReplayDiagnostic {
                     layer: 2,
-                    kind: ResearchWorkspaceBlockKind::Gdn,
+                    kind: WorkspaceLensBlockKind::Gdn,
                     residual_replay_max_abs_error: 0.0,
                 }],
             )
             .unwrap_err(),
-            ResearchError::NonFiniteWorkspaceVjpTrajectory { index: 1 }
+            WorkspaceLensError::NonFiniteWorkspaceVjpTrajectory { index: 1 }
         ));
     }
 
@@ -8352,12 +8405,12 @@ mod tests {
                 traversed.push(layer);
                 Ok((
                     gradient.iter().map(|value| value * layer as f32).collect(),
-                    ResearchWorkspaceReplayDiagnostic {
+                    WorkspaceLensReplayDiagnostic {
                         layer,
                         kind: if layer == 4 {
-                            ResearchWorkspaceBlockKind::Attention
+                            WorkspaceLensBlockKind::Attention
                         } else {
-                            ResearchWorkspaceBlockKind::Gdn
+                            WorkspaceLensBlockKind::Gdn
                         },
                         residual_replay_max_abs_error: layer as f32 * 1e-6,
                     },
@@ -8388,7 +8441,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            ResearchError::WorkspaceSourceNotBeforeTarget {
+            WorkspaceLensError::WorkspaceSourceNotBeforeTarget {
                 source_layer: 4,
                 target_layer: 4
             }
@@ -9371,7 +9424,7 @@ mod tests {
                                 };
                         }
                     }
-                    Ok(ResearchGdnVjp {
+                    Ok(WorkspaceLensGdnVjp {
                         layer: 3,
                         n_tokens: ROWS,
                         hidden_size: HIDDEN,
@@ -9443,7 +9496,7 @@ mod tests {
             ROWS,
             GdnBlockVjpRule::Jacobian,
             |incoming, _| {
-                Ok(ResearchGdnVjp {
+                Ok(WorkspaceLensGdnVjp {
                     layer: 3,
                     n_tokens: ROWS,
                     hidden_size: HIDDEN,
@@ -9562,7 +9615,7 @@ mod tests {
         .expect_err("architecture/weight shape mismatch must fail");
         assert!(matches!(
             mismatch,
-            ResearchError::InvalidDenseFfnShape {
+            WorkspaceLensError::InvalidDenseFfnShape {
                 role: LinearRole::FfnGate,
                 ..
             }

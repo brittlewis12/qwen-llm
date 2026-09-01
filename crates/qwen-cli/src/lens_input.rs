@@ -2,14 +2,16 @@ use crate::messages::{
     AnnotatedMessageRender, ChatMessage, MessageRenderSpanKind, Qwen38GenerationMode,
     Qwen38ReasoningEffort, QwenGenerationMode, parse_strict_messages_input,
     render_qwen_messages_prompt_with_generation_annotated,
-    render_qwen38_messages_prompt_with_generation_annotated, supports_qwen4exp_prompt_protocol,
-    supports_qwen36_no_thinking_prompt_protocol, supports_qwen38_release_prompt_protocol,
+    render_qwen38_messages_prompt_with_generation_annotated,
 };
 use crate::open_responses::bind_qwen_request;
 use crate::open_responses::items::{QwenTemplate, ServeError, ServeRequest, parse_request};
 use crate::open_responses::render::{
     AnnotatedQwenServePrompt, QwenServePromptSpanKind, qwen_serve_generation_mode_name,
     render_qwen_serve_prompt_annotated,
+};
+use crate::prompt_template::{
+    ModelPromptTemplate, QwenPromptTemplate, resolve_model_prompt_template,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::ValueEnum;
@@ -37,13 +39,6 @@ pub(crate) enum LensMessageMode {
     Medium,
     High,
     Xhigh,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QwenMessageProtocol {
-    Generic,
-    Qwen36,
-    Qwen38,
 }
 
 #[derive(Clone, Copy)]
@@ -136,7 +131,11 @@ pub(crate) fn is_known_lens_span(kind: &str) -> bool {
 pub(crate) fn valid_lens_span_metadata(renderer: &str, span: &LensRenderedSpan) -> bool {
     if matches!(
         renderer,
-        "qwen_chatml_messages_v1" | "qwen3.6_messages_v1" | "qwen3.8_messages_v1"
+        "qwen_chatml_messages_v1"
+            | "qwen3.5_messages_v1"
+            | "qwen3.6_messages_v1"
+            | "qwen3.8_messages_v1"
+            | "qwen4next_messages_v1"
     ) {
         return valid_qwen_span_metadata(span);
     }
@@ -745,38 +744,22 @@ pub(crate) fn validate_lens_input_spec(spec: LensInputSpec<'_>) -> Result<()> {
 pub(crate) fn detect_qwen_message_protocol(
     family: ModelFamily,
     gguf: &GgufFile,
-) -> Result<QwenMessageProtocol> {
-    if family == ModelFamily::Qwen4Exp {
-        ensure!(
-            supports_qwen4exp_prompt_protocol(family, gguf),
-            "Flash-Next structured input requires the released qwen35 prompt protocol; use --prompt/--raw-prompt or --token-ids for exact untemplated input"
-        );
-        return Ok(QwenMessageProtocol::Qwen38);
+) -> Result<QwenPromptTemplate> {
+    ensure!(
+        ModelFamily::detect(gguf) == Some(family),
+        "Qwen prompt family does not match the opened GGUF"
+    );
+    match resolve_model_prompt_template(gguf)? {
+        ModelPromptTemplate::Qwen(template) => Ok(template),
+        ModelPromptTemplate::MuseGlimmer(_) | ModelPromptTemplate::DeepSeekV4_0731 => {
+            bail!("Qwen prompt preparation received a non-Qwen template")
+        }
     }
-    if supports_qwen38_release_prompt_protocol(family, gguf) {
-        return Ok(QwenMessageProtocol::Qwen38);
-    }
-    if [
-        gguf.get_str("general.name"),
-        gguf.get_str("general.base_model.0.name"),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|name| name.to_ascii_lowercase().contains("qwen3.8"))
-    {
-        bail!(
-            "model declares Qwen3.8 but does not match the validated release prompt identity; use --prompt/--raw-prompt or --token-ids for exact untemplated input"
-        );
-    }
-    if supports_qwen36_no_thinking_prompt_protocol(family, gguf) {
-        return Ok(QwenMessageProtocol::Qwen36);
-    }
-    Ok(QwenMessageProtocol::Generic)
 }
 
 pub(crate) fn prepare_qwen_input(
     spec: LensInputSpec<'_>,
-    protocol: QwenMessageProtocol,
+    protocol: QwenPromptTemplate,
     tokenizer: &Tokenizer,
 ) -> Result<PreparedLensInput> {
     validate_lens_input_spec(spec)?;
@@ -855,7 +838,7 @@ pub(crate) fn prepare_qwen_model_input(
     let protocol = if spec.user.is_some() || spec.messages.is_some() {
         detect_qwen_message_protocol(family, gguf)?
     } else {
-        QwenMessageProtocol::Generic
+        QwenPromptTemplate::UnverifiedChatMl
     };
     prepare_qwen_input(spec, protocol, tokenizer)
 }
@@ -878,13 +861,17 @@ fn prepare_qwen_open_responses_input(
     validate_open_responses_execution_controls(&request)?;
     let protocol = detect_qwen_message_protocol(family, gguf)?;
     let template = match protocol {
-        QwenMessageProtocol::Qwen38 => QwenTemplate::Qwen38,
-        QwenMessageProtocol::Generic | QwenMessageProtocol::Qwen36 => QwenTemplate::Generic,
+        QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next => QwenTemplate::Qwen38,
+        QwenPromptTemplate::Qwen35
+        | QwenPromptTemplate::Qwen36
+        | QwenPromptTemplate::UnverifiedChatMl => QwenTemplate::Generic,
     };
-    let no_thinking_supported = supports_qwen36_no_thinking_prompt_protocol(family, gguf)
-        || template == QwenTemplate::Qwen38;
-    let request = bind_qwen_request(&request, template, no_thinking_supported)
+    let no_thinking_supported = protocol != QwenPromptTemplate::UnverifiedChatMl;
+    let mut request = bind_qwen_request(&request, template, no_thinking_supported)
         .map_err(open_responses_error)?;
+    if protocol == QwenPromptTemplate::Qwen35 {
+        request.strip_history_thinking = true;
+    }
     let rendered = render_qwen_serve_prompt_annotated(&request);
     let token_ids = tokenizer
         .encode(&rendered.text, false)
@@ -1039,22 +1026,23 @@ pub(crate) fn prepare_muse_input(
 
 fn render_qwen_structured_messages(
     messages: &[ChatMessage],
-    protocol: QwenMessageProtocol,
+    protocol: QwenPromptTemplate,
     requested: Option<LensMessageMode>,
 ) -> Result<(AnnotatedMessageRender, &'static str, ResolvedMessageMode)> {
     let mode = resolve_qwen_message_mode(protocol, requested)?;
     let (rendered, renderer) = match mode {
         ResolvedMessageMode::Qwen36(mode) => (
-            render_qwen_messages_prompt_with_generation_annotated(messages, false, true, mode),
-            match protocol {
-                QwenMessageProtocol::Generic => "qwen_chatml_messages_v1",
-                QwenMessageProtocol::Qwen36 => "qwen3.6_messages_v1",
-                QwenMessageProtocol::Qwen38 => unreachable!(),
-            },
+            render_qwen_messages_prompt_with_generation_annotated(
+                messages,
+                protocol == QwenPromptTemplate::Qwen36,
+                true,
+                mode,
+            ),
+            protocol.renderer_name(),
         ),
         ResolvedMessageMode::Qwen38(mode) => (
             render_qwen38_messages_prompt_with_generation_annotated(messages, true, mode),
-            "qwen3.8_messages_v1",
+            protocol.renderer_name(),
         ),
         ResolvedMessageMode::Muse(_) => unreachable!(),
     };
@@ -1155,11 +1143,11 @@ fn read_stdin_sentinel(value: &str, label: &str) -> Result<String> {
 }
 
 fn resolve_qwen_message_mode(
-    protocol: QwenMessageProtocol,
+    protocol: QwenPromptTemplate,
     requested: Option<LensMessageMode>,
 ) -> Result<ResolvedMessageMode> {
     match protocol {
-        QwenMessageProtocol::Generic => match requested {
+        QwenPromptTemplate::UnverifiedChatMl => match requested {
             None | Some(LensMessageMode::Auto) => {
                 Ok(ResolvedMessageMode::Qwen36(QwenGenerationMode::Auto))
             }
@@ -1168,7 +1156,7 @@ fn resolve_qwen_message_mode(
                 mode.to_possible_value().unwrap().get_name()
             ),
         },
-        QwenMessageProtocol::Qwen36 => match requested {
+        QwenPromptTemplate::Qwen35 | QwenPromptTemplate::Qwen36 => match requested {
             None | Some(LensMessageMode::Auto) => {
                 Ok(ResolvedMessageMode::Qwen36(QwenGenerationMode::Auto))
             }
@@ -1179,11 +1167,11 @@ fn resolve_qwen_message_mode(
                 Ok(ResolvedMessageMode::Qwen36(QwenGenerationMode::NoThinking))
             }
             Some(mode) => bail!(
-                "--message-mode {} is not supported by Qwen3.6; use auto, thinking, or no-thinking",
+                "--message-mode {} is not supported by this Qwen release; use auto, thinking, or no-thinking",
                 mode.to_possible_value().unwrap().get_name()
             ),
         },
-        QwenMessageProtocol::Qwen38 => match requested {
+        QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next => match requested {
             None | Some(LensMessageMode::Thinking | LensMessageMode::Xhigh) => {
                 Ok(ResolvedMessageMode::Qwen38(Qwen38GenerationMode::Thinking(
                     Qwen38ReasoningEffort::Xhigh,
@@ -1558,20 +1546,81 @@ mod tests {
 
     #[test]
     fn qwen38_defaults_match_modern_run_xhigh_contract() {
-        let mode = resolve_qwen_message_mode(QwenMessageProtocol::Qwen38, None).unwrap();
+        let mode = resolve_qwen_message_mode(QwenPromptTemplate::Qwen38, None).unwrap();
         assert_eq!(mode.artifact_name(), "thinking_xhigh");
         assert_eq!(
-            resolve_qwen_message_mode(QwenMessageProtocol::Qwen38, Some(LensMessageMode::Thinking))
+            resolve_qwen_message_mode(QwenPromptTemplate::Qwen38, Some(LensMessageMode::Thinking))
                 .unwrap()
                 .artifact_name(),
             "thinking_xhigh"
         );
         assert_eq!(
-            resolve_qwen_message_mode(QwenMessageProtocol::Qwen38, Some(LensMessageMode::Medium))
+            resolve_qwen_message_mode(QwenPromptTemplate::Qwen38, Some(LensMessageMode::Medium))
                 .unwrap()
                 .artifact_name(),
             "thinking_medium"
         );
+    }
+
+    #[test]
+    fn qwen35_and_qwen36_share_explicit_thinking_boundaries() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: "request".into(),
+            ..Default::default()
+        }];
+        for template in [QwenPromptTemplate::Qwen35, QwenPromptTemplate::Qwen36] {
+            let (thinking, renderer, mode) = render_qwen_structured_messages(
+                &messages,
+                template,
+                Some(LensMessageMode::Thinking),
+            )
+            .unwrap();
+            assert_eq!(renderer, template.renderer_name());
+            assert_eq!(mode.artifact_name(), "thinking");
+            assert!(thinking.text.ends_with("<|im_start|>assistant\n<think>\n"));
+
+            let (no_thinking, renderer, mode) = render_qwen_structured_messages(
+                &messages,
+                template,
+                Some(LensMessageMode::NoThinking),
+            )
+            .unwrap();
+            assert_eq!(renderer, template.renderer_name());
+            assert_eq!(mode.artifact_name(), "no_thinking");
+            assert!(
+                no_thinking
+                    .text
+                    .ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+            );
+        }
+    }
+
+    #[test]
+    fn qwen36_preserves_prior_thinking_that_qwen35_strips() {
+        let messages = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "first".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "<think>private</think>answer".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "second".into(),
+                ..Default::default()
+            },
+        ];
+        let (qwen35, _, _) =
+            render_qwen_structured_messages(&messages, QwenPromptTemplate::Qwen35, None).unwrap();
+        let (qwen36, _, _) =
+            render_qwen_structured_messages(&messages, QwenPromptTemplate::Qwen36, None).unwrap();
+        assert!(!qwen35.text.contains("private"));
+        assert!(qwen36.text.contains("<think>private</think>answer"));
     }
 
     #[test]
@@ -1589,7 +1638,7 @@ mod tests {
             },
         ];
         let (qwen38, renderer, mode) =
-            render_qwen_structured_messages(&messages, QwenMessageProtocol::Qwen38, None).unwrap();
+            render_qwen_structured_messages(&messages, QwenPromptTemplate::Qwen38, None).unwrap();
         assert_eq!(renderer, "qwen3.8_messages_v1");
         assert_eq!(mode.artifact_name(), "thinking_xhigh");
         assert_eq!(
@@ -1602,7 +1651,8 @@ mod tests {
         );
 
         let (generic, renderer, mode) =
-            render_qwen_structured_messages(&messages, QwenMessageProtocol::Generic, None).unwrap();
+            render_qwen_structured_messages(&messages, QwenPromptTemplate::UnverifiedChatMl, None)
+                .unwrap();
         assert_eq!(renderer, "qwen_chatml_messages_v1");
         assert_eq!(mode.artifact_name(), "auto");
         assert_eq!(
@@ -1742,13 +1792,13 @@ mod tests {
     fn message_modes_fail_closed_by_protocol() {
         assert!(
             resolve_qwen_message_mode(
-                QwenMessageProtocol::Generic,
+                QwenPromptTemplate::UnverifiedChatMl,
                 Some(LensMessageMode::NoThinking)
             )
             .is_err()
         );
         assert!(
-            resolve_qwen_message_mode(QwenMessageProtocol::Qwen36, Some(LensMessageMode::Low))
+            resolve_qwen_message_mode(QwenPromptTemplate::Qwen36, Some(LensMessageMode::Low))
                 .is_err()
         );
         assert!(resolve_muse_requested_reasoning(Some(LensMessageMode::NoThinking)).is_err());
@@ -1814,7 +1864,7 @@ mod tests {
             "reasoning_xhigh"
         );
         assert!(
-            resolve_qwen_message_mode(QwenMessageProtocol::Qwen38, Some(LensMessageMode::High))
+            resolve_qwen_message_mode(QwenPromptTemplate::Qwen38, Some(LensMessageMode::High))
                 .is_err()
         );
     }
@@ -2210,6 +2260,50 @@ mod tests {
                 && span.channel.as_deref() == Some("tool_result")
                 && span.label.as_deref() == Some("fetch")
         }));
+    }
+
+    #[test]
+    #[ignore = "requires QWEN36_BF16_GGUF"]
+    fn real_qwen36_bf16_uses_release_identity_and_thinking_boundaries() {
+        let path = std::env::var("QWEN36_BF16_GGUF").expect("set QWEN36_BF16_GGUF");
+        let gguf = GgufFile::open(path).unwrap();
+        let family = ModelFamily::detect(&gguf).unwrap();
+        let tokenizer = Tokenizer::from_gguf(&gguf).unwrap();
+        for (mode, suffix, artifact_mode) in [
+            (LensMessageMode::Thinking, "<think>\n", "thinking"),
+            (
+                LensMessageMode::NoThinking,
+                "<think>\n\n</think>\n\n",
+                "no_thinking",
+            ),
+        ] {
+            let prepared = prepare_qwen_model_input(
+                LensInputSpec {
+                    prompt: None,
+                    token_ids: None,
+                    user: Some("probe"),
+                    system: None,
+                    messages: None,
+                    open_responses: None,
+                    no_special_tokens: false,
+                    message_mode: Some(mode),
+                },
+                family,
+                &gguf,
+                &tokenizer,
+            )
+            .unwrap();
+            assert_eq!(prepared.rendering.renderer, "qwen3.6_messages_v1");
+            assert_eq!(
+                prepared.rendering.generation_mode.as_deref(),
+                Some(artifact_mode)
+            );
+            let prompt = tokenizer.try_decode(&prepared.token_ids).unwrap();
+            assert_eq!(
+                prompt,
+                format!("<|im_start|>user\nprobe<|im_end|>\n<|im_start|>assistant\n{suffix}")
+            );
+        }
     }
 
     #[test]

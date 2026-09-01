@@ -20,9 +20,11 @@ use crate::muse_glimmer_residency::{
     MuseGlimmerMetalWeightPlan, MuseGlimmerMetalWeights, MuseGlimmerResidencyError,
 };
 use crate::muse_glimmer_text_session::{
-    MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES, MuseGlimmerPostBlockForward,
-    MuseGlimmerPreparedF16Transport, MuseGlimmerTextForward, MuseGlimmerTextGeometry,
-    MuseGlimmerTextSession, MuseGlimmerTextSessionError, MuseGlimmerTextSessionMemoryPlan,
+    MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES, MuseGlimmerBatchedFullReadout,
+    MuseGlimmerFullReadoutWorkspace, MuseGlimmerFullReadoutWorkspacePlan,
+    MuseGlimmerPostBlockForward, MuseGlimmerPreparedF16Transport, MuseGlimmerTextForward,
+    MuseGlimmerTextGeometry, MuseGlimmerTextSession, MuseGlimmerTextSessionError,
+    MuseGlimmerTextSessionMemoryPlan,
 };
 use objc2_metal::MTLDevice;
 
@@ -248,6 +250,46 @@ impl MuseGlimmerTextRunner<'_, '_> {
         Ok(self
             .forward
             .prepare_f16_post_block_transport(transport_bytes)?)
+    }
+
+    /// Allocate reusable storage for batched passive full-vocabulary readout.
+    pub fn full_readout_workspace_plan(
+        &self,
+        row_capacity: usize,
+    ) -> Result<MuseGlimmerFullReadoutWorkspacePlan, MuseGlimmerRuntimeError> {
+        Ok(self.forward.full_readout_workspace_plan(row_capacity)?)
+    }
+
+    /// Whether this resident head has an arithmetic-equivalent command-batched path.
+    pub fn supports_command_batched_full_readout(&self) -> bool {
+        self.forward.supports_command_batched_full_readout()
+    }
+
+    /// Allocate reusable storage after refreshing Metal memory admission.
+    pub fn create_full_readout_workspace(
+        &self,
+        row_capacity: usize,
+    ) -> Result<MuseGlimmerFullReadoutWorkspace, MuseGlimmerRuntimeError> {
+        Ok(self.forward.create_full_readout_workspace(row_capacity)?)
+    }
+
+    /// Run independent source rows through a prepared transport and the
+    /// deployed output tail, returning compact exact top-k results.
+    pub fn apply_prepared_f16_transport_topk_rows(
+        &self,
+        workspace: &mut MuseGlimmerFullReadoutWorkspace,
+        transport: &MuseGlimmerPreparedF16Transport,
+        source_rows: &[f32],
+        top_k: usize,
+        transported_rows: &[usize],
+    ) -> Result<MuseGlimmerBatchedFullReadout, MuseGlimmerRuntimeError> {
+        Ok(self.forward.apply_prepared_f16_transport_topk_rows(
+            workspace,
+            transport,
+            source_rows,
+            top_k,
+            transported_rows,
+        )?)
     }
 
     /// Apply a prepared transport without advancing or mutating the text session.
@@ -590,5 +632,90 @@ mod tests {
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    fn batched_full_readout_matches_scalar_oracle_exactly() {
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
+        let ctx = MetalContext::new().expect("open Metal context");
+        let mut model = MuseGlimmerLoadedModel::load(&ctx, &gguf, 2).expect("load Muse Q8 target");
+        let final_layer = model.config().layer_count - 1;
+        let token = model.config().bos_token_id;
+        let mut runner = model.create_runner(&ctx).expect("create Muse runner");
+        let mut source_rows = Vec::new();
+        for _ in 0..2 {
+            let captured = runner
+                .forward_token_capture_post_blocks(token, &[final_layer])
+                .expect("capture final residual");
+            source_rows.extend_from_slice(captured.layer_values(0).unwrap());
+        }
+        let hidden = source_rows.len() / 2;
+        let mut identity = vec![0u8; hidden * hidden * 2];
+        for coordinate in 0..hidden {
+            let offset = (coordinate * hidden + coordinate) * 2;
+            identity[offset..offset + 2].copy_from_slice(&half::f16::ONE.to_bits().to_le_bytes());
+        }
+        let transport = runner
+            .prepare_f16_post_block_transport(&identity)
+            .expect("prepare identity transport");
+        let mut scalar = Vec::new();
+        for source in source_rows.chunks_exact(hidden) {
+            let transported = runner
+                .apply_prepared_f16_post_block_transport(&transport, source)
+                .expect("scalar transport");
+            let logits = runner
+                .deployed_logits_from_post_block_residual(&transported)
+                .expect("scalar output tail");
+            let mut scores = logits.into_iter().enumerate().collect::<Vec<_>>();
+            scores.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            scores.truncate(16);
+            scalar.push((transported, scores));
+        }
+        let mut workspace = runner
+            .create_full_readout_workspace(2)
+            .expect("create batched workspace");
+        let batched = runner
+            .apply_prepared_f16_transport_topk_rows(
+                &mut workspace,
+                &transport,
+                &source_rows,
+                16,
+                &[0, 1],
+            )
+            .expect("batched readout");
+        for row in 0..2 {
+            assert_eq!(
+                batched.transported_rows[row]
+                    .values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                scalar[row]
+                    .0
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            let actual = batched.rows[row]
+                .scores
+                .iter()
+                .map(|score| (score.token_id as usize, score.logit.to_bits()))
+                .collect::<Vec<_>>();
+            let expected = scalar[row]
+                .1
+                .iter()
+                .map(|&(token_id, logit)| (token_id, logit.to_bits()))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
     }
 }

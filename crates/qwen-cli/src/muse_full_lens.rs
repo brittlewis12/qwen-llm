@@ -14,7 +14,8 @@ use qwen_llm::checkpoint_identity::{
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME, MuseGlimmerModel};
-use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
+use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerRuntimeError};
+use qwen_llm::muse_glimmer_text_session::MuseGlimmerTextSessionError;
 use qwen_llm::tokenizer::LlamaCppTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -851,6 +852,11 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let mut runner = loaded
         .create_runner(&context)
         .context("create Muse full-trace runner")?;
+    let scalar_readout_requested =
+        qwen_llm::env_flag::read_default_off("QWEN_MUSE_TRACE_FULL_SCALAR");
+    let command_batch_supported = runner.supports_command_batched_full_readout();
+    let mut scalar_readout =
+        use_scalar_muse_trace_readout(scalar_readout_requested, command_batch_supported);
     let prefill_started = Instant::now();
     for (position, &token_id) in token_ids.iter().enumerate() {
         let capture = runner
@@ -896,8 +902,25 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .try_reserve_exact(vector_requests.len())
         .context("allocate Muse trace vectors")?;
     let mut matrix_read_wall_ms = 0.0;
-    let mut transport_wall_ms = 0.0;
-    let mut output_tail_wall_ms = 0.0;
+    let mut transport_prepare_wall_ms = 0.0;
+    let mut scalar_transport_wall_ms = 0.0;
+    let mut scalar_output_tail_wall_ms = 0.0;
+    let mut batched_readout_gpu_ms = 0.0;
+    let mut batched_readout_command_wall_ms = 0.0;
+    let mut batched_transport_gpu_ms = 0.0;
+    let mut batched_transport_wall_ms = 0.0;
+    let mut batched_output_tail_gpu_ms = 0.0;
+    let mut batched_output_tail_wall_ms = 0.0;
+    let mut admission_fallback = false;
+    let mut readout_workspace = if scalar_readout {
+        None
+    } else {
+        let (workspace, fallback) =
+            muse_trace_workspace_or_scalar(runner.create_full_readout_workspace(token_ids.len()))?;
+        scalar_readout = fallback;
+        admission_fallback = fallback;
+        workspace
+    };
     for &layer in &layers {
         let descriptor = manifest
             .payload
@@ -917,8 +940,75 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         let prepared = runner
             .prepare_f16_post_block_transport(&matrix)
             .with_context(|| format!("prepare Muse trace source layer {layer}"))?;
-        transport_wall_ms += started.elapsed().as_secs_f64() * 1e3;
+        transport_prepare_wall_ms += started.elapsed().as_secs_f64() * 1e3;
         let captures = &captured_by_layer[&layer];
+        if let Some(workspace) = readout_workspace.as_mut() {
+            let vector_positions = token_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(position, _)| {
+                    vector_requests
+                        .contains(&(layer, position))
+                        .then_some(position)
+                })
+                .collect::<Vec<_>>();
+            let readout = runner
+                .apply_prepared_f16_transport_topk_rows(
+                    workspace,
+                    &prepared,
+                    captures,
+                    args.top_k,
+                    &vector_positions,
+                )
+                .with_context(|| format!("apply batched Muse trace source layer {layer}"))?;
+            batched_readout_gpu_ms += readout.gpu_ms;
+            batched_readout_command_wall_ms += readout.command_wall_ms;
+            batched_transport_gpu_ms += readout.transport_gpu_ms;
+            batched_transport_wall_ms += readout.transport_wall_ms;
+            batched_output_tail_gpu_ms += readout.output_tail_gpu_ms;
+            batched_output_tail_wall_ms += readout.output_tail_wall_ms;
+            ensure!(
+                readout.row_count == token_ids.len()
+                    && readout.top_k == args.top_k
+                    && readout.rows.len() == token_ids.len()
+                    && readout.transported_rows.len() == vector_positions.len(),
+                "batched Muse trace metadata is inconsistent for layer {layer}"
+            );
+            for transported in readout.transported_rows {
+                let position = transported.row;
+                vectors.push(MuseTraceVector {
+                    source_layer: layer,
+                    source_position: position,
+                    source_token_id: token_ids[position],
+                    predicts_position: position + 1,
+                    values: transported.values,
+                });
+            }
+            for row in readout.rows {
+                let position = row.row;
+                let mut top_k = Vec::with_capacity(row.scores.len());
+                for (rank, score) in row.scores.into_iter().enumerate() {
+                    let piece = tokenizer
+                        .try_decode_piece_bytes_exact(score.token_id as i32)
+                        .with_context(|| format!("decode Muse trace token {}", score.token_id))?;
+                    top_k.push(MuseTraceTokenScore {
+                        rank,
+                        token_id: score.token_id,
+                        token_display_lossy: String::from_utf8_lossy(&piece).into_owned(),
+                        token_piece_hex: super::hex(&piece),
+                        logit: score.logit,
+                    });
+                }
+                cells.push(MuseTraceCell {
+                    source_layer: layer,
+                    source_position: position,
+                    source_token_id: token_ids[position],
+                    predicts_position: position + 1,
+                    top_k,
+                });
+            }
+            continue;
+        }
         for (position, &source_token_id) in token_ids.iter().enumerate() {
             let start = position * hidden_size;
             let source_residual = &captures[start..start + hidden_size];
@@ -926,14 +1016,14 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             let transported = runner
                 .apply_prepared_f16_post_block_transport(&prepared, source_residual)
                 .with_context(|| format!("apply Muse trace layer {layer} position {position}"))?;
-            transport_wall_ms += started.elapsed().as_secs_f64() * 1e3;
+            scalar_transport_wall_ms += started.elapsed().as_secs_f64() * 1e3;
             let started = Instant::now();
             let logits = runner
                 .deployed_logits_from_post_block_residual(&transported)
                 .with_context(|| {
                     format!("apply Muse trace output tail at layer {layer} position {position}")
                 })?;
-            output_tail_wall_ms += started.elapsed().as_secs_f64() * 1e3;
+            scalar_output_tail_wall_ms += started.elapsed().as_secs_f64() * 1e3;
             let ranked = top_k_logits(&logits, args.top_k)?;
             let mut top_k = Vec::with_capacity(ranked.len());
             for (rank, (token_id, logit)) in ranked.into_iter().enumerate() {
@@ -990,8 +1080,40 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     timing.insert("model_load_wall_ms", model_load_wall_ms);
     timing.insert("scalar_prefill_capture_wall_ms", prefill_wall_ms);
     timing.insert("matrix_read_wall_ms", matrix_read_wall_ms);
-    timing.insert("transport_wall_ms", transport_wall_ms);
-    timing.insert("output_tail_wall_ms", output_tail_wall_ms);
+    timing.insert("transport_prepare_wall_ms", transport_prepare_wall_ms);
+    timing.insert(
+        "transport_wall_ms",
+        legacy_muse_trace_transport_wall_ms(
+            transport_prepare_wall_ms,
+            if scalar_readout {
+                scalar_transport_wall_ms
+            } else {
+                batched_transport_wall_ms
+            },
+        ),
+    );
+    timing.insert(
+        "output_tail_wall_ms",
+        if scalar_readout {
+            scalar_output_tail_wall_ms
+        } else {
+            batched_output_tail_wall_ms
+        },
+    );
+    if scalar_readout {
+        timing.insert("scalar_transport_wall_ms", scalar_transport_wall_ms);
+        timing.insert("scalar_output_tail_wall_ms", scalar_output_tail_wall_ms);
+    } else {
+        timing.insert("batched_readout_gpu_ms", batched_readout_gpu_ms);
+        timing.insert(
+            "batched_readout_command_wall_ms",
+            batched_readout_command_wall_ms,
+        );
+        timing.insert("batched_transport_gpu_ms", batched_transport_gpu_ms);
+        timing.insert("batched_transport_wall_ms", batched_transport_wall_ms);
+        timing.insert("batched_output_tail_gpu_ms", batched_output_tail_gpu_ms);
+        timing.insert("batched_output_tail_wall_ms", batched_output_tail_wall_ms);
+    }
     timing.insert(
         "trace_execution_wall_ms",
         trace_started.elapsed().as_secs_f64() * 1e3,
@@ -1048,7 +1170,15 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             candidate_universe: "full_model_vocabulary",
             softmax_applied: false,
         },
-        execution_mode: "passive_scalar_prefill_prepared_transport_no_interventions",
+        execution_mode: if scalar_readout_requested {
+            "passive_scalar_prefill_prepared_transport_no_interventions"
+        } else if !command_batch_supported {
+            "passive_scalar_prefill_automatic_scalar_readout_fallback_no_interventions"
+        } else if admission_fallback {
+            "passive_scalar_prefill_admission_scalar_readout_fallback_no_interventions"
+        } else {
+            "passive_scalar_prefill_position_batched_gpu_readout_no_interventions"
+        },
         input_source,
         add_special_tokens,
         input_token_ids: token_ids,
@@ -1240,15 +1370,61 @@ fn print_muse_trace_summary(document: &MuseTraceDocument, output: Option<&Path>)
         document.deployed_model.name.as_deref().unwrap_or("unknown"),
         document.rendering.renderer,
     );
-    println!(
-        "trace {:.1} ms (prefill {:.1} ms, transport {:.1} ms, output {:.1} ms)",
-        document.timing["trace_execution_wall_ms"],
-        document.timing["scalar_prefill_capture_wall_ms"],
-        document.timing["transport_wall_ms"],
-        document.timing["output_tail_wall_ms"],
-    );
+    println!("{}", muse_trace_timing_summary(&document.timing));
     if let Some(path) = output {
         println!("artifact {}", path.display());
+    }
+}
+
+fn muse_trace_timing_summary(timing: &BTreeMap<&'static str, f64>) -> String {
+    let trace = timing["trace_execution_wall_ms"];
+    let prefill = timing["scalar_prefill_capture_wall_ms"];
+    let prepare = timing["transport_prepare_wall_ms"];
+    if let (Some(&command), Some(&gpu)) = (
+        timing.get("batched_readout_command_wall_ms"),
+        timing.get("batched_readout_gpu_ms"),
+    ) {
+        format!(
+            "trace {trace:.1} ms (prefill {prefill:.1} ms, transport prepare {prepare:.1} ms, batched command {command:.1} ms, GPU {gpu:.1} ms)"
+        )
+    } else {
+        format!(
+            "trace {trace:.1} ms (prefill {prefill:.1} ms, transport prepare {prepare:.1} ms, scalar transport {:.1} ms, scalar output {:.1} ms)",
+            timing["scalar_transport_wall_ms"], timing["scalar_output_tail_wall_ms"]
+        )
+    }
+}
+
+fn legacy_muse_trace_transport_wall_ms(
+    transport_prepare_wall_ms: f64,
+    transport_execution_wall_ms: f64,
+) -> f64 {
+    transport_prepare_wall_ms + transport_execution_wall_ms
+}
+
+fn use_scalar_muse_trace_readout(scalar_requested: bool, command_batch_supported: bool) -> bool {
+    scalar_requested || !command_batch_supported
+}
+
+fn muse_trace_workspace_or_scalar<T>(
+    workspace: std::result::Result<T, MuseGlimmerRuntimeError>,
+) -> Result<(Option<T>, bool)> {
+    match workspace {
+        Ok(workspace) => Ok((Some(workspace), false)),
+        Err(MuseGlimmerRuntimeError::Session(
+            MuseGlimmerTextSessionError::FullReadoutMemoryAdmissionDenied {
+                reason,
+                required_bytes,
+                working_set_headroom_bytes,
+                process_remaining_bytes,
+            },
+        )) => {
+            eprintln!(
+                "Muse trace reusable GPU workspace unavailable ({reason:?}, required={required_bytes:?}, working_set_headroom={working_set_headroom_bytes:?}, process_remaining={process_remaining_bytes:?}); falling back to established scalar readout"
+            );
+            Ok((None, true))
+        }
+        Err(error) => Err(error).context("create reusable Muse trace full-readout workspace"),
     }
 }
 
@@ -1949,6 +2125,56 @@ fn config_source_count(shards: &[ShardInput]) -> Result<usize> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn trace_summary_uses_mode_specific_timing_keys() {
+        let base = BTreeMap::from([
+            ("trace_execution_wall_ms", 10.0),
+            ("scalar_prefill_capture_wall_ms", 2.0),
+            ("transport_prepare_wall_ms", 1.0),
+            ("transport_wall_ms", 5.0),
+            ("output_tail_wall_ms", 6.0),
+        ]);
+        let mut batched = base.clone();
+        batched.insert("batched_readout_command_wall_ms", 4.0);
+        batched.insert("batched_readout_gpu_ms", 3.0);
+        let batched_summary = muse_trace_timing_summary(&batched);
+        assert!(batched_summary.contains("batched command 4.0 ms"));
+        assert!(batched_summary.contains("GPU 3.0 ms"));
+
+        let mut scalar = base;
+        scalar.insert("scalar_transport_wall_ms", 5.0);
+        scalar.insert("scalar_output_tail_wall_ms", 6.0);
+        let scalar_summary = muse_trace_timing_summary(&scalar);
+        assert!(scalar_summary.contains("scalar transport 5.0 ms"));
+        assert!(scalar_summary.contains("scalar output 6.0 ms"));
+        assert_eq!(legacy_muse_trace_transport_wall_ms(1.0, 5.0), 6.0);
+    }
+
+    #[test]
+    fn trace_readout_automatically_falls_back_without_blocking_scalar_models() {
+        assert!(!use_scalar_muse_trace_readout(false, true));
+        assert!(use_scalar_muse_trace_readout(false, false));
+        assert!(use_scalar_muse_trace_readout(true, true));
+    }
+
+    #[test]
+    fn trace_workspace_admission_denial_falls_back_without_hiding_other_errors() {
+        let denial = MuseGlimmerRuntimeError::Session(
+            MuseGlimmerTextSessionError::FullReadoutMemoryAdmissionDenied {
+                reason: qwen_llm::metal::MetalMemoryAdmissionReason::BothInsufficient,
+                required_bytes: Some(400),
+                working_set_headroom_bytes: Some(200),
+                process_remaining_bytes: Some(100),
+            },
+        );
+        let (workspace, fallback) = muse_trace_workspace_or_scalar::<()>(Err(denial)).unwrap();
+        assert!(workspace.is_none());
+        assert!(fallback);
+
+        let other = MuseGlimmerRuntimeError::Invalid("unrelated failure".into());
+        assert!(muse_trace_workspace_or_scalar::<()>(Err(other)).is_err());
+    }
 
     #[test]
     fn artifact_probe_recognizes_local_and_published_muse_schemas() {

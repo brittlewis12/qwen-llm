@@ -9,12 +9,13 @@
 #[cfg(test)]
 use crate::metal::encode_mat_mat_q8_0_f32;
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalTensor,
-    PostBlockIntervention, encode_add_inplace_f32, encode_copy_offset_f32, encode_get_rows_f32,
-    encode_mat_vec_f16_f32, encode_mat_vec_q8_0_batch_f32, encode_post_block_intervention_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32, encode_silu_mul_f32,
-    evaluate_metal_memory_admission, host_page_size_bytes,
+    KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalMemoryAdmissionReason,
+    MetalTensor, PostBlockIntervention, encode_add_inplace_f32, encode_copy_offset_f32,
+    encode_get_rows_f32, encode_mat_vec_f16_f32, encode_mat_vec_q8_0_batch_f32,
+    encode_post_block_intervention_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rms_norm_mul_rows_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32,
+    encode_silu_mul_f32, encode_topk16_f32, evaluate_metal_memory_admission,
+    evaluate_metal_memory_admission_with_cpu_bytes, host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
@@ -54,6 +55,25 @@ pub const MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
 pub const MUSE_GLIMMER_PACKED_PREFILL_QUANTUM: usize = 16;
 pub const MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS: usize = 128;
+const MUSE_GLIMMER_FULL_READOUT_PASS_K: usize = 16;
+pub const MUSE_GLIMMER_FULL_READOUT_MAX_ROWS: usize = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MuseGlimmerFullReadoutHeadMode {
+    Q8Batch,
+    Bf16ScalarRows,
+}
+
+fn muse_glimmer_full_readout_head_mode(
+    dtype: GgmlType,
+    q8_lcpp_enabled: bool,
+) -> Option<MuseGlimmerFullReadoutHeadMode> {
+    match dtype {
+        GgmlType::Q8_0 if q8_lcpp_enabled => Some(MuseGlimmerFullReadoutHeadMode::Q8Batch),
+        GgmlType::BF16 => Some(MuseGlimmerFullReadoutHeadMode::Bf16ScalarRows),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseGlimmerPostBlockForward {
@@ -88,6 +108,15 @@ pub enum MuseGlimmerTextSessionError {
     Invalid(String),
     #[error("Muse Glimmer command buffer failed: {0}")]
     CommandBuffer(String),
+    #[error(
+        "Muse Glimmer full-readout workspace admission denied: reason={reason:?} required={required_bytes:?} working_set_headroom={working_set_headroom_bytes:?} process_remaining={process_remaining_bytes:?}"
+    )]
+    FullReadoutMemoryAdmissionDenied {
+        reason: MetalMemoryAdmissionReason,
+        required_bytes: Option<u64>,
+        working_set_headroom_bytes: Option<u64>,
+        process_remaining_bytes: Option<u64>,
+    },
     #[error("Muse Glimmer prefill checkpoint failed: {0}")]
     Checkpoint(String),
     #[error("Muse Glimmer text session is poisoned: {0}")]
@@ -823,6 +852,202 @@ pub struct MuseGlimmerTextForward<'ctx, 'model> {
 pub struct MuseGlimmerPreparedF16Transport {
     tensor: MetalTensor,
     hidden_size: usize,
+    device_registry_id: u64,
+}
+
+/// Reusable GPU storage for transport/output-tail readout over independent rows.
+/// Rows need not belong to one prompt, which leaves batching policy with callers.
+pub struct MuseGlimmerFullReadoutWorkspace {
+    device_registry_id: u64,
+    row_capacity: usize,
+    hidden_size: usize,
+    vocab_size: usize,
+    source: MetalTensor,
+    transported: MetalTensor,
+    normalized: MetalTensor,
+    logits: MetalTensor,
+    first_ids: MetalTensor,
+    first_values: MetalTensor,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MuseGlimmerFullReadoutWorkspacePlan {
+    row_capacity: usize,
+    logical_bytes: u64,
+    priced_upper_bytes: u64,
+    prepared_transport_reserve_bytes: u64,
+    host_transport_reserve_bytes: u64,
+}
+
+impl MuseGlimmerFullReadoutWorkspacePlan {
+    pub fn for_model(
+        ctx: &MetalContext,
+        hidden_size: usize,
+        vocab_size: usize,
+        row_capacity: usize,
+    ) -> Result<Self, MuseGlimmerTextSessionError> {
+        if row_capacity == 0 || row_capacity > MUSE_GLIMMER_FULL_READOUT_MAX_ROWS {
+            return invalid(format!(
+                "full-readout workspace row capacity must be in 1..={}, got {row_capacity}",
+                MUSE_GLIMMER_FULL_READOUT_MAX_ROWS
+            ));
+        }
+        let rows = row_capacity as u64;
+        let hidden = hidden_size as u64;
+        let vocab = vocab_size as u64;
+        let f32_bytes = std::mem::size_of::<f32>() as u64;
+        let i32_bytes = std::mem::size_of::<i32>() as u64;
+        let row_hidden_bytes = rows
+            .checked_mul(hidden)
+            .and_then(|elements| elements.checked_mul(f32_bytes))
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("workspace size overflow".into())
+            })?;
+        let logits_bytes = rows
+            .checked_mul(vocab)
+            .and_then(|elements| elements.checked_mul(f32_bytes))
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("workspace size overflow".into())
+            })?;
+        let compact_elements = rows
+            .checked_mul(MUSE_GLIMMER_FULL_READOUT_PASS_K as u64)
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("workspace size overflow".into())
+            })?;
+        let specs = [
+            row_hidden_bytes,
+            row_hidden_bytes,
+            row_hidden_bytes,
+            logits_bytes,
+            compact_elements * i32_bytes,
+            compact_elements * f32_bytes,
+        ];
+        let page_size = host_page_size_bytes()? as u64;
+        let max_buffer_length = ctx.max_buffer_length() as u64;
+        let mut logical_bytes = 0_u64;
+        let mut priced_upper_bytes = 0_u64;
+        for logical in specs {
+            if logical == 0 || logical > max_buffer_length {
+                return invalid(format!(
+                    "full-readout workspace allocation {logical} is outside 1..={max_buffer_length} bytes"
+                ));
+            }
+            let priced = ctx.shared_buffer_size_and_align(logical)?;
+            if priced.alignment == 0 || !priced.alignment.is_power_of_two() {
+                return invalid("invalid Metal full-readout workspace alignment");
+            }
+            let alignment = priced.alignment.max(page_size);
+            if priced.size < logical || !alignment.is_power_of_two() {
+                return invalid("invalid Metal full-readout workspace pricing");
+            }
+            let aligned = priced
+                .size
+                .checked_add(alignment - 1)
+                .map(|bytes| bytes / alignment * alignment)
+                .ok_or_else(|| {
+                    MuseGlimmerTextSessionError::Invalid("workspace pricing overflow".into())
+                })?;
+            logical_bytes = logical_bytes.checked_add(logical).ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("workspace size overflow".into())
+            })?;
+            priced_upper_bytes = priced_upper_bytes.checked_add(aligned).ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("workspace pricing overflow".into())
+            })?;
+        }
+        let transport_logical = hidden
+            .checked_mul(hidden)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<half::f16>() as u64))
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("transport reserve overflow".into())
+            })?;
+        if transport_logical == 0 || transport_logical > max_buffer_length {
+            return invalid("prepared-transport reserve exceeds Metal buffer limits");
+        }
+        let transport_priced = ctx.shared_buffer_size_and_align(transport_logical)?;
+        if transport_priced.size < transport_logical
+            || transport_priced.alignment == 0
+            || !transport_priced.alignment.is_power_of_two()
+        {
+            return invalid("invalid prepared-transport Metal alignment");
+        }
+        let transport_alignment = transport_priced.alignment.max(page_size);
+        let prepared_transport_reserve_bytes = transport_priced
+            .size
+            .checked_add(transport_alignment - 1)
+            .map(|bytes| bytes / transport_alignment * transport_alignment)
+            .ok_or_else(|| {
+                MuseGlimmerTextSessionError::Invalid("transport reserve pricing overflow".into())
+            })?;
+        Ok(Self {
+            row_capacity,
+            logical_bytes,
+            priced_upper_bytes,
+            prepared_transport_reserve_bytes,
+            host_transport_reserve_bytes: transport_logical,
+        })
+    }
+
+    pub fn row_capacity(&self) -> usize {
+        self.row_capacity
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
+    }
+
+    pub fn priced_upper_bytes(&self) -> u64 {
+        self.priced_upper_bytes
+    }
+
+    pub fn prepared_transport_reserve_bytes(&self) -> u64 {
+        self.prepared_transport_reserve_bytes
+    }
+
+    pub fn host_transport_reserve_bytes(&self) -> u64 {
+        self.host_transport_reserve_bytes
+    }
+
+    pub fn admission(&self, ctx: &MetalContext) -> MetalMemoryAdmission {
+        evaluate_metal_memory_admission_with_cpu_bytes(
+            self.priced_upper_bytes,
+            self.host_transport_reserve_bytes,
+            self.prepared_transport_reserve_bytes,
+            ctx.memory_signals(),
+            true,
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerFullReadoutScore {
+    pub token_id: u32,
+    pub logit: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerFullReadoutRow {
+    pub row: usize,
+    pub scores: Vec<MuseGlimmerFullReadoutScore>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerTransportedRow {
+    pub row: usize,
+    pub values: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MuseGlimmerBatchedFullReadout {
+    pub row_count: usize,
+    pub top_k: usize,
+    pub gpu_ms: f64,
+    pub command_wall_ms: f64,
+    pub transport_gpu_ms: f64,
+    pub transport_wall_ms: f64,
+    pub output_tail_gpu_ms: f64,
+    pub output_tail_wall_ms: f64,
+    pub rows: Vec<MuseGlimmerFullReadoutRow>,
+    pub transported_rows: Vec<MuseGlimmerTransportedRow>,
 }
 
 impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
@@ -927,6 +1152,294 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         Ok(MuseGlimmerPreparedF16Transport {
             tensor,
             hidden_size: hidden,
+            device_registry_id: self.ctx.device.registryID(),
+        })
+    }
+
+    pub(crate) fn full_readout_workspace_plan(
+        &self,
+        row_capacity: usize,
+    ) -> Result<MuseGlimmerFullReadoutWorkspacePlan, MuseGlimmerTextSessionError> {
+        MuseGlimmerFullReadoutWorkspacePlan::for_model(
+            self.ctx,
+            self.weights.config.hidden_size as usize,
+            self.weights.config.vocab_size as usize,
+            row_capacity,
+        )
+    }
+
+    fn full_readout_head_mode(&self) -> Option<MuseGlimmerFullReadoutHeadMode> {
+        muse_glimmer_full_readout_head_mode(
+            self.weights.output.dtype,
+            crate::metal::mat_vec_q8_0_lcpp_enabled(),
+        )
+    }
+
+    pub(crate) fn supports_command_batched_full_readout(&self) -> bool {
+        self.full_readout_head_mode().is_some()
+    }
+
+    pub(crate) fn create_full_readout_workspace(
+        &self,
+        row_capacity: usize,
+    ) -> Result<MuseGlimmerFullReadoutWorkspace, MuseGlimmerTextSessionError> {
+        let hidden_size = self.weights.config.hidden_size as usize;
+        let vocab_size = self.weights.config.vocab_size as usize;
+        let plan = self.full_readout_workspace_plan(row_capacity)?;
+        let _allocation_transaction = self.ctx.begin_allocation_transaction();
+        let admission = plan.admission(self.ctx);
+        if !admission.admitted {
+            return Err(
+                MuseGlimmerTextSessionError::FullReadoutMemoryAdmissionDenied {
+                    reason: admission.reason,
+                    required_bytes: admission.required_bytes,
+                    working_set_headroom_bytes: admission.working_set_headroom_bytes,
+                    process_remaining_bytes: admission.signals.process_limit_remaining_bytes,
+                },
+            );
+        }
+        let rows = row_capacity as u64;
+        let pass_k = MUSE_GLIMMER_FULL_READOUT_PASS_K as u64;
+        Ok(MuseGlimmerFullReadoutWorkspace {
+            device_registry_id: self.ctx.device.registryID(),
+            row_capacity,
+            hidden_size,
+            vocab_size,
+            source: MetalTensor::zeros_f32(self.ctx, vec![rows, hidden_size as u64])?,
+            transported: MetalTensor::zeros_f32(self.ctx, vec![rows, hidden_size as u64])?,
+            normalized: MetalTensor::zeros_f32(self.ctx, vec![rows, hidden_size as u64])?,
+            logits: MetalTensor::zeros_f32(self.ctx, vec![rows, vocab_size as u64])?,
+            first_ids: MetalTensor::zeros_i32(self.ctx, vec![rows, pass_k])?,
+            first_values: MetalTensor::zeros_f32(self.ctx, vec![rows, pass_k])?,
+        })
+    }
+
+    /// Batch independent F32 source rows through one prepared F16 transport,
+    /// the deployed output tail, and exact compact top-k. Only requested
+    /// transported rows and the compact score set cross back to the host.
+    pub(crate) fn apply_prepared_f16_transport_topk_rows(
+        &self,
+        workspace: &mut MuseGlimmerFullReadoutWorkspace,
+        transport: &MuseGlimmerPreparedF16Transport,
+        source_rows: &[f32],
+        top_k: usize,
+        transported_rows: &[usize],
+    ) -> Result<MuseGlimmerBatchedFullReadout, MuseGlimmerTextSessionError> {
+        let hidden_size = self.weights.config.hidden_size as usize;
+        let vocab_size = self.weights.config.vocab_size as usize;
+        if workspace.hidden_size != hidden_size || workspace.vocab_size != vocab_size {
+            return invalid("full-readout workspace does not match the loaded model");
+        }
+        let device_registry_id = self.ctx.device.registryID();
+        if workspace.device_registry_id != device_registry_id {
+            return invalid("full-readout workspace belongs to a different Metal device");
+        }
+        if transport.hidden_size != hidden_size
+            || transport.device_registry_id != device_registry_id
+        {
+            return invalid("prepared F16 transport does not match the loaded model");
+        }
+        if top_k == 0 || top_k > MUSE_GLIMMER_FULL_READOUT_PASS_K {
+            return invalid(format!(
+                "full-readout top-k must be in 1..={}, got {top_k}",
+                MUSE_GLIMMER_FULL_READOUT_PASS_K
+            ));
+        }
+        if source_rows.is_empty() || !source_rows.len().is_multiple_of(hidden_size) {
+            return invalid(format!(
+                "full-readout source length {} is not a positive multiple of hidden size {hidden_size}",
+                source_rows.len()
+            ));
+        }
+        if let Some(index) = source_rows.iter().position(|value| !value.is_finite()) {
+            return invalid(format!(
+                "full-readout source has non-finite value at index {index}"
+            ));
+        }
+        let row_count = source_rows.len() / hidden_size;
+        if row_count > workspace.row_capacity {
+            return invalid(format!(
+                "full-readout row count {row_count} exceeds workspace capacity {}",
+                workspace.row_capacity
+            ));
+        }
+        for (slot, &row) in transported_rows.iter().enumerate() {
+            if row >= row_count {
+                return invalid(format!(
+                    "transported row request {row} at slot {slot} is outside {row_count} rows"
+                ));
+            }
+            if transported_rows[..slot].contains(&row) {
+                return invalid(format!("transported row request {row} is duplicated"));
+            }
+        }
+        write_f32_prefix(&workspace.source, source_rows)?;
+
+        let hidden_elements = row_count * hidden_size;
+        let logits_elements = row_count * vocab_size;
+        let source = workspace
+            .source
+            .view_subrange(0, vec![row_count as u64, hidden_size as u64]);
+        let transported = workspace
+            .transported
+            .view_subrange(0, vec![row_count as u64, hidden_size as u64]);
+        let normalized = workspace
+            .normalized
+            .view_subrange(0, vec![row_count as u64, hidden_size as u64]);
+        let logits = workspace
+            .logits
+            .view_subrange(0, vec![row_count as u64, vocab_size as u64]);
+        let first_ids = workspace.first_ids.view_subrange(
+            0,
+            vec![row_count as u64, MUSE_GLIMMER_FULL_READOUT_PASS_K as u64],
+        );
+        let first_values = workspace.first_values.view_subrange(
+            0,
+            vec![row_count as u64, MUSE_GLIMMER_FULL_READOUT_PASS_K as u64],
+        );
+        debug_assert_eq!(source.n_elements() as usize, hidden_elements);
+        debug_assert_eq!(logits.n_elements() as usize, logits_elements);
+
+        let transport_started = std::time::Instant::now();
+        let transport_command = self.ctx.queue.commandBuffer().ok_or_else(|| {
+            MuseGlimmerTextSessionError::CommandBuffer("allocation failed".into())
+        })?;
+        let transport_encoder = KernelEncoder::begin(&transport_command);
+        let transport_encode_result = (|| {
+            for row in 0..row_count {
+                let source_row = packed_row(&source, row, hidden_size);
+                let transported_row = packed_row(&transported, row, hidden_size);
+                encode_mat_vec_f16_f32(
+                    self.ctx,
+                    &transport_encoder,
+                    &transport.tensor,
+                    &source_row,
+                    &transported_row,
+                    hidden_size,
+                    hidden_size,
+                )?;
+            }
+            Ok::<(), MuseGlimmerTextSessionError>(())
+        })();
+        transport_encoder.end();
+        transport_encode_result?;
+        transport_command.commit();
+        transport_command.waitUntilCompleted();
+        let transport_status = transport_command.status();
+        let transport_error = transport_command.error().map(|error| error.to_string());
+        if transport_status != MTLCommandBufferStatus::Completed || transport_error.is_some() {
+            return Err(MuseGlimmerTextSessionError::CommandBuffer(format!(
+                "transport status={transport_status:?}, error={transport_error:?}"
+            )));
+        }
+        let transport_gpu_ms =
+            (transport_command.GPUEndTime() - transport_command.GPUStartTime()) * 1e3;
+        let mut selected_transported = Vec::with_capacity(transported_rows.len());
+        for &row in transported_rows {
+            let values = read_f32(&packed_row(&transported, row, hidden_size));
+            if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+                return invalid(format!(
+                    "transported row {row} has non-finite value at component {index}"
+                ));
+            }
+            selected_transported.push(MuseGlimmerTransportedRow { row, values });
+        }
+        let transport_wall_ms = transport_started.elapsed().as_secs_f64() * 1e3;
+
+        let output_tail_started = std::time::Instant::now();
+        let output_tail_command = self.ctx.queue.commandBuffer().ok_or_else(|| {
+            MuseGlimmerTextSessionError::CommandBuffer("allocation failed".into())
+        })?;
+        let output_tail_encoder = KernelEncoder::begin(&output_tail_command);
+        let output_tail_encode_result = (|| {
+            for row in 0..row_count {
+                let transported_row = packed_row(&transported, row, hidden_size);
+                let normalized_row = packed_row(&normalized, row, hidden_size);
+                encode_rms_norm_mul_f32(
+                    self.ctx,
+                    &output_tail_encoder,
+                    &transported_row,
+                    self.weights.output_norm,
+                    &normalized_row,
+                    self.weights.config.rms_epsilon,
+                )?;
+            }
+            match self.full_readout_head_mode() {
+                Some(MuseGlimmerFullReadoutHeadMode::Q8Batch) => {
+                    encode_mat_vec_q8_0_batch_f32(
+                        self.ctx,
+                        &output_tail_encoder,
+                        self.weights.output,
+                        &normalized,
+                        &logits,
+                        hidden_size,
+                        vocab_size,
+                        row_count,
+                    )?;
+                }
+                Some(MuseGlimmerFullReadoutHeadMode::Bf16ScalarRows) => {
+                    for row in 0..row_count {
+                        encode_mat_vec_dispatch(
+                            self.ctx,
+                            &output_tail_encoder,
+                            self.weights.output,
+                            &packed_row(&normalized, row, hidden_size),
+                            &packed_row(&logits, row, vocab_size),
+                            hidden_size,
+                            vocab_size,
+                        )?;
+                    }
+                }
+                None => return invalid("command-batched full readout is unavailable"),
+            }
+            encode_muse_glimmer_logit_softcap_f32(
+                self.ctx,
+                &output_tail_encoder,
+                &logits,
+                &logits,
+                self.weights.config.logit_scale,
+                self.weights.config.final_logit_softcap,
+            )?;
+            encode_topk16_f32(
+                self.ctx,
+                &output_tail_encoder,
+                &logits,
+                &first_ids,
+                &first_values,
+                row_count,
+                vocab_size,
+            )?;
+            Ok::<(), MuseGlimmerTextSessionError>(())
+        })();
+        output_tail_encoder.end();
+        output_tail_encode_result?;
+        output_tail_command.commit();
+        output_tail_command.waitUntilCompleted();
+        let output_tail_status = output_tail_command.status();
+        let output_tail_error = output_tail_command.error().map(|error| error.to_string());
+        if output_tail_status != MTLCommandBufferStatus::Completed || output_tail_error.is_some() {
+            return Err(MuseGlimmerTextSessionError::CommandBuffer(format!(
+                "output-tail status={output_tail_status:?}, error={output_tail_error:?}"
+            )));
+        }
+        let output_tail_gpu_ms =
+            (output_tail_command.GPUEndTime() - output_tail_command.GPUStartTime()) * 1e3;
+        let first_ids = read_i32(&first_ids);
+        let first_values = read_f32(&first_values);
+        let rows =
+            build_full_readout_rows(row_count, vocab_size, top_k, &first_ids, &first_values)?;
+        let output_tail_wall_ms = output_tail_started.elapsed().as_secs_f64() * 1e3;
+        Ok(MuseGlimmerBatchedFullReadout {
+            row_count,
+            top_k,
+            gpu_ms: transport_gpu_ms + output_tail_gpu_ms,
+            command_wall_ms: transport_wall_ms + output_tail_wall_ms,
+            transport_gpu_ms,
+            transport_wall_ms,
+            output_tail_gpu_ms,
+            output_tail_wall_ms,
+            rows,
+            transported_rows: selected_transported,
         })
     }
 
@@ -936,10 +1449,14 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         source_residual: &[f32],
     ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
         let hidden = self.weights.config.hidden_size as usize;
-        if transport.hidden_size != hidden {
+        if transport.hidden_size != hidden
+            || transport.device_registry_id != self.ctx.device.registryID()
+        {
             return invalid(format!(
-                "prepared F16 transport hidden size {} != model hidden size {hidden}",
-                transport.hidden_size
+                "prepared F16 transport hidden size/device {}/{} != model {hidden}/{}",
+                transport.hidden_size,
+                transport.device_registry_id,
+                self.ctx.device.registryID()
             ));
         }
         validate_deployed_output_residual(source_residual, hidden)?;
@@ -2365,6 +2882,107 @@ fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
     values
 }
 
+fn read_i32(tensor: &MetalTensor) -> Vec<i32> {
+    let mut values = vec![0_i32; tensor.n_elements() as usize];
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<i32>(),
+            values.as_mut_ptr(),
+            values.len(),
+        );
+    }
+    values
+}
+
+fn write_f32_prefix(
+    tensor: &MetalTensor,
+    values: &[f32],
+) -> Result<(), MuseGlimmerTextSessionError> {
+    if values.len() > tensor.n_elements() as usize {
+        return invalid(format!(
+            "Metal tensor prefix write length {} exceeds capacity {}",
+            values.len(),
+            tensor.n_elements()
+        ));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            values.as_ptr(),
+            tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<f32>(),
+            values.len(),
+        );
+    }
+    Ok(())
+}
+
+fn build_full_readout_rows(
+    row_count: usize,
+    vocab_size: usize,
+    top_k: usize,
+    first_ids: &[i32],
+    first_values: &[f32],
+) -> Result<Vec<MuseGlimmerFullReadoutRow>, MuseGlimmerTextSessionError> {
+    let expected = row_count * MUSE_GLIMMER_FULL_READOUT_PASS_K;
+    if first_ids.len() != expected || first_values.len() != expected {
+        return invalid("full-readout compact result size is inconsistent");
+    }
+    let mut rows = Vec::with_capacity(row_count);
+    for row in 0..row_count {
+        let base = row * MUSE_GLIMMER_FULL_READOUT_PASS_K;
+        let mut scores = Vec::with_capacity(top_k);
+        let mut previous: Option<MuseGlimmerFullReadoutScore> = None;
+        for slot in 0..MUSE_GLIMMER_FULL_READOUT_PASS_K {
+            let token_id = first_ids[base + slot];
+            let logit = first_values[base + slot];
+            if token_id < 0 || token_id as usize >= vocab_size {
+                return invalid(format!(
+                    "full-readout row {row} returned invalid token ID {token_id}"
+                ));
+            }
+            if !logit.is_finite() {
+                return invalid(format!(
+                    "full-readout row {row} returned non-finite compact logit"
+                ));
+            }
+            let score = MuseGlimmerFullReadoutScore {
+                token_id: token_id as u32,
+                logit,
+            };
+            if first_ids[base..base + slot].contains(&token_id) {
+                return invalid(format!(
+                    "full-readout row {row} returned duplicate token ID {token_id}"
+                ));
+            }
+            if previous.as_ref().is_some_and(|prior| {
+                let order = prior.logit.total_cmp(&score.logit);
+                order.is_lt() || (order.is_eq() && prior.token_id > score.token_id)
+            }) {
+                return invalid(format!(
+                    "full-readout row {row} is not deterministically ordered"
+                ));
+            }
+            previous = Some(score.clone());
+            if slot < top_k {
+                scores.push(score);
+            }
+        }
+        rows.push(MuseGlimmerFullReadoutRow { row, scores });
+    }
+    Ok(rows)
+}
+
 fn session_allocation_specs(
     geometry: &MuseGlimmerTextGeometry,
 ) -> Result<Vec<(String, u64)>, MuseGlimmerTextSessionError> {
@@ -2551,6 +3169,208 @@ mod tests {
     use crate::muse_glimmer_residency::MuseGlimmerMetalWeightPlan;
     use crate::tokenizer::LlamaCppTokenizer;
     use sha2::{Digest, Sha256};
+
+    fn scalar_top_k(logits: &[f32], top_k: usize) -> Vec<MuseGlimmerFullReadoutScore> {
+        let mut scores = logits
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(token_id, logit)| MuseGlimmerFullReadoutScore {
+                token_id: token_id as u32,
+                logit,
+            })
+            .collect::<Vec<_>>();
+        scores.sort_by(|left, right| {
+            right
+                .logit
+                .total_cmp(&left.logit)
+                .then_with(|| left.token_id.cmp(&right.token_id))
+        });
+        scores.truncate(top_k);
+        scores
+    }
+
+    #[test]
+    fn deterministic_gpu_topk_and_compaction_match_scalar_rows_exactly() {
+        let mut signed_zero = vec![-5.0; 64];
+        signed_zero[0] = -0.0;
+        signed_zero[1] = 0.0;
+        let logits = [
+            (0..64)
+                .map(|token| ((token * 37 + 11) % 101) as f32 - token as f32 * 0.001)
+                .collect::<Vec<_>>(),
+            (0..64)
+                .map(|token| if token < 20 { 9.0 } else { -(token as f32) })
+                .collect::<Vec<_>>(),
+            signed_zero,
+        ];
+        let flattened = logits.concat();
+        let ctx = MetalContext::new().unwrap();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&flattened),
+            vec![3, 64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let ids = MetalTensor::zeros_i32(&ctx, vec![3, 16]).unwrap();
+        let values = MetalTensor::zeros_f32(&ctx, vec![3, 16]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_topk16_f32(&ctx, &encoder, &input, &ids, &values, 3, 64).unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        let actual =
+            build_full_readout_rows(3, 64, 16, &read_i32(&ids), &read_f32(&values)).unwrap();
+        for (row, source) in actual.iter().zip(&logits) {
+            assert_eq!(row.scores, scalar_top_k(source, 16));
+        }
+    }
+
+    #[test]
+    fn full_readout_compaction_rejects_non_deterministic_order() {
+        let ids = (0..MUSE_GLIMMER_FULL_READOUT_PASS_K as i32).collect::<Vec<_>>();
+        let values = (0..MUSE_GLIMMER_FULL_READOUT_PASS_K)
+            .map(|value| value as f32)
+            .collect::<Vec<_>>();
+        assert!(build_full_readout_rows(1, 64, 8, &ids, &values).is_err());
+    }
+
+    #[test]
+    fn full_readout_workspace_plan_is_bounded_and_prices_every_buffer() {
+        let ctx = MetalContext::new().unwrap();
+        assert!(MuseGlimmerFullReadoutWorkspacePlan::for_model(&ctx, 64, 256, 0).is_err());
+        assert!(
+            MuseGlimmerFullReadoutWorkspacePlan::for_model(
+                &ctx,
+                64,
+                256,
+                MUSE_GLIMMER_FULL_READOUT_MAX_ROWS + 1,
+            )
+            .is_err()
+        );
+        let plan = MuseGlimmerFullReadoutWorkspacePlan::for_model(
+            &ctx,
+            64,
+            256,
+            MUSE_GLIMMER_FULL_READOUT_MAX_ROWS,
+        )
+        .unwrap();
+        assert_eq!(plan.row_capacity(), MUSE_GLIMMER_FULL_READOUT_MAX_ROWS);
+        assert!(plan.priced_upper_bytes() >= plan.logical_bytes());
+        assert!(plan.prepared_transport_reserve_bytes() >= 64 * 64 * 2);
+        assert_eq!(plan.host_transport_reserve_bytes(), 64 * 64 * 2);
+        let admission = plan.admission(&ctx);
+        assert_eq!(
+            admission.required_bytes,
+            Some(
+                plan.priced_upper_bytes()
+                    + plan.prepared_transport_reserve_bytes()
+                    + plan.host_transport_reserve_bytes()
+            )
+        );
+        assert!(admission.admitted);
+    }
+
+    #[test]
+    fn full_readout_head_modes_batch_bf16_and_q8_and_fallback_other_dtypes() {
+        assert_eq!(
+            muse_glimmer_full_readout_head_mode(GgmlType::BF16, false),
+            Some(MuseGlimmerFullReadoutHeadMode::Bf16ScalarRows)
+        );
+        assert_eq!(
+            muse_glimmer_full_readout_head_mode(GgmlType::Q8_0, true),
+            Some(MuseGlimmerFullReadoutHeadMode::Q8Batch)
+        );
+        assert_eq!(
+            muse_glimmer_full_readout_head_mode(GgmlType::Q8_0, false),
+            None,
+            "Q8 must fall back when the scalar _lcpp mode is disabled"
+        );
+        for dtype in [GgmlType::F16, GgmlType::F32, GgmlType::Q4_K] {
+            assert_eq!(muse_glimmer_full_readout_head_mode(dtype, true), None);
+        }
+    }
+
+    #[test]
+    fn bf16_head_rows_match_separate_scalar_commands_bitwise() {
+        let ctx = MetalContext::new().unwrap();
+        let n_in = 64;
+        let n_out = 7;
+        let rows = 3;
+        let weights = (0..n_in * n_out)
+            .map(|index| half::bf16::from_f32(((index * 13 % 41) as f32 - 20.0) * 0.01))
+            .collect::<Vec<_>>();
+        let inputs = (0..rows * n_in)
+            .map(|index| ((index * 17 % 53) as f32 - 26.0) * 0.02)
+            .collect::<Vec<_>>();
+        let weight = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&weights),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::BF16,
+        )
+        .unwrap();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&inputs),
+            vec![rows as u64, n_in as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let batched = MetalTensor::zeros_f32(&ctx, vec![rows as u64, n_out as u64]).unwrap();
+        let scalar = MetalTensor::zeros_f32(&ctx, vec![rows as u64, n_out as u64]).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for row in 0..rows {
+            encode_mat_vec_dispatch(
+                &ctx,
+                &encoder,
+                &weight,
+                &packed_row(&input, row, n_in),
+                &packed_row(&batched, row, n_out),
+                n_in,
+                n_out,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+
+        for row in 0..rows {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_mat_vec_dispatch(
+                &ctx,
+                &encoder,
+                &weight,
+                &packed_row(&input, row, n_in),
+                &packed_row(&scalar, row, n_out),
+                n_in,
+                n_out,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        }
+        assert_eq!(
+            read_f32(&batched)
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            read_f32(&scalar)
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn release_geometry_accepts_model_context_and_pins_cache_windows() {

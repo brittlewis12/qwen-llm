@@ -70,6 +70,18 @@ kernel void kernel_dflash2_conv_f32(
 
 constant constexpr ushort DFLASH2_TOP_K = 16;
 
+inline int f32_total_order_key(float value) {
+    int bits = as_type<int>(value);
+    return bits ^ int(uint(bits >> 31) >> 1);
+}
+
+inline bool topk16_better(float value, uint index, float current, uint current_index) {
+    const int value_key = f32_total_order_key(value);
+    const int current_key = f32_total_order_key(current);
+    return value_key > current_key ||
+           (value_key == current_key && index < current_index);
+}
+
 struct topk16_args {
     uint n;        // row length (vocab size)
     uint stride_x; // row stride in elements
@@ -104,11 +116,9 @@ kernel void kernel_topk16_f32(
     for (uint i = tpitg; i < args.n; i += ntg) {
         const float v = x_row[i];
         const ushort last = DFLASH2_TOP_K - 1;
-        if (v > best_val[last] || (v == best_val[last] && i < best_idx[last])) {
+        if (topk16_better(v, i, best_val[last], best_idx[last])) {
             short j = last;
-            while (j > 0 &&
-                   (v > best_val[j - 1] ||
-                    (v == best_val[j - 1] && i < best_idx[j - 1]))) {
+            while (j > 0 && topk16_better(v, i, best_val[j - 1], best_idx[j - 1])) {
                 best_val[j] = best_val[j - 1];
                 best_idx[j] = best_idx[j - 1];
                 --j;
@@ -139,11 +149,9 @@ kernel void kernel_topk16_f32(
             if (i == 0xFFFFFFFFu) {
                 continue; // unfilled sentinel (n < ntg * 16 edge)
             }
-            if (v > top_val[last] || (v == top_val[last] && i < top_idx[last])) {
+            if (topk16_better(v, i, top_val[last], top_idx[last])) {
                 short j = last;
-                while (j > 0 &&
-                       (v > top_val[j - 1] ||
-                        (v == top_val[j - 1] && i < top_idx[j - 1]))) {
+                while (j > 0 && topk16_better(v, i, top_val[j - 1], top_idx[j - 1])) {
                     top_val[j] = top_val[j - 1];
                     top_idx[j] = top_idx[j - 1];
                     --j;

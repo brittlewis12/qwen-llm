@@ -136,6 +136,7 @@ struct ScheduledDefinition {
 #[derive(Default)]
 pub(super) struct CompiledEvent {
     operation_indices: Vec<usize>,
+    operation_topology_indices: Vec<usize>,
     readout_indices: Vec<usize>,
     capture_layers: Vec<u32>,
 }
@@ -149,6 +150,10 @@ pub(super) struct PassivePrefillSpan {
 impl CompiledEvent {
     pub(super) fn operation_indices(&self) -> &[usize] {
         &self.operation_indices
+    }
+
+    pub(super) fn operation_topology_indices(&self) -> &[usize] {
+        &self.operation_topology_indices
     }
 
     pub(super) fn readout_indices(&self) -> &[usize] {
@@ -238,6 +243,10 @@ impl BoundEventSchedule<'_, '_> {
             .try_reserve_exact(self.schedule.operations.len())
             .context("allocate Lens event operation indices")?;
         event
+            .operation_topology_indices
+            .try_reserve_exact(self.schedule.operations.len())
+            .context("allocate Lens event operation topology indices")?;
+        event
             .readout_indices
             .try_reserve_exact(self.schedule.readouts.len())
             .context("allocate Lens event readout indices")?;
@@ -253,14 +262,16 @@ impl BoundEventSchedule<'_, '_> {
 
     pub(super) fn populate(&self, phase: Phase, event: &mut CompiledEvent) -> Result<()> {
         event.operation_indices.clear();
+        event.operation_topology_indices.clear();
         event.readout_indices.clear();
         event.capture_layers.clear();
 
         for (definition_index, compiled) in self.schedule.operations.iter().enumerate() {
-            if operation_enabled(&self.plan.operations[definition_index])
-                && compiled.scope.phase_matches(phase)?
-            {
-                event.operation_indices.push(definition_index);
+            if compiled.scope.phase_matches(phase)? {
+                event.operation_topology_indices.push(definition_index);
+                if operation_enabled(&self.plan.operations[definition_index]) {
+                    event.operation_indices.push(definition_index);
+                }
             }
         }
         for (definition_index, compiled) in self.schedule.readouts.iter().enumerate() {
@@ -292,12 +303,27 @@ impl BoundEventSchedule<'_, '_> {
             "packed prefill minimum span must be positive"
         );
         let final_prompt_index = prompt_len - 1;
-        let mut event = self.new_event()?;
         let mut span_start = None;
         let mut spans = Vec::new();
         for index in 0..final_prompt_index {
-            self.populate(Phase::Prefill(index), &mut event)?;
-            let passive = event.operation_indices.is_empty() && event.readout_indices.is_empty();
+            let phase = Phase::Prefill(index);
+            let mut has_operation = false;
+            for (definition_index, compiled) in self.schedule.operations.iter().enumerate() {
+                if operation_enabled(&self.plan.operations[definition_index])
+                    && compiled.scope.phase_matches(phase)?
+                {
+                    has_operation = true;
+                    break;
+                }
+            }
+            let mut has_readout = false;
+            for compiled in &self.schedule.readouts {
+                if compiled.scope.phase_matches(phase)? {
+                    has_readout = true;
+                    break;
+                }
+            }
+            let passive = !has_operation && !has_readout;
             match (span_start, passive) {
                 (None, true) => span_start = Some(index),
                 (Some(start), false) => {
@@ -519,6 +545,7 @@ mod tests {
             let mut event = schedule.new_event().unwrap();
             schedule.populate(Phase::Prefill(1), &mut event).unwrap();
             assert_eq!(event.operation_indices().contains(&1), coefficient != 0.0);
+            assert!(event.operation_topology_indices().contains(&1));
         }
     }
 

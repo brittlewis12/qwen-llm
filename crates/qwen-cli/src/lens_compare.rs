@@ -13,7 +13,9 @@ use super::lens_input::{
     valid_lens_span_metadata,
 };
 use super::lens_inspect::{self, Cell, TraceDocument, VectorCell};
-use super::lens_run::{self, CoefficientSweepManifest, LensPlan};
+use super::lens_run::{
+    self, CoefficientSweepManifest, LensPlan, RunExecution, RunExecutionScheduleBasis,
+};
 use super::{read_regular_file_bounded, read_regular_file_exact};
 
 const COMPARE_MAX_BYTES: usize = 256 * 1024 * 1024;
@@ -105,9 +107,9 @@ pub(crate) fn run(args: CompareArgs) -> Result<()> {
         }
         "qwen.lens.run" => {
             ensure!(
-                matches!(left_envelope.schema_version, 1 | 2 | 3 | 4)
+                matches!(left_envelope.schema_version, 1 | 2 | 3 | 4 | 5)
                     && left_envelope.schema_version == right_envelope.schema_version,
-                "run comparison supports same-version schema 1, 2, 3, or 4 pairs only"
+                "run comparison supports same-version schema 1 through 5 pairs only"
             );
             let left = parse_run_bytes(&left_bytes, &args.left)?;
             let right = parse_run_bytes(&right_bytes, &args.right)?;
@@ -273,11 +275,12 @@ pub(crate) fn inspect_sweep(args: InspectSweepArgs) -> Result<()> {
             1 => "strict_known_qwen_lens_run_v1",
             3 => "strict_known_qwen_lens_run_v3",
             4 => "strict_known_qwen_lens_run_v4",
-            _ => unreachable!("validated sweep children use run schema v1, v3, or v4"),
+            5 => "strict_known_qwen_lens_run_v5",
+            _ => unreachable!("validated sweep children use run schema v1, v3, v4, or v5"),
         },
         source_plan_identity: match loaded.manifest.schema_version {
             1 => "unverifiable_manifest_v1",
-            2 => "verified_embedded_canonical_json_blake3",
+            2 | 3 => "verified_embedded_canonical_json_blake3",
             _ => unreachable!("validated sweep schema"),
         },
         sweep_root: loaded.root,
@@ -415,6 +418,7 @@ fn validate_sweep_child(
     let valid_child_version = match manifest.schema_version {
         1 => matches!(document.schema_version, 1 | 3),
         2 => document.schema_version == 4,
+        3 => document.schema_version == 5,
         _ => false,
     };
     ensure!(
@@ -426,6 +430,32 @@ fn validate_sweep_child(
         arm.index,
         manifest.schema_version
     );
+    if manifest.schema_version == 3 {
+        let execution = document
+            .execution
+            .as_ref()
+            .context("v3 sweep child lacks execution metadata")?;
+        ensure!(
+            execution.schedule_basis() == RunExecutionScheduleBasis::SweepSourcePlan,
+            "sweep child {} does not use the source-plan execution schedule",
+            arm.index
+        );
+        let source_plan = manifest
+            .source_plan
+            .as_ref()
+            .context("v3 sweep manifest lacks its source plan")?;
+        let rendering = document
+            .rendering
+            .as_ref()
+            .context("v5 sweep child lacks rendering metadata")?;
+        let source_bound =
+            lens_run::bind_plan_positions(source_plan, rendering, document.prompt_token_ids.len())?;
+        execution.validate_against_plan(
+            &document.runtime_kind,
+            &source_bound.resolved,
+            document.prompt_token_ids.len(),
+        )?;
+    }
     ensure!(
         document.decoded_text.len() <= RUN_DECODED_TEXT_MAX_BYTES
             && document
@@ -461,11 +491,11 @@ fn validate_sweep_child(
         .with_context(|| format!("parse sweep child {} effective plan", arm.index))?;
     lens_run::validate_sweep_effective_plan(&plan, &manifest.operation_id)
         .with_context(|| format!("validate sweep child {} effective plan", arm.index))?;
-    let authored_plan = if document.schema_version == 4 {
+    let authored_plan = if matches!(document.schema_version, 4 | 5) {
         let value = document
             .authored_plan
             .as_ref()
-            .context("run v4 sweep child lacks authored plan")?;
+            .context("run v4/v5 sweep child lacks authored plan")?;
         let authored: LensPlan = serde_json::from_value(value.clone())
             .with_context(|| format!("parse sweep child {} authored plan", arm.index))?;
         lens_run::validate_sweep_effective_plan(&authored, &manifest.operation_id)
@@ -656,7 +686,8 @@ fn ensure_sweep_run_context(reference: &RunDocument, candidate: &RunDocument) ->
             && reference.add_special_tokens == candidate.add_special_tokens
             && reference.rendering == candidate.rendering
             && reference.position_bindings == candidate.position_bindings
-            && reference.max_new_tokens == candidate.max_new_tokens,
+            && reference.max_new_tokens == candidate.max_new_tokens
+            && reference.execution == candidate.execution,
         "sweep child run schema or input/generation context differs"
     );
     ensure!(
@@ -1492,7 +1523,7 @@ struct RunSampler {
     seed: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RunDocument {
     schema: String,
@@ -1518,6 +1549,8 @@ struct RunDocument {
     max_new_tokens: usize,
     decoded_text: String,
     stop_reason: String,
+    #[serde(default)]
+    execution: Option<RunExecution>,
     operation_applications: Vec<RunOperationApplication>,
     requested_live_readouts: Vec<serde_json::Value>,
     live_readouts: Vec<RunReadout>,
@@ -1576,7 +1609,7 @@ struct RunPublishedMatrixBinding {
 impl RunDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "qwen.lens.run" && matches!(self.schema_version, 1 | 2 | 3 | 4),
+            self.schema == "qwen.lens.run" && matches!(self.schema_version, 1 | 2 | 3 | 4 | 5),
             "unsupported run schema/version"
         );
         match (self.schema_version, &self.execution_binding) {
@@ -1586,6 +1619,8 @@ impl RunDocument {
             (3, None) => {}
             (4, Some(binding)) => binding.validate()?,
             (4, None) => {}
+            (5, Some(binding)) => binding.validate()?,
+            (5, None) => {}
             (1, Some(_)) => bail!("run schema version 1 must not contain execution_binding"),
             (2, None) => bail!("run schema version 2 requires execution_binding"),
             _ => unreachable!(),
@@ -1595,7 +1630,7 @@ impl RunDocument {
                 self.add_special_tokens.is_none() && self.rendering.is_none(),
                 "run schema versions 1 and 2 must not contain input-rendering metadata"
             ),
-            3 | 4 => self.validate_input_rendering()?,
+            3 | 4 | 5 => self.validate_input_rendering()?,
             _ => unreachable!(),
         }
         match self.schema_version {
@@ -1605,7 +1640,19 @@ impl RunDocument {
                     && self.position_bindings.is_empty(),
                 "run schema versions 1 through 3 must not contain authored-plan provenance"
             ),
-            4 => self.validate_authored_plan_provenance()?,
+            4 | 5 => self.validate_authored_plan_provenance()?,
+            _ => unreachable!(),
+        }
+        match self.schema_version {
+            1 | 2 | 3 | 4 => ensure!(
+                self.execution.is_none(),
+                "run schema versions 1 through 4 must not contain execution metadata"
+            ),
+            5 => self
+                .execution
+                .as_ref()
+                .context("run schema version 5 requires execution metadata")?
+                .validate(&self.runtime_kind, self.prompt_token_ids.len())?,
             _ => unreachable!(),
         }
         ensure!(
@@ -1691,7 +1738,7 @@ impl RunDocument {
         let rendering = self
             .rendering
             .as_ref()
-            .context("run schema version 3 or 4 requires rendering metadata")?;
+            .context("run schema version 3 through 5 requires rendering metadata")?;
         ensure!(
             !rendering.renderer.is_empty()
                 && rendering.renderer.len() <= RUN_METADATA_STRING_MAX_BYTES
@@ -1833,7 +1880,7 @@ impl RunDocument {
         let authored_value = self
             .authored_plan
             .as_ref()
-            .context("run schema version 4 requires authored_plan")?;
+            .context("run schema version 4 or 5 requires authored_plan")?;
         let authored: LensPlan = serde_json::from_value(authored_value.clone())
             .context("parse run authored Lens plan")?;
         let resolved: LensPlan =
@@ -1851,7 +1898,7 @@ impl RunDocument {
         let rendering = self
             .rendering
             .as_ref()
-            .context("run schema version 4 requires rendering metadata")?;
+            .context("run schema version 4 or 5 requires rendering metadata")?;
         let expected =
             lens_run::bind_plan_positions(&authored, rendering, self.prompt_token_ids.len())
                 .context("resolve run authored semantic positions")?;
@@ -1862,7 +1909,7 @@ impl RunDocument {
         let digest = self
             .authored_plan_canonical_json_blake3
             .as_deref()
-            .context("run schema version 4 requires authored-plan digest")?;
+            .context("run schema version 4 or 5 requires authored-plan digest")?;
         ensure!(
             expected.authored_plan_canonical_json_blake3 == digest && is_lower_hex_digest(digest),
             "run authored-plan canonical JSON BLAKE3 is invalid"
@@ -1873,6 +1920,20 @@ impl RunDocument {
             "run requested readouts differ from the resolved plan"
         );
         self.validate_v4_execution_records(&resolved)?;
+        if self.schema_version == 5
+            && self.execution.as_ref().is_some_and(|execution| {
+                execution.schedule_basis() == RunExecutionScheduleBasis::EffectivePlan
+            })
+        {
+            self.execution
+                .as_ref()
+                .expect("checked execution metadata")
+                .validate_against_plan(
+                    &self.runtime_kind,
+                    &resolved,
+                    self.prompt_token_ids.len(),
+                )?;
+        }
         Ok(())
     }
 
@@ -2100,6 +2161,9 @@ struct RunComparison {
     runtime_kind: String,
     model_path: PathBuf,
     plans_equal: bool,
+    execution_matches: bool,
+    left_execution: Option<RunExecution>,
+    right_execution: Option<RunExecution>,
     left_generated_text: String,
     right_generated_text: String,
     left_generated_token_ids: Vec<i32>,
@@ -2236,6 +2300,9 @@ fn compare_runs(left: &RunDocument, right: &RunDocument, limit: usize) -> Result
         runtime_kind: left.runtime_kind.clone(),
         model_path: left.model_path.clone(),
         plans_equal: left.plan == right.plan && left.authored_plan == right.authored_plan,
+        execution_matches: left.execution == right.execution,
+        left_execution: left.execution.clone(),
+        right_execution: right.execution.clone(),
         left_generated_text: left.decoded_text.clone(),
         right_generated_text: right.decoded_text.clone(),
         left_generated_token_ids: left.generated_token_ids.clone(),
@@ -2495,7 +2562,10 @@ fn print_text(result: &ComparisonResult) {
                 result.native_capture_counts.left,
                 result.native_capture_counts.right
             );
-            println!("plans_equal={}", result.plans_equal);
+            println!(
+                "plans_equal={} execution_matches={}",
+                result.plans_equal, result.execution_matches
+            );
             for application in &result.operation_applications.left_applications {
                 println!(
                     "left operation id={} layer={} phase={} index={}",
@@ -2634,6 +2704,7 @@ mod tests {
             max_new_tokens: 1,
             decoded_text: "answer".into(),
             stop_reason: "max_new_tokens".into(),
+            execution: None,
             operation_applications: if coefficient == 0.0 {
                 Vec::new()
             } else {
@@ -2814,6 +2885,38 @@ mod tests {
         std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
 
+    fn upgrade_sweep_fixture_to_v3(root: &Path) {
+        let manifest_path = root.join("manifest.json");
+        let mut manifest =
+            lens_run::parse_sweep_manifest_bytes(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let source_plan = sweep_plan(0.25);
+        manifest.schema_version = 3;
+        manifest.source_plan = Some(source_plan.clone());
+        manifest.source_plan_canonical_json_blake3 =
+            Some(lens_run::canonical_plan_blake3(&source_plan).unwrap());
+        for arm in &mut manifest.arms {
+            let path = root.join(&arm.artifact);
+            let mut document: RunDocument =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let plan: LensPlan = serde_json::from_value(document.plan.clone()).unwrap();
+            document.schema_version = 5;
+            document.authored_plan = Some(document.plan.clone());
+            document.authored_plan_canonical_json_blake3 =
+                Some(lens_run::canonical_plan_blake3(&plan).unwrap());
+            document.position_bindings = Vec::new();
+            document.execution = Some(lens_run::RunExecution::serial(
+                lens_run::PrefillExecution::Auto,
+                lens_run::RunExecutionScheduleBasis::SweepSourcePlan,
+                lens_run::RunSerialReason::NoEligiblePassiveSpan,
+            ));
+            let bytes = serde_json::to_vec(&document).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            arm.byte_length = bytes.len() as u64;
+            arm.blake3 = blake3::hash(&bytes).to_hex().to_string();
+        }
+        std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
     fn rewrite_sweep_child(root: &Path, index: usize, mutate: impl FnOnce(&mut serde_json::Value)) {
         let path = root.join(format!("arms/{index:06}/run.json"));
         let mut value: serde_json::Value =
@@ -2909,6 +3012,35 @@ mod tests {
         });
         assert!(load_sweep(&mixed).is_err());
         std::fs::remove_dir_all(mixed).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_v3_requires_one_v5_execution_schedule_across_arms() {
+        let root = sweep_fixture(&[0.0, 0.1], |_, _| {});
+        upgrade_sweep_fixture_to_v3(&root);
+        let loaded = load_sweep(&root).unwrap();
+        assert_eq!(loaded.manifest.schema_version, 3);
+        assert_eq!(loaded.arms[0].document.schema_version, 5);
+        let left = loaded.arms[0].document.clone();
+        let mut serial_control = left.clone();
+        serial_control.execution = Some(lens_run::RunExecution::serial(
+            lens_run::PrefillExecution::Serial,
+            lens_run::RunExecutionScheduleBasis::SweepSourcePlan,
+            lens_run::RunSerialReason::RequestedSerial,
+        ));
+        serial_control.validate().unwrap();
+        let comparison = compare_runs(&left, &serial_control, 10).unwrap();
+        assert!(!comparison.execution_matches);
+        std::fs::remove_dir_all(root).unwrap();
+
+        let drift = sweep_fixture(&[0.0, 0.1], |_, _| {});
+        upgrade_sweep_fixture_to_v3(&drift);
+        rewrite_sweep_child(&drift, 1, |document| {
+            document["execution"]["requested_prefill"] = json!("serial");
+            document["execution"]["serial_reason"] = json!("requested_serial");
+        });
+        assert!(load_sweep(&drift).is_err());
+        std::fs::remove_dir_all(drift).unwrap();
     }
 
     #[test]
@@ -3270,6 +3402,7 @@ mod tests {
             max_new_tokens: 1,
             decoded_text: "x".into(),
             stop_reason: "max_new_tokens".into(),
+            execution: None,
             operation_applications: Vec::new(),
             requested_live_readouts,
             live_readouts: Vec::new(),
@@ -3654,6 +3787,7 @@ mod tests {
             max_new_tokens,
             decoded_text: "text".into(),
             stop_reason: "max_new_tokens".into(),
+            execution: None,
             operation_applications: Vec::new(),
             requested_live_readouts: Vec::new(),
             live_readouts: vec![RunReadout {

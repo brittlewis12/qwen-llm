@@ -15,7 +15,7 @@ use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpFixedHyperAdd, Qwen4ExpLoadedModel, Qwen4ExpPostLayerHyperRequest,
     Qwen4ExpSessionCapacity, Qwen4ExpTextRunner,
 };
-use qwen_llm::runtime::{Runtime, SequenceConfig};
+use qwen_llm::runtime::{PackedPrefillScratch, Runtime, SequenceConfig};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
@@ -48,11 +48,20 @@ const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
 pub(crate) const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 const RUN_SCHEMA: &str = "qwen.lens.run";
-const RUN_SCHEMA_VERSION: u32 = 4;
+const RUN_SCHEMA_VERSION: u32 = 5;
 const SWEEP_SCHEMA: &str = "qwen.lens.coefficient_sweep";
-const SWEEP_SCHEMA_VERSION: u32 = 2;
+const SWEEP_SCHEMA_VERSION: u32 = 3;
 const SWEEP_MANIFEST_NAME: &str = "manifest.json";
 const MAX_SWEEP_ARMS: usize = 64;
+const PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS: usize = 65;
+const PACKED_PREFILL_CHUNK_CAP_TOKENS: usize = 1024;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PrefillExecution {
+    Auto,
+    Serial,
+}
 
 #[derive(Debug, Args)]
 #[command(group(
@@ -117,6 +126,10 @@ pub(crate) struct LensRunArgs {
     /// Maximum number of generated tokens.
     #[arg(long, default_value_t = 32)]
     pub(crate) max_new_tokens: usize,
+
+    /// Use qualified packed passive spans when safe, or force the serial reference path.
+    #[arg(long, value_enum, default_value_t = PrefillExecution::Auto)]
+    pub(crate) prefill_execution: PrefillExecution,
 
     /// Native sampler temperature; zero is deterministic greedy decoding.
     #[arg(long, default_value_t = 0.0)]
@@ -235,6 +248,10 @@ pub(crate) struct CoefficientSweepArgs {
     #[arg(long, default_value_t = 32)]
     max_new_tokens: usize,
 
+    /// Use one qualified passive-span schedule for every arm, or force serial prefill.
+    #[arg(long, value_enum, default_value_t = PrefillExecution::Auto)]
+    prefill_execution: PrefillExecution,
+
     /// Native sampler temperature; each arm restarts from the same seed.
     #[arg(long, default_value_t = 0.0)]
     temperature: f32,
@@ -275,6 +292,7 @@ impl CoefficientSweepArgs {
             message_mode: self.message_mode,
             no_special_tokens: self.no_special_tokens,
             max_new_tokens: self.max_new_tokens,
+            prefill_execution: self.prefill_execution,
             temperature: self.temperature,
             top_k: self.top_k,
             top_p: self.top_p,
@@ -925,6 +943,306 @@ pub(crate) struct BoundLensPlan {
     pub(crate) position_bindings: Vec<PositionBinding>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RunEffectivePrefill {
+    Serial,
+    DensePackedPassiveSpans,
+}
+
+impl RunEffectivePrefill {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Serial => "serial",
+            Self::DensePackedPassiveSpans => "dense_packed_passive_spans",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RunExecutionScheduleBasis {
+    EffectivePlan,
+    SweepSourcePlan,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RunNumericalRelationship {
+    SerialReference,
+    PackedReductionTopologyDiffersFromSerial,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RunSerialReason {
+    RequestedSerial,
+    NoEligiblePassiveSpan,
+    DensePackedMemoryAdmissionDenied,
+    MoePackedNotQualified,
+    FlashNextPackedNotImplemented,
+    MusePackedNotImplemented,
+}
+
+impl RunSerialReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestedSerial => "requested_serial",
+            Self::NoEligiblePassiveSpan => "no_eligible_passive_span",
+            Self::DensePackedMemoryAdmissionDenied => "dense_packed_memory_admission_denied",
+            Self::MoePackedNotQualified => "moe_packed_not_qualified",
+            Self::FlashNextPackedNotImplemented => "flash_next_packed_not_implemented",
+            Self::MusePackedNotImplemented => "muse_packed_not_implemented",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RunPackedPrefillSpan {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RunExecution {
+    requested_prefill: PrefillExecution,
+    effective_prefill: RunEffectivePrefill,
+    schedule_basis: RunExecutionScheduleBasis,
+    numerical_relationship: RunNumericalRelationship,
+    minimum_span_tokens: usize,
+    chunk_cap_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_matrix_max_position: Option<u64>,
+    scratch_priced_upper_bytes: u64,
+    packed_spans: Vec<RunPackedPrefillSpan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    serial_reason: Option<RunSerialReason>,
+}
+
+fn expected_packed_prefill_spans(
+    plan: &LensPlan,
+    prompt_len: usize,
+) -> Result<Vec<RunPackedPrefillSpan>> {
+    let schedule = CompiledEventSchedule::compile(plan, u32::MAX)?;
+    Ok(schedule
+        .bind(plan)?
+        .passive_prefill_spans(prompt_len, PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS)?
+        .into_iter()
+        .map(|span| RunPackedPrefillSpan {
+            start: span.start,
+            end: span.end,
+        })
+        .collect())
+}
+
+impl RunExecution {
+    pub(crate) fn serial(
+        requested_prefill: PrefillExecution,
+        schedule_basis: RunExecutionScheduleBasis,
+        automatic_reason: RunSerialReason,
+    ) -> Self {
+        let serial_reason = if requested_prefill == PrefillExecution::Serial {
+            RunSerialReason::RequestedSerial
+        } else {
+            automatic_reason
+        };
+        Self {
+            requested_prefill,
+            effective_prefill: RunEffectivePrefill::Serial,
+            schedule_basis,
+            numerical_relationship: RunNumericalRelationship::SerialReference,
+            minimum_span_tokens: PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS,
+            chunk_cap_tokens: PACKED_PREFILL_CHUNK_CAP_TOKENS,
+            block_tokens: None,
+            attention_matrix_max_position: None,
+            scratch_priced_upper_bytes: 0,
+            packed_spans: Vec::new(),
+            serial_reason: Some(serial_reason),
+        }
+    }
+
+    fn dense_packed(
+        schedule_basis: RunExecutionScheduleBasis,
+        block_tokens: u32,
+        attention_matrix_max_position: u64,
+        scratch_priced_upper_bytes: u64,
+        packed_spans: Vec<RunPackedPrefillSpan>,
+    ) -> Self {
+        Self {
+            requested_prefill: PrefillExecution::Auto,
+            effective_prefill: RunEffectivePrefill::DensePackedPassiveSpans,
+            schedule_basis,
+            numerical_relationship:
+                RunNumericalRelationship::PackedReductionTopologyDiffersFromSerial,
+            minimum_span_tokens: PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS,
+            chunk_cap_tokens: PACKED_PREFILL_CHUNK_CAP_TOKENS,
+            block_tokens: Some(block_tokens),
+            attention_matrix_max_position: (attention_matrix_max_position > 0)
+                .then_some(attention_matrix_max_position),
+            scratch_priced_upper_bytes,
+            packed_spans,
+            serial_reason: None,
+        }
+    }
+
+    pub(crate) fn runtime_serial(
+        requested_prefill: PrefillExecution,
+        automatic_reason: RunSerialReason,
+    ) -> Self {
+        Self::serial(
+            requested_prefill,
+            RunExecutionScheduleBasis::EffectivePlan,
+            automatic_reason,
+        )
+    }
+
+    pub(crate) fn validate(&self, runtime_kind: &str, prompt_len: usize) -> Result<()> {
+        ensure!(
+            self.minimum_span_tokens == PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS
+                && self.chunk_cap_tokens == PACKED_PREFILL_CHUNK_CAP_TOKENS,
+            "run execution policy constants are unsupported"
+        );
+        match self.effective_prefill {
+            RunEffectivePrefill::Serial => {
+                ensure!(
+                    self.numerical_relationship == RunNumericalRelationship::SerialReference
+                        && self.block_tokens.is_none()
+                        && self.attention_matrix_max_position.is_none()
+                        && self.scratch_priced_upper_bytes == 0
+                        && self.packed_spans.is_empty()
+                        && self.serial_reason.is_some(),
+                    "serial run execution metadata contains packed state"
+                );
+                let reason_matches = match (self.requested_prefill, self.serial_reason) {
+                    (PrefillExecution::Serial, Some(RunSerialReason::RequestedSerial)) => true,
+                    (PrefillExecution::Auto, Some(reason)) => {
+                        reason != RunSerialReason::RequestedSerial
+                    }
+                    _ => false,
+                };
+                ensure!(
+                    reason_matches,
+                    "serial run execution reason differs from the request"
+                );
+                let runtime_matches = match self.serial_reason {
+                    Some(RunSerialReason::RequestedSerial) => true,
+                    Some(
+                        RunSerialReason::NoEligiblePassiveSpan
+                        | RunSerialReason::DensePackedMemoryAdmissionDenied
+                        | RunSerialReason::MoePackedNotQualified,
+                    ) => runtime_kind == "ordinary_qwen",
+                    Some(RunSerialReason::FlashNextPackedNotImplemented) => {
+                        runtime_kind == "flash_next"
+                    }
+                    Some(RunSerialReason::MusePackedNotImplemented) => {
+                        runtime_kind == "muse_glimmer"
+                    }
+                    None => false,
+                };
+                ensure!(
+                    runtime_matches,
+                    "serial run execution reason differs from the runtime"
+                );
+            }
+            RunEffectivePrefill::DensePackedPassiveSpans => {
+                ensure!(
+                    runtime_kind == "ordinary_qwen"
+                        && self.requested_prefill == PrefillExecution::Auto
+                        && self.numerical_relationship
+                            == RunNumericalRelationship::PackedReductionTopologyDiffersFromSerial
+                        && self.serial_reason.is_none()
+                        && self.scratch_priced_upper_bytes > 0
+                        && !self.packed_spans.is_empty(),
+                    "packed run execution metadata has an inconsistent runtime or policy"
+                );
+                let block_tokens = self
+                    .block_tokens
+                    .context("packed run execution requires block_tokens")?;
+                ensure!(
+                    self.attention_matrix_max_position
+                        .is_none_or(|position| position >= u64::from(block_tokens)),
+                    "packed run execution attention-matrix extent is smaller than its block"
+                );
+                let final_prompt_index = prompt_len
+                    .checked_sub(1)
+                    .context("packed run execution requires a nonempty prompt")?;
+                let mut previous_end = 0usize;
+                let mut longest = 0usize;
+                for span in &self.packed_spans {
+                    let length = span
+                        .end
+                        .checked_sub(span.start)
+                        .context("packed run execution span is reversed")?;
+                    ensure!(
+                        span.start >= previous_end
+                            && span.end <= final_prompt_index
+                            && length >= self.minimum_span_tokens,
+                        "packed run execution contains an invalid, overlapping, or final-token span"
+                    );
+                    previous_end = span.end;
+                    longest = longest.max(length);
+                }
+                ensure!(
+                    usize::try_from(block_tokens)? == longest.min(self.chunk_cap_tokens),
+                    "packed run execution block size differs from its spans"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_against_plan(
+        &self,
+        runtime_kind: &str,
+        plan: &LensPlan,
+        prompt_len: usize,
+    ) -> Result<()> {
+        self.validate(runtime_kind, prompt_len)?;
+        let expected = expected_packed_prefill_spans(plan, prompt_len)?;
+        match (self.effective_prefill, self.serial_reason) {
+            (RunEffectivePrefill::DensePackedPassiveSpans, None) => ensure!(
+                self.packed_spans == expected,
+                "packed run execution spans differ from passive plan spans"
+            ),
+            (RunEffectivePrefill::Serial, Some(RunSerialReason::NoEligiblePassiveSpan)) => {
+                ensure!(
+                    expected.is_empty(),
+                    "serial run claims no eligible passive span, but the plan has one"
+                )
+            }
+            (
+                RunEffectivePrefill::Serial,
+                Some(RunSerialReason::DensePackedMemoryAdmissionDenied),
+            ) => ensure!(
+                !expected.is_empty(),
+                "serial run claims packed-memory denial without an eligible passive span"
+            ),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn effective_prefill(&self) -> RunEffectivePrefill {
+        self.effective_prefill
+    }
+
+    fn serial_reason(&self) -> Option<RunSerialReason> {
+        self.serial_reason
+    }
+
+    fn packed_spans(&self) -> &[RunPackedPrefillSpan] {
+        &self.packed_spans
+    }
+
+    pub(crate) fn schedule_basis(&self) -> RunExecutionScheduleBasis {
+        self.schedule_basis
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct RunOutput {
     schema: &'static str,
@@ -945,6 +1263,7 @@ pub(crate) struct RunOutput {
     max_new_tokens: usize,
     decoded_text: String,
     stop_reason: String,
+    execution: RunExecution,
     operation_applications: Vec<OperationApplication>,
     requested_live_readouts: Vec<ReadoutDefinition>,
     live_readouts: Vec<LiveReadout>,
@@ -1104,6 +1423,7 @@ pub(crate) fn emit_run_output(
     bound_plan: BoundLensPlan,
     prepared_input: &PreparedLensInput,
     result: RunResult,
+    execution: RunExecution,
     execution_binding: Option<RunExecutionBinding>,
     output_path: Option<&Path>,
 ) -> Result<()> {
@@ -1114,6 +1434,7 @@ pub(crate) fn emit_run_output(
         bound_plan,
         prepared_input,
         result,
+        execution,
         execution_binding,
     );
     let stdout_format = effective_run_stdout_format(args.format, output_path.is_some());
@@ -1146,6 +1467,7 @@ fn build_run_output(
     bound_plan: BoundLensPlan,
     prepared_input: &PreparedLensInput,
     result: RunResult,
+    execution: RunExecution,
     execution_binding: Option<RunExecutionBinding>,
 ) -> RunOutput {
     let requested_live_readouts = bound_plan.resolved.readouts.clone();
@@ -1169,6 +1491,7 @@ fn build_run_output(
         max_new_tokens: args.max_new_tokens,
         decoded_text: result.decoded_text,
         stop_reason: result.stop_reason,
+        execution,
         operation_applications: result.operation_applications,
         live_readouts: result.live_readouts,
         native_hyper_captures: result.native_hyper_captures,
@@ -1177,6 +1500,17 @@ fn build_run_output(
 }
 
 fn serialize_run_output(artifact: &RunOutput) -> Result<Vec<u8>> {
+    if artifact.execution.schedule_basis() == RunExecutionScheduleBasis::EffectivePlan {
+        artifact.execution.validate_against_plan(
+            artifact.runtime_kind,
+            &artifact.plan,
+            artifact.prompt_token_ids.len(),
+        )?;
+    } else {
+        artifact
+            .execution
+            .validate(artifact.runtime_kind, artifact.prompt_token_ids.len())?;
+    }
     let bytes = serde_json::to_vec(artifact).context("serialize Lens run artifact")?;
     ensure!(
         bytes.len() <= MAX_RUN_ARTIFACT_BYTES,
@@ -1212,10 +1546,16 @@ fn print_run_summary(artifact: &RunOutput, output_path: Option<&Path>) {
 }
 
 fn run_summary(artifact: &RunOutput, output_path: Option<&Path>) -> String {
+    let serial_reason = artifact
+        .execution
+        .serial_reason()
+        .map_or("none", RunSerialReason::as_str);
     let mut summary = format!(
-        "runtime={} model={}\ngenerated_text={}\nstop_reason={}\noperation_applications={} live_readouts={}\n",
+        "runtime={} model={}\nprefill_execution={} serial_reason={}\ngenerated_text={}\nstop_reason={}\noperation_applications={} live_readouts={}\n",
         artifact.runtime_kind,
         artifact.model_path.display(),
+        artifact.execution.effective_prefill().as_str(),
+        serial_reason,
         serde_json::to_string(&artifact.decoded_text).expect("string serialization cannot fail"),
         artifact.stop_reason,
         artifact.operation_applications.len(),
@@ -1261,6 +1601,24 @@ struct ExecutionPlan {
     n_layer: u32,
     hidden_size: usize,
     capture: Option<MetalTensor>,
+}
+
+struct PreparedOrdinaryPrefill {
+    execution: RunExecution,
+    scratch: Option<PackedPrefillScratch>,
+}
+
+impl PreparedOrdinaryPrefill {
+    fn serial(
+        requested: PrefillExecution,
+        schedule_basis: RunExecutionScheduleBasis,
+        reason: RunSerialReason,
+    ) -> Self {
+        Self {
+            execution: RunExecution::serial(requested, schedule_basis, reason),
+            scratch: None,
+        }
+    }
 }
 
 struct PreparedNativeHyperDirection {
@@ -1355,6 +1713,20 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     let execution = prepare_execution_plan(&bound_plan.resolved, plan_dir, &loaded)?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
     let schedule = CompiledEventSchedule::compile(&execution.plan, execution.n_layer)?;
+    let mut prefill = prepare_ordinary_prefill(
+        &loaded,
+        &schedule,
+        &execution.plan,
+        args.prefill_execution,
+        RunExecutionScheduleBasis::EffectivePlan,
+        prompt_token_ids.len(),
+        args.max_new_tokens,
+    )?;
+    prefill.execution.validate_against_plan(
+        "ordinary_qwen",
+        &execution.plan,
+        prompt_token_ids.len(),
+    )?;
     let stop_tokens: HashSet<i32> = loaded.gguf().stop_token_ids()?.into_iter().collect();
     let result = execute_ordinary_arm(
         &loaded,
@@ -1366,6 +1738,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         args.max_new_tokens,
         run_sampler(&args),
         &stop_tokens,
+        &mut prefill,
     )?;
     emit_run_output(
         &args,
@@ -1374,6 +1747,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         bound_plan,
         &prepared_input,
         result,
+        prefill.execution,
         None,
         output_path.as_deref(),
     )
@@ -1388,6 +1762,84 @@ fn validate_run_args(args: &LensRunArgs) -> Result<()> {
     Ok(())
 }
 
+fn prepare_ordinary_prefill(
+    loaded: &qwen_llm::runtime::LoadedModel,
+    schedule: &CompiledEventSchedule,
+    schedule_plan: &LensPlan,
+    requested: PrefillExecution,
+    schedule_basis: RunExecutionScheduleBasis,
+    prompt_len: usize,
+    max_new_tokens: usize,
+) -> Result<PreparedOrdinaryPrefill> {
+    if requested == PrefillExecution::Serial {
+        return Ok(PreparedOrdinaryPrefill::serial(
+            requested,
+            schedule_basis,
+            RunSerialReason::RequestedSerial,
+        ));
+    }
+    if loaded.arch().kind == ArchKind::Moe {
+        return Ok(PreparedOrdinaryPrefill::serial(
+            requested,
+            schedule_basis,
+            RunSerialReason::MoePackedNotQualified,
+        ));
+    }
+
+    let bound_schedule = schedule.bind(schedule_plan)?;
+    let packed_spans = bound_schedule
+        .passive_prefill_spans(prompt_len, PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS)?
+        .into_iter()
+        .map(|span| RunPackedPrefillSpan {
+            start: span.start,
+            end: span.end,
+        })
+        .collect::<Vec<_>>();
+    let Some(longest_span) = packed_spans.iter().map(|span| span.end - span.start).max() else {
+        return Ok(PreparedOrdinaryPrefill::serial(
+            requested,
+            schedule_basis,
+            RunSerialReason::NoEligiblePassiveSpan,
+        ));
+    };
+    let block_tokens = u32::try_from(longest_span.min(PACKED_PREFILL_CHUNK_CAP_TOKENS))
+        .context("packed Lens prefill block size exceeds u32")?;
+    let scratch_plan = loaded
+        .plan_packed_prefill_scratch(block_tokens, prompt_len)
+        .context("plan dense packed Lens prefill scratch")?;
+    let scratch_priced_upper_bytes = scratch_plan.priced_upper_bytes();
+    let capacity = prompt_len
+        .checked_add(max_new_tokens)
+        .context("Lens sequence capacity overflow")?;
+    let admission = loaded
+        .qwen_execution_memory_admission(1, capacity, scratch_priced_upper_bytes, 0)
+        .context("price dense packed Lens prefill memory")?;
+    if !admission.admitted {
+        return Ok(PreparedOrdinaryPrefill::serial(
+            requested,
+            schedule_basis,
+            RunSerialReason::DensePackedMemoryAdmissionDenied,
+        ));
+    }
+    let block_tokens = scratch_plan.block_size();
+    let matrix_max_position = scratch_plan.matrix_max_pos();
+    let scratch = loaded
+        .allocate_packed_prefill_scratch(scratch_plan)
+        .context("allocate dense packed Lens prefill scratch")?;
+    let execution = RunExecution::dense_packed(
+        schedule_basis,
+        block_tokens,
+        matrix_max_position,
+        scratch_priced_upper_bytes,
+        packed_spans,
+    );
+    execution.validate("ordinary_qwen", prompt_len)?;
+    Ok(PreparedOrdinaryPrefill {
+        execution,
+        scratch: Some(scratch),
+    })
+}
+
 fn execute_ordinary_arm(
     loaded: &qwen_llm::runtime::LoadedModel,
     tokenizer: &Tokenizer,
@@ -1398,6 +1850,7 @@ fn execute_ordinary_arm(
     max_new_tokens: usize,
     sampler_config: RunSampler,
     stop_tokens: &HashSet<i32>,
+    prefill: &mut PreparedOrdinaryPrefill,
 ) -> Result<RunResult> {
     let schedule = schedule.bind(plan)?;
     let mut event = schedule.new_event()?;
@@ -1419,7 +1872,37 @@ fn execute_ordinary_arm(
     let mut live_readouts = Vec::new();
     let mut logits = Vec::new();
 
-    for (index, &token) in prompt_token_ids.iter().enumerate() {
+    let mut packed_span_index = 0usize;
+    let mut index = 0usize;
+    while index < prompt_token_ids.len() {
+        if let Some(span) = prefill
+            .execution
+            .packed_spans()
+            .get(packed_span_index)
+            .copied()
+            && span.start == index
+        {
+            let scratch = prefill
+                .scratch
+                .as_mut()
+                .context("packed Lens prefill schedule has no scratch")?;
+            loaded
+                .prefill_prompt_only(
+                    &mut sequence,
+                    scratch,
+                    &prompt_token_ids[span.start..span.end],
+                )
+                .with_context(|| {
+                    format!(
+                        "execute packed passive Lens prefill span {}..{}",
+                        span.start, span.end
+                    )
+                })?;
+            index = span.end;
+            packed_span_index += 1;
+            continue;
+        }
+        let token = prompt_token_ids[index];
         let phase = Phase::Prefill(index);
         schedule.populate(phase, &mut event)?;
         logits = forward_event(
@@ -1435,7 +1918,12 @@ fn execute_ordinary_arm(
             &mut operation_applications,
             &mut live_readouts,
         )?;
+        index += 1;
     }
+    ensure!(
+        packed_span_index == prefill.execution.packed_spans().len(),
+        "packed Lens prefill schedule was not fully consumed"
+    );
     let mut generated_token_ids = Vec::new();
     let mut stop_reason = String::from("max_new_tokens");
     for generated_index in 0..max_new_tokens {
@@ -1550,6 +2038,20 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
     let execution = prepare_execution_plan(&source_bound_plan.resolved, plan_dir, &loaded)?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
     let schedule = CompiledEventSchedule::compile(&execution.plan, execution.n_layer)?;
+    let mut prefill = prepare_ordinary_prefill(
+        &loaded,
+        &schedule,
+        &source_bound_plan.resolved,
+        args.prefill_execution,
+        RunExecutionScheduleBasis::SweepSourcePlan,
+        prompt_token_ids.len(),
+        args.max_new_tokens,
+    )?;
+    prefill.execution.validate_against_plan(
+        "ordinary_qwen",
+        &source_bound_plan.resolved,
+        prompt_token_ids.len(),
+    )?;
     let stop_tokens = loaded
         .gguf()
         .stop_token_ids()?
@@ -1585,6 +2087,7 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
                 args.max_new_tokens,
                 sampler,
                 &stop_tokens,
+                &mut prefill,
             )?;
             let summary = SweepArmSummary {
                 index,
@@ -1601,6 +2104,7 @@ pub(crate) fn run_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
                 effective_bound_plan,
                 &prepared_input,
                 result,
+                prefill.execution.clone(),
                 None,
             );
             let bytes = serialize_run_output(&artifact)?;
@@ -1811,7 +2315,7 @@ pub(crate) fn parse_sweep_manifest_bytes(bytes: &[u8]) -> Result<CoefficientSwee
 
 fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
     ensure!(
-        manifest.schema == SWEEP_SCHEMA && matches!(manifest.schema_version, 1 | 2),
+        manifest.schema == SWEEP_SCHEMA && matches!(manifest.schema_version, 1 | 2 | 3),
         "unsupported coefficient sweep manifest schema"
     );
     ensure!(
@@ -1834,11 +2338,11 @@ fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
             manifest.source_plan.is_none() && manifest.source_plan_canonical_json_blake3.is_none(),
             "coefficient sweep v1 must not contain embedded source-plan provenance"
         ),
-        2 => {
+        2 | 3 => {
             let source_plan = manifest
                 .source_plan
                 .as_ref()
-                .context("coefficient sweep v2 requires embedded source plan")?;
+                .context("coefficient sweep v2/v3 requires embedded source plan")?;
             validate_plan(source_plan)
                 .context("validate embedded coefficient-sweep source plan")?;
             validate_ordinary_plan(source_plan)
@@ -1846,7 +2350,7 @@ fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
             let digest = manifest
                 .source_plan_canonical_json_blake3
                 .as_deref()
-                .context("coefficient sweep v2 requires source-plan digest")?;
+                .context("coefficient sweep v2/v3 requires source-plan digest")?;
             ensure!(
                 canonical_plan_blake3(source_plan)? == digest
                     && digest.len() == 64
@@ -2062,6 +2566,10 @@ fn run_qwen4exp(
         bound_plan,
         &prepared_input,
         result,
+        RunExecution::runtime_serial(
+            args.prefill_execution,
+            RunSerialReason::FlashNextPackedNotImplemented,
+        ),
         None,
         output_path,
     )
@@ -3248,7 +3756,7 @@ fn event_forward_route(
     needs_logits: bool,
     has_capture_plan: bool,
     has_active_readouts: bool,
-    has_interventions: bool,
+    has_operation_topology: bool,
 ) -> EventForwardRoute {
     debug_assert!(!has_active_readouts || has_capture_plan);
     if has_active_readouts {
@@ -3257,7 +3765,7 @@ fn event_forward_route(
         } else {
             EventForwardRoute::SerialNoTailCapture
         }
-    } else if has_capture_plan || has_interventions {
+    } else if has_capture_plan || has_operation_topology {
         if needs_logits {
             EventForwardRoute::SerialFullTailNoCapture
         } else {
@@ -3311,7 +3819,7 @@ fn forward_event(
         needs_logits,
         execution.capture.is_some(),
         has_readouts,
-        !borrowed.is_empty(),
+        !event.operation_topology_indices().is_empty(),
     );
     let capture = if has_readouts {
         ensure!(
@@ -3702,6 +4210,7 @@ mod tests {
         let defaults = test_args();
         assert_eq!(defaults.format, None);
         assert!(defaults.output.is_none());
+        assert_eq!(defaults.prefill_execution, PrefillExecution::Auto);
 
         let parsed = RunArgsParser::try_parse_from([
             "test",
@@ -3715,10 +4224,13 @@ mod tests {
             "run.json",
             "--format",
             "json",
+            "--prefill-execution",
+            "serial",
         ])
         .unwrap()
         .args;
         assert_eq!(parsed.format, Some(RunStdoutFormat::Json));
+        assert_eq!(parsed.prefill_execution, PrefillExecution::Serial);
         assert_eq!(parsed.output.as_deref(), Some(Path::new("run.json")));
         assert_eq!(
             effective_run_stdout_format(None, false),
@@ -3852,6 +4364,10 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(parsed.arm_run_args().seed, 0);
+        assert_eq!(
+            parsed.arm_run_args().prefill_execution,
+            PrefillExecution::Auto
+        );
         validate_coefficient_sweep_args(&parsed).unwrap();
 
         let responses = SweepArgsParser::try_parse_from([
@@ -4072,6 +4588,10 @@ mod tests {
             max_new_tokens: 1,
             decoded_text: "done".into(),
             stop_reason: "max_new_tokens".into(),
+            execution: RunExecution::runtime_serial(
+                PrefillExecution::Auto,
+                RunSerialReason::NoEligiblePassiveSpan,
+            ),
             operation_applications: Vec::new(),
             live_readouts: vec![LiveReadout {
                 id: "live".into(),
@@ -4090,7 +4610,7 @@ mod tests {
         };
         let value = serde_json::to_value(&artifact).unwrap();
         assert_eq!(value["schema"], RUN_SCHEMA);
-        assert_eq!(value["schema_version"], 4);
+        assert_eq!(value["schema_version"], 5);
         assert_eq!(value["input_source"], "prompt");
         assert_eq!(value["add_special_tokens"], true);
         assert_eq!(value["rendering"]["renderer"], "tokenizer_text");
@@ -4105,6 +4625,86 @@ mod tests {
             "lens_artifact_selected_token_rows"
         );
         assert!(value["live_readouts"][0].get("probability").is_none());
+    }
+
+    #[test]
+    fn run_execution_metadata_distinguishes_serial_controls_from_packed_spans() {
+        let automatic_serial = RunExecution::runtime_serial(
+            PrefillExecution::Auto,
+            RunSerialReason::NoEligiblePassiveSpan,
+        );
+        automatic_serial.validate("ordinary_qwen", 8).unwrap();
+        assert_eq!(
+            automatic_serial.serial_reason(),
+            Some(RunSerialReason::NoEligiblePassiveSpan)
+        );
+
+        let explicit_serial = RunExecution::runtime_serial(
+            PrefillExecution::Serial,
+            RunSerialReason::MusePackedNotImplemented,
+        );
+        explicit_serial.validate("ordinary_qwen", 8).unwrap();
+        assert_eq!(
+            explicit_serial.serial_reason(),
+            Some(RunSerialReason::RequestedSerial)
+        );
+
+        let packed = RunExecution::dense_packed(
+            RunExecutionScheduleBasis::EffectivePlan,
+            70,
+            141,
+            1,
+            vec![
+                RunPackedPrefillSpan { start: 0, end: 65 },
+                RunPackedPrefillSpan {
+                    start: 70,
+                    end: 140,
+                },
+            ],
+        );
+        packed.validate("ordinary_qwen", 141).unwrap();
+
+        let mut final_token_overlap = packed.clone();
+        final_token_overlap.packed_spans[1].end = 141;
+        assert!(final_token_overlap.validate("ordinary_qwen", 141).is_err());
+        let mut wrong_block = packed;
+        wrong_block.block_tokens = Some(65);
+        assert!(wrong_block.validate("ordinary_qwen", 141).is_err());
+
+        let mut scheduled_plan = minimal_plan();
+        scheduled_plan.readouts[0].scope.prefill = Some(Selector::Values { values: vec![70] });
+        let scheduled = RunExecution::dense_packed(
+            RunExecutionScheduleBasis::EffectivePlan,
+            70,
+            0,
+            1,
+            vec![
+                RunPackedPrefillSpan { start: 0, end: 70 },
+                RunPackedPrefillSpan {
+                    start: 71,
+                    end: 140,
+                },
+            ],
+        );
+        scheduled
+            .validate_against_plan("ordinary_qwen", &scheduled_plan, 141)
+            .unwrap();
+        let mut undersized_matrix = scheduled.clone();
+        undersized_matrix.attention_matrix_max_position = Some(1);
+        assert!(undersized_matrix.validate("ordinary_qwen", 141).is_err());
+        assert!(
+            automatic_serial
+                .validate_against_plan("ordinary_qwen", &scheduled_plan, 141)
+                .is_err()
+        );
+        let mut false_schedule = scheduled;
+        false_schedule.packed_spans[0].end = 69;
+        false_schedule.block_tokens = Some(69);
+        assert!(
+            false_schedule
+                .validate_against_plan("ordinary_qwen", &scheduled_plan, 141)
+                .is_err()
+        );
     }
 
     #[test]
@@ -4141,6 +4741,10 @@ mod tests {
             max_new_tokens: 1,
             decoded_text: "line\nbreak".into(),
             stop_reason: "stop_token".into(),
+            execution: RunExecution::runtime_serial(
+                PrefillExecution::Auto,
+                RunSerialReason::MusePackedNotImplemented,
+            ),
             operation_applications: vec![OperationApplication {
                 id: "op".into(),
                 layer: 1,
@@ -4155,6 +4759,7 @@ mod tests {
             run_summary(&artifact, Some(Path::new("/tmp/run.json"))),
             concat!(
                 "runtime=muse_glimmer model=muse.gguf\n",
+                "prefill_execution=serial serial_reason=muse_packed_not_implemented\n",
                 "generated_text=\"line\\nbreak\"\n",
                 "stop_reason=stop_token\n",
                 "operation_applications=1 live_readouts=0\n",

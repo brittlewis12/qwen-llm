@@ -1,10 +1,10 @@
 # Lens Run
 
-`qwen-lens run` performs one fresh, serial Qwen run with live workspace-lens
-readouts and optional ordered post-block interventions.
+`qwen-lens run` performs one fresh Qwen run with live workspace-lens readouts
+and optional ordered post-block interventions.
 
 ```sh
-cargo run -q -p qwen-cli --bin qwen-lens -- run \
+cargo run -q --release -p qwen-cli --bin qwen-lens -- run \
   --model /path/to/model.gguf \
   --plan /path/to/plan.json \
   --messages /path/to/messages.json \
@@ -34,21 +34,33 @@ equivalence remains auditable. Request generation/sampling fields and narrowed
 Sampling defaults to greedy. `--temperature`, `--top-k`, `--top-p`, `--min-p`,
 and `--seed` expose the existing deterministic native sampler.
 
+`--prefill-execution auto` is the default. For ordinary dense Qwen, it packs
+maximal non-final prompt spans of at least 65 tokens that contain no operation
+or readout event. Packed blocks are capped at 1,024 tokens; active events, the
+final prompt token, and every decode transition stay on the serial intervention
+path. Packed reductions use a different topology from serial matvec, so the
+artifact classifies the run as numerically approximate rather than bit-exact.
+`--prefill-execution serial` is the explicit scientific control.
+Ordinary MoE, Muse, and Flash-Next currently resolve `auto` to serial and record
+the stable reason in the run artifact and summary.
+
 Without `--output`, stdout defaults to the complete `qwen.lens.run` JSON
 document, preserving the original pipe-friendly behavior. With `--output`,
 stdout defaults to a compact summary while the document is persisted. An
 explicit `--format json` always prints JSON; explicit `--format summary` is also
 allowed without an output file when discarding the full artifact is intentional.
 `--output PATH` atomically replaces a regular run file in an existing parent
-directory; symlink leaves are rejected. Run schema v4 records the runtime and
+directory; symlink leaves are rejected. Run schema v5 records the runtime and
 model path, canonical plan path, exact authored plan and canonical-JSON BLAKE3,
 numeric resolved execution plan, semantic position bindings, input source,
 exact token IDs, resolved renderer/mode, authored byte/token spans, sampler
 settings, decoded text and stop reason, operation applications, requested and
-emitted live readouts, and native captures. The offline validator recomputes the
-resolved plan and every binding from the authored plan plus rendering metadata.
+emitted live readouts, native captures, and the requested/effective prefill
+topology. Packed spans are half-open and exclude active and final prompt events;
+the offline validator re-derives them from the resolved plan. It also recomputes
+the resolved plan and every binding from the authored plan plus rendering metadata.
 Published Muse runs additionally bind the model content identity and exact
-selected lens matrices. Run schemas v1 through v3 remain readable.
+selected lens matrices. Run schemas v1 through v4 remain readable.
 
 ## Coefficient Sweep
 
@@ -74,12 +86,16 @@ and duplicates, and accepts at most 64 values that pass the selected action's
 finite-scale validation (`coordinate_swap` also validates `2 * coefficient`).
 Positive, negative, and signed-zero values are retained in the artifacts. A
 zero-valued selected operation is disabled: no intervention kernel runs and no
-operation application is recorded.
+operation application is recorded. Its scalar event still uses the same serial
+kernel topology selected by the nonzero source plan, avoiding a zero-control
+topology confound.
 
 Every arm gets a fresh sequence and a fresh sampler initialized with the same
-requested seed. Arms execute serially; no KV state, sampler state, or generated
-tokens cross arm boundaries. Each child is an ordinary `qwen.lens.run` v4
-artifact containing its exact effective authored and resolved plans. The command
+requested seed. Arms execute sequentially; no KV state, sampler state, or generated
+tokens cross arm boundaries. Automatic packed prefill uses one schedule derived
+from the nonzero source plan and one reusable scratch allocation for every arm.
+Each child is an ordinary `qwen.lens.run` v5 artifact containing its exact
+effective authored and resolved plans. The command
 writes all children to a private sibling staging directory and exclusively
 publishes a new output directory only after every arm and the manifest are
 synced:
@@ -91,7 +107,7 @@ new-sweep/
   arms/000001/run.json
 ```
 
-The `qwen.lens.coefficient_sweep` v2 manifest records producer build identity,
+The `qwen.lens.coefficient_sweep` v3 manifest records producer build identity,
 the canonical source-plan path, embedded authored source plan and its
 canonical-JSON BLAKE3, selected operation, ordered coefficients, and each child
 path, byte length, and BLAKE3 digest. Existing output paths are never replaced.
@@ -108,7 +124,8 @@ It requires the exact manifest/arms directory topology with no extra entries or
 symlinks, checks every declared child length and BLAKE3, parses ordinary
 `qwen.lens.run` children, and rejects cross-arm runtime, model path, prompt,
 sampler, generation-bound, source-plan-path, or effective-plan drift. Only the
-selected operation coefficient may differ. Coefficient matching is bit-exact,
+selected operation coefficient may differ. The inspector also re-derives the
+common passive-span schedule from the embedded source plan. Coefficient matching is bit-exact,
 so `0` and `-0` remain distinct; zero arms must not record the disabled
 operation. Inspection is bounded to 128 MiB of child JSON and 1,024 retained
 exact detail records across the complete report.
@@ -116,10 +133,11 @@ exact detail records across the complete report.
 The report defaults to the first numeric-zero arm (or arm 0), groups exact
 duplicate coefficients and exact generated outputs, and includes bounded exact
 readout comparisons against the reference. `--reference-arm` changes the
-reference explicitly. Manifest v2 verifies that every effective authored plan
+reference explicitly. Manifest v3 verifies that every effective authored plan
 is exactly the embedded source plan with only the selected coefficient changed,
 then independently recomputes every child's resolved semantic position
-bindings. Legacy manifest v1 remains readable and is honestly marked
+bindings and execution schedule. Manifest v2 remains readable for v4 children.
+Legacy manifest v1 remains readable and is honestly marked
 `unverifiable_manifest_v1` because it did not hash or embed the source plan.
 
 Individual children remain compatible with the normal offline comparator:
@@ -342,7 +360,7 @@ qwen-lens compare left.json right.json --format json --limit 25
 ```
 
 It accepts only validated, same-version `qwen.lens.trace` v2 or v3 pairs, or
-`qwen.lens.run` v1, v2, v3, or v4 pairs. Each input must be a regular non-symlink file no
+`qwen.lens.run` v1 through v5 pairs. Each input must be a regular non-symlink file no
 larger than 256 MiB. Mixed schemas, unknown versions, incompatible trace
 geometry, score semantics, input rendering provenance, and runs with different prompt IDs, runtime, model
 path, stable execution identities, or sampler settings are rejected. Cache-state
@@ -357,7 +375,7 @@ are compatible. Run readouts align only by the complete documented readout key,
 then by `(token_id,row_id,word_id,label)`. Incompatible score kinds or candidate
 universes remain unmatched; one-sided returned candidates are reported as
 entering or exiting the readout top-k. Generated-token divergence, stop reasons,
-operation applications, and native-capture counts are reported without executing
+operation applications, execution-topology equality, and native-capture counts are reported without executing
 or loading a model. `--limit` bounds deterministic detail lists while the typed
 JSON retains total counts.
 
@@ -738,15 +756,17 @@ sampled stop token is reported but never fed back through a decode step.
 
 ## Current Runtime
 
-`run` intentionally uses fresh serial token-major execution so intervention
-schedules remain exact. Ordinary dense and MoE runs consume completed native
+`run` uses fresh sequence state. Ordinary dense auto mode packs only qualified
+passive prompt spans; serial intervention execution resumes at every operation,
+readout, final-prompt, and decode event. Ordinary MoE, Muse, and Flash-Next stay
+fully serial, and `--prefill-execution serial` keeps dense runs fully serial as
+well. Ordinary dense and MoE runs consume completed native
 selected-token J/R rows and workspace-template rows. Dense Qwen3.6 can project
 selected directions from its released matched J/R pair; dense Qwen3.8 can do so
 from its published J transport. Flash-Next runs use only explicit native hyper
 directions. Muse runs consume model-bound selected-token J/R rows for readout
 and all five post-block action kinds. Concurrent or speculative decode and
-prefix caching are not selected silently. `trace-full` separately uses packed
-prefill for passive full-transport prompt traces.
+prefix caching are not selected silently.
 
 ## Flash-Next Capability Boundary
 

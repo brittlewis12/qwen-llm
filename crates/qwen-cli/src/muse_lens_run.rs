@@ -1,8 +1,9 @@
 use super::lens_input::prepare_muse_input;
 use super::lens_run::{
     Action, DirectionDefinition, DirectionRow, LensDefinition, LensPlan, LensRunArgs, LiveReadout,
-    LiveScore, OperationApplication, RunExecutionBinding, RunPublishedLensBinding,
-    RunPublishedMatrixBinding, RunResult, Scope, Selector, bind_plan_positions, emit_run_output,
+    LiveScore, OperationApplication, RunExecution, RunExecutionBinding, RunPublishedLensBinding,
+    RunPublishedMatrixBinding, RunResult, RunSerialReason, Scope, Selector, bind_plan_positions,
+    emit_run_output,
 };
 use super::muse_lens_artifact as artifact;
 use super::muse_published_full_lens_artifact as published;
@@ -237,6 +238,10 @@ pub(crate) fn run(
             live_readouts,
             native_hyper_captures: Vec::new(),
         },
+        RunExecution::runtime_serial(
+            args.prefill_execution,
+            RunSerialReason::MusePackedNotImplemented,
+        ),
         execution_binding,
         output_path,
     )
@@ -1006,6 +1011,7 @@ mod tests {
             message_mode: None,
             no_special_tokens: false,
             max_new_tokens: 1,
+            prefill_execution: super::super::lens_run::PrefillExecution::Auto,
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,

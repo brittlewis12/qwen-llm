@@ -24,6 +24,10 @@ use crate::loader::{LoadError, Model};
 use crate::metal::{
     MetalContext, MetalError, MetalMemoryAdmission, evaluate_metal_memory_admission_with_cpu_bytes,
 };
+use crate::metal_dflash::{
+    DFlashError, MetalDFlashLayerMajorScratch, PrefillScratchConfig, PrefillScratchPlan,
+    plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_prompt_only_profiled,
+};
 use crate::metal_forward::{
     MetalForward, MetalLoadPrefetchAdvice, MetalModel, MetalModelLoadOptions, MetalSession,
     MfError, SessionSnapshot, SnapshotAbi, SnapshotIdentity, SnapshotValidationError,
@@ -110,6 +114,14 @@ pub enum RuntimeError {
     MoeBatch16(#[from] MoeBatch16Error),
     #[error("independent queue execution: {0}")]
     IndependentQueue2(#[from] IndependentQueue2Error),
+    #[error("packed prefill: {0}")]
+    PackedPrefill(#[from] DFlashError),
+    #[error("packed prefill requires at least one token")]
+    EmptyPackedPrefill,
+    #[error("packed prefill block size must be positive")]
+    EmptyPackedPrefillBlock,
+    #[error("sequence position {position} does not fit packed prefill addressing")]
+    PackedPrefillPositionOverflow { position: usize },
 }
 
 struct RuntimeInner {
@@ -588,6 +600,33 @@ mod tests {
         assert!(matches!(
             ensure_same_model_owner(&first, &second),
             Err(RuntimeError::SequenceModelMismatch)
+        ));
+    }
+
+    #[test]
+    fn packed_prefill_bounds_reject_empty_capacity_and_u32_overflow() {
+        assert!(matches!(
+            validate_packed_prefill_block_size(0),
+            Err(RuntimeError::EmptyPackedPrefillBlock)
+        ));
+        validate_packed_prefill_block_size(1).unwrap();
+        assert!(matches!(
+            checked_packed_prefill_bounds(0, 0, 1),
+            Err(RuntimeError::EmptyPackedPrefill)
+        ));
+        assert_eq!(checked_packed_prefill_bounds(5, 3, 8).unwrap(), (5, 8));
+        assert!(matches!(
+            checked_packed_prefill_bounds(5, 4, 8),
+            Err(RuntimeError::SequenceCapacityExceeded { .. })
+        ));
+        let max = u32::MAX as usize;
+        assert_eq!(
+            checked_packed_prefill_bounds(max, 1, max + 1).unwrap(),
+            (u32::MAX, max + 1)
+        );
+        assert!(matches!(
+            checked_packed_prefill_bounds(max, 2, max + 2),
+            Err(RuntimeError::PackedPrefillPositionOverflow { .. })
         ));
     }
 
@@ -1277,6 +1316,84 @@ impl LoadedModel {
         MetalForward::new(self.context(), &self.metal_model)
     }
 
+    pub fn plan_packed_prefill_scratch(
+        &self,
+        block_size: u32,
+        matrix_max_pos: usize,
+    ) -> Result<PackedPrefillScratchPlan, RuntimeError> {
+        validate_packed_prefill_block_size(block_size)?;
+        let plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+            &self.metal_model,
+            block_size,
+            matrix_max_pos,
+            PrefillScratchConfig::default(),
+        )?;
+        let priced_upper_bytes = plan.priced_upper_bound(|logical_bytes| {
+            u64::try_from(
+                self.context()
+                    .shared_buffer_size_and_align(logical_bytes)?
+                    .size,
+            )
+            .map_err(|_| MetalError::BadShape {
+                kernel: "packed_prefill_scratch_plan",
+                detail: "priced Metal allocation does not fit u64".into(),
+            })
+        })?;
+        Ok(PackedPrefillScratchPlan {
+            inner: plan,
+            priced_upper_bytes,
+            owner: Arc::clone(&self.owner),
+        })
+    }
+
+    pub fn allocate_packed_prefill_scratch(
+        &self,
+        plan: PackedPrefillScratchPlan,
+    ) -> Result<PackedPrefillScratch, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &plan.owner)?;
+        Ok(PackedPrefillScratch {
+            inner: MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(
+                self.context(),
+                &self.metal_model,
+                plan.inner,
+            )?,
+            owner: Arc::clone(&self.owner),
+        })
+    }
+
+    /// Advance one owned sequence through a nonempty packed prompt span without
+    /// final norm, LM-head work, capture, or logits readback.
+    pub fn prefill_prompt_only(
+        &self,
+        sequence: &mut Sequence,
+        scratch: &mut PackedPrefillScratch,
+        token_ids: &[i32],
+    ) -> Result<f64, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &sequence.owner)?;
+        ensure_same_model_owner(&self.owner, &scratch.owner)?;
+        sequence.state.ensure_usable()?;
+        let start = sequence.position;
+        let (start_u32, end) =
+            checked_packed_prefill_bounds(start, token_ids.len(), sequence.max_context_tokens)?;
+        let result = prefill_tokens_prompt_only_profiled(
+            &self.forward(),
+            token_ids,
+            start_u32,
+            &mut sequence.state,
+            &mut scratch.inner,
+        );
+        match result {
+            Ok(gpu_ms) => {
+                sequence.position = end;
+                Ok(gpu_ms)
+            }
+            Err(error) => {
+                sequence.state.poison("packed prefill failed");
+                Err(error.into())
+            }
+        }
+    }
+
     /// Create the fixed-width dense-Qwen decode executor over this model.
     ///
     /// The returned wrapper keeps model provenance and logical sequence
@@ -1916,6 +2033,73 @@ pub struct IndependentQueue2Step {
 pub struct IndependentQueue2SequenceExecutor<'a> {
     inner: QwenQueue2Executor<'a>,
     owner: Arc<ModelOwnerToken>,
+}
+
+/// Model-bound scratch for packed prompt spans.
+pub struct PackedPrefillScratch {
+    inner: MetalDFlashLayerMajorScratch,
+    owner: Arc<ModelOwnerToken>,
+}
+
+pub struct PackedPrefillScratchPlan {
+    inner: PrefillScratchPlan,
+    priced_upper_bytes: u64,
+    owner: Arc<ModelOwnerToken>,
+}
+
+impl PackedPrefillScratchPlan {
+    pub fn block_size(&self) -> u32 {
+        self.inner.block_size()
+    }
+
+    pub fn matrix_max_pos(&self) -> u64 {
+        self.inner.matrix_max_pos()
+    }
+
+    /// Metal allocation upper bound for eager and deferred scratch owned by
+    /// this plan. Sequence state and the small per-call token-ID buffer are
+    /// separate execution costs.
+    pub fn priced_upper_bytes(&self) -> u64 {
+        self.priced_upper_bytes
+    }
+}
+
+fn validate_packed_prefill_block_size(block_size: u32) -> Result<(), RuntimeError> {
+    if block_size == 0 {
+        return Err(RuntimeError::EmptyPackedPrefillBlock);
+    }
+    Ok(())
+}
+
+fn checked_packed_prefill_bounds(
+    position: usize,
+    n_tokens: usize,
+    max_context_tokens: usize,
+) -> Result<(u32, usize), RuntimeError> {
+    if n_tokens == 0 {
+        return Err(RuntimeError::EmptyPackedPrefill);
+    }
+    let end = position
+        .checked_add(n_tokens)
+        .ok_or(RuntimeError::SequenceCapacityExceeded {
+            position,
+            n_tokens,
+            max_context_tokens,
+        })?;
+    if end > max_context_tokens {
+        return Err(RuntimeError::SequenceCapacityExceeded {
+            position,
+            n_tokens,
+            max_context_tokens,
+        });
+    }
+    let start = u32::try_from(position)
+        .map_err(|_| RuntimeError::PackedPrefillPositionOverflow { position })?;
+    let final_position = end - 1;
+    u32::try_from(final_position).map_err(|_| RuntimeError::PackedPrefillPositionOverflow {
+        position: final_position,
+    })?;
+    Ok((start, end))
 }
 
 impl IndependentQueue2SequenceExecutor<'_> {

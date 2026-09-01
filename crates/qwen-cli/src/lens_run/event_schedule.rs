@@ -140,6 +140,12 @@ pub(super) struct CompiledEvent {
     capture_layers: Vec<u32>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PassivePrefillSpan {
+    pub(super) start: usize,
+    pub(super) end: usize,
+}
+
 impl CompiledEvent {
     pub(super) fn operation_indices(&self) -> &[usize] {
         &self.operation_indices
@@ -273,6 +279,45 @@ impl BoundEventSchedule<'_, '_> {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn passive_prefill_spans(
+        &self,
+        prompt_len: usize,
+        min_span_len: usize,
+    ) -> Result<Vec<PassivePrefillSpan>> {
+        ensure!(prompt_len > 0, "Lens prompt must not be empty");
+        ensure!(
+            min_span_len > 0,
+            "packed prefill minimum span must be positive"
+        );
+        let final_prompt_index = prompt_len - 1;
+        let mut event = self.new_event()?;
+        let mut span_start = None;
+        let mut spans = Vec::new();
+        for index in 0..final_prompt_index {
+            self.populate(Phase::Prefill(index), &mut event)?;
+            let passive = event.operation_indices.is_empty() && event.readout_indices.is_empty();
+            match (span_start, passive) {
+                (None, true) => span_start = Some(index),
+                (Some(start), false) => {
+                    if index - start >= min_span_len {
+                        spans.push(PassivePrefillSpan { start, end: index });
+                    }
+                    span_start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(start) = span_start
+            && final_prompt_index - start >= min_span_len
+        {
+            spans.push(PassivePrefillSpan {
+                start,
+                end: final_prompt_index,
+            });
+        }
+        Ok(spans)
     }
 
     pub(super) fn plan(&self) -> &LensPlan {
@@ -475,6 +520,61 @@ mod tests {
             schedule.populate(Phase::Prefill(1), &mut event).unwrap();
             assert_eq!(event.operation_indices().contains(&1), coefficient != 0.0);
         }
+    }
+
+    #[test]
+    fn passive_spans_are_maximal_thresholded_and_exclude_the_final_prompt_token() {
+        let mut source = plan();
+        source.readouts.clear();
+        source.operations.truncate(2);
+        source.operations[0].scope.prefill = Some(Selector::Values { values: vec![2] });
+        source.operations[1].scope.prefill = Some(Selector::Values { values: vec![5] });
+        let compiled = CompiledEventSchedule::compile(&source, 3).unwrap();
+        let schedule = compiled.bind(&source).unwrap();
+
+        assert_eq!(
+            schedule.passive_prefill_spans(8, 2).unwrap(),
+            vec![
+                PassivePrefillSpan { start: 0, end: 2 },
+                PassivePrefillSpan { start: 3, end: 5 },
+            ]
+        );
+        assert_eq!(
+            schedule.passive_prefill_spans(8, 1).unwrap(),
+            vec![
+                PassivePrefillSpan { start: 0, end: 2 },
+                PassivePrefillSpan { start: 3, end: 5 },
+                PassivePrefillSpan { start: 6, end: 7 },
+            ]
+        );
+        assert!(schedule.passive_prefill_spans(1, 1).unwrap().is_empty());
+        assert!(schedule.passive_prefill_spans(0, 1).is_err());
+        assert!(schedule.passive_prefill_spans(8, 0).is_err());
+
+        let mut zero_arm = source.clone();
+        zero_arm.operations[1].action.set_coefficient(-0.0);
+        let zero_schedule = compiled.bind(&zero_arm).unwrap();
+        assert_eq!(
+            zero_schedule.passive_prefill_spans(8, 2).unwrap(),
+            vec![
+                PassivePrefillSpan { start: 0, end: 2 },
+                PassivePrefillSpan { start: 3, end: 7 },
+            ]
+        );
+
+        let mut readout_source = plan();
+        readout_source.operations.clear();
+        readout_source.readouts.truncate(1);
+        readout_source.readouts[0].scope.prefill = Some(Selector::Values { values: vec![3] });
+        let readout_compiled = CompiledEventSchedule::compile(&readout_source, 3).unwrap();
+        let readout_schedule = readout_compiled.bind(&readout_source).unwrap();
+        assert_eq!(
+            readout_schedule.passive_prefill_spans(7, 2).unwrap(),
+            vec![
+                PassivePrefillSpan { start: 0, end: 3 },
+                PassivePrefillSpan { start: 4, end: 6 },
+            ]
+        );
     }
 
     #[test]

@@ -5,17 +5,19 @@
 //! session state across the public API boundary.
 
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalError, MetalTensor, RmsNormVjpRule, SwiGluVjpRule,
-    encode_add_f32, encode_copy_offset_f32, encode_fill_f32, encode_frozen_linear_vjp_f32,
-    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_vjp_f32,
-    encode_gdn_prep_packed_ckpt_f32, encode_gdn_step_decay_packed_ckpt_f32,
-    encode_gdn_step_decay_packed_vjp_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_l2_norm_vjp_batched_f32, encode_mask_row_indices_f32, encode_mat_mat_f16_f32,
-    encode_mat_vec_f16_f32, encode_mps_topk16_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_broadcast_f32,
+    KernelEncoder, MetalContext, MetalError, MetalMemoryAdmissionReason, MetalTensor,
+    RmsNormVjpRule, SwiGluVjpRule, encode_add_f32, encode_copy_offset_f32, encode_fill_f32,
+    encode_frozen_linear_vjp_f32, encode_gdn_decay_chain_batched_f32,
+    encode_gdn_decay_chain_vjp_f32, encode_gdn_prep_packed_ckpt_f32,
+    encode_gdn_step_decay_packed_ckpt_f32, encode_gdn_step_decay_packed_vjp_f32,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_l2_norm_vjp_batched_f32,
+    encode_mask_row_indices_f32, encode_mat_mat_f16_f32, encode_mat_vec_f16_f32,
+    encode_mps_topk16_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rms_norm_mul_rows_f32, encode_rms_norm_mul_vjp_broadcast_f32,
     encode_rms_norm_mul_vjp_rows_f32, encode_rmsnorm_gated_f32, encode_rmsnorm_gated_vjp_f32,
     encode_sigmoid_f32, encode_sigmoid_output_vjp_f32, encode_silu_mul_vjp_broadcast_f32,
     encode_silu_mul_vjp_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_split_packed_vjp_f32,
+    evaluate_metal_memory_admission,
 };
 use crate::metal_dflash::{
     DFlashError, MetalDFlashLayerMajorScratch,
@@ -587,6 +589,41 @@ pub struct WorkspaceLensFullVocabularyReadoutWithVector {
     pub transported_values: Vec<f32>,
 }
 
+/// Model-bound GPU storage for repeated full-vocabulary readout rows.
+///
+/// The capacity is expressed in rows so callers can later tile positions or
+/// flatten prompt batches without changing the allocation contract.
+pub struct WorkspaceLensFullReadoutWorkspace<'model> {
+    model: &'model LoadedModel,
+    row_capacity: usize,
+    transport: MetalTensor,
+    source: MetalTensor,
+    transported: MetalTensor,
+    normalized: MetalTensor,
+    logits: MetalTensor,
+    first_ids: MetalTensor,
+    first_values: MetalTensor,
+    second_ids: MetalTensor,
+    second_values: MetalTensor,
+}
+
+impl WorkspaceLensFullReadoutWorkspace<'_> {
+    pub fn apply_row_f16_transport_topk(
+        &mut self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+        top_k: usize,
+    ) -> Result<WorkspaceLensFullVocabularyReadout, WorkspaceLensError> {
+        Ok(self
+            .apply_row_f16_transport_topk_with_vector(transport_bytes, source_residual, top_k)?
+            .readout)
+    }
+
+    pub fn row_capacity(&self) -> usize {
+        self.row_capacity
+    }
+}
+
 /// Opaque packed post-block residual capture owned by one loaded model.
 /// The resident `[T,K,H]` Metal tensor is intentionally private.
 pub struct WorkspaceLensPackedPostBlockCapture<'model> {
@@ -916,6 +953,19 @@ pub enum WorkspaceLensError {
     FullReadoutRequiresFreshSequence(usize),
     #[error("full-vocabulary lens top-k {got} is outside the supported range 1..={max}")]
     InvalidFullReadoutTopK { got: usize, max: usize },
+    #[error("full-vocabulary GPU workspace requires a nonzero row capacity")]
+    EmptyFullReadoutWorkspace,
+    #[error("full-vocabulary GPU workspace has {capacity} rows but this call requires {required}")]
+    FullReadoutWorkspaceTooSmall { capacity: usize, required: usize },
+    #[error(
+        "full-vocabulary GPU workspace memory admission denied: reason={reason:?} requested={requested_bytes} working_set_headroom={working_set_headroom_bytes:?} process_remaining={process_remaining_bytes:?}"
+    )]
+    FullReadoutMemoryAdmissionDenied {
+        reason: MetalMemoryAdmissionReason,
+        requested_bytes: u64,
+        working_set_headroom_bytes: Option<u64>,
+        process_remaining_bytes: Option<u64>,
+    },
     #[error(
         "full-vocabulary lens top-k returned token ID {token_id} outside vocabulary {vocab_size}"
     )]
@@ -990,6 +1040,84 @@ impl LoadedModel {
 impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
     pub fn arch(&self) -> Arch {
         self.model.arch()
+    }
+
+    /// Allocate reusable model-bound storage for full-vocabulary readout.
+    /// All subsequent row calls reuse these transport, hidden, logit, and
+    /// compact top-k buffers.
+    pub fn full_readout_workspace(
+        &self,
+        row_capacity: usize,
+    ) -> Result<WorkspaceLensFullReadoutWorkspace<'model>, WorkspaceLensError> {
+        if row_capacity == 0 {
+            return Err(WorkspaceLensError::EmptyFullReadoutWorkspace);
+        }
+        let arch = self.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let vocab_size = arch.vocab_size as usize;
+        let allocation_bytes =
+            full_readout_workspace_allocation_bytes(row_capacity, hidden_size, vocab_size)?;
+        let logical_bytes = allocation_bytes.iter().try_fold(0usize, |total, &bytes| {
+            total
+                .checked_add(bytes)
+                .ok_or(WorkspaceLensError::SizeOverflow)
+        })?;
+        enforce_workspace_lens_byte_budget("full-vocabulary GPU workspace", logical_bytes)?;
+
+        let context = self.model.context();
+        let _allocation = context.begin_allocation_transaction();
+        let priced_bytes = allocation_bytes.iter().try_fold(0u64, |total, &bytes| {
+            let bytes = u64::try_from(bytes).map_err(|_| WorkspaceLensError::SizeOverflow)?;
+            let priced = context.shared_buffer_size_and_align(bytes)?.size;
+            total
+                .checked_add(priced)
+                .ok_or(WorkspaceLensError::SizeOverflow)
+        })?;
+        let admission =
+            evaluate_metal_memory_admission(priced_bytes, 0, context.memory_signals(), true);
+        if !admission.admitted {
+            return Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
+                reason: admission.reason,
+                requested_bytes: priced_bytes,
+                working_set_headroom_bytes: admission.working_set_headroom_bytes,
+                process_remaining_bytes: admission.signals.process_limit_remaining_bytes,
+            });
+        }
+
+        Ok(WorkspaceLensFullReadoutWorkspace {
+            model: self.model,
+            row_capacity,
+            transport: MetalTensor::zeros_f16(
+                context,
+                vec![hidden_size as u64, hidden_size as u64],
+            )?,
+            source: MetalTensor::zeros_f32(context, vec![row_capacity as u64, hidden_size as u64])?,
+            transported: MetalTensor::zeros_f32(
+                context,
+                vec![row_capacity as u64, hidden_size as u64],
+            )?,
+            normalized: MetalTensor::zeros_f32(
+                context,
+                vec![row_capacity as u64, hidden_size as u64],
+            )?,
+            logits: MetalTensor::zeros_f32(context, vec![row_capacity as u64, vocab_size as u64])?,
+            first_ids: MetalTensor::zeros_i32(
+                context,
+                vec![row_capacity as u64, MPS_FULL_READOUT_TOP_K as u64],
+            )?,
+            first_values: MetalTensor::zeros_f32(
+                context,
+                vec![row_capacity as u64, MPS_FULL_READOUT_TOP_K as u64],
+            )?,
+            second_ids: MetalTensor::zeros_i32(
+                context,
+                vec![row_capacity as u64, MPS_FULL_READOUT_TOP_K as u64],
+            )?,
+            second_values: MetalTensor::zeros_f32(
+                context,
+                vec![row_capacity as u64, MPS_FULL_READOUT_TOP_K as u64],
+            )?,
+        })
     }
 
     pub fn identity(&self) -> WorkspaceLensModelIdentity {
@@ -6466,6 +6594,386 @@ fn validate_selected_token_ids(
     Ok(())
 }
 
+impl WorkspaceLensFullReadoutWorkspace<'_> {
+    /// Read one row with the historical matvec, full-logit validation, and
+    /// exact CPU top-k path.
+    pub fn apply_row_f16_transport_topk_with_vector(
+        &mut self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+        top_k: usize,
+    ) -> Result<WorkspaceLensFullVocabularyReadoutWithVector, WorkspaceLensError> {
+        if top_k == 0 || top_k > MAX_FULL_READOUT_TOP_K {
+            return Err(WorkspaceLensError::InvalidFullReadoutTopK {
+                got: top_k,
+                max: MAX_FULL_READOUT_TOP_K,
+            });
+        }
+        let arch = self.model.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let vocab_size = arch.vocab_size as usize;
+        if source_residual.len() != hidden_size {
+            return Err(WorkspaceLensError::ActivationSize {
+                name: "full readout source residual",
+                got: source_residual.len(),
+                expected: hidden_size,
+            });
+        }
+        if let Some(index) = source_residual.iter().position(|value| !value.is_finite()) {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
+                name: "full readout source residual",
+                index,
+            });
+        }
+        validate_full_readout_transport_size(transport_bytes, hidden_size)?;
+        validate_full_readout_tail(self.model.metal_model(), hidden_size, vocab_size)?;
+        let hidden_bytes = checked_product(hidden_size, std::mem::size_of::<f32>())?;
+        let logits_bytes = checked_product(vocab_size, std::mem::size_of::<f32>())?;
+        let peak_bytes = transport_bytes
+            .len()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(5)?))
+            .and_then(|bytes| bytes.checked_add(logits_bytes.checked_mul(2)?))
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        enforce_workspace_lens_byte_budget("full-vocabulary F16 transport readout", peak_bytes)?;
+
+        write_tensor_bytes(
+            &self.transport,
+            transport_bytes,
+            transport_bytes.len(),
+            "full readout transport upload",
+        )?;
+        write_tensor_bytes(
+            &self.source,
+            bytemuck::cast_slice(source_residual),
+            hidden_bytes,
+            "full readout source upload",
+        )?;
+        let source = self.source.view_subrange(0, vec![hidden_size as u64]);
+        let transported = self.transported.view_subrange(0, vec![hidden_size as u64]);
+        let normalized = self.normalized.view_subrange(0, vec![hidden_size as u64]);
+        let logits = self.logits.view_subrange(0, vec![vocab_size as u64]);
+        let context = self.model.context();
+        let model = self.model.metal_model();
+        let command = context
+            .queue
+            .commandBuffer()
+            .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = (|| -> Result<(), WorkspaceLensError> {
+            encode_mat_vec_f16_f32(
+                context,
+                &encoder,
+                &self.transport,
+                &source,
+                &transported,
+                hidden_size,
+                hidden_size,
+            )?;
+            encode_rms_norm_mul_f32(
+                context,
+                &encoder,
+                &transported,
+                &model.output_norm,
+                &normalized,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                context,
+                &encoder,
+                &model.lm_head,
+                &normalized,
+                &logits,
+                hidden_size,
+                vocab_size,
+            )?;
+            Ok(())
+        })();
+        encoder.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        validate_completed_command(&command)?;
+
+        let transported_values = read_f32_fallible(
+            &transported,
+            hidden_size,
+            "full readout transported residual",
+        )?;
+        if let Some(index) = transported_values
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
+                name: "full readout transported residual",
+                index,
+            });
+        }
+        let rms_denominator_f64_recomputed = (transported_values
+            .iter()
+            .map(|value| f64::from(*value) * f64::from(*value))
+            .sum::<f64>()
+            / hidden_size as f64
+            + f64::from(RMS_EPS))
+        .sqrt() as f32;
+        let full_logits = read_f32_fallible(&logits, vocab_size, "full readout logits")?;
+        if let Some(index) = full_logits.iter().position(|value| !value.is_finite()) {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
+                name: "full readout logits",
+                index,
+            });
+        }
+        let scores = exact_vocabulary_top_k(&full_logits, top_k)?;
+        Ok(WorkspaceLensFullVocabularyReadoutWithVector {
+            readout: WorkspaceLensFullVocabularyReadout {
+                rms_denominator_f64_recomputed,
+                scores,
+            },
+            transported_values,
+        })
+    }
+
+    /// Read all rows of one packed layer with the historical matmat and
+    /// two-pass compact top-k path.
+    pub fn apply_packed_capture_f16_transport_topk(
+        &mut self,
+        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
+        source_layer: u32,
+        transport_bytes: &[u8],
+        top_k: usize,
+    ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
+        self.apply_packed_capture_f16_transport_topk_with_vectors(
+            capture,
+            source_layer,
+            transport_bytes,
+            top_k,
+            &[],
+        )
+    }
+
+    pub fn apply_packed_capture_f16_transport_topk_with_vectors(
+        &mut self,
+        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
+        source_layer: u32,
+        transport_bytes: &[u8],
+        top_k: usize,
+        transported_source_positions: &[usize],
+    ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
+        if !std::ptr::eq(self.model, capture.model) {
+            return Err(WorkspaceLensError::PackedCaptureModelMismatch);
+        }
+        if top_k == 0 || top_k > MAX_FULL_READOUT_TOP_K {
+            return Err(WorkspaceLensError::InvalidFullReadoutTopK {
+                got: top_k,
+                max: MAX_FULL_READOUT_TOP_K,
+            });
+        }
+        let position_count = capture.position_count();
+        if position_count > self.row_capacity {
+            return Err(WorkspaceLensError::FullReadoutWorkspaceTooSmall {
+                capacity: self.row_capacity,
+                required: position_count,
+            });
+        }
+        let layer_slot = capture.layer_slot(source_layer)?;
+        let arch = self.model.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let vocab_size = arch.vocab_size as usize;
+        validate_full_readout_transport_size(transport_bytes, hidden_size)?;
+        validate_full_readout_tail(self.model.metal_model(), hidden_size, vocab_size)?;
+        let transported_position_rows = validate_packed_transported_vector_positions(
+            capture.start_position(),
+            position_count,
+            transported_source_positions,
+        )?;
+        let hidden_elements = checked_product(position_count, hidden_size)?;
+        let logits_elements = checked_product(position_count, vocab_size)?;
+        let compact_elements = checked_product(position_count, FULL_READOUT_CANDIDATE_COUNT)?;
+        let hidden_bytes = checked_product(hidden_elements, std::mem::size_of::<f32>())?;
+        let logits_bytes = checked_product(logits_elements, std::mem::size_of::<f32>())?;
+        let compact_bytes = checked_product(compact_elements, 2 * std::mem::size_of::<u32>())?;
+        let transported_vector_bytes = checked_product(
+            checked_product(transported_position_rows.len(), hidden_size)?,
+            std::mem::size_of::<f32>(),
+        )?;
+        let peak_bytes = transport_bytes
+            .len()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(3)?))
+            .and_then(|bytes| bytes.checked_add(logits_bytes))
+            .and_then(|bytes| bytes.checked_add(compact_bytes))
+            .and_then(|bytes| bytes.checked_add(transported_vector_bytes))
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        enforce_workspace_lens_byte_budget(
+            "packed full-vocabulary F16 transport readout",
+            peak_bytes,
+        )?;
+        write_tensor_bytes(
+            &self.transport,
+            transport_bytes,
+            transport_bytes.len(),
+            "packed full readout transport upload",
+        )?;
+        let hidden_shape = vec![position_count as u64, hidden_size as u64];
+        let source = self.source.view_subrange(0, hidden_shape.clone());
+        let transported = self.transported.view_subrange(0, hidden_shape.clone());
+        let normalized = self.normalized.view_subrange(0, hidden_shape);
+        let logits = self
+            .logits
+            .view_subrange(0, vec![position_count as u64, vocab_size as u64]);
+        let compact_shape = vec![position_count as u64, MPS_FULL_READOUT_TOP_K as u64];
+        let first_ids = self.first_ids.view_subrange(0, compact_shape.clone());
+        let first_values = self.first_values.view_subrange(0, compact_shape.clone());
+        let second_ids = self.second_ids.view_subrange(0, compact_shape.clone());
+        let second_values = self.second_values.view_subrange(0, compact_shape);
+
+        let context = self.model.context();
+        let model = self.model.metal_model();
+        let readout_started = Instant::now();
+        let command = context
+            .queue
+            .commandBuffer()
+            .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = (|| -> Result<(), WorkspaceLensError> {
+            for position_row in 0..position_count {
+                let source_offset = checked_product(
+                    checked_product(position_row, capture.layer_ids.len())?
+                        .checked_add(layer_slot)
+                        .ok_or(WorkspaceLensError::SizeOverflow)?,
+                    hidden_size,
+                )?;
+                let destination = source.view_subrange(
+                    u64::try_from(checked_product(position_row, hidden_size)?)
+                        .map_err(|_| WorkspaceLensError::SizeOverflow)?,
+                    vec![hidden_size as u64],
+                );
+                encode_copy_offset_f32(
+                    context,
+                    &encoder,
+                    &capture.values,
+                    source_offset,
+                    &destination,
+                    hidden_size,
+                )?;
+            }
+            encode_mat_mat_f16_f32(
+                context,
+                &encoder,
+                &self.transport,
+                &source,
+                &transported,
+                hidden_size,
+                hidden_size,
+                position_count,
+            )?;
+            encode_rms_norm_mul_rows_f32(
+                context,
+                &encoder,
+                &transported,
+                &model.output_norm,
+                &normalized,
+                position_count,
+                hidden_size,
+                RMS_EPS,
+            )?;
+            encode_mat_mat_dispatch(
+                context,
+                &encoder,
+                &model.lm_head,
+                &normalized,
+                &logits,
+                hidden_size,
+                vocab_size,
+                position_count,
+            )?;
+            Ok(())
+        })();
+        encoder.end();
+        encode_result?;
+        encode_mps_topk16_f32(
+            context,
+            &command,
+            &logits,
+            &first_ids,
+            &first_values,
+            position_count,
+            vocab_size,
+        )?;
+        let mask_encoder = KernelEncoder::begin(&command);
+        let mask_result = encode_mask_row_indices_f32(
+            context,
+            &mask_encoder,
+            &logits,
+            &first_ids,
+            position_count,
+            vocab_size,
+            MPS_FULL_READOUT_TOP_K,
+        );
+        mask_encoder.end();
+        mask_result?;
+        encode_mps_topk16_f32(
+            context,
+            &command,
+            &logits,
+            &second_ids,
+            &second_values,
+            position_count,
+            vocab_size,
+        )?;
+        command.commit();
+        command.waitUntilCompleted();
+        validate_completed_command(&command)?;
+        let readout_wall_ms = readout_started.elapsed().as_secs_f64() * 1e3;
+        let readout_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+
+        let pass_elements = checked_product(position_count, MPS_FULL_READOUT_TOP_K)?;
+        let first_ids =
+            read_i32_fallible(&first_ids, pass_elements, "packed readout first-pass IDs")?;
+        let first_values = read_f32_fallible(
+            &first_values,
+            pass_elements,
+            "packed readout first-pass logits",
+        )?;
+        let second_ids =
+            read_i32_fallible(&second_ids, pass_elements, "packed readout second-pass IDs")?;
+        let second_values = read_f32_fallible(
+            &second_values,
+            pass_elements,
+            "packed readout second-pass logits",
+        )?;
+        let positions = build_packed_vocabulary_positions(
+            capture.token_ids(),
+            capture.start_position(),
+            top_k,
+            arch.vocab_size,
+            &first_ids,
+            &first_values,
+            &second_ids,
+            &second_values,
+        )?;
+        let transported_vectors = read_packed_transported_vectors(
+            &transported,
+            capture,
+            transported_source_positions,
+            &transported_position_rows,
+            hidden_size,
+        )?;
+        Ok(WorkspaceLensPackedFullVocabularyReadout {
+            source_layer,
+            start_position: capture.start_position(),
+            position_count,
+            top_k,
+            packed_prefill_gpu_ms: capture.packed_prefill_gpu_ms(),
+            packed_prefill_wall_ms: capture.packed_prefill_wall_ms(),
+            readout_gpu_ms,
+            readout_wall_ms,
+            positions,
+            transported_vectors,
+        })
+    }
+}
+
 fn validate_full_readout_transport_size(
     transport_bytes: &[u8],
     hidden_size: usize,
@@ -6476,6 +6984,55 @@ fn validate_full_readout_transport_size(
             got: transport_bytes.len(),
             expected,
         });
+    }
+    Ok(())
+}
+
+fn full_readout_workspace_allocation_bytes(
+    row_capacity: usize,
+    hidden_size: usize,
+    vocab_size: usize,
+) -> Result<[usize; 9], WorkspaceLensError> {
+    let transport = checked_product(checked_product(hidden_size, hidden_size)?, 2)?;
+    let hidden = checked_product(
+        checked_product(row_capacity, hidden_size)?,
+        std::mem::size_of::<f32>(),
+    )?;
+    let logits = checked_product(
+        checked_product(row_capacity, vocab_size)?,
+        std::mem::size_of::<f32>(),
+    )?;
+    let compact = checked_product(
+        checked_product(row_capacity, MPS_FULL_READOUT_TOP_K)?,
+        std::mem::size_of::<u32>(),
+    )?;
+    Ok([
+        transport, hidden, hidden, hidden, logits, compact, compact, compact, compact,
+    ])
+}
+
+fn write_tensor_bytes(
+    tensor: &MetalTensor,
+    bytes: &[u8],
+    expected: usize,
+    name: &'static str,
+) -> Result<(), WorkspaceLensError> {
+    if bytes.len() != expected {
+        return Err(WorkspaceLensError::ActivationSize {
+            name,
+            got: bytes.len(),
+            expected,
+        });
+    }
+    debug_assert!(tensor.is_writable());
+    unsafe {
+        let destination = tensor
+            .buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(tensor.offset as usize);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len());
     }
     Ok(())
 }
@@ -7796,6 +8353,103 @@ mod tests {
     use super::*;
 
     #[test]
+    fn full_readout_workspace_plan_is_stable_across_layer_reuse() {
+        let plan = full_readout_workspace_allocation_bytes(7, 32, 101).unwrap();
+        assert_eq!(plan.len(), 9);
+        assert_eq!(plan[0], 32 * 32 * 2);
+        assert_eq!(plan[1..4], [7 * 32 * 4; 3]);
+        assert_eq!(plan[4], 7 * 101 * 4);
+        assert_eq!(plan[5..], [7 * MPS_FULL_READOUT_TOP_K * 4; 4]);
+
+        for _source_layer in 0..32 {
+            assert_eq!(
+                full_readout_workspace_allocation_bytes(7, 32, 101).unwrap(),
+                plan,
+                "a layer read must fit the original persistent allocation plan"
+            );
+        }
+    }
+
+    #[test]
+    fn reusable_cpu_exact_top_k_matches_pre_workspace_reference() {
+        let logits = [-3.0, 8.0, 8.0, 1.25, -0.0, 0.0, 19.0, 7.5, 19.0, -11.0];
+        let actual = exact_vocabulary_top_k(&logits, 6).unwrap();
+        let mut reference = logits
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(token_id, logit)| WorkspaceLensVocabularyScore {
+                token_id: token_id as u32,
+                logit,
+            })
+            .collect::<Vec<_>>();
+        reference.sort_by(|left, right| {
+            right
+                .logit
+                .total_cmp(&left.logit)
+                .then_with(|| left.token_id.cmp(&right.token_id))
+        });
+        reference.truncate(6);
+        assert_eq!(actual, reference);
+    }
+
+    #[test]
+    fn reusable_packed_selection_matches_pre_workspace_two_pass_reference() {
+        let token_ids = [71, 72];
+        let mut first_ids = vec![0; token_ids.len() * MPS_FULL_READOUT_TOP_K];
+        let mut second_ids = vec![0; token_ids.len() * MPS_FULL_READOUT_TOP_K];
+        let mut first_values = vec![0.0; first_ids.len()];
+        let mut second_values = vec![0.0; second_ids.len()];
+        for row in 0..token_ids.len() {
+            for slot in 0..MPS_FULL_READOUT_TOP_K {
+                let index = row * MPS_FULL_READOUT_TOP_K + slot;
+                first_ids[index] = slot as i32;
+                second_ids[index] = (MPS_FULL_READOUT_TOP_K + slot) as i32;
+                first_values[index] = (row * 100 + slot) as f32;
+                second_values[index] = (row * 100 + 50 - slot) as f32;
+            }
+        }
+        let actual = build_packed_vocabulary_positions(
+            &token_ids,
+            9,
+            25,
+            64,
+            &first_ids,
+            &first_values,
+            &second_ids,
+            &second_values,
+        )
+        .unwrap();
+
+        for (row, position) in actual.iter().enumerate() {
+            let base = row * MPS_FULL_READOUT_TOP_K;
+            let mut reference = (0..MPS_FULL_READOUT_TOP_K)
+                .flat_map(|slot| {
+                    [
+                        WorkspaceLensVocabularyScore {
+                            token_id: first_ids[base + slot] as u32,
+                            logit: first_values[base + slot],
+                        },
+                        WorkspaceLensVocabularyScore {
+                            token_id: second_ids[base + slot] as u32,
+                            logit: second_values[base + slot],
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>();
+            reference.sort_by(|left, right| {
+                right
+                    .logit
+                    .total_cmp(&left.logit)
+                    .then_with(|| left.token_id.cmp(&right.token_id))
+            });
+            reference.truncate(25);
+            assert_eq!(position.scores, reference);
+            assert_eq!(position.source_position, 9 + row);
+        }
+    }
+
+    #[test]
     fn full_readout_transport_validation_requires_exact_matrix_size() {
         let finite_word = half::f16::from_f32(0.5).to_bits().to_le_bytes();
         let transport = finite_word.repeat(4);
@@ -7914,8 +8568,8 @@ mod tests {
 
     #[test]
     #[ignore = "requires a real dense model, Metal, and the full F16 transport payload"]
-    fn packed_full_readout_matches_serial_row_real_model() {
-        use crate::runtime::{Runtime, SequenceConfig};
+    fn reusable_full_readout_matches_legacy_real_model() {
+        use crate::runtime::{LoadedModelConfig, ModelLoadIntent, Runtime, SequenceConfig};
         use std::io::{Read, Seek, SeekFrom};
 
         let model_path = std::env::var("QWEN_WORKSPACE_LENS_MODEL")
@@ -7931,21 +8585,33 @@ mod tests {
             .expect("numeric source layer");
 
         let runtime = Runtime::metal().expect("initialize Metal runtime");
-        let loaded = runtime.load_model(model_path).expect("load real model");
+        let loaded = runtime
+            .load_model_with_intent(
+                model_path,
+                LoadedModelConfig::default(),
+                ModelLoadIntent::SinglePassAnalysis,
+            )
+            .expect("load real model");
         let arch = loaded.arch();
         let matrix_bytes = checked_product(
             checked_product(arch.hidden_size as usize, arch.hidden_size as usize).unwrap(),
             2,
         )
         .unwrap();
-        let mut transport = vec![0u8; matrix_bytes];
         let mut payload = std::fs::File::open(payload_path).expect("open transport payload");
-        payload
-            .seek(SeekFrom::Start(source_layer as u64 * matrix_bytes as u64))
-            .expect("seek source-layer matrix");
-        payload
-            .read_exact(&mut transport)
-            .expect("read source-layer matrix");
+        let other_layer = if source_layer == 0 { 1 } else { 0 };
+        let mut read_transport = |layer: u32| {
+            let mut transport = vec![0u8; matrix_bytes];
+            payload
+                .seek(SeekFrom::Start(layer as u64 * matrix_bytes as u64))
+                .expect("seek source-layer matrix");
+            payload
+                .read_exact(&mut transport)
+                .expect("read source-layer matrix");
+            transport
+        };
+        let transport = read_transport(source_layer);
+        let other_transport = read_transport(other_layer);
 
         let token_ids =
             (1..=MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS as i32).collect::<Vec<_>>();
@@ -7955,7 +8621,6 @@ mod tests {
         let mut workspace_lens = loaded
             .workspace_lens_session(&mut sequence)
             .expect("open workspace-lens session");
-        let other_layer = if source_layer == 0 { 1 } else { 0 };
         let capture = workspace_lens
             .forward_packed_post_block_capture(&token_ids, &[other_layer, source_layer])
             .expect("packed post-block capture");
@@ -7968,6 +8633,66 @@ mod tests {
                 &[0, 16, 127],
             )
             .expect("packed full-vocabulary readout");
+        let other_packed = workspace_lens
+            .apply_packed_capture_f16_transport_topk_with_vectors(
+                &capture,
+                other_layer,
+                &other_transport,
+                MAX_FULL_READOUT_TOP_K,
+                &[0, 16, 127],
+            )
+            .expect("legacy packed other-layer readout");
+        let mut reusable = workspace_lens
+            .full_readout_workspace(token_ids.len())
+            .expect("allocate reusable full-readout workspace");
+        let reusable_packed = reusable
+            .apply_packed_capture_f16_transport_topk_with_vectors(
+                &capture,
+                source_layer,
+                &transport,
+                MAX_FULL_READOUT_TOP_K,
+                &[0, 16, 127],
+            )
+            .expect("reusable packed source-layer readout");
+        let reusable_other_packed = reusable
+            .apply_packed_capture_f16_transport_topk_with_vectors(
+                &capture,
+                other_layer,
+                &other_transport,
+                MAX_FULL_READOUT_TOP_K,
+                &[0, 16, 127],
+            )
+            .expect("reusable packed other-layer readout");
+        let reusable_packed_repeat = reusable
+            .apply_packed_capture_f16_transport_topk_with_vectors(
+                &capture,
+                source_layer,
+                &transport,
+                MAX_FULL_READOUT_TOP_K,
+                &[0, 16, 127],
+            )
+            .expect("repeated reusable packed source-layer readout");
+        let assert_exact_packed =
+            |legacy: &WorkspaceLensPackedFullVocabularyReadout,
+             candidate: &WorkspaceLensPackedFullVocabularyReadout| {
+                assert_eq!(candidate.source_layer, legacy.source_layer);
+                assert_eq!(candidate.start_position, legacy.start_position);
+                assert_eq!(candidate.position_count, legacy.position_count);
+                assert_eq!(candidate.top_k, legacy.top_k);
+                assert_eq!(
+                    candidate.packed_prefill_gpu_ms,
+                    legacy.packed_prefill_gpu_ms
+                );
+                assert_eq!(
+                    candidate.packed_prefill_wall_ms,
+                    legacy.packed_prefill_wall_ms
+                );
+                assert_eq!(candidate.positions, legacy.positions);
+                assert_eq!(candidate.transported_vectors, legacy.transported_vectors);
+            };
+        assert_exact_packed(&packed, &reusable_packed);
+        assert_exact_packed(&other_packed, &reusable_other_packed);
+        assert_exact_packed(&packed, &reusable_packed_repeat);
         assert_eq!(packed.transported_vectors.len(), 3);
         for (&source_position, vector) in [0, 16, 127].iter().zip(&packed.transported_vectors) {
             assert_eq!(vector.source_position, source_position);
@@ -7981,39 +8706,57 @@ mod tests {
                 .row_for_test(capture_row, source_layer)
                 .expect("read exact packed capture row");
             let serial = workspace_lens
-                .apply_f16_transport_topk(&transport, &captured_residual, MAX_FULL_READOUT_TOP_K)
+                .apply_f16_transport_topk_with_vector(
+                    &transport,
+                    &captured_residual,
+                    MAX_FULL_READOUT_TOP_K,
+                )
                 .expect("serial full-vocabulary readout");
-            let packed_row = &packed.positions[capture_row];
-            assert_eq!(packed_row.source_position, capture_row);
-            assert_eq!(packed_row.predicts_position, capture_row + 1);
-            let packed_ids = packed_row
-                .scores
-                .iter()
-                .map(|score| score.token_id)
-                .collect::<Vec<_>>();
-            let serial_ids = serial
-                .scores
-                .iter()
-                .map(|score| score.token_id)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                packed_ids, serial_ids,
-                "ordered top-16 IDs differ at row {capture_row}"
-            );
-            let max_abs_logit = packed_row
-                .scores
-                .iter()
-                .zip(&serial.scores)
-                .map(|(packed, serial)| (packed.logit - serial.logit).abs())
-                .fold(0.0f32, f32::max);
-            assert!(
-                max_abs_logit <= 0.01,
-                "packed-vs-serial max logit delta {max_abs_logit} exceeds 0.01 at row {capture_row}"
-            );
-            eprintln!(
-                "packed-vs-serial source_layer={source_layer} row={capture_row} max_abs_logit={max_abs_logit:.6}"
-            );
+            let reusable_serial = reusable
+                .apply_row_f16_transport_topk_with_vector(
+                    &transport,
+                    &captured_residual,
+                    MAX_FULL_READOUT_TOP_K,
+                )
+                .expect("reusable serial full-vocabulary readout");
+            assert_eq!(reusable_serial, serial);
         }
+        let source_residual = capture
+            .row_for_test(16, source_layer)
+            .expect("read repeated source-layer row");
+        let other_residual = capture
+            .row_for_test(16, other_layer)
+            .expect("read other-layer row");
+        let legacy_other_serial = workspace_lens
+            .apply_f16_transport_topk_with_vector(
+                &other_transport,
+                &other_residual,
+                MAX_FULL_READOUT_TOP_K,
+            )
+            .expect("legacy other-layer serial readout");
+        let reusable_other_serial = reusable
+            .apply_row_f16_transport_topk_with_vector(
+                &other_transport,
+                &other_residual,
+                MAX_FULL_READOUT_TOP_K,
+            )
+            .expect("reusable other-layer serial readout");
+        assert_eq!(reusable_other_serial, legacy_other_serial);
+        let legacy_source_repeat = workspace_lens
+            .apply_f16_transport_topk_with_vector(
+                &transport,
+                &source_residual,
+                MAX_FULL_READOUT_TOP_K,
+            )
+            .expect("legacy repeated source-layer serial readout");
+        let reusable_source_repeat = reusable
+            .apply_row_f16_transport_topk_with_vector(
+                &transport,
+                &source_residual,
+                MAX_FULL_READOUT_TOP_K,
+            )
+            .expect("reusable repeated source-layer serial readout");
+        assert_eq!(reusable_source_repeat, legacy_source_repeat);
         eprintln!(
             "packed timings positions={} prefill_gpu_ms={:.3} prefill_wall_ms={:.3} readout_gpu_ms={:.3} readout_wall_ms={:.3}",
             packed.position_count,

@@ -6,7 +6,7 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::runtime::{LoadedModelConfig, ModelLoadIntent, Runtime, SequenceConfig};
 use qwen_llm::workspace_lens::{
-    MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS, WORKSPACE_LENS_IDENTITY_SCHEME,
+    MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS, WORKSPACE_LENS_IDENTITY_SCHEME, WorkspaceLensError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1442,7 +1442,6 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             && capture.capture.hidden_size == arch.hidden_size as usize,
         "full-lens prompt capture metadata is inconsistent"
     );
-
     let payload_path = args.full_lens.join(&manifest.payload.path);
     let (mut payload_file, payload_length) = open_regular_file(&payload_path)?;
     ensure!(
@@ -1457,6 +1456,21 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         .try_reserve_exact(matrix_len)
         .context("allocate full-lens transport matrix")?;
     matrix.resize(matrix_len, 0);
+    let mut full_readout_workspace = match workspace_lens.full_readout_workspace(1) {
+        Ok(workspace) => Some(workspace),
+        Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
+            reason,
+            requested_bytes,
+            working_set_headroom_bytes,
+            process_remaining_bytes,
+        }) => {
+            eprintln!(
+                "full-lens reusable GPU workspace unavailable ({reason:?}, requested={requested_bytes}, working_set_headroom={working_set_headroom_bytes:?}, process_remaining={process_remaining_bytes:?}); falling back to established per-layer allocations"
+            );
+            None
+        }
+        Err(error) => return Err(error).context("allocate reusable full-lens GPU workspace"),
+    };
     let selected_slots: BTreeMap<u32, usize> = layers
         .iter()
         .copied()
@@ -1492,9 +1506,12 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             "read full lens source_layer={} position={} top_k={}",
             layer, selected_position, args.top_k
         );
-        let readout = workspace_lens
-            .apply_f16_transport_topk_with_vector(&matrix, residual, args.top_k)
-            .with_context(|| format!("apply full-lens source layer {layer}"))?;
+        let readout = if let Some(workspace) = &mut full_readout_workspace {
+            workspace.apply_row_f16_transport_topk_with_vector(&matrix, residual, args.top_k)
+        } else {
+            workspace_lens.apply_f16_transport_topk_with_vector(&matrix, residual, args.top_k)
+        }
+        .with_context(|| format!("apply full-lens source layer {layer}"))?;
         let mut top_k = Vec::new();
         top_k
             .try_reserve_exact(readout.readout.scores.len())
@@ -1751,6 +1768,21 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             && capture.hidden_size() == arch.hidden_size as usize,
         "packed trace-full capture metadata is inconsistent"
     );
+    let mut full_readout_workspace = match workspace_lens.full_readout_workspace(token_ids.len()) {
+        Ok(workspace) => Some(workspace),
+        Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
+            reason,
+            requested_bytes,
+            working_set_headroom_bytes,
+            process_remaining_bytes,
+        }) => {
+            eprintln!(
+                "trace-full reusable GPU workspace unavailable ({reason:?}, requested={requested_bytes}, working_set_headroom={working_set_headroom_bytes:?}, process_remaining={process_remaining_bytes:?}); falling back to established per-layer allocations"
+            );
+            None
+        }
+        Err(error) => return Err(error).context("allocate reusable trace-full GPU workspace"),
+    };
 
     let mut cells = Vec::new();
     cells
@@ -1791,15 +1823,24 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             .get(&layer)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let readout = workspace_lens
-            .apply_packed_capture_f16_transport_topk_with_vectors(
+        let readout = if let Some(workspace) = &mut full_readout_workspace {
+            workspace.apply_packed_capture_f16_transport_topk_with_vectors(
                 &capture,
                 layer,
                 &matrix,
                 args.top_k,
                 vector_positions,
             )
-            .with_context(|| format!("apply packed full-lens source layer {layer}"))?;
+        } else {
+            workspace_lens.apply_packed_capture_f16_transport_topk_with_vectors(
+                &capture,
+                layer,
+                &matrix,
+                args.top_k,
+                vector_positions,
+            )
+        }
+        .with_context(|| format!("apply packed full-lens source layer {layer}"))?;
         ensure!(
             readout.source_layer == layer
                 && readout.start_position == 0

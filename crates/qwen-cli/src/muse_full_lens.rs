@@ -1,4 +1,7 @@
-use super::full_lens::{ReadFullArgs, TraceFullArgs, TraceFullStdoutFormat};
+use super::full_lens::{
+    ReadFullArgs, TraceFullArgs, TraceFullStdoutFormat, ensure_trace_document_budget,
+    trace_host_result_reserve_bytes, trace_position_tiles,
+};
 use super::lens_input::{LensInputRendering, prepare_muse_input, validate_lens_input_spec};
 use super::muse_full_lens_artifact as artifact;
 use super::muse_lens_artifact;
@@ -12,10 +15,14 @@ use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, checkpoint_content_identity_without_weight_hashing,
 };
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::metal::MetalContext;
+use qwen_llm::metal::{
+    MetalContext, MetalMemoryAdmission, evaluate_metal_memory_admission_with_cpu_bytes,
+};
 use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME, MuseGlimmerModel};
-use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerRuntimeError};
-use qwen_llm::muse_glimmer_text_session::MuseGlimmerTextSessionError;
+use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
+use qwen_llm::muse_glimmer_text_session::{
+    MUSE_GLIMMER_FULL_READOUT_MAX_ROWS, MuseGlimmerFullReadoutWorkspacePlan,
+};
 use qwen_llm::tokenizer::LlamaCppTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -240,9 +247,25 @@ impl ReadArtifact {
     }
 }
 
-const MAX_MUSE_TRACE_TOKENS: usize = 128;
 const MAX_MUSE_TRACE_VECTOR_CELLS: usize = 32;
 const MAX_MUSE_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
+
+fn muse_trace_capture_bytes(
+    layer_count: usize,
+    token_count: usize,
+    hidden_size: usize,
+) -> Result<u64> {
+    let elements = layer_count
+        .checked_mul(token_count)
+        .and_then(|value| value.checked_mul(hidden_size))
+        .context("Muse trace capture size overflow")?;
+    u64::try_from(
+        elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .context("Muse trace capture byte count overflow")?,
+    )
+    .context("Muse trace capture byte count does not fit u64")
+}
 
 #[derive(Debug, Serialize)]
 struct MuseTraceDocument {
@@ -787,6 +810,47 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             && manifest.model.geometry == muse_lens_artifact::geometry(&bound.config),
         "Muse published trace artifact does not match deployed release geometry"
     );
+    let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
+        .context("load Muse tokenizer for full trace")?;
+    muse_lens_artifact::validate_tokenizer(&tokenizer, &bound.config)?;
+    let prepared_input = prepare_muse_input(
+        args.input_spec(),
+        bound.config.chat_template_profile,
+        &tokenizer,
+        bound.config.vocab_size,
+    )?;
+    let input_source = prepared_input.source;
+    let add_special_tokens = prepared_input.add_special_tokens;
+    let token_ids = prepared_input.token_ids;
+    let rendering = prepared_input.rendering;
+    ensure!(!token_ids.is_empty(), "Muse trace input has no tokens");
+    if let Some(max_tokens) = args.max_tokens {
+        ensure!(
+            token_ids.len() <= max_tokens,
+            "Muse trace input has {} tokens, exceeding --max-tokens {max_tokens}",
+            token_ids.len(),
+        );
+    }
+    ensure!(
+        token_ids.len() <= bound.config.context_length as usize,
+        "Muse trace requires {} token forwards, exceeding model context {}",
+        token_ids.len(),
+        bound.config.context_length,
+    );
+    let vector_requests = validate_trace_vector_requests(&args, &layers, token_ids.len())?;
+    let hidden_size = bound.config.hidden_size as usize;
+    ensure_trace_document_budget(
+        token_ids.len(),
+        layers.len(),
+        args.top_k,
+        vector_requests.len(),
+        hidden_size,
+        MAX_MUSE_TRACE_DOCUMENT_BYTES,
+        "Muse trace request",
+    )?;
+    let host_result_reserve_bytes =
+        trace_host_result_reserve_bytes(1, MAX_MUSE_TRACE_DOCUMENT_BYTES)?;
+
     let identity_cache = args
         .identity_cache
         .as_ref()
@@ -805,27 +869,6 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         content.bytes_hashed == 0,
         "Muse trace-full refuses model identities that hash weight bytes"
     );
-    let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
-        .context("load Muse tokenizer for full trace")?;
-    muse_lens_artifact::validate_tokenizer(&tokenizer, &bound.config)?;
-    let prepared_input = prepare_muse_input(
-        args.input_spec(),
-        bound.config.chat_template_profile,
-        &tokenizer,
-        bound.config.vocab_size,
-    )?;
-    let input_source = prepared_input.source;
-    let add_special_tokens = prepared_input.add_special_tokens;
-    let token_ids = prepared_input.token_ids;
-    let rendering = prepared_input.rendering;
-    ensure!(!token_ids.is_empty(), "Muse trace input has no tokens");
-    ensure!(
-        token_ids.len() <= args.max_tokens,
-        "Muse trace input has {} tokens, exceeding --max-tokens {}",
-        token_ids.len(),
-        args.max_tokens
-    );
-    let vector_requests = validate_trace_vector_requests(&args, &layers, token_ids.len())?;
 
     let mut capture_layers = layers.clone();
     capture_layers.sort_unstable();
@@ -835,19 +878,11 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .enumerate()
         .map(|(slot, layer)| (layer, slot))
         .collect::<BTreeMap<_, _>>();
-    let hidden_size = bound.config.hidden_size as usize;
     let values_per_layer = token_ids
         .len()
         .checked_mul(hidden_size)
         .context("Muse trace capture size overflow")?;
-    let mut captured_by_layer = BTreeMap::<u32, Vec<f32>>::new();
-    for &layer in &layers {
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(values_per_layer)
-            .context("allocate Muse trace captures")?;
-        captured_by_layer.insert(layer, values);
-    }
+    let capture_bytes = muse_trace_capture_bytes(layers.len(), token_ids.len(), hidden_size)?;
 
     let context = MetalContext::new().context("initialize Metal for Muse full trace")?;
     let model_load_started = Instant::now();
@@ -861,8 +896,60 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let scalar_readout_requested =
         qwen_llm::env_flag::read_default_off("QWEN_MUSE_TRACE_FULL_SCALAR");
     let command_batch_supported = runner.supports_command_batched_full_readout();
-    let mut scalar_readout =
+    let workspace_rows = token_ids.len().min(MUSE_GLIMMER_FULL_READOUT_MAX_ROWS);
+    let additional_host_bytes = capture_bytes
+        .checked_add(host_result_reserve_bytes)
+        .context("Muse trace host memory estimate overflow")?;
+    let scalar_readout =
         use_scalar_muse_trace_readout(scalar_readout_requested, command_batch_supported);
+    let (scalar_readout, admission_fallback, capture_admission) = if scalar_readout {
+        let plan = runner
+            .full_readout_workspace_plan(1)
+            .context("price scalar Muse trace readout")?;
+        (
+            true,
+            false,
+            muse_trace_composite_admission(&context, &plan, additional_host_bytes)?,
+        )
+    } else {
+        let plan = runner
+            .full_readout_workspace_plan(workspace_rows)
+            .context("price batched Muse trace readout")?;
+        let batched = muse_trace_composite_admission(&context, &plan, additional_host_bytes)?;
+        if batched.admitted {
+            (false, false, batched)
+        } else {
+            let scalar_plan = runner
+                .full_readout_workspace_plan(1)
+                .context("price scalar Muse trace fallback")?;
+            let scalar =
+                muse_trace_composite_admission(&context, &scalar_plan, additional_host_bytes)?;
+            if scalar.admitted {
+                eprintln!(
+                    "Muse trace batched readout memory admission denied (reason={}, required={:?}); using the independently admitted scalar readout",
+                    batched.reason.as_str(),
+                    batched.required_bytes,
+                );
+            }
+            (true, true, scalar)
+        }
+    };
+    ensure!(
+        capture_admission.admitted,
+        "Muse trace composite memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+        capture_admission.reason.as_str(),
+        capture_admission.required_bytes,
+        capture_admission.working_set_headroom_bytes,
+        capture_admission.signals.process_limit_remaining_bytes,
+    );
+    let mut captured_by_layer = BTreeMap::<u32, Vec<f32>>::new();
+    for &layer in &layers {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(values_per_layer)
+            .context("allocate Muse trace captures")?;
+        captured_by_layer.insert(layer, values);
+    }
     let prefill_started = Instant::now();
     for (position, &token_id) in token_ids.iter().enumerate() {
         let capture = runner
@@ -917,15 +1004,15 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let mut batched_transport_wall_ms = 0.0;
     let mut batched_output_tail_gpu_ms = 0.0;
     let mut batched_output_tail_wall_ms = 0.0;
-    let mut admission_fallback = false;
+    let position_tiles = trace_position_tiles(token_ids.len(), MUSE_GLIMMER_FULL_READOUT_MAX_ROWS)?;
     let mut readout_workspace = if scalar_readout {
         None
     } else {
-        let (workspace, fallback) =
-            muse_trace_workspace_or_scalar(runner.create_full_readout_workspace(token_ids.len()))?;
-        scalar_readout = fallback;
-        admission_fallback = fallback;
-        workspace
+        Some(
+            runner
+                .create_full_readout_workspace(workspace_rows)
+                .context("allocate pre-admitted Muse trace full-readout workspace")?,
+        )
     };
     for &layer in &layers {
         let descriptor = manifest
@@ -949,69 +1036,101 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         transport_prepare_wall_ms += started.elapsed().as_secs_f64() * 1e3;
         let captures = &captured_by_layer[&layer];
         if let Some(workspace) = readout_workspace.as_mut() {
-            let vector_positions = token_ids
-                .iter()
-                .enumerate()
-                .filter_map(|(position, _)| {
-                    vector_requests
-                        .contains(&(layer, position))
-                        .then_some(position)
-                })
-                .collect::<Vec<_>>();
-            let readout = runner
-                .apply_prepared_f16_transport_topk_rows(
-                    workspace,
-                    &prepared,
-                    captures,
-                    args.top_k,
-                    &vector_positions,
-                )
-                .with_context(|| format!("apply batched Muse trace source layer {layer}"))?;
-            batched_readout_gpu_ms += readout.gpu_ms;
-            batched_readout_command_wall_ms += readout.command_wall_ms;
-            batched_transport_gpu_ms += readout.transport_gpu_ms;
-            batched_transport_wall_ms += readout.transport_wall_ms;
-            batched_output_tail_gpu_ms += readout.output_tail_gpu_ms;
-            batched_output_tail_wall_ms += readout.output_tail_wall_ms;
-            ensure!(
-                readout.row_count == token_ids.len()
-                    && readout.top_k == args.top_k
-                    && readout.rows.len() == token_ids.len()
-                    && readout.transported_rows.len() == vector_positions.len(),
-                "batched Muse trace metadata is inconsistent for layer {layer}"
-            );
-            for transported in readout.transported_rows {
-                let position = transported.row;
-                vectors.push(MuseTraceVector {
-                    source_layer: layer,
-                    source_position: position,
-                    source_token_id: token_ids[position],
-                    predicts_position: position + 1,
-                    values: transported.values,
-                });
-            }
-            for row in readout.rows {
-                let position = row.row;
-                let mut top_k = Vec::with_capacity(row.scores.len());
-                for (rank, score) in row.scores.into_iter().enumerate() {
-                    let piece = tokenizer
-                        .try_decode_piece_bytes_exact(score.token_id as i32)
-                        .with_context(|| format!("decode Muse trace token {}", score.token_id))?;
-                    top_k.push(MuseTraceTokenScore {
-                        rank,
-                        token_id: score.token_id,
-                        token_display_lossy: String::from_utf8_lossy(&piece).into_owned(),
-                        token_piece_hex: super::hex(&piece),
-                        logit: score.logit,
+            for tile in &position_tiles {
+                let tile_rows = tile.end - tile.start;
+                let capture_start = tile
+                    .start
+                    .checked_mul(hidden_size)
+                    .context("Muse trace tile capture offset overflow")?;
+                let capture_end = tile
+                    .end
+                    .checked_mul(hidden_size)
+                    .context("Muse trace tile capture endpoint overflow")?;
+                let tile_captures = captures
+                    .get(capture_start..capture_end)
+                    .context("Muse trace tile capture is outside retained storage")?;
+                let vector_positions = (tile.start..tile.end)
+                    .filter(|&position| vector_requests.contains(&(layer, position)))
+                    .map(|position| position - tile.start)
+                    .collect::<Vec<_>>();
+                let readout = runner
+                    .apply_prepared_f16_transport_topk_rows(
+                        workspace,
+                        &prepared,
+                        tile_captures,
+                        args.top_k,
+                        &vector_positions,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "apply batched Muse trace source layer {layer} positions {}..{}",
+                            tile.start, tile.end
+                        )
+                    })?;
+                batched_readout_gpu_ms += readout.gpu_ms;
+                batched_readout_command_wall_ms += readout.command_wall_ms;
+                batched_transport_gpu_ms += readout.transport_gpu_ms;
+                batched_transport_wall_ms += readout.transport_wall_ms;
+                batched_output_tail_gpu_ms += readout.output_tail_gpu_ms;
+                batched_output_tail_wall_ms += readout.output_tail_wall_ms;
+                ensure!(
+                    readout.row_count == tile_rows
+                        && readout.top_k == args.top_k
+                        && readout.rows.len() == tile_rows
+                        && readout.transported_rows.len() == vector_positions.len(),
+                    "batched Muse trace metadata is inconsistent for layer {layer} positions {}..{}",
+                    tile.start,
+                    tile.end,
+                );
+                for transported in readout.transported_rows {
+                    ensure!(
+                        transported.row < tile_rows,
+                        "Muse transported row is outside its trace tile"
+                    );
+                    let position = tile
+                        .start
+                        .checked_add(transported.row)
+                        .context("Muse transported trace position overflow")?;
+                    vectors.push(MuseTraceVector {
+                        source_layer: layer,
+                        source_position: position,
+                        source_token_id: token_ids[position],
+                        predicts_position: position + 1,
+                        values: transported.values,
                     });
                 }
-                cells.push(MuseTraceCell {
-                    source_layer: layer,
-                    source_position: position,
-                    source_token_id: token_ids[position],
-                    predicts_position: position + 1,
-                    top_k,
-                });
+                for row in readout.rows {
+                    ensure!(
+                        row.row < tile_rows,
+                        "Muse readout row is outside its trace tile"
+                    );
+                    let position = tile
+                        .start
+                        .checked_add(row.row)
+                        .context("Muse readout trace position overflow")?;
+                    let mut top_k = Vec::with_capacity(row.scores.len());
+                    for (rank, score) in row.scores.into_iter().enumerate() {
+                        let piece = tokenizer
+                            .try_decode_piece_bytes_exact(score.token_id as i32)
+                            .with_context(|| {
+                                format!("decode Muse trace token {}", score.token_id)
+                            })?;
+                        top_k.push(MuseTraceTokenScore {
+                            rank,
+                            token_id: score.token_id,
+                            token_display_lossy: String::from_utf8_lossy(&piece).into_owned(),
+                            token_piece_hex: super::hex(&piece),
+                            logit: score.logit,
+                        });
+                    }
+                    cells.push(MuseTraceCell {
+                        source_layer: layer,
+                        source_position: position,
+                        source_token_id: token_ids[position],
+                        predicts_position: position + 1,
+                        top_k,
+                    });
+                }
             }
             continue;
         }
@@ -1247,8 +1366,8 @@ fn validate_trace_args(args: &TraceFullArgs) -> Result<()> {
         "--top-k must be in 1..=16"
     );
     ensure!(
-        args.max_tokens > 0 && args.max_tokens <= MAX_MUSE_TRACE_TOKENS,
-        "Muse --max-tokens must be in 1..={MAX_MUSE_TRACE_TOKENS}"
+        args.max_tokens.is_none_or(|max_tokens| max_tokens > 0),
+        "Muse --max-tokens must be positive"
     );
     ensure!(
         args.vectors.len() <= MAX_MUSE_TRACE_VECTOR_CELLS,
@@ -1412,26 +1531,27 @@ fn use_scalar_muse_trace_readout(scalar_requested: bool, command_batch_supported
     scalar_requested || !command_batch_supported
 }
 
-fn muse_trace_workspace_or_scalar<T>(
-    workspace: std::result::Result<T, MuseGlimmerRuntimeError>,
-) -> Result<(Option<T>, bool)> {
-    match workspace {
-        Ok(workspace) => Ok((Some(workspace), false)),
-        Err(MuseGlimmerRuntimeError::Session(
-            MuseGlimmerTextSessionError::FullReadoutMemoryAdmissionDenied {
-                reason,
-                required_bytes,
-                working_set_headroom_bytes,
-                process_remaining_bytes,
-            },
-        )) => {
-            eprintln!(
-                "Muse trace reusable GPU workspace unavailable ({reason:?}, required={required_bytes:?}, working_set_headroom={working_set_headroom_bytes:?}, process_remaining={process_remaining_bytes:?}); falling back to established scalar readout"
-            );
-            Ok((None, true))
-        }
-        Err(error) => Err(error).context("create reusable Muse trace full-readout workspace"),
-    }
+fn muse_trace_composite_cpu_bytes(
+    host_transport_bytes: u64,
+    additional_host_bytes: u64,
+) -> Result<u64> {
+    host_transport_bytes
+        .checked_add(additional_host_bytes)
+        .context("Muse trace composite host memory estimate overflow")
+}
+
+fn muse_trace_composite_admission(
+    context: &MetalContext,
+    plan: &MuseGlimmerFullReadoutWorkspacePlan,
+    additional_host_bytes: u64,
+) -> Result<MetalMemoryAdmission> {
+    Ok(evaluate_metal_memory_admission_with_cpu_bytes(
+        plan.priced_upper_bytes(),
+        muse_trace_composite_cpu_bytes(plan.host_transport_reserve_bytes(), additional_host_bytes)?,
+        plan.prepared_transport_reserve_bytes(),
+        context.memory_signals(),
+        true,
+    ))
 }
 
 fn validate_read_args(args: &ReadFullArgs) -> Result<()> {
@@ -2130,6 +2250,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn trace_capture_pricing_scales_with_requested_work() {
+        assert_eq!(
+            muse_trace_capture_bytes(51, 129, 6_656).unwrap(),
+            175_159_296
+        );
+        assert!(muse_trace_capture_bytes(usize::MAX, 2, 6_656).is_err());
+    }
+
+    #[test]
     fn trace_summary_uses_mode_specific_timing_keys() {
         let base = BTreeMap::from([
             ("trace_execution_wall_ms", 10.0),
@@ -2162,21 +2291,9 @@ mod tests {
     }
 
     #[test]
-    fn trace_workspace_admission_denial_falls_back_without_hiding_other_errors() {
-        let denial = MuseGlimmerRuntimeError::Session(
-            MuseGlimmerTextSessionError::FullReadoutMemoryAdmissionDenied {
-                reason: qwen_llm::metal::MetalMemoryAdmissionReason::BothInsufficient,
-                required_bytes: Some(400),
-                working_set_headroom_bytes: Some(200),
-                process_remaining_bytes: Some(100),
-            },
-        );
-        let (workspace, fallback) = muse_trace_workspace_or_scalar::<()>(Err(denial)).unwrap();
-        assert!(workspace.is_none());
-        assert!(fallback);
-
-        let other = MuseGlimmerRuntimeError::Invalid("unrelated failure".into());
-        assert!(muse_trace_workspace_or_scalar::<()>(Err(other)).is_err());
+    fn trace_composite_admission_accounts_for_matrix_and_retained_results() {
+        assert_eq!(muse_trace_composite_cpu_bytes(80, 120).unwrap(), 200);
+        assert!(muse_trace_composite_cpu_bytes(u64::MAX, 1).is_err());
     }
 
     #[test]

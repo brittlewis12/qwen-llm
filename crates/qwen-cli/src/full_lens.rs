@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -57,6 +58,105 @@ const MAX_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TRACE_FULL_BATCH_REQUESTS: usize = 8;
 const MAX_TRACE_FULL_BATCH_RECORD_BYTES: usize = 1024 * 1024;
 const TRACE_FULL_BATCH_MANIFEST_NAME: &str = "manifest.json";
+const TRACE_MIN_INPUT_TOKEN_JSON_BYTES: usize = 72;
+const TRACE_MIN_CELL_JSON_BYTES: usize = 90;
+const TRACE_MIN_SCORE_JSON_BYTES: usize = 80;
+const TRACE_MIN_VECTOR_JSON_BYTES: usize = 90;
+const TRACE_MIN_VECTOR_VALUE_JSON_BYTES: usize = 2;
+
+pub(crate) fn ensure_trace_document_budget(
+    position_count: usize,
+    layer_count: usize,
+    top_k: usize,
+    vector_count: usize,
+    hidden_size: usize,
+    max_document_bytes: usize,
+    label: &str,
+) -> Result<()> {
+    let cell_count = position_count
+        .checked_mul(layer_count)
+        .context("trace cell count overflow")?;
+    let score_count = cell_count
+        .checked_mul(top_k)
+        .context("trace score count overflow")?;
+    let vector_values = vector_count
+        .checked_mul(hidden_size)
+        .context("trace vector value count overflow")?;
+    let minimum_bytes = position_count
+        .checked_mul(TRACE_MIN_INPUT_TOKEN_JSON_BYTES)
+        .and_then(|bytes| bytes.checked_add(cell_count.checked_mul(TRACE_MIN_CELL_JSON_BYTES)?))
+        .and_then(|bytes| bytes.checked_add(score_count.checked_mul(TRACE_MIN_SCORE_JSON_BYTES)?))
+        .and_then(|bytes| bytes.checked_add(vector_count.checked_mul(TRACE_MIN_VECTOR_JSON_BYTES)?))
+        .and_then(|bytes| {
+            bytes.checked_add(vector_values.checked_mul(TRACE_MIN_VECTOR_VALUE_JSON_BYTES)?)
+        })
+        .context("trace document size lower bound overflow")?;
+    ensure!(
+        minimum_bytes <= max_document_bytes,
+        "{label} cannot fit the {max_document_bytes}-byte trace artifact budget: its required rows have a minimum serialized size of {minimum_bytes} bytes before token text and occurrence metadata; select fewer layers, a lower --top-k, or fewer vector cells"
+    );
+    Ok(())
+}
+
+pub(crate) fn trace_host_result_reserve_bytes(
+    document_count: usize,
+    max_document_bytes: usize,
+) -> Result<u64> {
+    let bytes = document_count
+        .checked_mul(max_document_bytes)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .context("trace host result reserve overflow")?;
+    u64::try_from(bytes).context("trace host result reserve does not fit u64")
+}
+
+pub(crate) fn trace_position_tiles(
+    position_count: usize,
+    tile_capacity: usize,
+) -> Result<Vec<Range<usize>>> {
+    ensure!(position_count > 0, "trace requires at least one position");
+    ensure!(tile_capacity > 0, "trace tile capacity must be positive");
+    let tile_count = position_count
+        .checked_add(tile_capacity - 1)
+        .context("trace tile count overflow")?
+        / tile_capacity;
+    let mut tiles = Vec::new();
+    tiles
+        .try_reserve_exact(tile_count)
+        .context("allocate trace tile plan")?;
+    let mut start = 0usize;
+    while start < position_count {
+        let end = start.saturating_add(tile_capacity).min(position_count);
+        tiles.push(start..end);
+        start = end;
+    }
+    Ok(tiles)
+}
+
+fn qwen_trace_capture_priced_upper_bytes(
+    loaded: &LoadedModel,
+    tiles: &[Range<usize>],
+    layer_count: usize,
+    hidden_size: usize,
+) -> Result<u64> {
+    tiles.iter().try_fold(0u64, |total, tile| {
+        let logical_elements = (tile.end - tile.start)
+            .checked_mul(layer_count)
+            .and_then(|value| value.checked_mul(hidden_size))
+            .context("trace capture size overflow")?;
+        let logical_bytes = logical_elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .context("trace capture byte count overflow")?;
+        let priced = loaded
+            .context()
+            .shared_buffer_size_and_align(
+                u64::try_from(logical_bytes).context("trace capture byte count")?,
+            )?
+            .size;
+        total
+            .checked_add(priced)
+            .context("trace capture priced byte count overflow")
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublishedProfileId {
@@ -340,9 +440,9 @@ pub(crate) struct TraceFullArgs {
     #[arg(long, default_value_t = 8)]
     pub(crate) top_k: usize,
 
-    /// Reject inputs above this bound without truncating them.
-    #[arg(long, default_value_t = MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS)]
-    pub(crate) max_tokens: usize,
+    /// Optional input-token budget below the model context; inputs are never truncated.
+    #[arg(long)]
+    pub(crate) max_tokens: Option<usize>,
 
     /// Transported target-space vectors to include as layer:position cells.
     #[arg(
@@ -442,7 +542,7 @@ struct PreparedTraceFullBatchPrompt<'model> {
     input_tokens: Vec<TraceFullInputToken>,
     rendering: TraceFullRendering,
     vector_positions_by_layer: BTreeMap<u32, Vec<usize>>,
-    capture: WorkspaceLensPackedPostBlockCapture<'model>,
+    captures: Vec<WorkspaceLensPackedPostBlockCapture<'model>>,
     cells: Vec<TraceFullCell>,
     transported_vectors: Vec<TraceFullVector>,
 }
@@ -1907,21 +2007,16 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         "--layers must be unique source layers present in the full lens"
     );
 
-    let runtime = Runtime::metal().context("initialize Metal runtime")?;
-    let loaded = runtime
-        .load_model_with_intent(
-            &args.model,
-            LoadedModelConfig::default(),
-            ModelLoadIntent::SinglePassAnalysis,
-        )
-        .with_context(|| format!("load model {}", args.model.display()))?;
-    validate_deployed_model(&manifest, &loaded)?;
-    let arch = loaded.arch();
-    let (deployed_model, tokenizer_summary) = trace_full_runtime_summaries(&args.model, &loaded);
-    let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
-    let family = ModelFamily::detect(loaded.gguf()).context("detect trace-full Qwen family")?;
-    let prepared_input =
-        prepare_qwen_model_input(args.input_spec(), family, loaded.gguf(), &tokenizer)?;
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    let family = ModelFamily::detect(&gguf).context("detect trace-full Qwen family")?;
+    ensure!(
+        family == ModelFamily::Qwen35,
+        "trace-full requires an ordinary dense Qwen model"
+    );
+    let model_context_tokens = gguf.declared_context_length()?;
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load tokenizer from GGUF")?;
+    let prepared_input = prepare_qwen_model_input(args.input_spec(), family, &gguf, &tokenizer)?;
     let input_source = prepared_input.source;
     let add_special_tokens = prepared_input.add_special_tokens;
     let token_ids = prepared_input.token_ids;
@@ -1930,14 +2025,30 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         !token_ids.is_empty(),
         "trace-full input tokenized to no tokens"
     );
+    if let Some(max_tokens) = args.max_tokens {
+        ensure!(
+            token_ids.len() <= max_tokens,
+            "trace-full input has {} tokens, exceeding --max-tokens {max_tokens}; input is not truncated",
+            token_ids.len(),
+        );
+    }
     ensure!(
-        token_ids.len() <= args.max_tokens,
-        "trace-full input has {} tokens, exceeding --max-tokens {}; input is not truncated",
+        token_ids.len() <= model_context_tokens,
+        "trace-full requires {} token forwards, exceeding model context {model_context_tokens}",
         token_ids.len(),
-        args.max_tokens
     );
     let vector_positions_by_layer =
         group_trace_full_vector_cells(&args.vectors, &layers, token_ids.len())?;
+    ensure_trace_document_budget(
+        token_ids.len(),
+        layers.len(),
+        args.top_k,
+        args.vectors.len(),
+        manifest.transport.hidden_size as usize,
+        MAX_TRACE_DOCUMENT_BYTES,
+        "trace-full request",
+    )?;
+    let host_result_reserve_bytes = trace_host_result_reserve_bytes(1, MAX_TRACE_DOCUMENT_BYTES)?;
     let input_tokens = token_ids
         .iter()
         .enumerate()
@@ -1953,6 +2064,19 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
+
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let loaded = runtime
+        .load_opened_gguf_with_intent(
+            gguf,
+            args.model.clone(),
+            LoadedModelConfig::default(),
+            ModelLoadIntent::SinglePassAnalysis,
+        )
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    validate_deployed_model(&manifest, &loaded)?;
+    let arch = loaded.arch();
+    let (deployed_model, tokenizer_summary) = trace_full_runtime_summaries(&args.model, &loaded);
     let payload_path = args.full_lens.join(&manifest.payload.path);
     let (mut payload_file, payload_length) = open_regular_file(&payload_path)?;
     ensure!(
@@ -1968,37 +2092,80 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     matrix.resize(matrix_len, 0);
 
     let trace_started = Instant::now();
+    let position_tiles =
+        trace_position_tiles(token_ids.len(), MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS)?;
+    let capture_priced_upper_bytes = qwen_trace_capture_priced_upper_bytes(
+        &loaded,
+        &position_tiles,
+        layers.len(),
+        arch.hidden_size as usize,
+    )?;
+    let prefill_scratch_upper_bytes = loaded
+        .workspace_lens_packed_capture_scratch_upper_bytes(token_ids.len())
+        .context("price trace-full packed-prefill scratch")?;
+    let admission = loaded
+        .qwen_execution_memory_admission_with_additional_bytes(
+            1,
+            token_ids.len(),
+            prefill_scratch_upper_bytes,
+            capture_priced_upper_bytes,
+            host_result_reserve_bytes,
+        )
+        .context("price trace-full sequence and retained captures")?;
+    ensure!(
+        admission.admitted,
+        "trace-full memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+        admission.reason.as_str(),
+        admission.required_bytes,
+        admission.working_set_headroom_bytes,
+        admission.signals.process_limit_remaining_bytes,
+    );
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(token_ids.len()))
         .context("create trace-full prompt sequence")?;
-    let mut workspace_lens = loaded
+    let mut captures = Vec::new();
+    captures
+        .try_reserve_exact(position_tiles.len())
+        .context("allocate trace-full capture tiles")?;
+    let mut packed_prefill_gpu_ms = 0.0f64;
+    let mut packed_prefill_wall_ms = 0.0f64;
+    for tile in &position_tiles {
+        let capture = {
+            let mut workspace_lens = loaded
+                .workspace_lens_session(&mut sequence)
+                .context("open trace-full capture session")?;
+            workspace_lens
+                .forward_packed_post_block_capture(&token_ids[tile.clone()], &layers)
+                .with_context(|| {
+                    format!(
+                        "capture packed trace-full post-block residuals at {}..{}",
+                        tile.start, tile.end
+                    )
+                })?
+        };
+        ensure!(
+            capture.start_position() == tile.start
+                && capture.end_position() == tile.end
+                && capture.token_ids() == &token_ids[tile.clone()]
+                && capture.layer_ids() == layers.as_slice()
+                && capture.hidden_size() == arch.hidden_size as usize,
+            "packed trace-full capture metadata is inconsistent at {}..{}",
+            tile.start,
+            tile.end,
+        );
+        packed_prefill_gpu_ms += capture.packed_prefill_gpu_ms();
+        packed_prefill_wall_ms += capture.packed_prefill_wall_ms();
+        captures.push(capture);
+    }
+    let workspace_lens = loaded
         .workspace_lens_session(&mut sequence)
         .context("open trace-full workspace-lens session")?;
-    let capture = workspace_lens
-        .forward_packed_post_block_capture(&token_ids, &layers)
-        .context("capture packed trace-full post-block residuals")?;
-    ensure!(
-        capture.start_position() == 0
-            && capture.token_ids() == token_ids.as_slice()
-            && capture.layer_ids() == layers.as_slice()
-            && capture.hidden_size() == arch.hidden_size as usize,
-        "packed trace-full capture metadata is inconsistent"
-    );
-    let mut full_readout_workspace = match workspace_lens.full_readout_workspace(token_ids.len()) {
-        Ok(workspace) => Some(workspace),
-        Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
-            reason,
-            requested_bytes,
-            working_set_headroom_bytes,
-            process_remaining_bytes,
-        }) => {
-            eprintln!(
-                "trace-full reusable GPU workspace unavailable ({reason:?}, requested={requested_bytes}, working_set_headroom={working_set_headroom_bytes:?}, process_remaining={process_remaining_bytes:?}); falling back to established per-layer allocations"
-            );
-            None
-        }
-        Err(error) => return Err(error).context("allocate reusable trace-full GPU workspace"),
-    };
+    let workspace_rows = token_ids
+        .len()
+        .min(MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS);
+    let mut full_readout_workspace = workspace_lens
+        .full_readout_workspace(workspace_rows)
+        .context("allocate admitted reusable trace-full GPU workspace")?;
 
     let mut cells = Vec::new();
     cells
@@ -2039,68 +2206,75 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             .get(&layer)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let readout = if let Some(workspace) = &mut full_readout_workspace {
-            workspace.apply_packed_capture_f16_transport_topk_with_vectors(
-                &capture,
-                layer,
-                &matrix,
-                args.top_k,
-                vector_positions,
-            )
-        } else {
-            workspace_lens.apply_packed_capture_f16_transport_topk_with_vectors(
-                &capture,
-                layer,
-                &matrix,
-                args.top_k,
-                vector_positions,
-            )
-        }
-        .with_context(|| format!("apply packed full-lens source layer {layer}"))?;
-        ensure!(
-            readout.source_layer == layer
-                && readout.start_position == 0
-                && readout.position_count == token_ids.len()
-                && readout.top_k == args.top_k,
-            "packed trace-full readout metadata is inconsistent for layer {layer}"
-        );
-        readout_gpu_ms += readout.readout_gpu_ms;
-        readout_wall_ms += readout.readout_wall_ms;
-        for vector in readout.transported_vectors {
-            transported_vectors.push(TraceFullVector {
-                source_layer: layer,
-                source_position: vector.source_position,
-                source_token_id: vector.source_token_id,
-                predicts_position: vector.predicts_position,
-                values: vector.values,
-            });
-        }
-        for position in readout.positions {
-            let mut top_k = Vec::new();
-            top_k
-                .try_reserve_exact(position.scores.len())
-                .context("allocate decoded trace-full top-k")?;
-            for (rank, score) in position.scores.into_iter().enumerate() {
-                let token_id = i32::try_from(score.token_id)
-                    .context("decode trace-full vocabulary token ID")?;
-                let piece = tokenizer
-                    .try_decode_piece_bytes_exact(token_id)
-                    .with_context(|| format!("decode trace-full token {}", score.token_id))?;
-                top_k.push(TraceFullTokenScore {
-                    rank,
-                    token_id: score.token_id,
-                    token_display_lossy: String::from_utf8_lossy(piece).into_owned(),
-                    token_piece_hex: hex(piece),
-                    logit: score.logit,
+        full_readout_workspace
+            .bind_f16_transport(&matrix)
+            .with_context(|| format!("bind full-lens source layer {layer}"))?;
+        for capture in &captures {
+            let capture_end = capture.end_position();
+            let tile_vector_positions = vector_positions
+                .iter()
+                .copied()
+                .filter(|position| *position >= capture.start_position() && *position < capture_end)
+                .collect::<Vec<_>>();
+            let readout = full_readout_workspace
+                .apply_packed_capture_bound_f16_transport_topk_with_vectors(
+                    capture,
+                    layer,
+                    args.top_k,
+                    &tile_vector_positions,
+                )
+                .with_context(|| {
+                    format!(
+                        "apply packed full-lens source layer {layer} positions {}..{capture_end}",
+                        capture.start_position()
+                    )
+                })?;
+            ensure!(
+                readout.source_layer == layer
+                    && readout.start_position == capture.start_position()
+                    && readout.position_count == capture.position_count()
+                    && readout.top_k == args.top_k,
+                "packed trace-full readout metadata is inconsistent for layer {layer} positions {}..{capture_end}",
+                capture.start_position(),
+            );
+            readout_gpu_ms += readout.readout_gpu_ms;
+            readout_wall_ms += readout.readout_wall_ms;
+            for vector in readout.transported_vectors {
+                transported_vectors.push(TraceFullVector {
+                    source_layer: layer,
+                    source_position: vector.source_position,
+                    source_token_id: vector.source_token_id,
+                    predicts_position: vector.predicts_position,
+                    values: vector.values,
                 });
             }
-            cells.push(TraceFullCell {
-                source_layer: layer,
-                source_position: position.source_position,
-                source_token_id: position.source_token_id,
-                predicts_position: position.predicts_position,
-                top_k,
-            });
+            for position in readout.positions {
+                let mut top_k = Vec::new();
+                top_k
+                    .try_reserve_exact(position.scores.len())
+                    .context("allocate decoded trace-full top-k")?;
+                for (rank, score) in position.scores.into_iter().enumerate() {
+                    let token_id = i32::try_from(score.token_id)
+                        .context("decode trace-full vocabulary token ID")?;
+                    let piece = tokenizer
+                        .try_decode_piece_bytes_exact(token_id)
+                        .with_context(|| format!("decode trace-full token {}", score.token_id))?;
+                    top_k.push(TraceFullTokenScore {
+                        rank,
+                        token_id: score.token_id,
+                        token_display_lossy: String::from_utf8_lossy(piece).into_owned(),
+                        token_piece_hex: hex(piece),
+                        logit: score.logit,
+                    });
+                }
+                cells.push(TraceFullCell {
+                    source_layer: layer,
+                    source_position: position.source_position,
+                    source_token_id: position.source_token_id,
+                    predicts_position: position.predicts_position,
+                    top_k,
+                });
+            }
         }
     }
     let occurrences = aggregate_trace_full_occurrences(&cells, &layers);
@@ -2149,8 +2323,8 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         cells,
         vectors,
         timing: TraceFullTiming {
-            packed_prefill_gpu_ms: capture.packed_prefill_gpu_ms(),
-            packed_prefill_wall_ms: capture.packed_prefill_wall_ms(),
+            packed_prefill_gpu_ms,
+            packed_prefill_wall_ms,
             matrix_read_wall_ms,
             readout_gpu_ms,
             readout_command_wall_ms: readout_wall_ms,
@@ -2230,22 +2404,15 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
     );
 
     let batch_started = Instant::now();
-    let runtime = Runtime::metal().context("initialize Metal runtime")?;
-    let model_load_started = Instant::now();
-    let loaded = runtime
-        .load_model_with_intent(
-            &args.model,
-            LoadedModelConfig::default(),
-            ModelLoadIntent::SinglePassAnalysis,
-        )
-        .with_context(|| format!("load model {}", args.model.display()))?;
-    let model_load_wall_ms = model_load_started.elapsed().as_secs_f64() * 1e3;
-    validate_deployed_model(&manifest, &loaded)?;
-    let arch = loaded.arch();
-    let (deployed_model, tokenizer_summary) = trace_full_runtime_summaries(&args.model, &loaded);
-    let lens_summary = trace_full_lens_summary(&manifest);
-    let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
-    let family = ModelFamily::detect(loaded.gguf()).context("detect trace-full Qwen family")?;
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    let family = ModelFamily::detect(&gguf).context("detect trace-full Qwen family")?;
+    ensure!(
+        family == ModelFamily::Qwen35,
+        "trace-full requires an ordinary dense Qwen model"
+    );
+    let model_context_tokens = gguf.declared_context_length()?;
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load tokenizer from GGUF")?;
 
     let mut prepared_inputs = Vec::new();
     prepared_inputs
@@ -2254,28 +2421,39 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
     let mut aggregate_rows = 0usize;
     for (line_number, request) in requests {
         let vector_count = request.vectors.len();
-        let prepared =
-            prepare_qwen_model_input(request.input_spec(), family, loaded.gguf(), &tokenizer)
-                .with_context(|| format!("prepare trace-full request on line {line_number}"))?;
+        let prepared = prepare_qwen_model_input(request.input_spec(), family, &gguf, &tokenizer)
+            .with_context(|| format!("prepare trace-full request on line {line_number}"))?;
         ensure!(
             !prepared.token_ids.is_empty(),
             "trace-full request on line {line_number} tokenized to no tokens"
         );
+        if let Some(max_tokens) = args.max_tokens {
+            ensure!(
+                prepared.token_ids.len() <= max_tokens,
+                "trace-full request on line {line_number} has {} tokens, exceeding --max-tokens {max_tokens}; input is not truncated",
+                prepared.token_ids.len(),
+            );
+        }
         ensure!(
-            prepared.token_ids.len() <= args.max_tokens,
-            "trace-full request on line {line_number} has {} tokens, exceeding --max-tokens {}; input is not truncated",
+            prepared.token_ids.len() <= model_context_tokens,
+            "trace-full request on line {line_number} requires {} token forwards, exceeding model context {}",
             prepared.token_ids.len(),
-            args.max_tokens
+            model_context_tokens,
         );
         aggregate_rows = aggregate_rows
             .checked_add(prepared.token_ids.len())
             .context("trace-full aggregate row count overflow")?;
-        ensure!(
-            aggregate_rows <= MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS,
-            "trace-full request cohort has {aggregate_rows} aggregate rows, exceeding {MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS}"
-        );
         let vector_positions_by_layer =
             group_trace_full_vector_cells(&request.vectors, &layers, prepared.token_ids.len())?;
+        ensure_trace_document_budget(
+            prepared.token_ids.len(),
+            layers.len(),
+            args.top_k,
+            request.vectors.len(),
+            manifest.transport.hidden_size as usize,
+            MAX_TRACE_DOCUMENT_BYTES,
+            &format!("trace-full request on line {line_number}"),
+        )?;
         let input_tokens = decode_trace_full_input_tokens(&tokenizer, &prepared.token_ids)?;
         prepared_inputs.push(PreparedTraceFullBatchInput {
             line_number,
@@ -2290,7 +2468,65 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         });
     }
 
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let model_load_started = Instant::now();
+    let loaded = runtime
+        .load_opened_gguf_with_intent(
+            gguf,
+            args.model.clone(),
+            LoadedModelConfig::default(),
+            ModelLoadIntent::SinglePassAnalysis,
+        )
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    let model_load_wall_ms = model_load_started.elapsed().as_secs_f64() * 1e3;
+    validate_deployed_model(&manifest, &loaded)?;
+    let arch = loaded.arch();
+    let (deployed_model, tokenizer_summary) = trace_full_runtime_summaries(&args.model, &loaded);
+    let lens_summary = trace_full_lens_summary(&manifest);
+
     let execution_started = Instant::now();
+    let max_prompt_rows = prepared_inputs
+        .iter()
+        .map(|input| input.token_ids.len())
+        .max()
+        .context("trace-full prompt cohort is empty")?;
+    let host_result_reserve_bytes =
+        trace_host_result_reserve_bytes(prepared_inputs.len(), MAX_TRACE_DOCUMENT_BYTES)?;
+    let capture_priced_upper_bytes = prepared_inputs.iter().try_fold(0u64, |total, input| {
+        let tiles = trace_position_tiles(
+            input.token_ids.len(),
+            MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS,
+        )?;
+        let prompt_bytes = qwen_trace_capture_priced_upper_bytes(
+            &loaded,
+            &tiles,
+            layers.len(),
+            arch.hidden_size as usize,
+        )?;
+        total
+            .checked_add(prompt_bytes)
+            .context("trace-full cohort capture byte count overflow")
+    })?;
+    let prefill_scratch_upper_bytes = loaded
+        .workspace_lens_packed_capture_scratch_upper_bytes(max_prompt_rows)
+        .context("price trace-full cohort packed-prefill scratch")?;
+    let admission = loaded
+        .qwen_execution_memory_admission_with_additional_bytes(
+            1,
+            max_prompt_rows,
+            prefill_scratch_upper_bytes,
+            capture_priced_upper_bytes,
+            host_result_reserve_bytes,
+        )
+        .context("price trace-full cohort sequence and retained captures")?;
+    ensure!(
+        admission.admitted,
+        "trace-full cohort memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+        admission.reason.as_str(),
+        admission.required_bytes,
+        admission.working_set_headroom_bytes,
+        admission.signals.process_limit_remaining_bytes,
+    );
     let mut prompts = Vec::new();
     prompts
         .try_reserve_exact(prepared_inputs.len())
@@ -2304,27 +2540,43 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
                     input.request_id
                 )
             })?;
-        let capture = {
-            let mut workspace_lens =
-                loaded
+        let position_tiles = trace_position_tiles(
+            input.token_ids.len(),
+            MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS,
+        )?;
+        let mut captures = Vec::new();
+        captures
+            .try_reserve_exact(position_tiles.len())
+            .context("allocate trace-full request capture tiles")?;
+        for tile in &position_tiles {
+            let capture = {
+                let mut workspace_lens = loaded
                     .workspace_lens_session(&mut sequence)
                     .with_context(|| {
                         format!("open trace-full session for request {:?}", input.request_id)
                     })?;
-            workspace_lens
-                .forward_packed_post_block_capture(&input.token_ids, &layers)
-                .with_context(|| {
-                    format!("capture packed trace-full request {:?}", input.request_id)
-                })?
-        };
-        ensure!(
-            capture.start_position() == 0
-                && capture.token_ids() == input.token_ids.as_slice()
-                && capture.layer_ids() == layers.as_slice()
-                && capture.hidden_size() == arch.hidden_size as usize,
-            "packed trace-full capture metadata is inconsistent for request {:?}",
-            input.request_id
-        );
+                workspace_lens
+                    .forward_packed_post_block_capture(&input.token_ids[tile.clone()], &layers)
+                    .with_context(|| {
+                        format!(
+                            "capture packed trace-full request {:?} positions {}..{}",
+                            input.request_id, tile.start, tile.end
+                        )
+                    })?
+            };
+            ensure!(
+                capture.start_position() == tile.start
+                    && capture.end_position() == tile.end
+                    && capture.token_ids() == &input.token_ids[tile.clone()]
+                    && capture.layer_ids() == layers.as_slice()
+                    && capture.hidden_size() == arch.hidden_size as usize,
+                "packed trace-full capture metadata is inconsistent for request {:?} at {}..{}",
+                input.request_id,
+                tile.start,
+                tile.end,
+            );
+            captures.push(capture);
+        }
         let expected_cells = layers
             .len()
             .checked_mul(input.token_ids.len())
@@ -2346,7 +2598,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             input_tokens: input.input_tokens,
             rendering: input.rendering,
             vector_positions_by_layer: input.vector_positions_by_layer,
-            capture,
+            captures,
             cells,
             transported_vectors,
         });
@@ -2369,39 +2621,21 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         .context("allocate reusable full-lens transport matrix")?;
     matrix.resize(matrix_len, 0);
 
-    let max_prompt_rows = prompts
-        .iter()
-        .map(|prompt| prompt.token_ids.len())
-        .max()
-        .context("trace-full prompt cohort is empty")?;
-    let mut prompt_workspace = None;
-    let execution_mode;
-    {
+    let tiled = max_prompt_rows > MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS;
+    let workspace_rows = max_prompt_rows.min(MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS);
+    let execution_mode = if tiled {
+        "resident_layer_major_prompt_local_tiled_readout_no_interventions"
+    } else {
+        "resident_layer_major_prompt_local_readout_no_interventions"
+    };
+    let mut prompt_workspace = {
         let workspace_lens = loaded
             .workspace_lens_session(&mut readout_owner)
             .context("open trace-full cohort workspace owner")?;
-        match workspace_lens.full_readout_workspace(max_prompt_rows) {
-            Ok(workspace) => {
-                prompt_workspace = Some(workspace);
-                execution_mode = "resident_layer_major_prompt_local_readout_no_interventions";
-            }
-            Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
-                reason,
-                requested_bytes,
-                working_set_headroom_bytes,
-                process_remaining_bytes,
-            }) => {
-                eprintln!(
-                    "trace-full prompt workspace unavailable ({reason:?}, requested={requested_bytes}, working_set_headroom={working_set_headroom_bytes:?}, process_remaining={process_remaining_bytes:?}); falling back to established per-prompt allocations"
-                );
-                execution_mode =
-                    "resident_layer_major_established_allocation_fallback_no_interventions";
-            }
-            Err(error) => {
-                return Err(error).context("allocate prompt-local trace-full GPU workspace");
-            }
-        }
-    }
+        workspace_lens
+            .full_readout_workspace(workspace_rows)
+            .context("allocate admitted prompt-local trace-full GPU workspace")?
+    };
 
     let mut matrix_read_wall_ms = 0.0f64;
     let mut readout_gpu_ms = 0.0f64;
@@ -2424,63 +2658,65 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             .read_exact(&mut matrix)
             .with_context(|| format!("read full-lens source layer {layer}"))?;
         matrix_read_wall_ms += read_started.elapsed().as_secs_f64() * 1e3;
+        prompt_workspace
+            .bind_f16_transport(&matrix)
+            .with_context(|| format!("bind cohort full-lens source layer {layer}"))?;
 
         for prompt_index in 0..prompts.len() {
             let vector_positions = prompts[prompt_index]
                 .vector_positions_by_layer
                 .get(&layer)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let readout = if let Some(workspace) = prompt_workspace.as_mut() {
-                workspace.apply_packed_capture_f16_transport_topk_with_vectors(
-                    &prompts[prompt_index].capture,
-                    layer,
-                    &matrix,
-                    args.top_k,
-                    vector_positions,
-                )
-            } else {
-                let workspace_lens = loaded
-                    .workspace_lens_session(&mut readout_owner)
+                .cloned()
+                .unwrap_or_default();
+            let request_id = prompts[prompt_index].request_id.clone();
+            let capture_count = prompts[prompt_index].captures.len();
+            for capture_index in 0..capture_count {
+                let readout = {
+                    let capture = &prompts[prompt_index].captures[capture_index];
+                    let capture_end = capture.end_position();
+                    let tile_vector_positions = vector_positions
+                        .iter()
+                        .copied()
+                        .filter(|position| {
+                            *position >= capture.start_position() && *position < capture_end
+                        })
+                        .collect::<Vec<_>>();
+                    prompt_workspace
+                        .apply_packed_capture_bound_f16_transport_topk_with_vectors(
+                            capture,
+                            layer,
+                            args.top_k,
+                            &tile_vector_positions,
+                        )
                     .with_context(|| {
                         format!(
-                            "open fallback trace-full session for request {:?}",
-                            prompts[prompt_index].request_id
+                            "apply prompt-local full-lens source layer {layer} for request {request_id:?} positions {}..{capture_end}",
+                            capture.start_position(),
                         )
-                    })?;
-                workspace_lens.apply_packed_capture_f16_transport_topk_with_vectors(
-                    &prompts[prompt_index].capture,
+                    })?
+                };
+                readout_gpu_ms += readout.readout_gpu_ms;
+                readout_wall_ms += readout.readout_wall_ms;
+                append_trace_full_prompt_readout(
+                    &tokenizer,
                     layer,
-                    &matrix,
-                    args.top_k,
-                    vector_positions,
-                )
+                    readout.positions,
+                    readout.transported_vectors,
+                    &mut prompts[prompt_index],
+                )?;
             }
-            .with_context(|| {
-                format!(
-                    "apply prompt-local full-lens source layer {layer} for request {:?}",
-                    prompts[prompt_index].request_id
-                )
-            })?;
-            readout_gpu_ms += readout.readout_gpu_ms;
-            readout_wall_ms += readout.readout_wall_ms;
-            append_trace_full_prompt_readout(
-                &tokenizer,
-                layer,
-                readout.positions,
-                readout.transported_vectors,
-                &mut prompts[prompt_index],
-            )?;
         }
     }
 
     let packed_prefill_gpu_ms = prompts
         .iter()
-        .map(|prompt| prompt.capture.packed_prefill_gpu_ms())
+        .flat_map(|prompt| prompt.captures.iter())
+        .map(WorkspaceLensPackedPostBlockCapture::packed_prefill_gpu_ms)
         .sum::<f64>();
     let packed_prefill_wall_ms = prompts
         .iter()
-        .map(|prompt| prompt.capture.packed_prefill_wall_ms())
+        .flat_map(|prompt| prompt.captures.iter())
+        .map(WorkspaceLensPackedPostBlockCapture::packed_prefill_wall_ms)
         .sum::<f64>();
     let batch_execution_wall_ms = execution_started.elapsed().as_secs_f64() * 1e3;
     let request_count = prompts.len();
@@ -2493,6 +2729,16 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         .try_reserve_exact(request_count)
         .context("allocate trace-full batch manifest entries")?;
     for (request_index, prompt) in prompts.into_iter().enumerate() {
+        let prompt_packed_prefill_gpu_ms = prompt
+            .captures
+            .iter()
+            .map(WorkspaceLensPackedPostBlockCapture::packed_prefill_gpu_ms)
+            .sum::<f64>();
+        let prompt_packed_prefill_wall_ms = prompt
+            .captures
+            .iter()
+            .map(WorkspaceLensPackedPostBlockCapture::packed_prefill_wall_ms)
+            .sum::<f64>();
         let expected_cells = layers
             .len()
             .checked_mul(prompt.token_ids.len())
@@ -2551,8 +2797,8 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             cells: prompt.cells,
             vectors,
             timing: TraceFullTiming {
-                packed_prefill_gpu_ms: prompt.capture.packed_prefill_gpu_ms(),
-                packed_prefill_wall_ms: prompt.capture.packed_prefill_wall_ms(),
+                packed_prefill_gpu_ms: prompt_packed_prefill_gpu_ms,
+                packed_prefill_wall_ms: prompt_packed_prefill_wall_ms,
                 matrix_read_wall_ms,
                 readout_gpu_ms,
                 readout_command_wall_ms: readout_wall_ms,
@@ -2801,8 +3047,8 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
         "--top-k must be in 1..={MAX_FULL_READOUT_TOP_K}"
     );
     ensure!(
-        (1..=MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS).contains(&args.max_tokens),
-        "--max-tokens must be in 1..={MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS}"
+        args.max_tokens.is_none_or(|max_tokens| max_tokens > 0),
+        "--max-tokens must be positive"
     );
     if args.requests_jsonl.is_some() {
         ensure!(
@@ -2826,10 +3072,13 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
         "--prompt must not be empty"
     );
     ensure!(
-        args.token_ids
-            .as_ref()
-            .is_none_or(|token_ids| !token_ids.is_empty() && token_ids.len() <= args.max_tokens),
-        "--token-ids must be nonempty and contain at most --max-tokens entries"
+        args.token_ids.as_ref().is_none_or(|token_ids| {
+            !token_ids.is_empty()
+                && args
+                    .max_tokens
+                    .is_none_or(|max_tokens| token_ids.len() <= max_tokens)
+        }),
+        "--token-ids must be nonempty and fit the optional --max-tokens budget"
     );
     ensure!(
         args.vectors.len() <= MAX_TRACE_FULL_VECTOR_CELLS,
@@ -3895,7 +4144,7 @@ mod tests {
             no_special_tokens: false,
             layers: vec![0, 31, 62],
             top_k: 8,
-            max_tokens: MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS,
+            max_tokens: None,
             vectors: Vec::new(),
             identity_cache: None,
             allow_unvalidated_transfer: false,
@@ -4267,9 +4516,11 @@ mod tests {
         args.top_k = 26;
         assert!(validate_trace_full_args(&args).is_err());
         args.top_k = 8;
-        args.max_tokens = MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS + 1;
+        args.max_tokens = Some(262_144);
+        validate_trace_full_args(&args).unwrap();
+        args.max_tokens = Some(0);
         assert!(validate_trace_full_args(&args).is_err());
-        args.max_tokens = MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS;
+        args.max_tokens = Some(MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS);
 
         args.prompt = None;
         args.messages = Some("messages.json".into());
@@ -4285,6 +4536,50 @@ mod tests {
         validate_trace_full_args(&args).unwrap();
         args.prompt = Some("also set".into());
         assert!(validate_trace_full_args(&args).is_err());
+    }
+
+    #[test]
+    fn trace_position_tiles_cover_logical_context_without_exposing_tile_width() {
+        assert!(trace_position_tiles(0, 128).is_err());
+        assert!(trace_position_tiles(1, 0).is_err());
+        for (positions, expected) in [
+            (1, vec![0..1]),
+            (128, vec![0..128]),
+            (129, vec![0..128, 128..129]),
+            (493, vec![0..128, 128..256, 256..384, 384..493]),
+        ] {
+            assert_eq!(trace_position_tiles(positions, 128).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn trace_document_budget_accepts_tool_transcripts_and_rejects_impossible_artifacts_early() {
+        ensure_trace_document_budget(
+            493,
+            51,
+            8,
+            32,
+            6_656,
+            MAX_TRACE_DOCUMENT_BYTES,
+            "test trace",
+        )
+        .unwrap();
+        assert!(
+            ensure_trace_document_budget(
+                8_192,
+                51,
+                8,
+                0,
+                6_656,
+                MAX_TRACE_DOCUMENT_BYTES,
+                "test trace",
+            )
+            .is_err()
+        );
+        assert_eq!(
+            trace_host_result_reserve_bytes(2, MAX_TRACE_DOCUMENT_BYTES).unwrap(),
+            4 * MAX_TRACE_DOCUMENT_BYTES as u64
+        );
     }
 
     #[test]

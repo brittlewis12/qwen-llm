@@ -20,7 +20,8 @@ use crate::metal::{
     evaluate_metal_memory_admission,
 };
 use crate::metal_dflash::{
-    DFlashError, MetalDFlashLayerMajorScratch,
+    DFlashError, MetalDFlashLayerMajorScratch, PrefillScratchConfig,
+    plan_prefill_scratch_with_matrix_max_pos_configured,
     prefill_tokens_with_multi_hidden_prompt_only_profiled,
 };
 use crate::metal_forward::{
@@ -604,6 +605,7 @@ pub struct WorkspaceLensFullVocabularyReadoutWithVector {
 pub struct WorkspaceLensFullReadoutWorkspace<'model> {
     model: &'model LoadedModel,
     row_capacity: usize,
+    transport_bound: bool,
     transport: MetalTensor,
     source: MetalTensor,
     transported: MetalTensor,
@@ -613,6 +615,14 @@ pub struct WorkspaceLensFullReadoutWorkspace<'model> {
     first_values: MetalTensor,
     second_ids: MetalTensor,
     second_values: MetalTensor,
+}
+
+struct PackedFullReadoutValidation {
+    layer_slot: usize,
+    position_count: usize,
+    hidden_size: usize,
+    vocab_size: usize,
+    transported_position_rows: Vec<usize>,
 }
 
 impl WorkspaceLensFullReadoutWorkspace<'_> {
@@ -965,6 +975,8 @@ pub enum WorkspaceLensError {
     EmptyFullReadoutWorkspace,
     #[error("full-vocabulary GPU workspace has {capacity} rows but this call requires {required}")]
     FullReadoutWorkspaceTooSmall { capacity: usize, required: usize },
+    #[error("full-vocabulary GPU workspace has no bound F16 transport")]
+    FullReadoutTransportNotBound,
     #[error(
         "full-vocabulary GPU workspace memory admission denied: reason={reason:?} requested={requested_bytes} working_set_headroom={working_set_headroom_bytes:?} process_remaining={process_remaining_bytes:?}"
     )]
@@ -1043,6 +1055,27 @@ impl LoadedModel {
             sequence,
         })
     }
+
+    pub fn workspace_lens_packed_capture_scratch_upper_bytes(
+        &self,
+        matrix_max_position: usize,
+    ) -> Result<u64, WorkspaceLensError> {
+        if matrix_max_position == 0 {
+            return Err(WorkspaceLensError::EmptyFullReadoutPrompt);
+        }
+        let plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+            self.metal_model(),
+            PACKED_FULL_READOUT_CHUNK_SIZE as u32,
+            matrix_max_position,
+            PrefillScratchConfig::default(),
+        )?;
+        Ok(plan.priced_upper_bound(|logical_bytes| {
+            Ok(self
+                .context()
+                .shared_buffer_size_and_align(logical_bytes)?
+                .size)
+        })?)
+    }
 }
 
 impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
@@ -1095,6 +1128,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         Ok(WorkspaceLensFullReadoutWorkspace {
             model: self.model,
             row_capacity,
+            transport_bound: false,
             transport: MetalTensor::zeros_f16(
                 context,
                 vec![hidden_size as u64, hidden_size as u64],
@@ -6631,6 +6665,21 @@ fn validate_selected_token_ids(
 }
 
 impl WorkspaceLensFullReadoutWorkspace<'_> {
+    /// Bind one F16 hidden-to-hidden transport for repeated row or tile use.
+    pub fn bind_f16_transport(&mut self, transport_bytes: &[u8]) -> Result<(), WorkspaceLensError> {
+        self.transport_bound = false;
+        let hidden_size = self.model.arch().hidden_size as usize;
+        validate_full_readout_transport_size(transport_bytes, hidden_size)?;
+        write_tensor_bytes(
+            &self.transport,
+            transport_bytes,
+            transport_bytes.len(),
+            "full readout transport upload",
+        )?;
+        self.transport_bound = true;
+        Ok(())
+    }
+
     /// Read one row with the historical matvec, full-logit validation, and
     /// exact CPU top-k path.
     pub fn apply_row_f16_transport_topk_with_vector(
@@ -6673,12 +6722,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             .ok_or(WorkspaceLensError::SizeOverflow)?;
         enforce_workspace_lens_byte_budget("full-vocabulary F16 transport readout", peak_bytes)?;
 
-        write_tensor_bytes(
-            &self.transport,
-            transport_bytes,
-            transport_bytes.len(),
-            "full readout transport upload",
-        )?;
+        self.bind_f16_transport(transport_bytes)?;
         write_tensor_bytes(
             &self.source,
             bytemuck::cast_slice(source_residual),
@@ -6795,61 +6839,49 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
         top_k: usize,
         transported_source_positions: &[usize],
     ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
-        if !std::ptr::eq(self.model, capture.model) {
-            return Err(WorkspaceLensError::PackedCaptureModelMismatch);
-        }
-        if top_k == 0 || top_k > MAX_FULL_READOUT_TOP_K {
-            return Err(WorkspaceLensError::InvalidFullReadoutTopK {
-                got: top_k,
-                max: MAX_FULL_READOUT_TOP_K,
-            });
-        }
-        let position_count = capture.position_count();
-        if position_count > self.row_capacity {
-            return Err(WorkspaceLensError::FullReadoutWorkspaceTooSmall {
-                capacity: self.row_capacity,
-                required: position_count,
-            });
-        }
-        let layer_slot = capture.layer_slot(source_layer)?;
-        let arch = self.model.arch();
-        let hidden_size = arch.hidden_size as usize;
-        let vocab_size = arch.vocab_size as usize;
-        validate_full_readout_transport_size(transport_bytes, hidden_size)?;
-        validate_full_readout_tail(self.model.metal_model(), hidden_size, vocab_size)?;
-        let transported_position_rows = validate_packed_transported_vector_positions(
-            capture.start_position(),
-            position_count,
+        self.validate_packed_capture_readout(
+            capture,
+            source_layer,
+            Some(transport_bytes),
+            top_k,
             transported_source_positions,
         )?;
-        let hidden_elements = checked_product(position_count, hidden_size)?;
-        let logits_elements = checked_product(position_count, vocab_size)?;
-        let compact_elements = checked_product(position_count, FULL_READOUT_CANDIDATE_COUNT)?;
-        let hidden_bytes = checked_product(hidden_elements, std::mem::size_of::<f32>())?;
-        let logits_bytes = checked_product(logits_elements, std::mem::size_of::<f32>())?;
-        let compact_bytes = checked_product(compact_elements, 2 * std::mem::size_of::<u32>())?;
-        let transported_vector_bytes = checked_product(
-            checked_product(transported_position_rows.len(), hidden_size)?,
-            std::mem::size_of::<f32>(),
+        self.bind_f16_transport(transport_bytes)?;
+        self.apply_packed_capture_bound_f16_transport_topk_with_vectors(
+            capture,
+            source_layer,
+            top_k,
+            transported_source_positions,
+        )
+    }
+
+    /// Apply the currently bound transport while preserving this capture's
+    /// prompt-local row shape and arithmetic topology.
+    pub fn apply_packed_capture_bound_f16_transport_topk_with_vectors(
+        &mut self,
+        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
+        source_layer: u32,
+        top_k: usize,
+        transported_source_positions: &[usize],
+    ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
+        if !self.transport_bound {
+            return Err(WorkspaceLensError::FullReadoutTransportNotBound);
+        }
+        let validation = self.validate_packed_capture_readout(
+            capture,
+            source_layer,
+            None,
+            top_k,
+            transported_source_positions,
         )?;
-        let peak_bytes = transport_bytes
-            .len()
-            .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(3)?))
-            .and_then(|bytes| bytes.checked_add(logits_bytes))
-            .and_then(|bytes| bytes.checked_add(compact_bytes))
-            .and_then(|bytes| bytes.checked_add(transported_vector_bytes))
-            .ok_or(WorkspaceLensError::SizeOverflow)?;
-        enforce_workspace_lens_byte_budget(
-            "packed full-vocabulary F16 transport readout",
-            peak_bytes,
-        )?;
-        write_tensor_bytes(
-            &self.transport,
-            transport_bytes,
-            transport_bytes.len(),
-            "packed full readout transport upload",
-        )?;
+        let PackedFullReadoutValidation {
+            layer_slot,
+            position_count,
+            hidden_size,
+            vocab_size,
+            transported_position_rows,
+        } = validation;
+        let vocab_size_u32 = self.model.arch().vocab_size;
         let hidden_shape = vec![position_count as u64, hidden_size as u64];
         let source = self.source.view_subrange(0, hidden_shape.clone());
         let transported = self.transported.view_subrange(0, hidden_shape.clone());
@@ -6982,7 +7014,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             capture.token_ids(),
             capture.start_position(),
             top_k,
-            arch.vocab_size,
+            vocab_size_u32,
             &first_ids,
             &first_values,
             &second_ids,
@@ -7006,6 +7038,74 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             readout_wall_ms,
             positions,
             transported_vectors,
+        })
+    }
+
+    fn validate_packed_capture_readout(
+        &self,
+        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
+        source_layer: u32,
+        transport_bytes: Option<&[u8]>,
+        top_k: usize,
+        transported_source_positions: &[usize],
+    ) -> Result<PackedFullReadoutValidation, WorkspaceLensError> {
+        if !std::ptr::eq(self.model, capture.model) {
+            return Err(WorkspaceLensError::PackedCaptureModelMismatch);
+        }
+        if top_k == 0 || top_k > MAX_FULL_READOUT_TOP_K {
+            return Err(WorkspaceLensError::InvalidFullReadoutTopK {
+                got: top_k,
+                max: MAX_FULL_READOUT_TOP_K,
+            });
+        }
+        let position_count = capture.position_count();
+        if position_count > self.row_capacity {
+            return Err(WorkspaceLensError::FullReadoutWorkspaceTooSmall {
+                capacity: self.row_capacity,
+                required: position_count,
+            });
+        }
+        let layer_slot = capture.layer_slot(source_layer)?;
+        let arch = self.model.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let vocab_size = arch.vocab_size as usize;
+        if let Some(transport_bytes) = transport_bytes {
+            validate_full_readout_transport_size(transport_bytes, hidden_size)?;
+        }
+        validate_full_readout_tail(self.model.metal_model(), hidden_size, vocab_size)?;
+        let transported_position_rows = validate_packed_transported_vector_positions(
+            capture.start_position(),
+            position_count,
+            transported_source_positions,
+        )?;
+        let hidden_elements = checked_product(position_count, hidden_size)?;
+        let logits_elements = checked_product(position_count, vocab_size)?;
+        let compact_elements = checked_product(position_count, FULL_READOUT_CANDIDATE_COUNT)?;
+        let hidden_bytes = checked_product(hidden_elements, std::mem::size_of::<f32>())?;
+        let logits_bytes = checked_product(logits_elements, std::mem::size_of::<f32>())?;
+        let compact_bytes = checked_product(compact_elements, 2 * std::mem::size_of::<u32>())?;
+        let transported_vector_bytes = checked_product(
+            checked_product(transported_position_rows.len(), hidden_size)?,
+            std::mem::size_of::<f32>(),
+        )?;
+        let transport_bytes = checked_product(checked_product(hidden_size, hidden_size)?, 2)?;
+        let peak_bytes = transport_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(hidden_bytes.checked_mul(3)?))
+            .and_then(|bytes| bytes.checked_add(logits_bytes))
+            .and_then(|bytes| bytes.checked_add(compact_bytes))
+            .and_then(|bytes| bytes.checked_add(transported_vector_bytes))
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        enforce_workspace_lens_byte_budget(
+            "packed full-vocabulary F16 transport readout",
+            peak_bytes,
+        )?;
+        Ok(PackedFullReadoutValidation {
+            layer_slot,
+            position_count,
+            hidden_size,
+            vocab_size,
+            transported_position_rows,
         })
     }
 }
@@ -8681,6 +8781,26 @@ mod tests {
         let mut reusable = workspace_lens
             .full_readout_workspace(token_ids.len())
             .expect("allocate reusable full-readout workspace");
+        assert!(matches!(
+            reusable.apply_packed_capture_bound_f16_transport_topk_with_vectors(
+                &capture,
+                source_layer,
+                MAX_FULL_READOUT_TOP_K,
+                &[0, 16, 127],
+            ),
+            Err(WorkspaceLensError::FullReadoutTransportNotBound)
+        ));
+        reusable
+            .bind_f16_transport(&transport)
+            .expect("bind reusable source-layer transport");
+        let reusable_bound_packed = reusable
+            .apply_packed_capture_bound_f16_transport_topk_with_vectors(
+                &capture,
+                source_layer,
+                MAX_FULL_READOUT_TOP_K,
+                &[0, 16, 127],
+            )
+            .expect("bound reusable packed source-layer readout");
         let reusable_packed = reusable
             .apply_packed_capture_f16_transport_topk_with_vectors(
                 &capture,
@@ -8727,6 +8847,7 @@ mod tests {
                 assert_eq!(candidate.transported_vectors, legacy.transported_vectors);
             };
         assert_exact_packed(&packed, &reusable_packed);
+        assert_exact_packed(&packed, &reusable_bound_packed);
         assert_exact_packed(&other_packed, &reusable_other_packed);
         assert_exact_packed(&packed, &reusable_packed_repeat);
         assert_eq!(packed.transported_vectors.len(), 3);

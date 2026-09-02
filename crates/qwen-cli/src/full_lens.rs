@@ -340,7 +340,7 @@ pub(crate) struct ReadFullArgs {
     #[arg(long, value_delimiter = ',')]
     pub(crate) layers: Vec<u32>,
 
-    /// Full-vocabulary results per layer (maximum 16).
+    /// Full-vocabulary results per layer (Qwen maximum 25; Muse maximum 32).
     #[arg(long, default_value_t = 10)]
     pub(crate) top_k: usize,
 

@@ -16437,6 +16437,7 @@ pub fn encode_mask_row_indices_f32(
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
+        row_count: u32,
         row_width: u32,
         index_count: u32,
     }
@@ -16445,6 +16446,7 @@ pub fn encode_mask_row_indices_f32(
     enc.set_bytes(
         0,
         &Args {
+            row_count: n_rows as u32,
             row_width: row_width as u32,
             index_count: index_count as u32,
         },
@@ -28591,7 +28593,8 @@ mod tests {
 
     #[test]
     fn mps_two_pass_topk_matches_cpu_at_full_vocabulary_width() {
-        const ROWS: usize = 128;
+        // Exercise the rounded mask-dispatch tail as well as full vocabulary width.
+        const ROWS: usize = 3;
         const COLUMNS: usize = 248_320;
         const PASS_K: usize = 16;
         const RESULT_K: usize = 25;

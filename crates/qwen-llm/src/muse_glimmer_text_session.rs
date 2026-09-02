@@ -11,11 +11,12 @@ use crate::metal::encode_mat_mat_q8_0_f32;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalMemoryAdmissionReason,
     MetalTensor, PostBlockIntervention, encode_add_inplace_f32, encode_copy_offset_f32,
-    encode_get_rows_f32, encode_mat_vec_f16_f32, encode_mat_vec_q8_0_batch_f32,
-    encode_post_block_intervention_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rms_norm_mul_rows_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_mul_f32,
-    encode_silu_mul_f32, encode_topk16_f32, evaluate_metal_memory_admission,
-    evaluate_metal_memory_admission_with_cpu_bytes, host_page_size_bytes,
+    encode_get_rows_f32, encode_mask_row_indices_f32, encode_mat_vec_f16_f32,
+    encode_mat_vec_q8_0_batch_f32, encode_post_block_intervention_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_sigmoid_mul_f32, encode_silu_mul_f32, encode_topk16_f32,
+    evaluate_metal_memory_admission, evaluate_metal_memory_admission_with_cpu_bytes,
+    host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
@@ -56,6 +57,7 @@ pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
 pub const MUSE_GLIMMER_PACKED_PREFILL_QUANTUM: usize = 16;
 pub const MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS: usize = 128;
 const MUSE_GLIMMER_FULL_READOUT_PASS_K: usize = 16;
+pub const MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K: usize = MUSE_GLIMMER_FULL_READOUT_PASS_K * 2;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_ROWS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -868,6 +870,8 @@ pub struct MuseGlimmerFullReadoutWorkspace {
     logits: MetalTensor,
     first_ids: MetalTensor,
     first_values: MetalTensor,
+    second_ids: MetalTensor,
+    second_values: MetalTensor,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -919,6 +923,8 @@ impl MuseGlimmerFullReadoutWorkspacePlan {
             row_hidden_bytes,
             row_hidden_bytes,
             logits_bytes,
+            compact_elements * i32_bytes,
+            compact_elements * f32_bytes,
             compact_elements * i32_bytes,
             compact_elements * f32_bytes,
         ];
@@ -1211,6 +1217,8 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             logits: MetalTensor::zeros_f32(self.ctx, vec![rows, vocab_size as u64])?,
             first_ids: MetalTensor::zeros_i32(self.ctx, vec![rows, pass_k])?,
             first_values: MetalTensor::zeros_f32(self.ctx, vec![rows, pass_k])?,
+            second_ids: MetalTensor::zeros_i32(self.ctx, vec![rows, pass_k])?,
+            second_values: MetalTensor::zeros_f32(self.ctx, vec![rows, pass_k])?,
         })
     }
 
@@ -1239,10 +1247,15 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         {
             return invalid("prepared F16 transport does not match the loaded model");
         }
-        if top_k == 0 || top_k > MUSE_GLIMMER_FULL_READOUT_PASS_K {
+        if top_k == 0 || top_k > MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K {
             return invalid(format!(
                 "full-readout top-k must be in 1..={}, got {top_k}",
-                MUSE_GLIMMER_FULL_READOUT_PASS_K
+                MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K
+            ));
+        }
+        if top_k > vocab_size {
+            return invalid(format!(
+                "full-readout top-k {top_k} exceeds vocabulary size {vocab_size}"
             ));
         }
         if source_rows.is_empty() || !source_rows.len().is_multiple_of(hidden_size) {
@@ -1294,6 +1307,14 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             vec![row_count as u64, MUSE_GLIMMER_FULL_READOUT_PASS_K as u64],
         );
         let first_values = workspace.first_values.view_subrange(
+            0,
+            vec![row_count as u64, MUSE_GLIMMER_FULL_READOUT_PASS_K as u64],
+        );
+        let second_ids = workspace.second_ids.view_subrange(
+            0,
+            vec![row_count as u64, MUSE_GLIMMER_FULL_READOUT_PASS_K as u64],
+        );
+        let second_values = workspace.second_values.view_subrange(
             0,
             vec![row_count as u64, MUSE_GLIMMER_FULL_READOUT_PASS_K as u64],
         );
@@ -1409,6 +1430,26 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 row_count,
                 vocab_size,
             )?;
+            if top_k > MUSE_GLIMMER_FULL_READOUT_PASS_K {
+                encode_mask_row_indices_f32(
+                    self.ctx,
+                    &output_tail_encoder,
+                    &logits,
+                    &first_ids,
+                    row_count,
+                    vocab_size,
+                    MUSE_GLIMMER_FULL_READOUT_PASS_K,
+                )?;
+                encode_topk16_f32(
+                    self.ctx,
+                    &output_tail_encoder,
+                    &logits,
+                    &second_ids,
+                    &second_values,
+                    row_count,
+                    vocab_size,
+                )?;
+            }
             Ok::<(), MuseGlimmerTextSessionError>(())
         })();
         output_tail_encoder.end();
@@ -1426,8 +1467,20 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             (output_tail_command.GPUEndTime() - output_tail_command.GPUStartTime()) * 1e3;
         let first_ids = read_i32(&first_ids);
         let first_values = read_f32(&first_values);
-        let rows =
-            build_full_readout_rows(row_count, vocab_size, top_k, &first_ids, &first_values)?;
+        let (second_ids, second_values) = if top_k > MUSE_GLIMMER_FULL_READOUT_PASS_K {
+            (read_i32(&second_ids), read_f32(&second_values))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let rows = build_full_readout_rows(
+            row_count,
+            vocab_size,
+            top_k,
+            &first_ids,
+            &first_values,
+            &second_ids,
+            &second_values,
+        )?;
         let output_tail_wall_ms = output_tail_started.elapsed().as_secs_f64() * 1e3;
         Ok(MuseGlimmerBatchedFullReadout {
             row_count,
@@ -2933,54 +2986,115 @@ fn build_full_readout_rows(
     top_k: usize,
     first_ids: &[i32],
     first_values: &[f32],
+    second_ids: &[i32],
+    second_values: &[f32],
 ) -> Result<Vec<MuseGlimmerFullReadoutRow>, MuseGlimmerTextSessionError> {
-    let expected = row_count * MUSE_GLIMMER_FULL_READOUT_PASS_K;
+    if top_k == 0 || top_k > MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K || top_k > vocab_size {
+        return invalid(format!(
+            "full-readout top-k {top_k} is outside the supported vocabulary bound"
+        ));
+    }
+    let expected = row_count
+        .checked_mul(MUSE_GLIMMER_FULL_READOUT_PASS_K)
+        .ok_or_else(|| {
+            MuseGlimmerTextSessionError::Invalid("full-readout result size overflow".into())
+        })?;
     if first_ids.len() != expected || first_values.len() != expected {
-        return invalid("full-readout compact result size is inconsistent");
+        return invalid("full-readout first-pass result size is inconsistent");
+    }
+    let second_expected = if top_k > MUSE_GLIMMER_FULL_READOUT_PASS_K {
+        expected
+    } else {
+        0
+    };
+    if second_ids.len() != second_expected || second_values.len() != second_expected {
+        return invalid("full-readout second-pass result size is inconsistent");
     }
     let mut rows = Vec::with_capacity(row_count);
     for row in 0..row_count {
         let base = row * MUSE_GLIMMER_FULL_READOUT_PASS_K;
-        let mut scores = Vec::with_capacity(top_k);
-        let mut previous: Option<MuseGlimmerFullReadoutScore> = None;
-        for slot in 0..MUSE_GLIMMER_FULL_READOUT_PASS_K {
-            let token_id = first_ids[base + slot];
-            let logit = first_values[base + slot];
-            if token_id < 0 || token_id as usize >= vocab_size {
-                return invalid(format!(
-                    "full-readout row {row} returned invalid token ID {token_id}"
-                ));
-            }
-            if !logit.is_finite() {
-                return invalid(format!(
-                    "full-readout row {row} returned non-finite compact logit"
-                ));
-            }
-            let score = MuseGlimmerFullReadoutScore {
-                token_id: token_id as u32,
-                logit,
-            };
-            if first_ids[base..base + slot].contains(&token_id) {
-                return invalid(format!(
-                    "full-readout row {row} returned duplicate token ID {token_id}"
-                ));
-            }
-            if previous.as_ref().is_some_and(|prior| {
-                let order = prior.logit.total_cmp(&score.logit);
-                order.is_lt() || (order.is_eq() && prior.token_id > score.token_id)
-            }) {
-                return invalid(format!(
-                    "full-readout row {row} is not deterministically ordered"
-                ));
-            }
-            previous = Some(score.clone());
-            if slot < top_k {
-                scores.push(score);
-            }
+        let candidate_capacity = if second_expected == 0 {
+            MUSE_GLIMMER_FULL_READOUT_PASS_K
+        } else {
+            MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K
+        };
+        let mut scores = Vec::with_capacity(candidate_capacity);
+        append_full_readout_pass(
+            row,
+            vocab_size,
+            "first",
+            &first_ids[base..base + MUSE_GLIMMER_FULL_READOUT_PASS_K],
+            &first_values[base..base + MUSE_GLIMMER_FULL_READOUT_PASS_K],
+            &mut scores,
+        )?;
+        if second_expected != 0 {
+            append_full_readout_pass(
+                row,
+                vocab_size,
+                "second",
+                &second_ids[base..base + MUSE_GLIMMER_FULL_READOUT_PASS_K],
+                &second_values[base..base + MUSE_GLIMMER_FULL_READOUT_PASS_K],
+                &mut scores,
+            )?;
         }
+        scores.sort_by(|left, right| {
+            right
+                .logit
+                .total_cmp(&left.logit)
+                .then_with(|| left.token_id.cmp(&right.token_id))
+        });
+        scores.truncate(top_k);
         rows.push(MuseGlimmerFullReadoutRow { row, scores });
     }
     Ok(rows)
+}
+
+fn append_full_readout_pass(
+    row: usize,
+    vocab_size: usize,
+    pass: &str,
+    ids: &[i32],
+    values: &[f32],
+    scores: &mut Vec<MuseGlimmerFullReadoutScore>,
+) -> Result<(), MuseGlimmerTextSessionError> {
+    debug_assert_eq!(ids.len(), MUSE_GLIMMER_FULL_READOUT_PASS_K);
+    debug_assert_eq!(values.len(), MUSE_GLIMMER_FULL_READOUT_PASS_K);
+    let mut previous: Option<MuseGlimmerFullReadoutScore> = None;
+    for (&token_id, &logit) in ids.iter().zip(values) {
+        if token_id < 0 || token_id as usize >= vocab_size {
+            return invalid(format!(
+                "full-readout row {row} {pass} pass returned invalid token ID {token_id}"
+            ));
+        }
+        if !logit.is_finite() {
+            return invalid(format!(
+                "full-readout row {row} {pass} pass returned non-finite compact logit"
+            ));
+        }
+        let score = MuseGlimmerFullReadoutScore {
+            token_id: token_id as u32,
+            logit,
+        };
+        if scores
+            .iter()
+            .any(|existing| existing.token_id == score.token_id)
+        {
+            return invalid(format!(
+                "full-readout row {row} returned duplicate token ID {token_id}"
+            ));
+        }
+        if previous.as_ref().is_some_and(|prior| {
+            let order = prior.logit.total_cmp(&score.logit);
+            order.is_lt() || (order.is_eq() && prior.token_id > score.token_id)
+        }) {
+            return invalid(format!(
+                "full-readout row {row} {pass} pass is not deterministically ordered"
+            ));
+        }
+        previous = Some(score.clone());
+        scores.push(score);
+    }
+    Ok(())
 }
 
 fn session_allocation_specs(
@@ -3213,19 +3327,42 @@ mod tests {
             GgmlType::F32,
         )
         .unwrap();
-        let ids = MetalTensor::zeros_i32(&ctx, vec![3, 16]).unwrap();
-        let values = MetalTensor::zeros_f32(&ctx, vec![3, 16]).unwrap();
+        let first_ids = MetalTensor::zeros_i32(&ctx, vec![3, 16]).unwrap();
+        let first_values = MetalTensor::zeros_f32(&ctx, vec![3, 16]).unwrap();
+        let second_ids = MetalTensor::zeros_i32(&ctx, vec![3, 16]).unwrap();
+        let second_values = MetalTensor::zeros_f32(&ctx, vec![3, 16]).unwrap();
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
-        encode_topk16_f32(&ctx, &encoder, &input, &ids, &values, 3, 64).unwrap();
+        encode_topk16_f32(&ctx, &encoder, &input, &first_ids, &first_values, 3, 64).unwrap();
+        encode_mask_row_indices_f32(&ctx, &encoder, &input, &first_ids, 3, 64, 16).unwrap();
+        encode_topk16_f32(&ctx, &encoder, &input, &second_ids, &second_values, 3, 64).unwrap();
         encoder.end();
         command.commit();
         command.waitUntilCompleted();
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
-        let actual =
-            build_full_readout_rows(3, 64, 16, &read_i32(&ids), &read_f32(&values)).unwrap();
-        for (row, source) in actual.iter().zip(&logits) {
-            assert_eq!(row.scores, scalar_top_k(source, 16));
+        let first_ids = read_i32(&first_ids);
+        let first_values = read_f32(&first_values);
+        let second_ids = read_i32(&second_ids);
+        let second_values = read_f32(&second_values);
+        for top_k in [16, 17, 25, 32] {
+            let (second_ids, second_values) = if top_k > 16 {
+                (second_ids.as_slice(), second_values.as_slice())
+            } else {
+                (&[][..], &[][..])
+            };
+            let actual = build_full_readout_rows(
+                3,
+                64,
+                top_k,
+                &first_ids,
+                &first_values,
+                second_ids,
+                second_values,
+            )
+            .unwrap();
+            for (row, source) in actual.iter().zip(&logits) {
+                assert_eq!(row.scores, scalar_top_k(source, top_k));
+            }
         }
     }
 
@@ -3235,7 +3372,7 @@ mod tests {
         let values = (0..MUSE_GLIMMER_FULL_READOUT_PASS_K)
             .map(|value| value as f32)
             .collect::<Vec<_>>();
-        assert!(build_full_readout_rows(1, 64, 8, &ids, &values).is_err());
+        assert!(build_full_readout_rows(1, 64, 8, &ids, &values, &[], &[]).is_err());
     }
 
     #[test]
@@ -3259,6 +3396,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.row_capacity(), MUSE_GLIMMER_FULL_READOUT_MAX_ROWS);
+        assert_eq!(
+            plan.logical_bytes(),
+            (3 * 64 * MUSE_GLIMMER_FULL_READOUT_MAX_ROWS * std::mem::size_of::<f32>()
+                + 256 * MUSE_GLIMMER_FULL_READOUT_MAX_ROWS * std::mem::size_of::<f32>()
+                + 2 * MUSE_GLIMMER_FULL_READOUT_PASS_K
+                    * MUSE_GLIMMER_FULL_READOUT_MAX_ROWS
+                    * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>())) as u64
+        );
         assert!(plan.priced_upper_bytes() >= plan.logical_bytes());
         assert!(plan.prepared_transport_reserve_bytes() >= 64 * 64 * 2);
         assert_eq!(plan.host_transport_reserve_bytes(), 64 * 64 * 2);

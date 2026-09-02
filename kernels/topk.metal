@@ -2,6 +2,7 @@
 using namespace metal;
 
 struct mask_row_indices_args {
+    uint row_count;
     uint row_width;
     uint index_count;
 };
@@ -11,6 +12,9 @@ kernel void kernel_mask_row_indices_f32(
         device       float * values           [[buffer(1)]],
         device const uint  * indices          [[buffer(2)]],
         uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.row_count * args.index_count) {
+        return;
+    }
     const uint row = gid / args.index_count;
     const uint index = indices[gid];
     if (index < args.row_width) {

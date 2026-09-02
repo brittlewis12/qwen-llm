@@ -21,7 +21,8 @@ use qwen_llm::metal::{
 use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME, MuseGlimmerModel};
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
 use qwen_llm::muse_glimmer_text_session::{
-    MUSE_GLIMMER_FULL_READOUT_MAX_ROWS, MuseGlimmerFullReadoutWorkspacePlan,
+    MUSE_GLIMMER_FULL_READOUT_MAX_ROWS, MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K,
+    MuseGlimmerFullReadoutWorkspacePlan,
 };
 use qwen_llm::tokenizer::LlamaCppTokenizer;
 use serde::{Deserialize, Serialize};
@@ -1361,10 +1362,7 @@ fn validate_trace_args(args: &TraceFullArgs) -> Result<()> {
         args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
         "--prompt must not be empty"
     );
-    ensure!(
-        args.top_k > 0 && args.top_k <= 16,
-        "--top-k must be in 1..=16"
-    );
+    validate_muse_top_k(args.top_k)?;
     ensure!(
         args.max_tokens.is_none_or(|max_tokens| max_tokens > 0),
         "Muse --max-tokens must be positive"
@@ -1559,10 +1557,7 @@ fn validate_read_args(args: &ReadFullArgs) -> Result<()> {
         args.prompt.is_some() ^ !args.token_ids.is_empty(),
         "exactly one of --prompt or --token-ids is required"
     );
-    ensure!(
-        args.top_k > 0 && args.top_k <= 16,
-        "--top-k must be in 1..=16"
-    );
+    validate_muse_top_k(args.top_k)?;
     ensure!(args.max_tokens > 0, "--max-tokens must be positive");
     ensure!(
         args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
@@ -1697,7 +1692,7 @@ fn rms_denominator(values: &[f32], epsilon: f32) -> f32 {
 }
 
 fn top_k_logits(logits: &[f32], top_k: usize) -> Result<Vec<(u32, f32)>> {
-    ensure!(top_k > 0 && top_k <= 16, "invalid Muse top-k bound");
+    validate_muse_top_k(top_k)?;
     let mut ranked = Vec::<(u32, f32)>::with_capacity(top_k);
     for (token_id, &logit) in logits.iter().enumerate() {
         ensure!(
@@ -1718,6 +1713,14 @@ fn top_k_logits(logits: &[f32], top_k: usize) -> Result<Vec<(u32, f32)>> {
         "Muse vocabulary is smaller than top-k"
     );
     Ok(ranked)
+}
+
+fn validate_muse_top_k(top_k: usize) -> Result<()> {
+    ensure!(
+        (1..=MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K).contains(&top_k),
+        "Muse --top-k must be in 1..={MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K}"
+    );
+    Ok(())
 }
 
 fn compare_scores(left: &(u32, f32), right: &(u32, f32)) -> std::cmp::Ordering {
@@ -2392,6 +2395,16 @@ mod tests {
         let mut invalid = logits;
         invalid[3] = f32::NAN;
         assert!(top_k_logits(&invalid, 3).is_err());
+
+        let tied = vec![1.0; 64];
+        assert_eq!(
+            top_k_logits(&tied, 32).unwrap(),
+            (0..32).map(|token_id| (token_id, 1.0)).collect::<Vec<_>>()
+        );
+        assert!(validate_muse_top_k(0).is_err());
+        assert!(validate_muse_top_k(1).is_ok());
+        assert!(validate_muse_top_k(32).is_ok());
+        assert!(validate_muse_top_k(33).is_err());
     }
 
     #[test]

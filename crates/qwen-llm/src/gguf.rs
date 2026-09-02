@@ -446,6 +446,33 @@ impl GgufFile {
             .and_then(|v| v.as_str().map(|s| s.to_string()))
     }
 
+    /// Context declared by the opened model's architecture metadata.
+    pub fn declared_context_length(&self) -> Result<usize, GgufError> {
+        let architecture = self
+            .get_str("general.architecture")
+            .ok_or_else(|| GgufError::Decode("missing general.architecture metadata".into()))?;
+        let key = format!("{architecture}.context_length");
+        let value = self
+            .get_u64(&key)
+            .ok_or_else(|| GgufError::Decode(format!("missing required metadata key {key:?}")))?;
+        if value > u64::from(u32::MAX) + 1 {
+            return Err(GgufError::Decode(format!(
+                "metadata key {key:?} exceeds the runtime position address space"
+            )));
+        }
+        let value = usize::try_from(value).map_err(|_| {
+            GgufError::Decode(format!(
+                "metadata key {key:?} does not fit the platform context size"
+            ))
+        })?;
+        if value == 0 {
+            return Err(GgufError::Decode(format!(
+                "metadata key {key:?} must be nonzero"
+            )));
+        }
+        Ok(value)
+    }
+
     /// Convenience: lookup a u64-typed metadata value by key.
     pub fn get_u64(&self, key: &str) -> Option<u64> {
         metadata_u64(&self.model, key)

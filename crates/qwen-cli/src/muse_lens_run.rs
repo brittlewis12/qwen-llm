@@ -97,14 +97,17 @@ pub(crate) fn run(
         "prompt must encode to at least one token"
     );
     ensure!(
-        prompt_ids.len() <= 4096 * 16,
-        "prompt is too long for the bounded Lens runner"
-    );
-    ensure!(
         prompt_ids
             .iter()
             .all(|&id| id >= 0 && (id as u32) < config.vocab_size),
         "Muse prompt contains an invalid token ID"
+    );
+    let forward_count =
+        super::lens_run::required_forward_count(prompt_ids.len(), args.max_new_tokens)?;
+    ensure!(
+        forward_count <= config.context_length as usize,
+        "request requires {forward_count} token forwards, exceeding Muse model context {}",
+        config.context_length,
     );
     let bound_plan = bind_plan_positions(&plan, &prepared_input.rendering, prompt_ids.len())?;
     let plan = &bound_plan.resolved;
@@ -125,10 +128,6 @@ pub(crate) fn run(
         "Muse lens execution must not hash model weights"
     );
     let content_id = super::hex(&content.content_id);
-    let forward_count = prompt_ids
-        .len()
-        .checked_add(args.max_new_tokens.saturating_sub(1))
-        .context("Muse forward count overflow")?;
     let context = MetalContext::new().context("initialize Metal for Muse Lens run")?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, forward_count)
         .context("load Muse Lens runner model")?;

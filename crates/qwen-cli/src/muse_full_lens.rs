@@ -474,6 +474,33 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             "Muse published full transport does not match the deployed release geometry"
         ),
     }
+    let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
+        .context("load Muse tokenizer for full readout")?;
+    muse_lens_artifact::validate_tokenizer(&tokenizer, &bound.config)?;
+    let (input_source, add_special_tokens, token_ids) = prepare_read_input(&args, &tokenizer)?;
+    let selected_position = args.position.unwrap_or(token_ids.len() - 1);
+    ensure!(
+        selected_position < token_ids.len(),
+        "--position {selected_position} is outside {} input tokens",
+        token_ids.len()
+    );
+    let prefix = &token_ids[..=selected_position];
+    ensure!(
+        prefix.len() <= bound.config.context_length as usize,
+        "Muse full readout requires {} token forwards, exceeding model context {}",
+        prefix.len(),
+        bound.config.context_length,
+    );
+    let layers = select_layers(&args.layers, read_artifact.source_layers())?;
+    let mut capture_layers = layers.clone();
+    capture_layers.sort_unstable();
+    let capture_slots = capture_layers
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(slot, layer)| (layer, slot))
+        .collect::<BTreeMap<_, _>>();
+
     let content = checkpoint_content_identity_without_weight_hashing(
         &gguf,
         &CheckpointIdentityCache::new(&args.identity_cache),
@@ -496,27 +523,6 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         );
     }
 
-    let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
-        .context("load Muse tokenizer for full readout")?;
-    muse_lens_artifact::validate_tokenizer(&tokenizer, &bound.config)?;
-    let (input_source, add_special_tokens, token_ids) = prepare_read_input(&args, &tokenizer)?;
-    let selected_position = args.position.unwrap_or(token_ids.len() - 1);
-    ensure!(
-        selected_position < token_ids.len(),
-        "--position {selected_position} is outside {} input tokens",
-        token_ids.len()
-    );
-    let layers = select_layers(&args.layers, read_artifact.source_layers())?;
-    let mut capture_layers = layers.clone();
-    capture_layers.sort_unstable();
-    let capture_slots = capture_layers
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(slot, layer)| (layer, slot))
-        .collect::<BTreeMap<_, _>>();
-
-    let prefix = &token_ids[..=selected_position];
     let context = MetalContext::new().context("initialize Metal for Muse full readout")?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, prefix.len())
         .context("load Muse model for full readout")?;
@@ -1437,10 +1443,7 @@ fn validate_read_args(args: &ReadFullArgs) -> Result<()> {
         args.top_k > 0 && args.top_k <= 16,
         "--top-k must be in 1..=16"
     );
-    ensure!(
-        args.max_tokens > 0 && args.max_tokens <= 4_096,
-        "--max-tokens must be in 1..=4096"
-    );
+    ensure!(args.max_tokens > 0, "--max-tokens must be positive");
     ensure!(
         args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
         "--prompt must not be empty"

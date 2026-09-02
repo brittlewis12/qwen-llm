@@ -1670,9 +1670,7 @@ impl RunDocument {
                 self.input_source.as_str(),
                 "prompt" | "token_ids" | "messages" | "open_responses"
             ) && !self.prompt_token_ids.is_empty()
-                && self.prompt_token_ids.len() <= lens_run::MAX_NEW_TOKENS * 16
-                && self.max_new_tokens > 0
-                && self.max_new_tokens <= lens_run::MAX_NEW_TOKENS,
+                && self.max_new_tokens > 0,
             "run input source, prompt, or generation bound is invalid"
         );
         ensure!(

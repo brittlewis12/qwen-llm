@@ -51,7 +51,6 @@ const MATRIX_BYTES: u64 = (HIDDEN_SIZE as u64) * (HIDDEN_SIZE as u64) * 2;
 const PAYLOAD_BYTES: u64 = MATRIX_BYTES * (SOURCE_LAYER_COUNT as u64);
 const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROJECTED_FULL_TOKENS: usize = 32;
-const MAX_FULL_READOUT_PROMPT_TOKENS: usize = 4_096;
 const MAX_FULL_READOUT_TOP_K: usize = 25;
 const MAX_TRACE_FULL_VECTOR_CELLS: usize = 32;
 const MAX_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
@@ -1536,28 +1535,14 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         "--layers must be unique source layers present in the full lens"
     );
 
-    let runtime = Runtime::metal().context("initialize Metal runtime")?;
-    let loaded = runtime
-        .load_model_with_intent(
-            &args.model,
-            LoadedModelConfig::default(),
-            ModelLoadIntent::SinglePassAnalysis,
-        )
-        .with_context(|| format!("load model {}", args.model.display()))?;
-    validate_deployed_model(&manifest, &loaded)?;
-    let arch = loaded.arch();
-    let identity = loaded.workspace_lens_identity();
-    let content = checkpoint_content_identity(
-        loaded.gguf(),
-        &CheckpointIdentityCache::new(&args.identity_cache),
-    )
-    .with_context(|| {
-        format!(
-            "resolve strong model identity using {}",
-            args.identity_cache.display()
-        )
-    })?;
-    let tokenizer = loaded.tokenizer().context("load tokenizer from GGUF")?;
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    ensure!(
+        ModelFamily::detect(&gguf) == Some(ModelFamily::Qwen35),
+        "full-lens readout requires an ordinary dense Qwen model"
+    );
+    let model_context_tokens = gguf.declared_context_length()?;
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load tokenizer from GGUF")?;
     let (input_source, add_special_tokens, token_ids) = if let Some(prompt) = &args.prompt {
         (
             "prompt",
@@ -1573,9 +1558,9 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             .context("allocate explicit full-lens token IDs")?;
         for &token_id in &args.token_ids {
             ensure!(
-                token_id < arch.vocab_size && token_id <= i32::MAX as u32,
+                token_id < tokenizer.n_vocab() && token_id <= i32::MAX as u32,
                 "--token-ids entry {token_id} is outside vocabulary {}",
-                arch.vocab_size
+                tokenizer.n_vocab()
             );
             token_ids.push(token_id as i32);
         }
@@ -1598,6 +1583,41 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         token_ids.len()
     );
     let prefix = &token_ids[..=selected_position];
+    ensure!(
+        prefix.len() <= model_context_tokens,
+        "full-lens readout requires {} token forwards, exceeding model context {model_context_tokens}",
+        prefix.len(),
+    );
+
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let loaded = runtime
+        .load_opened_gguf_with_intent(
+            gguf,
+            args.model.clone(),
+            LoadedModelConfig::default(),
+            ModelLoadIntent::SinglePassAnalysis,
+        )
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    validate_deployed_model(&manifest, &loaded)?;
+    let arch = loaded.arch();
+    ensure!(
+        token_ids
+            .iter()
+            .all(|&token| token >= 0 && (token as u32) < arch.vocab_size),
+        "full-lens input contains a token outside the deployed vocabulary"
+    );
+    let identity = loaded.workspace_lens_identity();
+    let content = checkpoint_content_identity(
+        loaded.gguf(),
+        &CheckpointIdentityCache::new(&args.identity_cache),
+    )
+    .with_context(|| {
+        format!(
+            "resolve strong model identity using {}",
+            args.identity_cache.display()
+        )
+    })?;
+    super::lens_run::ensure_qwen_sequence_admitted(&loaded, prefix.len())?;
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(prefix.len()))
         .context("create full-lens prompt sequence")?;
@@ -3091,10 +3111,7 @@ fn validate_read_full_args(args: &ReadFullArgs) -> Result<()> {
         (1..=MAX_FULL_READOUT_TOP_K).contains(&args.top_k),
         "--top-k must be in 1..={MAX_FULL_READOUT_TOP_K}"
     );
-    ensure!(
-        (1..=MAX_FULL_READOUT_PROMPT_TOKENS).contains(&args.max_tokens),
-        "--max-tokens must be in 1..={MAX_FULL_READOUT_PROMPT_TOKENS}"
-    );
+    ensure!(args.max_tokens > 0, "--max-tokens must be positive");
     ensure!(
         args.prompt.is_some() ^ !args.token_ids.is_empty(),
         "specify exactly one of --prompt or nonempty --token-ids"
@@ -4200,6 +4217,12 @@ mod tests {
     fn full_readout_requires_explicit_safe_input_contract() {
         let mut args = test_read_full_args();
         validate_read_full_args(&args).unwrap();
+
+        args.max_tokens = 262_144;
+        validate_read_full_args(&args).unwrap();
+        args.max_tokens = 0;
+        assert!(validate_read_full_args(&args).is_err());
+        args.max_tokens = 256;
 
         args.allow_unvalidated_transfer = false;
         assert!(

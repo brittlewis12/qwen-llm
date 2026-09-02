@@ -1315,6 +1315,11 @@ impl LoadedModel {
         self.metal_model.arch
     }
 
+    /// Maximum sequence extent declared by the opened GGUF.
+    pub fn context_length(&self) -> Result<usize, RuntimeError> {
+        Ok(self.gguf.declared_context_length()?)
+    }
+
     /// Create a tokenizer from the same GGUF metadata as this loaded model.
     ///
     /// Tokenizer construction remains explicit for phase 1 so synthetic

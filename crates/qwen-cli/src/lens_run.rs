@@ -46,7 +46,6 @@ const MAX_RENDERED_SELECTOR_TEXT_BYTES: usize = 1024;
 const MAX_RENDERED_SELECTORS_PER_PLAN: usize = 1024;
 const MAX_RENDERED_SELECTOR_MATCH_WORK: usize = 1_000_000;
 const MAX_TOP_K: usize = 1024;
-pub(crate) const MAX_NEW_TOKENS: usize = 4096;
 const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
 pub(crate) const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
@@ -70,6 +69,49 @@ const MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND: u64 = 1_000_000;
 const MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES: u64 = 512 * 1024 * 1024;
 const PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS: usize = 65;
 const PACKED_PREFILL_CHUNK_CAP_TOKENS: usize = 1024;
+
+pub(crate) fn required_forward_count(prompt_tokens: usize, max_new_tokens: usize) -> Result<usize> {
+    ensure!(
+        prompt_tokens > 0,
+        "prompt must encode to at least one token"
+    );
+    ensure!(max_new_tokens > 0, "--max-new-tokens must be positive");
+    prompt_tokens
+        .checked_add(max_new_tokens - 1)
+        .context("request forward count overflow")
+}
+
+fn ensure_request_fits_context(
+    prompt_tokens: usize,
+    max_new_tokens: usize,
+    model_context_tokens: usize,
+) -> Result<usize> {
+    let required_forwards = required_forward_count(prompt_tokens, max_new_tokens)?;
+    ensure!(
+        required_forwards <= model_context_tokens,
+        "request requires {required_forwards} token forwards ({prompt_tokens} prompt + {} maximum decode transitions), exceeding model context {model_context_tokens}",
+        max_new_tokens - 1,
+    );
+    Ok(required_forwards)
+}
+
+pub(crate) fn ensure_qwen_sequence_admitted(
+    loaded: &qwen_llm::runtime::LoadedModel,
+    capacity: usize,
+) -> Result<()> {
+    let admission = loaded
+        .qwen_execution_memory_admission(1, capacity, 0, 0)
+        .context("price Lens sequence memory")?;
+    ensure!(
+        admission.admitted,
+        "Lens sequence memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+        admission.reason.as_str(),
+        admission.required_bytes,
+        admission.working_set_headroom_bytes,
+        admission.signals.process_limit_remaining_bytes,
+    );
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -1395,6 +1437,15 @@ struct PreparedSweepCohortRequest {
     prefill: PreparedOrdinaryPrefill,
 }
 
+struct PreflightSweepCohortRequest {
+    source_line: usize,
+    id: String,
+    messages_path: PathBuf,
+    messages_blake3: String,
+    arm_args: LensRunArgs,
+    prepared_input: PreparedLensInput,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SweepCohortManifest {
@@ -1853,7 +1904,26 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
             output_path.as_deref(),
         );
     }
+    ensure!(
+        matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
+        "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next"
+    );
     validate_ordinary_plan(&plan)?;
+
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load model tokenizer")?;
+    let prepared_input = prepare_qwen_model_input(args.input_spec(), family, &gguf, &tokenizer)?;
+    let prompt_token_ids = &prepared_input.token_ids;
+    ensure!(
+        prompt_token_ids
+            .iter()
+            .all(|&token| token >= 0 && (token as u32) < tokenizer.n_vocab()),
+        "prompt contains a token outside the model vocabulary"
+    );
+    ensure_request_fits_context(
+        prompt_token_ids.len(),
+        args.max_new_tokens,
+        gguf.declared_context_length()?,
+    )?;
 
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
@@ -1865,18 +1935,6 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         )
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
-    let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
-    let prepared_input =
-        prepare_qwen_model_input(args.input_spec(), family, loaded.gguf(), &tokenizer)?;
-    let prompt_token_ids = &prepared_input.token_ids;
-    ensure!(
-        !prompt_token_ids.is_empty(),
-        "prompt must encode to at least one token"
-    );
-    ensure!(
-        prompt_token_ids.len() <= MAX_NEW_TOKENS * 16,
-        "prompt is too long for the bounded Lens runner"
-    );
     ensure!(
         prompt_token_ids
             .iter()
@@ -1929,10 +1987,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
 }
 
 fn validate_run_args(args: &LensRunArgs) -> Result<()> {
-    ensure!(
-        args.max_new_tokens > 0 && args.max_new_tokens <= MAX_NEW_TOKENS,
-        "--max-new-tokens must be in 1..={MAX_NEW_TOKENS}"
-    );
+    ensure!(args.max_new_tokens > 0, "--max-new-tokens must be positive");
     validate_lens_input_spec(args.input_spec())?;
     Ok(())
 }
@@ -1983,9 +2038,7 @@ fn prepare_ordinary_prefill(
         .plan_packed_prefill_scratch(block_tokens, prompt_len)
         .context("plan dense packed Lens prefill scratch")?;
     let scratch_priced_upper_bytes = scratch_plan.priced_upper_bytes();
-    let capacity = prompt_len
-        .checked_add(max_new_tokens)
-        .context("Lens sequence capacity overflow")?;
+    let capacity = required_forward_count(prompt_len, max_new_tokens)?;
     let admission = loaded
         .qwen_execution_memory_admission(1, capacity, scratch_priced_upper_bytes, 0)
         .context("price dense packed Lens prefill memory")?;
@@ -2029,12 +2082,13 @@ fn execute_ordinary_arm(
 ) -> Result<RunResult> {
     let schedule = schedule.bind(plan)?;
     let mut event = schedule.new_event()?;
-    let mut sequence = loaded.create_sequence(SequenceConfig::new(
-        prompt_token_ids
-            .len()
-            .checked_add(max_new_tokens)
-            .context("sequence capacity overflow")?,
-    ))?;
+    let capacity = ensure_request_fits_context(
+        prompt_token_ids.len(),
+        max_new_tokens,
+        loaded.context_length()?,
+    )?;
+    ensure_qwen_sequence_admitted(loaded, capacity)?;
+    let mut sequence = loaded.create_sequence(SequenceConfig::new(capacity))?;
     let forward = loaded.forward();
     let mut sampler = Sampler::new(SamplingConfig {
         temperature: sampler_config.temperature,
@@ -2085,7 +2139,7 @@ fn execute_ordinary_arm(
             &schedule,
             &forward,
             token,
-            index as u32,
+            u32::try_from(index).context("prefill position exceeds runtime addressing")?,
             &mut sequence,
             phase,
             &event,
@@ -2113,12 +2167,16 @@ fn execute_ordinary_arm(
         }
         let phase = Phase::Decode(generated_index);
         schedule.populate(phase, &mut event)?;
+        let position = prompt_token_ids
+            .len()
+            .checked_add(generated_index)
+            .context("decode position overflow")?;
         logits = forward_event(
             execution,
             &schedule,
             &forward,
             sampled,
-            (prompt_token_ids.len() + generated_index) as u32,
+            u32::try_from(position).context("decode position exceeds runtime addressing")?,
             &mut sequence,
             phase,
             &event,
@@ -2184,27 +2242,26 @@ fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
     );
     let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
     ensure!(
-        family != ModelFamily::Qwen4Exp,
-        "qwen-lens sweep supports ordinary Qwen only; Flash-Next is not supported"
+        matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
+        "qwen-lens sweep supports ordinary Qwen only"
     );
+
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load model tokenizer")?;
+    let prepared_input =
+        prepare_qwen_model_input(arm_args.input_spec(), family, &gguf, &tokenizer)?;
+    validate_sweep_prompt(
+        &prepared_input.token_ids,
+        tokenizer.n_vocab(),
+        args.max_new_tokens,
+        gguf.declared_context_length()?,
+    )?;
 
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf(gguf, args.model.clone())
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
-    let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
-    let prepared_input =
-        prepare_qwen_model_input(arm_args.input_spec(), family, loaded.gguf(), &tokenizer)?;
     let prompt_token_ids = &prepared_input.token_ids;
-    ensure!(
-        !prompt_token_ids.is_empty(),
-        "prompt must encode to at least one token"
-    );
-    ensure!(
-        prompt_token_ids.len() <= MAX_NEW_TOKENS * 16,
-        "prompt is too long for the bounded Lens runner"
-    );
     ensure!(
         prompt_token_ids
             .iter()
@@ -2455,17 +2512,13 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
     );
     let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
     ensure!(
-        family != ModelFamily::Qwen4Exp,
-        "qwen-lens sweep supports ordinary Qwen only; Flash-Next is not supported"
+        matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
+        "qwen-lens sweep supports ordinary Qwen only"
     );
-    let runtime = Runtime::metal().context("initialize Metal runtime")?;
-    let loaded = runtime
-        .load_opened_gguf(gguf, args.model.clone())
-        .with_context(|| format!("load model {}", args.model.display()))?;
-    validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
-    let tokenizer = loaded.tokenizer().context("load model tokenizer")?;
+    let model_context_tokens = gguf.declared_context_length()?;
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load model tokenizer")?;
 
-    let mut prepared_requests = Vec::with_capacity(requests.records.len());
+    let mut preflight_requests = Vec::with_capacity(requests.records.len());
     for (source_line, request) in requests.records {
         let captured = capture_sweep_cohort_messages(&request.messages)
             .with_context(|| format!("capture sweep cohort request {:?} messages", request.id))?;
@@ -2480,18 +2533,64 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
             &source,
             request.message_mode,
             family,
-            loaded.gguf(),
+            &gguf,
             &tokenizer,
         )
         .with_context(|| format!("render sweep cohort request {:?}", request.id))?;
-        validate_sweep_prompt(&prepared_input.token_ids, loaded.arch().vocab_size)
-            .with_context(|| format!("preflight sweep cohort request {:?}", request.id))?;
+        validate_sweep_prompt(
+            &prepared_input.token_ids,
+            tokenizer.n_vocab(),
+            args.max_new_tokens,
+            model_context_tokens,
+        )
+        .with_context(|| format!("preflight sweep cohort request {:?}", request.id))?;
+        preflight_requests.push(PreflightSweepCohortRequest {
+            source_line,
+            id: request.id,
+            messages_path: captured.path,
+            messages_blake3: captured.blake3,
+            arm_args,
+            prepared_input,
+        });
+    }
+    let plan_bounds = plan_sweep_cohort_bounds(
+        &preflight_requests
+            .iter()
+            .map(|request| request.prepared_input.token_ids.len())
+            .collect::<Vec<_>>(),
+        args.coefficients.len(),
+        args.max_new_tokens,
+    )?;
+
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let loaded = runtime
+        .load_opened_gguf(gguf, args.model.clone())
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
+
+    let mut prepared_requests = Vec::with_capacity(preflight_requests.len());
+    for request in preflight_requests {
+        let PreflightSweepCohortRequest {
+            source_line,
+            id,
+            messages_path,
+            messages_blake3,
+            arm_args,
+            prepared_input,
+        } = request;
+        ensure!(
+            prepared_input
+                .token_ids
+                .iter()
+                .all(|&token| token >= 0 && (token as u32) < loaded.arch().vocab_size),
+            "sweep cohort request {id:?} contains a token outside the deployed vocabulary"
+        );
         let source_bound_plan = bind_plan_positions(
             &source_plan,
             &prepared_input.rendering,
             prepared_input.token_ids.len(),
         )
-        .with_context(|| format!("bind sweep cohort request {:?}", request.id))?;
+        .with_context(|| format!("bind sweep cohort request {id:?}"))?;
         validate_reachable_scopes(
             &source_bound_plan.resolved,
             prepared_input.token_ids.len(),
@@ -2515,9 +2614,9 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         )?;
         prepared_requests.push(PreparedSweepCohortRequest {
             source_line,
-            id: request.id,
-            messages_path: captured.path,
-            messages_blake3: captured.blake3,
+            id,
+            messages_path,
+            messages_blake3,
             arm_args,
             prepared_input,
             source_bound_plan,
@@ -2525,15 +2624,6 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
             prefill,
         });
     }
-
-    let plan_bounds = plan_sweep_cohort_bounds(
-        &prepared_requests
-            .iter()
-            .map(|request| request.prepared_input.token_ids.len())
-            .collect::<Vec<_>>(),
-        args.coefficients.len(),
-        args.max_new_tokens,
-    )?;
 
     let execution = prepare_execution_plan(
         &prepared_requests
@@ -2634,14 +2724,15 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
     Ok(())
 }
 
-fn validate_sweep_prompt(token_ids: &[i32], vocab_size: u32) -> Result<()> {
+fn validate_sweep_prompt(
+    token_ids: &[i32],
+    vocab_size: u32,
+    max_new_tokens: usize,
+    model_context_tokens: usize,
+) -> Result<()> {
     ensure!(
         !token_ids.is_empty(),
         "prompt must encode to at least one token"
-    );
-    ensure!(
-        token_ids.len() <= MAX_NEW_TOKENS * 16,
-        "prompt is too long for the bounded Lens runner"
     );
     ensure!(
         token_ids
@@ -2649,6 +2740,7 @@ fn validate_sweep_prompt(token_ids: &[i32], vocab_size: u32) -> Result<()> {
             .all(|&token| token >= 0 && (token as u32) < vocab_size),
         "prompt contains a token outside the model vocabulary"
     );
+    ensure_request_fits_context(token_ids.len(), max_new_tokens, model_context_tokens)?;
     Ok(())
 }
 
@@ -2884,7 +2976,6 @@ fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> 
     );
     ensure!(
         manifest.max_new_tokens > 0
-            && manifest.max_new_tokens <= MAX_NEW_TOKENS
             && manifest.prefill_execution == PrefillExecution::Serial
             && manifest.execution_policy
                 == "serial_prompts_serial_arms_fresh_sequence_and_sampler_no_batched_generation",
@@ -2932,7 +3023,6 @@ fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> 
                 && child.source_line > 0
                 && child.path == format!("sweeps/{index:06}")
                 && child.prompt_token_count > 0
-                && child.prompt_token_count <= MAX_NEW_TOKENS * 16
                 && child.messages_path.is_absolute()
                 && child.messages_blake3.len() == 64
                 && is_lower_hex(&child.messages_blake3)
@@ -3300,15 +3390,18 @@ fn run_qwen4exp(
         "prompt must encode to at least one token"
     );
     ensure!(
-        prompt_token_ids.len() <= MAX_NEW_TOKENS * 16,
-        "prompt is too long for the bounded Lens runner"
-    );
-    ensure!(
         prompt_token_ids
             .iter()
             .all(|&token| token >= 0 && (token as u32) < config.vocab_size),
         "prompt contains a token outside the Flash-Next vocabulary"
     );
+    let required_forwards = ensure_request_fits_context(
+        prompt_token_ids.len(),
+        args.max_new_tokens,
+        config.context_length as usize,
+    )?;
+    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, required_forwards)
+        .context("derive Flash-Next serial session capacity")?;
     let bound_plan = bind_plan_positions(&plan, &prepared_input.rendering, prompt_token_ids.len())?;
     validate_reachable_scopes(
         &bound_plan.resolved,
@@ -3319,12 +3412,6 @@ fn run_qwen4exp(
         prepare_qwen4exp_execution_plan(bound_plan.resolved.clone(), plan_dir, &config)?;
     validate_qwen4exp_event_schedule(&execution, prompt_token_ids.len(), args.max_new_tokens)?;
 
-    let required_forwards = prompt_token_ids
-        .len()
-        .checked_add(args.max_new_tokens.saturating_sub(1))
-        .context("Flash-Next forward count overflow")?;
-    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, required_forwards)
-        .context("derive Flash-Next serial session capacity")?;
     let stop_tokens = gguf
         .stop_token_ids()
         .context("load Flash-Next stop tokens")?;
@@ -5112,6 +5199,19 @@ mod tests {
     struct SweepArgsParser {
         #[command(flatten)]
         args: CoefficientSweepArgs,
+    }
+
+    #[test]
+    fn request_capacity_follows_model_context_not_cli_constants() {
+        assert_eq!(required_forward_count(1, 1).unwrap(), 1);
+        assert_eq!(required_forward_count(493, 16_384).unwrap(), 16_876);
+        assert_eq!(
+            ensure_request_fits_context(493, 16_384, 16_876).unwrap(),
+            16_876
+        );
+        assert!(ensure_request_fits_context(493, 16_384, 16_875).is_err());
+        assert!(required_forward_count(0, 1).is_err());
+        assert!(required_forward_count(1, 0).is_err());
     }
 
     fn minimal_plan() -> LensPlan {

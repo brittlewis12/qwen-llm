@@ -819,7 +819,7 @@ fn event_interventions<'a>(
     let mut interventions = Vec::new();
     for layer in 0..execution.layer_count {
         for operation in &execution.plan.operations {
-            if matches(&operation.scope, event, layer)? {
+            if operation.action.coefficient() != 0.0 && matches(&operation.scope, event, layer)? {
                 interventions.push((
                     operation.id.clone(),
                     layer,
@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_only_execution_prepares_all_actions_in_file_order() {
+    fn operation_only_execution_preserves_enabled_order_and_skips_zero_controls() {
         let config = MuseGlimmerConfig::unsloth_release_reference();
         let hidden = config.hidden_size as usize;
         let mut values = vec![0.0_f32; 2 * 2 * hidden];
@@ -1125,7 +1125,8 @@ mod tests {
                 {"id":"relative","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"residual_l2_fraction","direction":"u","coefficient":0.1}},
                 {"id":"ablate","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"projection_ablate","direction":"u","coefficient":1.0}},
                 {"id":"displace","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"source_to_target","source":"u","target":"a","coefficient":0.5}},
-                {"id":"swap","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"coordinate_swap","source":"u","target":"a","coefficient":1.0}}
+                {"id":"swap","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"coordinate_swap","source":"u","target":"a","coefficient":1.0}},
+                {"id":"disabled","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"values","values":[0]}},"action":{"kind":"fixed_add","direction":"a","coefficient":-0.0}}
             ],
             "readouts": []
         }))

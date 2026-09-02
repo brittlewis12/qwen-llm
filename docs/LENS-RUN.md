@@ -79,16 +79,24 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- sweep \
   --output /path/to/new-sweep
 ```
 
-The source plan must be an ordinary dense or MoE Qwen plan with finite, nonzero
-authored coefficients. Muse Glimmer and Flash-Next are rejected. The command
-changes only the exact `--operation` coefficient, preserves coefficient order
-and duplicates, and accepts at most 64 values that pass the selected action's
-finite-scale validation (`coordinate_swap` also validates `2 * coefficient`).
+The source plan must be an ordinary dense or MoE Qwen plan with finite authored
+coefficients. Its selected `--operation` must be nonzero so every enabled arm
+shares the conservative source-plan prefill topology. Muse Glimmer and
+Flash-Next are rejected. The command changes only the exact `--operation`
+coefficient, preserves coefficient order and duplicates, and accepts at most 64
+values that pass the selected action's finite-scale validation
+(`coordinate_swap` also validates `2 * coefficient`).
 Positive, negative, and signed-zero values are retained in the artifacts. A
 zero-valued selected operation is disabled: no intervention kernel runs and no
 operation application is recorded. Its scalar event still uses the same serial
 kernel topology selected by the nonzero source plan, avoiding a zero-control
 topology confound.
+
+Single sweeps and resident sweep cohorts share a 512 MiB serialized bundle
+budget. Cohort `auto` prefill currently resolves to the documented serial
+effective policy; callers do not need to restate that implementation choice.
+The number of cohort requests is derived from the 96-arm aggregate work budget
+rather than capped independently.
 
 Every arm gets a fresh sequence and a fresh sampler initialized with the same
 requested seed. Arms execute sequentially; no KV state, sampler state, or generated
@@ -125,18 +133,19 @@ symlinks, checks every declared child length and BLAKE3, parses ordinary
 `qwen.lens.run` children, and rejects cross-arm runtime, model path, prompt,
 sampler, generation-bound, source-plan-path, or effective-plan drift. Only the
 selected operation coefficient may differ. The inspector also re-derives the
-common passive-span schedule from the embedded source plan. Coefficient matching is bit-exact,
-so `0` and `-0` remain distinct; zero arms must not record the disabled
-operation. Inspection is bounded to 128 MiB of child JSON and 1,024 retained
-exact detail records across the complete report.
+common passive-span schedule from the embedded source plan. Coefficient
+matching is bit-exact, so `0` and `-0` remain distinct; zero arms must not record
+the disabled operation. Inspection is bounded to 512 MiB of child JSON and
+1,024 retained exact detail records across the complete report.
 
-The report defaults to the first numeric-zero arm (or arm 0), groups exact
-duplicate coefficients and exact generated outputs, and includes bounded exact
-readout comparisons against the reference. `--reference-arm` changes the
-reference explicitly. Manifest v3 verifies that every effective authored plan
-is exactly the embedded source plan with only the selected coefficient changed,
-then independently recomputes every child's resolved semantic position
-bindings and execution schedule. Manifest v2 remains readable for v4 children.
+The report defaults to the first numeric-zero arm and requires
+`--reference-arm` when the sweep has no zero control. It groups exact duplicate
+coefficients and exact generated outputs, and includes bounded exact readout
+comparisons against the reference. Manifest v3 verifies that every effective
+authored plan is exactly the embedded source plan with only the selected
+coefficient changed, then independently recomputes every child's resolved
+semantic position bindings and execution schedule. Manifest v2 remains readable
+for v4 children.
 Legacy manifest v1 remains readable and is honestly marked
 `unverifiable_manifest_v1` because it did not hash or embed the source plan.
 
@@ -740,6 +749,10 @@ source_to_target:      x <- x + coefficient * dot(x, source) * (target - source)
 coordinate_swap:       u <- unit(source - target)
                        x <- x - 2 * coefficient * dot(x, u) * u
 ```
+
+A finite signed-zero coefficient is a valid disabled control. It emits no
+intervention kernel or operation-application record; its authored scope remains
+available in provenance.
 
 For unit source and target directions, coefficient-1 `coordinate_swap` is
 mathematically identical to `x + V(swap(V^dagger x) - V^dagger x)` for

@@ -14,14 +14,14 @@ use super::lens_input::{
 };
 use super::lens_inspect::{self, Cell, TraceDocument, VectorCell};
 use super::lens_run::{
-    self, CoefficientSweepManifest, LensPlan, RunExecution, RunExecutionScheduleBasis,
+    self, CoefficientSweepManifest, LensPlan, MAX_SWEEP_BUNDLE_BYTES, RunExecution,
+    RunExecutionScheduleBasis,
 };
 use super::{read_regular_file_bounded, read_regular_file_exact};
 
 const COMPARE_MAX_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_LIMIT: usize = 25;
 const SWEEP_MANIFEST_MAX_BYTES: usize = 16 * 1024 * 1024;
-const SWEEP_INSPECT_MAX_TOTAL_BYTES: usize = 128 * 1024 * 1024;
 const SWEEP_INSPECT_MAX_DETAILS: usize = 1024;
 const RUN_METADATA_STRING_MAX_BYTES: usize = 16 * 1024;
 const RUN_DECODED_TEXT_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -222,18 +222,7 @@ pub(crate) fn inspect_sweep(args: InspectSweepArgs) -> Result<()> {
         "--limit must be in 1..={SWEEP_INSPECT_MAX_DETAILS}"
     );
     let loaded = load_sweep(&args.sweep)?;
-    let reference_arm = args.reference_arm.unwrap_or_else(|| {
-        loaded
-            .arms
-            .iter()
-            .position(|arm| arm.coefficient == 0.0)
-            .unwrap_or(0)
-    });
-    ensure!(
-        reference_arm < loaded.arms.len(),
-        "--reference-arm {reference_arm} is outside 0..{}",
-        loaded.arms.len()
-    );
+    let reference_arm = resolve_sweep_reference_arm(&loaded.arms, args.reference_arm)?;
     let reference = &loaded.arms[reference_arm].document;
     let (generation_groups, generation_group_by_arm) = sweep_generation_groups(&loaded.arms);
     let duplicate_coefficient_groups = duplicate_coefficient_groups(&loaded.arms);
@@ -305,6 +294,22 @@ pub(crate) fn inspect_sweep(args: InspectSweepArgs) -> Result<()> {
     Ok(())
 }
 
+fn resolve_sweep_reference_arm(arms: &[LoadedSweepArm], requested: Option<usize>) -> Result<usize> {
+    let reference_arm = if let Some(reference_arm) = requested {
+        reference_arm
+    } else {
+        arms.iter().position(|arm| arm.coefficient == 0.0).context(
+            "coefficient sweep has no numeric-zero control arm; pass --reference-arm explicitly",
+        )?
+    };
+    ensure!(
+        reference_arm < arms.len(),
+        "--reference-arm {reference_arm} is outside 0..{}",
+        arms.len()
+    );
+    Ok(reference_arm)
+}
+
 fn load_sweep(path: &Path) -> Result<LoadedSweep> {
     let root = canonical_real_directory(path, "sweep root")?;
     ensure_directory_entries(
@@ -329,6 +334,13 @@ fn load_sweep(path: &Path) -> Result<LoadedSweep> {
         .collect();
     ensure_directory_entries(&arms_root, expected_arm_entries, "sweep arms directory")?;
 
+    let sweep_bundle_limit = usize::try_from(MAX_SWEEP_BUNDLE_BYTES)
+        .context("sweep bundle byte budget does not fit this platform")?;
+    let mut inspected_bundle_bytes = manifest_bytes.len();
+    ensure!(
+        inspected_bundle_bytes <= sweep_bundle_limit,
+        "sweep manifest exceeds inspection bundle limit {sweep_bundle_limit}"
+    );
     let mut total_child_bytes = 0usize;
     let mut arms = Vec::with_capacity(manifest.arms.len());
     let mut plans = Vec::with_capacity(manifest.arms.len());
@@ -351,11 +363,14 @@ fn load_sweep(path: &Path) -> Result<LoadedSweep> {
         total_child_bytes = total_child_bytes
             .checked_add(byte_length)
             .context("sweep child byte total overflow")?;
+        inspected_bundle_bytes = inspected_bundle_bytes
+            .checked_add(byte_length)
+            .context("sweep inspection bundle byte total overflow")?;
         ensure!(
-            total_child_bytes <= SWEEP_INSPECT_MAX_TOTAL_BYTES,
-            "sweep children total {} bytes exceeds inspection limit {}",
-            total_child_bytes,
-            SWEEP_INSPECT_MAX_TOTAL_BYTES
+            inspected_bundle_bytes <= sweep_bundle_limit,
+            "sweep bundle total {} bytes exceeds inspection limit {}",
+            inspected_bundle_bytes,
+            sweep_bundle_limit
         );
         let run_path = arm_directory.join("run.json");
         let bytes = read_regular_file_exact(&run_path, byte_length)?;
@@ -2978,6 +2993,28 @@ mod tests {
         );
         assert_eq!(detail_budget, 8);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspect_sweep_requires_a_zero_control_or_explicit_reference() {
+        let signed_zero = sweep_fixture(&[0.2, -0.0, 0.4], |_, _| {});
+        let loaded = load_sweep(&signed_zero).unwrap();
+        assert_eq!(resolve_sweep_reference_arm(&loaded.arms, None).unwrap(), 1);
+        assert_eq!(
+            resolve_sweep_reference_arm(&loaded.arms, Some(2)).unwrap(),
+            2
+        );
+        assert!(resolve_sweep_reference_arm(&loaded.arms, Some(3)).is_err());
+        std::fs::remove_dir_all(signed_zero).unwrap();
+
+        let no_zero = sweep_fixture(&[0.2, 0.4], |_, _| {});
+        let loaded = load_sweep(&no_zero).unwrap();
+        assert!(resolve_sweep_reference_arm(&loaded.arms, None).is_err());
+        assert_eq!(
+            resolve_sweep_reference_arm(&loaded.arms, Some(0)).unwrap(),
+            0
+        );
+        std::fs::remove_dir_all(no_zero).unwrap();
     }
 
     #[test]

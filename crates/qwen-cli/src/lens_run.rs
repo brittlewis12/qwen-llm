@@ -58,15 +58,13 @@ const MAX_SWEEP_ARMS: usize = 64;
 const SWEEP_COHORT_SCHEMA: &str = "qwen.lens.coefficient_sweep_cohort";
 const SWEEP_COHORT_SCHEMA_VERSION: u32 = 1;
 const MIN_SWEEP_COHORT_REQUESTS: usize = 2;
-const MAX_SWEEP_COHORT_REQUESTS: usize = 32;
 const MAX_SWEEP_COHORT_RECORD_BYTES: usize = 1024 * 1024;
-const MAX_SWEEP_COHORT_FILE_BYTES: usize =
-    MAX_SWEEP_COHORT_REQUESTS * MAX_SWEEP_COHORT_RECORD_BYTES;
+const MAX_SWEEP_COHORT_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SWEEP_COHORT_ID_BYTES: usize = 128;
 const MAX_SWEEP_COHORT_MESSAGES_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SWEEP_COHORT_TOTAL_ARMS: usize = 96;
 const MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND: u64 = 1_000_000;
-const MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_SWEEP_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS: usize = 65;
 const PACKED_PREFILL_CHUNK_CAP_TOKENS: usize = 1024;
 
@@ -1084,6 +1082,7 @@ pub(crate) enum RunSerialReason {
     NoEligiblePassiveSpan,
     DensePackedMemoryAdmissionDenied,
     MoePackedNotQualified,
+    CohortSerialPolicy,
     FlashNextPackedNotImplemented,
     MusePackedNotImplemented,
 }
@@ -1095,6 +1094,7 @@ impl RunSerialReason {
             Self::NoEligiblePassiveSpan => "no_eligible_passive_span",
             Self::DensePackedMemoryAdmissionDenied => "dense_packed_memory_admission_denied",
             Self::MoePackedNotQualified => "moe_packed_not_qualified",
+            Self::CohortSerialPolicy => "cohort_serial_policy",
             Self::FlashNextPackedNotImplemented => "flash_next_packed_not_implemented",
             Self::MusePackedNotImplemented => "muse_packed_not_implemented",
         }
@@ -1237,7 +1237,8 @@ impl RunExecution {
                     Some(
                         RunSerialReason::NoEligiblePassiveSpan
                         | RunSerialReason::DensePackedMemoryAdmissionDenied
-                        | RunSerialReason::MoePackedNotQualified,
+                        | RunSerialReason::MoePackedNotQualified
+                        | RunSerialReason::CohortSerialPolicy,
                     ) => runtime_kind == "ordinary_qwen",
                     Some(RunSerialReason::FlashNextPackedNotImplemented) => {
                         runtime_kind == "flash_next"
@@ -1506,21 +1507,21 @@ struct SweepCohortPlanBounds {
     transition_upper_bound: u64,
 }
 
-struct SweepCohortOutputBudget {
+struct SweepOutputBudget {
     consumed: u64,
 }
 
-impl SweepCohortOutputBudget {
+impl SweepOutputBudget {
     fn charge(&mut self, byte_length: usize) -> Result<()> {
         self.consumed = self
             .consumed
             .checked_add(u64::try_from(byte_length).context("serialized child byte length")?)
             .context("cohort serialized child byte count overflow")?;
         ensure!(
-            self.consumed <= MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES,
-            "cohort serialized child bytes {} exceed limit {}",
+            self.consumed <= MAX_SWEEP_BUNDLE_BYTES,
+            "coefficient sweep serialized bytes {} exceed bundle limit {}",
             self.consumed,
-            MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES
+            MAX_SWEEP_BUNDLE_BYTES
         );
         Ok(())
     }
@@ -2219,14 +2220,7 @@ fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
     .with_context(|| format!("parse Lens plan {}", plan_path.display()))?;
     validate_plan(&source_plan)?;
     validate_ordinary_plan(&source_plan)?;
-    ensure!(
-        source_plan
-            .operations
-            .iter()
-            .any(|operation| operation.id == args.operation),
-        "Lens plan has no operation {:?}",
-        args.operation
-    );
+    validate_sweep_source_operation(&source_plan, &args.operation)?;
     for &coefficient in &args.coefficients {
         let effective =
             plan_with_operation_coefficient(&source_plan, &args.operation, coefficient)?;
@@ -2298,6 +2292,7 @@ fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
         .collect::<HashSet<_>>();
     let sampler = run_sampler(&arm_args);
     let built = stage_and_publish_sweep(&output_path, |staging| {
+        let mut output_budget = SweepOutputBudget { consumed: 0 };
         build_sweep_bundle(
             staging,
             &args,
@@ -2313,7 +2308,7 @@ fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
             &stop_tokens,
             sampler,
             &mut prefill,
-            None,
+            Some(&mut output_budget),
         )
     })?;
     print_sweep_summary(&args, &output_path, &built.summaries);
@@ -2336,7 +2331,7 @@ fn build_sweep_bundle(
     stop_tokens: &HashSet<i32>,
     sampler: RunSampler,
     prefill: &mut PreparedOrdinaryPrefill,
-    mut output_budget: Option<&mut SweepCohortOutputBudget>,
+    mut output_budget: Option<&mut SweepOutputBudget>,
 ) -> Result<BuiltSweepBundle> {
     let arms_path = root.join("arms");
     create_sweep_directory(&arms_path)?;
@@ -2444,7 +2439,7 @@ fn build_sweep_bundle(
 fn charge_sweep_bundle_bytes(
     current: u64,
     byte_length: usize,
-    output_budget: Option<&mut SweepCohortOutputBudget>,
+    output_budget: Option<&mut SweepOutputBudget>,
 ) -> Result<u64> {
     let byte_length = u64::try_from(byte_length).context("serialized sweep byte length")?;
     let next = current
@@ -2466,14 +2461,11 @@ fn current_sweep_producer() -> SweepProducer {
 }
 
 fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
-    ensure!(
-        args.prefill_execution == PrefillExecution::Serial,
-        "--requests-jsonl requires --prefill-execution serial"
-    );
     let requests = read_sweep_cohort_requests(
         args.requests_jsonl
             .as_deref()
             .context("--requests-jsonl is required in cohort mode")?,
+        args.coefficients.len(),
     )?;
     validate_sweep_cohort_child_count(requests.records.len(), args.coefficients.len())?;
     let output_path = super::resolve_output_path(&args.output)?;
@@ -2488,14 +2480,7 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
     .with_context(|| format!("parse Lens plan {}", plan_path.display()))?;
     validate_plan(&source_plan)?;
     validate_ordinary_plan(&source_plan)?;
-    ensure!(
-        source_plan
-            .operations
-            .iter()
-            .any(|operation| operation.id == args.operation),
-        "Lens plan has no operation {:?}",
-        args.operation
-    );
+    validate_sweep_source_operation(&source_plan, &args.operation)?;
     for &coefficient in &args.coefficients {
         let effective =
             plan_with_operation_coefficient(&source_plan, &args.operation, coefficient)?;
@@ -2598,15 +2583,11 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         )?;
         let schedule =
             CompiledEventSchedule::compile(&source_bound_plan.resolved, loaded.arch().n_layer)?;
-        let prefill = prepare_ordinary_prefill(
-            &loaded,
-            &schedule,
-            &source_bound_plan.resolved,
-            PrefillExecution::Serial,
+        let prefill = PreparedOrdinaryPrefill::serial(
+            args.prefill_execution,
             RunExecutionScheduleBasis::SweepSourcePlan,
-            prepared_input.token_ids.len(),
-            args.max_new_tokens,
-        )?;
+            RunSerialReason::CohortSerialPolicy,
+        );
         prefill.execution.validate_against_plan(
             "ordinary_qwen",
             &source_bound_plan.resolved,
@@ -2646,7 +2627,7 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         create_sweep_directory(&sweeps_root)?;
         super::sync_directory(staging)?;
         let mut children = Vec::with_capacity(prepared_requests.len());
-        let mut output_budget = SweepCohortOutputBudget { consumed: 0 };
+        let mut output_budget = SweepOutputBudget { consumed: 0 };
         for (index, request) in prepared_requests.iter_mut().enumerate() {
             let child_path = sweeps_root.join(format!("{index:06}"));
             create_sweep_directory(&child_path)?;
@@ -2698,7 +2679,7 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
             coefficients: args.coefficients.clone(),
             sampler,
             max_new_tokens: args.max_new_tokens,
-            prefill_execution: PrefillExecution::Serial,
+            prefill_execution: args.prefill_execution,
             execution_policy:
                 "serial_prompts_serial_arms_fresh_sequence_and_sampler_no_batched_generation".into(),
             planned_request_count: plan_bounds.request_count,
@@ -2714,11 +2695,15 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         Ok(())
     })?;
     println!(
-        "runtime=ordinary_qwen model={} operation={} requests={} arms_per_request={} prefill_execution=serial\nartifact={}",
+        "runtime=ordinary_qwen model={} operation={} requests={} arms_per_request={} requested_prefill={} effective_prefill=serial\nartifact={}",
         args.model.display(),
         args.operation,
         request_count,
         args.coefficients.len(),
+        match args.prefill_execution {
+            PrefillExecution::Auto => "auto",
+            PrefillExecution::Serial => "serial",
+        },
         output_path.display()
     );
     Ok(())
@@ -2788,7 +2773,9 @@ fn plan_sweep_cohort_bounds(
     })
 }
 
-fn read_sweep_cohort_requests(path: &Path) -> Result<LoadedSweepCohortRequests> {
+fn read_sweep_cohort_requests(path: &Path, arm_count: usize) -> Result<LoadedSweepCohortRequests> {
+    ensure!(arm_count > 0, "sweep cohort arm count must be positive");
+    let request_capacity = MAX_SWEEP_COHORT_TOTAL_ARMS / arm_count;
     let canonical_path = std::fs::canonicalize(path)
         .with_context(|| format!("resolve sweep request file {}", path.display()))?;
     let bytes = super::read_regular_file_bounded(&canonical_path, MAX_SWEEP_COHORT_FILE_BYTES)?;
@@ -2814,8 +2801,8 @@ fn read_sweep_cohort_requests(path: &Path) -> Result<LoadedSweepCohortRequests> 
             continue;
         }
         ensure!(
-            records.len() < MAX_SWEEP_COHORT_REQUESTS,
-            "sweep request cohort exceeds {MAX_SWEEP_COHORT_REQUESTS} nonblank records"
+            records.len() < request_capacity,
+            "sweep request cohort with {arm_count} arms per request exceeds the {MAX_SWEEP_COHORT_TOTAL_ARMS}-arm aggregate work budget"
         );
         let mut request: SweepCohortRequestRecord = serde_json::from_str(trimmed)
             .with_context(|| format!("parse {} line {source_line}", canonical_path.display()))?;
@@ -2835,8 +2822,8 @@ fn read_sweep_cohort_requests(path: &Path) -> Result<LoadedSweepCohortRequests> 
         records.push((source_line, request));
     }
     ensure!(
-        (MIN_SWEEP_COHORT_REQUESTS..=MAX_SWEEP_COHORT_REQUESTS).contains(&records.len()),
-        "sweep request cohort requires {MIN_SWEEP_COHORT_REQUESTS}..={MAX_SWEEP_COHORT_REQUESTS} nonblank records"
+        records.len() >= MIN_SWEEP_COHORT_REQUESTS,
+        "sweep request cohort requires at least {MIN_SWEEP_COHORT_REQUESTS} nonblank records within the {MAX_SWEEP_COHORT_TOTAL_ARMS}-arm aggregate work budget"
     );
     Ok(LoadedSweepCohortRequests {
         canonical_path,
@@ -2935,7 +2922,23 @@ fn parse_sweep_cohort_manifest_bytes(bytes: &[u8]) -> Result<SweepCohortManifest
     let manifest: SweepCohortManifest =
         serde_json::from_value(value).context("bind coefficient sweep cohort manifest")?;
     validate_sweep_cohort_manifest(&manifest)?;
+    validate_sweep_cohort_bundle_size(&manifest, bytes.len())?;
     Ok(manifest)
+}
+
+fn validate_sweep_cohort_bundle_size(
+    manifest: &SweepCohortManifest,
+    manifest_byte_length: usize,
+) -> Result<()> {
+    let total = manifest
+        .cumulative_serialized_child_bytes
+        .checked_add(u64::try_from(manifest_byte_length).context("sweep cohort manifest length")?)
+        .context("coefficient sweep cohort bundle byte count overflow")?;
+    ensure!(
+        total <= MAX_SWEEP_BUNDLE_BYTES,
+        "coefficient sweep cohort bundle bytes {total} exceed limit {MAX_SWEEP_BUNDLE_BYTES}"
+    );
+    Ok(())
 }
 
 fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> {
@@ -2960,14 +2963,8 @@ fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> 
         canonical_plan_blake3(&manifest.source_plan)? == manifest.source_plan_canonical_json_blake3,
         "coefficient sweep cohort source-plan digest is invalid"
     );
-    ensure!(
-        manifest
-            .source_plan
-            .operations
-            .iter()
-            .any(|operation| operation.id == manifest.operation_id),
-        "coefficient sweep cohort source plan lacks the selected operation"
-    );
+    validate_sweep_source_operation(&manifest.source_plan, &manifest.operation_id)
+        .context("validate coefficient sweep cohort source operation")?;
     ensure!(
         !manifest.coefficients.is_empty()
             && manifest.coefficients.len() <= MAX_SWEEP_ARMS
@@ -2976,7 +2973,6 @@ fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> 
     );
     ensure!(
         manifest.max_new_tokens > 0
-            && manifest.prefill_execution == PrefillExecution::Serial
             && manifest.execution_policy
                 == "serial_prompts_serial_arms_fresh_sequence_and_sampler_no_batched_generation",
         "coefficient sweep cohort execution policy is invalid"
@@ -2992,8 +2988,7 @@ fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> 
     .context("coefficient sweep cohort sampler is invalid")?;
     ensure!(
         manifest.planned_request_count == manifest.sweeps.len()
-            && (MIN_SWEEP_COHORT_REQUESTS..=MAX_SWEEP_COHORT_REQUESTS)
-                .contains(&manifest.planned_request_count),
+            && manifest.planned_request_count >= MIN_SWEEP_COHORT_REQUESTS,
         "coefficient sweep cohort planned request count is invalid"
     );
     let planned = plan_sweep_cohort_bounds(
@@ -3027,7 +3022,7 @@ fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> 
                 && child.messages_blake3.len() == 64
                 && is_lower_hex(&child.messages_blake3)
                 && child.serialized_byte_length >= child.manifest_byte_length
-                && child.serialized_byte_length <= MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES
+                && child.serialized_byte_length <= MAX_SWEEP_BUNDLE_BYTES
                 && child.manifest_byte_length > 0
                 && child.manifest_byte_length <= MAX_PLAN_BYTES as u64
                 && child.manifest_blake3.len() == 64
@@ -3040,7 +3035,7 @@ fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> 
     }
     ensure!(
         cumulative_serialized_child_bytes == manifest.cumulative_serialized_child_bytes
-            && cumulative_serialized_child_bytes <= MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES,
+            && cumulative_serialized_child_bytes <= MAX_SWEEP_BUNDLE_BYTES,
         "coefficient sweep cohort cumulative serialized child bytes are invalid"
     );
     Ok(())
@@ -3081,10 +3076,6 @@ fn validate_coefficient_sweep_args(args: &CoefficientSweepArgs) -> Result<()> {
                 && args.message_mode.is_none()
                 && !args.no_special_tokens,
             "--requests-jsonl conflicts with all single-prompt input flags"
-        );
-        ensure!(
-            args.prefill_execution == PrefillExecution::Serial,
-            "--requests-jsonl requires --prefill-execution serial"
         );
     }
     Ok(())
@@ -3217,11 +3208,8 @@ fn serialize_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<Vec<u
         bytes.len() <= MAX_PLAN_BYTES,
         "coefficient sweep manifest exceeds {MAX_PLAN_BYTES} bytes"
     );
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).context("reparse coefficient sweep manifest JSON")?;
-    let decoded: CoefficientSweepManifest =
-        serde_json::from_value(value).context("bind coefficient sweep manifest")?;
-    validate_sweep_manifest(&decoded)?;
+    let decoded =
+        parse_sweep_manifest_bytes(&bytes).context("reparse coefficient sweep manifest JSON")?;
     ensure!(
         serde_json::to_vec(&decoded)? == bytes,
         "coefficient sweep manifest failed canonical JSON round trip"
@@ -3230,12 +3218,36 @@ fn serialize_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<Vec<u
 }
 
 pub(crate) fn parse_sweep_manifest_bytes(bytes: &[u8]) -> Result<CoefficientSweepManifest> {
+    ensure!(
+        bytes.len() <= MAX_PLAN_BYTES,
+        "coefficient sweep manifest exceeds {MAX_PLAN_BYTES} bytes"
+    );
     let value: serde_json::Value =
         serde_json::from_slice(bytes).context("parse coefficient sweep manifest JSON")?;
     let manifest: CoefficientSweepManifest =
         serde_json::from_value(value).context("bind coefficient sweep manifest")?;
     validate_sweep_manifest(&manifest)?;
+    validate_sweep_bundle_size(&manifest, bytes.len())?;
     Ok(manifest)
+}
+
+fn validate_sweep_bundle_size(
+    manifest: &CoefficientSweepManifest,
+    manifest_byte_length: usize,
+) -> Result<()> {
+    let total = manifest.arms.iter().try_fold(
+        u64::try_from(manifest_byte_length).context("sweep manifest length")?,
+        |total, arm| {
+            total
+                .checked_add(arm.byte_length)
+                .context("coefficient sweep bundle byte count overflow")
+        },
+    )?;
+    ensure!(
+        total <= MAX_SWEEP_BUNDLE_BYTES,
+        "coefficient sweep bundle bytes {total} exceed limit {MAX_SWEEP_BUNDLE_BYTES}"
+    );
+    Ok(())
 }
 
 fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
@@ -3289,14 +3301,10 @@ fn validate_sweep_manifest(manifest: &CoefficientSweepManifest) -> Result<()> {
         !manifest.operation_id.is_empty(),
         "coefficient sweep operation ID must not be empty"
     );
-    ensure!(
-        manifest.source_plan.as_ref().is_none_or(|plan| {
-            plan.operations
-                .iter()
-                .any(|operation| operation.id == manifest.operation_id)
-        }),
-        "coefficient sweep embedded source plan lacks the selected operation"
-    );
+    if let Some(source_plan) = &manifest.source_plan {
+        validate_sweep_source_operation(source_plan, &manifest.operation_id)
+            .context("validate embedded coefficient sweep source operation")?;
+    }
     ensure!(
         !manifest.coefficients.is_empty() && manifest.coefficients.len() <= MAX_SWEEP_ARMS,
         "coefficient sweep requires 1..={MAX_SWEEP_ARMS} coefficients"
@@ -3643,6 +3651,9 @@ fn qwen4exp_matching_operation<'a>(
 ) -> Result<Option<(&'a OperationDefinition, u32)>> {
     let mut matched = None;
     for operation in &execution.plan.operations {
+        if !operation_enabled(operation) {
+            continue;
+        }
         let layer = execution.operation_layers[&operation.id];
         if !scope_matches(&operation.scope, phase, layer)? {
             continue;
@@ -3737,13 +3748,6 @@ fn parse_plan_bytes(bytes: &[u8]) -> Result<LensPlan> {
 }
 
 fn validate_plan(plan: &LensPlan) -> Result<()> {
-    validate_plan_with_zero_operation(plan, None)
-}
-
-fn validate_plan_with_zero_operation(
-    plan: &LensPlan,
-    zero_operation_id: Option<&str>,
-) -> Result<()> {
     ensure!(
         matches!(plan.version, 1 | 2),
         "Lens plan version must be 1 or 2"
@@ -3872,11 +3876,6 @@ fn validate_plan_with_zero_operation(
             "operation {} coefficient must be finite",
             operation.id,
         );
-        ensure!(
-            coefficient != 0.0 || zero_operation_id == Some(operation.id.as_str()),
-            "operation {} coefficient must be nonzero",
-            operation.id,
-        );
         if let Action::CoordinateSwap {
             source,
             target,
@@ -3945,6 +3944,19 @@ fn unique_ids<'a>(ids: impl Iterator<Item = &'a str>, kind: &str) -> Result<()> 
     Ok(())
 }
 
+fn validate_sweep_source_operation(plan: &LensPlan, operation_id: &str) -> Result<()> {
+    let operation = plan
+        .operations
+        .iter()
+        .find(|operation| operation.id == operation_id)
+        .with_context(|| format!("Lens plan has no operation {operation_id:?}"))?;
+    ensure!(
+        operation.action.coefficient() != 0.0,
+        "sweep source operation {operation_id:?} must be nonzero so enabled arms share a conservative prefill topology"
+    );
+    Ok(())
+}
+
 pub(crate) fn plan_with_operation_coefficient(
     source: &LensPlan,
     operation_id: &str,
@@ -3958,27 +3970,23 @@ pub(crate) fn plan_with_operation_coefficient(
         .find(|operation| operation.id == operation_id)
         .with_context(|| format!("Lens plan has no operation {operation_id:?}"))?;
     operation.action.set_coefficient(coefficient);
-    validate_plan_with_zero_operation(&plan, Some(operation_id))?;
+    validate_plan(&plan)?;
     Ok(plan)
 }
 
 pub(crate) fn validate_sweep_effective_plan(plan: &LensPlan, operation_id: &str) -> Result<()> {
-    validate_plan_with_zero_operation(plan, Some(operation_id))?;
+    ensure!(
+        plan.operations
+            .iter()
+            .any(|operation| operation.id == operation_id),
+        "Lens plan has no operation {operation_id:?}"
+    );
+    validate_plan(plan)?;
     validate_ordinary_plan(plan)
 }
 
 pub(crate) fn validate_run_artifact_plan(plan: &LensPlan, runtime_kind: &str) -> Result<()> {
-    let zero_operations = plan
-        .operations
-        .iter()
-        .filter(|operation| operation.action.coefficient() == 0.0)
-        .map(|operation| operation.id.as_str())
-        .collect::<Vec<_>>();
-    ensure!(
-        zero_operations.len() <= 1,
-        "run artifact plan disables more than one operation"
-    );
-    validate_plan_with_zero_operation(plan, zero_operations.first().copied())?;
+    validate_plan(plan)?;
     match runtime_kind {
         "ordinary_qwen" => validate_ordinary_plan(plan),
         "muse_glimmer" => validate_muse_artifact_plan(plan),
@@ -5467,7 +5475,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_cohort_cli_is_message_file_only_and_requires_explicit_serial_prefill() {
+    fn sweep_cohort_cli_accepts_auto_and_explicit_serial_prefill_policy() {
         let parsed = SweepArgsParser::try_parse_from([
             "test",
             "--model",
@@ -5480,8 +5488,6 @@ mod tests {
             "0,0.5",
             "--requests-jsonl",
             "requests.jsonl",
-            "--prefill-execution",
-            "serial",
             "--output",
             "cohort",
         ])
@@ -5491,9 +5497,10 @@ mod tests {
             parsed.requests_jsonl.as_deref(),
             Some(Path::new("requests.jsonl"))
         );
+        assert_eq!(parsed.prefill_execution, PrefillExecution::Auto);
         validate_coefficient_sweep_args(&parsed).unwrap();
 
-        let auto = SweepArgsParser::try_parse_from([
+        let explicit_serial = SweepArgsParser::try_parse_from([
             "test",
             "--model",
             "model.gguf",
@@ -5505,12 +5512,14 @@ mod tests {
             "0",
             "--requests-jsonl",
             "requests.jsonl",
+            "--prefill-execution",
+            "serial",
             "--output",
             "cohort",
         ])
         .unwrap()
         .args;
-        assert!(validate_coefficient_sweep_args(&auto).is_err());
+        validate_coefficient_sweep_args(&explicit_serial).unwrap();
         assert!(
             SweepArgsParser::try_parse_from([
                 "test",
@@ -5556,7 +5565,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let loaded = read_sweep_cohort_requests(&requests_path).unwrap();
+        let loaded = read_sweep_cohort_requests(&requests_path, 2).unwrap();
         assert!(loaded.canonical_path.is_absolute());
         assert_eq!(loaded.records.len(), 2);
         assert_eq!(loaded.records[0].0, 1);
@@ -5578,7 +5587,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
         std::fs::write(
             &requests_path,
             concat!(
@@ -5587,12 +5596,12 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn sweep_cohort_jsonl_rejects_duplicate_ids_stdin_and_count_bounds() {
+    fn sweep_cohort_jsonl_rejects_invalid_records_and_arm_product_overflow() {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "qwen-lens-sweep-cohort-bounds-{}-{}",
@@ -5610,7 +5619,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
         std::fs::write(
             &requests_path,
             concat!(
@@ -5619,18 +5628,20 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
         std::fs::write(
             &requests_path,
             "{\"id\":\"one\",\"messages\":\"messages.json\"}\n",
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path).is_err());
-        let excessive = (0..=MAX_SWEEP_COHORT_REQUESTS)
+        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
+        let arm_count = 2;
+        let request_capacity = MAX_SWEEP_COHORT_TOTAL_ARMS / arm_count;
+        let excessive = (0..=request_capacity)
             .map(|index| format!("{{\"id\":\"request-{index}\",\"messages\":\"messages.json\"}}\n"))
             .collect::<String>();
         std::fs::write(&requests_path, excessive).unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, arm_count).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5699,8 +5710,8 @@ mod tests {
         assert!(
             stage_and_publish_sweep(&output, |staging| -> Result<()> {
                 write_new_sweep_file(&staging.join("partial"), b"partial")?;
-                let mut budget = SweepCohortOutputBudget {
-                    consumed: MAX_SWEEP_COHORT_SERIALIZED_CHILD_BYTES - 1,
+                let mut budget = SweepOutputBudget {
+                    consumed: MAX_SWEEP_BUNDLE_BYTES - 1,
                 };
                 budget.charge(2)
             })
@@ -5764,7 +5775,7 @@ mod tests {
             message_mode: None,
             no_special_tokens: false,
             max_new_tokens: 1,
-            prefill_execution: PrefillExecution::Serial,
+            prefill_execution: PrefillExecution::Auto,
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,
@@ -5814,7 +5825,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_changes_only_the_selected_operation_and_disables_zero() {
+    fn sweep_changes_only_the_selected_operation_and_supports_zero_controls() {
         let source = sweep_plan();
         validate_plan(&source).unwrap();
         let zero = plan_with_operation_coefficient(&source, "swept", -0.0).unwrap();
@@ -5826,12 +5837,14 @@ mod tests {
         assert_eq!(zero.operations[1], source.operations[1]);
         assert!(!operation_enabled(&zero.operations[0]));
         assert!(operation_enabled(&zero.operations[1]));
-        assert!(validate_plan(&zero).is_err());
-        validate_plan_with_zero_operation(&zero, Some("swept")).unwrap();
+        validate_plan(&zero).unwrap();
+        assert!(validate_sweep_source_operation(&zero, "swept").is_err());
+        validate_sweep_source_operation(&source, "swept").unwrap();
 
         let mut wrong_zero = source.clone();
         wrong_zero.operations[1].action.set_coefficient(0.0);
-        assert!(validate_plan_with_zero_operation(&wrong_zero, Some("swept")).is_err());
+        validate_plan(&wrong_zero).unwrap();
+        assert!(!operation_enabled(&wrong_zero.operations[1]));
         assert!(plan_with_operation_coefficient(&source, "missing", 1.0).is_err());
 
         let first = plan_with_operation_coefficient(&source, "swept", 0.0).unwrap();
@@ -5875,6 +5888,10 @@ mod tests {
         let decoded = parse_sweep_manifest_bytes(&bytes).unwrap();
         assert_eq!(decoded.coefficients[2].to_bits(), (-0.0_f32).to_bits());
         assert_eq!(decoded.arms[2].coefficient.to_bits(), (-0.0_f32).to_bits());
+        let arm_bytes = decoded.arms.iter().map(|arm| arm.byte_length).sum::<u64>();
+        let largest_manifest = usize::try_from(MAX_SWEEP_BUNDLE_BYTES - arm_bytes).unwrap();
+        validate_sweep_bundle_size(&decoded, largest_manifest).unwrap();
+        assert!(validate_sweep_bundle_size(&decoded, largest_manifest + 1).is_err());
 
         let mut malformed = decoded.clone();
         malformed.arms[1].artifact = "../run.json".into();
@@ -5957,6 +5974,11 @@ mod tests {
         };
         let bytes = serialize_sweep_cohort_manifest(&manifest).unwrap();
         assert_eq!(parse_sweep_cohort_manifest_bytes(&bytes).unwrap(), manifest);
+        let largest_manifest =
+            usize::try_from(MAX_SWEEP_BUNDLE_BYTES - manifest.cumulative_serialized_child_bytes)
+                .unwrap();
+        validate_sweep_cohort_bundle_size(&manifest, largest_manifest).unwrap();
+        assert!(validate_sweep_cohort_bundle_size(&manifest, largest_manifest + 1).is_err());
         let mut malformed_aggregate = manifest.clone();
         malformed_aggregate.cumulative_serialized_child_bytes += 1;
         assert!(validate_sweep_cohort_manifest(&malformed_aggregate).is_err());
@@ -6149,6 +6171,17 @@ mod tests {
         assert_eq!(
             explicit_serial.serial_reason(),
             Some(RunSerialReason::RequestedSerial)
+        );
+
+        let cohort_auto = RunExecution::serial(
+            PrefillExecution::Auto,
+            RunExecutionScheduleBasis::SweepSourcePlan,
+            RunSerialReason::CohortSerialPolicy,
+        );
+        cohort_auto.validate("ordinary_qwen", 8).unwrap();
+        assert_eq!(
+            cohort_auto.serial_reason(),
+            Some(RunSerialReason::CohortSerialPolicy)
         );
 
         let packed = RunExecution::dense_packed(
@@ -7056,6 +7089,26 @@ mod tests {
         let execution = prepare_qwen4exp_execution_plan(valid, Path::new("/"), &config).unwrap();
         validate_qwen4exp_event_schedule(&execution, 1, 1).unwrap();
         assert_eq!(execution.directions["hyper"].layer, 23);
+
+        let disabled = native_hyper_plan(
+            &path,
+            json!([{
+                "id": "disabled",
+                "scope": {
+                    "layers": {"kind": "values", "values": [23]},
+                    "prefill": {"kind": "values", "values": [0]}
+                },
+                "action": {"kind": "fixed_add", "direction": "hyper", "coefficient": -0.0}
+            }]),
+        );
+        validate_plan(&disabled).unwrap();
+        let disabled = prepare_qwen4exp_execution_plan(disabled, Path::new("/"), &config).unwrap();
+        validate_qwen4exp_event_schedule(&disabled, 1, 1).unwrap();
+        assert!(
+            qwen4exp_matching_operation(&disabled, Phase::Prefill(0))
+                .unwrap()
+                .is_none()
+        );
 
         let wrong_layer = native_hyper_plan(
             &path,

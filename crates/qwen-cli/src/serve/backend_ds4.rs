@@ -208,7 +208,7 @@ impl DeepSeekV4Backend {
             .map_err(|error| ServeError::server_error(format!("tokenize prompt: {error}")))?;
         ids.into_iter()
             .map(|token| {
-                crate::checked_deepseek_v4_token_id(token, self.vocab_size, "prompt")
+                crate::checked_token_id(token, self.vocab_size, "prompt")
                     .map_err(|error| ServeError::server_error(error.to_string()))
             })
             .collect()
@@ -290,8 +290,13 @@ impl GenerationBackend for DeepSeekV4Backend {
             .into());
         }
         // Forward-budget admission (spec truncation:"disabled" semantics).
-        let required = crate::deepseek_v4_required_forwards(prompt_ids.len(), max_tokens)
-            .map_err(|error| ServeError::invalid_request(None, error.to_string()))?;
+        let required = crate::required_forwards(
+            "DeepSeek V4",
+            prompt_ids.len(),
+            max_tokens,
+            Some(crate::DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
+        )
+        .map_err(|error| ServeError::invalid_request(None, error.to_string()))?;
         if required > self.session_capacity.forward_limit() {
             return Err(ServeError::invalid_request(
                 Some("max_output_tokens"),
@@ -457,9 +462,9 @@ impl DeepSeekV4Backend {
             }
         };
         for token in &stop_tokens {
-            crate::checked_deepseek_v4_token_id(*token, self.vocab_size, "stop").map_err(
-                |error| ServeError::server_error(format!("invalid stop token: {error}")),
-            )?;
+            crate::checked_token_id(*token, self.vocab_size, "stop").map_err(|error| {
+                ServeError::server_error(format!("invalid stop token: {error}"))
+            })?;
         }
         let mut abort: Option<io::Error> = None;
         let tokenizer = &self.tokenizer;
@@ -482,8 +487,7 @@ impl DeepSeekV4Backend {
                     })
                 },
                 |token| {
-                    let token =
-                        crate::checked_deepseek_v4_token_id(token, vocab_size, "generated")?;
+                    let token = crate::checked_token_id(token, vocab_size, "generated")?;
                     session
                         .forward_token(ctx, token)
                         .context("decode DeepSeek V4 token")?;
@@ -511,7 +515,7 @@ impl DeepSeekV4Backend {
         if generation.transitions > 0 && !truncated_in_reasoning {
             let mut consumed = prompt_ids.to_vec();
             for token in generation.tokens.iter().take(generation.transitions) {
-                match crate::checked_deepseek_v4_token_id(*token, vocab_size, "consumed") {
+                match crate::checked_token_id(*token, vocab_size, "consumed") {
                     Ok(token) => consumed.push(token),
                     Err(error) => {
                         tracing::warn!("serve: deepseek_v4 consumed token invalid: {error}");

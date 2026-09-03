@@ -2401,7 +2401,7 @@ fn generate_deepseek_lane(
         },
         |token| {
             let current_transition = transition_index;
-            let token = checked_deepseek_v4_token_id(
+            let token = checked_token_id(
                 token,
                 vocab_size,
                 &format!(

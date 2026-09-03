@@ -6,12 +6,15 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn muse_glimmer_forward_budget_counts_only_required_transitions() {
-    assert_eq!(muse_glimmer_required_forwards(2, 1).unwrap(), 2);
-    assert_eq!(muse_glimmer_required_forwards(2, 3).unwrap(), 4);
-    assert_eq!(muse_glimmer_required_forwards(7_168, 2).unwrap(), 7_169);
-    assert!(muse_glimmer_required_forwards(0, 1).is_err());
-    assert!(muse_glimmer_required_forwards(1, 0).is_err());
-    assert!(muse_glimmer_required_forwards(usize::MAX, 2).is_err());
+    assert_eq!(required_forwards("Muse Glimmer", 2, 1, None).unwrap(), 2);
+    assert_eq!(required_forwards("Muse Glimmer", 2, 3, None).unwrap(), 4);
+    assert_eq!(
+        required_forwards("Muse Glimmer", 7_168, 2, None).unwrap(),
+        7_169
+    );
+    assert!(required_forwards("Muse Glimmer", 0, 1, None).is_err());
+    assert!(required_forwards("Muse Glimmer", 1, 0, None).is_err());
+    assert!(required_forwards("Muse Glimmer", usize::MAX, 2, None).is_err());
 }
 
 #[test]
@@ -723,27 +726,85 @@ fn prepared(id: &str, tokens: &[i32]) -> PreparedJsonlRequest {
 #[test]
 fn deepseek_v4_forward_budget_accounts_for_unconsumed_final_token() {
     assert_eq!(
-        deepseek_v4_required_forwards(1, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY).unwrap(),
+        required_forwards(
+            "DeepSeek V4",
+            1,
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+        )
+        .unwrap(),
         DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY
     );
     assert_eq!(
-        deepseek_v4_required_forwards(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 1).unwrap(),
+        required_forwards(
+            "DeepSeek V4",
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            1,
+            Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+        )
+        .unwrap(),
         DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY
     );
-    assert!(deepseek_v4_required_forwards(1, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY + 1).is_err());
-    assert!(deepseek_v4_required_forwards(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 2).is_err());
-    assert!(deepseek_v4_required_forwards(0, 1).is_err());
-    assert!(deepseek_v4_required_forwards(1, 0).is_err());
-    assert!(deepseek_v4_required_forwards(usize::MAX, 2).is_err());
+    assert!(
+        required_forwards(
+            "DeepSeek V4",
+            1,
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY + 1,
+            Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+        )
+        .is_err()
+    );
+    assert!(
+        required_forwards(
+            "DeepSeek V4",
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            2,
+            Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+        )
+        .is_err()
+    );
+    assert!(
+        required_forwards(
+            "DeepSeek V4",
+            0,
+            1,
+            Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+        )
+        .is_err()
+    );
+    assert!(
+        required_forwards(
+            "DeepSeek V4",
+            1,
+            0,
+            Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+        )
+        .is_err()
+    );
+    assert!(
+        required_forwards(
+            "DeepSeek V4",
+            usize::MAX,
+            2,
+            Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn qwen4exp_forward_budget_accounts_for_unconsumed_final_token() {
-    assert_eq!(qwen4exp_required_forwards(18, 8).unwrap(), 25);
-    assert_eq!(qwen4exp_required_forwards(1, 1).unwrap(), 1);
-    assert!(qwen4exp_required_forwards(0, 1).is_err());
-    assert!(qwen4exp_required_forwards(1, 0).is_err());
-    assert!(qwen4exp_required_forwards(usize::MAX, 2).is_err());
+    assert_eq!(
+        required_forwards("Qwen3.8-Flash-Next", 18, 8, None).unwrap(),
+        25
+    );
+    assert_eq!(
+        required_forwards("Qwen3.8-Flash-Next", 1, 1, None).unwrap(),
+        1
+    );
+    assert!(required_forwards("Qwen3.8-Flash-Next", 0, 1, None).is_err());
+    assert!(required_forwards("Qwen3.8-Flash-Next", 1, 0, None).is_err());
+    assert!(required_forwards("Qwen3.8-Flash-Next", usize::MAX, 2, None).is_err());
 }
 
 #[test]

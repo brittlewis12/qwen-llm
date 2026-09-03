@@ -90,12 +90,8 @@ impl MuseGlimmerBackend {
             .into_iter()
             .enumerate()
             .map(|(index, token)| {
-                crate::checked_muse_glimmer_token_id(
-                    token,
-                    self.vocab_size,
-                    &format!("prompt[{index}]"),
-                )
-                .map_err(|error| ServeError::server_error(error.to_string()))
+                crate::checked_token_id(token, self.vocab_size, &format!("prompt[{index}]"))
+                    .map_err(|error| ServeError::server_error(error.to_string()))
             })
             .collect()
     }
@@ -206,7 +202,7 @@ impl GenerationBackend for MuseGlimmerBackend {
             if output_tokens == max_tokens {
                 break GenerationEnd::TokenLimit;
             }
-            let token = crate::checked_muse_glimmer_token_id(token, vocab_size, "generated")
+            let token = crate::checked_token_id(token, vocab_size, "generated")
                 .map_err(|error| ServeError::server_error(error.to_string()))?;
             logits = runner.forward_token(token).map_err(|error| {
                 ServeError::server_error(format!("forward Muse token: {error}"))

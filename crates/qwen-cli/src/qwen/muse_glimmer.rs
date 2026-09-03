@@ -72,20 +72,6 @@ pub(crate) fn resolve_muse_glimmer_reasoning_strength(
     }
 }
 
-pub(crate) fn muse_glimmer_required_forwards(
-    prompt_tokens: usize,
-    max_tokens: usize,
-) -> Result<usize> {
-    ensure!(
-        prompt_tokens > 0,
-        "Muse Glimmer prompt tokenized to zero tokens"
-    );
-    ensure!(max_tokens > 0, "--tokens must be >= 1");
-    prompt_tokens
-        .checked_add(max_tokens - 1)
-        .context("Muse Glimmer forward budget overflow")
-}
-
 pub(crate) fn validate_muse_glimmer_generation_mode(
     args: &Args,
     explicit: ExplicitCliOptions,
@@ -157,20 +143,6 @@ pub(crate) fn validate_muse_glimmer_generation_mode(
     Ok(())
 }
 
-pub(crate) fn checked_muse_glimmer_token_id(
-    token: i32,
-    vocab_size: u32,
-    purpose: &str,
-) -> Result<u32> {
-    let token =
-        u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
-    ensure!(
-        token < vocab_size,
-        "{purpose} token ID {token} is outside Muse Glimmer vocabulary {vocab_size}"
-    );
-    Ok(token)
-}
-
 pub(crate) fn run_muse_glimmer_single_turn(
     model_path: &Path,
     gguf: &GgufFile,
@@ -213,10 +185,11 @@ pub(crate) fn run_muse_glimmer_single_turn(
         .into_iter()
         .enumerate()
         .map(|(index, token)| {
-            checked_muse_glimmer_token_id(token, config.vocab_size, &format!("prompt[{index}]"))
+            checked_token_id(token, config.vocab_size, &format!("prompt[{index}]"))
         })
         .collect::<Result<Vec<_>>>()?;
-    let required_forwards = muse_glimmer_required_forwards(prompt_tokens.len(), args.tokens)?;
+    let required_forwards =
+        required_forwards("Muse Glimmer", prompt_tokens.len(), args.tokens, None)?;
     let capacity = args.max_context_tokens.unwrap_or(required_forwards);
     ensure!(
         capacity >= required_forwards,
@@ -308,7 +281,7 @@ pub(crate) fn run_muse_glimmer_single_turn(
             Ok(())
         },
         |token| {
-            let token = checked_muse_glimmer_token_id(token, config.vocab_size, "generated")?;
+            let token = checked_token_id(token, config.vocab_size, "generated")?;
             runner
                 .forward_token(token)
                 .context("forward generated Muse Glimmer token")

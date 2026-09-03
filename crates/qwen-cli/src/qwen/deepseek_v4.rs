@@ -405,26 +405,6 @@ pub(crate) fn deepseek_v4_requests_reads_stdin(args: &Args) -> Result<bool> {
     Ok(path.as_os_str() == "-")
 }
 
-pub(crate) fn deepseek_v4_required_forwards(
-    prompt_tokens: usize,
-    max_tokens: usize,
-) -> Result<usize> {
-    ensure!(prompt_tokens > 0, "prompt tokenized to zero tokens");
-    ensure!(max_tokens > 0, "--tokens must be >= 1");
-    let decode_transitions = max_tokens
-        .checked_sub(1)
-        .context("DeepSeek V4 decode transition count underflow")?;
-    let required = prompt_tokens
-        .checked_add(decode_transitions)
-        .context("DeepSeek V4 forward budget overflow")?;
-    ensure!(
-        required <= DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
-        "DeepSeek V4 request requires {required} token forwards ({prompt_tokens} prompt + {decode_transitions} maximum decode transitions), but the native session is promoted for {} forwards; shorten the prompt or reduce --tokens",
-        DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
-    );
-    Ok(required)
-}
-
 pub(crate) fn deepseek_v4_forward_budget_for_context_limit(context_tokens: usize) -> Result<usize> {
     ensure!(
         (2..=DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY).contains(&context_tokens),
@@ -626,20 +606,6 @@ pub(crate) fn execute_deepseek_v4_prompt_suffix(
         shutdown::checkpoint()?;
     }
     Ok(chunk_count)
-}
-
-pub(crate) fn checked_deepseek_v4_token_id(
-    token: i32,
-    vocab_size: u32,
-    purpose: &str,
-) -> Result<u32> {
-    let token =
-        u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
-    ensure!(
-        token < vocab_size,
-        "{purpose} token ID {token} is outside vocabulary {vocab_size}"
-    );
-    Ok(token)
 }
 
 pub(crate) fn copy_deepseek_v4_logits(
@@ -852,15 +818,18 @@ pub(crate) fn run_deepseek_v4_single_turn(
     let prompt_ids = tokenizer
         .encode(&prompt, false)
         .context("tokenize raw DeepSeek V4 prompt")?;
-    let required_forwards = deepseek_v4_required_forwards(prompt_ids.len(), args.tokens)?;
+    let required_forwards = required_forwards(
+        "DeepSeek V4",
+        prompt_ids.len(),
+        args.tokens,
+        Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
+    )?;
     deepseek_v4_debug_dump_prompt_ids("single_turn", &prompt_ids);
     let vocab_size = tokenizer.n_vocab();
     let prompt_token_ids = prompt_ids
         .iter()
         .enumerate()
-        .map(|(index, &token)| {
-            checked_deepseek_v4_token_id(token, vocab_size, &format!("prompt[{index}]"))
-        })
+        .map(|(index, &token)| checked_token_id(token, vocab_size, &format!("prompt[{index}]")))
         .collect::<Result<Vec<_>>>()?;
     let durable_store = deepseek_v4_checkpoint_store(args, staged_integrity)?;
     let durable_max_record_bytes = if durable_store.is_some() {
@@ -898,7 +867,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
         .stop_token_ids()
         .context("load producer-declared DeepSeek V4 stop tokens")?;
     for &token in &stop_tokens {
-        checked_deepseek_v4_token_id(token, vocab_size, "stop")?;
+        checked_token_id(token, vocab_size, "stop")?;
     }
     // Probe store occupancy before resolving the strong model identity so an
     // empty store with no planned capture skips identity work entirely.
@@ -1334,7 +1303,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
             Ok(())
         },
         |token| {
-            let token = checked_deepseek_v4_token_id(token, vocab_size, "generated")?;
+            let token = checked_token_id(token, vocab_size, "generated")?;
             #[cfg(feature = "dsv4-diagnostics")]
             let capture_temporal = temporal_capture.should_capture();
             #[cfg(not(feature = "dsv4-diagnostics"))]
@@ -1731,13 +1700,18 @@ pub(crate) fn prepare_deepseek_v4_jsonl_request_line(
         .iter()
         .enumerate()
         .map(|(index, &token)| {
-            checked_deepseek_v4_token_id(token, vocab_size, &format!("{id} prompt[{index}]"))
+            checked_token_id(token, vocab_size, &format!("{id} prompt[{index}]"))
         })
         .collect::<Result<Vec<_>>>()?;
     let max_tokens = request.tokens.unwrap_or(args.tokens);
     ensure!(max_tokens > 0, "request {id} requires tokens >= 1");
-    let required_forwards = deepseek_v4_required_forwards(prompt_token_ids.len(), max_tokens)
-        .with_context(|| format!("derive forward budget for request {id}"))?;
+    let required_forwards = required_forwards(
+        "DeepSeek V4",
+        prompt_token_ids.len(),
+        max_tokens,
+        Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
+    )
+    .with_context(|| format!("derive forward budget for request {id}"))?;
     let sampling = request_sampling_config(&request, args)
         .with_context(|| format!("validate sampling for request {id}"))?;
     Ok(Some(DeepSeekV4PreparedRequest {
@@ -1778,7 +1752,7 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
         .stop_token_ids()
         .context("load producer-declared DeepSeek V4 stop tokens")?;
     for &token in &stop_tokens {
-        checked_deepseek_v4_token_id(token, vocab_size, "stop")?;
+        checked_token_id(token, vocab_size, "stop")?;
     }
 
     let (prepared, forward_budget, logical_context_limit) = if stdin_mode {
@@ -2037,7 +2011,7 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
                 },
                 |token| {
                     let current_transition = transition_index;
-                    let token = checked_deepseek_v4_token_id(
+                    let token = checked_token_id(
                         token,
                         vocab_size,
                         &format!(

@@ -69,17 +69,6 @@ pub(crate) fn qwen4exp_chat_template_matches(template: &str) -> bool {
     messages::qwen4exp_chat_template_matches(template)
 }
 
-pub(crate) fn qwen4exp_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Result<usize> {
-    ensure!(
-        prompt_tokens > 0,
-        "Qwen3.8-Flash-Next prompt tokenized to zero tokens"
-    );
-    ensure!(max_tokens > 0, "--tokens must be >= 1");
-    prompt_tokens
-        .checked_add(max_tokens - 1)
-        .context("Qwen3.8-Flash-Next forward budget overflow")
-}
-
 pub(crate) fn validate_qwen4exp_generation_mode(
     args: &Args,
     explicit: ExplicitCliOptions,
@@ -148,16 +137,6 @@ pub(crate) fn validate_qwen4exp_generation_mode(
     Ok(())
 }
 
-pub(crate) fn checked_qwen4exp_token_id(token: i32, vocab_size: u32, purpose: &str) -> Result<u32> {
-    let token =
-        u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
-    ensure!(
-        token < vocab_size,
-        "{purpose} token ID {token} is outside vocabulary {vocab_size}"
-    );
-    Ok(token)
-}
-
 pub(crate) fn validate_qwen4exp_stop_tokens(stop_tokens: &[i32], vocab_size: u32) -> Result<()> {
     ensure!(
         !stop_tokens.is_empty(),
@@ -169,7 +148,7 @@ pub(crate) fn validate_qwen4exp_stop_tokens(stop_tokens: &[i32], vocab_size: u32
         stop_tokens.len()
     );
     for &token in stop_tokens {
-        checked_qwen4exp_token_id(token, vocab_size, "stop")?;
+        checked_token_id(token, vocab_size, "stop")?;
     }
     Ok(())
 }
@@ -528,7 +507,8 @@ pub(crate) fn run_qwen4exp_single_turn(
         .encode(&prompt, prompt_add_special_tokens(args, prompt_source))
         .context("tokenize Qwen3.8-Flash-Next prompt")?;
     let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
-    let required_forwards = qwen4exp_required_forwards(prompt_ids.len(), args.tokens)?;
+    let required_forwards =
+        required_forwards("Qwen3.8-Flash-Next", prompt_ids.len(), args.tokens, None)?;
     let config =
         Qwen4ExpConfig::from_gguf(gguf).context("bind Qwen3.8-Flash-Next request geometry")?;
     ensure!(
@@ -552,9 +532,7 @@ pub(crate) fn run_qwen4exp_single_turn(
     let prompt_tokens = prompt_ids
         .iter()
         .enumerate()
-        .map(|(index, &token)| {
-            checked_qwen4exp_token_id(token, vocab_size, &format!("prompt[{index}]"))
-        })
+        .map(|(index, &token)| checked_token_id(token, vocab_size, &format!("prompt[{index}]")))
         .collect::<Result<Vec<_>>>()?;
     let stop_tokens = gguf
         .stop_token_ids()
@@ -870,7 +848,7 @@ pub(crate) fn run_qwen4exp_single_turn(
             Ok(())
         },
         |token| {
-            let token = checked_qwen4exp_token_id(token, vocab_size, "generated")?;
+            let token = checked_token_id(token, vocab_size, "generated")?;
             let next_logits = runner
                 .forward_token(token)
                 .context("forward generated Qwen3.8-Flash-Next token")?

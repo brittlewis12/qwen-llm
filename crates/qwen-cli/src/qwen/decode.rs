@@ -733,3 +733,42 @@ pub(crate) fn decode_prompt_lookup(
     )?;
     Ok((result, generated_text))
 }
+
+/// Convert a sampler-produced `i32` token into a vocabulary-bounded ID for
+/// runtimes that consume `u32` tokens.
+pub(crate) fn checked_token_id(token: i32, vocab_size: u32, purpose: &str) -> Result<u32> {
+    let token =
+        u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
+    ensure!(
+        token < vocab_size,
+        "{purpose} token ID {token} is outside vocabulary {vocab_size}"
+    );
+    Ok(token)
+}
+
+/// Token forwards a request needs: every prompt token plus one transition per
+/// generated token after the first. `capacity` bounds the total when the
+/// session is promoted for a fixed forward budget.
+pub(crate) fn required_forwards(
+    family: &str,
+    prompt_tokens: usize,
+    max_tokens: usize,
+    capacity: Option<usize>,
+) -> Result<usize> {
+    ensure!(
+        prompt_tokens > 0,
+        "{family} prompt tokenized to zero tokens"
+    );
+    ensure!(max_tokens > 0, "--tokens must be >= 1");
+    let decode_transitions = max_tokens - 1;
+    let required = prompt_tokens
+        .checked_add(decode_transitions)
+        .with_context(|| format!("{family} forward budget overflow"))?;
+    if let Some(capacity) = capacity {
+        ensure!(
+            required <= capacity,
+            "{family} request requires {required} token forwards ({prompt_tokens} prompt + {decode_transitions} maximum decode transitions), but the native session is promoted for {capacity} forwards; shorten the prompt or reduce --tokens",
+        );
+    }
+    Ok(required)
+}

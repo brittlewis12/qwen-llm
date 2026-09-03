@@ -310,6 +310,8 @@ const TOOLS_FORMAT_INSTRUCTION: &str = concat!(
 /// absorbs the caller's system text after `</IMPORTANT>`.
 fn render_tools_system_block(
     tools: &[ToolDefinition],
+    effort_instruction: Option<&str>,
+    trim_system: bool,
     system: Option<&str>,
     system_source: Option<&str>,
     message_index: usize,
@@ -317,6 +319,22 @@ fn render_tools_system_block(
 ) {
     let context = SpanContext::message(message_index, QwenServePromptRole::System, None);
     push_message_header(output, context, false);
+    // Qwen3.8 places the reasoning-effort instruction before `# Tools`
+    // (qwen38_27b_chat_template.jinja: reasoning_instructions + '\n\n').
+    if let Some(instruction) = effort_instruction {
+        output.push(
+            instruction,
+            QwenServePromptSpanKind::ReasoningInstructionContent,
+            context.channel(Some(QwenServePromptChannel::Thinking)),
+            None,
+        );
+        output.push(
+            "\n\n",
+            QwenServePromptSpanKind::ContentSeparator,
+            context,
+            None,
+        );
+    }
     let mut tools_content =
         String::from("# Tools\n\nYou have access to the following functions:\n\n<tools>");
     for tool in tools {
@@ -354,7 +372,7 @@ fn render_tools_system_block(
             None,
         );
         output.push(
-            system,
+            if trim_system { system.trim() } else { system },
             QwenServePromptSpanKind::MessageContent,
             context,
             system_source.map(str::to_owned),
@@ -530,6 +548,8 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
     if !request.model_request.tools.is_empty() {
         render_tools_system_block(
             &request.model_request.tools,
+            effort_instruction,
+            qwen38_mode.is_some(),
             request.model_request.system.as_deref(),
             request
                 .model_request
@@ -1073,6 +1093,37 @@ mod tests {
                 "effective Qwen3.8 no-thinking mode lost replay identity"
             );
         }
+    }
+
+    /// qwen38_27b_chat_template.jinja emits `reasoning_instructions + '\n\n'`
+    /// before `# Tools`, and trims a caller system message appended after
+    /// `</IMPORTANT>`.
+    #[test]
+    fn qwen38_tools_keep_reasoning_effort_instruction_before_tools() {
+        let body = json!({
+            "model": "m",
+            "reasoning": {"effort": "xhigh"},
+            "instructions": "  Be terse.  ",
+            "tools": [{"type": "function", "name": "ping",
+                       "parameters": {"type": "object"}}],
+            "input": [{"role": "user", "content": "Ping."}],
+        });
+        let mut request = parse_request(&body).expect("qwen38 tools request parses");
+        request.template = QwenTemplate::Qwen38;
+        let rendered = render_qwen_serve_prompt(&request);
+        let xhigh = crate::messages::Qwen38ReasoningEffort::Xhigh
+            .instruction()
+            .expect("xhigh carries an instruction");
+        let expected_head = format!("<|im_start|>system\n{xhigh}\n\n# Tools\n\n");
+        assert!(
+            rendered.starts_with(&expected_head),
+            "reasoning instruction must precede the tools block:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("</IMPORTANT>\n\nBe terse.<|im_end|>\n"),
+            "system text after tools must be trimmed:\n{rendered}"
+        );
+        assert_eq!(rendered.matches(xhigh).count(), 1);
     }
 
     /// Anti-drift: serve's renderer must agree byte-for-byte with the CLI

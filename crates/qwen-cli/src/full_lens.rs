@@ -3,6 +3,7 @@ use blake3::Hasher as Blake3Hasher;
 use clap::{ArgGroup, Args, ValueEnum};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
+use qwen_llm::metal::host_page_size_bytes;
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::runtime::{LoadedModel, LoadedModelConfig, ModelLoadIntent, Runtime, SequenceConfig};
 use qwen_llm::tokenizer::Tokenizer;
@@ -31,11 +32,11 @@ use super::published_pt::{
     ArchiveLayout, ArchiveSpec, ensure_finite_f16, hash_sha256, validate_archive,
 };
 use super::{
-    FitMethod, ORIENTATION, SCHEMA_VERSION, TOKEN_ARTIFACT_MAX_BYTES, TOKEN_ID_ARGUMENT_MAX_COUNT,
-    TOKEN_MANIFEST_NAME, TOKEN_ORIENTATION, TOKEN_PAYLOAD_NAME, TOKEN_READOUT_SCHEMA,
-    TokenReadoutManifest, decode_f32_le, digest_json, hex, open_regular_file, publish_immutable,
-    read_bounded_jsonl_record, read_json_file, resolve_output_file_path, resolve_output_path,
-    serialize_json_pretty_bounded, sync_directory, token_covector_digest,
+    FitMethod, JSON_FILE_MAX_BYTES, ORIENTATION, SCHEMA_VERSION, TOKEN_ARTIFACT_MAX_BYTES,
+    TOKEN_ID_ARGUMENT_MAX_COUNT, TOKEN_MANIFEST_NAME, TOKEN_ORIENTATION, TOKEN_PAYLOAD_NAME,
+    TOKEN_READOUT_SCHEMA, TokenReadoutManifest, decode_f32_le, digest_json, hex, open_regular_file,
+    publish_immutable, read_bounded_jsonl_record, read_json_file, resolve_output_file_path,
+    resolve_output_path, serialize_json_pretty_bounded, sync_directory, token_covector_digest,
     validate_token_build_identity, validate_token_readout_spec, write_atomic_replace,
 };
 
@@ -51,7 +52,7 @@ const VOCAB_SIZE: u32 = 248_320;
 const MATRIX_BYTES: u64 = (HIDDEN_SIZE as u64) * (HIDDEN_SIZE as u64) * 2;
 const PAYLOAD_BYTES: u64 = MATRIX_BYTES * (SOURCE_LAYER_COUNT as u64);
 const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
-const MAX_PROJECTED_FULL_TOKENS: usize = 32;
+const MAX_TRANSFER_COMPARISON_TOKENS: usize = 32;
 const MAX_FULL_READOUT_TOP_K: usize = 25;
 const MAX_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TRACE_FULL_BATCH_REQUESTS: usize = 8;
@@ -1262,9 +1263,9 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
     );
     let (native_manifest, native_values) = load_native_j_readouts(&args.native_readouts)?;
     ensure!(
-        native_manifest.readouts.token_ids.len() <= MAX_PROJECTED_FULL_TOKENS,
+        native_manifest.readouts.token_ids.len() <= MAX_TRANSFER_COMPARISON_TOKENS,
         "transfer comparison supports at most {} selected tokens, got {}",
-        MAX_PROJECTED_FULL_TOKENS,
+        MAX_TRANSFER_COMPARISON_TOKENS,
         native_manifest.readouts.token_ids.len()
     );
     ensure!(
@@ -1496,6 +1497,74 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn projected_full_token_direction_retained_bytes(
+    source_layer_count: usize,
+    token_count: usize,
+    hidden_size: usize,
+) -> Result<usize> {
+    let value_bytes = source_layer_count
+        .checked_mul(token_count)
+        .and_then(|values| values.checked_mul(hidden_size))
+        .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()))
+        .context("published full transport projected direction byte count overflow")?;
+    let page_size = host_page_size_bytes().context("query host page size")?;
+    ensure!(page_size > 0, "host page size must be positive");
+    [
+        value_bytes,
+        token_count
+            .checked_mul(std::mem::size_of::<i32>())
+            .context("published full transport token ID byte count overflow")?,
+        source_layer_count
+            .checked_mul(std::mem::size_of::<u32>())
+            .context("published full transport source layer byte count overflow")?,
+        128,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, logical_bytes| {
+        let priced = logical_bytes
+            .checked_add(page_size - 1)
+            .map(|bytes| bytes / page_size * page_size)
+            .context("published full transport host allocation pricing overflow")?;
+        total
+            .checked_add(priced)
+            .context("published full transport retained byte count overflow")
+    })
+}
+
+fn write_projected_full_token_tile(
+    values: &mut [f32],
+    layer_index: usize,
+    total_token_count: usize,
+    token_start: usize,
+    hidden_size: usize,
+    projected: &[f32],
+) -> Result<()> {
+    ensure!(
+        hidden_size > 0 && projected.len().is_multiple_of(hidden_size),
+        "published full transport projection tile has an invalid shape"
+    );
+    let tile_token_count = projected.len() / hidden_size;
+    ensure!(
+        token_start
+            .checked_add(tile_token_count)
+            .is_some_and(|end| end <= total_token_count),
+        "published full transport projection tile exceeds its token dimension"
+    );
+    let destination_start = layer_index
+        .checked_mul(total_token_count)
+        .and_then(|value| value.checked_add(token_start))
+        .and_then(|value| value.checked_mul(hidden_size))
+        .context("published full transport projection destination overflow")?;
+    let destination_end = destination_start
+        .checked_add(projected.len())
+        .context("published full transport projection destination overflow")?;
+    values
+        .get_mut(destination_start..destination_end)
+        .context("published full transport projection destination is outside result")?
+        .copy_from_slice(projected);
+    Ok(())
+}
+
 pub(crate) fn project_full_token_directions(
     artifact: &Path,
     token_ids: &[u32],
@@ -1509,17 +1578,17 @@ pub(crate) fn project_full_token_directions(
     validate_deployed_model(&manifest, loaded)?;
     let arch = loaded.arch();
     ensure!(
-        !token_ids.is_empty() && token_ids.len() <= MAX_PROJECTED_FULL_TOKENS,
-        "published full transport lens requires 1..={} selected token IDs",
-        MAX_PROJECTED_FULL_TOKENS
+        !token_ids.is_empty(),
+        "published full transport lens requires selected token IDs"
     );
     let mut unique_tokens = BTreeSet::new();
     ensure!(
-        token_ids
-            .iter()
-            .all(|&token| token < arch.vocab_size && unique_tokens.insert(token)),
+        token_ids.iter().all(|&token| token < arch.vocab_size
+            && token <= i32::MAX as u32
+            && unique_tokens.insert(token)),
         "published full transport token IDs must be unique and inside the model vocabulary"
     );
+    drop(unique_tokens);
     ensure!(
         !source_layers.is_empty()
             && source_layers.windows(2).all(|pair| pair[0] < pair[1])
@@ -1529,30 +1598,50 @@ pub(crate) fn project_full_token_directions(
         "published full transport source layers must be nonempty, sorted, unique artifact layers"
     );
 
+    let hidden_size = arch.hidden_size as usize;
+    let projected_values = source_layers
+        .len()
+        .checked_mul(token_ids.len())
+        .and_then(|value| value.checked_mul(hidden_size))
+        .context("published full transport projected direction count overflow")?;
+    let projected_bytes = projected_full_token_direction_retained_bytes(
+        source_layers.len(),
+        token_ids.len(),
+        hidden_size,
+    )?;
+    ensure!(
+        projected_bytes <= TOKEN_ARTIFACT_MAX_BYTES,
+        "published full transport projected directions require {projected_bytes} bytes, exceeding retained result budget {TOKEN_ARTIFACT_MAX_BYTES}"
+    );
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(1))
         .context("create published full transport projection sequence")?;
     let workspace_lens = loaded
         .workspace_lens_session(&mut sequence)
         .context("open published full transport projection session")?;
-    let selected = match target_covector {
-        FullTokenTargetCovector::DeployedLogitNumerator => workspace_lens
-            .selected_token_readouts(token_ids)
-            .context("derive deployed-model selected-token score covectors")?,
-        FullTokenTargetCovector::RawLmHead => workspace_lens
-            .selected_token_raw_lm_head_rows(token_ids)
-            .context("derive deployed-model raw LM-head token covectors")?,
-    };
-    let hidden_size = selected.hidden_size;
-    let projected_values = source_layers
-        .len()
-        .checked_mul(token_ids.len())
-        .and_then(|value| value.checked_mul(hidden_size))
-        .context("published full transport projected direction count overflow")?;
+    let caller_reserve_bytes = TOKEN_ARTIFACT_MAX_BYTES
+        .checked_add(JSON_FILE_MAX_BYTES)
+        .context("full-transport projection caller reserve overflow")?;
+    let query_capacity = workspace_lens
+        .f16_transport_readout_query_capacity(caller_reserve_bytes)
+        .context("derive full-transport token projection tile")?;
     let mut values = Vec::new();
     values
         .try_reserve_exact(projected_values)
         .context("allocate published full transport projected directions")?;
+    values.resize(projected_values, f32::NAN);
+    let single_tile_selected = if token_ids.len() <= query_capacity {
+        Some(match target_covector {
+            FullTokenTargetCovector::DeployedLogitNumerator => workspace_lens
+                .selected_token_readouts(token_ids)
+                .context("derive deployed-model selected-token score covectors")?,
+            FullTokenTargetCovector::RawLmHead => workspace_lens
+                .selected_token_raw_lm_head_rows(token_ids)
+                .context("derive deployed-model raw LM-head token covectors")?,
+        })
+    } else {
+        None
+    };
 
     let payload_path = artifact.join(&manifest.payload.path);
     let (mut payload, payload_length) = open_regular_file(&payload_path)?;
@@ -1564,7 +1653,7 @@ pub(crate) fn project_full_token_directions(
     let matrix_length =
         usize::try_from(matrix_bytes).context("full transport matrix byte count")?;
     let mut matrix = vec![0_u8; matrix_length];
-    for &layer in source_layers {
+    for (layer_index, &layer) in source_layers.iter().enumerate() {
         let layer_slot = manifest
             .transport
             .source_layers
@@ -1582,14 +1671,51 @@ pub(crate) fn project_full_token_directions(
             .read_exact(&mut matrix)
             .with_context(|| format!("read published full transport source layer {layer}"))?;
         ensure_finite_f16(&matrix, layer as usize, 0)?;
-        let projected = workspace_lens
-            .project_f16_transport_readouts(&matrix, &selected)
-            .with_context(|| format!("project published full transport source layer {layer}"))?;
-        ensure!(
-            projected.len() == token_ids.len() * hidden_size,
-            "published full transport projection returned an invalid shape"
-        );
-        values.extend(projected);
+        let prepared_transport = workspace_lens
+            .prepare_f16_transport_readouts(&matrix)
+            .with_context(|| format!("prepare published full transport source layer {layer}"))?;
+        for (tile_index, token_tile) in token_ids.chunks(query_capacity).enumerate() {
+            let token_start = tile_index
+                .checked_mul(query_capacity)
+                .context("published full transport token tile offset overflow")?;
+            let tile_selected = if single_tile_selected.is_none() {
+                Some(match target_covector {
+                    FullTokenTargetCovector::DeployedLogitNumerator => workspace_lens
+                        .selected_token_readouts(token_tile)
+                        .context("derive deployed-model selected-token score covectors")?,
+                    FullTokenTargetCovector::RawLmHead => workspace_lens
+                        .selected_token_raw_lm_head_rows(token_tile)
+                        .context("derive deployed-model raw LM-head token covectors")?,
+                })
+            } else {
+                None
+            };
+            let selected = single_tile_selected
+                .as_ref()
+                .or(tile_selected.as_ref())
+                .expect("one selected-token tile is available");
+            ensure!(
+                selected.hidden_size == hidden_size && selected.token_ids == token_tile,
+                "published full transport selected-token projection changed row order"
+            );
+            let projected = workspace_lens
+                .project_prepared_f16_transport_readouts(&prepared_transport, selected)
+                .with_context(|| {
+                    format!("project published full transport source layer {layer}")
+                })?;
+            ensure!(
+                projected.len() == token_tile.len() * hidden_size,
+                "published full transport projection returned an invalid shape"
+            );
+            write_projected_full_token_tile(
+                &mut values,
+                layer_index,
+                token_ids.len(),
+                token_start,
+                hidden_size,
+                &projected,
+            )?;
+        }
     }
     ensure!(
         values.len() == projected_values && values.iter().all(|value| value.is_finite()),
@@ -1609,11 +1735,7 @@ pub(crate) fn project_full_token_directions(
         ),
         target_layer: manifest.transport.target_layer,
         source_layers: source_layers.to_vec(),
-        token_ids: selected
-            .token_ids
-            .into_iter()
-            .map(|token| token as i32)
-            .collect(),
+        token_ids: token_ids.iter().map(|&token| token as i32).collect(),
         hidden_size,
         values,
     })
@@ -4593,6 +4715,39 @@ mod tests {
             trace_host_result_reserve_bytes(2, MAX_TRACE_DOCUMENT_BYTES).unwrap(),
             4 * MAX_TRACE_DOCUMENT_BYTES as u64
         );
+    }
+
+    #[test]
+    fn projected_full_token_banks_are_priced_by_shape() {
+        let logical_bytes = 82_575_360 + 64 * 4 + 63 * 4 + 128;
+        let page_size = host_page_size_bytes().unwrap();
+        let priced = projected_full_token_direction_retained_bytes(63, 64, 5_120).unwrap();
+        assert!(priced >= logical_bytes && priced <= logical_bytes + 4 * (page_size - 1));
+        assert!(projected_full_token_direction_retained_bytes(usize::MAX, 2, 5_120).is_err());
+    }
+
+    #[test]
+    fn projected_full_token_tiles_preserve_layer_major_token_order() {
+        let mut values = vec![f32::NAN; 2 * 5 * 2];
+        write_projected_full_token_tile(&mut values, 0, 5, 0, 2, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+            .unwrap();
+        write_projected_full_token_tile(&mut values, 0, 5, 3, 2, &[6.0, 7.0, 8.0, 9.0]).unwrap();
+        write_projected_full_token_tile(
+            &mut values,
+            1,
+            5,
+            0,
+            2,
+            &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+        )
+        .unwrap();
+        write_projected_full_token_tile(&mut values, 1, 5, 3, 2, &[16.0, 17.0, 18.0, 19.0])
+            .unwrap();
+        assert_eq!(
+            values,
+            (0..20).map(|value| value as f32).collect::<Vec<_>>()
+        );
+        assert!(write_projected_full_token_tile(&mut values, 1, 5, 4, 2, &[0.0; 4]).is_err());
     }
 
     #[test]

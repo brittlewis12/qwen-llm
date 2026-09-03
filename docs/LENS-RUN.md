@@ -583,11 +583,14 @@ referenced by the plan; no new fit or intermediate artifact is required:
 }
 ```
 
-The selected token list is bounded to 32 unique model-vocabulary IDs. Its
-directions are `transport_layer^T * (LM-head row * output-RMSNorm gamma)` for
-the deployed GGUF. The acknowledgement is required because the transport was
-fitted on the published BF16 checkpoint and is being transferred to a GGUF
-runtime. Legacy `published_full_j` plans remain accepted as an alias.
+For ordinary Qwen, the selected token list contains unique model-vocabulary IDs
+and has no fixed row-count ceiling. `run` admits the combined deployed-logit and
+optional raw LM-head direction banks within its 128 MiB retained-result budget,
+then tiles projection queries under the workspace byte budget. Its directions are
+`transport_layer^T * (LM-head row * output-RMSNorm gamma)` for the deployed
+GGUF. The acknowledgement is required because the transport was fitted on the
+published BF16 checkpoint and is being transferred to a GGUF runtime. Legacy
+`published_full_j` plans remain accepted as an alias.
 
 Native and published selected J/R artifacts report selected-row projection
 numerator scores over only the artifact's selected token rows. Muse selected

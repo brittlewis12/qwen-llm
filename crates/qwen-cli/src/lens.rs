@@ -63,7 +63,7 @@ const TOKEN_ORIENTATION: &str = "source_layer_selected_token_source_coordinate";
 const TOKEN_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
 const TOKEN_ID_ARGUMENT_MAX_COUNT: usize = 65_536;
 // Valid row-v1 and token artifacts are accepted up to this explicit JSON compatibility limit.
-const JSON_FILE_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const JSON_FILE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROMPT_RECORDS: usize = 10_000;
 // At six JSON bytes per escaped input byte, 10k skipped IDs occupy at most 7.32 MiB.
 const MAX_PROMPT_ID_BYTES: usize = 128;

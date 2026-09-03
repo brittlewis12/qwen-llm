@@ -46,6 +46,8 @@ const PACKED_FULL_READOUT_CHUNK_SIZE: usize = 16;
 const MPS_FULL_READOUT_TOP_K: usize = 16;
 const FULL_READOUT_CANDIDATE_COUNT: usize = 2 * MPS_FULL_READOUT_TOP_K;
 const MAX_FULL_READOUT_TOP_K: usize = 25;
+const F16_TRANSPORT_READOUT_LIVE_TRANSPORT_BANKS: usize = 2;
+const F16_TRANSPORT_READOUT_LIVE_COVECTOR_BANKS: usize = 4;
 /// Maximum peak host bytes attributable to a newly materialized workspace-lens
 /// result and its immediate fitting/readout workspaces. 256 MiB keeps selected
 /// experimental banks practical while preventing accidental multi-GiB jobs.
@@ -570,6 +572,12 @@ impl WorkspaceLensTokenReadouts {
     }
 }
 
+pub struct WorkspaceLensPreparedF16Transport<'model> {
+    model: &'model LoadedModel,
+    hidden_size: usize,
+    tensor: MetalTensor,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceLensPromptLastCapture {
     pub position: usize,
@@ -951,6 +959,8 @@ pub enum WorkspaceLensError {
     PackedFullReadoutTooLong { got: usize, max: usize },
     #[error("F16 transport has {got} bytes, expected exactly {expected}")]
     InvalidFullReadoutTransportSize { got: usize, expected: usize },
+    #[error("prepared F16 transport belongs to a different loaded model")]
+    PreparedF16TransportModelMismatch,
     #[error("packed capture layer {layer} occurs more than once")]
     DuplicatePackedCaptureLayer { layer: u32 },
     #[error("packed capture belongs to a different loaded model")]
@@ -1352,6 +1362,47 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         })
     }
 
+    /// Maximum selected covectors one F16 transport projection can admit while
+    /// retaining all live transport, Metal, host result, and caller-owned banks.
+    pub fn f16_transport_readout_query_capacity(
+        &self,
+        additional_live_bytes: usize,
+    ) -> Result<usize, WorkspaceLensError> {
+        let hidden_size = self.arch().hidden_size as usize;
+        let transport_bytes = checked_product(
+            checked_product(hidden_size, hidden_size)?,
+            std::mem::size_of::<half::f16>(),
+        )?;
+        f16_transport_readout_query_capacity(hidden_size, transport_bytes, additional_live_bytes)
+    }
+
+    pub fn prepare_f16_transport_readouts(
+        &self,
+        transport_bytes: &[u8],
+    ) -> Result<WorkspaceLensPreparedF16Transport<'model>, WorkspaceLensError> {
+        let hidden_size = self.arch().hidden_size as usize;
+        let expected_bytes = checked_product(
+            checked_product(hidden_size, hidden_size)?,
+            std::mem::size_of::<half::f16>(),
+        )?;
+        if transport_bytes.len() != expected_bytes {
+            return Err(WorkspaceLensError::InvalidFullReadoutTransportSize {
+                got: transport_bytes.len(),
+                expected: expected_bytes,
+            });
+        }
+        Ok(WorkspaceLensPreparedF16Transport {
+            model: self.model,
+            hidden_size,
+            tensor: MetalTensor::from_bytes(
+                self.model.context(),
+                transport_bytes,
+                vec![hidden_size as u64, hidden_size as u64],
+                GgmlType::F16,
+            )?,
+        })
+    }
+
     /// Project selected target covectors through one row-major F16 transport
     /// matrix. The result is query-major `[Q,H]` and computes
     /// `transport^T * covector` for each selected token.
@@ -1360,7 +1411,26 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         transport_bytes: &[u8],
         readouts: &WorkspaceLensTokenReadouts,
     ) -> Result<Vec<f32>, WorkspaceLensError> {
+        let transport = self.prepare_f16_transport_readouts(transport_bytes)?;
+        self.project_prepared_f16_transport_readouts(&transport, readouts)
+    }
+
+    pub fn project_prepared_f16_transport_readouts(
+        &self,
+        transport: &WorkspaceLensPreparedF16Transport<'_>,
+        readouts: &WorkspaceLensTokenReadouts,
+    ) -> Result<Vec<f32>, WorkspaceLensError> {
+        if !std::ptr::eq(self.model, transport.model) {
+            return Err(WorkspaceLensError::PreparedF16TransportModelMismatch);
+        }
         let hidden_size = self.arch().hidden_size as usize;
+        if transport.hidden_size != hidden_size {
+            return Err(WorkspaceLensError::ActivationSize {
+                name: "prepared transport hidden size",
+                got: transport.hidden_size,
+                expected: hidden_size,
+            });
+        }
         if readouts.hidden_size != hidden_size {
             return Err(WorkspaceLensError::ActivationSize {
                 name: "transport readout hidden size",
@@ -1389,21 +1459,15 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
                 index,
             });
         }
-        let covector_bytes = checked_product(expected_covectors, std::mem::size_of::<f32>())?;
-        let peak_bytes = transport_bytes
-            .len()
-            .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(covector_bytes.checked_mul(4)?))
-            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        let peak_bytes = f16_transport_readout_peak_bytes(
+            hidden_size,
+            usize::try_from(transport.tensor.n_bytes())
+                .map_err(|_| WorkspaceLensError::SizeOverflow)?,
+            n_query,
+        )?;
         enforce_workspace_lens_byte_budget("F16 transport readout projection", peak_bytes)?;
 
         let context = self.model.context();
-        let transport = MetalTensor::from_bytes(
-            context,
-            transport_bytes,
-            vec![hidden_size as u64, hidden_size as u64],
-            GgmlType::F16,
-        )?;
         let grad_output = MetalTensor::from_bytes(
             context,
             bytemuck::cast_slice(&readouts.values),
@@ -1419,7 +1483,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         let encode_result = encode_frozen_linear_vjp_f32(
             context,
             &encoder,
-            &transport,
+            &transport.tensor,
             &grad_output,
             &grad_input,
             hidden_size,
@@ -6507,6 +6571,57 @@ fn checked_product(left: usize, right: usize) -> Result<usize, WorkspaceLensErro
         .ok_or(WorkspaceLensError::SizeOverflow)
 }
 
+fn f16_transport_readout_peak_bytes(
+    hidden_size: usize,
+    transport_bytes: usize,
+    query_count: usize,
+) -> Result<usize, WorkspaceLensError> {
+    let covector_bytes = checked_product(
+        checked_product(query_count, hidden_size)?,
+        std::mem::size_of::<f32>(),
+    )?;
+    transport_bytes
+        .checked_mul(F16_TRANSPORT_READOUT_LIVE_TRANSPORT_BANKS)
+        .and_then(|bytes| {
+            bytes
+                .checked_add(covector_bytes.checked_mul(F16_TRANSPORT_READOUT_LIVE_COVECTOR_BANKS)?)
+        })
+        .ok_or(WorkspaceLensError::SizeOverflow)
+}
+
+fn f16_transport_readout_query_capacity(
+    hidden_size: usize,
+    transport_bytes: usize,
+    additional_live_bytes: usize,
+) -> Result<usize, WorkspaceLensError> {
+    let fixed_bytes = transport_bytes
+        .checked_mul(F16_TRANSPORT_READOUT_LIVE_TRANSPORT_BANKS)
+        .and_then(|bytes| bytes.checked_add(additional_live_bytes))
+        .ok_or(WorkspaceLensError::SizeOverflow)?;
+    let bytes_per_query = checked_product(
+        checked_product(hidden_size, std::mem::size_of::<f32>())?,
+        F16_TRANSPORT_READOUT_LIVE_COVECTOR_BANKS,
+    )?;
+    let available = MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES
+        .checked_sub(fixed_bytes)
+        .ok_or(WorkspaceLensError::WorkspaceLensResultByteBudgetExceeded {
+            name: "F16 transport readout projection",
+            requested_bytes: fixed_bytes,
+            max_bytes: MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES,
+        })?;
+    let capacity = available / bytes_per_query;
+    if capacity == 0 {
+        return Err(WorkspaceLensError::WorkspaceLensResultByteBudgetExceeded {
+            name: "F16 transport readout projection",
+            requested_bytes: fixed_bytes
+                .checked_add(bytes_per_query)
+                .ok_or(WorkspaceLensError::SizeOverflow)?,
+            max_bytes: MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES,
+        });
+    }
+    Ok(capacity)
+}
+
 fn enforce_workspace_lens_byte_budget(
     name: &'static str,
     requested_bytes: usize,
@@ -9167,6 +9282,37 @@ mod tests {
             validate_selected_token_request_size(70_000_000, u32::MAX, 1).unwrap_err(),
             WorkspaceLensError::WorkspaceLensResultByteBudgetExceeded { .. }
         ));
+    }
+
+    #[test]
+    fn f16_transport_projection_capacity_is_derived_from_live_bytes() {
+        let hidden_size = 5_120;
+        let transport_bytes = hidden_size * hidden_size * std::mem::size_of::<half::f16>();
+        let capacity =
+            f16_transport_readout_query_capacity(hidden_size, transport_bytes, 0).unwrap();
+        assert!(capacity > 32);
+        assert!(
+            f16_transport_readout_peak_bytes(hidden_size, transport_bytes, capacity).unwrap()
+                <= MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES
+        );
+        assert!(
+            f16_transport_readout_peak_bytes(hidden_size, transport_bytes, capacity + 1).unwrap()
+                > MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES
+        );
+        let additional_live_bytes = 144 * 1024 * 1024;
+        let reserved_capacity = f16_transport_readout_query_capacity(
+            hidden_size,
+            transport_bytes,
+            additional_live_bytes,
+        )
+        .unwrap();
+        assert!(reserved_capacity > 32 && reserved_capacity < capacity);
+        assert!(
+            f16_transport_readout_peak_bytes(hidden_size, transport_bytes, reserved_capacity,)
+                .unwrap()
+                + additional_live_bytes
+                <= MAX_WORKSPACE_LENS_OWNED_RESULT_BYTES
+        );
     }
 
     #[test]

@@ -47,7 +47,6 @@ const MAX_RENDERED_SELECTORS_PER_PLAN: usize = 1024;
 const MAX_RENDERED_SELECTOR_MATCH_WORK: usize = 1_000_000;
 const MAX_TOP_K: usize = 1024;
 const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
-const MAX_PUBLISHED_FULL_TOKEN_IDS: usize = 32;
 pub(crate) const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 const RUN_SCHEMA: &str = "qwen.lens.run";
 const RUN_SCHEMA_VERSION: u32 = 5;
@@ -3934,10 +3933,8 @@ fn validate_plan(plan: &LensPlan) -> Result<()> {
         {
             let unique = token_ids.iter().copied().collect::<HashSet<_>>();
             ensure!(
-                !token_ids.is_empty()
-                    && token_ids.len() <= MAX_PUBLISHED_FULL_TOKEN_IDS
-                    && unique.len() == token_ids.len(),
-                "published full transport lens {id} requires 1..={MAX_PUBLISHED_FULL_TOKEN_IDS} unique token IDs"
+                !token_ids.is_empty() && unique.len() == token_ids.len(),
+                "published full transport lens {id} requires unique token IDs"
             );
             ensure!(
                 *allow_unvalidated_transfer,
@@ -4234,6 +4231,49 @@ fn validate_runtime(gguf: &GgufFile, kind: ArchKind, n_layer: u32) -> Result<()>
     Ok(())
 }
 
+fn ensure_projected_full_direction_bank_budget(
+    plan: &LensPlan,
+    required_lens_layers: &HashMap<&str, BTreeSet<u32>>,
+    raw_lens_layers: &HashMap<&str, BTreeSet<u32>>,
+    hidden_size: usize,
+) -> Result<()> {
+    let mut retained_bytes = 0usize;
+    for lens in &plan.lenses {
+        let LensDefinition::PublishedFullTransport { id, token_ids, .. } = lens else {
+            continue;
+        };
+        let layers = required_lens_layers
+            .get(id.as_str())
+            .with_context(|| format!("published full transport lens {id} is not used"))?;
+        retained_bytes = retained_bytes
+            .checked_add(
+                super::full_lens::projected_full_token_direction_retained_bytes(
+                    layers.len(),
+                    token_ids.len(),
+                    hidden_size,
+                )?,
+            )
+            .context("published full transport retained bank size overflow")?;
+        if let Some(raw_layers) = raw_lens_layers.get(id.as_str()) {
+            retained_bytes = retained_bytes
+                .checked_add(
+                    super::full_lens::projected_full_token_direction_retained_bytes(
+                        raw_layers.len(),
+                        token_ids.len(),
+                        hidden_size,
+                    )?,
+                )
+                .context("published full transport retained raw bank size overflow")?;
+        }
+    }
+    ensure!(
+        retained_bytes <= super::TOKEN_ARTIFACT_MAX_BYTES,
+        "published full transport direction banks require {retained_bytes} bytes, exceeding retained result budget {}",
+        super::TOKEN_ARTIFACT_MAX_BYTES
+    );
+    Ok(())
+}
+
 fn prepare_execution_plan(
     plan: &LensPlan,
     plan_dir: &Path,
@@ -4287,6 +4327,12 @@ fn prepare_execution_plan(
             .extend(layers.iter().copied());
         readout_layers.extend(layers);
     }
+    ensure_projected_full_direction_bank_budget(
+        plan,
+        &required_lens_layers,
+        &raw_lens_layers,
+        arch.hidden_size as usize,
+    )?;
 
     let mut lenses = HashMap::new();
     for definition in &plan.lenses {
@@ -7006,6 +7052,8 @@ mod tests {
             &valid.lenses[0],
             LensDefinition::PublishedFullTransport { token_ids, .. } if token_ids == &[42, 43]
         ));
+        let expanded = plan(json!((0..64).collect::<Vec<_>>()), true);
+        validate_plan(&expanded).unwrap();
 
         assert!(validate_plan(&plan(json!([42, 43]), false)).is_err());
         assert!(validate_plan(&plan(json!([42, 42]), true)).is_err());
@@ -7035,6 +7083,16 @@ mod tests {
             legacy.lenses[0],
             LensDefinition::PublishedFullTransport { .. }
         ));
+
+        let mut required = HashMap::new();
+        required.insert("j", (0..63).collect::<BTreeSet<_>>());
+        let raw = HashMap::new();
+        ensure_projected_full_direction_bank_budget(&expanded, &required, &raw, 5_120).unwrap();
+        let mut raw = HashMap::new();
+        raw.insert("j", (0..63).collect::<BTreeSet<_>>());
+        assert!(
+            ensure_projected_full_direction_bank_budget(&expanded, &required, &raw, 5_120).is_err()
+        );
     }
 
     #[test]

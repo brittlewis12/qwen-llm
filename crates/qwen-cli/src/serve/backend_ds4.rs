@@ -20,6 +20,7 @@
 //! Thinking tiers pre-open `<think>` in the prompt, so [`preopens_reasoning`]
 //! reports headless generation to the transport (S3-1).
 
+use super::backend::request_sampler;
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
@@ -34,7 +35,7 @@ use qwen_llm::deepseek_v4_metal::{
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
-use qwen_llm::sampling::{Sampler, SamplingConfig};
+use qwen_llm::sampling::Sampler;
 use qwen_llm::tokenizer::Tokenizer;
 use std::io;
 use std::sync::Arc;
@@ -233,17 +234,6 @@ fn decoded_text_closed_reasoning(
         }
     }
     text.contains("</think>")
-}
-
-fn request_sampler(request: &ServeRequest) -> Result<Sampler, ServeError> {
-    Sampler::new(SamplingConfig {
-        temperature: request.temperature.unwrap_or(0.0),
-        top_k: request.top_k.unwrap_or(200),
-        top_p: request.top_p.unwrap_or(1.0),
-        min_p: request.min_p.unwrap_or(0.05),
-        seed: request.seed.unwrap_or(42),
-    })
-    .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))
 }
 
 impl GenerationBackend for DeepSeekV4Backend {

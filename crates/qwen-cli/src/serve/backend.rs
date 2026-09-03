@@ -255,7 +255,9 @@ fn preopens(template: QwenTemplate, request: &ServeRequest) -> bool {
         && request.reasoning_effort.as_deref() != Some("none")
 }
 
-fn request_sampler(request: &ServeRequest) -> Result<Sampler, ServeError> {
+/// Sampler for a Qwen or DeepSeek V4 serve request with the greedy-leaning
+/// serve defaults (temperature 0, top_k 200, min_p 0.05).
+pub(crate) fn request_sampler(request: &ServeRequest) -> Result<Sampler, ServeError> {
     Sampler::new(SamplingConfig {
         temperature: request.temperature.unwrap_or(0.0),
         top_k: request.top_k.unwrap_or(200),

@@ -4642,18 +4642,11 @@ fn validate_cooperative_pipeline_threads(
 }
 
 fn preflight_projection(ctx: &MetalContext, dtype: GgmlType) -> Result<(), Qwen4ExpQsaError> {
-    let kernels: &[&str] = match dtype {
-        GgmlType::F32 => &["kernel_mat_vec_f32_f32", "kernel_mat_vec_f32_f32_lcpp_r2"],
-        GgmlType::Q8_0 => &["kernel_mat_vec_q8_0_f32", "kernel_mat_vec_q8_0_f32_lcpp"],
-        GgmlType::BF16 => &["kernel_mat_vec_bf16_f32"],
-        _ => return invalid(format!("unsupported QSA projection dtype {dtype:?}")),
-    };
-    for kernel in kernels {
-        ctx.pipeline(kernel)?;
+    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, false, true)? {
+        return invalid(format!("unsupported QSA projection dtype {dtype:?}"));
     }
     Ok(())
 }
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct RopeArgs {

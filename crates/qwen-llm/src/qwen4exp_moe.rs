@@ -2867,21 +2867,11 @@ fn preflight_packed_projection(
     ctx: &MetalContext,
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpMoeError> {
-    let kernels: &[&str] = match dtype {
-        GgmlType::F32 => &["kernel_mat_mat_f32_f32"],
-        GgmlType::Q8_0 => &[
-            "kernel_mat_mat_q8_0_f32",
-            "kernel_mat_mat_q8_0_f32_n16",
-            "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
-        ],
-        _ => return invalid(format!("unsupported packed MoE projection dtype {dtype:?}")),
-    };
-    for kernel in kernels {
-        ctx.pipeline(kernel)?;
+    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, false)? {
+        return invalid(format!("unsupported packed MoE projection dtype {dtype:?}"));
     }
     Ok(())
 }
-
 fn preflight_projection(ctx: &MetalContext, dtype: GgmlType) -> Result<(), Qwen4ExpMoeError> {
     let kernels: &[(&str, usize, usize)] = match dtype {
         GgmlType::F32 => &[

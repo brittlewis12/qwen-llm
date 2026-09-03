@@ -1189,42 +1189,65 @@ fn preflight_packed_combine(ctx: &MetalContext) -> Result<(), Qwen4ExpMetalError
     Ok(())
 }
 
-fn preflight_packed_projection(
-    ctx: &MetalContext,
+/// Kernel names every Flash-Next projection dtype must be able to build.
+/// Returns `None` for unsupported dtypes so callers can report their own
+/// family-specific error.
+pub(crate) fn projection_kernel_names(
     dtype: GgmlType,
-) -> Result<(), Qwen4ExpMetalError> {
-    preflight_projection(ctx, dtype)?;
-    let kernels: &[&str] = match dtype {
-        GgmlType::F32 => &["kernel_mat_mat_f32_f32"],
-        GgmlType::Q8_0 => &[
+    packed: bool,
+    allow_bf16: bool,
+) -> Option<&'static [&'static str]> {
+    Some(match (dtype, packed) {
+        (GgmlType::F32, false) => &["kernel_mat_vec_f32_f32", "kernel_mat_vec_f32_f32_lcpp_r2"],
+        (GgmlType::Q8_0, false) => &["kernel_mat_vec_q8_0_f32", "kernel_mat_vec_q8_0_f32_lcpp"],
+        (GgmlType::BF16, false) if allow_bf16 => &["kernel_mat_vec_bf16_f32"],
+        (GgmlType::F32, true) => &["kernel_mat_mat_f32_f32"],
+        (GgmlType::Q8_0, true) => &[
             "kernel_mat_mat_q8_0_f32",
             "kernel_mat_mat_q8_0_f32_n16",
             "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
         ],
-        _ => {
-            return Err(invalid(format!(
-                "unsupported packed gated-residual projection dtype {dtype:?}"
-            )));
-        }
+        _ => return None,
+    })
+}
+
+/// Build every pipeline a projection dtype needs. `Ok(false)` means the dtype
+/// is unsupported; pipeline failures surface as `MetalError`.
+pub(crate) fn preflight_projection_pipelines(
+    ctx: &MetalContext,
+    dtype: GgmlType,
+    packed: bool,
+    allow_bf16: bool,
+) -> Result<bool, MetalError> {
+    if packed && !preflight_projection_pipelines(ctx, dtype, false, allow_bf16)? {
+        return Ok(false);
+    }
+    let Some(kernels) = projection_kernel_names(dtype, packed, allow_bf16) else {
+        return Ok(false);
     };
     for kernel in kernels {
         ctx.pipeline(kernel)?;
+    }
+    Ok(true)
+}
+
+fn preflight_packed_projection(
+    ctx: &MetalContext,
+    dtype: GgmlType,
+) -> Result<(), Qwen4ExpMetalError> {
+    if !preflight_projection_pipelines(ctx, dtype, true, false)? {
+        return Err(invalid(format!(
+            "unsupported packed gated-residual projection dtype {dtype:?}"
+        )));
     }
     Ok(())
 }
 
 fn preflight_projection(ctx: &MetalContext, dtype: GgmlType) -> Result<(), Qwen4ExpMetalError> {
-    let kernels: &[&str] = match dtype {
-        GgmlType::F32 => &["kernel_mat_vec_f32_f32", "kernel_mat_vec_f32_f32_lcpp_r2"],
-        GgmlType::Q8_0 => &["kernel_mat_vec_q8_0_f32", "kernel_mat_vec_q8_0_f32_lcpp"],
-        _ => {
-            return Err(invalid(format!(
-                "unsupported gated-residual projection dtype {dtype:?}"
-            )));
-        }
-    };
-    for kernel in kernels {
-        ctx.pipeline(kernel)?;
+    if !preflight_projection_pipelines(ctx, dtype, false, false)? {
+        return Err(invalid(format!(
+            "unsupported gated-residual projection dtype {dtype:?}"
+        )));
     }
     Ok(())
 }

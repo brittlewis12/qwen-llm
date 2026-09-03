@@ -1211,17 +1211,15 @@ pub(crate) fn projection_kernel_names(
     })
 }
 
-/// Build every pipeline a projection dtype needs. `Ok(false)` means the dtype
-/// is unsupported; pipeline failures surface as `MetalError`.
+/// Build the pipelines one projection shape (scalar or packed) needs.
+/// `Ok(false)` means the dtype is unsupported; pipeline failures surface as
+/// `MetalError`. Callers that require both shapes call this twice.
 pub(crate) fn preflight_projection_pipelines(
     ctx: &MetalContext,
     dtype: GgmlType,
     packed: bool,
     allow_bf16: bool,
 ) -> Result<bool, MetalError> {
-    if packed && !preflight_projection_pipelines(ctx, dtype, false, allow_bf16)? {
-        return Ok(false);
-    }
     let Some(kernels) = projection_kernel_names(dtype, packed, allow_bf16) else {
         return Ok(false);
     };
@@ -1235,6 +1233,7 @@ fn preflight_packed_projection(
     ctx: &MetalContext,
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpMetalError> {
+    preflight_projection(ctx, dtype)?;
     if !preflight_projection_pipelines(ctx, dtype, true, false)? {
         return Err(invalid(format!(
             "unsupported packed gated-residual projection dtype {dtype:?}"
@@ -1844,6 +1843,41 @@ fn invalid(detail: impl Into<String>) -> Qwen4ExpMetalError {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn projection_kernel_names_pin_each_caller_list() {
+        use super::projection_kernel_names as names;
+        use crate::tensor::GgmlType;
+        assert_eq!(
+            names(GgmlType::F32, false, false),
+            Some(&["kernel_mat_vec_f32_f32", "kernel_mat_vec_f32_f32_lcpp_r2"][..])
+        );
+        assert_eq!(
+            names(GgmlType::Q8_0, false, false),
+            Some(&["kernel_mat_vec_q8_0_f32", "kernel_mat_vec_q8_0_f32_lcpp"][..])
+        );
+        assert_eq!(names(GgmlType::BF16, false, false), None);
+        assert_eq!(
+            names(GgmlType::BF16, false, true),
+            Some(&["kernel_mat_vec_bf16_f32"][..])
+        );
+        assert_eq!(
+            names(GgmlType::F32, true, false),
+            Some(&["kernel_mat_mat_f32_f32"][..])
+        );
+        assert_eq!(
+            names(GgmlType::Q8_0, true, false),
+            Some(
+                &[
+                    "kernel_mat_mat_q8_0_f32",
+                    "kernel_mat_mat_q8_0_f32_n16",
+                    "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+                ][..]
+            )
+        );
+        assert_eq!(names(GgmlType::BF16, true, true), None);
+        assert_eq!(names(GgmlType::Q4_K, false, true), None);
+    }
     use super::*;
     use crate::metal::MetalTensorProvenance;
     use crate::qwen4exp_forward::{

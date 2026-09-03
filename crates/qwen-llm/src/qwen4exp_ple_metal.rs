@@ -1230,6 +1230,7 @@ fn preflight_packed_projection(
     ctx: &MetalContext,
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpPleMetalError> {
+    preflight_projection(ctx, dtype)?;
     if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, false)? {
         return invalid(format!("unsupported packed PLE projection dtype {dtype:?}"));
     }

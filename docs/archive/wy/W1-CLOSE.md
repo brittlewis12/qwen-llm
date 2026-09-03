@@ -41,7 +41,7 @@ prefill >= 5%, exact state or explicit numerical contract.
 
 ## What survives (shelf assets, all committed)
 
-- docs/wy/W1A-DERIVATION.md: exact chunked WY/UT algebra in engine
+- docs/archive/wy/W1A-DERIVATION.md: exact chunked WY/UT algebra in engine
   conventions, adversarially reviewed. Correct regardless of economics.
 - The bit-exact verifier oracle configuration + per-packet state probe
   (--mtp-state-trace) + deferred-bail timing harness.

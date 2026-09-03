@@ -378,7 +378,11 @@ mod stop_token_cli_tests {
     #[cfg(not(feature = "dflash-k0s-diagnostics"))]
     #[test]
     fn default_bench_source_gates_every_k0s_reference() {
-        let source = include_str!("bench.rs");
+        let source = concat!(
+            include_str!("bench.rs"),
+            "\n",
+            include_str!("bench/args.rs")
+        );
         for line in source.lines().filter(|line| line.contains("dflash_k0s")) {
             assert!(
                 line.contains("mod dflash_k0s")

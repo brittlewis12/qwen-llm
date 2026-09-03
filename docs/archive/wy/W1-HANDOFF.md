@@ -95,7 +95,7 @@ literature computes this exactly:
   work becomes [C x d] GEMMs + one [d x d] state update per chunk.
 - YOUR derivation must handle THIS parameterization exactly: per-head
   scalar decay alpha_t (gating), beta_t, L2-normed k, head_dim 128,
-  fp32. Write it as docs/wy/W1A-DERIVATION.md with explicit shapes and
+  fp32. Write it as docs/archive/wy/W1A-DERIVATION.md with explicit shapes and
   a mapping to available kernel primitives (simdgroup_matrix mat-mat
   tiles exist in-repo; see kernels/mat_mat_mm_tile.h).
 - cx (`cx ask`, defaults read-only sandbox; it HAS web search) is

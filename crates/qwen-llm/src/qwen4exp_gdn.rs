@@ -1575,6 +1575,7 @@ fn preflight_packed_projection(
     ctx: &MetalContext,
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpGdnError> {
+    preflight_projection(ctx, dtype)?;
     if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, false)? {
         return invalid(format!("unsupported packed GDN projection dtype {dtype:?}"));
     }

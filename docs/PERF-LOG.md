@@ -9829,7 +9829,7 @@ certification: `cx ask` session `019f633c-62be-7820-9dfa-256d733a58ef`.
 
 ## ANE prefill co-processor oracle — P0 KILL (2026-07-14, ane-oracle branch)
 
-Preregistered ladder (docs/ANE-ORACLE.md rev 2, frozen at 18684c7 before any
+Preregistered ladder (docs/archive/ANE-ORACLE.md rev 2, frozen at 18684c7 before any
 run) asking whether stateless static projections (GDN qkv/z/out, shared
 expert, attn projections, dense FFN) can run on ANE concurrently with GPU
 prefill for a net whole-phase win. Priors from rustane @ c422447 /

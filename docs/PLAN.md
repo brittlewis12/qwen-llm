@@ -1,4 +1,10 @@
-# qwen-llm: v1 plan
+# qwen-llm: v1 plan (historical)
+
+> Status: this is the May 2026 v1 plan, kept for the architecture decisions
+> it records. It is not maintained. Current state lives in `README.md`
+> (support matrix), `docs/PERF-ROADMAP.md` (active queue), and
+> `docs/PERF-LOG.md` (measurements); the benchmark table below is the
+> original llama.cpp baseline, not a maintained comparison.
 
 A from-scratch inference engine for the Qwen 3.5 / 3.6 hybrid Gated DeltaNet
 family (architecture name `qwen3_5` in HF transformers; `LLM_ARCH_QWEN35` in

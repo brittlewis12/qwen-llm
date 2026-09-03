@@ -1,6 +1,6 @@
 # P0/P0b: ANE prefill co-processor Amdahl + DAG oracle — KILL
 
-Program: docs/ANE-ORACLE.md rev 2 (preregistered at 18684c7, before any run).
+Program: docs/archive/ANE-ORACLE.md rev 2 (preregistered at 18684c7, before any run).
 Identity: zekrom M4 Max 128GB, macOS 15.6.1, binary+source 18684c75c (clean),
 AC power, quiet box, `pmset -g therm` clean at start and end
 (thermal-start.txt / thermal-end.txt).
@@ -85,7 +85,7 @@ mechanism note 2).
 **KILL the ANE prefill co-processor lane** per the preregistered gate.
 P1-P4 do not run. No workspace ANE dependency is introduced. The pinned
 sibling-harness design and rustane survey remain recorded in
-docs/ANE-ORACLE.md for reopen use.
+docs/archive/ANE-ORACLE.md for reopen use.
 
 ## Boundary (what this does and does not close)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P0b DAG makespan oracle for the ANE prefill co-processor ladder.
 
-Preregistered in docs/ANE-ORACLE.md rev 2. Replays a serialized
+Preregistered in docs/archive/ANE-ORACLE.md rev 2. Replays a serialized
 prefill phase trace (QWEN_PREFILL_TRACE_{LAYER,ATTN,FFN}_PHASES) in traced
 execution order, moves chosen job classes to a serial ANE queue with
 explicit producer/consumer edges, and reports projected whole-prefill
@@ -17,7 +17,7 @@ Timing model (current engine order; chunks sequential, layers sequential):
   - Optimistic row: sync = 0, staging fully overlapped (compute time only).
   - Pessimistic row: sync = 250 us/job (once), staging serial at 13.55 GB/s
     over f32 byte counts, input staging deduped per (chunk, layer, producer).
-  - ANE service time = FLOPs / A_class prior (docs/ANE-ORACLE.md table),
+  - ANE service time = FLOPs / A_class prior (docs/archive/ANE-ORACLE.md table),
     replaced by P1 measurements when available via --rates-json.
 
 Projection onto product wall W (untraced median): distortion D =
@@ -50,7 +50,7 @@ ATTN_RE = re.compile(
 STAGE_RATE = 13.55e9  # B/s, fused f32<->fp16 conversion prior (rustane)
 SYNC_PESS = 250e-6  # s per ANE job, CPU rendezvous + encoder split proxy
 
-# Class -> ANE TFLOP/s prior (docs/ANE-ORACLE.md rev 2 table).
+# Class -> ANE TFLOP/s prior (docs/archive/ANE-ORACLE.md rev 2 table).
 ANE_RATES = {
     "OFF-EXP": 7.3e12,
     "OFF-RED": 3.2e12,

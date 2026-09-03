@@ -4,14 +4,15 @@ A from-scratch Apple Silicon inference engine for **Qwen 3.5 / 3.6 / 3.8 hybrid 
 DeltaNet** models and **DeepSeek V4 Flash-0731**. Single goal: maximum tok/sec
 for prompt processing and token generation, single-stream and batched.
 
-Architecture decisions live in [`docs/PLAN.md`](docs/PLAN.md).
+Original architecture decisions live in [`docs/PLAN.md`](docs/PLAN.md)
+(historical); see the docs index below for what is maintained.
 
 ## Status
 
 v0 — active bring-up. Numerical-oracle target: byte-for-byte logits match vs
 `llama-cli` on `~/models/Qwen3.5-0.8B.F32.gguf`. Throughput target: beat the
-clean-box `llama.cpp` baseline on `Qwen3.6-27B-Q4_K_M.gguf` on M4 Max; the
-maintained benchmark table lives in `docs/PLAN.md`, and adaptive DFlash notes
+clean-box `llama.cpp` baseline on `Qwen3.6-27B-Q4_K_M.gguf` on M4 Max;
+current numbers live in `docs/PERF-LOG.md`, and adaptive DFlash notes
 live in `docs/H5-DFLASH.md`. Native DeepSeek V4 status and evidence live in
 `docs/DEEPSEEK-V4-STRATEGY.md`.
 
@@ -30,11 +31,30 @@ model residency.
 ## Layout
 
 ```
-crates/qwen-llm     — engine library
-crates/qwen-cli     — `qwen` inference CLI + `qwen-bench` throughput tool
-kernels/            — Metal compute shaders (compiled to embedded .metallib)
-docs/PLAN.md        — architectural decisions
+crates/qwen-llm     — engine library (per-family runtimes under src/, Metal host
+                      encoders under src/metal/, one module per kernel family)
+crates/qwen-cli     — binaries: `qwen` (run/serve), `qwen-bench`, `qwen-lens`,
+                      `qwen-tok`, `qwen-census`, `qwen-grammar-oracle`
+kernels/            — Metal compute shaders (compiled to one embedded .metallib)
+scripts/            — bench, profile, reference-oracle, and serve helpers
+docs/               — see the index below
 ```
+
+## Docs
+
+| Doc | What it is |
+|---|---|
+| `docs/SERVE.md`, `docs/serve-opencode.md` | `qwen serve` Open Responses contract and client setup |
+| `docs/CLI-UX.md` | `qwen run` evidence and decisions |
+| `docs/PERF-ROADMAP.md` | active force-ranked performance queue |
+| `docs/PERF-LOG.md` | append-only measurement log; `docs/bench/` holds the evidence packets |
+| `docs/PERF-TOOLS.md`, `docs/PERF-TOOLS-SETUP.md`, `docs/BENCH.md` | profiling and benchmark tooling |
+| `docs/H5-DFLASH.md`, `docs/H4-MTP.md` | speculative decode design and evidence |
+| `docs/DEEPSEEK-V4-STRATEGY.md` | native DeepSeek V4 status |
+| `docs/LENS-MVP.md`, `docs/LENS-RUN.md` | `qwen-lens` research instrument |
+| `docs/INFERENCE-GRAPH.md`, `docs/APPLE-GPU-OPTIMIZATION.md` | forward-pass map and AGX playbook (reference) |
+| `docs/PLAN.md` | May 2026 v1 plan, historical |
+| `docs/archive/` | closed programs (ANE oracle, chunked-GDN W1) |
 
 ## Build
 

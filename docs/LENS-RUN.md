@@ -95,8 +95,11 @@ topology confound.
 Single sweeps and resident sweep cohorts share a 512 MiB serialized bundle
 budget. Cohort `auto` prefill currently resolves to the documented serial
 effective policy; callers do not need to restate that implementation choice.
-The number of cohort requests is derived from the 96-arm aggregate work budget
-rather than capped independently.
+Cohort request count has no independent prompt-by-arm ceiling. The bounded
+JSONL input, model context, one-million-transition work budget, and exact
+serialized bundle budget admit the requested campaign instead. A conservative
+outer-manifest reservation is checked before model residency and held back from
+child output throughout execution.
 
 Every arm gets a fresh sequence and a fresh sampler initialized with the same
 requested seed. Arms execute sequentially; no KV state, sampler state, or generated

@@ -62,7 +62,6 @@ const MAX_SWEEP_COHORT_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_SWEEP_COHORT_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SWEEP_COHORT_ID_BYTES: usize = 128;
 const MAX_SWEEP_COHORT_MESSAGES_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SWEEP_COHORT_TOTAL_ARMS: usize = 96;
 const MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND: u64 = 1_000_000;
 pub(crate) const MAX_SWEEP_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS: usize = 65;
@@ -1426,18 +1425,6 @@ struct LoadedSweepCohortRequests {
     records: Vec<(usize, SweepCohortRequestRecord)>,
 }
 
-struct PreparedSweepCohortRequest {
-    source_line: usize,
-    id: String,
-    messages_path: PathBuf,
-    messages_blake3: String,
-    arm_args: LensRunArgs,
-    prepared_input: PreparedLensInput,
-    source_bound_plan: BoundLensPlan,
-    schedule: CompiledEventSchedule,
-    prefill: PreparedOrdinaryPrefill,
-}
-
 struct PreflightSweepCohortRequest {
     source_line: usize,
     id: String,
@@ -1507,23 +1494,91 @@ struct SweepCohortPlanBounds {
     transition_upper_bound: u64,
 }
 
+struct SweepCohortManifestBasis {
+    producer: SweepProducer,
+    requests_jsonl_path: PathBuf,
+    requests_jsonl_blake3: String,
+    canonical_source_plan_path: PathBuf,
+    source_plan: LensPlan,
+    source_plan_canonical_json_blake3: String,
+    model_path: PathBuf,
+    operation_id: String,
+    coefficients: Vec<f32>,
+    sampler: RunSampler,
+    max_new_tokens: usize,
+    prefill_execution: PrefillExecution,
+    bounds: SweepCohortPlanBounds,
+}
+
+impl SweepCohortManifestBasis {
+    fn build(
+        &self,
+        cumulative_serialized_child_bytes: u64,
+        sweeps: Vec<SweepCohortChild>,
+    ) -> SweepCohortManifest {
+        SweepCohortManifest {
+            schema: SWEEP_COHORT_SCHEMA.into(),
+            schema_version: SWEEP_COHORT_SCHEMA_VERSION,
+            producer: self.producer.clone(),
+            requests_jsonl_path: self.requests_jsonl_path.clone(),
+            requests_jsonl_blake3: self.requests_jsonl_blake3.clone(),
+            canonical_source_plan_path: self.canonical_source_plan_path.clone(),
+            source_plan: self.source_plan.clone(),
+            source_plan_canonical_json_blake3: self.source_plan_canonical_json_blake3.clone(),
+            model_path: self.model_path.clone(),
+            operation_id: self.operation_id.clone(),
+            coefficients: self.coefficients.clone(),
+            sampler: self.sampler,
+            max_new_tokens: self.max_new_tokens,
+            prefill_execution: self.prefill_execution,
+            execution_policy:
+                "serial_prompts_serial_arms_fresh_sequence_and_sampler_no_batched_generation".into(),
+            planned_request_count: self.bounds.request_count,
+            planned_total_arm_count: self.bounds.total_arm_count,
+            transition_upper_bound: self.bounds.transition_upper_bound,
+            cumulative_serialized_child_bytes,
+            sweeps,
+        }
+    }
+}
+
 struct SweepOutputBudget {
     consumed: u64,
+    reserved: u64,
 }
 
 impl SweepOutputBudget {
+    fn new(reserved: usize) -> Result<Self> {
+        let reserved = u64::try_from(reserved).context("reserved sweep output bytes")?;
+        ensure!(
+            reserved <= MAX_SWEEP_BUNDLE_BYTES,
+            "reserved sweep output bytes {reserved} exceed bundle limit {MAX_SWEEP_BUNDLE_BYTES}"
+        );
+        Ok(Self {
+            consumed: 0,
+            reserved,
+        })
+    }
+
     fn charge(&mut self, byte_length: usize) -> Result<()> {
-        self.consumed = self
+        let consumed = self
             .consumed
             .checked_add(u64::try_from(byte_length).context("serialized child byte length")?)
             .context("cohort serialized child byte count overflow")?;
+        let committed = consumed
+            .checked_add(self.reserved)
+            .context("cohort committed byte count overflow")?;
         ensure!(
-            self.consumed <= MAX_SWEEP_BUNDLE_BYTES,
-            "coefficient sweep serialized bytes {} exceed bundle limit {}",
-            self.consumed,
+            committed <= MAX_SWEEP_BUNDLE_BYTES,
+            "coefficient sweep committed bytes {committed} exceed bundle limit {}",
             MAX_SWEEP_BUNDLE_BYTES
         );
+        self.consumed = consumed;
         Ok(())
+    }
+
+    fn release_reservation(&mut self) {
+        self.reserved = 0;
     }
 }
 
@@ -2292,7 +2347,7 @@ fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
         .collect::<HashSet<_>>();
     let sampler = run_sampler(&arm_args);
     let built = stage_and_publish_sweep(&output_path, |staging| {
-        let mut output_budget = SweepOutputBudget { consumed: 0 };
+        let mut output_budget = SweepOutputBudget::new(0)?;
         build_sweep_bundle(
             staging,
             &args,
@@ -2466,8 +2521,9 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
             .as_deref()
             .context("--requests-jsonl is required in cohort mode")?,
         args.coefficients.len(),
+        args.max_new_tokens,
     )?;
-    validate_sweep_cohort_child_count(requests.records.len(), args.coefficients.len())?;
+    checked_sweep_cohort_child_count(requests.records.len(), args.coefficients.len())?;
     let output_path = super::resolve_output_path(&args.output)?;
     ensure_new_sweep_output(&output_path)?;
 
@@ -2503,7 +2559,11 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
     let model_context_tokens = gguf.declared_context_length()?;
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load model tokenizer")?;
 
-    let mut preflight_requests = Vec::with_capacity(requests.records.len());
+    let mut preflight_requests = Vec::new();
+    preflight_requests
+        .try_reserve_exact(requests.records.len())
+        .context("allocate sweep cohort preflight requests")?;
+    let mut admitted_transition_upper_bound = 0u64;
     for (source_line, request) in requests.records {
         let captured = capture_sweep_cohort_messages(&request.messages)
             .with_context(|| format!("capture sweep cohort request {:?} messages", request.id))?;
@@ -2529,6 +2589,29 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
             model_context_tokens,
         )
         .with_context(|| format!("preflight sweep cohort request {:?}", request.id))?;
+        admitted_transition_upper_bound = admitted_transition_upper_bound
+            .checked_add(sweep_cohort_request_transition_upper_bound(
+                prepared_input.token_ids.len(),
+                args.coefficients.len(),
+                args.max_new_tokens,
+            )?)
+            .context("cohort transition bound overflow")?;
+        ensure!(
+            admitted_transition_upper_bound <= MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND,
+            "cohort transition upper bound {admitted_transition_upper_bound} exceeds limit {MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND}"
+        );
+        let source_bound_plan = bind_plan_positions(
+            &source_plan,
+            &prepared_input.rendering,
+            prepared_input.token_ids.len(),
+        )
+        .with_context(|| format!("bind sweep cohort request {:?}", request.id))?;
+        validate_reachable_scopes(
+            &source_bound_plan.resolved,
+            prepared_input.token_ids.len(),
+            args.max_new_tokens,
+        )
+        .with_context(|| format!("validate sweep cohort request {:?} scopes", request.id))?;
         preflight_requests.push(PreflightSweepCohortRequest {
             source_line,
             id: request.id,
@@ -2546,6 +2629,28 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         args.coefficients.len(),
         args.max_new_tokens,
     )?;
+    ensure!(
+        plan_bounds.transition_upper_bound == admitted_transition_upper_bound,
+        "incremental sweep cohort transition admission drifted from the final plan"
+    );
+    let sampler = run_sampler(&args.arm_run_args());
+    let manifest_basis = SweepCohortManifestBasis {
+        producer: current_sweep_producer(),
+        requests_jsonl_path: requests.canonical_path.clone(),
+        requests_jsonl_blake3: requests.blake3.clone(),
+        canonical_source_plan_path: plan_path.clone(),
+        source_plan: source_plan.clone(),
+        source_plan_canonical_json_blake3: source_plan_blake3.clone(),
+        model_path: args.model.clone(),
+        operation_id: args.operation.clone(),
+        coefficients: args.coefficients.clone(),
+        sampler,
+        max_new_tokens: args.max_new_tokens,
+        prefill_execution: args.prefill_execution,
+        bounds: plan_bounds,
+    };
+    let manifest_reserve_bytes =
+        ensure_sweep_cohort_manifest_capacity(&manifest_basis, &preflight_requests)?;
 
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
@@ -2553,82 +2658,62 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         .with_context(|| format!("load model {}", args.model.display()))?;
     validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
 
-    let mut prepared_requests = Vec::with_capacity(preflight_requests.len());
-    for request in preflight_requests {
-        let PreflightSweepCohortRequest {
-            source_line,
-            id,
-            messages_path,
-            messages_blake3,
-            arm_args,
-            prepared_input,
-        } = request;
+    for request in &preflight_requests {
         ensure!(
-            prepared_input
+            request
+                .prepared_input
                 .token_ids
                 .iter()
                 .all(|&token| token >= 0 && (token as u32) < loaded.arch().vocab_size),
-            "sweep cohort request {id:?} contains a token outside the deployed vocabulary"
+            "sweep cohort request {:?} contains a token outside the deployed vocabulary",
+            request.id
         );
-        let source_bound_plan = bind_plan_positions(
-            &source_plan,
-            &prepared_input.rendering,
-            prepared_input.token_ids.len(),
-        )
-        .with_context(|| format!("bind sweep cohort request {id:?}"))?;
-        validate_reachable_scopes(
-            &source_bound_plan.resolved,
-            prepared_input.token_ids.len(),
-            args.max_new_tokens,
-        )?;
-        let schedule =
-            CompiledEventSchedule::compile(&source_bound_plan.resolved, loaded.arch().n_layer)?;
-        let prefill = PreparedOrdinaryPrefill::serial(
-            args.prefill_execution,
-            RunExecutionScheduleBasis::SweepSourcePlan,
-            RunSerialReason::CohortSerialPolicy,
-        );
-        prefill.execution.validate_against_plan(
-            "ordinary_qwen",
-            &source_bound_plan.resolved,
-            prepared_input.token_ids.len(),
-        )?;
-        prepared_requests.push(PreparedSweepCohortRequest {
-            source_line,
-            id,
-            messages_path,
-            messages_blake3,
-            arm_args,
-            prepared_input,
-            source_bound_plan,
-            schedule,
-            prefill,
-        });
     }
-
-    let execution = prepare_execution_plan(
-        &prepared_requests
-            .first()
-            .context("sweep cohort has no prepared requests")?
-            .source_bound_plan
-            .resolved,
-        plan_dir,
-        &loaded,
-    )?;
+    let first_request = preflight_requests
+        .first()
+        .context("sweep cohort has no preflight requests")?;
+    let first_bound_plan = bind_plan_positions(
+        &source_plan,
+        &first_request.prepared_input.rendering,
+        first_request.prepared_input.token_ids.len(),
+    )
+    .with_context(|| format!("bind sweep cohort request {:?}", first_request.id))?;
+    let execution = prepare_execution_plan(&first_bound_plan.resolved, plan_dir, &loaded)?;
+    drop(first_bound_plan);
     let stop_tokens = loaded
         .gguf()
         .stop_token_ids()?
         .into_iter()
         .collect::<HashSet<_>>();
-    let sampler = run_sampler(&prepared_requests[0].arm_args);
-    let request_count = prepared_requests.len();
+    let request_count = preflight_requests.len();
     stage_and_publish_sweep(&output_path, |staging| {
         let sweeps_root = staging.join("sweeps");
         create_sweep_directory(&sweeps_root)?;
         super::sync_directory(staging)?;
-        let mut children = Vec::with_capacity(prepared_requests.len());
-        let mut output_budget = SweepOutputBudget { consumed: 0 };
-        for (index, request) in prepared_requests.iter_mut().enumerate() {
+        let mut children = Vec::new();
+        children
+            .try_reserve_exact(preflight_requests.len())
+            .context("allocate sweep cohort child manifest entries")?;
+        let mut output_budget = SweepOutputBudget::new(manifest_reserve_bytes)?;
+        for (index, request) in preflight_requests.iter().enumerate() {
+            let source_bound_plan = bind_plan_positions(
+                &source_plan,
+                &request.prepared_input.rendering,
+                request.prepared_input.token_ids.len(),
+            )
+            .with_context(|| format!("bind sweep cohort request {:?}", request.id))?;
+            let schedule =
+                CompiledEventSchedule::compile(&source_bound_plan.resolved, loaded.arch().n_layer)?;
+            let mut prefill = PreparedOrdinaryPrefill::serial(
+                args.prefill_execution,
+                RunExecutionScheduleBasis::SweepSourcePlan,
+                RunSerialReason::CohortSerialPolicy,
+            );
+            prefill.execution.validate_against_plan(
+                "ordinary_qwen",
+                &source_bound_plan.resolved,
+                request.prepared_input.token_ids.len(),
+            )?;
             let child_path = sweeps_root.join(format!("{index:06}"));
             create_sweep_directory(&child_path)?;
             let child = build_sweep_bundle(
@@ -2637,15 +2722,15 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
                 &request.arm_args,
                 &plan_path,
                 &source_plan,
-                &request.source_bound_plan,
+                &source_bound_plan,
                 &request.prepared_input,
                 &loaded,
                 &tokenizer,
                 &execution,
-                &request.schedule,
+                &schedule,
                 &stop_tokens,
                 sampler,
-                &mut request.prefill,
+                &mut prefill,
                 Some(&mut output_budget),
             )?;
             children.push(SweepCohortChild {
@@ -2665,30 +2750,13 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         for child in &children {
             verify_sweep_cohort_child_manifest(staging, child)?;
         }
-        let manifest = SweepCohortManifest {
-            schema: SWEEP_COHORT_SCHEMA.into(),
-            schema_version: SWEEP_COHORT_SCHEMA_VERSION,
-            producer: current_sweep_producer(),
-            requests_jsonl_path: requests.canonical_path.clone(),
-            requests_jsonl_blake3: requests.blake3.clone(),
-            canonical_source_plan_path: plan_path.clone(),
-            source_plan: source_plan.clone(),
-            source_plan_canonical_json_blake3: source_plan_blake3.clone(),
-            model_path: args.model.clone(),
-            operation_id: args.operation.clone(),
-            coefficients: args.coefficients.clone(),
-            sampler,
-            max_new_tokens: args.max_new_tokens,
-            prefill_execution: args.prefill_execution,
-            execution_policy:
-                "serial_prompts_serial_arms_fresh_sequence_and_sampler_no_batched_generation".into(),
-            planned_request_count: plan_bounds.request_count,
-            planned_total_arm_count: plan_bounds.total_arm_count,
-            transition_upper_bound: plan_bounds.transition_upper_bound,
-            cumulative_serialized_child_bytes: output_budget.consumed,
-            sweeps: children,
-        };
+        let manifest = manifest_basis.build(output_budget.consumed, children);
         let manifest_bytes = serialize_sweep_cohort_manifest(&manifest)?;
+        ensure!(
+            manifest_bytes.len() <= manifest_reserve_bytes,
+            "sweep cohort manifest exceeded its preflight reservation"
+        );
+        output_budget.release_reservation();
         output_budget.charge(manifest_bytes.len())?;
         write_new_sweep_file(&staging.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
         super::sync_directory(staging)?;
@@ -2729,15 +2797,60 @@ fn validate_sweep_prompt(
     Ok(())
 }
 
-fn validate_sweep_cohort_child_count(request_count: usize, arm_count: usize) -> Result<usize> {
-    let total_arm_count = request_count
+fn checked_sweep_cohort_child_count(request_count: usize, arm_count: usize) -> Result<usize> {
+    request_count
         .checked_mul(arm_count)
-        .context("cohort prompt/arm child count overflow")?;
+        .context("cohort prompt/arm child count overflow")
+}
+
+fn sweep_cohort_request_transition_upper_bound(
+    prompt_tokens: usize,
+    arm_count: usize,
+    max_new_tokens: usize,
+) -> Result<u64> {
+    let arm_count = u64::try_from(arm_count).context("cohort arm count")?;
+    u64::try_from(prompt_tokens)
+        .context("cohort prompt token count")?
+        .checked_add(u64::try_from(max_new_tokens).context("cohort generation bound")?)
+        .and_then(|transitions| transitions.checked_mul(arm_count))
+        .context("cohort request transition bound overflow")
+}
+
+fn sweep_cohort_request_capacity(arm_count: usize, max_new_tokens: usize) -> Result<usize> {
+    ensure!(arm_count > 0, "sweep cohort arm count must be positive");
     ensure!(
-        total_arm_count <= MAX_SWEEP_COHORT_TOTAL_ARMS,
-        "cohort plans {total_arm_count} prompt/arm children, exceeding limit {MAX_SWEEP_COHORT_TOTAL_ARMS}"
+        max_new_tokens > 0,
+        "sweep cohort generation bound must be positive"
     );
-    Ok(total_arm_count)
+    let minimum_transitions =
+        sweep_cohort_request_transition_upper_bound(1, arm_count, max_new_tokens)?;
+    let transition_capacity = MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND / minimum_transitions;
+    let minimal_child = SweepCohortChild {
+        index: 0,
+        id: "x".into(),
+        source_line: 1,
+        path: "x".into(),
+        prompt_token_count: 1,
+        messages_path: PathBuf::from("x"),
+        messages_blake3: "0".repeat(64),
+        serialized_byte_length: 1,
+        manifest_byte_length: 1,
+        manifest_blake3: "0".repeat(64),
+    };
+    let minimum_child_bytes = serde_json::to_vec(&minimal_child)
+        .context("price minimum sweep cohort child metadata")?
+        .len()
+        .checked_add(1)
+        .context("minimum sweep cohort child size overflow")?;
+    let manifest_capacity = MAX_PLAN_BYTES / minimum_child_bytes;
+    let capacity = usize::try_from(transition_capacity)
+        .unwrap_or(usize::MAX)
+        .min(manifest_capacity);
+    ensure!(
+        capacity >= MIN_SWEEP_COHORT_REQUESTS,
+        "sweep cohort cannot admit {MIN_SWEEP_COHORT_REQUESTS} requests within its transition and manifest budgets"
+    );
+    Ok(capacity)
 }
 
 fn plan_sweep_cohort_bounds(
@@ -2745,23 +2858,18 @@ fn plan_sweep_cohort_bounds(
     arm_count: usize,
     max_new_tokens: usize,
 ) -> Result<SweepCohortPlanBounds> {
-    let total_arm_count = validate_sweep_cohort_child_count(prompt_token_counts.len(), arm_count)?;
-    let transitions_per_arm = prompt_token_counts
+    let total_arm_count = checked_sweep_cohort_child_count(prompt_token_counts.len(), arm_count)?;
+    let transition_upper_bound = prompt_token_counts
         .iter()
         .try_fold(0u64, |total, &prompt| {
-            let prompt = u64::try_from(prompt).context("cohort prompt token count")?;
-            let generation = u64::try_from(max_new_tokens).context("cohort generation bound")?;
             total
-                .checked_add(
-                    prompt
-                        .checked_add(generation)
-                        .context("cohort request transition bound overflow")?,
-                )
+                .checked_add(sweep_cohort_request_transition_upper_bound(
+                    prompt,
+                    arm_count,
+                    max_new_tokens,
+                )?)
                 .context("cohort transition bound overflow")
         })?;
-    let transition_upper_bound = transitions_per_arm
-        .checked_mul(u64::try_from(arm_count).context("cohort arm count")?)
-        .context("cohort transition bound overflow")?;
     ensure!(
         transition_upper_bound <= MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND,
         "cohort transition upper bound {transition_upper_bound} exceeds limit {MAX_SWEEP_COHORT_TRANSITION_UPPER_BOUND}"
@@ -2773,9 +2881,45 @@ fn plan_sweep_cohort_bounds(
     })
 }
 
-fn read_sweep_cohort_requests(path: &Path, arm_count: usize) -> Result<LoadedSweepCohortRequests> {
-    ensure!(arm_count > 0, "sweep cohort arm count must be positive");
-    let request_capacity = MAX_SWEEP_COHORT_TOTAL_ARMS / arm_count;
+fn ensure_sweep_cohort_manifest_capacity(
+    basis: &SweepCohortManifestBasis,
+    requests: &[PreflightSweepCohortRequest],
+) -> Result<usize> {
+    let placeholder_digest = "0".repeat(64);
+    let mut children = Vec::new();
+    children
+        .try_reserve_exact(requests.len())
+        .context("allocate sweep cohort manifest preflight")?;
+    for (index, request) in requests.iter().enumerate() {
+        children.push(SweepCohortChild {
+            index,
+            id: request.id.clone(),
+            source_line: request.source_line,
+            path: format!("sweeps/{index:06}"),
+            prompt_token_count: request.prepared_input.token_ids.len(),
+            messages_path: request.messages_path.clone(),
+            messages_blake3: request.messages_blake3.clone(),
+            serialized_byte_length: u64::MAX,
+            manifest_byte_length: u64::MAX,
+            manifest_blake3: placeholder_digest.clone(),
+        });
+    }
+    let manifest = basis.build(MAX_SWEEP_BUNDLE_BYTES, children);
+    let bytes = serde_json::to_vec(&manifest).context("price sweep cohort manifest")?;
+    ensure!(
+        bytes.len() <= MAX_PLAN_BYTES,
+        "planned sweep cohort manifest requires at most {} bytes, exceeding limit {MAX_PLAN_BYTES}",
+        bytes.len()
+    );
+    Ok(bytes.len())
+}
+
+fn read_sweep_cohort_requests(
+    path: &Path,
+    arm_count: usize,
+    max_new_tokens: usize,
+) -> Result<LoadedSweepCohortRequests> {
+    let request_capacity = sweep_cohort_request_capacity(arm_count, max_new_tokens)?;
     let canonical_path = std::fs::canonicalize(path)
         .with_context(|| format!("resolve sweep request file {}", path.display()))?;
     let bytes = super::read_regular_file_bounded(&canonical_path, MAX_SWEEP_COHORT_FILE_BYTES)?;
@@ -2802,7 +2946,7 @@ fn read_sweep_cohort_requests(path: &Path, arm_count: usize) -> Result<LoadedSwe
         }
         ensure!(
             records.len() < request_capacity,
-            "sweep request cohort with {arm_count} arms per request exceeds the {MAX_SWEEP_COHORT_TOTAL_ARMS}-arm aggregate work budget"
+            "sweep request cohort exceeds the resource-derived capacity of {request_capacity} records for this arm and generation budget"
         );
         let mut request: SweepCohortRequestRecord = serde_json::from_str(trimmed)
             .with_context(|| format!("parse {} line {source_line}", canonical_path.display()))?;
@@ -2823,7 +2967,7 @@ fn read_sweep_cohort_requests(path: &Path, arm_count: usize) -> Result<LoadedSwe
     }
     ensure!(
         records.len() >= MIN_SWEEP_COHORT_REQUESTS,
-        "sweep request cohort requires at least {MIN_SWEEP_COHORT_REQUESTS} nonblank records within the {MAX_SWEEP_COHORT_TOTAL_ARMS}-arm aggregate work budget"
+        "sweep request cohort requires at least {MIN_SWEEP_COHORT_REQUESTS} nonblank records"
     );
     Ok(LoadedSweepCohortRequests {
         canonical_path,
@@ -5565,7 +5709,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let loaded = read_sweep_cohort_requests(&requests_path, 2).unwrap();
+        let loaded = read_sweep_cohort_requests(&requests_path, 2, 64).unwrap();
         assert!(loaded.canonical_path.is_absolute());
         assert_eq!(loaded.records.len(), 2);
         assert_eq!(loaded.records[0].0, 1);
@@ -5587,7 +5731,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, 2, 64).is_err());
         std::fs::write(
             &requests_path,
             concat!(
@@ -5596,12 +5740,12 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, 2, 64).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn sweep_cohort_jsonl_rejects_invalid_records_and_arm_product_overflow() {
+    fn sweep_cohort_jsonl_rejects_invalid_records_and_accepts_resource_bounded_counts() {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "qwen-lens-sweep-cohort-bounds-{}-{}",
@@ -5619,7 +5763,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, 2, 64).is_err());
         std::fs::write(
             &requests_path,
             concat!(
@@ -5628,20 +5772,23 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
+        assert!(read_sweep_cohort_requests(&requests_path, 2, 64).is_err());
         std::fs::write(
             &requests_path,
             "{\"id\":\"one\",\"messages\":\"messages.json\"}\n",
         )
         .unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path, 2).is_err());
-        let arm_count = 2;
-        let request_capacity = MAX_SWEEP_COHORT_TOTAL_ARMS / arm_count;
-        let excessive = (0..=request_capacity)
+        assert!(read_sweep_cohort_requests(&requests_path, 2, 64).is_err());
+        assert!(checked_sweep_cohort_child_count(usize::MAX, 2).is_err());
+
+        let expanded = (0..97)
             .map(|index| format!("{{\"id\":\"request-{index}\",\"messages\":\"messages.json\"}}\n"))
             .collect::<String>();
-        std::fs::write(&requests_path, excessive).unwrap();
-        assert!(read_sweep_cohort_requests(&requests_path, arm_count).is_err());
+        std::fs::write(&requests_path, expanded).unwrap();
+        let loaded = read_sweep_cohort_requests(&requests_path, 2, 64).unwrap();
+        assert_eq!(loaded.records.len(), 97);
+        assert_eq!(checked_sweep_cohort_child_count(97, 2).unwrap(), 194);
+        assert!(read_sweep_cohort_requests(&requests_path, 1, 499_999).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5688,12 +5835,12 @@ mod tests {
 
     #[test]
     fn sweep_cohort_aggregate_bounds_admit_campaign_and_reject_pathological_work() {
-        let admitted = plan_sweep_cohort_bounds(&vec![4_096; 32], 3, 64).unwrap();
-        assert_eq!(admitted.request_count, 32);
-        assert_eq!(admitted.total_arm_count, 96);
-        assert_eq!(admitted.transition_upper_bound, 399_360);
+        let admitted = plan_sweep_cohort_bounds(&vec![4_096; 64], 3, 64).unwrap();
+        assert_eq!(admitted.request_count, 64);
+        assert_eq!(admitted.total_arm_count, 192);
+        assert_eq!(admitted.transition_upper_bound, 798_720);
 
-        assert!(plan_sweep_cohort_bounds(&vec![1; 32], 64, 64).is_err());
+        assert!(plan_sweep_cohort_bounds(&vec![4_096; 64], 64, 64).is_err());
         assert!(plan_sweep_cohort_bounds(&vec![11_000; 32], 3, 64).is_err());
     }
 
@@ -5710,9 +5857,8 @@ mod tests {
         assert!(
             stage_and_publish_sweep(&output, |staging| -> Result<()> {
                 write_new_sweep_file(&staging.join("partial"), b"partial")?;
-                let mut budget = SweepOutputBudget {
-                    consumed: MAX_SWEEP_BUNDLE_BYTES - 1,
-                };
+                let mut budget = SweepOutputBudget::new(0)?;
+                budget.consumed = MAX_SWEEP_BUNDLE_BYTES - 1;
                 budget.charge(2)
             })
             .is_err()
@@ -5726,6 +5872,17 @@ mod tests {
                 .contains(".stage.")
         }));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_output_budget_reserves_then_reconciles_outer_manifest() {
+        let mut budget = SweepOutputBudget::new(8).unwrap();
+        budget.consumed = MAX_SWEEP_BUNDLE_BYTES - 8;
+        assert!(budget.charge(1).is_err());
+        assert_eq!(budget.consumed, MAX_SWEEP_BUNDLE_BYTES - 8);
+        budget.release_reservation();
+        budget.charge(8).unwrap();
+        assert_eq!(budget.consumed, MAX_SWEEP_BUNDLE_BYTES);
     }
 
     #[test]

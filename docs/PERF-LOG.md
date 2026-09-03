@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-03 - Flash-Next Selected Packed QSA Default-On
+
+Status: `QWEN4EXP_PACKED_SELECTED_QSA` flipped from default-off to default-on.
+`=0` restores packed-dense-then-scalar-selected execution.
+
+- The 08-28 N=4,099 trace already established that the packed-selected
+  distance from the scalar-selected reference (`6.5e-2` endpoint RMS) is
+  packed-HC accumulation arithmetic, that ordinary dense packed prefill (already
+  default) sits `8.6e-2` from scalar on the same workload, and that all argmax
+  IDs match llama.cpp. The preregistered natural-prompt NLL gate was never run;
+  the reference it measured against is not one the shipped product meets.
+- Natural 25,609-token prompt, greedy, release binary at `e925ef20`:
+  scalarized `prefill_ms=1470769.8` (`17.41 tok/s`, 23,560 commands) versus
+  selected packed `prefill_ms=60254.3` (`425.02 tok/s`, 14 commands). Decode
+  unchanged (`16.28` vs `16.29 tok/s`). Both continuations coherent.
+- 2,238-token truncation: identical first token; `149.47 -> 476.36 tok/s`.
+
 ## 2026-08-29 - Muse Full-R Banked Attention VJP KEEP
 
 Status: keep the two-dispatch Metal causal-GQA VJP for the Muse `T<=16`

@@ -94,10 +94,11 @@ CLI diagnostics. Existing flat invocations and resident
 `qwen --help` shows expanded documented legacy/research options. Legacy flags
 cannot be combined with `qwen run`.
 
-Flash-Next currently uses request-shaped QSA caches and a correctness-first
-token-at-a-time prompt path for the released `UD-Q3_K_XL` profile. Its CLI lane
-is serial single-turn text generation; batching, serve, prefix caches, and
-packed prefill remain explicit follow-ups rather than silent fallbacks.
+Flash-Next uses request-shaped QSA caches and packed prefill (dense and
+selected ranges) for the released `UD-Q3_K_XL` profile;
+`QWEN4EXP_PACKED_SELECTED_QSA=0` scalarizes selected rows past the dense
+shoulder. Its CLI lane is serial single-turn text generation; batching, serve,
+and prefix caches remain explicit follow-ups rather than silent fallbacks.
 
 Qwen3.8 support is text-only. Modern messages do not accept image content,
 developer or tool roles, structured tool calls/results, response-format

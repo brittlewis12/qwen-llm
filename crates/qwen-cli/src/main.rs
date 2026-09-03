@@ -4555,9 +4555,9 @@ fn run_qwen4exp_single_turn(
     let packed_selected_requested = loaded.packed_selected_requested();
     let packed_selected_capable = loaded.packed_selected_capable();
     let packed_selected_active = loaded.packed_selected_active();
-    if packed_selected_requested {
+    if !packed_selected_requested {
         eprintln!(
-            "qwen4exp: experimental selected-range packed QSA requested via {QWEN4EXP_PACKED_SELECTED_QSA_ENV}; capable={packed_selected_capable} active={packed_selected_active}"
+            "qwen4exp: selected-range packed QSA disabled via {QWEN4EXP_PACKED_SELECTED_QSA_ENV}=0; selected rows past the dense shoulder will scalarize"
         );
     }
     eprintln!(

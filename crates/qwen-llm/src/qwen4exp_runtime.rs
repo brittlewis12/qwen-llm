@@ -32,8 +32,14 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::ops::Range;
 use std::time::Instant;
 
+// Selected-range packed QSA prefill. Default-on since 2026-09-03: the
+// 08-28 N=4,099 trace showed its distance from the scalar-selected path is the
+// same packed-HC arithmetic distance the already-default dense packed path
+// carries, with matching argmax; a 25,609-token natural prompt prefills at
+// 425 tok/s versus 17.4 tok/s scalarized. `QWEN4EXP_PACKED_SELECTED_QSA=0`
+// restores packed-dense-then-scalar-selected execution.
 crate::env_flag!(
-    default_off configured_qwen4exp_packed_selected_qsa_enabled,
+    default_on configured_qwen4exp_packed_selected_qsa_enabled,
     "QWEN4EXP_PACKED_SELECTED_QSA"
 );
 
@@ -3273,7 +3279,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_prefill_execution_requires_explicit_runtime_opt_in() {
+    fn selected_prefill_execution_honors_runtime_override() {
         let configured = qwen4exp_packed_selected_qsa_enabled();
         {
             let _override = Qwen4ExpPackedSelectedQsaOverride::set(false);

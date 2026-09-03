@@ -70,6 +70,48 @@ const MAX_PROMPT_ID_BYTES: usize = 128;
 const MAX_PROMPT_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_SELECTED_CORPUS_BYTES: usize = 64 * 1024 * 1024;
 
+pub(crate) struct ByteLimitedWriter<W> {
+    inner: W,
+    written: usize,
+    max_bytes: usize,
+}
+
+impl<W> ByteLimitedWriter<W> {
+    pub(crate) fn new(inner: W, max_bytes: usize) -> Self {
+        Self {
+            inner,
+            written: 0,
+            max_bytes,
+        }
+    }
+
+    pub(crate) fn written(&self) -> usize {
+        self.written
+    }
+}
+
+impl<W: Write> Write for ByteLimitedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.max_bytes.saturating_sub(self.written);
+        if bytes.len() > remaining {
+            return Err(std::io::Error::other(format!(
+                "serialized output exceeds bounded writer capacity {}",
+                self.max_bytes
+            )));
+        }
+        let written = self.inner.write(bytes)?;
+        self.written = self
+            .written
+            .checked_add(written)
+            .ok_or_else(|| std::io::Error::other("serialized output byte count overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "qwen-lens", about = "Native Qwen workspace-lens tools")]
 struct Cli {
@@ -86,7 +128,7 @@ enum Command {
     /// Verify and inspect one coefficient-sweep bundle without loading a model.
     #[command(name = "inspect-sweep")]
     InspectSweep(lens_compare::InspectSweepArgs),
-    /// Run one bounded serial Lens plan and emit a summary or versioned JSON.
+    /// Run one Lens request or a resident ordinary-Qwen request cohort.
     #[command(name = "run")]
     LensRun(lens_run::LensRunArgs),
     /// Sweep one operation coefficient with one resident ordinary-Qwen model load.

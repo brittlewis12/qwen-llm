@@ -34,12 +34,13 @@ use super::published_pt::{
     ArchiveLayout, ArchiveSpec, ensure_finite_f16, hash_sha256, validate_archive,
 };
 use super::{
-    FitMethod, JSON_FILE_MAX_BYTES, ORIENTATION, SCHEMA_VERSION, TOKEN_ARTIFACT_MAX_BYTES,
-    TOKEN_ID_ARGUMENT_MAX_COUNT, TOKEN_MANIFEST_NAME, TOKEN_ORIENTATION, TOKEN_PAYLOAD_NAME,
-    TOKEN_READOUT_SCHEMA, TokenReadoutManifest, decode_f32_le, digest_json, hex, open_regular_file,
-    publish_immutable, read_bounded_jsonl_record, read_json_file, resolve_output_file_path,
-    resolve_output_path, serialize_json_pretty_bounded, sync_directory, token_covector_digest,
-    validate_token_build_identity, validate_token_readout_spec, write_atomic_replace,
+    ByteLimitedWriter, FitMethod, JSON_FILE_MAX_BYTES, ORIENTATION, SCHEMA_VERSION,
+    TOKEN_ARTIFACT_MAX_BYTES, TOKEN_ID_ARGUMENT_MAX_COUNT, TOKEN_MANIFEST_NAME, TOKEN_ORIENTATION,
+    TOKEN_PAYLOAD_NAME, TOKEN_READOUT_SCHEMA, TokenReadoutManifest, decode_f32_le, digest_json,
+    hex, open_regular_file, publish_immutable, read_bounded_jsonl_record, read_json_file,
+    resolve_output_file_path, resolve_output_path, serialize_json_pretty_bounded, sync_directory,
+    token_covector_digest, validate_token_build_identity, validate_token_readout_spec,
+    write_atomic_replace,
 };
 
 const FULL_SCHEMA: &str = "qwen.workspace_lens_full_transport";
@@ -555,48 +556,6 @@ struct PreparedTraceFullBatchInput {
     vector_count: usize,
 }
 
-struct TraceFullLimitedWriter<W> {
-    inner: W,
-    written: usize,
-    max_bytes: usize,
-}
-
-impl<W> TraceFullLimitedWriter<W> {
-    fn new(inner: W, max_bytes: usize) -> Self {
-        Self {
-            inner,
-            written: 0,
-            max_bytes,
-        }
-    }
-
-    fn written(&self) -> usize {
-        self.written
-    }
-}
-
-impl<W: Write> Write for TraceFullLimitedWriter<W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let remaining = self.max_bytes.saturating_sub(self.written);
-        if bytes.len() > remaining {
-            return Err(std::io::Error::other(format!(
-                "trace-full JSON exceeds bounded writer capacity {}",
-                self.max_bytes
-            )));
-        }
-        let written = self.inner.write(bytes)?;
-        self.written = self
-            .written
-            .checked_add(written)
-            .ok_or_else(|| std::io::Error::other("trace-full JSON byte count overflow"))?;
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
 struct TraceFullBatchPublication {
     output: PathBuf,
     parent: PathBuf,
@@ -685,7 +644,7 @@ impl TraceFullBatchPublication {
                 })?;
             let written = {
                 let mut buffered = std::io::BufWriter::new(&mut file);
-                let mut bounded = TraceFullLimitedWriter::new(&mut buffered, document_limit);
+                let mut bounded = ByteLimitedWriter::new(&mut buffered, document_limit);
                 serde_json::to_writer(&mut bounded, document)
                     .with_context(|| format!("serialize trace-full batch document {path:?}"))?;
                 bounded
@@ -4564,7 +4523,7 @@ mod tests {
         std::fs::remove_dir_all(&raced).unwrap();
 
         let mut bounded_bytes = Vec::new();
-        let mut bounded = TraceFullLimitedWriter::new(&mut bounded_bytes, 5);
+        let mut bounded = ByteLimitedWriter::new(&mut bounded_bytes, 5);
         assert!(serde_json::to_writer(&mut bounded, &"too large").is_err());
         drop(bounded);
         assert!(bounded_bytes.len() <= 5);

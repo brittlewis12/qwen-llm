@@ -1008,6 +1008,7 @@ mod tests {
             system: None,
             messages: None,
             open_responses: None,
+            requests_jsonl: None,
             message_mode: None,
             no_special_tokens: false,
             max_new_tokens: 1,
@@ -1019,6 +1020,7 @@ mod tests {
             seed: 0,
             output: None,
             format: Some(super::super::lens_run::RunStdoutFormat::Summary),
+            output_dir: None,
         };
         let plan: LensPlan = serde_json::from_value(json!({
             "version": 1,

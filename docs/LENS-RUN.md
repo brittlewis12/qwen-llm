@@ -1,7 +1,8 @@
 # Lens Run
 
-`qwen-lens run` performs one fresh Qwen run with live workspace-lens readouts
-and optional ordered post-block interventions.
+`qwen-lens run` performs one fresh model run, or a resident ordinary-Qwen
+request cohort, with live workspace-lens readouts and optional ordered
+post-block interventions.
 
 ```sh
 cargo run -q --release -p qwen-cli --bin qwen-lens -- run \
@@ -11,12 +12,12 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- run \
   --max-new-tokens 32
 ```
 
-Use exactly one of `--prompt`, `--token-ids`, `--user`, `--messages`, or
-`--open-responses`. Raw prompts use the tokenizer's configured special-token
-insertion unless `--no-special-tokens` is set, and literal token IDs are passed
-unchanged. Ordinary Qwen `--user` and `--messages` inputs use the same strict
-system/user/assistant renderer as normal model runs. Muse accepts the shared
-structured ATEM request described below.
+For a singleton run, use exactly one of `--prompt`, `--token-ids`, `--user`,
+`--messages`, or `--open-responses`. Raw prompts use the tokenizer's configured
+special-token insertion unless `--no-special-tokens` is set, and literal token
+IDs are passed unchanged. Ordinary Qwen `--user` and `--messages` inputs use the
+same strict system/user/assistant renderer as normal model runs. Muse accepts
+the shared structured ATEM request described below.
 
 `--open-responses FILE|-` (alias `--responses-input`) is ordinary-Qwen-only. It
 uses the exact parser, model capability gates, and prompt renderer shared with
@@ -61,6 +62,59 @@ the offline validator re-derives them from the resolved plan. It also recomputes
 the resolved plan and every binding from the authored plan plus rendering metadata.
 Published Muse runs additionally bind the model content identity and exact
 selected lens matrices. Run schemas v1 through v4 remain readable.
+
+## Resident Run Cohort
+
+`run --requests-jsonl ... --output-dir ...` executes an ordinary dense or MoE
+Qwen campaign without reloading the model, tokenizer, lenses, projected
+published directions, or reusable readout storage:
+
+```sh
+qwen-lens run \
+  --model /path/to/Qwen.gguf \
+  --plan /path/to/plan.json \
+  --requests-jsonl /path/to/campaign.jsonl \
+  --output-dir /path/to/new-campaign \
+  --max-new-tokens 32 \
+  --seed 17
+```
+
+Each strict JSONL record has a unique nonempty `id` and exactly one ordinary Lens
+input. The grammar is shared with `trace-full` cohorts:
+
+```jsonl
+{"id":"raw","prompt":"The capital of France is"}
+{"id":"chat","user":"Name one animal","system":"Answer with one word","message_mode":"no_thinking"}
+{"id":"messages","messages":"fixtures/messages.json","message_mode":"thinking"}
+{"id":"responses","open_responses":"fixtures/request.json"}
+{"id":"tokens","token_ids":[1,2,3]}
+```
+
+`messages` and `open_responses` paths resolve relative to the JSONL file. Cohort
+records cannot read stdin. Sampling, generation length, and requested prefill
+policy are campaign-wide CLI settings; every request starts a fresh sampler at
+the same seed. Every request also gets a fresh sequence, semantic position
+binding, compiled event schedule, and request-local auto/serial prefill choice.
+No KV state, sampler state, scratch state, or generated token crosses requests.
+
+Requests execute serially in input order; this is model residency, not arithmetic
+batching or prefix sharing. Each child keeps the existing 256 MiB
+`qwen.lens.run` artifact format and streams directly into private staging. The
+fresh output directory is exclusively published only after all files are
+durable:
+
+```text
+new-campaign/
+  manifest.json
+  run-000000.json
+  run-000001.json
+```
+
+The `qwen.lens.run_cohort` v1 manifest records input order, source line and ID,
+exact aggregate prompt/forward/sample bounds, global sampler and prefill policy,
+the embedded authored plan, each unchanged run-v5 child length, and the explicit
+resident-but-request-local execution policy. Muse and Flash-Next cohorts are not
+yet implemented; their singleton `run` paths are unchanged.
 
 ## Coefficient Sweep
 

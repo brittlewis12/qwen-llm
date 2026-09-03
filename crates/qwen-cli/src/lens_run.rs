@@ -1,7 +1,7 @@
 use crate::lens_input::{
-    LensInputRendering, LensInputSpec, LensMessageMode, LensRenderedSpan, PreparedLensInput,
-    is_known_lens_span, prepare_qwen_model_input, prepare_qwen_model_messages_bytes,
-    validate_lens_input_spec,
+    LensCohortRequest, LensInputRendering, LensInputSpec, LensMessageMode, LensRenderedSpan,
+    PreparedLensInput, is_known_lens_span, prepare_qwen_model_input,
+    prepare_qwen_model_messages_bytes, validate_lens_input_spec,
 };
 use crate::template_lens::{TemplateLens, TemplateScore, TemplateVocabulary};
 use anyhow::{Context, Result, bail, ensure};
@@ -50,6 +50,8 @@ const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 pub(crate) const MAX_RUN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 const RUN_SCHEMA: &str = "qwen.lens.run";
 const RUN_SCHEMA_VERSION: u32 = 5;
+const RUN_COHORT_SCHEMA: &str = "qwen.lens.run_cohort";
+const RUN_COHORT_SCHEMA_VERSION: u32 = 1;
 const SWEEP_SCHEMA: &str = "qwen.lens.coefficient_sweep";
 const SWEEP_SCHEMA_VERSION: u32 = 3;
 const SWEEP_MANIFEST_NAME: &str = "manifest.json";
@@ -121,7 +123,14 @@ pub(crate) enum PrefillExecution {
     ArgGroup::new("lens_input")
         .required(true)
         .multiple(false)
-        .args(["prompt", "token_ids", "user", "messages", "open_responses"])
+        .args([
+            "prompt",
+            "token_ids",
+            "user",
+            "messages",
+            "open_responses",
+            "requests_jsonl",
+        ])
 ))]
 pub(crate) struct LensRunArgs {
     /// Ordinary Qwen, Qwen3.8-Flash-Next, or Muse Glimmer GGUF model.
@@ -160,11 +169,15 @@ pub(crate) struct LensRunArgs {
     #[arg(long, visible_alias = "responses-input", value_name = "FILE|-")]
     pub(crate) open_responses: Option<PathBuf>,
 
+    /// Strict Lens-input JSONL cohort; paths inside records are relative to this file.
+    #[arg(long, value_name = "FILE", requires = "output_dir")]
+    pub(crate) requests_jsonl: Option<PathBuf>,
+
     /// Generation transition for --user/--messages; supported values depend on the model.
     #[arg(
         long,
         value_enum,
-        conflicts_with_all = ["prompt", "token_ids", "open_responses"]
+        conflicts_with_all = ["prompt", "token_ids", "open_responses", "requests_jsonl"]
     )]
     pub(crate) message_mode: Option<LensMessageMode>,
 
@@ -172,7 +185,13 @@ pub(crate) struct LensRunArgs {
     #[arg(
         long,
         requires = "prompt",
-        conflicts_with_all = ["token_ids", "user", "messages", "open_responses"]
+        conflicts_with_all = [
+            "token_ids",
+            "user",
+            "messages",
+            "open_responses",
+            "requests_jsonl"
+        ]
     )]
     pub(crate) no_special_tokens: bool,
 
@@ -205,12 +224,16 @@ pub(crate) struct LensRunArgs {
     pub(crate) seed: u64,
 
     /// Replace this JSON run artifact atomically after successful execution.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "requests_jsonl")]
     pub(crate) output: Option<PathBuf>,
 
     /// Compact summary or the complete JSON run artifact on stdout.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, conflicts_with = "requests_jsonl")]
     pub(crate) format: Option<RunStdoutFormat>,
+
+    /// Fresh immutable directory containing one ordinary run artifact per request.
+    #[arg(long, requires = "requests_jsonl")]
+    pub(crate) output_dir: Option<PathBuf>,
 }
 
 impl LensRunArgs {
@@ -372,6 +395,7 @@ impl CoefficientSweepArgs {
             system: self.system.clone(),
             messages: self.messages.clone(),
             open_responses: self.open_responses.clone(),
+            requests_jsonl: None,
             message_mode: self.message_mode,
             no_special_tokens: self.no_special_tokens,
             max_new_tokens: self.max_new_tokens,
@@ -383,6 +407,7 @@ impl CoefficientSweepArgs {
             seed: self.seed,
             output: None,
             format: None,
+            output_dir: None,
         }
     }
 }
@@ -1376,6 +1401,103 @@ pub(crate) struct RunOutput {
     execution_binding: Option<RunExecutionBinding>,
 }
 
+struct LoadedRunCohortRequests {
+    canonical_path: PathBuf,
+    records: Vec<(usize, LensCohortRequest)>,
+}
+
+struct PreflightRunCohortRequest {
+    source_line: usize,
+    id: String,
+    prepared_input: PreparedLensInput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RunCohortBounds {
+    request_count: usize,
+    aggregate_prompt_tokens: usize,
+    work_upper_bound: u64,
+    forward_upper_bound: u64,
+    sample_upper_bound: u64,
+    max_request_forwards: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RunCohortManifest {
+    schema: String,
+    schema_version: u32,
+    producer: SweepProducer,
+    execution_policy: String,
+    requests_jsonl_path: PathBuf,
+    canonical_plan_path: PathBuf,
+    source_plan: LensPlan,
+    model_path: PathBuf,
+    sampler: RunSampler,
+    max_new_tokens: usize,
+    prefill_execution: PrefillExecution,
+    request_count: usize,
+    aggregate_prompt_tokens: usize,
+    work_upper_bound: u64,
+    forward_upper_bound: u64,
+    sample_upper_bound: u64,
+    max_request_forwards: usize,
+    cumulative_child_bytes: u64,
+    runs: Vec<RunCohortChild>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RunCohortChild {
+    index: usize,
+    id: String,
+    source_line: usize,
+    path: String,
+    input_source: String,
+    prompt_token_count: usize,
+    artifact_byte_length: u64,
+}
+
+struct RunCohortManifestBasis {
+    producer: SweepProducer,
+    requests_jsonl_path: PathBuf,
+    canonical_plan_path: PathBuf,
+    source_plan: LensPlan,
+    model_path: PathBuf,
+    sampler: RunSampler,
+    max_new_tokens: usize,
+    prefill_execution: PrefillExecution,
+    bounds: RunCohortBounds,
+}
+
+impl RunCohortManifestBasis {
+    fn build(&self, cumulative_child_bytes: u64, runs: Vec<RunCohortChild>) -> RunCohortManifest {
+        RunCohortManifest {
+            schema: RUN_COHORT_SCHEMA.into(),
+            schema_version: RUN_COHORT_SCHEMA_VERSION,
+            producer: self.producer.clone(),
+            execution_policy:
+                "resident_model_shared_prepared_plan_serial_request_order_fresh_sequence_and_sampler_request_local_binding_no_cross_request_batching"
+                    .into(),
+            requests_jsonl_path: self.requests_jsonl_path.clone(),
+            canonical_plan_path: self.canonical_plan_path.clone(),
+            source_plan: self.source_plan.clone(),
+            model_path: self.model_path.clone(),
+            sampler: self.sampler,
+            max_new_tokens: self.max_new_tokens,
+            prefill_execution: self.prefill_execution,
+            request_count: self.bounds.request_count,
+            aggregate_prompt_tokens: self.bounds.aggregate_prompt_tokens,
+            work_upper_bound: self.bounds.work_upper_bound,
+            forward_upper_bound: self.bounds.forward_upper_bound,
+            sample_upper_bound: self.bounds.sample_upper_bound,
+            max_request_forwards: self.bounds.max_request_forwards,
+            cumulative_child_bytes,
+            runs,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SweepProducer {
@@ -1541,17 +1663,17 @@ impl SweepCohortManifestBasis {
     }
 }
 
-struct SweepOutputBudget {
+struct BundleOutputBudget {
     consumed: u64,
     reserved: u64,
 }
 
-impl SweepOutputBudget {
+impl BundleOutputBudget {
     fn new(reserved: usize) -> Result<Self> {
         let reserved = u64::try_from(reserved).context("reserved sweep output bytes")?;
         ensure!(
             reserved <= MAX_SWEEP_BUNDLE_BYTES,
-            "reserved sweep output bytes {reserved} exceed bundle limit {MAX_SWEEP_BUNDLE_BYTES}"
+            "reserved bundle output bytes {reserved} exceed limit {MAX_SWEEP_BUNDLE_BYTES}"
         );
         Ok(Self {
             consumed: 0,
@@ -1569,7 +1691,7 @@ impl SweepOutputBudget {
             .context("cohort committed byte count overflow")?;
         ensure!(
             committed <= MAX_SWEEP_BUNDLE_BYTES,
-            "coefficient sweep committed bytes {committed} exceed bundle limit {}",
+            "committed bundle bytes {committed} exceed limit {}",
             MAX_SWEEP_BUNDLE_BYTES
         );
         self.consumed = consumed;
@@ -1703,7 +1825,9 @@ pub(crate) fn emit_run_output(
     output_path: Option<&Path>,
 ) -> Result<()> {
     let artifact = build_run_output(
-        args,
+        &args.model,
+        run_sampler(args),
+        args.max_new_tokens,
         runtime_kind,
         plan_path,
         bound_plan,
@@ -1736,7 +1860,9 @@ pub(crate) fn emit_run_output(
 }
 
 fn build_run_output(
-    args: &LensRunArgs,
+    model_path: &Path,
+    sampler: RunSampler,
+    max_new_tokens: usize,
     runtime_kind: &'static str,
     plan_path: &Path,
     bound_plan: BoundLensPlan,
@@ -1750,7 +1876,7 @@ fn build_run_output(
         schema: RUN_SCHEMA,
         schema_version: RUN_SCHEMA_VERSION,
         runtime_kind,
-        model_path: args.model.clone(),
+        model_path: model_path.to_path_buf(),
         canonical_plan_path: plan_path.to_path_buf(),
         authored_plan: bound_plan.authored,
         authored_plan_canonical_json_blake3: bound_plan.authored_plan_canonical_json_blake3,
@@ -1762,8 +1888,8 @@ fn build_run_output(
         rendering: prepared_input.rendering.clone(),
         prompt_token_ids: result.prompt_token_ids,
         generated_token_ids: result.generated_token_ids,
-        sampler: run_sampler(args),
-        max_new_tokens: args.max_new_tokens,
+        sampler,
+        max_new_tokens,
         decoded_text: result.decoded_text,
         stop_reason: result.stop_reason,
         execution,
@@ -1774,7 +1900,7 @@ fn build_run_output(
     }
 }
 
-fn serialize_run_output(artifact: &RunOutput) -> Result<Vec<u8>> {
+fn validate_run_output(artifact: &RunOutput) -> Result<()> {
     if artifact.execution.schedule_basis() == RunExecutionScheduleBasis::EffectivePlan {
         artifact.execution.validate_against_plan(
             artifact.runtime_kind,
@@ -1786,6 +1912,11 @@ fn serialize_run_output(artifact: &RunOutput) -> Result<Vec<u8>> {
             .execution
             .validate(artifact.runtime_kind, artifact.prompt_token_ids.len())?;
     }
+    Ok(())
+}
+
+fn serialize_run_output(artifact: &RunOutput) -> Result<Vec<u8>> {
+    validate_run_output(artifact)?;
     let bytes = serde_json::to_vec(artifact).context("serialize Lens run artifact")?;
     ensure!(
         bytes.len() <= MAX_RUN_ARTIFACT_BYTES,
@@ -1793,6 +1924,40 @@ fn serialize_run_output(artifact: &RunOutput) -> Result<Vec<u8>> {
         bytes.len()
     );
     Ok(bytes)
+}
+
+fn write_new_run_output(path: &Path, artifact: &RunOutput, max_bytes: usize) -> Result<usize> {
+    validate_run_output(artifact)?;
+    ensure!(
+        max_bytes > 0 && max_bytes <= MAX_RUN_ARTIFACT_BYTES,
+        "run artifact writer requires a positive limit no larger than {MAX_RUN_ARTIFACT_BYTES}"
+    );
+    let serialized: Result<usize> = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("create run artifact {}", path.display()))?;
+        let written = {
+            let mut buffered = std::io::BufWriter::new(&mut file);
+            let mut bounded = super::ByteLimitedWriter::new(&mut buffered, max_bytes);
+            serde_json::to_writer(&mut bounded, artifact)
+                .with_context(|| format!("serialize run artifact {}", path.display()))?;
+            bounded
+                .flush()
+                .with_context(|| format!("flush run artifact {}", path.display()))?;
+            bounded.written()
+        };
+        file.sync_all()
+            .with_context(|| format!("sync run artifact {}", path.display()))?;
+        Ok(written)
+    })();
+    if serialized.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    serialized
 }
 
 fn run_sampler(args: &LensRunArgs) -> RunSampler {
@@ -1912,6 +2077,9 @@ struct Qwen4ExpExecutionPlan {
 
 pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     validate_run_args(&args)?;
+    if args.requests_jsonl.is_some() {
+        return run_cohort(args);
+    }
     let output_path = args
         .output
         .as_deref()
@@ -2041,8 +2209,287 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     )
 }
 
+fn run_cohort(args: LensRunArgs) -> Result<()> {
+    let requests = read_run_cohort_requests(
+        args.requests_jsonl
+            .as_deref()
+            .context("--requests-jsonl is required in cohort mode")?,
+    )?;
+    let output_path = super::resolve_output_path(
+        args.output_dir
+            .as_deref()
+            .context("--output-dir is required in cohort mode")?,
+    )?;
+    ensure_new_bundle_output(&output_path)?;
+
+    let plan_path = std::fs::canonicalize(&args.plan)
+        .with_context(|| format!("resolve plan {}", args.plan.display()))?;
+    let source_plan = parse_plan_bytes(&super::read_regular_file_bounded(
+        &plan_path,
+        MAX_PLAN_BYTES,
+    )?)
+    .with_context(|| format!("parse Lens plan {}", plan_path.display()))?;
+    validate_plan(&source_plan)?;
+    validate_ordinary_plan(&source_plan)?;
+    let plan_dir = plan_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    ensure!(
+        !crate::muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()),
+        "qwen-lens run cohorts currently support ordinary Qwen only; Muse Glimmer is not supported"
+    );
+    let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
+    ensure!(
+        matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
+        "qwen-lens run cohorts currently support ordinary Qwen only"
+    );
+    let model_context_tokens = gguf.declared_context_length()?;
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load model tokenizer")?;
+    let sampler = run_sampler(&args);
+    Sampler::new(SamplingConfig {
+        temperature: sampler.temperature,
+        top_k: sampler.top_k,
+        top_p: sampler.top_p,
+        min_p: sampler.min_p,
+        seed: sampler.seed,
+    })
+    .context("validate run cohort sampler")?;
+
+    let mut preflight_requests = Vec::new();
+    preflight_requests
+        .try_reserve_exact(requests.records.len())
+        .context("allocate run cohort preflight requests")?;
+    let mut aggregate_prompt_tokens = 0usize;
+    let mut work_upper_bound = 0u64;
+    let mut forward_upper_bound = 0u64;
+    let mut sample_upper_bound = 0u64;
+    let mut max_request_forwards = 0usize;
+    for (source_line, request) in requests.records {
+        let prepared_input =
+            prepare_qwen_model_input(request.input_spec(), family, &gguf, &tokenizer)
+                .with_context(|| format!("prepare run cohort request {:?}", request.id))?;
+        validate_sweep_prompt(
+            &prepared_input.token_ids,
+            tokenizer.n_vocab(),
+            args.max_new_tokens,
+            model_context_tokens,
+        )
+        .with_context(|| format!("preflight run cohort request {:?}", request.id))?;
+        let request_forwards =
+            required_forward_count(prepared_input.token_ids.len(), args.max_new_tokens)?;
+        aggregate_prompt_tokens = aggregate_prompt_tokens
+            .checked_add(prepared_input.token_ids.len())
+            .context("run cohort aggregate prompt token count overflow")?;
+        work_upper_bound = work_upper_bound
+            .checked_add(
+                u64::try_from(prepared_input.token_ids.len())
+                    .context("run cohort prompt token count")?
+                    .checked_add(
+                        u64::try_from(args.max_new_tokens)
+                            .context("run cohort generation bound")?,
+                    )
+                    .context("run cohort request work bound overflow")?,
+            )
+            .context("run cohort work bound overflow")?;
+        forward_upper_bound = forward_upper_bound
+            .checked_add(u64::try_from(request_forwards).context("run cohort forward bound")?)
+            .context("run cohort forward bound overflow")?;
+        sample_upper_bound = sample_upper_bound
+            .checked_add(u64::try_from(args.max_new_tokens).context("run cohort sample bound")?)
+            .context("run cohort sample bound overflow")?;
+        max_request_forwards = max_request_forwards.max(request_forwards);
+
+        let bound_plan = bind_plan_positions(
+            &source_plan,
+            &prepared_input.rendering,
+            prepared_input.token_ids.len(),
+        )
+        .with_context(|| format!("bind run cohort request {:?}", request.id))?;
+        validate_reachable_scopes(
+            &bound_plan.resolved,
+            prepared_input.token_ids.len(),
+            args.max_new_tokens,
+        )
+        .with_context(|| format!("validate run cohort request {:?} scopes", request.id))?;
+        preflight_requests.push(PreflightRunCohortRequest {
+            source_line,
+            id: request.id,
+            prepared_input,
+        });
+    }
+    let bounds = RunCohortBounds {
+        request_count: preflight_requests.len(),
+        aggregate_prompt_tokens,
+        work_upper_bound,
+        forward_upper_bound,
+        sample_upper_bound,
+        max_request_forwards,
+    };
+    let manifest_basis = RunCohortManifestBasis {
+        producer: current_sweep_producer(),
+        requests_jsonl_path: requests.canonical_path,
+        canonical_plan_path: plan_path.clone(),
+        source_plan: source_plan.clone(),
+        model_path: args.model.clone(),
+        sampler,
+        max_new_tokens: args.max_new_tokens,
+        prefill_execution: args.prefill_execution,
+        bounds,
+    };
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let loaded = runtime
+        .load_opened_gguf_with_intent(
+            gguf,
+            args.model.clone(),
+            LoadedModelConfig::default(),
+            ModelLoadIntent::Reusable,
+        )
+        .with_context(|| format!("load model {}", args.model.display()))?;
+    validate_runtime(loaded.gguf(), loaded.arch().kind, loaded.arch().n_layer)?;
+    for request in &preflight_requests {
+        ensure!(
+            request
+                .prepared_input
+                .token_ids
+                .iter()
+                .all(|&token| token >= 0 && (token as u32) < loaded.arch().vocab_size),
+            "run cohort request {:?} contains a token outside the deployed vocabulary",
+            request.id
+        );
+    }
+    let first_request = preflight_requests
+        .first()
+        .context("run cohort has no preflight requests")?;
+    let first_bound_plan = bind_plan_positions(
+        &source_plan,
+        &first_request.prepared_input.rendering,
+        first_request.prepared_input.token_ids.len(),
+    )
+    .with_context(|| format!("bind run cohort request {:?}", first_request.id))?;
+    let execution = prepare_execution_plan(&first_bound_plan.resolved, plan_dir, &loaded)?;
+    drop(first_bound_plan);
+    let stop_tokens = loaded
+        .gguf()
+        .stop_token_ids()?
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    stage_and_publish_bundle(&output_path, |staging| {
+        let mut children = Vec::new();
+        children
+            .try_reserve_exact(preflight_requests.len())
+            .context("allocate run cohort manifest entries")?;
+        let mut cumulative_child_bytes = 0u64;
+        for (index, request) in preflight_requests.iter().enumerate() {
+            let bound_plan = bind_plan_positions(
+                &source_plan,
+                &request.prepared_input.rendering,
+                request.prepared_input.token_ids.len(),
+            )
+            .with_context(|| format!("bind run cohort request {:?}", request.id))?;
+            let schedule =
+                CompiledEventSchedule::compile(&bound_plan.resolved, loaded.arch().n_layer)?;
+            let mut prefill = prepare_ordinary_prefill(
+                &loaded,
+                &schedule,
+                &bound_plan.resolved,
+                args.prefill_execution,
+                RunExecutionScheduleBasis::EffectivePlan,
+                request.prepared_input.token_ids.len(),
+                args.max_new_tokens,
+            )?;
+            prefill.execution.validate_against_plan(
+                "ordinary_qwen",
+                &bound_plan.resolved,
+                request.prepared_input.token_ids.len(),
+            )?;
+            let result = execute_ordinary_arm(
+                &loaded,
+                &tokenizer,
+                &execution,
+                &bound_plan.resolved,
+                &schedule,
+                &request.prepared_input.token_ids,
+                args.max_new_tokens,
+                sampler,
+                &stop_tokens,
+                &mut prefill,
+            )?;
+            let artifact = build_run_output(
+                &args.model,
+                sampler,
+                args.max_new_tokens,
+                "ordinary_qwen",
+                &plan_path,
+                bound_plan,
+                &request.prepared_input,
+                result,
+                prefill.execution,
+                None,
+            );
+            let path = format!("run-{index:06}.json");
+            let artifact_bytes =
+                write_new_run_output(&staging.join(&path), &artifact, MAX_RUN_ARTIFACT_BYTES)?;
+            cumulative_child_bytes = cumulative_child_bytes
+                .checked_add(
+                    u64::try_from(artifact_bytes)
+                        .context("run cohort child artifact byte length")?,
+                )
+                .context("run cohort child artifact byte count overflow")?;
+            children.push(RunCohortChild {
+                index,
+                id: request.id.clone(),
+                source_line: request.source_line,
+                path,
+                input_source: request.prepared_input.source.into(),
+                prompt_token_count: request.prepared_input.token_ids.len(),
+                artifact_byte_length: u64::try_from(artifact_bytes)
+                    .context("run cohort child artifact byte length")?,
+            });
+        }
+        let manifest = manifest_basis.build(cumulative_child_bytes, children);
+        let manifest_bytes = serialize_run_cohort_manifest(&manifest)?;
+        write_new_bundle_file(&staging.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
+        super::sync_directory(staging)
+    })?;
+    println!(
+        "runtime=ordinary_qwen requests={} aggregate_prompt_tokens={} work_upper_bound={} requested_prefill={}\nartifact={}",
+        bounds.request_count,
+        bounds.aggregate_prompt_tokens,
+        bounds.work_upper_bound,
+        match args.prefill_execution {
+            PrefillExecution::Auto => "auto",
+            PrefillExecution::Serial => "serial",
+        },
+        output_path.display()
+    );
+    Ok(())
+}
+
 fn validate_run_args(args: &LensRunArgs) -> Result<()> {
     ensure!(args.max_new_tokens > 0, "--max-new-tokens must be positive");
+    if args.requests_jsonl.is_some() {
+        ensure!(
+            args.prompt.is_none()
+                && args.token_ids.is_none()
+                && args.user.is_none()
+                && args.system.is_none()
+                && args.messages.is_none()
+                && args.open_responses.is_none()
+                && args.message_mode.is_none()
+                && !args.no_special_tokens
+                && args.output.is_none()
+                && args.format.is_none()
+                && args.output_dir.is_some(),
+            "--requests-jsonl requires --output-dir and conflicts with single-request input and output flags"
+        );
+        return Ok(());
+    }
+    ensure!(
+        args.output_dir.is_none(),
+        "--output-dir requires --requests-jsonl"
+    );
     validate_lens_input_spec(args.input_spec())?;
     Ok(())
 }
@@ -2263,7 +2710,7 @@ fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
     let arm_args = args.arm_run_args();
     validate_run_args(&arm_args)?;
     let output_path = super::resolve_output_path(&args.output)?;
-    ensure_new_sweep_output(&output_path)?;
+    ensure_new_bundle_output(&output_path)?;
 
     let plan_path = std::fs::canonicalize(&args.plan)
         .with_context(|| format!("resolve plan {}", args.plan.display()))?;
@@ -2345,8 +2792,8 @@ fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result<()> {
         .into_iter()
         .collect::<HashSet<_>>();
     let sampler = run_sampler(&arm_args);
-    let built = stage_and_publish_sweep(&output_path, |staging| {
-        let mut output_budget = SweepOutputBudget::new(0)?;
+    let built = stage_and_publish_bundle(&output_path, |staging| {
+        let mut output_budget = BundleOutputBudget::new(0)?;
         build_sweep_bundle(
             staging,
             &args,
@@ -2385,10 +2832,10 @@ fn build_sweep_bundle(
     stop_tokens: &HashSet<i32>,
     sampler: RunSampler,
     prefill: &mut PreparedOrdinaryPrefill,
-    mut output_budget: Option<&mut SweepOutputBudget>,
+    mut output_budget: Option<&mut BundleOutputBudget>,
 ) -> Result<BuiltSweepBundle> {
     let arms_path = root.join("arms");
-    create_sweep_directory(&arms_path)?;
+    create_bundle_directory(&arms_path)?;
     super::sync_directory(root)?;
 
     let prompt_token_ids = &prepared_input.token_ids;
@@ -2428,7 +2875,9 @@ fn build_sweep_bundle(
             live_readout_count: result.live_readouts.len(),
         };
         let artifact = build_run_output(
-            arm_args,
+            &arm_args.model,
+            run_sampler(arm_args),
+            arm_args.max_new_tokens,
             "ordinary_qwen",
             plan_path,
             effective_bound_plan,
@@ -2445,8 +2894,8 @@ fn build_sweep_bundle(
         )?;
         let relative = format!("arms/{index:06}/run.json");
         let arm_path = arms_path.join(format!("{index:06}"));
-        create_sweep_directory(&arm_path)?;
-        write_new_sweep_file(&arm_path.join("run.json"), &bytes)?;
+        create_bundle_directory(&arm_path)?;
+        write_new_bundle_file(&arm_path.join("run.json"), &bytes)?;
         super::sync_directory(&arm_path)?;
         arms.push(CoefficientSweepArm {
             index,
@@ -2480,7 +2929,7 @@ fn build_sweep_bundle(
         manifest_bytes.len(),
         output_budget.as_deref_mut(),
     )?;
-    write_new_sweep_file(&root.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
+    write_new_bundle_file(&root.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
     super::sync_directory(root)?;
     Ok(BuiltSweepBundle {
         summaries,
@@ -2493,7 +2942,7 @@ fn build_sweep_bundle(
 fn charge_sweep_bundle_bytes(
     current: u64,
     byte_length: usize,
-    output_budget: Option<&mut SweepOutputBudget>,
+    output_budget: Option<&mut BundleOutputBudget>,
 ) -> Result<u64> {
     let byte_length = u64::try_from(byte_length).context("serialized sweep byte length")?;
     let next = current
@@ -2524,7 +2973,7 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
     )?;
     checked_sweep_cohort_child_count(requests.records.len(), args.coefficients.len())?;
     let output_path = super::resolve_output_path(&args.output)?;
-    ensure_new_sweep_output(&output_path)?;
+    ensure_new_bundle_output(&output_path)?;
 
     let plan_path = std::fs::canonicalize(&args.plan)
         .with_context(|| format!("resolve plan {}", args.plan.display()))?;
@@ -2685,15 +3134,15 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         .into_iter()
         .collect::<HashSet<_>>();
     let request_count = preflight_requests.len();
-    stage_and_publish_sweep(&output_path, |staging| {
+    stage_and_publish_bundle(&output_path, |staging| {
         let sweeps_root = staging.join("sweeps");
-        create_sweep_directory(&sweeps_root)?;
+        create_bundle_directory(&sweeps_root)?;
         super::sync_directory(staging)?;
         let mut children = Vec::new();
         children
             .try_reserve_exact(preflight_requests.len())
             .context("allocate sweep cohort child manifest entries")?;
-        let mut output_budget = SweepOutputBudget::new(manifest_reserve_bytes)?;
+        let mut output_budget = BundleOutputBudget::new(manifest_reserve_bytes)?;
         for (index, request) in preflight_requests.iter().enumerate() {
             let source_bound_plan = bind_plan_positions(
                 &source_plan,
@@ -2714,7 +3163,7 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
                 request.prepared_input.token_ids.len(),
             )?;
             let child_path = sweeps_root.join(format!("{index:06}"));
-            create_sweep_directory(&child_path)?;
+            create_bundle_directory(&child_path)?;
             let child = build_sweep_bundle(
                 &child_path,
                 &args,
@@ -2757,7 +3206,7 @@ fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result<()> {
         );
         output_budget.release_reservation();
         output_budget.charge(manifest_bytes.len())?;
-        write_new_sweep_file(&staging.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
+        write_new_bundle_file(&staging.join(SWEEP_MANIFEST_NAME), &manifest_bytes)?;
         super::sync_directory(staging)?;
         Ok(())
     })?;
@@ -2913,6 +3362,155 @@ fn ensure_sweep_cohort_manifest_capacity(
     Ok(bytes.len())
 }
 
+fn read_run_cohort_requests(path: &Path) -> Result<LoadedRunCohortRequests> {
+    let canonical_path = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve run cohort request file {}", path.display()))?;
+    let (file, length) = super::open_regular_file(&canonical_path)?;
+    let bytes = super::read_opened_file_exact(file, &canonical_path, length)?;
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("read {} as UTF-8", canonical_path.display()))?;
+    let request_root = canonical_path
+        .parent()
+        .context("run cohort request file has no parent")?;
+    let mut records = Vec::new();
+    let mut ids = BTreeSet::new();
+    for (line_index, line) in text.split('\n').enumerate() {
+        let source_line = line_index + 1;
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut request: LensCohortRequest = serde_json::from_str(trimmed)
+            .with_context(|| format!("parse {} line {source_line}", canonical_path.display()))?;
+        ensure!(
+            !request.id.is_empty(),
+            "run cohort request ID on line {source_line} must not be empty"
+        );
+        ensure!(
+            ids.insert(request.id.clone()),
+            "run cohort request ID {:?} is duplicated",
+            request.id
+        );
+        request
+            .resolve_paths(request_root)
+            .with_context(|| format!("resolve run cohort request {:?}", request.id))?;
+        validate_lens_input_spec(request.input_spec())
+            .with_context(|| format!("validate run cohort request {:?}", request.id))?;
+        records.push((source_line, request));
+    }
+    ensure!(!records.is_empty(), "run cohort request file is empty");
+    Ok(LoadedRunCohortRequests {
+        canonical_path,
+        records,
+    })
+}
+
+fn serialize_run_cohort_manifest(manifest: &RunCohortManifest) -> Result<Vec<u8>> {
+    validate_run_cohort_manifest(manifest)?;
+    let bytes = serde_json::to_vec(manifest).context("serialize run cohort manifest")?;
+    let decoded: RunCohortManifest =
+        serde_json::from_slice(&bytes).context("reparse run cohort manifest")?;
+    ensure!(
+        &decoded == manifest,
+        "run cohort manifest failed canonical JSON round trip"
+    );
+    Ok(bytes)
+}
+
+fn validate_run_cohort_manifest(manifest: &RunCohortManifest) -> Result<()> {
+    ensure!(
+        manifest.schema == RUN_COHORT_SCHEMA
+            && manifest.schema_version == RUN_COHORT_SCHEMA_VERSION,
+        "unsupported run cohort manifest schema"
+    );
+    ensure!(
+        manifest.request_count > 0 && manifest.request_count == manifest.runs.len(),
+        "run cohort request count is inconsistent"
+    );
+    ensure!(
+        manifest.execution_policy
+            == "resident_model_shared_prepared_plan_serial_request_order_fresh_sequence_and_sampler_request_local_binding_no_cross_request_batching",
+        "run cohort execution policy is unsupported"
+    );
+    ensure!(
+        manifest.requests_jsonl_path.is_absolute() && manifest.canonical_plan_path.is_absolute(),
+        "run cohort source paths must be absolute"
+    );
+    validate_plan(&manifest.source_plan)?;
+    Sampler::new(SamplingConfig {
+        temperature: manifest.sampler.temperature,
+        top_k: manifest.sampler.top_k,
+        top_p: manifest.sampler.top_p,
+        min_p: manifest.sampler.min_p,
+        seed: manifest.sampler.seed,
+    })
+    .context("validate run cohort manifest sampler")?;
+    let mut ids = BTreeSet::new();
+    let mut aggregate_prompt_tokens = 0usize;
+    let mut work_upper_bound = 0u64;
+    let mut forward_upper_bound = 0u64;
+    let mut cumulative_child_bytes = 0u64;
+    let mut max_request_forwards = 0usize;
+    for (index, child) in manifest.runs.iter().enumerate() {
+        ensure!(
+            child.index == index
+                && child.path == format!("run-{index:06}.json")
+                && !child.id.is_empty()
+                && ids.insert(child.id.clone())
+                && matches!(
+                    child.input_source.as_str(),
+                    "prompt" | "token_ids" | "user" | "messages" | "open_responses"
+                )
+                && child.prompt_token_count > 0
+                && child.artifact_byte_length > 0
+                && child.artifact_byte_length <= MAX_RUN_ARTIFACT_BYTES as u64,
+            "run cohort child {index} metadata is invalid"
+        );
+        aggregate_prompt_tokens = aggregate_prompt_tokens
+            .checked_add(child.prompt_token_count)
+            .context("run cohort aggregate prompt token count overflow")?;
+        work_upper_bound = work_upper_bound
+            .checked_add(
+                u64::try_from(child.prompt_token_count)
+                    .context("run cohort child prompt token count")?
+                    .checked_add(
+                        u64::try_from(manifest.max_new_tokens)
+                            .context("run cohort generation bound")?,
+                    )
+                    .context("run cohort child work bound overflow")?,
+            )
+            .context("run cohort work bound overflow")?;
+        let child_forwards =
+            required_forward_count(child.prompt_token_count, manifest.max_new_tokens)?;
+        forward_upper_bound = forward_upper_bound
+            .checked_add(u64::try_from(child_forwards).context("run cohort child forwards")?)
+            .context("run cohort forward bound overflow")?;
+        max_request_forwards = max_request_forwards.max(child_forwards);
+        cumulative_child_bytes = cumulative_child_bytes
+            .checked_add(child.artifact_byte_length)
+            .context("run cohort child byte count overflow")?;
+    }
+    ensure!(
+        aggregate_prompt_tokens == manifest.aggregate_prompt_tokens
+            && manifest.max_new_tokens > 0
+            && work_upper_bound == manifest.work_upper_bound
+            && forward_upper_bound == manifest.forward_upper_bound
+            && max_request_forwards == manifest.max_request_forwards
+            && manifest.sample_upper_bound
+                == u64::try_from(manifest.request_count)
+                    .context("run cohort request count")?
+                    .checked_mul(
+                        u64::try_from(manifest.max_new_tokens)
+                            .context("run cohort generation bound")?
+                    )
+                    .context("run cohort sample bound overflow")?
+            && cumulative_child_bytes == manifest.cumulative_child_bytes,
+        "run cohort aggregate bounds are inconsistent"
+    );
+    Ok(())
+}
+
 fn read_sweep_cohort_requests(
     path: &Path,
     arm_count: usize,
@@ -2949,7 +3547,7 @@ fn read_sweep_cohort_requests(
         );
         let mut request: SweepCohortRequestRecord = serde_json::from_str(trimmed)
             .with_context(|| format!("parse {} line {source_line}", canonical_path.display()))?;
-        validate_sweep_cohort_id(&request.id, source_line)?;
+        validate_cohort_id(&request.id, source_line)?;
         ensure!(
             ids.insert(request.id.clone()),
             "sweep request ID {:?} is duplicated",
@@ -2993,10 +3591,10 @@ fn capture_sweep_cohort_messages_with(
     })
 }
 
-fn validate_sweep_cohort_id(id: &str, source_line: usize) -> Result<()> {
+fn validate_cohort_id(id: &str, source_line: usize) -> Result<()> {
     ensure!(
         !id.is_empty() && id.len() <= MAX_SWEEP_COHORT_ID_BYTES,
-        "sweep request ID on line {source_line} must contain 1..={MAX_SWEEP_COHORT_ID_BYTES} bytes"
+        "cohort request ID on line {source_line} must contain 1..={MAX_SWEEP_COHORT_ID_BYTES} bytes"
     );
     let mut bytes = id.bytes();
     ensure!(
@@ -3004,7 +3602,7 @@ fn validate_sweep_cohort_id(id: &str, source_line: usize) -> Result<()> {
             .next()
             .is_some_and(|byte| byte.is_ascii_alphanumeric())
             && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')),
-        "sweep request ID on line {source_line} must start with an ASCII alphanumeric and contain only ASCII alphanumerics, '.', '_', or '-'"
+        "cohort request ID on line {source_line} must start with an ASCII alphanumeric and contain only ASCII alphanumerics, '.', '_', or '-'"
     );
     Ok(())
 }
@@ -3151,7 +3749,7 @@ fn validate_sweep_cohort_manifest(manifest: &SweepCohortManifest) -> Result<()> 
     let mut ids = BTreeSet::new();
     let mut cumulative_serialized_child_bytes = 0u64;
     for (index, child) in manifest.sweeps.iter().enumerate() {
-        validate_sweep_cohort_id(&child.id, child.source_line)?;
+        validate_cohort_id(&child.id, child.source_line)?;
         ensure!(
             ids.insert(child.id.clone()),
             "coefficient sweep cohort child IDs repeat"
@@ -3224,40 +3822,40 @@ fn validate_coefficient_sweep_args(args: &CoefficientSweepArgs) -> Result<()> {
     Ok(())
 }
 
-fn ensure_new_sweep_output(path: &Path) -> Result<()> {
+fn ensure_new_bundle_output(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => bail!("sweep output {} already exists", path.display()),
+        Ok(_) => bail!("bundle output {} already exists", path.display()),
         Err(error) => {
-            Err(error).with_context(|| format!("inspect sweep output {}", path.display()))
+            Err(error).with_context(|| format!("inspect bundle output {}", path.display()))
         }
     }
 }
 
-fn create_sweep_directory(path: &Path) -> Result<()> {
+fn create_bundle_directory(path: &Path) -> Result<()> {
     DirBuilder::new()
         .mode(0o700)
         .create(path)
-        .with_context(|| format!("create sweep directory {}", path.display()))
+        .with_context(|| format!("create bundle directory {}", path.display()))
 }
 
-fn write_new_sweep_file(path: &Path, bytes: &[u8]) -> Result<()> {
+fn write_new_bundle_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .with_context(|| format!("create sweep file {}", path.display()))?;
+        .with_context(|| format!("create bundle file {}", path.display()))?;
     file.write_all(bytes)
-        .with_context(|| format!("write sweep file {}", path.display()))?;
+        .with_context(|| format!("write bundle file {}", path.display()))?;
     file.sync_all()
-        .with_context(|| format!("sync sweep file {}", path.display()))
+        .with_context(|| format!("sync bundle file {}", path.display()))
 }
 
-fn stage_and_publish_sweep<T>(output: &Path, build: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
-    let parent = output.parent().context("sweep output has no parent")?;
-    let leaf = output.file_name().context("sweep output has no leaf")?;
+fn stage_and_publish_bundle<T>(output: &Path, build: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    let parent = output.parent().context("bundle output has no parent")?;
+    let leaf = output.file_name().context("bundle output has no leaf")?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before Unix epoch")?
@@ -3268,18 +3866,18 @@ fn stage_and_publish_sweep<T>(output: &Path, build: impl FnOnce(&Path) -> Result
         std::process::id(),
         nonce
     ));
-    create_sweep_directory(&staging)?;
+    create_bundle_directory(&staging)?;
     if let Err(error) = super::sync_directory(parent) {
         if let Err(cleanup_error) = std::fs::remove_dir(&staging) {
             return Err(error.context(format!(
-                "also failed to remove empty sweep staging directory {}: {cleanup_error}",
+                "also failed to remove empty bundle staging directory {}: {cleanup_error}",
                 staging.display()
             )));
         }
         return Err(error);
     }
     let result = build(&staging).and_then(|value| {
-        publish_sweep_directory_exclusive(&staging, output)?;
+        publish_bundle_directory_exclusive(&staging, output)?;
         Ok(value)
     });
     match result {
@@ -3289,7 +3887,7 @@ fn stage_and_publish_sweep<T>(output: &Path, build: impl FnOnce(&Path) -> Result
                 Ok(_) => {
                     if let Err(cleanup_error) = std::fs::remove_dir_all(&staging) {
                         return Err(error.context(format!(
-                            "also failed to remove sweep staging directory {}: {cleanup_error}",
+                            "also failed to remove bundle staging directory {}: {cleanup_error}",
                             staging.display()
                         )));
                     }
@@ -3303,7 +3901,7 @@ fn stage_and_publish_sweep<T>(output: &Path, build: impl FnOnce(&Path) -> Result
                 Err(inspect_error) if inspect_error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(inspect_error) => {
                     return Err(error.context(format!(
-                        "also failed to inspect sweep staging directory {}: {inspect_error}",
+                        "also failed to inspect bundle staging directory {}: {inspect_error}",
                         staging.display()
                     )));
                 }
@@ -3313,7 +3911,7 @@ fn stage_and_publish_sweep<T>(output: &Path, build: impl FnOnce(&Path) -> Result
     }
 }
 
-fn publish_sweep_directory_exclusive(staging: &Path, output: &Path) -> Result<()> {
+fn publish_bundle_directory_exclusive(staging: &Path, output: &Path) -> Result<()> {
     let old = CString::new(staging.as_os_str().as_bytes())?;
     let new = CString::new(output.as_os_str().as_bytes())?;
     let renamed = unsafe {
@@ -3328,16 +3926,16 @@ fn publish_sweep_directory_exclusive(staging: &Path, output: &Path) -> Result<()
     if renamed != 0 {
         return Err(std::io::Error::last_os_error()).with_context(|| {
             format!(
-                "publish sweep directory {} to {}",
+                "publish bundle directory {} to {}",
                 staging.display(),
                 output.display()
             )
         });
     }
-    let parent = output.parent().context("sweep output has no parent")?;
+    let parent = output.parent().context("bundle output has no parent")?;
     if let Err(error) = super::sync_directory(parent) {
         eprintln!(
-            "warning: sweep {} is published, but its parent directory could not be synced: {error:#}",
+            "warning: bundle {} is published, but its parent directory could not be synced: {error:#}",
             output.display()
         );
     }
@@ -5511,6 +6109,61 @@ mod tests {
     }
 
     #[test]
+    fn run_cli_exposes_cohorts_without_competing_single_request_outputs() {
+        let parsed = RunArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--output-dir",
+            "runs",
+            "--seed",
+            "17",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(
+            parsed.requests_jsonl.as_deref(),
+            Some(Path::new("requests.jsonl"))
+        );
+        assert_eq!(parsed.output_dir.as_deref(), Some(Path::new("runs")));
+        assert_eq!(parsed.seed, 17);
+        validate_run_args(&parsed).unwrap();
+
+        assert!(
+            RunArgsParser::try_parse_from([
+                "test",
+                "--model",
+                "model.gguf",
+                "--plan",
+                "plan.json",
+                "--requests-jsonl",
+                "requests.jsonl",
+            ])
+            .is_err()
+        );
+        assert!(
+            RunArgsParser::try_parse_from([
+                "test",
+                "--model",
+                "model.gguf",
+                "--plan",
+                "plan.json",
+                "--requests-jsonl",
+                "requests.jsonl",
+                "--output-dir",
+                "runs",
+                "--output",
+                "run.json",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn run_cli_separates_templated_user_input_from_raw_and_literal_inputs() {
         let structured = RunArgsParser::try_parse_from([
             "test",
@@ -5735,6 +6388,155 @@ mod tests {
     }
 
     #[test]
+    fn run_cohort_jsonl_reuses_the_complete_strict_lens_input_grammar() {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-run-cohort-jsonl-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let requests_path = root.join("requests.jsonl");
+        std::fs::write(
+            &requests_path,
+            concat!(
+                "{\"id\":\"raw\",\"prompt\":\"hello\"}\n",
+                "{\"id\":\"tokens\",\"token_ids\":[1,2]}\n",
+                "{\"id\":\"user\",\"user\":\"hello\",\"system\":\"policy\",\"message_mode\":\"no_thinking\"}\n",
+                "{\"id\":\"messages\",\"messages\":\"messages.json\",\"message_mode\":\"thinking\"}\n",
+                "{\"id\":\"responses\",\"open_responses\":\"request.json\"}\n"
+            ),
+        )
+        .unwrap();
+        let loaded = read_run_cohort_requests(&requests_path).unwrap();
+        assert!(loaded.canonical_path.is_absolute());
+        assert_eq!(loaded.records.len(), 5);
+        assert_eq!(loaded.records[0].1.prompt.as_deref(), Some("hello"));
+        assert_eq!(
+            loaded.records[1].1.token_ids.as_deref(),
+            Some([1, 2].as_slice())
+        );
+        assert_eq!(loaded.records[2].1.system.as_deref(), Some("policy"));
+        assert_eq!(
+            loaded.records[3].1.messages.as_deref(),
+            Some(
+                loaded
+                    .canonical_path
+                    .parent()
+                    .unwrap()
+                    .join("messages.json")
+                    .as_path()
+            )
+        );
+        assert_eq!(
+            loaded.records[4].1.open_responses.as_deref(),
+            Some(
+                loaded
+                    .canonical_path
+                    .parent()
+                    .unwrap()
+                    .join("request.json")
+                    .as_path()
+            )
+        );
+
+        for invalid in [
+            concat!(
+                "{\"id\":\"one\",\"prompt\":\"x\",\"unknown\":true}\n",
+                "{\"id\":\"two\",\"prompt\":\"x\"}\n"
+            ),
+            concat!(
+                "{\"id\":\"one\",\"prompt\":\"x\",\"token_ids\":[1]}\n",
+                "{\"id\":\"two\",\"prompt\":\"x\"}\n"
+            ),
+            concat!(
+                "{\"id\":\"one\",\"user\":\"-\"}\n",
+                "{\"id\":\"two\",\"prompt\":\"x\"}\n"
+            ),
+            concat!(
+                "{\"id\":\"same\",\"prompt\":\"x\"}\n",
+                "{\"id\":\"same\",\"prompt\":\"x\"}\n"
+            ),
+        ] {
+            std::fs::write(&requests_path, invalid).unwrap();
+            assert!(read_run_cohort_requests(&requests_path).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_cohort_manifest_roundtrips_and_recomputes_all_aggregate_bounds() {
+        let source_plan = minimal_plan();
+        let prepared = |tokens: Vec<i32>| PreparedLensInput {
+            source: "token_ids",
+            add_special_tokens: None,
+            token_ids: tokens,
+            rendering: LensInputRendering {
+                renderer: "literal_token_ids".into(),
+                generation_mode: None,
+                spans: Vec::new(),
+            },
+        };
+        let requests = vec![
+            PreflightRunCohortRequest {
+                source_line: 1,
+                id: "one".into(),
+                prepared_input: prepared(vec![1, 2]),
+            },
+            PreflightRunCohortRequest {
+                source_line: 2,
+                id: "two".into(),
+                prepared_input: prepared(vec![1, 2, 3]),
+            },
+        ];
+        let basis = RunCohortManifestBasis {
+            producer: current_sweep_producer(),
+            requests_jsonl_path: PathBuf::from("/tmp/requests.jsonl"),
+            canonical_plan_path: PathBuf::from("/tmp/plan.json"),
+            source_plan,
+            model_path: PathBuf::from("model.gguf"),
+            sampler: RunSampler {
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: 7,
+            },
+            max_new_tokens: 4,
+            prefill_execution: PrefillExecution::Serial,
+            bounds: RunCohortBounds {
+                request_count: 2,
+                aggregate_prompt_tokens: 5,
+                work_upper_bound: 13,
+                forward_upper_bound: 11,
+                sample_upper_bound: 8,
+                max_request_forwards: 6,
+            },
+        };
+        let children = requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| RunCohortChild {
+                index,
+                id: request.id.clone(),
+                source_line: request.source_line,
+                path: format!("run-{index:06}.json"),
+                input_source: request.prepared_input.source.into(),
+                prompt_token_count: request.prepared_input.token_ids.len(),
+                artifact_byte_length: 10 * (index as u64 + 1),
+            })
+            .collect::<Vec<_>>();
+        let manifest = basis.build(30, children);
+        let bytes = serialize_run_cohort_manifest(&manifest).unwrap();
+        let decoded: RunCohortManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, manifest);
+
+        let mut invalid = manifest;
+        invalid.work_upper_bound += 1;
+        assert!(serialize_run_cohort_manifest(&invalid).is_err());
+    }
+
+    #[test]
     fn sweep_cohort_jsonl_is_strict_bounded_and_resolves_relative_message_paths() {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -5901,9 +6703,9 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let output = root.join("cohort");
         assert!(
-            stage_and_publish_sweep(&output, |staging| -> Result<()> {
-                write_new_sweep_file(&staging.join("partial"), b"partial")?;
-                let mut budget = SweepOutputBudget::new(0)?;
+            stage_and_publish_bundle(&output, |staging| -> Result<()> {
+                write_new_bundle_file(&staging.join("partial"), b"partial")?;
+                let mut budget = BundleOutputBudget::new(0)?;
                 budget.consumed = MAX_SWEEP_BUNDLE_BYTES - 1;
                 budget.charge(2)
             })
@@ -5922,7 +6724,7 @@ mod tests {
 
     #[test]
     fn sweep_output_budget_reserves_then_reconciles_outer_manifest() {
-        let mut budget = SweepOutputBudget::new(8).unwrap();
+        let mut budget = BundleOutputBudget::new(8).unwrap();
         budget.consumed = MAX_SWEEP_BUNDLE_BYTES - 8;
         assert!(budget.charge(1).is_err());
         assert_eq!(budget.consumed, MAX_SWEEP_BUNDLE_BYTES - 8);
@@ -6239,8 +7041,8 @@ mod tests {
         DirBuilder::new().mode(0o700).create(&root).unwrap();
 
         let published = root.join("published");
-        stage_and_publish_sweep(&published, |staging| {
-            write_new_sweep_file(&staging.join("marker"), b"complete")?;
+        stage_and_publish_bundle(&published, |staging| {
+            write_new_bundle_file(&staging.join("marker"), b"complete")?;
             super::super::sync_directory(staging)?;
             Ok(())
         })
@@ -6252,10 +7054,10 @@ mod tests {
 
         let failed = root.join("failed");
         assert!(
-            stage_and_publish_sweep(&failed, |staging| -> Result<()> {
+            stage_and_publish_bundle(&failed, |staging| -> Result<()> {
                 let nested = staging.join("sweeps");
-                create_sweep_directory(&nested)?;
-                write_new_sweep_file(&nested.join("partial"), b"partial")?;
+                create_bundle_directory(&nested)?;
+                write_new_bundle_file(&nested.join("partial"), b"partial")?;
                 bail!("injected failure")
             })
             .is_err()
@@ -6264,9 +7066,9 @@ mod tests {
 
         let raced = root.join("raced");
         assert!(
-            stage_and_publish_sweep(&raced, |staging| {
-                write_new_sweep_file(&staging.join("marker"), b"ours")?;
-                create_sweep_directory(&raced)?;
+            stage_and_publish_bundle(&raced, |staging| {
+                write_new_bundle_file(&staging.join("marker"), b"ours")?;
+                create_bundle_directory(&raced)?;
                 Ok(())
             })
             .is_err()
@@ -6352,6 +7154,26 @@ mod tests {
             "lens_artifact_selected_token_rows"
         );
         assert!(value["live_readouts"][0].get("probability").is_none());
+
+        let expected = serialize_run_output(&artifact).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "qwen-lens-run-output-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let output = root.join("run.json");
+        let length = write_new_run_output(&output, &artifact, MAX_RUN_ARTIFACT_BYTES).unwrap();
+        assert_eq!(length, expected.len());
+        assert_eq!(std::fs::read(&output).unwrap(), expected);
+
+        let rejected = root.join("rejected.json");
+        assert!(write_new_run_output(&rejected, &artifact, expected.len() - 1).is_err());
+        assert!(!rejected.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

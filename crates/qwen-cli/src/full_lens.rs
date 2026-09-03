@@ -14,9 +14,11 @@ use qwen_llm::workspace_lens::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::CString;
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -55,8 +57,11 @@ const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TRANSFER_COMPARISON_TOKENS: usize = 32;
 const MAX_FULL_READOUT_TOP_K: usize = 25;
 const MAX_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
-const MAX_TRACE_FULL_BATCH_REQUESTS: usize = 8;
 const MAX_TRACE_FULL_BATCH_RECORD_BYTES: usize = 1024 * 1024;
+const MAX_TRACE_FULL_BATCH_INPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TRACE_FULL_BATCH_OUTPUT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const MAX_TRACE_FULL_BATCH_DOCUMENT_BYTES: usize =
+    MAX_TRACE_FULL_BATCH_OUTPUT_BYTES - JSON_FILE_MAX_BYTES;
 const TRACE_FULL_BATCH_MANIFEST_NAME: &str = "manifest.json";
 const TRACE_MIN_INPUT_TOKEN_JSON_BYTES: usize = 72;
 const TRACE_MIN_CELL_JSON_BYTES: usize = 90;
@@ -84,7 +89,7 @@ pub(crate) fn ensure_trace_document_budget(
     hidden_size: usize,
     max_document_bytes: usize,
     label: &str,
-) -> Result<()> {
+) -> Result<usize> {
     let cell_count = position_count
         .checked_mul(layer_count)
         .context("trace cell count overflow")?;
@@ -104,16 +109,18 @@ pub(crate) fn ensure_trace_document_budget(
         admitted_bytes <= max_document_bytes,
         "{label} cannot fit the {max_document_bytes}-byte trace artifact budget: required rows plus conservatively priced inline vectors reserve {admitted_bytes} bytes before token text and occurrence metadata; select fewer layers, a lower --top-k, or fewer vector cells"
     );
-    Ok(())
+    Ok(admitted_bytes)
 }
 
 pub(crate) fn trace_host_result_reserve_bytes(
     document_count: usize,
     max_document_bytes: usize,
 ) -> Result<u64> {
+    // Retain every prompt-local result while matrices are reused layer-major,
+    // plus one active aggregation/serialization workspace.
     let bytes = document_count
-        .checked_mul(max_document_bytes)
-        .and_then(|bytes| bytes.checked_mul(2))
+        .checked_add(1)
+        .and_then(|banks| banks.checked_mul(max_document_bytes))
         .context("trace host result reserve overflow")?;
     u64::try_from(bytes).context("trace host result reserve does not fit u64")
 }
@@ -566,6 +573,228 @@ struct PreparedTraceFullBatchInput {
     rendering: TraceFullRendering,
     vector_positions_by_layer: BTreeMap<u32, Vec<usize>>,
     vector_count: usize,
+}
+
+struct TraceFullLimitedWriter<W> {
+    inner: W,
+    written: usize,
+    max_bytes: usize,
+}
+
+impl<W> TraceFullLimitedWriter<W> {
+    fn new(inner: W, max_bytes: usize) -> Self {
+        Self {
+            inner,
+            written: 0,
+            max_bytes,
+        }
+    }
+
+    fn written(&self) -> usize {
+        self.written
+    }
+}
+
+impl<W: Write> Write for TraceFullLimitedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.max_bytes.saturating_sub(self.written);
+        if bytes.len() > remaining {
+            return Err(std::io::Error::other(format!(
+                "trace-full JSON exceeds bounded writer capacity {}",
+                self.max_bytes
+            )));
+        }
+        let written = self.inner.write(bytes)?;
+        self.written = self
+            .written
+            .checked_add(written)
+            .ok_or_else(|| std::io::Error::other("trace-full JSON byte count overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct TraceFullBatchPublication {
+    output: PathBuf,
+    parent: PathBuf,
+    staging: PathBuf,
+    staged_bytes: usize,
+    max_bytes: usize,
+    manifest_reserve_bytes: usize,
+    published: bool,
+}
+
+impl TraceFullBatchPublication {
+    fn create(output: &Path, max_bytes: usize, manifest_reserve_bytes: usize) -> Result<Self> {
+        ensure!(
+            manifest_reserve_bytes > 0 && manifest_reserve_bytes < max_bytes,
+            "trace-full batch manifest reserve must fit inside its output budget"
+        );
+        ensure!(
+            !output.exists(),
+            "trace-full batch output {} must not already exist",
+            output.display()
+        );
+        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        let leaf = output
+            .file_name()
+            .context("trace-full batch output has no directory name")?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock before Unix epoch")?
+            .as_nanos();
+        let staging = parent.join(format!(
+            ".{}.stage.{}.{}",
+            leaf.to_string_lossy(),
+            std::process::id(),
+            nonce
+        ));
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&staging)
+            .with_context(|| format!("create trace-full batch staging {}", staging.display()))?;
+        Ok(Self {
+            output: output.to_path_buf(),
+            parent: parent.to_path_buf(),
+            staging,
+            staged_bytes: 0,
+            max_bytes,
+            manifest_reserve_bytes,
+            published: false,
+        })
+    }
+
+    fn stage_json_document(&mut self, path: &str, document: &impl Serialize) -> Result<usize> {
+        ensure!(
+            Path::new(path).components().count() == 1 && path != TRACE_FULL_BATCH_MANIFEST_NAME,
+            "trace-full batch document path must be one non-manifest filename"
+        );
+        let document_bank_bytes = self
+            .max_bytes
+            .checked_sub(self.manifest_reserve_bytes)
+            .context("trace-full batch document budget underflow")?;
+        let aggregate_remaining = document_bank_bytes
+            .checked_sub(self.staged_bytes)
+            .context("trace-full batch document budget exhausted")?;
+        let document_limit = aggregate_remaining.min(MAX_TRACE_DOCUMENT_BYTES);
+        ensure!(
+            document_limit > 0,
+            "trace-full batch document budget is exhausted"
+        );
+        let target = self.staging.join(path);
+        ensure!(
+            !target.exists(),
+            "trace-full batch document {path:?} is duplicated"
+        );
+        let temporary = self.staging.join(format!(".{path}.tmp"));
+        let serialized: Result<usize> = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&temporary)
+                .with_context(|| {
+                    format!(
+                        "create trace-full batch temporary document {}",
+                        temporary.display()
+                    )
+                })?;
+            let written = {
+                let mut buffered = std::io::BufWriter::new(&mut file);
+                let mut bounded = TraceFullLimitedWriter::new(&mut buffered, document_limit);
+                serde_json::to_writer(&mut bounded, document)
+                    .with_context(|| format!("serialize trace-full batch document {path:?}"))?;
+                bounded
+                    .flush()
+                    .with_context(|| format!("flush trace-full batch document {path:?}"))?;
+                bounded.written()
+            };
+            file.sync_all()
+                .with_context(|| format!("sync trace-full batch document {path:?}"))?;
+            Ok(written)
+        })();
+        if serialized.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        let written = serialized?;
+        std::fs::rename(&temporary, &target)
+            .with_context(|| format!("install trace-full batch document {}", target.display()))?;
+        self.staged_bytes = self
+            .staged_bytes
+            .checked_add(written)
+            .context("trace-full batch output byte count overflow")?;
+        Ok(written)
+    }
+
+    fn publish(mut self, manifest: &[u8]) -> Result<()> {
+        ensure!(
+            manifest.len() <= self.manifest_reserve_bytes,
+            "trace-full batch manifest requires {} bytes, exceeding reserved {}",
+            manifest.len(),
+            self.manifest_reserve_bytes
+        );
+        let total_bytes = self
+            .staged_bytes
+            .checked_add(manifest.len())
+            .context("trace-full batch publication byte count overflow")?;
+        ensure!(
+            total_bytes <= self.max_bytes,
+            "trace-full batch publication requires {total_bytes} bytes, exceeding aggregate output budget {}",
+            self.max_bytes
+        );
+        write_atomic_replace(&self.staging.join(TRACE_FULL_BATCH_MANIFEST_NAME), manifest)?;
+        sync_directory(&self.staging)?;
+        ensure!(
+            !self.output.exists(),
+            "trace-full batch output {} appeared during publication",
+            self.output.display()
+        );
+        publish_trace_full_batch_directory_exclusive(&self.staging, &self.output)?;
+        self.published = true;
+        if let Err(error) = sync_directory(&self.parent) {
+            eprintln!(
+                "warning: trace-full batch {} is published, but its parent directory could not be synced: {error:#}",
+                self.output.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TraceFullBatchPublication {
+    fn drop(&mut self) {
+        if !self.published && self.staging.exists() {
+            let _ = std::fs::remove_dir_all(&self.staging);
+        }
+    }
+}
+
+fn publish_trace_full_batch_directory_exclusive(staging: &Path, output: &Path) -> Result<()> {
+    let old = CString::new(staging.as_os_str().as_bytes())?;
+    let new = CString::new(output.as_os_str().as_bytes())?;
+    let renamed = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            old.as_ptr(),
+            libc::AT_FDCWD,
+            new.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if renamed != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "publish trace-full batch staging {} to {}",
+                staging.display(),
+                output.display()
+            )
+        });
+    }
+    Ok(())
 }
 
 pub(crate) struct ProjectedFullTokenDirections {
@@ -1114,6 +1343,7 @@ struct TraceFullBatchTiming {
     readout_gpu_ms: f64,
     readout_command_wall_ms: f64,
     batch_execution_wall_ms: f64,
+    document_staging_wall_ms: f64,
     total_wall_ms: f64,
 }
 
@@ -2549,6 +2779,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         .try_reserve_exact(requests.len())
         .context("allocate trace-full prepared inputs")?;
     let mut aggregate_rows = 0usize;
+    let mut aggregate_minimum_output_bytes = 0usize;
     for (line_number, request) in requests {
         let vector_count = request.vectors.len();
         let prepared = prepare_qwen_model_input(request.input_spec(), family, &gguf, &tokenizer)
@@ -2575,7 +2806,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             .context("trace-full aggregate row count overflow")?;
         let vector_positions_by_layer =
             group_trace_full_vector_cells(&request.vectors, &layers, prepared.token_ids.len())?;
-        ensure_trace_document_budget(
+        let minimum_output_bytes = ensure_trace_document_budget(
             prepared.token_ids.len(),
             layers.len(),
             args.top_k,
@@ -2584,6 +2815,13 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             MAX_TRACE_DOCUMENT_BYTES,
             &format!("trace-full request on line {line_number}"),
         )?;
+        aggregate_minimum_output_bytes = aggregate_minimum_output_bytes
+            .checked_add(minimum_output_bytes)
+            .context("trace-full aggregate output reserve overflow")?;
+        ensure!(
+            aggregate_minimum_output_bytes <= MAX_TRACE_FULL_BATCH_DOCUMENT_BYTES,
+            "trace-full request cohort cannot fit the {MAX_TRACE_FULL_BATCH_DOCUMENT_BYTES}-byte aggregate document budget after reserving its manifest; select fewer requests, layers, top-k ranks, or vector cells"
+        );
         let input_tokens = decode_trace_full_input_tokens(&tokenizer, &prepared.token_ids)?;
         prepared_inputs.push(PreparedTraceFullBatchInput {
             line_number,
@@ -2850,10 +3088,12 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         .sum::<f64>();
     let batch_execution_wall_ms = execution_started.elapsed().as_secs_f64() * 1e3;
     let request_count = prompts.len();
-    let mut serialized_documents = Vec::new();
-    serialized_documents
-        .try_reserve_exact(request_count)
-        .context("allocate serialized trace-full batch")?;
+    let document_staging_started = Instant::now();
+    let mut publication = TraceFullBatchPublication::create(
+        &output_dir,
+        MAX_TRACE_FULL_BATCH_OUTPUT_BYTES,
+        JSON_FILE_MAX_BYTES,
+    )?;
     let mut artifacts = Vec::new();
     artifacts
         .try_reserve_exact(request_count)
@@ -2949,12 +3189,6 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
                 ],
             }),
         };
-        let bytes = serde_json::to_vec(&document).context("serialize batched trace artifact")?;
-        ensure!(
-            bytes.len() <= MAX_TRACE_DOCUMENT_BYTES,
-            "serialized trace artifact for request {request_id:?} is {} bytes; limit is {MAX_TRACE_DOCUMENT_BYTES}",
-            bytes.len()
-        );
         let artifact_path = format!("trace-{request_index:04}.json");
         artifacts.push(TraceFullBatchArtifact {
             request_id,
@@ -2963,12 +3197,14 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             input_tokens,
             path: artifact_path.clone(),
         });
-        serialized_documents.push((artifact_path, bytes));
+        publication.stage_json_document(&artifact_path, &document)?;
     }
+    let document_staging_wall_ms = document_staging_started.elapsed().as_secs_f64() * 1e3;
+    let total_wall_ms = batch_started.elapsed().as_secs_f64() * 1e3;
 
     let batch_manifest = TraceFullBatchManifest {
         schema: "qwen.lens.trace_batch",
-        schema_version: 1,
+        schema_version: 2,
         producer: TraceFullProducer {
             build_commit: env!("QWEN_BUILD_COMMIT"),
             build_dirty: env!("QWEN_BUILD_DIRTY"),
@@ -2991,12 +3227,13 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             readout_gpu_ms,
             readout_command_wall_ms: readout_wall_ms,
             batch_execution_wall_ms,
-            total_wall_ms: batch_started.elapsed().as_secs_f64() * 1e3,
+            document_staging_wall_ms,
+            total_wall_ms,
         },
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&batch_manifest)
-        .context("serialize trace-full batch manifest")?;
-    publish_trace_full_batch_directory(&output_dir, &serialized_documents, &manifest_bytes)?;
+    let manifest_bytes =
+        serialize_json_pretty_bounded(&batch_manifest, "trace-full batch manifest")?;
+    publication.publish(&manifest_bytes)?;
     println!(
         "trace-full batch {} requests, {} aggregate rows, {} layers | {:.1} ms execution ({:.1} ms readout GPU) | {}",
         request_count,
@@ -3074,60 +3311,6 @@ fn append_trace_full_prompt_readout(
         });
     }
     Ok(())
-}
-
-fn publish_trace_full_batch_directory(
-    output: &Path,
-    documents: &[(String, Vec<u8>)],
-    manifest: &[u8],
-) -> Result<()> {
-    ensure!(
-        !output.exists(),
-        "trace-full batch output {} must not already exist",
-        output.display()
-    );
-    let parent = output.parent().unwrap_or_else(|| Path::new("."));
-    let leaf = output
-        .file_name()
-        .context("trace-full batch output has no directory name")?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock before Unix epoch")?
-        .as_nanos();
-    let staging = parent.join(format!(
-        ".{}.stage.{}.{}",
-        leaf.to_string_lossy(),
-        std::process::id(),
-        nonce
-    ));
-    DirBuilder::new()
-        .mode(0o700)
-        .create(&staging)
-        .with_context(|| format!("create trace-full batch staging {}", staging.display()))?;
-    let publish = (|| {
-        for (path, bytes) in documents {
-            write_atomic_replace(&staging.join(path), bytes)?;
-        }
-        write_atomic_replace(&staging.join(TRACE_FULL_BATCH_MANIFEST_NAME), manifest)?;
-        sync_directory(&staging)?;
-        ensure!(
-            !output.exists(),
-            "trace-full batch output {} appeared during publication",
-            output.display()
-        );
-        std::fs::rename(&staging, output).with_context(|| {
-            format!(
-                "publish trace-full batch staging {} to {}",
-                staging.display(),
-                output.display()
-            )
-        })?;
-        sync_directory(parent)
-    })();
-    if publish.is_err() && staging.exists() {
-        let _ = std::fs::remove_dir_all(&staging);
-    }
-    publish
 }
 
 fn effective_trace_stdout_format(
@@ -3221,9 +3404,8 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
 fn read_trace_full_batch_requests(path: &Path) -> Result<Vec<(usize, TraceFullBatchRequest)>> {
     let (file, length) = open_regular_file(path)?;
     ensure!(
-        length <= MAX_TRACE_FULL_BATCH_REQUESTS * MAX_TRACE_FULL_BATCH_RECORD_BYTES,
-        "trace-full request file exceeds {} bytes",
-        MAX_TRACE_FULL_BATCH_REQUESTS * MAX_TRACE_FULL_BATCH_RECORD_BYTES
+        length <= MAX_TRACE_FULL_BATCH_INPUT_BYTES,
+        "trace-full request file exceeds {MAX_TRACE_FULL_BATCH_INPUT_BYTES} bytes"
     );
     let request_root = path
         .parent()
@@ -3248,10 +3430,6 @@ fn read_trace_full_batch_requests(path: &Path) -> Result<Vec<(usize, TraceFullBa
         if trimmed.is_empty() {
             continue;
         }
-        ensure!(
-            requests.len() < MAX_TRACE_FULL_BATCH_REQUESTS,
-            "trace-full request cohort exceeds {MAX_TRACE_FULL_BATCH_REQUESTS} records"
-        );
         let mut request: TraceFullBatchRequest = serde_json::from_str(trimmed)
             .with_context(|| format!("parse {} line {line_number}", path.display()))?;
         ensure!(
@@ -4300,16 +4478,18 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("messages.json"), "[]").unwrap();
         let requests_path = root.join("requests.jsonl");
-        std::fs::write(
-            &requests_path,
-            concat!(
-                "{\"id\":\"literal\",\"token_ids\":[1,2],\"vectors\":[{\"source_layer\":0,\"source_position\":1}]}\n",
-                "{\"id\":\"chat\",\"messages\":\"messages.json\",\"message_mode\":\"thinking\"}\n"
-            ),
-        )
-        .unwrap();
+        let mut cohort = String::from(concat!(
+            "{\"id\":\"literal\",\"token_ids\":[1,2],\"vectors\":[{\"source_layer\":0,\"source_position\":1}]}\n",
+            "{\"id\":\"chat\",\"messages\":\"messages.json\",\"message_mode\":\"thinking\"}\n"
+        ));
+        for index in 2..32 {
+            cohort.push_str(&format!(
+                "{{\"id\":\"literal-{index}\",\"token_ids\":[1,2]}}\n"
+            ));
+        }
+        std::fs::write(&requests_path, cohort).unwrap();
         let requests = read_trace_full_batch_requests(&requests_path).unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 32);
         assert_eq!(requests[0].1.id, "literal");
         assert_eq!(
             requests[1].1.messages.as_deref(),
@@ -4340,23 +4520,74 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let output = root.join("cohort");
         let documents = vec![
-            ("trace-0000.json".into(), b"first".to_vec()),
-            ("trace-0001.json".into(), b"second".to_vec()),
+            ("trace-0000.json", serde_json::json!({"value": "first"})),
+            ("trace-0001.json", serde_json::json!({"value": "second"})),
         ];
-        publish_trace_full_batch_directory(&output, &documents, b"manifest").unwrap();
+        let mut publication = TraceFullBatchPublication::create(&output, 1024, 128).unwrap();
+        for (path, document) in &documents {
+            publication.stage_json_document(path, document).unwrap();
+        }
+        publication.publish(b"manifest").unwrap();
         assert_eq!(
             std::fs::read(output.join("trace-0000.json")).unwrap(),
-            b"first"
+            serde_json::to_vec(&documents[0].1).unwrap()
         );
         assert_eq!(
             std::fs::read(output.join(TRACE_FULL_BATCH_MANIFEST_NAME)).unwrap(),
             b"manifest"
         );
-        assert!(publish_trace_full_batch_directory(&output, &documents, b"new").is_err());
+        assert!(TraceFullBatchPublication::create(&output, 1024, 128).is_err());
         assert_eq!(
             std::fs::read(output.join(TRACE_FULL_BATCH_MANIFEST_NAME)).unwrap(),
             b"manifest"
         );
+
+        let rejected = root.join("rejected");
+        {
+            let mut publication = TraceFullBatchPublication::create(&rejected, 16, 8).unwrap();
+            publication
+                .stage_json_document("trace-0000.json", &"first")
+                .unwrap();
+            assert!(
+                publication
+                    .stage_json_document("trace-0001.json", &"second")
+                    .is_err()
+            );
+        }
+        assert!(!rejected.exists());
+
+        let manifest_rejected = root.join("manifest-rejected");
+        {
+            let mut publication =
+                TraceFullBatchPublication::create(&manifest_rejected, 64, 8).unwrap();
+            publication
+                .stage_json_document("trace-0000.json", &serde_json::json!({}))
+                .unwrap();
+            assert!(publication.publish(b"manifest-too-large").is_err());
+        }
+        assert!(!manifest_rejected.exists());
+
+        let raced = root.join("raced");
+        let mut publication = TraceFullBatchPublication::create(&raced, 64, 8).unwrap();
+        publication
+            .stage_json_document("trace-0000.json", &serde_json::json!({}))
+            .unwrap();
+        std::fs::create_dir(&raced).unwrap();
+        assert!(publication.publish(b"manifest").is_err());
+        assert!(raced.is_dir());
+        assert_eq!(std::fs::read_dir(&raced).unwrap().count(), 0);
+        std::fs::remove_dir_all(&raced).unwrap();
+
+        let mut bounded_bytes = Vec::new();
+        let mut bounded = TraceFullLimitedWriter::new(&mut bounded_bytes, 5);
+        assert!(serde_json::to_writer(&mut bounded, &"too large").is_err());
+        drop(bounded);
+        assert!(bounded_bytes.len() <= 5);
+
+        assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.contains(".stage.")
+        }));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4675,7 +4906,7 @@ mod tests {
 
     #[test]
     fn trace_document_budget_accepts_tool_transcripts_and_rejects_impossible_artifacts_early() {
-        ensure_trace_document_budget(
+        let tool_trace_bytes = ensure_trace_document_budget(
             493,
             51,
             8,
@@ -4685,6 +4916,11 @@ mod tests {
             "test trace",
         )
         .unwrap();
+        assert!(
+            tool_trace_bytes
+                .checked_mul(32)
+                .is_some_and(|bytes| bytes <= MAX_TRACE_FULL_BATCH_DOCUMENT_BYTES)
+        );
         assert!(
             ensure_trace_document_budget(
                 8_192,
@@ -4713,7 +4949,7 @@ mod tests {
         );
         assert_eq!(
             trace_host_result_reserve_bytes(2, MAX_TRACE_DOCUMENT_BYTES).unwrap(),
-            4 * MAX_TRACE_DOCUMENT_BYTES as u64
+            3 * MAX_TRACE_DOCUMENT_BYTES as u64
         );
     }
 

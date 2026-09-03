@@ -276,8 +276,11 @@ the resolved mode (`auto`, `thinking`, `no_thinking`, or a `thinking_*` tier).
 Muse accepts `thinking`, `low`, `medium`, `high`, or `xhigh`; `thinking` is an
 alias for its released `high` default. A command-line mode overrides an omitted
 document value and conflicts fail closed.
-Inputs are never truncated and are bounded at 128 tokens. Omit `--layers` to
-trace all 63 published source layers.
+Inputs are never truncated. Their logical length is bounded by the deployed
+model context, while trace shape and inline vectors must fit the explicit
+artifact and execution-memory budgets. The 128-position runtime width is an
+internal tile, not a prompt limit. Omit `--layers` to trace all 63 published
+source layers.
 
 Qwen performs one packed prompt forward, streams only the selected F16 transport
 matrices, and keeps full logits on Metal. Published Muse tracing currently
@@ -288,6 +291,38 @@ scalar prefill once, uploads each selected 88.6 MB matrix once, and reuses it
 across positions; `execution_mode` records this rather than claiming packed
 prefill. Muse lens logits apply the deployed output RMSNorm, native head, output
 multiplier, and final softcap, with no softmax or post-target blocks.
+
+Qwen `trace-full --requests-jsonl ... --output-dir ...` keeps the model resident
+and reads each selected transport matrix once across the cohort. Request count
+has no fixed ceiling: the JSONL input is bounded to 8 MiB with 1 MiB per record,
+each trace retains the same 256 MiB document budget, and the complete published
+cohort has a 2 GiB output budget, including a reserved 16 MiB manifest bank.
+Capture and host-result memory are admitted for the actual cohort before
+execution. A geometry lower bound rejects output shapes that cannot fit the
+remaining document bank before model residency. Token text and occurrence
+cardinality are data-dependent, so exact document and aggregate bytes are
+enforced later by a bounded direct-to-stage serializer; a late size rejection
+leaves no visible output directory. The directory becomes visible only after
+every document and its bounded manifest are durable.
+
+The cohort contains at least two records and is Qwen-only. Each JSONL record has
+a unique `id`, exactly one ordinary Lens input (`prompt`, `token_ids`, `user`,
+`messages`, or `open_responses` plus its compatible fields), and optional
+`vectors`. Structured-input paths are resolved relative to the JSONL file. For
+example:
+
+```jsonl
+{"id":"control","messages":"control.json","message_mode":"thinking"}
+{"id":"contrast","messages":"contrast.json","message_mode":"thinking","vectors":[{"source_layer":40,"source_position":128}]}
+```
+
+`--output-dir` must name a fresh path. Each child artifact records its request
+index and the shared cohort timing fields; the manifest preserves input order and
+maps every request ID to its immutable child path. Batch-manifest schema 2 keeps
+`batch_execution_wall_ms` scoped to capture/readout execution and records compact
+JSON serialization, writes, and file syncs separately as
+`document_staging_wall_ms`. `total_wall_ms` ends after child staging and before
+the final manifest serialization and exclusive directory rename.
 
 Without `--output`, stdout
 defaults to the complete JSON document. With `--output`, stdout defaults to a

@@ -153,7 +153,11 @@ pub(crate) fn run_requests_jsonl(
                 fixed_cohort_jsonl::CohortPlanSummary::default(),
                 fixed_cohort_jsonl::plan_summary::<MOE_BATCH16_WIDTH>(requests, args)?,
             ),
-            (Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None, false) => (
+            (
+                Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer)
+                | None,
+                false,
+            ) => (
                 fixed_cohort_jsonl::CohortPlanSummary::default(),
                 fixed_cohort_jsonl::CohortPlanSummary::default(),
             ),
@@ -236,7 +240,8 @@ pub(crate) fn run_requests_jsonl(
             fixed_cohort_economics_rejected: match model_family {
                 Some(ModelFamily::Qwen35) => dense_summary.economics_rejected_cohorts > 0,
                 Some(ModelFamily::Qwen35Moe) => moe_summary.economics_rejected_cohorts > 0,
-                Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None => false,
+                Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer)
+                | None => false,
             },
             concurrency2_memory_admitted,
             dense_batch8_memory_admitted,
@@ -252,31 +257,46 @@ pub(crate) fn run_requests_jsonl(
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_policy,
                     Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_policy,
-                    Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None => None,
+                    Some(
+                        ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer,
+                    )
+                    | None => None,
                 },
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_plan_decision,
                     Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_plan_decision,
-                    Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4) | None => None,
+                    Some(
+                        ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer,
+                    )
+                    | None => None,
                 },
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.refill_policy,
                     Some(
-                        ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4,
+                        ModelFamily::Qwen35Moe
+                        | ModelFamily::Qwen4Exp
+                        | ModelFamily::DeepSeek4
+                        | ModelFamily::MuseGlimmer,
                     )
                     | None => None,
                 },
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.planned_refill_arenas,
                     Some(
-                        ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4,
+                        ModelFamily::Qwen35Moe
+                        | ModelFamily::Qwen4Exp
+                        | ModelFamily::DeepSeek4
+                        | ModelFamily::MuseGlimmer,
                     )
                     | None => None,
                 },
                 match model_family {
                     Some(ModelFamily::Qwen35) => dense_summary.planned_refill_requests,
                     Some(
-                        ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4,
+                        ModelFamily::Qwen35Moe
+                        | ModelFamily::Qwen4Exp
+                        | ModelFamily::DeepSeek4
+                        | ModelFamily::MuseGlimmer,
                     )
                     | None => None,
                 },

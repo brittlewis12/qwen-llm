@@ -95,7 +95,7 @@ use qwen_llm::metal_forward::{
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::moe_batch16::MOE_BATCH16_WIDTH;
-use qwen_llm::muse_glimmer::{ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, MuseGlimmerConfig};
+use qwen_llm::muse_glimmer::MuseGlimmerConfig;
 use qwen_llm::muse_glimmer_prompt::MuseGlimmerReasoningStrength;
 use qwen_llm::muse_glimmer_request::MuseGlimmerRequest;
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
@@ -246,7 +246,8 @@ fn run() -> Result<()> {
     validate_request_before_model_open(&args)?;
     let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
-    if gguf.architecture().as_deref() == Some(MUSE_GLIMMER_ARCHITECTURE) {
+    let model_family = ModelFamily::detect(&gguf);
+    if model_family == Some(ModelFamily::MuseGlimmer) {
         return run_muse_glimmer_single_turn(
             &model_path,
             &gguf,
@@ -255,7 +256,6 @@ fn run() -> Result<()> {
             invocation,
         );
     }
-    let model_family = ModelFamily::detect(&gguf);
     fixed_cohort_jsonl::validate_model_family(args.batch_size, model_family)?;
     concurrent_jsonl::validate_model_family(&args, model_family)?;
     validate_deepseek_v4_multigroup_selector_family(
@@ -578,6 +578,9 @@ fn prepare_modern_run_prompt(
                     DeepSeekV4EncodeOptions::default(),
                 )
                 .context("render DeepSeek V4 0731 user request")?,
+                ModelFamily::MuseGlimmer => {
+                    bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
+                }
             };
             (prompt, PromptSource::Messages)
         }
@@ -616,6 +619,9 @@ fn prepare_modern_run_prompt(
                     DeepSeekV4EncodeOptions::default(),
                 )
                 .context("render strict DeepSeek V4 0731 messages")?,
+                ModelFamily::MuseGlimmer => {
+                    bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
+                }
             };
             (prompt, PromptSource::Messages)
         }

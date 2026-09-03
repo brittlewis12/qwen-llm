@@ -6,6 +6,7 @@ pub enum ModelFamily {
     Qwen35Moe,
     Qwen4Exp,
     DeepSeek4,
+    MuseGlimmer,
 }
 
 impl ModelFamily {
@@ -15,6 +16,7 @@ impl ModelFamily {
             "qwen35moe" => Some(Self::Qwen35Moe),
             "qwen4exp" => Some(Self::Qwen4Exp),
             "deepseek4" => Some(Self::DeepSeek4),
+            crate::muse_glimmer::ARCHITECTURE_NAME => Some(Self::MuseGlimmer),
             _ => None,
         }
     }
@@ -31,6 +33,7 @@ impl ModelFamily {
             Self::Qwen35Moe => "qwen35moe",
             Self::Qwen4Exp => "qwen4exp",
             Self::DeepSeek4 => "deepseek4",
+            Self::MuseGlimmer => crate::muse_glimmer::ARCHITECTURE_NAME,
         }
     }
 }
@@ -51,6 +54,10 @@ mod tests {
             Some(ModelFamily::Qwen4Exp)
         );
         assert_eq!(ModelFamily::Qwen4Exp.architecture_name(), "qwen4exp");
+        assert_eq!(
+            ModelFamily::from_architecture_name("muse-glimmer"),
+            Some(ModelFamily::MuseGlimmer)
+        );
         assert_eq!(ModelFamily::from_architecture_name("deepseek2"), None);
     }
 }

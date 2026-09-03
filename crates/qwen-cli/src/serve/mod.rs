@@ -93,7 +93,12 @@ fn snapshot_cache_bytes(mib: u64) -> Result<u64> {
 fn supports_serve_family(family: Option<ModelFamily>) -> bool {
     matches!(
         family,
-        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::DeepSeek4)
+        Some(
+            ModelFamily::Qwen35
+                | ModelFamily::Qwen35Moe
+                | ModelFamily::DeepSeek4
+                | ModelFamily::MuseGlimmer
+        )
     )
 }
 
@@ -130,11 +135,10 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     let snapshot_cache_bytes = snapshot_cache_bytes(invocation.snapshot_cache_mib)?;
     let gguf = GgufFile::open(&invocation.model)
         .with_context(|| format!("open model {}", invocation.model.display()))?;
-    let muse_glimmer =
-        gguf.architecture().as_deref() == Some(qwen_llm::muse_glimmer::ARCHITECTURE_NAME);
     let family = ModelFamily::detect(&gguf);
+    let muse_glimmer = family == Some(ModelFamily::MuseGlimmer);
     ensure!(
-        muse_glimmer || supports_serve_family(family),
+        supports_serve_family(family),
         "qwen serve supports Qwen3.5/3.6-family, DeepSeek V4, and Muse Glimmer models (docs/SERVE.md)"
     );
     let mut trace = invocation

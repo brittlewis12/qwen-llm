@@ -514,6 +514,9 @@ fn validate_model_family_with_modes(
         Some(ModelFamily::Qwen4Exp) => {
             bail!("--concurrency is not yet supported for Qwen3.8-Flash-Next")
         }
+        Some(ModelFamily::MuseGlimmer) => {
+            bail!("--concurrency is not supported for Muse Glimmer")
+        }
         None => bail!("--concurrency requires a supported Qwen or DeepSeek V4 model"),
     }
 }

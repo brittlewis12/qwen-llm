@@ -257,6 +257,10 @@ fn capabilities(family: ModelFamily) -> Vec<ModeCapability> {
             "primitive_only",
             "shared immutable residency exists; layer-synchronous backend required",
         ),
+        ModelFamily::MuseGlimmer => (
+            "unsupported",
+            "Muse Glimmer queue-overlap probing requires a family-specific session backend",
+        ),
     };
     vec![
         ModeCapability {
@@ -1266,13 +1270,18 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open queue-overlap model {}", args.model.display()))?;
     let family = ModelFamily::detect(&gguf).context("unsupported queue-overlap model family")?;
-    if family == ModelFamily::Qwen4Exp {
-        bail!("queue-overlap probing is not supported for Qwen3.8-Flash-Next");
+    if matches!(family, ModelFamily::Qwen4Exp | ModelFamily::MuseGlimmer) {
+        bail!(
+            "queue-overlap probing is not supported for {}",
+            family.architecture_name()
+        );
     }
     let ctx = MetalContext::new().context("create queue-overlap Metal context")?;
     let rows = match family {
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => run_qwen(&ctx, &gguf, &args)?,
-        ModelFamily::Qwen4Exp => unreachable!("Qwen3.8-Flash-Next requests fail before Metal init"),
+        ModelFamily::Qwen4Exp | ModelFamily::MuseGlimmer => {
+            unreachable!("unsupported families fail before Metal init")
+        }
         ModelFamily::DeepSeek4 => run_deepseek(&ctx, &gguf, &args)?.0,
     };
     let (graph_policy, host_submission_policy) = match family {
@@ -1280,8 +1289,8 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
             "monolithic_encode_single_token_argmax",
             "single_host_thread_encode_all_then_commit_all",
         ),
-        ModelFamily::Qwen4Exp => {
-            unreachable!("Qwen3.8-Flash-Next requests fail before Metal init")
+        ModelFamily::Qwen4Exp | ModelFamily::MuseGlimmer => {
+            unreachable!("unsupported families fail before Metal init")
         }
         ModelFamily::DeepSeek4 => (
             "forward_token_whole_profiled",

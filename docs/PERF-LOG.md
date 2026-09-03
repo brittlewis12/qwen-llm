@@ -22,6 +22,11 @@ Status: `QWEN4EXP_PACKED_SELECTED_QSA` flipped from default-off to default-on.
   selected packed `prefill_ms=60254.3` (`425.02 tok/s`, 14 commands). Decode
   unchanged (`16.28` vs `16.29 tok/s`). Both continuations coherent.
 - 2,238-token truncation: identical first token; `149.47 -> 476.36 tok/s`.
+- The frozen `2026-08-29-qwen4exp-selected-semantic` protocol was then run once
+  as written: `SEMANTIC_GO`. Pooled held-out NLL delta `0.005498` against the
+  `ln(1.01)` gate (ssh `-0.000183`, zsh `+0.011179`); known-answer selected output
+  parses to `amber-lattice-2049` / `K-17`. Evidence:
+  `docs/bench/2026-08-29-qwen4exp-selected-semantic/{RESULT.md,result.json}`.
 
 ## 2026-08-29 - Muse Full-R Banked Attention VJP KEEP
 

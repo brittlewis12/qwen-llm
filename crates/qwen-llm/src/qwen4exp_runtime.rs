@@ -3279,6 +3279,15 @@ mod tests {
     }
 
     #[test]
+    fn selected_prefill_defaults_on_without_environment() {
+        assert!(
+            std::env::var_os("QWEN4EXP_PACKED_SELECTED_QSA").is_some()
+                || configured_qwen4exp_packed_selected_qsa_enabled(),
+            "selected packed QSA must default on when the switch is absent"
+        );
+    }
+
+    #[test]
     fn selected_prefill_execution_honors_runtime_override() {
         let configured = qwen4exp_packed_selected_qsa_enabled();
         {

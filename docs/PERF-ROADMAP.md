@@ -324,10 +324,11 @@ JSON and EOS. The independent rollback flags are
 performance promotion inside selected execution, not semantic authority to
 enable selected packed QSA globally.
 
-1. Keep selected packed QSA default-off. Bound its semantic disposition to two
-   held-out natural selected contexts plus one known-answer long-context case,
-   with `NLL_selected - NLL_safe <= ln(1.01)` and both known-answer predicates
-   passing. Do not rebuild a broad quality harness or wait on BF16 authority.
+1. Selected packed QSA is default-on as of 2026-09-03: the frozen
+   `2026-08-29-qwen4exp-selected-semantic` packet returned `SEMANTIC_GO`
+   (pooled held-out NLL delta `0.0055` against the `ln(1.01)` gate; both
+   known-answer predicates pass). `QWEN4EXP_PACKED_SELECTED_QSA=0` is the
+   rollback. Do not rebuild a broad quality harness or wait on BF16 authority.
 2. Revisit native K=1 MTP only with a converted or side-loaded artifact carrying
    all 31 omitted speculative tensors, full admission metadata, and atomic
    QSA/GDN/PLE state. Do not pursue K=2/K=3.
@@ -388,11 +389,11 @@ at the endpoint on that workload. Retain its `393.5 tok/s` versus `32.7 tok/s`
 result as experimental leverage, not a qualified performance row or a semantic
 quality failure.
 
-`QWEN4EXP_PACKED_SELECTED_QSA=1` is explicitly experimental and default-off.
-Without it, the runtime still packs repeated dense chunks and scalarizes selected
-rows. Do not flip the default until the quant-native NLL and known-answer packet
-passes its preregistered policy on natural selected prompts. An upstream BF16
-anchor may strengthen that decision later but is not a release prerequisite.
+`QWEN4EXP_PACKED_SELECTED_QSA` defaults on; `=0` packs repeated dense chunks
+and scalarizes selected rows as before. The preregistered quant-native NLL and
+known-answer packet passed on 2026-09-03 (`SEMANTIC_GO`, see PERF-LOG). An
+upstream BF16 anchor may strengthen that decision later but is not a release
+prerequisite.
 Released 18-token HELLO runs retain output and scalar decode handoff.
 
 Accepted N=18 and N=2,048 first/warm/profile packets close the broad attribution

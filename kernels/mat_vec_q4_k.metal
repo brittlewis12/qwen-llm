@@ -1,9 +1,6 @@
 // Q4_K mat-vec.
 //
-// Two implementations:
-//   * `kernel_mat_vec_q4_K_f32_naive`: clean reference, one lane per
-//     super-block. Slow (~1 GB/s) but easy to reason about; kept as a
-//     correctness anchor for the fast path.
+// The CPU reference in `forward.rs` is the correctness anchor.
 //   * `kernel_mat_vec_q4_K_f32`: lifted in spirit from llama.cpp's
 //     `kernel_mul_mv_q4_K_f32_impl` (ggml/src/ggml-metal/ggml-metal.metal:7716).
 //     32 lanes cooperate per super-block, 8 lanes per row-pair, packed
@@ -51,60 +48,6 @@ inline void get_scale_min_q4k(int j, device const uchar* scales,
     } else {
         sc = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
         m  = (scales[j + 4] >> 4)   | ((scales[j - 0] >> 6) << 4);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Naive kernel — reference / correctness anchor.
-
-#ifndef MAT_VEC_Q4K_ROWS_PER_TG_NAIVE
-#define MAT_VEC_Q4K_ROWS_PER_TG_NAIVE 4
-#endif
-
-kernel void kernel_mat_vec_q4_K_f32_naive(
-        constant mat_vec_q4k_args & args   [[buffer(0)]],
-        device const uchar        * weight [[buffer(1)]],
-        device const float        * x      [[buffer(2)]],
-        device       float        * y      [[buffer(3)]],
-        uint   tgpig [[threadgroup_position_in_grid]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
-    const uint row = tgpig * MAT_VEC_Q4K_ROWS_PER_TG_NAIVE + sgitg;
-    if (row >= args.n_out) return;
-
-    const uint nblocks_per_row = args.n_in / QK_K;
-    const ulong row_byte_off   = (ulong)row * nblocks_per_row * Q4K_BYTES;
-    device const uchar * wrow = weight + row_byte_off;
-
-    float sum = 0.0f;
-    for (uint b = tiisg; b < nblocks_per_row; b += 32) {
-        device const uchar * blk = wrow + (ulong)b * Q4K_BYTES;
-        const float d    = (float)((device const half *)blk)[0];
-        const float dmin = (float)((device const half *)blk)[1];
-        device const uchar * scales = blk + 4;
-        device const uchar * qs     = blk + 4 + 12;
-        device const float * x_blk  = x + (ulong)b * QK_K;
-
-        for (int sb = 0; sb < 8; ++sb) {
-            uchar sc_u, m_u;
-            get_scale_min_q4k(sb, scales, sc_u, m_u);
-            const float scale = d * (float)sc_u;
-            const float minv  = dmin * (float)m_u;
-            const int qs_off = (sb / 2) * 32;
-            const int hi     = sb & 1;
-
-            float partial = 0.0f;
-            for (int k = 0; k < 32; ++k) {
-                const uchar byte = qs[qs_off + k];
-                const uchar nibble = hi ? (byte >> 4) : (byte & 0x0F);
-                partial += (scale * (float)nibble - minv) * x_blk[sb * 32 + k];
-            }
-            sum += partial;
-        }
-    }
-    sum = simd_sum(sum);
-    if (tiisg == 0) {
-        y[row] = sum;
     }
 }
 

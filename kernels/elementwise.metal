@@ -238,57 +238,6 @@ kernel void kernel_post_block_intervention_f32(
     }
 }
 
-struct topk_args {
-    uint n;
-    uint k;
-};
-
-// Naive single-thread top-k over one probability vector. n is small (<=256)
-// and k is tiny (<=16), so this is adequate for the first MoE routing pass.
-kernel void kernel_topk_select_f32(
-        constant topk_args & args [[buffer(0)]],
-        device const float * probs    [[buffer(1)]],
-        device       int   * out_idx  [[buffer(2)]],
-        device       float * out_w    [[buffer(3)]],
-        uint tid [[thread_position_in_grid]]) {
-    if (tid != 0) return;
-    const uint MAX_K = 16;
-    if (args.k == 0 || args.k > MAX_K) return;
-
-    int top_idx[MAX_K];
-    float top_val[MAX_K];
-    for (uint i = 0; i < args.k; ++i) {
-        top_idx[i] = -1;
-        top_val[i] = -INFINITY;
-    }
-
-    for (uint i = 0; i < args.n; ++i) {
-        const float v = probs[i];
-        for (uint j = 0; j < args.k; ++j) {
-            const bool better = (v > top_val[j]) || (v == top_val[j] && (top_idx[j] < 0 || int(i) < top_idx[j]));
-            if (better) {
-                for (uint m = args.k - 1; m > j; --m) {
-                    top_val[m] = top_val[m - 1];
-                    top_idx[m] = top_idx[m - 1];
-                }
-                top_val[j] = v;
-                top_idx[j] = int(i);
-                break;
-            }
-        }
-    }
-
-    float sum = 0.0f;
-    for (uint i = 0; i < args.k; ++i) {
-        if (top_idx[i] >= 0) sum += max(top_val[i], 0.0f);
-    }
-    sum = max(sum, 6.103515625e-5f);
-    for (uint i = 0; i < args.k; ++i) {
-        out_idx[i] = max(top_idx[i], 0);
-        out_w[i] = top_idx[i] >= 0 ? max(top_val[i], 0.0f) / sum : 0.0f;
-    }
-}
-
 // SwiGLU FFN inner: ffn[i] = silu(gate[i]) * up[i].
 // Two-input fused op, saves a separate silu kernel + intermediate buffer
 // in the FFN path. (down(silu(gate(x)) * up(x)) is the full SwiGLU; this

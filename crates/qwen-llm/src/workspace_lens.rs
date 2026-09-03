@@ -1681,25 +1681,6 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         })
     }
 
-    /// Apply one row-major F16 transport to one layer in an opaque packed
-    /// capture, followed by the deployed output norm, resident LM head, and
-    /// compact GPU top-k. Capture position `p` predicts `p + 1`.
-    pub fn apply_packed_capture_f16_transport_topk(
-        &self,
-        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
-        source_layer: u32,
-        transport_bytes: &[u8],
-        top_k: usize,
-    ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
-        self.apply_packed_capture_f16_transport_topk_with_vectors(
-            capture,
-            source_layer,
-            transport_bytes,
-            top_k,
-            &[],
-        )
-    }
-
     /// Apply one row-major F16 transport and full-vocabulary readout while
     /// returning only the caller-selected transported rows. Source positions
     /// are zero-based absolute positions and preserve caller request order.
@@ -1932,19 +1913,6 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
             positions,
             transported_vectors,
         })
-    }
-
-    /// Apply one row-major F16 transport, the deployed final RMSNorm, and the
-    /// deployed LM head, then return exact full-vocabulary top-k logits.
-    pub fn apply_f16_transport_topk(
-        &self,
-        transport_bytes: &[u8],
-        source_residual: &[f32],
-        top_k: usize,
-    ) -> Result<WorkspaceLensFullVocabularyReadout, WorkspaceLensError> {
-        Ok(self
-            .apply_f16_transport_topk_with_vector(transport_bytes, source_residual, top_k)?
-            .readout)
     }
 
     /// Apply one row-major F16 transport and return both deployed top-k logits
@@ -6926,24 +6894,6 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             },
             transported_values,
         })
-    }
-
-    /// Read all rows of one packed layer with the historical matmat and
-    /// two-pass compact top-k path.
-    pub fn apply_packed_capture_f16_transport_topk(
-        &mut self,
-        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
-        source_layer: u32,
-        transport_bytes: &[u8],
-        top_k: usize,
-    ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
-        self.apply_packed_capture_f16_transport_topk_with_vectors(
-            capture,
-            source_layer,
-            transport_bytes,
-            top_k,
-            &[],
-        )
     }
 
     pub fn apply_packed_capture_f16_transport_topk_with_vectors(

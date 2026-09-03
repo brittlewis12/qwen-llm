@@ -36,7 +36,7 @@ use crate::metal::{
     MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer, RetainedStorageDisposition,
     RetainedStorageFallback, RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c,
     encode_add_inplace_f32, encode_argmax_f32, encode_argmax_f32_greedy,
-    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
+    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32,
     encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
     encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
     encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_vec_f32,
@@ -6174,122 +6174,6 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn encode_moe_ffn_apply(
-        &self,
-        enc: &KernelEncoder,
-        session: &mut MetalSession,
-        ffn_gate: &MetalTensor,
-        ffn_up: &MetalTensor,
-        ffn_down: &MetalTensor,
-        moe: &MetalMoeFfn,
-        route: &MoeRouteDecision,
-    ) -> Result<(), MfError> {
-        let arch = &self.model.arch;
-        let h = arch.hidden_size as usize;
-        let f_exp = arch.expert_feed_forward_length as usize;
-        let f_shared = arch.expert_shared_feed_forward_length as usize;
-        let n_expert = arch.expert_count as usize;
-
-        // 2^-14 (FP16 minimum normal): matches forward.rs MoE normalization floor.
-        let weight_sum = route
-            .ranked
-            .iter()
-            .map(|(_, p)| *p)
-            .sum::<f32>()
-            .max(f32::from_bits(0x3880_0000));
-
-        unsafe {
-            let dst = (session.mixer_out.buffer.contents().as_ptr() as *mut u8)
-                .add(session.mixer_out.offset as usize);
-            std::ptr::write_bytes(dst, 0, h * std::mem::size_of::<f32>());
-        }
-
-        let gate_tmp = session.ffn_gate.view_subrange(0, vec![f_exp as u64]);
-        let up_tmp = session.ffn_up.view_subrange(0, vec![f_exp as u64]);
-        let inner_tmp = session.ffn_inner.view_subrange(0, vec![f_exp as u64]);
-        let out_tmp = session.ffn_out.view_subrange(0, vec![h as u64]);
-        let shared_gate_tmp = session.ffn_gate.view_subrange(0, vec![f_shared as u64]);
-        let shared_up_tmp = session.ffn_up.view_subrange(0, vec![f_shared as u64]);
-        let shared_inner_tmp = session.ffn_inner.view_subrange(0, vec![f_shared as u64]);
-
-        let per_gate_bytes = moe.gate_exps.n_bytes() / n_expert as u64;
-        let per_up_bytes = moe.up_exps.n_bytes() / n_expert as u64;
-        let per_down_bytes = moe.down_exps.n_bytes() / n_expert as u64;
-        let routed_fused =
-            moe.gate_exps.dtype == GgmlType::Q4_K && moe.up_exps.dtype == GgmlType::Q4_K;
-        for (expert_idx, prob) in route.ranked.iter().copied() {
-            let weight = prob / weight_sum;
-            let gate_w = moe.gate_exps.view_bytes(
-                per_gate_bytes * expert_idx as u64,
-                vec![h as u64, f_exp as u64],
-            );
-            let up_w = moe.up_exps.view_bytes(
-                per_up_bytes * expert_idx as u64,
-                vec![h as u64, f_exp as u64],
-            );
-            let down_w = moe.down_exps.view_bytes(
-                per_down_bytes * expert_idx as u64,
-                vec![f_exp as u64, h as u64],
-            );
-            if routed_fused {
-                encode_ffn_swiglu_q4_K_f32(
-                    self.ctx, enc, &gate_w, &up_w, &session.h, &inner_tmp, h, f_exp,
-                )?;
-            } else {
-                encode_mat_vec_dispatch(self.ctx, enc, &gate_w, &session.h, &gate_tmp, h, f_exp)?;
-                encode_mat_vec_dispatch(self.ctx, enc, &up_w, &session.h, &up_tmp, h, f_exp)?;
-                encode_silu_mul_f32(self.ctx, enc, &gate_tmp, &up_tmp, &inner_tmp)?;
-            }
-            encode_mat_vec_dispatch(self.ctx, enc, &down_w, &inner_tmp, &out_tmp, f_exp, h)?;
-            encode_axpy_f32(self.ctx, enc, &out_tmp, &session.mixer_out, weight)?;
-        }
-
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            ffn_gate,
-            &session.h,
-            &shared_gate_tmp,
-            h,
-            f_shared,
-        )?;
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            ffn_up,
-            &session.h,
-            &shared_up_tmp,
-            h,
-            f_shared,
-        )?;
-        encode_silu_mul_f32(
-            self.ctx,
-            enc,
-            &shared_gate_tmp,
-            &shared_up_tmp,
-            &shared_inner_tmp,
-        )?;
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            ffn_down,
-            &shared_inner_tmp,
-            &out_tmp,
-            f_shared,
-            h,
-        )?;
-        encode_axpy_f32(
-            self.ctx,
-            enc,
-            &out_tmp,
-            &session.mixer_out,
-            route.shared_gate_scalar,
-        )?;
-        encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
-        Ok(())
-    }
-
     pub(crate) fn encode_moe_routed_ffn_gpu(
         &self,
         enc: &KernelEncoder,
@@ -10094,24 +9978,6 @@ impl<'a> MetalForward<'a> {
         }
         self.encode_single_token_argmax_dense_with_reduction(
             enc, position, session, ids_buf, argmax_tok, reduction,
-        )
-    }
-
-    pub fn encode_single_token_argmax_dense(
-        &self,
-        enc: &KernelEncoder,
-        position: u32,
-        session: &mut MetalSession,
-        ids_buf: &MetalTensor,
-        argmax_tok: &MetalTensor,
-    ) -> Result<(), MfError> {
-        self.encode_single_token_argmax_dense_with_reduction(
-            enc,
-            position,
-            session,
-            ids_buf,
-            argmax_tok,
-            ArgmaxReduction::SpeculativeLowest,
         )
     }
 

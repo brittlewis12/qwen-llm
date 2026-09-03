@@ -238,25 +238,39 @@ The importer pins the source SHA-256, exact ZIP inventory, opaque `data.pkl`,
 whole extracted payload, and all 51 matrix digests. Published Muse reads require
 `--allow-unvalidated-transfer`; model-bound locally assembled Muse assets do not.
 
-The active published profiles are the pinned eyes-ml J asset above and the Muse
-R asset described next. Import is profile-driven rather than shape-driven: an
-arbitrary `.pt` with the same dimensions is rejected. The pickle is never
-interpreted. Profiles may declare either 51 separate F16 matrix storages or one
-contiguous rank-3 F16 storage; both normalize to matrix-major
+The active published profiles are the pinned eyes-ml J asset above and the
+matched first-25-Pile J/R pair described next. Import is profile-driven rather
+than shape-driven: an arbitrary `.pt` with the same dimensions is rejected. The
+pickle is never interpreted. Profiles may declare either 51 separate F16 matrix
+storages or one contiguous rank-3 F16 storage; both normalize to matrix-major
 `transport.f16le` with orientation
 `[source_layer, target_output_coordinate, source_coordinate]`.
 
-### Muse R asset
+### Muse matched J/R assets
 
-The active CUDA-produced Muse R profile pins
+The matched CUDA-produced Muse J profile pins
+`brittlewis12/muse-glimmer-30b-r-lens-checkpoints` at immutable revision
+`4f73cadc74ab26263f3860888a2c274cce452951`. Import it with:
+
+```sh
+cargo run -q --release -p qwen-cli --bin qwen-lens -- import-muse-full \
+  --source /path/to/muse-glimmer-30b-j-lens.pt \
+  --output /path/to/Muse-Glimmer-30B-jlens-pile10k25-v1
+```
+
+The matched R profile pins
 `brittlewis12/muse-glimmer-30b-r-lens-checkpoints` at immutable revision
 `b406c8465c9a49657e30af07753cd08ae7f96f56`. Its logical shape is
 `[51,6656,6656]`: post-block residuals 0 through 49 map into target block 50,
 with an exact F16 identity at source/target block 50; block 51 is not present.
-Its recipe uses the first 25 unfiltered, unshuffled documents from
-`NeelNanda/pile-10k`, `max_seq_len=128`, and `skip_first=4`.
+Both matched profiles use the same model and tokenizer revisions, first 25
+unfiltered and unshuffled `NeelNanda/pile-10k` documents, tokenized corpus,
+target, T128 geometry, `skip_first=4`, batch width, dependency versions,
+arithmetic contract, and F16 serialization. Their fitter revisions belong to
+one published lineage; the J revision descends from the R revision and selects
+the ordinary-Jacobian estimator instead of RelP.
 
-Import it with the same command surface:
+Import R with the same command surface:
 
 ```sh
 cargo run -q --release -p qwen-cli --bin qwen-lens -- import-muse-full \
@@ -264,7 +278,7 @@ cargo run -q --release -p qwen-cli --bin qwen-lens -- import-muse-full \
   --output /path/to/Muse-Glimmer-30B-rlens-published-v1
 ```
 
-The profile pins the immutable source and opaque `data.pkl` SHA-256, Torch ZIP
+Each profile pins its immutable source and opaque `data.pkl` SHA-256, Torch ZIP
 inventory, serialization ID, whole payload and every matrix digest, fitted model
 and tokenizer revisions, exact method/estimator/arithmetic contracts, corpus
 revision and selection, and raw-text/token-ID digests. Import verifies every F16

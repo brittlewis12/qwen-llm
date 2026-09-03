@@ -248,7 +248,6 @@ impl ReadArtifact {
     }
 }
 
-const MAX_MUSE_TRACE_VECTOR_CELLS: usize = 32;
 const MAX_MUSE_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
 
 fn muse_trace_capture_bytes(
@@ -1366,10 +1365,6 @@ fn validate_trace_args(args: &TraceFullArgs) -> Result<()> {
     ensure!(
         args.max_tokens.is_none_or(|max_tokens| max_tokens > 0),
         "Muse --max-tokens must be positive"
-    );
-    ensure!(
-        args.vectors.len() <= MAX_MUSE_TRACE_VECTOR_CELLS,
-        "Muse trace supports at most {MAX_MUSE_TRACE_VECTOR_CELLS} vector cells"
     );
     ensure!(
         args.identity_cache.is_some(),

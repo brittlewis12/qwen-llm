@@ -312,9 +312,12 @@ enables selectors such as
 `role:user:end`, `role:assistant:start`, and `channel:thinking:start` without
 searching decoded delimiter-shaped text.
 
-`--vectors LAYER:POSITION,...` optionally includes up to 32 selected transported
+`--vectors LAYER:POSITION,...` optionally includes selected transported
 target-space vectors inline in the same JSON. It may be repeated; cells must be
 unique, must use selected layers, and use zero-based tokenized-input positions.
+Vector count is admitted by a conservative inline-JSON and live-F32 byte reserve,
+not a fixed cell count. `inspect` and `compare` stream-count external vector
+arrays against the same reserve before materializing their F32 values.
 Each F32 vector is `transport_layer * post_block_residual` in target coordinates
 before the deployed output RMSNorm and LM head. It is not the source activation,
 logits, or an observed target-layer activation. The JSON reports the J/R method,

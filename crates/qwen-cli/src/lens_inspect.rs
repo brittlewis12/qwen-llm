@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand, ValueEnum};
+use serde::de::{Error as _, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::path::PathBuf;
 
 use super::lens_input::{
@@ -133,6 +135,8 @@ pub(crate) struct DeployedModel {
     #[serde(default)]
     pub(crate) locator_id: Option<String>,
     #[serde(default)]
+    hidden_size: Option<usize>,
+    #[serde(default)]
     vocab_size: Option<u32>,
 }
 
@@ -224,6 +228,123 @@ pub(crate) struct VectorCell {
     source_token_id: i32,
     predicts_position: usize,
     pub(crate) values: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+struct TraceVectorAdmissionDocument {
+    #[serde(default)]
+    deployed_model: Option<TraceVectorAdmissionModel>,
+    #[serde(default)]
+    vectors: Option<TraceVectorAdmission>,
+}
+
+#[derive(Deserialize)]
+struct TraceVectorAdmissionModel {
+    #[serde(default)]
+    hidden_size: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct TraceVectorAdmission {
+    #[serde(default)]
+    hidden_size: Option<usize>,
+    #[serde(default)]
+    shape: Option<[usize; 2]>,
+    #[serde(default, deserialize_with = "deserialize_trace_vector_cell_counts")]
+    cells: TraceVectorCellCounts,
+}
+
+#[derive(Default)]
+struct TraceVectorCellCounts {
+    cell_count: usize,
+    total_value_count: usize,
+    minimum_value_count: Option<usize>,
+    maximum_value_count: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct TraceVectorCellCount {
+    #[serde(deserialize_with = "deserialize_trace_vector_value_count")]
+    values: usize,
+}
+
+fn deserialize_trace_vector_value_count<'de, D>(
+    deserializer: D,
+) -> std::result::Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ValueCountVisitor;
+
+    impl<'de> Visitor<'de> for ValueCountVisitor {
+        type Value = usize;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a trace vector value array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut count = 0usize;
+            while sequence.next_element::<IgnoredAny>()?.is_some() {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| A::Error::custom("trace vector value count overflow"))?;
+            }
+            Ok(count)
+        }
+    }
+
+    deserializer.deserialize_seq(ValueCountVisitor)
+}
+
+fn deserialize_trace_vector_cell_counts<'de, D>(
+    deserializer: D,
+) -> std::result::Result<TraceVectorCellCounts, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct CellCountsVisitor;
+
+    impl<'de> Visitor<'de> for CellCountsVisitor {
+        type Value = TraceVectorCellCounts;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a trace vector cell array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut counts = TraceVectorCellCounts::default();
+            while let Some(cell) = sequence.next_element::<TraceVectorCellCount>()? {
+                counts.cell_count = counts
+                    .cell_count
+                    .checked_add(1)
+                    .ok_or_else(|| A::Error::custom("trace vector cell count overflow"))?;
+                counts.total_value_count = counts
+                    .total_value_count
+                    .checked_add(cell.values)
+                    .ok_or_else(|| A::Error::custom("trace vector value count overflow"))?;
+                counts.minimum_value_count = Some(
+                    counts
+                        .minimum_value_count
+                        .map_or(cell.values, |current| current.min(cell.values)),
+                );
+                counts.maximum_value_count = Some(
+                    counts
+                        .maximum_value_count
+                        .map_or(cell.values, |current| current.max(cell.values)),
+                );
+            }
+            Ok(counts)
+        }
+    }
+
+    deserializer.deserialize_seq(CellCountsVisitor)
 }
 
 #[derive(Debug, Deserialize)]
@@ -517,10 +638,57 @@ pub(crate) fn parse_trace(path: &std::path::Path) -> Result<TraceDocument> {
 }
 
 pub(crate) fn parse_trace_bytes(bytes: &[u8], path: &std::path::Path) -> Result<TraceDocument> {
-    let document: TraceDocument = serde_json::from_slice(&bytes)
+    ensure!(
+        bytes.len() <= TRACE_MAX_BYTES,
+        "trace JSON {} exceeds {TRACE_MAX_BYTES} bytes",
+        path.display()
+    );
+    validate_trace_vector_admission(bytes, path)?;
+    let document: TraceDocument = serde_json::from_slice(bytes)
         .with_context(|| format!("parse trace JSON {}", path.display()))?;
     validate_trace(&document)?;
     Ok(document)
+}
+
+fn validate_trace_vector_admission(bytes: &[u8], path: &std::path::Path) -> Result<()> {
+    let admission: TraceVectorAdmissionDocument = serde_json::from_slice(bytes)
+        .with_context(|| format!("preflight trace vector storage {}", path.display()))?;
+    let Some(vectors) = admission.vectors else {
+        return Ok(());
+    };
+    let hidden_size = vectors
+        .hidden_size
+        .context("trace vectors are missing hidden_size")?;
+    ensure!(hidden_size > 0, "trace vector hidden_size must be positive");
+    ensure!(
+        vectors.shape == Some([vectors.cells.cell_count, hidden_size]),
+        "trace vector shape is inconsistent with cells and hidden_size"
+    );
+    let expected_values = vectors
+        .cells
+        .cell_count
+        .checked_mul(hidden_size)
+        .context("trace vector value count overflow")?;
+    ensure!(
+        vectors.cells.total_value_count == expected_values
+            && (vectors.cells.cell_count == 0
+                || (vectors.cells.minimum_value_count == Some(hidden_size)
+                    && vectors.cells.maximum_value_count == Some(hidden_size))),
+        "trace vector cell dimensions are inconsistent with hidden_size"
+    );
+    if let Some(model_hidden_size) = admission.deployed_model.and_then(|model| model.hidden_size) {
+        ensure!(
+            hidden_size == model_hidden_size,
+            "trace vector hidden_size {hidden_size} does not match deployed model hidden_size {model_hidden_size}"
+        );
+    }
+    let reserve_bytes =
+        super::full_lens::trace_vector_reserve_bytes(vectors.cells.cell_count, hidden_size)?;
+    ensure!(
+        reserve_bytes <= TRACE_MAX_BYTES,
+        "trace vectors reserve {reserve_bytes} bytes, exceeding the {TRACE_MAX_BYTES}-byte trace resource budget"
+    );
+    Ok(())
 }
 
 fn validate_trace(document: &TraceDocument) -> Result<()> {
@@ -777,6 +945,16 @@ fn validate_trace(document: &TraceDocument) -> Result<()> {
             .hidden_size
             .context("trace vectors are missing hidden_size")?;
         ensure!(hidden_size > 0, "trace vector hidden_size must be positive");
+        if let Some(model_hidden_size) = document
+            .deployed_model
+            .as_ref()
+            .and_then(|model| model.hidden_size)
+        {
+            ensure!(
+                hidden_size == model_hidden_size,
+                "trace vector hidden_size {hidden_size} does not match deployed model hidden_size {model_hidden_size}"
+            );
+        }
         ensure!(
             vectors.shape == Some([vectors.cells.len(), hidden_size]),
             "trace vector shape is inconsistent with cells and hidden_size"
@@ -2115,6 +2293,7 @@ mod tests {
                 base_model_name: None,
                 architecture: Some("qwen35moe".into()),
                 locator_id: Some("test".into()),
+                hidden_size: Some(4),
                 vocab_size: Some(32),
             }),
             tokenizer: (version == 3).then(|| TokenizerSummary {
@@ -2169,6 +2348,39 @@ mod tests {
             token_display_lossy: display.into(),
             logit,
         }
+    }
+
+    #[test]
+    fn trace_vector_admission_counts_values_without_materializing_them() {
+        let valid = br#"{
+            "deployed_model":{"hidden_size":4},
+            "vectors":{"hidden_size":4,"shape":[2,4],"cells":[
+                {"values":[0,1,2,3]},
+                {"values":[4,5,6,7]}
+            ]}
+        }"#;
+        validate_trace_vector_admission(valid, std::path::Path::new("valid.json")).unwrap();
+
+        let uneven = br#"{
+            "vectors":{"hidden_size":4,"shape":[2,4],"cells":[
+                {"values":[0,1,2]},
+                {"values":[3,4,5,6,7]}
+            ]}
+        }"#;
+        assert!(
+            validate_trace_vector_admission(uneven, std::path::Path::new("uneven.json")).is_err()
+        );
+
+        let wrong_model = br#"{
+            "deployed_model":{"hidden_size":5},
+            "vectors":{"hidden_size":4,"shape":[1,4],"cells":[
+                {"values":[0,1,2,3]}
+            ]}
+        }"#;
+        assert!(
+            validate_trace_vector_admission(wrong_model, std::path::Path::new("wrong-model.json"))
+                .is_err()
+        );
     }
     fn input(position: usize, token_id: i32, display: &str) -> InputToken {
         InputToken {

@@ -53,7 +53,6 @@ const PAYLOAD_BYTES: u64 = MATRIX_BYTES * (SOURCE_LAYER_COUNT as u64);
 const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROJECTED_FULL_TOKENS: usize = 32;
 const MAX_FULL_READOUT_TOP_K: usize = 25;
-const MAX_TRACE_FULL_VECTOR_CELLS: usize = 32;
 const MAX_TRACE_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TRACE_FULL_BATCH_REQUESTS: usize = 8;
 const MAX_TRACE_FULL_BATCH_RECORD_BYTES: usize = 1024 * 1024;
@@ -61,8 +60,20 @@ const TRACE_FULL_BATCH_MANIFEST_NAME: &str = "manifest.json";
 const TRACE_MIN_INPUT_TOKEN_JSON_BYTES: usize = 72;
 const TRACE_MIN_CELL_JSON_BYTES: usize = 90;
 const TRACE_MIN_SCORE_JSON_BYTES: usize = 80;
-const TRACE_MIN_VECTOR_JSON_BYTES: usize = 90;
-const TRACE_MIN_VECTOR_VALUE_JSON_BYTES: usize = 2;
+const TRACE_VECTOR_JSON_METADATA_RESERVE_BYTES: usize = 256;
+const TRACE_VECTOR_VALUE_RESERVE_BYTES: usize = 32;
+
+pub(crate) fn trace_vector_reserve_bytes(vector_count: usize, hidden_size: usize) -> Result<usize> {
+    let vector_values = vector_count
+        .checked_mul(hidden_size)
+        .context("trace vector value count overflow")?;
+    vector_count
+        .checked_mul(TRACE_VECTOR_JSON_METADATA_RESERVE_BYTES)
+        .and_then(|bytes| {
+            bytes.checked_add(vector_values.checked_mul(TRACE_VECTOR_VALUE_RESERVE_BYTES)?)
+        })
+        .context("trace vector reserve overflow")
+}
 
 pub(crate) fn ensure_trace_document_budget(
     position_count: usize,
@@ -79,21 +90,18 @@ pub(crate) fn ensure_trace_document_budget(
     let score_count = cell_count
         .checked_mul(top_k)
         .context("trace score count overflow")?;
-    let vector_values = vector_count
-        .checked_mul(hidden_size)
-        .context("trace vector value count overflow")?;
-    let minimum_bytes = position_count
+    let required_row_bytes = position_count
         .checked_mul(TRACE_MIN_INPUT_TOKEN_JSON_BYTES)
         .and_then(|bytes| bytes.checked_add(cell_count.checked_mul(TRACE_MIN_CELL_JSON_BYTES)?))
         .and_then(|bytes| bytes.checked_add(score_count.checked_mul(TRACE_MIN_SCORE_JSON_BYTES)?))
-        .and_then(|bytes| bytes.checked_add(vector_count.checked_mul(TRACE_MIN_VECTOR_JSON_BYTES)?))
-        .and_then(|bytes| {
-            bytes.checked_add(vector_values.checked_mul(TRACE_MIN_VECTOR_VALUE_JSON_BYTES)?)
-        })
         .context("trace document size lower bound overflow")?;
+    let vector_reserve_bytes = trace_vector_reserve_bytes(vector_count, hidden_size)?;
+    let admitted_bytes = required_row_bytes
+        .checked_add(vector_reserve_bytes)
+        .context("trace document admission size overflow")?;
     ensure!(
-        minimum_bytes <= max_document_bytes,
-        "{label} cannot fit the {max_document_bytes}-byte trace artifact budget: its required rows have a minimum serialized size of {minimum_bytes} bytes before token text and occurrence metadata; select fewer layers, a lower --top-k, or fewer vector cells"
+        admitted_bytes <= max_document_bytes,
+        "{label} cannot fit the {max_document_bytes}-byte trace artifact budget: required rows plus conservatively priced inline vectors reserve {admitted_bytes} bytes before token text and occurrence metadata; select fewer layers, a lower --top-k, or fewer vector cells"
     );
     Ok(())
 }
@@ -3080,11 +3088,6 @@ fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
         }),
         "--token-ids must be nonempty and fit the optional --max-tokens budget"
     );
-    ensure!(
-        args.vectors.len() <= MAX_TRACE_FULL_VECTOR_CELLS,
-        "--vectors selects {} cells, exceeding the limit {MAX_TRACE_FULL_VECTOR_CELLS}",
-        args.vectors.len()
-    );
     let mut vector_cells = BTreeSet::new();
     ensure!(
         args.vectors.iter().all(|cell| vector_cells.insert(*cell)),
@@ -3157,10 +3160,6 @@ fn read_trace_full_batch_requests(path: &Path) -> Result<Vec<(usize, TraceFullBa
                 .as_ref()
                 .is_none_or(|prompt| !prompt.is_empty()),
             "trace-full request prompt on line {line_number} is empty"
-        );
-        ensure!(
-            request.vectors.len() <= MAX_TRACE_FULL_VECTOR_CELLS,
-            "trace-full request on line {line_number} selects too many vectors"
         );
         let mut vector_cells = BTreeSet::new();
         ensure!(
@@ -4576,6 +4575,20 @@ mod tests {
             )
             .is_err()
         );
+        let vector_count =
+            MAX_TRACE_DOCUMENT_BYTES / (6_656 * TRACE_VECTOR_VALUE_RESERVE_BYTES) + 1;
+        assert!(
+            ensure_trace_document_budget(
+                1,
+                1,
+                1,
+                vector_count,
+                6_656,
+                MAX_TRACE_DOCUMENT_BYTES,
+                "test trace",
+            )
+            .is_err()
+        );
         assert_eq!(
             trace_host_result_reserve_bytes(2, MAX_TRACE_DOCUMENT_BYTES).unwrap(),
             4 * MAX_TRACE_DOCUMENT_BYTES as u64
@@ -4624,7 +4637,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_vector_cells_are_bounded_and_unique() {
+    fn trace_vector_cells_are_resource_admitted_and_unique() {
         let mut args = test_trace_full_args();
         args.vectors = vec![
             TraceFullVectorCell {
@@ -4635,13 +4648,13 @@ mod tests {
         ];
         assert!(validate_trace_full_args(&args).is_err());
 
-        args.vectors = (0..=MAX_TRACE_FULL_VECTOR_CELLS)
+        args.vectors = (0..33)
             .map(|source_position| TraceFullVectorCell {
                 source_layer: 31,
                 source_position,
             })
             .collect();
-        assert!(validate_trace_full_args(&args).is_err());
+        validate_trace_full_args(&args).unwrap();
     }
 
     #[test]

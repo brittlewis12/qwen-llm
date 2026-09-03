@@ -26,8 +26,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
 use crate::lens_input::{
-    LensInputRendering, LensInputSpec, LensMessageMode, prepare_qwen_model_input,
-    validate_lens_input_spec,
+    LensCohortRequest, LensInputRendering, LensInputSpec, LensMessageMode,
+    prepare_qwen_model_input, validate_lens_input_spec,
 };
 
 use super::published_pt::{
@@ -517,35 +517,15 @@ pub(crate) struct TraceFullVectorCell {
     pub(crate) source_position: usize,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 struct TraceFullBatchRequest {
-    id: String,
-    prompt: Option<String>,
-    token_ids: Option<Vec<i32>>,
-    user: Option<String>,
-    system: Option<String>,
-    messages: Option<PathBuf>,
-    open_responses: Option<PathBuf>,
-    #[serde(default)]
-    no_special_tokens: bool,
-    message_mode: Option<LensMessageMode>,
-    #[serde(default)]
+    input: LensCohortRequest,
     vectors: Vec<TraceFullVectorCell>,
 }
 
 impl TraceFullBatchRequest {
     fn input_spec(&self) -> LensInputSpec<'_> {
-        LensInputSpec {
-            prompt: self.prompt.as_deref(),
-            token_ids: self.token_ids.as_deref(),
-            user: self.user.as_deref(),
-            system: self.system.as_deref(),
-            messages: self.messages.as_deref(),
-            open_responses: self.open_responses.as_deref(),
-            no_special_tokens: self.no_special_tokens,
-            message_mode: self.message_mode,
-        }
+        self.input.input_spec()
     }
 }
 
@@ -2825,7 +2805,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         let input_tokens = decode_trace_full_input_tokens(&tokenizer, &prepared.token_ids)?;
         prepared_inputs.push(PreparedTraceFullBatchInput {
             line_number,
-            request_id: request.id,
+            request_id: request.input.id,
             input_source: prepared.source,
             add_special_tokens: prepared.add_special_tokens,
             token_ids: prepared.token_ids,
@@ -3430,32 +3410,37 @@ fn read_trace_full_batch_requests(path: &Path) -> Result<Vec<(usize, TraceFullBa
         if trimmed.is_empty() {
             continue;
         }
-        let mut request: TraceFullBatchRequest = serde_json::from_str(trimmed)
+        let mut value: serde_json::Value = serde_json::from_str(trimmed)
             .with_context(|| format!("parse {} line {line_number}", path.display()))?;
+        let object = value.as_object_mut().with_context(|| {
+            format!("trace-full request on line {line_number} must be a JSON object")
+        })?;
+        let vectors = object
+            .remove("vectors")
+            .map(serde_json::from_value)
+            .transpose()
+            .with_context(|| format!("parse trace-full vectors on line {line_number}"))?
+            .unwrap_or_default();
+        let mut input: LensCohortRequest = serde_json::from_value(value)
+            .with_context(|| format!("parse {} line {line_number}", path.display()))?;
+        input
+            .resolve_paths(request_root)
+            .with_context(|| format!("resolve trace-full request on line {line_number}"))?;
+        let request = TraceFullBatchRequest { input, vectors };
         ensure!(
-            !request.id.is_empty() && request.id.len() <= 128,
+            !request.input.id.is_empty() && request.input.id.len() <= 128,
             "trace-full request ID on line {line_number} must contain 1..=128 bytes"
         );
         ensure!(
-            ids.insert(request.id.clone()),
+            ids.insert(request.input.id.clone()),
             "trace-full request ID {:?} is duplicated",
-            request.id
+            request.input.id
         );
-        for input_path in [&mut request.messages, &mut request.open_responses] {
-            if let Some(input_path) = input_path {
-                ensure!(
-                    input_path != Path::new("-"),
-                    "trace-full batch records cannot read structured input from stdin"
-                );
-                if input_path.is_relative() {
-                    *input_path = request_root.join(&*input_path);
-                }
-            }
-        }
         validate_lens_input_spec(request.input_spec())
             .with_context(|| format!("validate trace-full request on line {line_number}"))?;
         ensure!(
             request
+                .input
                 .prompt
                 .as_ref()
                 .is_none_or(|prompt| !prompt.is_empty()),
@@ -4490,9 +4475,9 @@ mod tests {
         std::fs::write(&requests_path, cohort).unwrap();
         let requests = read_trace_full_batch_requests(&requests_path).unwrap();
         assert_eq!(requests.len(), 32);
-        assert_eq!(requests[0].1.id, "literal");
+        assert_eq!(requests[0].1.input.id, "literal");
         assert_eq!(
-            requests[1].1.messages.as_deref(),
+            requests[1].1.input.messages.as_deref(),
             Some(root.join("messages.json").as_path())
         );
 

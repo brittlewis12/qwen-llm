@@ -26,7 +26,7 @@ use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_OPEN_RESPONSES_BYTES: usize = 16 * 1024 * 1024;
 
@@ -52,6 +52,53 @@ pub(crate) struct LensInputSpec<'a> {
     pub(crate) open_responses: Option<&'a Path>,
     pub(crate) no_special_tokens: bool,
     pub(crate) message_mode: Option<LensMessageMode>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LensCohortRequest {
+    pub(crate) id: String,
+    pub(crate) prompt: Option<String>,
+    pub(crate) token_ids: Option<Vec<i32>>,
+    pub(crate) user: Option<String>,
+    pub(crate) system: Option<String>,
+    pub(crate) messages: Option<PathBuf>,
+    pub(crate) open_responses: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) no_special_tokens: bool,
+    pub(crate) message_mode: Option<LensMessageMode>,
+}
+
+impl LensCohortRequest {
+    pub(crate) fn input_spec(&self) -> LensInputSpec<'_> {
+        LensInputSpec {
+            prompt: self.prompt.as_deref(),
+            token_ids: self.token_ids.as_deref(),
+            user: self.user.as_deref(),
+            system: self.system.as_deref(),
+            messages: self.messages.as_deref(),
+            open_responses: self.open_responses.as_deref(),
+            no_special_tokens: self.no_special_tokens,
+            message_mode: self.message_mode,
+        }
+    }
+
+    pub(crate) fn resolve_paths(&mut self, root: &Path) -> Result<()> {
+        ensure!(
+            self.user.as_deref() != Some("-"),
+            "cohort user input cannot read stdin"
+        );
+        for path in [&mut self.messages, &mut self.open_responses]
+            .into_iter()
+            .flatten()
+        {
+            ensure!(path != Path::new("-"), "cohort input cannot read stdin");
+            if path.is_relative() {
+                *path = root.join(&*path);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]

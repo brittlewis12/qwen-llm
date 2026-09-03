@@ -1847,7 +1847,7 @@ pub(crate) fn argmax_i32(xs: &[f32]) -> i32 {
 }
 
 #[cfg(test)]
-pub(crate) mod argmax_tie_tests {
+mod argmax_tie_tests {
     use super::argmax_i32;
 
     #[test]

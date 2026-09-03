@@ -88,7 +88,7 @@ const REQUIRED_SOURCE_MAP: [(&str, &str); 18] = [
     ("dflash_k0s_rs", "crates/qwen-cli/src/dflash_k0s.rs"),
     ("qwen_llm_cargo_toml", "crates/qwen-llm/Cargo.toml"),
     ("qwen_cli_cargo_toml", "crates/qwen-cli/Cargo.toml"),
-    ("metal_rs", "crates/qwen-llm/src/metal.rs"),
+    ("metal_rs", "crates/qwen-llm/src/metal/mat_mat.rs"),
     ("metal_forward_rs", "crates/qwen-llm/src/metal_forward.rs"),
     ("dflash2_metal", "kernels/dflash2.metal"),
     ("mat_mat_mma8_metal", "kernels/mat_mat_mma8.metal"),

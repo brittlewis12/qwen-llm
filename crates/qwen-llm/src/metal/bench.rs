@@ -1,4 +1,5 @@
-//! Bench helpers chaining many dispatches into one command buffer.
+//! Bench helpers chaining many dispatches into one command buffer, plus the
+//! bench-only trellis3 decode-floor probe.
 
 use super::*;
 

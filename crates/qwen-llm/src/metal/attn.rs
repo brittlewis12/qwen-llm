@@ -142,8 +142,8 @@ pub fn encode_split_qkv_fused_f32(
     Ok(())
 }
 
-/// F16 KV-cache variant of `encode_attn_decode_f32`. Same algorithm,
-/// reads K and V as half-precision. Halves attention bandwidth at long
+/// Naive fused single-token attention over an F16 KV cache (scores in
+/// threadgroup memory, so the host caps `n_pos` at 7,168 positions). Halves attention bandwidth at long
 /// context (saves ~4 GB of reads/token at 4K positions on 27B). Q is
 /// still F32; output is F32.
 ///

@@ -1,4 +1,4 @@
-//! Research-only probes: trellis decode floor, roofline, touch-bytes.
+//! Research-only probes: roofline and touch-bytes kernels (bench-only).
 
 use super::*;
 

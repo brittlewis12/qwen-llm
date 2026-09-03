@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Per-element kernel arg used by silu/sigmoid/softplus/add/mul/silu_mul.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct NArgs {
+    pub(crate) n: u32,
+}
+
 pub fn encode_scatter_rows_f32_unique(
     ctx: &MetalContext,
     enc: &KernelEncoder,

@@ -28,7 +28,7 @@ Primary repo context:
 - `docs/PERF-LOG.md`
 - `docs/PERF-TOOLS.md`
 - `docs/INFERENCE-GRAPH.md`
-- `crates/qwen-llm/src/metal.rs`
+- `crates/qwen-llm/src/metal/` (one module per kernel family; `mod.rs` re-exports)
 - `crates/qwen-llm/src/metal_forward.rs`
 - `crates/qwen-llm/src/metal_dflash.rs`
 - `kernels/`

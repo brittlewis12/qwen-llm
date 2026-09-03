@@ -1200,7 +1200,7 @@ but α tells us the drafter is broken.
 - `crates/qwen-llm/src/metal_forward.rs` — `packed_forward`,
   `packed_forward_with_logits`, `restore_after_partial_accept`,
   `single_token_with_multi_hidden`.
-- `crates/qwen-llm/src/metal.rs` — packed-N kernels (extend mat-vec
+- `crates/qwen-llm/src/metal/` (mat_vec.rs, mat_mat.rs, dflash.rs) — packed-N kernels (extend mat-vec
   to mat-mat for F32/Q4_K/Q5_K/Q6_K/Q8_0; GDN packed; flash-attn
   v4 verified for N=16 queries).
 - `kernels/*.metal` — new packed kernel templates. GDN gets per-token

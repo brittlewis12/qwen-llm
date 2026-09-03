@@ -38,20 +38,6 @@ struct ds4_all_slots_q4k_args {
 };
 
 // ---------------------------------------------------------------------------
-// Helper: decode (sc, min) for sub-block j from the 12-byte scales array.
-// (kept for the naive kernel's clarity.)
-inline void get_scale_min_q4k(int j, device const uchar* scales,
-                              thread uchar& sc, thread uchar& m) {
-    if (j < 4) {
-        sc = scales[j] & 63;
-        m  = scales[j + 4] & 63;
-    } else {
-        sc = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
-        m  = (scales[j + 4] >> 4)   | ((scales[j - 0] >> 6) << 4);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Fast kernel — lift of llama.cpp's `kernel_mul_mv_q4_K_f32_impl`.
 //
 // 32-lane simdgroup mapping:

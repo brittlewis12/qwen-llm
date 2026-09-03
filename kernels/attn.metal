@@ -1,4 +1,5 @@
-// Full-attention kernels for Qwen3.5/3.6 gated-attention layers.
+// Full-attention helper kernels: Q/K norm, gate split, and a naive F16-KV
+// decode shared by the Qwen3.5/3.6, DFlash, MTP, and Muse paths.
 //
 // Kernels:
 //
@@ -16,7 +17,7 @@
 //
 //   * kernel_attn_decode_f16kv — naive fused single-token attention over
 //     an F16 KV cache: scoring, softmax, V-aggregate per Q head, GQA-aware.
-//     Scores live in threadgroup memory, so n_pos ≤ ~8192. The flash
+//     Scores live in threadgroup memory; the host caps n_pos at 7,168. The flash
 //     kernels in attn_v4.metal are the production path; this remains the
 //     small-context/reference decode used by several families.
 

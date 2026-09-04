@@ -475,7 +475,7 @@ const PROFILES: [Profile; 3] = [
         fit: FitClaims {
             claims_basis: "pinned_source_and_opaque_data_pickle_sha256_with_audited_embedded_provenance",
             embedded_provenance: true,
-            fitter: "brittlewis12/jacobian-lens/jlens",
+            fitter: "anthropics/jacobian-lens/jlens",
             fitter_revision: "6ca15db1bfe166ea2261da24bae3c0e83e5d8495",
             transformers_revision: "42ca97014c85d71a88ad60d55f08cb9fb4d26e2c",
             recipe_id: Some(
@@ -1107,9 +1107,10 @@ mod tests {
         assert_eq!(manifest.fit.skip_first, 4);
         assert_eq!(manifest.fit.dim_batch, 4);
         assert!(manifest.fit.embedded_provenance);
+        assert_eq!(matched_j.fit.fitter, "brittlewis12/jacobian-lens/jlens");
         assert_eq!(
-            matched_j.fit.fitter,
-            profile(ProfileId::BrittLewisMuseGlimmer30bR).fit.fitter
+            profile(ProfileId::BrittLewisMuseGlimmer30bR).fit.fitter,
+            "anthropics/jacobian-lens/jlens"
         );
         assert_eq!(
             manifest.fit.recipe_id.as_deref(),

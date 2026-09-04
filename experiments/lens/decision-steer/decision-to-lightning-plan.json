@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "neuronpedia-j1000",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/neuronpedia-j-lens-n1000-native-v1",
+      "token_ids": [101725, 31367],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [
+    {
+      "id": "decision",
+      "lens": "neuronpedia-j1000",
+      "row": {
+        "kind": "token_id",
+        "token_id": 101725
+      },
+      "normalization": "unit_l2"
+    },
+    {
+      "id": "lightning",
+      "lens": "neuronpedia-j1000",
+      "row": {
+        "kind": "token_id",
+        "token_id": 31367
+      },
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "decision-to-lightning",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [54]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [52]
+        }
+      },
+      "action": {
+        "kind": "source_to_target",
+        "source": "decision",
+        "target": "lightning",
+        "coefficient": 1.0
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "directed-transfer",
+      "lens": "neuronpedia-j1000",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [54, 55, 58, 62]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [52]
+        }
+      },
+      "top_k": 2
+    }
+  ]
+}

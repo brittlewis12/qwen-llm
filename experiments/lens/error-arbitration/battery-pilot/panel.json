@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "pairs": [
+    {
+      "family": "tag_closing_transposition",
+      "anomalous": "tag-closing-transposition-anomalous.messages.json",
+      "control": "tag-closing-transposition-control.messages.json",
+      "evidence_position_rule": "first closing-tag token that completes chekc rather than check",
+      "expected_repair": "status-chekc -> status-check"
+    },
+    {
+      "family": "prose_transposition",
+      "anomalous": "prose-transposition-anomalous.messages.json",
+      "control": "prose-transposition-control.messages.json",
+      "evidence_position_rule": "first token that completes freind rather than friend",
+      "expected_repair": "freind -> friend"
+    },
+    {
+      "family": "json_missing_comma",
+      "anomalous": "json-missing-comma-anomalous.messages.json",
+      "control": "json-missing-comma-control.messages.json",
+      "evidence_position_rule": "opening quote of the message key after the completed mood value",
+      "expected_repair": "insert comma between mood and message fields"
+    },
+    {
+      "family": "unbalanced_parenthesis",
+      "anomalous": "unbalanced-parenthesis-anomalous.messages.json",
+      "control": "unbalanced-parenthesis-control.messages.json",
+      "evidence_position_rule": "user turn end, where the missing closing parenthesis becomes final",
+      "expected_repair": "close the parenthetical after the aside"
+    },
+    {
+      "family": "invalid_calendar_date",
+      "anomalous": "invalid-date-anomalous.messages.json",
+      "control": "invalid-date-control.messages.json",
+      "evidence_position_rule": "token completing day 31 after September",
+      "expected_repair": "September has 30 days"
+    },
+    {
+      "family": "arithmetic_inconsistency",
+      "anomalous": "arithmetic-inconsistency-anomalous.messages.json",
+      "control": "arithmetic-inconsistency-control.messages.json",
+      "evidence_position_rule": "token completing the claimed tip amount",
+      "expected_repair": "18 percent of 58.46 rounds to 10.52"
+    }
+  ]
+}

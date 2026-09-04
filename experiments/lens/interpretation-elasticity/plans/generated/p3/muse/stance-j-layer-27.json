@@ -1,0 +1,123 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Users/tito/models/muse-glimmer/lenses/muse-glimmer-30b-j-lens-matched-v1",
+      "token_ids": [
+        158448
+      ],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/jacobian-lenses/Muse-Glimmer-30B-rlens-published-v1",
+      "token_ids": [
+        158448
+      ],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [
+    {
+      "id": "stance",
+      "lens": "j",
+      "row": {
+        "kind": "token_id",
+        "token_id": 158448
+      },
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "attenuate",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            27
+          ]
+        },
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [
+            {
+              "span_kind": "message_end_marker",
+              "role": "user",
+              "occurrence": "last",
+              "edge": "start"
+            }
+          ]
+        }
+      },
+      "action": {
+        "kind": "projection_ablate",
+        "direction": "stance",
+        "coefficient": 1.0
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "j-track-stance",
+      "lens": "j",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            27,
+            50
+          ]
+        },
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [
+            {
+              "span_kind": "message_end_marker",
+              "role": "user",
+              "occurrence": "last",
+              "edge": "start"
+            },
+            {
+              "span_kind": "generated_assistant_start_marker",
+              "edge": "start"
+            }
+          ]
+        }
+      },
+      "top_k": 1
+    },
+    {
+      "id": "r-track-stance",
+      "lens": "r",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            27,
+            50
+          ]
+        },
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [
+            {
+              "span_kind": "message_end_marker",
+              "role": "user",
+              "occurrence": "last",
+              "edge": "start"
+            },
+            {
+              "span_kind": "generated_assistant_start_marker",
+              "edge": "start"
+            }
+          ]
+        }
+      },
+      "top_k": 1
+    }
+  ]
+}

@@ -1,0 +1,124 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Users/tito/models/muse-glimmer/lenses/muse-glimmer-30b-j-lens-matched-v1",
+      "token_ids": [
+        146738
+      ],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/jacobian-lenses/Muse-Glimmer-30B-rlens-published-v1",
+      "token_ids": [
+        146738
+      ],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [
+    {
+      "id": "stance",
+      "lens": "r",
+      "row": {
+        "kind": "token_id",
+        "token_id": 146738
+      },
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "attenuate-user-end",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            46
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            74
+          ]
+        }
+      },
+      "action": {
+        "kind": "projection_ablate",
+        "direction": "stance",
+        "coefficient": 0.0
+      }
+    },
+    {
+      "id": "attenuate-assistant-start",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            46
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            75
+          ]
+        }
+      },
+      "action": {
+        "kind": "projection_ablate",
+        "direction": "stance",
+        "coefficient": 0.0
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "j-track-stance",
+      "lens": "j",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            46,
+            50
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            74,
+            75
+          ]
+        }
+      },
+      "top_k": 1
+    },
+    {
+      "id": "r-track-stance",
+      "lens": "r",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            46,
+            50
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            74,
+            75
+          ]
+        }
+      },
+      "top_k": 1
+    }
+  ]
+}

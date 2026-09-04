@@ -1,0 +1,311 @@
+{
+  "schema": "qwen.lens.trace_batch",
+  "schema_version": 2,
+  "producer": {
+    "build_commit": "ec1944ec27bae432cc62a3f79a822e7d01c09b11",
+    "build_dirty": "0",
+    "build_source_state": "git-source-sha256-v2:2170269e844b0696d53366b5be539a6cdf937d700d5388e13f5c2ed53b5fba22"
+  },
+  "execution_mode": "resident_layer_major_prompt_local_readout_no_interventions",
+  "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/qwen-passive-batch-02.requests.jsonl",
+  "deployed_model": {
+    "path": "/Volumes/wdblack/weights-archive/qwen3.6-27b-q8/qwen3.6-27b-q8_0.gguf",
+    "locator_scheme": "qwen_llm_model_locator_v1",
+    "locator_id": "853abe5a37f56c53",
+    "content_authenticated": false,
+    "architecture": "qwen35",
+    "name": "Qwen3.6 27B",
+    "base_model_name": null,
+    "n_layers": 64,
+    "hidden_size": 5120,
+    "vocab_size": 248320
+  },
+  "lens": {
+    "kind": "published_full_transport",
+    "method": "j",
+    "target_layer": 62,
+    "source_site": "post_block_residual",
+    "source_repository": "camilablank/workspace-lenses",
+    "source_revision": "d740106d1e0f95456dc8718fba2895e9c8ffd6ef",
+    "source_filename": "qwen3.6-27b/j-lens/lens.pt",
+    "payload_blake3": "a76c67d0c977696970511bbaf23baeb9e02f6a526c873069b4bb18c92317965e",
+    "scoring": "deployed_output_rmsnorm_and_lm_head_full_vocabulary_logits_no_softmax"
+  },
+  "selected_layers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62
+  ],
+  "top_k": 25,
+  "request_count": 28,
+  "aggregate_rows": 910,
+  "artifacts": [
+    {
+      "request_id": "p5-target-thinking",
+      "request_index": 0,
+      "source_line": 1,
+      "input_tokens": 21,
+      "path": "trace-0000.json"
+    },
+    {
+      "request_id": "p5-twin-thinking",
+      "request_index": 1,
+      "source_line": 2,
+      "input_tokens": 20,
+      "path": "trace-0001.json"
+    },
+    {
+      "request_id": "p6-target-thinking",
+      "request_index": 2,
+      "source_line": 3,
+      "input_tokens": 33,
+      "path": "trace-0002.json"
+    },
+    {
+      "request_id": "p6-twin-thinking",
+      "request_index": 3,
+      "source_line": 4,
+      "input_tokens": 28,
+      "path": "trace-0003.json"
+    },
+    {
+      "request_id": "p7-target-thinking",
+      "request_index": 4,
+      "source_line": 5,
+      "input_tokens": 33,
+      "path": "trace-0004.json"
+    },
+    {
+      "request_id": "p7-twin-thinking",
+      "request_index": 5,
+      "source_line": 6,
+      "input_tokens": 34,
+      "path": "trace-0005.json"
+    },
+    {
+      "request_id": "p8-target-thinking",
+      "request_index": 6,
+      "source_line": 7,
+      "input_tokens": 27,
+      "path": "trace-0006.json"
+    },
+    {
+      "request_id": "p8-twin-thinking",
+      "request_index": 7,
+      "source_line": 8,
+      "input_tokens": 28,
+      "path": "trace-0007.json"
+    },
+    {
+      "request_id": "p9-target-thinking",
+      "request_index": 8,
+      "source_line": 9,
+      "input_tokens": 33,
+      "path": "trace-0008.json"
+    },
+    {
+      "request_id": "p9-twin-thinking",
+      "request_index": 9,
+      "source_line": 10,
+      "input_tokens": 31,
+      "path": "trace-0009.json"
+    },
+    {
+      "request_id": "p10-target-thinking",
+      "request_index": 10,
+      "source_line": 11,
+      "input_tokens": 33,
+      "path": "trace-0010.json"
+    },
+    {
+      "request_id": "p10-twin-thinking",
+      "request_index": 11,
+      "source_line": 12,
+      "input_tokens": 31,
+      "path": "trace-0011.json"
+    },
+    {
+      "request_id": "p11-target-thinking",
+      "request_index": 12,
+      "source_line": 13,
+      "input_tokens": 41,
+      "path": "trace-0012.json"
+    },
+    {
+      "request_id": "p11-twin-thinking",
+      "request_index": 13,
+      "source_line": 14,
+      "input_tokens": 48,
+      "path": "trace-0013.json"
+    },
+    {
+      "request_id": "p5-target-no-thinking",
+      "request_index": 14,
+      "source_line": 15,
+      "input_tokens": 23,
+      "path": "trace-0014.json"
+    },
+    {
+      "request_id": "p5-twin-no-thinking",
+      "request_index": 15,
+      "source_line": 16,
+      "input_tokens": 22,
+      "path": "trace-0015.json"
+    },
+    {
+      "request_id": "p6-target-no-thinking",
+      "request_index": 16,
+      "source_line": 17,
+      "input_tokens": 35,
+      "path": "trace-0016.json"
+    },
+    {
+      "request_id": "p6-twin-no-thinking",
+      "request_index": 17,
+      "source_line": 18,
+      "input_tokens": 30,
+      "path": "trace-0017.json"
+    },
+    {
+      "request_id": "p7-target-no-thinking",
+      "request_index": 18,
+      "source_line": 19,
+      "input_tokens": 35,
+      "path": "trace-0018.json"
+    },
+    {
+      "request_id": "p7-twin-no-thinking",
+      "request_index": 19,
+      "source_line": 20,
+      "input_tokens": 36,
+      "path": "trace-0019.json"
+    },
+    {
+      "request_id": "p8-target-no-thinking",
+      "request_index": 20,
+      "source_line": 21,
+      "input_tokens": 29,
+      "path": "trace-0020.json"
+    },
+    {
+      "request_id": "p8-twin-no-thinking",
+      "request_index": 21,
+      "source_line": 22,
+      "input_tokens": 30,
+      "path": "trace-0021.json"
+    },
+    {
+      "request_id": "p9-target-no-thinking",
+      "request_index": 22,
+      "source_line": 23,
+      "input_tokens": 35,
+      "path": "trace-0022.json"
+    },
+    {
+      "request_id": "p9-twin-no-thinking",
+      "request_index": 23,
+      "source_line": 24,
+      "input_tokens": 33,
+      "path": "trace-0023.json"
+    },
+    {
+      "request_id": "p10-target-no-thinking",
+      "request_index": 24,
+      "source_line": 25,
+      "input_tokens": 35,
+      "path": "trace-0024.json"
+    },
+    {
+      "request_id": "p10-twin-no-thinking",
+      "request_index": 25,
+      "source_line": 26,
+      "input_tokens": 33,
+      "path": "trace-0025.json"
+    },
+    {
+      "request_id": "p11-target-no-thinking",
+      "request_index": 26,
+      "source_line": 27,
+      "input_tokens": 43,
+      "path": "trace-0026.json"
+    },
+    {
+      "request_id": "p11-twin-no-thinking",
+      "request_index": 27,
+      "source_line": 28,
+      "input_tokens": 50,
+      "path": "trace-0027.json"
+    }
+  ],
+  "timing": {
+    "model_load_wall_ms": 729.586625,
+    "packed_prefill_gpu_ms": 11871.682337950915,
+    "packed_prefill_wall_ms": 12210.059708,
+    "matrix_read_wall_ms": 1421.9600389999996,
+    "readout_gpu_ms": 20533.511543646455,
+    "readout_command_wall_ms": 20859.819699000047,
+    "batch_execution_wall_ms": 34841.507209,
+    "document_staging_wall_ms": 845.649125,
+    "total_wall_ms": 36515.413958000005
+  }
+}

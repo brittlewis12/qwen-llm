@@ -1,0 +1,198 @@
+{
+  "schema": "interpretation_elasticity.distributed_followup",
+  "schema_version": 1,
+  "selection_status": "fixed_before_distributed_intervention_outputs",
+  "model": "Qwen3.6-27B Q8",
+  "mode": "no-thinking",
+  "item": "p7",
+  "token_id": 15191,
+  "token": " feelings",
+  "layer": 49,
+  "site_admission": "token_in_target_top25_under_both_j_and_r_at_every_site",
+  "sites": {
+    "j": [
+      {
+        "label": "user-content-and",
+        "target": 9,
+        "twin": 10,
+        "p_target": 23.380766,
+        "p_twin": 11.765689,
+        "ratio": 0.49677914744110613
+      },
+      {
+        "label": "user-content-I",
+        "target": 10,
+        "twin": 11,
+        "p_target": 20.654943,
+        "p_twin": 15.149302,
+        "ratio": 0.26655319261834803
+      },
+      {
+        "label": "user-end",
+        "target": 26,
+        "twin": 27,
+        "p_target": 23.323778,
+        "p_twin": 13.927554,
+        "ratio": 0.402860291330161
+      },
+      {
+        "label": "assistant-role",
+        "target": 29,
+        "twin": 30,
+        "p_target": 19.187443,
+        "p_twin": 14.134675,
+        "ratio": 0.2633372252884347
+      },
+      {
+        "label": "final-prefill",
+        "target": 34,
+        "twin": 35,
+        "p_target": 21.211395,
+        "p_twin": 14.494372,
+        "ratio": 0.316670497154949
+      }
+    ],
+    "r": [
+      {
+        "label": "user-content-and",
+        "target": 9,
+        "twin": 10,
+        "p_target": 22.804321,
+        "p_twin": 10.889866,
+        "ratio": 0.522464799543911
+      },
+      {
+        "label": "user-content-I",
+        "target": 10,
+        "twin": 11,
+        "p_target": 19.73962,
+        "p_twin": 14.191096,
+        "ratio": 0.2810856541311332
+      },
+      {
+        "label": "user-end",
+        "target": 26,
+        "twin": 27,
+        "p_target": 22.936817,
+        "p_twin": 13.389655,
+        "ratio": 0.4162374404434583
+      },
+      {
+        "label": "assistant-role",
+        "target": 29,
+        "twin": 30,
+        "p_target": 19.234158,
+        "p_twin": 14.061194,
+        "ratio": 0.26894673528209556
+      },
+      {
+        "label": "final-prefill",
+        "target": 34,
+        "twin": 35,
+        "p_target": 21.471933,
+        "p_twin": 14.739945,
+        "ratio": 0.3135250096020698
+      }
+    ]
+  },
+  "jobs": [
+    {
+      "lens": "j",
+      "index": 0,
+      "label": "zero-a",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/j/arm-00-zero-a.json"
+    },
+    {
+      "lens": "j",
+      "index": 1,
+      "label": "zero-b",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/j/arm-01-zero-b.json"
+    },
+    {
+      "lens": "j",
+      "index": 2,
+      "label": "kappa-0.25",
+      "kappa": 0.25,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/j/arm-02-kappa-0.25.json"
+    },
+    {
+      "lens": "j",
+      "index": 3,
+      "label": "kappa-0.5",
+      "kappa": 0.5,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/j/arm-03-kappa-0.5.json"
+    },
+    {
+      "lens": "j",
+      "index": 4,
+      "label": "kappa-0.75",
+      "kappa": 0.75,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/j/arm-04-kappa-0.75.json"
+    },
+    {
+      "lens": "j",
+      "index": 5,
+      "label": "kappa-1.0",
+      "kappa": 1.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/j/arm-05-kappa-1.0.json"
+    },
+    {
+      "lens": "j",
+      "index": 6,
+      "label": "full-ablation",
+      "kappa": null,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/j/arm-06-full-ablation.json"
+    },
+    {
+      "lens": "r",
+      "index": 0,
+      "label": "zero-a",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/r/arm-00-zero-a.json"
+    },
+    {
+      "lens": "r",
+      "index": 1,
+      "label": "zero-b",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/r/arm-01-zero-b.json"
+    },
+    {
+      "lens": "r",
+      "index": 2,
+      "label": "kappa-0.25",
+      "kappa": 0.25,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/r/arm-02-kappa-0.25.json"
+    },
+    {
+      "lens": "r",
+      "index": 3,
+      "label": "kappa-0.5",
+      "kappa": 0.5,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/r/arm-03-kappa-0.5.json"
+    },
+    {
+      "lens": "r",
+      "index": 4,
+      "label": "kappa-0.75",
+      "kappa": 0.75,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/r/arm-04-kappa-0.75.json"
+    },
+    {
+      "lens": "r",
+      "index": 5,
+      "label": "kappa-1.0",
+      "kappa": 1.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/r/arm-05-kappa-1.0.json"
+    },
+    {
+      "lens": "r",
+      "index": 6,
+      "label": "full-ablation",
+      "kappa": null,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p7-distributed-2026-09-04/r/arm-06-full-ablation.json"
+    }
+  ]
+}

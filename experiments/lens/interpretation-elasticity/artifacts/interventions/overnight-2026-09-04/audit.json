@@ -1,0 +1,217 @@
+{
+  "schema": "interpretation_elasticity.overnight_audit",
+  "schema_version": 1,
+  "categories": {
+    "qwen_single_site_stance": {
+      "count": 84,
+      "expected_count": 84,
+      "all_stop_token": true
+    },
+    "qwen_content": {
+      "count": 49,
+      "expected_count": 49,
+      "all_stop_token": true
+    },
+    "qwen_p7_distributed": {
+      "count": 14,
+      "expected_count": 14,
+      "all_stop_token": true
+    },
+    "muse_p7": {
+      "count": 28,
+      "expected_count": 28,
+      "all_stop_token": true
+    },
+    "qwen_p5_thinking": {
+      "count": 14,
+      "expected_count": 14,
+      "all_stop_token": true
+    },
+    "qwen_p11_boundary": {
+      "count": 14,
+      "expected_count": 14,
+      "all_stop_token": true
+    }
+  },
+  "total_completed_runs": 203,
+  "expected_total_completed_runs": 203,
+  "duplicate_zero_groups": 29,
+  "all_duplicate_zeros_valid": true,
+  "duplicate_zero_checks": [
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/burnout-distributed/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/burnout-distributed/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen/stance/p2/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen/stance/p2/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/boundary/p11/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/boundary/p11/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/content/p2/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/content/p2/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/content/p4/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/content/p4/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/content/p6/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/content/p6/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/content/p9/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/distributed/p7/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/distributed/p7/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p4/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p4/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p5/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p5/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p6/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p6/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p7/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p7/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p9/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p9/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-8192/thinking/p5/j",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    },
+    {
+      "group": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-8192/thinking/p5/r",
+      "generated_tokens_identical": true,
+      "decoded_text_identical": true,
+      "zero_applications": true
+    }
+  ],
+  "excluded_pilot": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen/stance/p7"
+}

@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/j-lens-native-v1",
+      "token_ids": [14169],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/r-lens-native-v1",
+      "token_ids": [14169],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [
+    {
+      "id": "stance",
+      "lens": "j",
+      "row": {"kind": "token_id", "token_id": 14169},
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "attenuate",
+      "scope": {
+        "layers": {"kind": "values", "values": [53]},
+        "prefill": {"kind": "values", "values": [18]}
+      },
+      "action": {
+        "kind": "projection_ablate",
+        "direction": "stance",
+        "coefficient": 1.0
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "j-track-stance",
+      "lens": "j",
+      "scope": {
+        "layers": {"kind": "values", "values": [53, 62]},
+        "prefill": {"kind": "values", "values": [18, 20]}
+      },
+      "top_k": 1
+    },
+    {
+      "id": "r-track-stance",
+      "lens": "r",
+      "scope": {
+        "layers": {"kind": "values", "values": [53, 62]},
+        "prefill": {"kind": "values", "values": [18, 20]}
+      },
+      "top_k": 1
+    }
+  ]
+}

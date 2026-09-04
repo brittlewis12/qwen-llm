@@ -1,0 +1,14 @@
+{"id":"p5-target","messages":"prompts/p5-riemann.target.messages.json","message_mode":"high"}
+{"id":"p5-twin","messages":"prompts/p5-riemann.twin.messages.json","message_mode":"high"}
+{"id":"p6-target","messages":"prompts/p6-grad-school.target.messages.json","message_mode":"high"}
+{"id":"p6-twin","messages":"prompts/p6-grad-school.twin.messages.json","message_mode":"high"}
+{"id":"p7-target","messages":"prompts/p7-quitting.target.messages.json","message_mode":"high"}
+{"id":"p7-twin","messages":"prompts/p7-quitting.twin.messages.json","message_mode":"high"}
+{"id":"p8-target","messages":"prompts/p8-promotion.target.messages.json","message_mode":"high"}
+{"id":"p8-twin","messages":"prompts/p8-promotion.twin.messages.json","message_mode":"high"}
+{"id":"p9-target","messages":"prompts/p9-relationship.target.messages.json","message_mode":"high"}
+{"id":"p9-twin","messages":"prompts/p9-relationship.twin.messages.json","message_mode":"high"}
+{"id":"p10-target","messages":"prompts/p10-concert.target.messages.json","message_mode":"high"}
+{"id":"p10-twin","messages":"prompts/p10-concert.twin.messages.json","message_mode":"high"}
+{"id":"p11-target","messages":"prompts/p11-dimethylmercury.target.messages.json","message_mode":"high"}
+{"id":"p11-twin","messages":"prompts/p11-dimethylmercury.twin.messages.json","message_mode":"high"}

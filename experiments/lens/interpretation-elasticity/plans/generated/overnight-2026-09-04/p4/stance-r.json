@@ -1,0 +1,106 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/j-lens-native-v1",
+      "token_ids": [
+        1412,
+        9584
+      ],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/r-lens-native-v1",
+      "token_ids": [
+        1412,
+        9584
+      ],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [
+    {
+      "id": "stance",
+      "lens": "r",
+      "row": {
+        "kind": "token_id",
+        "token_id": 1412
+      },
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "attenuate",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            38
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            119
+          ]
+        }
+      },
+      "action": {
+        "kind": "projection_ablate",
+        "direction": "stance",
+        "coefficient": 1.0
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "j-track-stance",
+      "lens": "j",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            38,
+            62
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            119,
+            121,
+            127
+          ]
+        }
+      },
+      "top_k": 2
+    },
+    {
+      "id": "r-track-stance",
+      "lens": "r",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            38,
+            62
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            119,
+            121,
+            127
+          ]
+        }
+      },
+      "top_k": 2
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/j-lens-native-v1",
+      "token_ids": [14169, 39854],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/r-lens-native-v1",
+      "token_ids": [14169, 39854],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [],
+  "operations": [],
+  "readouts": [
+    {
+      "id": "j-thinking-followup-coordinates",
+      "lens": "j",
+      "scope": {
+        "layers": {"kind": "values", "values": [49, 53, 62]},
+        "prefill": {"kind": "all"}
+      },
+      "top_k": 2
+    },
+    {
+      "id": "r-thinking-followup-coordinates",
+      "lens": "r",
+      "scope": {
+        "layers": {"kind": "values", "values": [49, 53, 62]},
+        "prefill": {"kind": "all"}
+      },
+      "top_k": 2
+    }
+  ]
+}

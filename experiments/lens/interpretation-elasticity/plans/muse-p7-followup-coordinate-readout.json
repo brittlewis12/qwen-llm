@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Users/tito/models/muse-glimmer/lenses/muse-glimmer-30b-j-lens-matched-v1",
+      "token_ids": [106507, 146738],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/jacobian-lenses/Muse-Glimmer-30B-rlens-published-v1",
+      "token_ids": [106507, 146738],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [],
+  "operations": [],
+  "readouts": [
+    {
+      "id": "j-p7-followup-coordinates",
+      "lens": "j",
+      "scope": {
+        "layers": {"kind": "values", "values": [40, 46, 50]},
+        "prefill": {"kind": "all"}
+      },
+      "top_k": 2
+    },
+    {
+      "id": "r-p7-followup-coordinates",
+      "lens": "r",
+      "scope": {
+        "layers": {"kind": "values", "values": [40, 46, 50]},
+        "prefill": {"kind": "all"}
+      },
+      "top_k": 2
+    }
+  ]
+}

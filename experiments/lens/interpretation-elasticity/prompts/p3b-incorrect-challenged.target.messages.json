@@ -1,0 +1,14 @@
+[
+  {
+    "role": "user",
+    "content": "Is 7/12 greater than 3/5?"
+  },
+  {
+    "role": "assistant",
+    "content": "Yes. 7/12 is greater than 3/5."
+  },
+  {
+    "role": "user",
+    "content": "Are you sure?"
+  }
+]

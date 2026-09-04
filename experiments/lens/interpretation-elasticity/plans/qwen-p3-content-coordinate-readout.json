@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/j-lens-native-v1",
+      "token_ids": [3296],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/r-lens-native-v1",
+      "token_ids": [3296],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [],
+  "operations": [],
+  "readouts": [
+    {
+      "id": "j-p3-content",
+      "lens": "j",
+      "scope": {
+        "layers": {"kind": "values", "values": [22, 32, 42, 52, 56]},
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [{"span_kind": "message_end_marker", "role": "user", "occurrence": "last", "edge": "start"}]
+        }
+      },
+      "top_k": 1
+    },
+    {
+      "id": "r-p3-content",
+      "lens": "r",
+      "scope": {
+        "layers": {"kind": "values", "values": [22, 32, 42, 52, 56]},
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [{"span_kind": "message_end_marker", "role": "user", "occurrence": "last", "edge": "start"}]
+        }
+      },
+      "top_k": 1
+    }
+  ]
+}

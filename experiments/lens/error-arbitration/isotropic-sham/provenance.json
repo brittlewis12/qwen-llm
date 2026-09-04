@@ -1,0 +1,17 @@
+{
+  "schema": "qwen.lens.seeded_isotropic_direction",
+  "schema_version": 1,
+  "model_id": "Qwen/Qwen3.6-27B",
+  "coordinate": "post_block_residual",
+  "construction": "python_mt19937_gauss_f64_unit_l2_bf16_rne",
+  "seed": "20260901",
+  "python_version": "3.14.0",
+  "hidden_size": "5120",
+  "layer": "46",
+  "decoded_bf16_sha256": "f004bed117104c61297d3307fffb1f2905ea611de38befdaef7bf08ccca9b636",
+  "decoded_bf16_l2": "1.000053877631778",
+  "decoded_bf16_mean": "-1.9830110250040889e-05",
+  "weights_file": "direction.safetensors",
+  "weights_sha256": "487cc8fcc518a25ee85f92c077f5949455a6a46fbe89e2ec2469e067834e1314",
+  "labels_file": "labels.tsv"
+}

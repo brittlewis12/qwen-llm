@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "neuronpedia-j1000",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/neuronpedia-j-lens-n1000-native-v1",
+      "token_ids": [
+        815
+      ],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "workspace_template",
+      "id": "isotropic-sham",
+      "weights": "direction.safetensors",
+      "labels": "labels.tsv"
+    }
+  ],
+  "directions": [
+    {
+      "id": "isotropic-layer46",
+      "lens": "isotropic-sham",
+      "row": {
+        "kind": "label",
+        "label": "seeded-isotropic-gaussian"
+      },
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "isotropic-layer46-add",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            46
+          ]
+        },
+        "prefill": {
+          "kind": "all"
+        },
+        "decode": {
+          "kind": "all"
+        }
+      },
+      "action": {
+        "kind": "residual_l2_fraction",
+        "direction": "isotropic-layer46",
+        "coefficient": 0.45
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "error-coordinate",
+      "lens": "neuronpedia-j1000",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            46
+          ]
+        },
+        "prefill": {
+          "kind": "all"
+        }
+      },
+      "top_k": 1
+    }
+  ]
+}

@@ -1,0 +1,2906 @@
+{
+  "schema": "interpretation_elasticity.p3_intervention_jobs",
+  "schema_version": 1,
+  "status": "fixed_before_intervention_outputs_viewed",
+  "kappas": [
+    0.25,
+    0.5,
+    0.75,
+    1.0
+  ],
+  "duplicate_zero_arms": 2,
+  "full_ablation_coefficient": 1.0,
+  "stance_tokens": {
+    "qwen": 10179,
+    "muse": 158448
+  },
+  "content_tokens": {
+    "qwen": 3296,
+    "muse": 4097
+  },
+  "content_token_display": " question",
+  "content_replacement_policy": "never_replace_after_intervention_outputs",
+  "random_manifest": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/controls/p3-random-v1/manifest.json",
+  "jobs": [
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 22,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-22.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.06707581835597874
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.13415163671195748
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.2012274550679362
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.26830327342391497
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 22,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-22.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.06613286843890577
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.13226573687781154
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.19839860531671732
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.2645314737556231
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 32,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-32.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.11596788126851125
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.2319357625370225
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.34790364380553374
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.463871525074045
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 32,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-32.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1126616837084855
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.225323367416971
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.3379850511254565
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.450646734833942
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 42,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-42.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.18629300604581434
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.37258601209162867
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.558879018137443
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7451720241832573
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 42,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-42.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1805644322883597
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3611288645767194
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.541693296865079
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7222577291534388
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 52,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-52.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.20910729925461305
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4182145985092261
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6273218977638392
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8364291970184522
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 52,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-52.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.18653019367700588
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.37306038735401176
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5595905810310177
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7461207747080235
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 56,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-56.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.23585376221739746
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4717075244347949
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.7075612866521923
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9434150488695898
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 56,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-j-layer-56.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.21776968829907745
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4355393765981549
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6533090648972324
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8710787531963098
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 22,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-22.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.10340841871467131
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.20681683742934262
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.3102252561440139
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.41363367485868524
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 22,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-22.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.10207072763963722
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.20414145527927444
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.30621218291891167
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.4082829105585489
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 32,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-32.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.14348396064864724
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.2869679212972945
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.43045188194594175
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.573935842594589
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 32,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-32.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.14126396335105232
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.28252792670210464
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.423791890053157
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.5650558534042093
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 42,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-42.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.18925564355442304
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3785112871088461
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5677669306632691
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7570225742176921
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 42,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-42.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.18248930351771786
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3649786070354357
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5474679105531536
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7299572140708714
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 52,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-52.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.20942622998972787
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.41885245997945575
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6282786899691837
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8377049199589115
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 52,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-52.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1872210863024159
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3744421726048318
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5616632589072477
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7488843452096636
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 56,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-56.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.2451886948770342
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4903773897540684
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.7355660846311026
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9807547795081368
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 56,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/stance-r-layer-56.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.23141663235576398
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.46283326471152797
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6942498970672919
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9256665294230559
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 22,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-22.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.042167441416473835
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.08433488283294767
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.1265023242494215
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.16866976566589534
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 22,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-22.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.04297736253155132
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.08595472506310264
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.12893208759465397
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.1719094501262053
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 32,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-32.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.06830054759705502
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.13660109519411004
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.20490164279116507
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.2732021903882201
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 32,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-32.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.06987941743824194
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.13975883487648388
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.20963825231472583
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.27951766975296777
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 42,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-42.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1572635167518158
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3145270335036316
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.47179055025544736
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.6290540670072632
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 42,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-42.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.15406064366942915
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3081212873388583
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.4621819310082874
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.6162425746777166
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 52,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-52.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.24623536257388234
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4924707251477647
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.738706087721647
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9849414502955294
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 52,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-52.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.23787946532933454
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4757589306586691
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.7136383959880036
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9515178613173382
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 56,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-56.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.20388280615947244
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.40776561231894487
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6116484184784173
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8155312246378897
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 56,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-j-layer-56.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.20059144529908704
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4011828905981741
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6017743358972611
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8023657811963482
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 22,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-22.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.08238000301654051
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.16476000603308102
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.24714000904962152
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.32952001206616205
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 22,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-22.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.08309556381516196
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.16619112763032393
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.24928669144548588
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.33238225526064785
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 32,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-32.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.08015132613473161
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.16030265226946322
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.24045397840419483
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.32060530453892644
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 32,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-32.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.08374051348153122
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.16748102696306244
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.25122154044459366
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.3349620539261249
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 42,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-42.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1617060308584819
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3234120617169638
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.4851180925754457
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.6468241234339276
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 42,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-42.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1577476086855437
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3154952173710874
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.47324282605663104
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.6309904347421748
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 52,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-52.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 52,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-52.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 56,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-56.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3a-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.20929526599667314
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4185905319933463
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6278857979900194
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8371810639866926
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "qwen",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 56,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen/content-r-layer-56.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/qwen-p3b-target.requests.jsonl",
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.21088813069000117
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.42177626138000235
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6326643920700035
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8435525227600047
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 27,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-j-layer-27.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.17951152460553496
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.3590230492110699
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5385345738166049
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7180460984221398
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 27,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-j-layer-27.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.17545745724213113
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.35091491448426226
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5263723717263934
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7018298289685245
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 35,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-j-layer-35.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.20646790601828127
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.41293581203656254
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6194037180548438
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8258716240731251
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 35,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-j-layer-35.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.20276218243824023
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.40552436487648047
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6082865473147208
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8110487297529609
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 43,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-j-layer-43.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.2472438776928507
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4944877553857014
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.741731633078552
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9889755107714028
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 43,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-j-layer-43.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.24969444298347787
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.49938888596695574
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.7490833289504336
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9987777719339115
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 49,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-j-layer-49.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 49,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-j-layer-49.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 27,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-r-layer-27.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1276112068163239
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.2552224136326478
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.38283362044897173
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.5104448272652956
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 27,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-r-layer-27.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.12564214127333312
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.25128428254666624
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.37692642381999936
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.5025685650933325
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 35,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-r-layer-35.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.20050347108458588
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.40100694216917177
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6015104132537576
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.8020138843383435
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 35,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-r-layer-35.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.19753113116186713
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.39506226232373426
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5925933934856014
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7901245246474685
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 43,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-r-layer-43.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.23173377427294276
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4634675485458855
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6952013228188283
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.926935097091771
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 43,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-r-layer-43.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.23273046180051027
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.46546092360102054
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6981913854015308
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9309218472020411
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 49,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-r-layer-49.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "stance",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 49,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/stance-r-layer-49.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 27,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-j-layer-27.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.12993135183843804
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.2598627036768761
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.3897940555153141
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.5197254073537522
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 27,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-j-layer-27.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.11621149375972574
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.23242298751945148
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.34863448127917723
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.46484597503890296
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 35,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-j-layer-35.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.19718744810159308
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.39437489620318616
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5915623443047793
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7887497924063723
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 35,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-j-layer-35.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.18321050099415429
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.36642100198830857
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5496315029824629
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.7328420039766171
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 43,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-j-layer-43.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.24032923914467738
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.48065847828935476
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.7209877174340321
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9613169565787095
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 43,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-j-layer-43.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.2321543840448051
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.4643087680896102
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6964631521344153
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9286175361792204
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3a",
+      "lens": "j",
+      "layer": 49,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-j-layer-49.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3b",
+      "lens": "j",
+      "layer": 49,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-j-layer-49.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 27,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-r-layer-27.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1384500531499825
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.276900106299965
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.41535015944994746
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.55380021259993
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 27,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-r-layer-27.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.12773636259012558
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.25547272518025116
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.38320908777037677
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.5109454503605023
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 35,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-r-layer-35.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.1712961303007415
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.342592260601483
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.5138883909022245
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.685184521202966
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 35,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-r-layer-35.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.16042808604007022
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.32085617208014044
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.4812842581202107
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.6417123441602809
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 43,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-r-layer-43.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.23664256808914683
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.47328513617829365
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.7099277042674405
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9465702723565873
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 43,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-r-layer-43.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.22991666315449064
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.45983332630898127
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.6897499894634719
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.9196666526179625
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3a",
+      "lens": "r",
+      "layer": 49,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-r-layer-49.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3a-correct-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "model": "muse",
+      "control": "content",
+      "item": "p3b",
+      "lens": "r",
+      "layer": 49,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/p3/muse/content-r-layer-49.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p3b-incorrect-challenged.target.messages.json",
+      "requests_jsonl": null,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.25
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.5
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.75
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 1.0
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    }
+  ]
+}

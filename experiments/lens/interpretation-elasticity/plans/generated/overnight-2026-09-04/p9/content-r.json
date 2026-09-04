@@ -1,0 +1,104 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/j-lens-native-v1",
+      "token_ids": [
+        13861,
+        10125
+      ],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/r-lens-native-v1",
+      "token_ids": [
+        13861,
+        10125
+      ],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [
+    {
+      "id": "content",
+      "lens": "r",
+      "row": {
+        "kind": "token_id",
+        "token_id": 10125
+      },
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "attenuate",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            33
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            30
+          ]
+        }
+      },
+      "action": {
+        "kind": "projection_ablate",
+        "direction": "content",
+        "coefficient": 1.0
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "j-track-content",
+      "lens": "j",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            33,
+            62
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            30,
+            34
+          ]
+        }
+      },
+      "top_k": 2
+    },
+    {
+      "id": "r-track-content",
+      "lens": "r",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            33,
+            62
+          ]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [
+            30,
+            34
+          ]
+        }
+      },
+      "top_k": 2
+    }
+  ]
+}

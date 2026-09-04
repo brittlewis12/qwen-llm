@@ -1,0 +1,296 @@
+{
+  "schema": "interpretation_elasticity.muse_p7_followups",
+  "schema_version": 1,
+  "selection_status": "fixed_before_muse_p7_intervention_outputs",
+  "model": "Muse-Glimmer-30B Q8",
+  "mode": "high",
+  "item": "p7",
+  "measurements": {
+    "empathy-final": {
+      "j": [
+        {
+          "label": "final-assistant-prefill",
+          "target": 76,
+          "twin": 77,
+          "p_target": 52.954273,
+          "p_twin": 41.309612,
+          "ratio": 0.21990030908365032
+        }
+      ],
+      "r": [
+        {
+          "label": "final-assistant-prefill",
+          "target": 76,
+          "twin": 77,
+          "p_target": 53.429688,
+          "p_twin": 42.77085,
+          "ratio": 0.1994927988349847
+        }
+      ]
+    },
+    "burnout-distributed": {
+      "j": [
+        {
+          "label": "user-end",
+          "target": 74,
+          "twin": 75,
+          "p_target": 182.53358,
+          "p_twin": 79.38921,
+          "ratio": 0.5650706571360732
+        },
+        {
+          "label": "assistant-start",
+          "target": 75,
+          "twin": 76,
+          "p_target": 112.27523,
+          "p_twin": 52.143818,
+          "ratio": 0.5355714880299065
+        }
+      ],
+      "r": [
+        {
+          "label": "user-end",
+          "target": 74,
+          "twin": 75,
+          "p_target": 199.32047,
+          "p_twin": 99.43191,
+          "ratio": 0.5011455170660595
+        },
+        {
+          "label": "assistant-start",
+          "target": 75,
+          "twin": 76,
+          "p_target": 128.58937,
+          "p_twin": 67.20149,
+          "ratio": 0.4773946711147274
+        }
+      ]
+    }
+  },
+  "jobs": [
+    {
+      "probe": "empathy-final",
+      "lens": "j",
+      "index": 0,
+      "label": "zero-a",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-00-zero-a.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "j",
+      "index": 1,
+      "label": "zero-b",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-01-zero-b.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "j",
+      "index": 2,
+      "label": "kappa-0.25",
+      "kappa": 0.25,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-02-kappa-0.25.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "j",
+      "index": 3,
+      "label": "kappa-0.5",
+      "kappa": 0.5,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-03-kappa-0.5.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "j",
+      "index": 4,
+      "label": "kappa-0.75",
+      "kappa": 0.75,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-04-kappa-0.75.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "j",
+      "index": 5,
+      "label": "kappa-1.0",
+      "kappa": 1.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-05-kappa-1.0.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "j",
+      "index": 6,
+      "label": "full-ablation",
+      "kappa": null,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-06-full-ablation.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "r",
+      "index": 0,
+      "label": "zero-a",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-00-zero-a.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "r",
+      "index": 1,
+      "label": "zero-b",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-01-zero-b.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "r",
+      "index": 2,
+      "label": "kappa-0.25",
+      "kappa": 0.25,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-02-kappa-0.25.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "r",
+      "index": 3,
+      "label": "kappa-0.5",
+      "kappa": 0.5,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-03-kappa-0.5.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "r",
+      "index": 4,
+      "label": "kappa-0.75",
+      "kappa": 0.75,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-04-kappa-0.75.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "r",
+      "index": 5,
+      "label": "kappa-1.0",
+      "kappa": 1.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-05-kappa-1.0.json"
+    },
+    {
+      "probe": "empathy-final",
+      "lens": "r",
+      "index": 6,
+      "label": "full-ablation",
+      "kappa": null,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-06-full-ablation.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "j",
+      "index": 0,
+      "label": "zero-a",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/j/arm-00-zero-a.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "j",
+      "index": 1,
+      "label": "zero-b",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/j/arm-01-zero-b.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "j",
+      "index": 2,
+      "label": "kappa-0.25",
+      "kappa": 0.25,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/j/arm-02-kappa-0.25.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "j",
+      "index": 3,
+      "label": "kappa-0.5",
+      "kappa": 0.5,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/j/arm-03-kappa-0.5.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "j",
+      "index": 4,
+      "label": "kappa-0.75",
+      "kappa": 0.75,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/j/arm-04-kappa-0.75.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "j",
+      "index": 5,
+      "label": "kappa-1.0",
+      "kappa": 1.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/j/arm-05-kappa-1.0.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "j",
+      "index": 6,
+      "label": "full-ablation",
+      "kappa": null,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/j/arm-06-full-ablation.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "r",
+      "index": 0,
+      "label": "zero-a",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/r/arm-00-zero-a.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "r",
+      "index": 1,
+      "label": "zero-b",
+      "kappa": 0.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/r/arm-01-zero-b.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "r",
+      "index": 2,
+      "label": "kappa-0.25",
+      "kappa": 0.25,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/r/arm-02-kappa-0.25.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "r",
+      "index": 3,
+      "label": "kappa-0.5",
+      "kappa": 0.5,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/r/arm-03-kappa-0.5.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "r",
+      "index": 4,
+      "label": "kappa-0.75",
+      "kappa": 0.75,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/r/arm-04-kappa-0.75.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "r",
+      "index": 5,
+      "label": "kappa-1.0",
+      "kappa": 1.0,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/r/arm-05-kappa-1.0.json"
+    },
+    {
+      "probe": "burnout-distributed",
+      "lens": "r",
+      "index": 6,
+      "label": "full-ablation",
+      "kappa": null,
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/burnout-distributed/r/arm-06-full-ablation.json"
+    }
+  ]
+}

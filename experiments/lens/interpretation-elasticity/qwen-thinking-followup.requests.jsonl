@@ -1,0 +1,4 @@
+{"id":"p5-target-thinking","messages":"prompts/p5-riemann.target.messages.json","message_mode":"thinking"}
+{"id":"p5-twin-thinking","messages":"prompts/p5-riemann.twin.messages.json","message_mode":"thinking"}
+{"id":"p7-target-thinking","messages":"prompts/p7-quitting.target.messages.json","message_mode":"thinking"}
+{"id":"p7-twin-thinking","messages":"prompts/p7-quitting.twin.messages.json","message_mode":"thinking"}

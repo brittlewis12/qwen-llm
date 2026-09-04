@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "neuronpedia-j1000",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/neuronpedia-j-lens-n1000-native-v1",
+      "token_ids": [815],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [
+    {
+      "id": "error-raw",
+      "lens": "neuronpedia-j1000",
+      "row": {
+        "kind": "token_id",
+        "token_id": 815
+      },
+      "target_covector": "raw_lm_head",
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "error-raw-probe",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [44]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [25]
+        }
+      },
+      "action": {
+        "kind": "residual_l2_fraction",
+        "direction": "error-raw",
+        "coefficient": 0.1
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "error-propagation",
+      "lens": "neuronpedia-j1000",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [44, 45, 48, 54, 62]
+        },
+        "prefill": {
+          "kind": "values",
+          "values": [25]
+        }
+      },
+      "top_k": 1
+    }
+  ]
+}

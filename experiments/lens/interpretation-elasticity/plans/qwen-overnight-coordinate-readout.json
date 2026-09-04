@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/j-lens-native-v1",
+      "token_ids": [65105, 1412, 11656, 63901, 15191, 13861, 4021, 10413, 9584, 52652, 4087, 27332, 10125],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/r-lens-native-v1",
+      "token_ids": [65105, 1412, 11656, 63901, 15191, 13861, 4021, 10413, 9584, 52652, 4087, 27332, 10125],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [],
+  "operations": [],
+  "readouts": [
+    {
+      "id": "j-overnight-coordinates",
+      "lens": "j",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [33, 38, 43, 46, 49, 51, 62]
+        },
+        "prefill": {"kind": "all"}
+      },
+      "top_k": 13
+    },
+    {
+      "id": "r-overnight-coordinates",
+      "lens": "r",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [33, 38, 43, 46, 49, 51, 62]
+        },
+        "prefill": {"kind": "all"}
+      },
+      "top_k": 13
+    }
+  ]
+}

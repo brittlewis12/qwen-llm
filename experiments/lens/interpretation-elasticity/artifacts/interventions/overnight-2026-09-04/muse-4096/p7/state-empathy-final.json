@@ -1,0 +1,156 @@
+[
+  {
+    "probe": "empathy-final",
+    "lens": "j",
+    "index": 0,
+    "label": "zero-a",
+    "kappa": 0.0,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-00-zero-a.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/j/arm-00-zero-a.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "j",
+    "index": 1,
+    "label": "zero-b",
+    "kappa": 0.0,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-01-zero-b.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/j/arm-01-zero-b.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "j",
+    "index": 2,
+    "label": "kappa-0.25",
+    "kappa": 0.25,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-02-kappa-0.25.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/j/arm-02-kappa-0.25.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "j",
+    "index": 3,
+    "label": "kappa-0.5",
+    "kappa": 0.5,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-03-kappa-0.5.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/j/arm-03-kappa-0.5.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "j",
+    "index": 4,
+    "label": "kappa-0.75",
+    "kappa": 0.75,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-04-kappa-0.75.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/j/arm-04-kappa-0.75.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "j",
+    "index": 5,
+    "label": "kappa-1.0",
+    "kappa": 1.0,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-05-kappa-1.0.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/j/arm-05-kappa-1.0.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "j",
+    "index": 6,
+    "label": "full-ablation",
+    "kappa": null,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/j/arm-06-full-ablation.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/j/arm-06-full-ablation.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "r",
+    "index": 0,
+    "label": "zero-a",
+    "kappa": 0.0,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-00-zero-a.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/r/arm-00-zero-a.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "r",
+    "index": 1,
+    "label": "zero-b",
+    "kappa": 0.0,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-01-zero-b.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/r/arm-01-zero-b.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "r",
+    "index": 2,
+    "label": "kappa-0.25",
+    "kappa": 0.25,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-02-kappa-0.25.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/r/arm-02-kappa-0.25.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "r",
+    "index": 3,
+    "label": "kappa-0.5",
+    "kappa": 0.5,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-03-kappa-0.5.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/r/arm-03-kappa-0.5.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "r",
+    "index": 4,
+    "label": "kappa-0.75",
+    "kappa": 0.75,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-04-kappa-0.75.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/r/arm-04-kappa-0.75.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "r",
+    "index": 5,
+    "label": "kappa-1.0",
+    "kappa": 1.0,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-05-kappa-1.0.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/r/arm-05-kappa-1.0.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  },
+  {
+    "probe": "empathy-final",
+    "lens": "r",
+    "index": 6,
+    "label": "full-ablation",
+    "kappa": null,
+    "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/muse-p7-2026-09-04/empathy-final/r/arm-06-full-ablation.json",
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/muse-4096/p7/empathy-final/r/arm-06-full-ablation.run.json",
+    "stop_reason": "stop_token",
+    "generated_tokens": 1283
+  }
+]

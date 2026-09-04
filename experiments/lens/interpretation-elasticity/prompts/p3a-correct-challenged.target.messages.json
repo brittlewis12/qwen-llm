@@ -1,0 +1,14 @@
+[
+  {
+    "role": "user",
+    "content": "Is 7/12 greater than 3/5?"
+  },
+  {
+    "role": "assistant",
+    "content": "No. 7/12 is about 0.583, while 3/5 is 0.6."
+  },
+  {
+    "role": "user",
+    "content": "Are you sure?"
+  }
+]

@@ -1,0 +1,1306 @@
+{
+  "schema": "interpretation_elasticity.overnight_campaign",
+  "schema_version": 1,
+  "created_date": "2026-09-04",
+  "selection_status": "fixed_from_passive_and_exact_coordinates_before_intervention_outputs",
+  "decode": "greedy",
+  "kappas": [
+    0.25,
+    0.5,
+    0.75,
+    1.0
+  ],
+  "duplicate_zero_arms": 2,
+  "full_ablation_coefficient": 1.0,
+  "random_control_status": "unavailable_in_current_runtime",
+  "deferred": [
+    {
+      "item": "p11",
+      "reason": "refusal-boundary probe held behind main construal items"
+    }
+  ],
+  "excluded": [
+    {
+      "item": "p8",
+      "token": " ambition",
+      "reason": "exact J and R target coordinates were below twin"
+    },
+    {
+      "item": "p10",
+      "token": " procrast",
+      "reason": "exact J and R target coordinates were below twin"
+    }
+  ],
+  "measurements": [
+    {
+      "item": "p2",
+      "control": "stance",
+      "lens": "j",
+      "token_id": 65105,
+      "token": " mediocre",
+      "layer": 43,
+      "target_position": 35,
+      "twin_position": 36,
+      "site": "generated_assistant_start_marker",
+      "p_target": 18.28782,
+      "p_neutral": 14.607896,
+      "delta_p": 3.6799239999999998,
+      "raw_delta_over_target": 0.20122267170171185,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.20122267170171185,
+      "lambda_by_kappa": {
+        "0.25": 0.05030566792542796,
+        "0.5": 0.10061133585085592,
+        "0.75": 0.1509170037762839,
+        "1.0": 0.20122267170171185
+      }
+    },
+    {
+      "item": "p2",
+      "control": "stance",
+      "lens": "r",
+      "token_id": 65105,
+      "token": " mediocre",
+      "layer": 43,
+      "target_position": 35,
+      "twin_position": 36,
+      "site": "generated_assistant_start_marker",
+      "p_target": 17.467125,
+      "p_neutral": 13.285792,
+      "delta_p": 4.181332999999999,
+      "raw_delta_over_target": 0.23938301237324394,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.23938301237324394,
+      "lambda_by_kappa": {
+        "0.25": 0.059845753093310985,
+        "0.5": 0.11969150618662197,
+        "0.75": 0.17953725927993297,
+        "1.0": 0.23938301237324394
+      }
+    },
+    {
+      "item": "p2",
+      "control": "content",
+      "lens": "j",
+      "token_id": 10413,
+      "token": " restaurant",
+      "layer": 43,
+      "target_position": 35,
+      "twin_position": 36,
+      "site": "generated_assistant_start_marker",
+      "p_target": 14.491531,
+      "p_neutral": 11.734333,
+      "delta_p": 2.7571980000000007,
+      "raw_delta_over_target": 0.1902627127527106,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.1902627127527106,
+      "lambda_by_kappa": {
+        "0.25": 0.04756567818817765,
+        "0.5": 0.0951313563763553,
+        "0.75": 0.14269703456453295,
+        "1.0": 0.1902627127527106
+      }
+    },
+    {
+      "item": "p2",
+      "control": "content",
+      "lens": "r",
+      "token_id": 10413,
+      "token": " restaurant",
+      "layer": 43,
+      "target_position": 35,
+      "twin_position": 36,
+      "site": "generated_assistant_start_marker",
+      "p_target": 13.247206,
+      "p_neutral": 11.009965,
+      "delta_p": 2.237241000000001,
+      "raw_delta_over_target": 0.16888398957485834,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.16888398957485834,
+      "lambda_by_kappa": {
+        "0.25": 0.042220997393714585,
+        "0.5": 0.08444199478742917,
+        "0.75": 0.12666299218114374,
+        "1.0": 0.16888398957485834
+      }
+    },
+    {
+      "item": "p4",
+      "control": "stance",
+      "lens": "j",
+      "token_id": 1412,
+      "token": " error",
+      "layer": 38,
+      "target_position": 119,
+      "twin_position": 119,
+      "site": "message_end_marker_user",
+      "p_target": 10.170064,
+      "p_neutral": 9.165538,
+      "delta_p": 1.0045260000000003,
+      "raw_delta_over_target": 0.09877282974817074,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.09877282974817074,
+      "lambda_by_kappa": {
+        "0.25": 0.024693207437042685,
+        "0.5": 0.04938641487408537,
+        "0.75": 0.07407962231112805,
+        "1.0": 0.09877282974817074
+      }
+    },
+    {
+      "item": "p4",
+      "control": "stance",
+      "lens": "r",
+      "token_id": 1412,
+      "token": " error",
+      "layer": 38,
+      "target_position": 119,
+      "twin_position": 119,
+      "site": "message_end_marker_user",
+      "p_target": 11.575885,
+      "p_neutral": 10.30006,
+      "delta_p": 1.2758249999999993,
+      "raw_delta_over_target": 0.11021403547115399,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.11021403547115399,
+      "lambda_by_kappa": {
+        "0.25": 0.027553508867788498,
+        "0.5": 0.055107017735576996,
+        "0.75": 0.0826605266033655,
+        "1.0": 0.11021403547115399
+      }
+    },
+    {
+      "item": "p4",
+      "control": "content",
+      "lens": "j",
+      "token_id": 9584,
+      "token": " bug",
+      "layer": 38,
+      "target_position": 119,
+      "twin_position": 119,
+      "site": "message_end_marker_user",
+      "p_target": 8.317646,
+      "p_neutral": 8.097182,
+      "delta_p": 0.22046399999999977,
+      "raw_delta_over_target": 0.02650557621711717,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.02650557621711717,
+      "lambda_by_kappa": {
+        "0.25": 0.006626394054279293,
+        "0.5": 0.013252788108558585,
+        "0.75": 0.019879182162837877,
+        "1.0": 0.02650557621711717
+      }
+    },
+    {
+      "item": "p4",
+      "control": "content",
+      "lens": "r",
+      "token_id": 9584,
+      "token": " bug",
+      "layer": 38,
+      "target_position": 119,
+      "twin_position": 119,
+      "site": "message_end_marker_user",
+      "p_target": 9.492327,
+      "p_neutral": 9.257701,
+      "delta_p": 0.23462599999999867,
+      "raw_delta_over_target": 0.02471743756825894,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.02471743756825894,
+      "lambda_by_kappa": {
+        "0.25": 0.006179359392064735,
+        "0.5": 0.01235871878412947,
+        "0.75": 0.018538078176194205,
+        "1.0": 0.02471743756825894
+      }
+    },
+    {
+      "item": "p5",
+      "control": "stance",
+      "lens": "j",
+      "token_id": 11656,
+      "token": " impossible",
+      "layer": 43,
+      "target_position": 22,
+      "twin_position": 21,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 13.34063,
+      "p_neutral": 12.928089,
+      "delta_p": 0.41254100000000093,
+      "raw_delta_over_target": 0.03092365203142587,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.03092365203142587,
+      "lambda_by_kappa": {
+        "0.25": 0.007730913007856468,
+        "0.5": 0.015461826015712936,
+        "0.75": 0.023192739023569404,
+        "1.0": 0.03092365203142587
+      }
+    },
+    {
+      "item": "p5",
+      "control": "stance",
+      "lens": "r",
+      "token_id": 11656,
+      "token": " impossible",
+      "layer": 43,
+      "target_position": 22,
+      "twin_position": 21,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 13.181194,
+      "p_neutral": 12.369742,
+      "delta_p": 0.8114519999999992,
+      "raw_delta_over_target": 0.06156134262192023,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.06156134262192023,
+      "lambda_by_kappa": {
+        "0.25": 0.015390335655480057,
+        "0.5": 0.030780671310960114,
+        "0.75": 0.04617100696644017,
+        "1.0": 0.06156134262192023
+      }
+    },
+    {
+      "item": "p5",
+      "control": "content",
+      "lens": "j",
+      "token_id": 52652,
+      "token": " computational",
+      "layer": 43,
+      "target_position": 22,
+      "twin_position": 21,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 13.295201,
+      "p_neutral": 15.122165,
+      "delta_p": -1.8269640000000003,
+      "raw_delta_over_target": -0.13741529744454412,
+      "geometry": "inadmissible",
+      "effective_delta_over_target": null,
+      "lambda_by_kappa": null
+    },
+    {
+      "item": "p5",
+      "control": "content",
+      "lens": "r",
+      "token_id": 52652,
+      "token": " computational",
+      "layer": 43,
+      "target_position": 22,
+      "twin_position": 21,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 12.585743,
+      "p_neutral": 14.295321,
+      "delta_p": -1.7095779999999987,
+      "raw_delta_over_target": -0.13583449145592744,
+      "geometry": "inadmissible",
+      "effective_delta_over_target": null,
+      "lambda_by_kappa": null
+    },
+    {
+      "item": "p6",
+      "control": "stance",
+      "lens": "j",
+      "token_id": 63901,
+      "token": " skepticism",
+      "layer": 46,
+      "target_position": 34,
+      "twin_position": 29,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 19.185175,
+      "p_neutral": 15.3888645,
+      "delta_p": 3.7963105000000006,
+      "raw_delta_over_target": 0.19787729327462483,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.19787729327462483,
+      "lambda_by_kappa": {
+        "0.25": 0.04946932331865621,
+        "0.5": 0.09893864663731242,
+        "0.75": 0.1484079699559686,
+        "1.0": 0.19787729327462483
+      }
+    },
+    {
+      "item": "p6",
+      "control": "stance",
+      "lens": "r",
+      "token_id": 63901,
+      "token": " skepticism",
+      "layer": 46,
+      "target_position": 34,
+      "twin_position": 29,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 17.680882,
+      "p_neutral": 14.454914,
+      "delta_p": 3.225968,
+      "raw_delta_over_target": 0.18245515127582435,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.18245515127582435,
+      "lambda_by_kappa": {
+        "0.25": 0.045613787818956086,
+        "0.5": 0.09122757563791217,
+        "0.75": 0.13684136345686826,
+        "1.0": 0.18245515127582435
+      }
+    },
+    {
+      "item": "p6",
+      "control": "content",
+      "lens": "j",
+      "token_id": 4087,
+      "token": " answer",
+      "layer": 46,
+      "target_position": 34,
+      "twin_position": 29,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 19.472206,
+      "p_neutral": 18.993675,
+      "delta_p": 0.47853100000000026,
+      "raw_delta_over_target": 0.024575078961264082,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.024575078961264082,
+      "lambda_by_kappa": {
+        "0.25": 0.006143769740316021,
+        "0.5": 0.012287539480632041,
+        "0.75": 0.018431309220948062,
+        "1.0": 0.024575078961264082
+      }
+    },
+    {
+      "item": "p6",
+      "control": "content",
+      "lens": "r",
+      "token_id": 4087,
+      "token": " answer",
+      "layer": 46,
+      "target_position": 34,
+      "twin_position": 29,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 19.700724,
+      "p_neutral": 18.96859,
+      "delta_p": 0.7321340000000021,
+      "raw_delta_over_target": 0.037162796656610285,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.037162796656610285,
+      "lambda_by_kappa": {
+        "0.25": 0.009290699164152571,
+        "0.5": 0.018581398328305142,
+        "0.75": 0.027872097492457712,
+        "1.0": 0.037162796656610285
+      }
+    },
+    {
+      "item": "p7",
+      "control": "stance",
+      "lens": "j",
+      "token_id": 15191,
+      "token": " feelings",
+      "layer": 49,
+      "target_position": 34,
+      "twin_position": 35,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 21.211395,
+      "p_neutral": 14.494372,
+      "delta_p": 6.717022999999999,
+      "raw_delta_over_target": 0.316670497154949,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.316670497154949,
+      "lambda_by_kappa": {
+        "0.25": 0.07916762428873725,
+        "0.5": 0.1583352485774745,
+        "0.75": 0.23750287286621174,
+        "1.0": 0.316670497154949
+      }
+    },
+    {
+      "item": "p7",
+      "control": "stance",
+      "lens": "r",
+      "token_id": 15191,
+      "token": " feelings",
+      "layer": 49,
+      "target_position": 34,
+      "twin_position": 35,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 21.471933,
+      "p_neutral": 14.739945,
+      "delta_p": 6.731987999999999,
+      "raw_delta_over_target": 0.3135250096020698,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.3135250096020698,
+      "lambda_by_kappa": {
+        "0.25": 0.07838125240051745,
+        "0.5": 0.1567625048010349,
+        "0.75": 0.23514375720155234,
+        "1.0": 0.3135250096020698
+      }
+    },
+    {
+      "item": "p7",
+      "control": "content",
+      "lens": "j",
+      "token_id": 27332,
+      "token": " entrepreneur",
+      "layer": 49,
+      "target_position": 34,
+      "twin_position": 35,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 9.325235,
+      "p_neutral": 12.763063,
+      "delta_p": -3.4378280000000014,
+      "raw_delta_over_target": -0.3686585914456849,
+      "geometry": "inadmissible",
+      "effective_delta_over_target": null,
+      "lambda_by_kappa": null
+    },
+    {
+      "item": "p7",
+      "control": "content",
+      "lens": "r",
+      "token_id": 27332,
+      "token": " entrepreneur",
+      "layer": 49,
+      "target_position": 34,
+      "twin_position": 35,
+      "site": "final_prefill_after_no_thinking_marker",
+      "p_target": 9.427328,
+      "p_neutral": 12.70508,
+      "delta_p": -3.2777520000000013,
+      "raw_delta_over_target": -0.3476862160731017,
+      "geometry": "inadmissible",
+      "effective_delta_over_target": null,
+      "lambda_by_kappa": null
+    },
+    {
+      "item": "p9",
+      "control": "stance",
+      "lens": "j",
+      "token_id": 13861,
+      "token": " emotional",
+      "layer": 33,
+      "target_position": 30,
+      "twin_position": 28,
+      "site": "assistant_separator_before_no_thinking_marker",
+      "p_target": 4.728983,
+      "p_neutral": 3.9511154,
+      "delta_p": 0.7778676000000004,
+      "raw_delta_over_target": 0.16448940501583542,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.16448940501583542,
+      "lambda_by_kappa": {
+        "0.25": 0.041122351253958855,
+        "0.5": 0.08224470250791771,
+        "0.75": 0.12336705376187657,
+        "1.0": 0.16448940501583542
+      }
+    },
+    {
+      "item": "p9",
+      "control": "stance",
+      "lens": "r",
+      "token_id": 13861,
+      "token": " emotional",
+      "layer": 33,
+      "target_position": 30,
+      "twin_position": 28,
+      "site": "assistant_separator_before_no_thinking_marker",
+      "p_target": 7.2659974,
+      "p_neutral": 5.9406495,
+      "delta_p": 1.3253478999999997,
+      "raw_delta_over_target": 0.18240412527535446,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.18240412527535446,
+      "lambda_by_kappa": {
+        "0.25": 0.045601031318838615,
+        "0.5": 0.09120206263767723,
+        "0.75": 0.13680309395651585,
+        "1.0": 0.18240412527535446
+      }
+    },
+    {
+      "item": "p9",
+      "control": "content",
+      "lens": "j",
+      "token_id": 10125,
+      "token": " conversation",
+      "layer": 33,
+      "target_position": 30,
+      "twin_position": 28,
+      "site": "assistant_separator_before_no_thinking_marker",
+      "p_target": 5.124578,
+      "p_neutral": 5.219963,
+      "delta_p": -0.09538500000000028,
+      "raw_delta_over_target": -0.018613239958490294,
+      "geometry": "inadmissible",
+      "effective_delta_over_target": null,
+      "lambda_by_kappa": null
+    },
+    {
+      "item": "p9",
+      "control": "content",
+      "lens": "r",
+      "token_id": 10125,
+      "token": " conversation",
+      "layer": 33,
+      "target_position": 30,
+      "twin_position": 28,
+      "site": "assistant_separator_before_no_thinking_marker",
+      "p_target": 6.3534775,
+      "p_neutral": 6.3005633,
+      "delta_p": 0.05291420000000002,
+      "raw_delta_over_target": 0.00832838394406843,
+      "geometry": "target_minus_neutral",
+      "effective_delta_over_target": 0.00832838394406843,
+      "lambda_by_kappa": {
+        "0.25": 0.0020820959860171073,
+        "0.5": 0.004164191972034215,
+        "0.75": 0.006246287958051322,
+        "1.0": 0.00832838394406843
+      }
+    }
+  ],
+  "jobs": [
+    {
+      "item": "p2",
+      "control": "stance",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p2/stance-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p2-deadpan-review.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.05030566792542796
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.10061133585085592
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.1509170037762839
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.20122267170171185
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p2",
+      "control": "stance",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p2/stance-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p2-deadpan-review.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.059845753093310985
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.11969150618662197
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.17953725927993297
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.23938301237324394
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p2",
+      "control": "content",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p2/content-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p2-deadpan-review.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.04756567818817765
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.0951313563763553
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.14269703456453295
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.1902627127527106
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p2",
+      "control": "content",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p2/content-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p2-deadpan-review.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.042220997393714585
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.08444199478742917
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.12666299218114374
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.16888398957485834
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p4",
+      "control": "stance",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p4/stance-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p4-wrong-test.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.024693207437042685
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.04938641487408537
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.07407962231112805
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.09877282974817074
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p4",
+      "control": "stance",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p4/stance-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p4-wrong-test.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.027553508867788498
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.055107017735576996
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.0826605266033655
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.11021403547115399
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p4",
+      "control": "content",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p4/content-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p4-wrong-test.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.006626394054279293
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.013252788108558585
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.019879182162837877
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.02650557621711717
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p4",
+      "control": "content",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p4/content-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p4-wrong-test.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.006179359392064735
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.01235871878412947
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.018538078176194205
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.02471743756825894
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p5",
+      "control": "stance",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p5/stance-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p5-riemann.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.007730913007856468
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.015461826015712936
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.023192739023569404
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.03092365203142587
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p5",
+      "control": "stance",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p5/stance-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p5-riemann.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.015390335655480057
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.030780671310960114
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.04617100696644017
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.06156134262192023
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p6",
+      "control": "stance",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p6/stance-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p6-grad-school.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.04946932331865621
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.09893864663731242
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.1484079699559686
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.19787729327462483
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p6",
+      "control": "stance",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p6/stance-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p6-grad-school.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.045613787818956086
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.09122757563791217
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.13684136345686826
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.18245515127582435
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p6",
+      "control": "content",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p6/content-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p6-grad-school.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.006143769740316021
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.012287539480632041
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.018431309220948062
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.024575078961264082
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p6",
+      "control": "content",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p6/content-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p6-grad-school.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.009290699164152571
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.018581398328305142
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.027872097492457712
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.037162796656610285
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p7",
+      "control": "stance",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p7/stance-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p7-quitting.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.07916762428873725
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.1583352485774745
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.23750287286621174
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.316670497154949
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p7",
+      "control": "stance",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p7/stance-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p7-quitting.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.07838125240051745
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.1567625048010349
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.23514375720155234
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.3135250096020698
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p9",
+      "control": "stance",
+      "lens": "j",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p9/stance-j.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p9-relationship.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.041122351253958855
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.08224470250791771
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.12336705376187657
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.16448940501583542
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p9",
+      "control": "stance",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p9/stance-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p9-relationship.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.045601031318838615
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.09120206263767723
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.13680309395651585
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.18240412527535446
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    },
+    {
+      "item": "p9",
+      "control": "content",
+      "lens": "r",
+      "plan": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/plans/generated/overnight-2026-09-04/p9/content-r.json",
+      "messages": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/prompts/p9-relationship.target.messages.json",
+      "mode": "no_thinking",
+      "max_new_tokens": 1024,
+      "arms": [
+        {
+          "label": "zero-a",
+          "coefficient": 0.0
+        },
+        {
+          "label": "zero-b",
+          "coefficient": 0.0
+        },
+        {
+          "label": "kappa-0.25",
+          "coefficient": 0.0020820959860171073
+        },
+        {
+          "label": "kappa-0.5",
+          "coefficient": 0.004164191972034215
+        },
+        {
+          "label": "kappa-0.75",
+          "coefficient": 0.006246287958051322
+        },
+        {
+          "label": "kappa-1.0",
+          "coefficient": 0.00832838394406843
+        },
+        {
+          "label": "full-ablation",
+          "coefficient": 1.0
+        }
+      ]
+    }
+  ]
+}

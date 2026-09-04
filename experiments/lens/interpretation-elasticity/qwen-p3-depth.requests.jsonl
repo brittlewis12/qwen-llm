@@ -1,0 +1,8 @@
+{"id":"p3a-target-thinking","messages":"prompts/p3a-correct-challenged.target.messages.json","message_mode":"thinking"}
+{"id":"p3a-twin-thinking","messages":"prompts/p3a-correct-challenged.twin.messages.json","message_mode":"thinking"}
+{"id":"p3b-target-thinking","messages":"prompts/p3b-incorrect-challenged.target.messages.json","message_mode":"thinking"}
+{"id":"p3b-twin-thinking","messages":"prompts/p3b-incorrect-challenged.twin.messages.json","message_mode":"thinking"}
+{"id":"p3a-target-no-thinking","messages":"prompts/p3a-correct-challenged.target.messages.json","message_mode":"no_thinking"}
+{"id":"p3a-twin-no-thinking","messages":"prompts/p3a-correct-challenged.twin.messages.json","message_mode":"no_thinking"}
+{"id":"p3b-target-no-thinking","messages":"prompts/p3b-incorrect-challenged.target.messages.json","message_mode":"no_thinking"}
+{"id":"p3b-twin-no-thinking","messages":"prompts/p3b-incorrect-challenged.twin.messages.json","message_mode":"no_thinking"}

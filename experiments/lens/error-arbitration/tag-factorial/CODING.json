@@ -1,0 +1,465 @@
+{
+  "schema": "qwen.lens.error_tag_factorial.coding",
+  "schema_version": 1,
+  "coder": "unblinded_single_rater",
+  "coding_status": "complete_provisional_pending_independent_review",
+  "definitions": {
+    "normalizes_corrupted_stem": "Explicitly supplies or proposes the intended canonical stem; mere topic interpretation is insufficient.",
+    "explicit_pair_repair": "States or unambiguously renders that the opening and closing tags differ and repairs the actual unequal pair."
+  },
+  "summary": {
+    "matched_correct": {
+      "n": 8,
+      "baseline_primary": {
+        "social_continuation": 8
+      },
+      "active_primary": {
+        "other": 1,
+        "social_continuation": 6,
+        "vigilance_without_fault_assertion": 1
+      },
+      "baseline_normalizes_corrupted_stem": 0,
+      "active_normalizes_corrupted_stem": 0,
+      "baseline_explicit_pair_repair": 0,
+      "active_explicit_pair_repair": 0
+    },
+    "matched_corrupted": {
+      "n": 8,
+      "baseline_primary": {
+        "lexical_normalization_without_pair_claim": 1,
+        "other": 1,
+        "social_continuation": 6
+      },
+      "active_primary": {
+        "lexical_normalization_without_pair_claim": 4,
+        "social_continuation": 3,
+        "vigilance_without_fault_assertion": 1
+      },
+      "baseline_normalizes_corrupted_stem": 1,
+      "active_normalizes_corrupted_stem": 4,
+      "baseline_explicit_pair_repair": 0,
+      "active_explicit_pair_repair": 0
+    },
+    "closing_mismatch": {
+      "n": 8,
+      "baseline_primary": {
+        "correct_pair_repair": 1,
+        "social_continuation": 6,
+        "vigilance_without_fault_assertion": 1
+      },
+      "active_primary": {
+        "correct_pair_repair": 3,
+        "lexical_normalization_without_pair_claim": 2,
+        "social_continuation": 2,
+        "vigilance_without_fault_assertion": 1
+      },
+      "baseline_normalizes_corrupted_stem": 1,
+      "active_normalizes_corrupted_stem": 5,
+      "baseline_explicit_pair_repair": 1,
+      "active_explicit_pair_repair": 3
+    },
+    "opening_mismatch": {
+      "n": 8,
+      "baseline_primary": {
+        "lexical_normalization_without_pair_claim": 1,
+        "other": 1,
+        "social_continuation": 6
+      },
+      "active_primary": {
+        "lexical_normalization_without_pair_claim": 5,
+        "social_continuation": 2,
+        "vigilance_without_fault_assertion": 1
+      },
+      "baseline_normalizes_corrupted_stem": 1,
+      "active_normalizes_corrupted_stem": 5,
+      "baseline_explicit_pair_repair": 0,
+      "active_explicit_pair_repair": 0
+    }
+  },
+  "rows": [
+    {
+      "id": "coffee_break__matched_corrupted",
+      "stem": "coffee-break",
+      "condition": "matched_corrupted",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "music_share__opening_mismatch",
+      "stem": "music-share",
+      "condition": "opening_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm supplies the canonical lexeme without naming pair inequality."
+    },
+    {
+      "id": "coffee_break__closing_mismatch",
+      "stem": "coffee-break",
+      "condition": "closing_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "lunch_message__matched_corrupted",
+      "stem": "lunch-message",
+      "condition": "matched_corrupted",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "weekend_plans__opening_mismatch",
+      "stem": "weekend-plans",
+      "condition": "opening_mismatch",
+      "baseline_primary": "lexical_normalization_without_pair_claim",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": true,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Both arms normalize the opening lexeme without asserting pair inequality."
+    },
+    {
+      "id": "travel_checkin__closing_mismatch",
+      "stem": "travel-checkin",
+      "condition": "closing_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "vigilance_without_fault_assertion",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm reframes the message as a travel error but does not identify the tag anomaly."
+    },
+    {
+      "id": "weather_report__closing_mismatch",
+      "stem": "weather-report",
+      "condition": "closing_mismatch",
+      "baseline_primary": "correct_pair_repair",
+      "active_primary": "correct_pair_repair",
+      "baseline_normalizes_corrupted_stem": true,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": true,
+      "active_explicit_pair_repair": true,
+      "note": "Both arms explicitly identify the malformed closing tag."
+    },
+    {
+      "id": "weather_report__matched_correct",
+      "stem": "weather-report",
+      "condition": "matched_correct",
+      "baseline_primary": "social_continuation",
+      "active_primary": "other",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm asserts a content/tag semantic mismatch, not a tag-pair mismatch."
+    },
+    {
+      "id": "garden_note__closing_mismatch",
+      "stem": "garden-note",
+      "condition": "closing_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "correct_pair_repair",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": true,
+      "note": "Active arm explicitly identifies and repairs the closing tag."
+    },
+    {
+      "id": "music_share__closing_mismatch",
+      "stem": "music-share",
+      "condition": "closing_mismatch",
+      "baseline_primary": "vigilance_without_fault_assertion",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Baseline notices the corrupted lexeme; active arm supplies the canonical lexeme without naming pair inequality."
+    },
+    {
+      "id": "weekend_plans__closing_mismatch",
+      "stem": "weekend-plans",
+      "condition": "closing_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "lunch_message__opening_mismatch",
+      "stem": "lunch-message",
+      "condition": "opening_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "weekend_plans__matched_correct",
+      "stem": "weekend-plans",
+      "condition": "matched_correct",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "music_share__matched_corrupted",
+      "stem": "music-share",
+      "condition": "matched_corrupted",
+      "baseline_primary": "social_continuation",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm proposes music-share without claiming unequal tags."
+    },
+    {
+      "id": "travel_checkin__matched_correct",
+      "stem": "travel-checkin",
+      "condition": "matched_correct",
+      "baseline_primary": "social_continuation",
+      "active_primary": "vigilance_without_fault_assertion",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm introduces generic error-checking language without asserting a concrete fault."
+    },
+    {
+      "id": "project_update__opening_mismatch",
+      "stem": "project-update",
+      "condition": "opening_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm normalizes the opening lexeme but does not state that the pair differs."
+    },
+    {
+      "id": "coffee_break__opening_mismatch",
+      "stem": "coffee-break",
+      "condition": "opening_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "project_update__matched_correct",
+      "stem": "project-update",
+      "condition": "matched_correct",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "weather_report__opening_mismatch",
+      "stem": "weather-report",
+      "condition": "opening_mismatch",
+      "baseline_primary": "other",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Baseline asserts a content/tag mismatch; active arm normalizes the opening lexeme."
+    },
+    {
+      "id": "music_share__matched_correct",
+      "stem": "music-share",
+      "condition": "matched_correct",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "weekend_plans__matched_corrupted",
+      "stem": "weekend-plans",
+      "condition": "matched_corrupted",
+      "baseline_primary": "lexical_normalization_without_pair_claim",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": true,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Both arms normalize palns to plans."
+    },
+    {
+      "id": "project_update__closing_mismatch",
+      "stem": "project-update",
+      "condition": "closing_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "correct_pair_repair",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": true,
+      "note": "Active arm explicitly identifies and repairs the closing tag."
+    },
+    {
+      "id": "garden_note__opening_mismatch",
+      "stem": "garden-note",
+      "condition": "opening_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm normalizes the opening lexeme without naming pair inequality."
+    },
+    {
+      "id": "lunch_message__matched_correct",
+      "stem": "lunch-message",
+      "condition": "matched_correct",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "project_update__matched_corrupted",
+      "stem": "project-update",
+      "condition": "matched_corrupted",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "garden_note__matched_corrupted",
+      "stem": "garden-note",
+      "condition": "matched_corrupted",
+      "baseline_primary": "social_continuation",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm proposes garden note without claiming unequal tags."
+    },
+    {
+      "id": "travel_checkin__matched_corrupted",
+      "stem": "travel-checkin",
+      "condition": "matched_corrupted",
+      "baseline_primary": "social_continuation",
+      "active_primary": "vigilance_without_fault_assertion",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm introduces generic mistake language without asserting a concrete fault."
+    },
+    {
+      "id": "travel_checkin__opening_mismatch",
+      "stem": "travel-checkin",
+      "condition": "opening_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "vigilance_without_fault_assertion",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm reframes the message as a travel error but does not identify the tag anomaly."
+    },
+    {
+      "id": "garden_note__matched_correct",
+      "stem": "garden-note",
+      "condition": "matched_correct",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "lunch_message__closing_mismatch",
+      "stem": "lunch-message",
+      "condition": "closing_mismatch",
+      "baseline_primary": "social_continuation",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Active arm normalizes the corrupted stem but renders both examples as opening tags."
+    },
+    {
+      "id": "coffee_break__matched_correct",
+      "stem": "coffee-break",
+      "condition": "matched_correct",
+      "baseline_primary": "social_continuation",
+      "active_primary": "social_continuation",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": false,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": ""
+    },
+    {
+      "id": "weather_report__matched_corrupted",
+      "stem": "weather-report",
+      "condition": "matched_corrupted",
+      "baseline_primary": "other",
+      "active_primary": "lexical_normalization_without_pair_claim",
+      "baseline_normalizes_corrupted_stem": false,
+      "active_normalizes_corrupted_stem": true,
+      "baseline_explicit_pair_repair": false,
+      "active_explicit_pair_repair": false,
+      "note": "Baseline asserts a content/tag mismatch; active arm explicitly normalizes reprot to report."
+    }
+  ]
+}

@@ -1,0 +1,432 @@
+[
+  {
+    "job": "stance p4 J",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p4/j",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      }
+    ]
+  },
+  {
+    "job": "stance p4 R",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p4/r",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 77
+      }
+    ]
+  },
+  {
+    "job": "stance p5 J",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p5/j",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 338
+      }
+    ]
+  },
+  {
+    "job": "stance p5 R",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p5/r",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 334
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 338
+      }
+    ]
+  },
+  {
+    "job": "stance p6 J",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p6/j",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      }
+    ]
+  },
+  {
+    "job": "stance p6 R",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p6/r",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1254
+      }
+    ]
+  },
+  {
+    "job": "stance p7 J",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p7/j",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 938
+      }
+    ]
+  },
+  {
+    "job": "stance p7 R",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p7/r",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1496
+      }
+    ]
+  },
+  {
+    "job": "stance p9 J",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p9/j",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1051
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1051
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1051
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1046
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1046
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1046
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1046
+      }
+    ]
+  },
+  {
+    "job": "stance p9 R",
+    "bound": 4096,
+    "output": "/Users/tito/code/qwen-llm-lens-recovery/experiments/lens/interpretation-elasticity/artifacts/interventions/overnight-2026-09-04/qwen-4096/stance/p9/r",
+    "complete": true,
+    "arms": [
+      {
+        "arm": "000000",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1051
+      },
+      {
+        "arm": "000001",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1051
+      },
+      {
+        "arm": "000002",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1051
+      },
+      {
+        "arm": "000003",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1046
+      },
+      {
+        "arm": "000004",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1046
+      },
+      {
+        "arm": "000005",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1046
+      },
+      {
+        "arm": "000006",
+        "stop_reason": "stop_token",
+        "generated_tokens": 1046
+      }
+    ]
+  }
+]

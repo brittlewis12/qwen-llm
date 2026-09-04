@@ -1,0 +1,69 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/j-lens-native-v1",
+      "token_ids": [65105, 10179, 1412],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/r-lens-native-v1",
+      "token_ids": [65105, 10179, 1412],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [],
+  "operations": [],
+  "readouts": [
+    {
+      "id": "j-primary-coordinates",
+      "lens": "j",
+      "scope": {
+        "layers": {"kind": "values", "values": [32, 38, 43]},
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [
+            {
+              "span_kind": "message_end_marker",
+              "role": "user",
+              "occurrence": "last",
+              "edge": "start"
+            },
+            {
+              "span_kind": "generated_assistant_start_marker",
+              "edge": "start"
+            }
+          ]
+        }
+      },
+      "top_k": 3
+    },
+    {
+      "id": "r-primary-coordinates",
+      "lens": "r",
+      "scope": {
+        "layers": {"kind": "values", "values": [32, 38, 43]},
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [
+            {
+              "span_kind": "message_end_marker",
+              "role": "user",
+              "occurrence": "last",
+              "edge": "start"
+            },
+            {
+              "span_kind": "generated_assistant_start_marker",
+              "edge": "start"
+            }
+          ]
+        }
+      },
+      "top_k": 3
+    }
+  ]
+}

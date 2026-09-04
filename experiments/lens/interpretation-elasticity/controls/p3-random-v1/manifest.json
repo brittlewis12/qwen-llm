@@ -1,0 +1,108 @@
+{
+  "schema": "interpretation_elasticity.random_controls",
+  "schema_version": 1,
+  "master_seed": 20260903,
+  "generator": "python_random_mt19937_getrandbits53_box_muller_then_f32le_unit_l2",
+  "reroll_policy": "never",
+  "records": [
+    {
+      "model": "qwen3.6-27b",
+      "layer": 22,
+      "hidden_size": 5120,
+      "path": "qwen3.6-27b.layer-22.f32le",
+      "byte_length": 20480,
+      "sha256": "e28d258855fdd21fa717d96bc672103e2306bba0574053ebb612fe56283c9012",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|qwen3.6-27b|22",
+      "seed_sha256": "2be99c254e73aa2ac627d9aed1fbf271fefe28db3c6a052bb148600ad36b3534",
+      "stored_l2_norm": 0.9999999990137582
+    },
+    {
+      "model": "qwen3.6-27b",
+      "layer": 32,
+      "hidden_size": 5120,
+      "path": "qwen3.6-27b.layer-32.f32le",
+      "byte_length": 20480,
+      "sha256": "656367fc89a58d0dfe4a762c6015bb9c186a51aa3710a7549e1edf5a0fa2f8a6",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|qwen3.6-27b|32",
+      "seed_sha256": "9db9e34337b18483dbcc0cac1fb7ee789e41361ad6e6459dff0cfd662e787c00",
+      "stored_l2_norm": 0.9999999995900984
+    },
+    {
+      "model": "qwen3.6-27b",
+      "layer": 42,
+      "hidden_size": 5120,
+      "path": "qwen3.6-27b.layer-42.f32le",
+      "byte_length": 20480,
+      "sha256": "8e94e2b3abb90e8b3cfd04f9d0ab189978fd5203efa3691027770f74f072f04b",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|qwen3.6-27b|42",
+      "seed_sha256": "67e3c0425c2839cc0369cb7cf15aae1195d7529ea186d87347ef733aa5d682ac",
+      "stored_l2_norm": 0.999999999475836
+    },
+    {
+      "model": "qwen3.6-27b",
+      "layer": 52,
+      "hidden_size": 5120,
+      "path": "qwen3.6-27b.layer-52.f32le",
+      "byte_length": 20480,
+      "sha256": "acd63133715e15ef95562e0bffd2e787949b6d804706523cdf31e0ac32f89d92",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|qwen3.6-27b|52",
+      "seed_sha256": "b06e9d3b5222fb0656d0f2fe8b84a13ec70942be1d32ff39a6d7299c44fb967f",
+      "stored_l2_norm": 1.00000000073189
+    },
+    {
+      "model": "qwen3.6-27b",
+      "layer": 56,
+      "hidden_size": 5120,
+      "path": "qwen3.6-27b.layer-56.f32le",
+      "byte_length": 20480,
+      "sha256": "1d6f1735203a055e47afd5c335bedc4463ee4914803a3a13a8ea63e92e4e8d97",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|qwen3.6-27b|56",
+      "seed_sha256": "26cd4101fa512ffd4edfcea2b6bf7087c1c149f1bdcd25383c687352372ed605",
+      "stored_l2_norm": 0.9999999998579279
+    },
+    {
+      "model": "muse-glimmer-30b",
+      "layer": 27,
+      "hidden_size": 6656,
+      "path": "muse-glimmer-30b.layer-27.f32le",
+      "byte_length": 26624,
+      "sha256": "9c2ba143c4a12e84aed4293a0991dcb7704c6b0a6663fb61ef6293b3b1275185",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|muse-glimmer-30b|27",
+      "seed_sha256": "b6058d84a964ebfae195b825993cb0b2c0b6f7c27196241619a6872605f9ebf5",
+      "stored_l2_norm": 1.0000000002643037
+    },
+    {
+      "model": "muse-glimmer-30b",
+      "layer": 35,
+      "hidden_size": 6656,
+      "path": "muse-glimmer-30b.layer-35.f32le",
+      "byte_length": 26624,
+      "sha256": "bf4d2a110eb9decdb0707cda572e89ebcdc8002c2a193e50252ce84d38b5c02c",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|muse-glimmer-30b|35",
+      "seed_sha256": "98921cc9c237c0d54ae335e5b460317f0d55f37d69c8e51127f34a36f818d5f7",
+      "stored_l2_norm": 1.0000000009697718
+    },
+    {
+      "model": "muse-glimmer-30b",
+      "layer": 43,
+      "hidden_size": 6656,
+      "path": "muse-glimmer-30b.layer-43.f32le",
+      "byte_length": 26624,
+      "sha256": "f7bce65cd705eabaa6b4ba98fa79520c10a18b8c4ad0c483019cbfc275c28f0a",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|muse-glimmer-30b|43",
+      "seed_sha256": "f47f4d0531cd922dccf9b43dfb9773e9c7ab3ffeba679a09dae2bd9ba22f3408",
+      "stored_l2_norm": 0.9999999993599029
+    },
+    {
+      "model": "muse-glimmer-30b",
+      "layer": 49,
+      "hidden_size": 6656,
+      "path": "muse-glimmer-30b.layer-49.f32le",
+      "byte_length": 26624,
+      "sha256": "60f26d101cd5bf8fbf0d959b641904c7b59c0f5d4cd455e51966db755640cd71",
+      "seed_label": "interpretation-elasticity|p3-random-v1|20260903|muse-glimmer-30b|49",
+      "seed_sha256": "bb9a6f363f4c8ad6e3833e815b81daaaf4b0945d68fa895638de321cd28f7f4e",
+      "stored_l2_norm": 1.0000000006821796
+    }
+  ]
+}

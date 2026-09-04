@@ -1,0 +1,123 @@
+{
+  "version": 2,
+  "lenses": [
+    {
+      "kind": "published_full_transport",
+      "id": "j",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/j-lens-native-v1",
+      "token_ids": [
+        3296
+      ],
+      "allow_unvalidated_transfer": true
+    },
+    {
+      "kind": "published_full_transport",
+      "id": "r",
+      "artifact": "/Volumes/wdblack/weights-archive/workspace-lenses/qwen3.6-27b/r-lens-native-v1",
+      "token_ids": [
+        3296
+      ],
+      "allow_unvalidated_transfer": true
+    }
+  ],
+  "directions": [
+    {
+      "id": "content",
+      "lens": "j",
+      "row": {
+        "kind": "token_id",
+        "token_id": 3296
+      },
+      "normalization": "unit_l2"
+    }
+  ],
+  "operations": [
+    {
+      "id": "attenuate",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            42
+          ]
+        },
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [
+            {
+              "span_kind": "message_end_marker",
+              "role": "user",
+              "occurrence": "last",
+              "edge": "start"
+            }
+          ]
+        }
+      },
+      "action": {
+        "kind": "projection_ablate",
+        "direction": "content",
+        "coefficient": 1.0
+      }
+    }
+  ],
+  "readouts": [
+    {
+      "id": "j-track-content",
+      "lens": "j",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            42,
+            62
+          ]
+        },
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [
+            {
+              "span_kind": "message_end_marker",
+              "role": "user",
+              "occurrence": "last",
+              "edge": "start"
+            },
+            {
+              "span_kind": "generated_assistant_start_marker",
+              "edge": "start"
+            }
+          ]
+        }
+      },
+      "top_k": 1
+    },
+    {
+      "id": "r-track-content",
+      "lens": "r",
+      "scope": {
+        "layers": {
+          "kind": "values",
+          "values": [
+            42,
+            62
+          ]
+        },
+        "prefill": {
+          "kind": "rendered_spans",
+          "selectors": [
+            {
+              "span_kind": "message_end_marker",
+              "role": "user",
+              "occurrence": "last",
+              "edge": "start"
+            },
+            {
+              "span_kind": "generated_assistant_start_marker",
+              "edge": "start"
+            }
+          ]
+        }
+      },
+      "top_k": 1
+    }
+  ]
+}

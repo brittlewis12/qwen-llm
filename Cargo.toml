@@ -49,7 +49,7 @@ memmap2 = "0.9"
 byteorder = "1.5"
 half = { version = "2.6", features = ["bytemuck"] }
 bytemuck = { version = "1.16", features = ["derive"] }
-gguf-rs = { path = "../gguf" }
+gguf-rs = { git = "https://github.com/brittlewis12/gguf.git", rev = "c7369fd4868a6f613459fff355477f53bf4ee2f1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "0.10"
@@ -58,7 +58,7 @@ unicode-general-category = "=1.1.0"
 rustc-hash = "2"
 
 # dequant codec for tooling / re-pack-on-load (see docs/PLAN.md weight-format role table)
-llama-cpp-sys-2 = { path = "../llama-cpp-rs/llama-cpp-sys-2" }
+llama-cpp-sys-2 = { git = "https://github.com/brittlewis12/llama-cpp-rs.git", rev = "f312d1659f5c1777d0b8d240af46b2c8a02b39d2" }
 
 # error / logging
 thiserror = "2"

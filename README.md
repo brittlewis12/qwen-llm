@@ -5,11 +5,6 @@ workspace-lens toolkit for local GGUF models on Apple Silicon. The engine is
 written in Rust and includes custom Metal kernels for dense, mixture-of-experts,
 and hybrid recurrent/attention architectures.
 
-The MATS research snapshot, including the J/R-lens intervention experiments and
-reproducible application figures, lives on the
-[`mats-application`](https://github.com/brittlewis12/qwen-llm/tree/mats-application)
-branch.
-
 ## Status
 
 This is experimental research software at version `0.0.1`. Support and evidence

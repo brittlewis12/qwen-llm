@@ -685,6 +685,7 @@ dependencies = [
 [[package]]
 name = "gguf-rs"
 version = "0.2.0"
+source = "git+https://github.com/brittlewis12/gguf.git?rev=c7369fd4868a6f613459fff355477f53bf4ee2f1#c7369fd4868a6f613459fff355477f53bf4ee2f1"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -842,6 +843,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llama-cpp-sys-2"
 version = "0.1.139"
+source = "git+https://github.com/brittlewis12/llama-cpp-rs.git?rev=f312d1659f5c1777d0b8d240af46b2c8a02b39d2#f312d1659f5c1777d0b8d240af46b2c8a02b39d2"
 dependencies = [
  "bindgen",
  "cc",

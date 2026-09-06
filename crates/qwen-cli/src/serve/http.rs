@@ -660,10 +660,20 @@ impl<W: EventWrite> GenerationSink for StreamingSink<'_, '_, W> {
 /// Handle one connection: read one request, dispatch, respond, close.
 /// Returns Ok(()) even for request-level errors (they were answered);
 /// Err means the connection is unusable (disconnect/cancellation).
-pub(crate) fn handle_connection(
+#[cfg(test)]
+fn handle_connection(
     stream: &TcpStream,
     backend: &mut dyn GenerationBackend,
     trace: Option<&mut TraceLog>,
+) -> io::Result<()> {
+    handle_connection_with_completion(stream, backend, trace, || {})
+}
+
+pub(crate) fn handle_connection_with_completion(
+    stream: &TcpStream,
+    backend: &mut dyn GenerationBackend,
+    trace: Option<&mut TraceLog>,
+    mut on_completion: impl FnMut(),
 ) -> io::Result<()> {
     configure_stream(stream)?;
     let mut writer = stream;
@@ -682,15 +692,20 @@ pub(crate) fn handle_connection(
     };
 
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/v1/models") => write_json_response(
-            &mut writer,
-            200,
-            &json!({
-                "object": "list",
-                "data": [{"id": backend.model_id(), "object": "model", "owned_by": "local"}],
-            }),
-        ),
-        ("POST", "/v1/responses") => handle_responses(&request.body, stream, backend, trace),
+        ("GET", "/v1/models") => {
+            on_completion();
+            write_json_response(
+                &mut writer,
+                200,
+                &json!({
+                    "object": "list",
+                    "data": [{"id": backend.model_id(), "object": "model", "owned_by": "local"}],
+                }),
+            )
+        }
+        ("POST", "/v1/responses") => {
+            handle_responses(&request.body, stream, backend, trace, &mut on_completion)
+        }
         ("GET", _) | ("POST", _) => write_serve_error(
             &mut writer,
             &ServeError {
@@ -719,6 +734,7 @@ fn handle_responses(
     stream: &TcpStream,
     backend: &mut dyn GenerationBackend,
     mut trace: Option<&mut TraceLog>,
+    on_completion: &mut dyn FnMut(),
 ) -> io::Result<()> {
     let mut writer = stream;
     let parsed: Value = match serde_json::from_slice::<Value>(body) {
@@ -793,6 +809,7 @@ fn handle_responses(
                     outcome.usage,
                     outcome.stats.as_ref().filter(|_| request.echo_stats),
                 )?;
+                on_completion();
                 write_json_response(&mut writer, 200, &envelope)
             }
             Err(BackendFailure::Serve(error)) => write_serve_error(&mut writer, &error),
@@ -832,6 +849,7 @@ fn handle_responses(
                 for event in &events {
                     response.on_partition(event)?;
                 }
+                on_completion();
                 response.finish(
                     response_stop_reason(outcome.end),
                     outcome.usage,

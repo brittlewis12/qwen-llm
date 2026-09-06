@@ -273,6 +273,27 @@ fn bind_loopback(addr: &str) -> Result<TcpListener> {
     TcpListener::bind(addresses.as_slice()).with_context(|| format!("bind {addr}"))
 }
 
+fn wait_for_connection(listener: &TcpListener) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // The listener owns the descriptor throughout this bounded wait. Readiness
+    // wakes immediately; the timeout only bounds cooperative shutdown latency.
+    let result = unsafe { libc::poll(&mut descriptor, 1, ACCEPT_POLL_INTERVAL.as_millis() as i32) };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    } else if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return Err(std::io::Error::other("HTTP listener readiness failed"));
+    }
+    Ok(())
+}
+
 fn spawn_acceptor(
     listener: TcpListener,
     sender: SyncSender<std::net::TcpStream>,
@@ -301,7 +322,10 @@ fn spawn_acceptor(
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                        if let Err(error) = wait_for_connection(&listener) {
+                            tracing::warn!("serve: listener wait failed: {error}");
+                            std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                        }
                     }
                     Err(error) => {
                         tracing::warn!("serve: accept failed: {error}");
@@ -509,6 +533,36 @@ mod tests {
         drop(receiver);
         drop(admitted);
         drop(client);
+        acceptor.join().unwrap();
+    }
+
+    #[test]
+    fn idle_acceptor_wakes_and_preserves_busy_rejection() {
+        use std::io::Read;
+        let listener = bind_loopback("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = sync_channel(0);
+        let ready = Arc::new(AtomicBool::new(true));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let acceptor =
+            spawn_acceptor(listener, sender, Arc::clone(&ready), Arc::clone(&stopping)).unwrap();
+        std::thread::sleep(ACCEPT_POLL_INTERVAL + Duration::from_millis(5));
+        let client = std::net::TcpStream::connect(address).unwrap();
+        let admitted = receiver
+            .recv_timeout(THREAD_EXIT_TIMEOUT)
+            .expect("idle listener must wake");
+        assert!(!ready.load(Ordering::Acquire));
+        let mut busy = std::net::TcpStream::connect(address).unwrap();
+        busy.set_read_timeout(Some(THREAD_EXIT_TIMEOUT)).unwrap();
+        let mut response = String::new();
+        busy.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503"));
+        assert!(response.to_ascii_lowercase().contains("retry-after: 1"));
+        stopping.store(true, Ordering::Release);
+        drop(receiver);
+        drop(admitted);
+        drop(client);
+        assert_thread_finishes(&acceptor, "readiness wait did not stop");
         acceptor.join().unwrap();
     }
 

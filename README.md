@@ -127,6 +127,9 @@ kernels/          Metal compute shaders compiled into an embedded metallib
 docs/             runtime contracts, research notes, and evidence packets
 ```
 
+The generated [environment knob reference](docs/ENV.md) lists every engine
+environment variable, its default behavior, source location, and module family.
+
 ## License
 
 Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the

@@ -78,9 +78,23 @@ impl ServeError {
 /// Qwen3.8 model with the generic ChatML contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum QwenTemplate {
+    /// ChatML whose `tokenizer.chat_template` digest is not pinned. Keeps the
+    /// legacy bare `<|im_start|>assistant\n` suffix and verbatim content.
     #[default]
     Generic,
+    /// Pinned Qwen3.5 template: thinking only when explicitly requested.
+    Qwen35,
+    /// Pinned Qwen3.6 template: thinking unless explicitly disabled.
+    Qwen36,
     Qwen38,
+}
+
+impl QwenTemplate {
+    /// Templates whose exact bytes are pinned by digest and byte-checked
+    /// against the released Jinja oracle.
+    pub(crate) fn verified(self) -> bool {
+        self != Self::Generic
+    }
 }
 
 /// Validated transcript plus generation controls, ready for rendering.
@@ -109,6 +123,9 @@ pub(crate) struct ServeRequest {
     /// map it; others reject or ignore per their contract.
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) no_thinking: bool,
+    /// Explicit thinking request for templates whose default is no-thinking
+    /// (Qwen3.5). CLI-only today; no wire field sets it yet.
+    pub(crate) thinking_requested: bool,
     /// Rendering family, resolved from the loaded model at startup rather
     /// than per request.
     pub(crate) template: QwenTemplate,
@@ -137,6 +154,7 @@ impl Default for ServeRequest {
             min_p: None,
             reasoning_effort: None,
             no_thinking: false,
+            thinking_requested: false,
             template: QwenTemplate::default(),
             strip_history_thinking: false,
             echo_stats: false,

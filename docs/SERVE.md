@@ -370,6 +370,17 @@ because client model-pickers probe it).
   history round-trip) rather than by a JSON fixture case.
 - Tool-continuation golden fixtures are **written before the renderer**
   (review R3), so the renderer is fit to the fixture, never the reverse.
+- Pinned templates: when the loaded Qwen3.5/3.6 GGUF's
+  `tokenizer.chat_template` digest is pinned (`prompt_template.rs`), the
+  renderer follows the released Jinja byte for byte (oracle fixture
+  `tests/fixtures/qwen36_chat_template_oracle_v1.json`): content is trimmed,
+  the generation suffix is always `<think>\n` or the preclosed block, and
+  preserved reasoning replays as `<think>\n{reasoning}\n</think>\n\n{content}`.
+  Qwen3.6 thinks unless `x_qwen.no_thinking`; Qwen3.5's released default is
+  no-thinking. The two documented divergences stand: no-thinking history keeps
+  the preclosed block, and a second system item is rejected rather than merged.
+  Unpinned ChatML keeps the legacy generic contract (bare suffix, verbatim
+  content) rather than guessing. `qwen run` renders through the same code.
 - Preserve/strip rendering policy: preserve is the default for the validated
   Qwen3.6 identity (owner position, Amendment 1 of S0; economics measured in S0
   G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 uses

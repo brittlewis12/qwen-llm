@@ -250,9 +250,10 @@ impl EngineBackend {
 }
 
 fn preopens(template: QwenTemplate, request: &ServeRequest) -> bool {
-    template == QwenTemplate::Qwen38
-        && !request.no_thinking
-        && request.reasoning_effort.as_deref() != Some("none")
+    let mut bound = request.clone();
+    bound.template = template;
+    crate::open_responses::render::qwen_generation(&bound)
+        == crate::open_responses::render::QwenGeneration::PreOpen
 }
 
 /// Sampler for a Qwen or DeepSeek V4 serve request with the greedy-leaning

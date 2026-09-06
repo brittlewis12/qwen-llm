@@ -1,0 +1,14 @@
+[
+ {"id":"user_thinking","messages":[{"role":"user","content":"Hi"}],"add_generation_prompt":true},
+ {"id":"system_user_thinking","messages":[{"role":"system","content":"Be concise."},{"role":"user","content":"Hi"}],"add_generation_prompt":true},
+ {"id":"user_no_thinking","messages":[{"role":"user","content":"Hi"}],"add_generation_prompt":true,"enable_thinking":false},
+ {"id":"padded_content_trims","messages":[{"role":"system","content":"  Be concise.\n"},{"role":"user","content":"\n Hi \n"}],"add_generation_prompt":true},
+ {"id":"history_strips_reasoning_before_last_user","messages":[{"role":"user","content":"One"},{"role":"assistant","content":"<think>\nthinking\n</think>\n\nAnswer one"},{"role":"user","content":"Two"}],"add_generation_prompt":true},
+ {"id":"history_reasoning_content_field_stripped","messages":[{"role":"user","content":"One"},{"role":"assistant","content":"Answer one","reasoning_content":"thinking"},{"role":"user","content":"Two"}],"add_generation_prompt":true},
+ {"id":"history_preserve_thinking","messages":[{"role":"user","content":"One"},{"role":"assistant","content":"Answer one","reasoning_content":"thinking"},{"role":"user","content":"Two"}],"add_generation_prompt":true,"preserve_thinking":true},
+ {"id":"history_preserve_inline_think","messages":[{"role":"user","content":"One"},{"role":"assistant","content":"<think>\n  thinking \n</think>\n\nAnswer one"},{"role":"user","content":"Two"}],"add_generation_prompt":true,"preserve_thinking":true},
+ {"id":"history_no_thinking_mode","messages":[{"role":"user","content":"One"},{"role":"assistant","content":"Answer one"},{"role":"user","content":"Two"}],"add_generation_prompt":true,"enable_thinking":false},
+ {"id":"two_system_messages_merge","messages":[{"role":"system","content":"A"},{"role":"system","content":"B"},{"role":"user","content":"Hi"}],"add_generation_prompt":true},
+ {"id":"developer_role_as_system","messages":[{"role":"developer","content":"Dev"},{"role":"user","content":"Hi"}],"add_generation_prompt":true},
+ {"id":"empty_system_omitted","messages":[{"role":"system","content":"   "},{"role":"user","content":"Hi"}],"add_generation_prompt":true}
+]

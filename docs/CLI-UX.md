@@ -86,6 +86,10 @@ Contract:
 - `--user -` reads one complete user message from stdin.
 - `--messages -` accepts either a bare message array or a wrapped
   `{ "messages": [...] }` document.
+- Ordinary chat renders through the serve renderer. On digest-pinned Qwen3.6
+  templates the generation suffix is the released `<think>\n` (the model
+  continues inside an open think block; output starts with reasoning text);
+  pinned Qwen3.5 templates default to the released no-thinking suffix.
 - `--no-thinking` is a prompt-rendering guarantee, not an output filter, and is
   rejected with raw input. On the exact validated Qwen3.6 and Qwen3.8
   model/tokenizer surfaces it selects the tested preclosed thinking suffix and

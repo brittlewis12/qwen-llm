@@ -97,6 +97,26 @@ pub(crate) fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelProm
     }
 }
 
+/// Serve/run rendering template for a Qwen-family GGUF. Qwen3.8 keeps its
+/// metadata-validated identity gate (`supports_qwen38_prompt_protocol`);
+/// among the rest, only digest-pinned Qwen3.5/3.6 templates render with
+/// released-exact bytes, and anything unpinned keeps the legacy generic
+/// ChatML contract rather than guessing.
+pub(crate) fn serve_qwen_template(
+    family: qwen_llm::model_family::ModelFamily,
+    gguf: &GgufFile,
+) -> crate::open_responses::items::QwenTemplate {
+    use crate::open_responses::items::QwenTemplate;
+    if crate::messages::supports_qwen38_release_prompt_protocol(family, gguf) {
+        return QwenTemplate::Qwen38;
+    }
+    match resolve_qwen_prompt_template(family.architecture_name(), gguf) {
+        Ok(QwenPromptTemplate::Qwen35) => QwenTemplate::Qwen35,
+        Ok(QwenPromptTemplate::Qwen36) => QwenTemplate::Qwen36,
+        _ => QwenTemplate::Generic,
+    }
+}
+
 fn resolve_qwen_prompt_template(architecture: &str, gguf: &GgufFile) -> Result<QwenPromptTemplate> {
     let tokenizer_model = gguf.get_str("tokenizer.ggml.model");
     let tokenizer_pre = gguf.get_str("tokenizer.ggml.pre");

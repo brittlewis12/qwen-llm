@@ -27,6 +27,8 @@ mod open_responses;
 mod prefill_plan;
 #[path = "qwen/prompt_lookup.rs"]
 mod prompt_lookup;
+#[allow(dead_code)]
+mod prompt_template;
 #[path = "qwen/qwen4exp.rs"]
 mod qwen4exp;
 mod qwen_file_root;
@@ -50,7 +52,7 @@ use messages::{
     Qwen38ReasoningEffort, QwenGenerationMode, load_deepseek_v4_0731_messages_prompt,
     load_messages_prompt_with_policy, messages_thinking_mode, parse_strict_messages_input,
     render_deepseek_v4_0731_messages_prompt, render_deepseek_v4_0731_single_turn_prompt,
-    render_qwen_messages_prompt_with_generation, render_qwen_single_turn_prompt,
+    render_qwen_messages_prompt_for_template, render_qwen_single_turn_prompt_for_template,
     render_qwen38_messages_prompt_with_generation, render_qwen38_single_turn_prompt,
 };
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
@@ -539,6 +541,9 @@ fn prepare_modern_run_prompt(
         );
     }
     let qwen38 = supports_qwen38_prompt_protocol(family, gguf);
+    // Pinned Qwen3.5/3.6 templates render their released bytes; unpinned
+    // ChatML keeps the legacy generic contract.
+    let qwen_template = prompt_template::serve_qwen_template(family, gguf);
 
     let no_thinking = run.no_thinking;
     let qwen38_generation_mode =
@@ -555,15 +560,18 @@ fn prepare_modern_run_prompt(
                         qwen38_generation_mode.expect("validated Qwen3.8 mode"),
                     )
                 }
-                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => render_qwen_single_turn_prompt(
-                    &user,
-                    system.as_deref(),
-                    if no_thinking {
-                        QwenGenerationMode::NoThinking
-                    } else {
-                        QwenGenerationMode::Auto
-                    },
-                ),
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
+                    render_qwen_single_turn_prompt_for_template(
+                        &user,
+                        system.as_deref(),
+                        qwen_template,
+                        if no_thinking {
+                            QwenGenerationMode::NoThinking
+                        } else {
+                            QwenGenerationMode::Auto
+                        },
+                    )
+                }
                 ModelFamily::Qwen4Exp => {
                     let failure = qwen4exp_prompt_capability_failure(family, gguf)
                         .expect("unsupported Flash-Next prompt has a capability failure");
@@ -595,8 +603,9 @@ fn prepare_modern_run_prompt(
                     )
                 }
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
-                    render_qwen_messages_prompt_with_generation(
+                    render_qwen_messages_prompt_for_template(
                         &messages,
+                        qwen_template,
                         false,
                         true,
                         if no_thinking {
@@ -605,6 +614,7 @@ fn prepare_modern_run_prompt(
                             QwenGenerationMode::Auto
                         },
                     )
+                    .text
                 }
                 ModelFamily::Qwen4Exp => {
                     let failure = qwen4exp_prompt_capability_failure(family, gguf)

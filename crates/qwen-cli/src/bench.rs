@@ -43,12 +43,16 @@ mod identity;
 mod integrated_grammar_row;
 mod lm_head_screening_oracle;
 mod messages;
+#[allow(dead_code)]
+mod model_request;
 mod moe_gdn_repair;
 #[path = "bench/moe_micro.rs"]
 mod moe_micro;
 #[path = "bench/mtp.rs"]
 mod mtp;
 mod muse_glimmer_request_bench;
+#[allow(dead_code)]
+mod open_responses;
 #[path = "bench/pld.rs"]
 mod pld;
 #[path = "bench/power.rs"]

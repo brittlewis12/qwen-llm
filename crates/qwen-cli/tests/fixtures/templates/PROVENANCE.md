@@ -2,7 +2,11 @@
 
 Extracted verbatim from `tokenizer.chat_template` GGUF metadata on
 2026-08-18. These are reference oracles for the hand-frozen cases in
-`../serve_render_fixtures_v1.json`; no Jinja engine consumes them.
+`../serve_render_fixtures_v1.json` (the unpinned/legacy ChatML contract).
+`../qwen36_chat_template_oracle_v1.json` is rendered *from* the Qwen3.6 file
+by `scripts/reference/render_qwen_chat_template.py` (jinja2, the engine
+Transformers uses) and pins the released bytes for the digest-verified
+Qwen3.6 template; regenerate with `--check` to detect drift.
 
 | File | Bytes | SHA-256 (first 16) | Source model file |
 | --- | ---: | --- | --- |

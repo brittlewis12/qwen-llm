@@ -6,6 +6,13 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::model_request::{SystemSource, Turn};
+use crate::open_responses::items::{QwenTemplate, ServeRequest};
+use crate::open_responses::render::{
+    QwenServePromptChannel, QwenServePromptSpanKind, render_qwen_serve_prompt_annotated_with,
+    split_reasoning,
+};
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct ChatMessage {
     pub(crate) role: String,
@@ -778,131 +785,129 @@ pub(crate) fn render_qwen_messages_prompt_with_generation_annotated(
     append_generation_prompt: bool,
     generation_mode: QwenGenerationMode,
 ) -> AnnotatedMessageRender {
-    let mut output = AnnotatedMessageRenderBuilder::default();
-    for (message_index, message) in messages.iter().enumerate() {
-        let index = Some(message_index);
-        output.push(
-            "<|im_start|>",
-            MessageRenderSpanKind::MessageStartMarker,
-            index,
-            Some(&message.role),
-            None,
-        );
-        output.push(
-            &message.role,
-            MessageRenderSpanKind::Role,
-            index,
-            Some(&message.role),
-            None,
-        );
-        output.push(
-            "\n",
-            MessageRenderSpanKind::ContentSeparator,
-            index,
-            Some(&message.role),
-            None,
-        );
-        let content;
-        if message.role == "assistant" && !preserve_thinking {
-            content = strip_think(&message.content);
-        } else {
-            content = message.content.clone();
-        }
-        output.push(
-            &content,
-            MessageRenderSpanKind::MessageContent,
-            index,
-            Some(&message.role),
-            None,
-        );
-        output.push(
-            "<|im_end|>",
-            MessageRenderSpanKind::MessageEndMarker,
-            index,
-            Some(&message.role),
-            None,
-        );
-        output.push(
-            "\n",
-            MessageRenderSpanKind::ContentSeparator,
-            index,
-            Some(&message.role),
-            None,
-        );
-    }
-    if append_generation_prompt {
-        output.push(
-            "<|im_start|>",
-            MessageRenderSpanKind::GeneratedAssistantStartMarker,
-            None,
-            Some("assistant"),
-            None,
-        );
-        output.push(
-            "assistant",
-            MessageRenderSpanKind::GeneratedAssistantRole,
-            None,
-            Some("assistant"),
-            None,
-        );
-        output.push(
-            "\n",
-            MessageRenderSpanKind::ContentSeparator,
-            None,
-            Some("assistant"),
-            None,
-        );
-        match generation_mode {
-            QwenGenerationMode::Auto => {}
-            QwenGenerationMode::Thinking => output.push(
-                "<think>",
-                MessageRenderSpanKind::ThinkingChannelStartMarker,
-                None,
-                Some("assistant"),
-                Some(MessageRenderChannel::Thinking),
-            ),
-            QwenGenerationMode::NoThinking => {
-                output.push(
-                    "<think>",
-                    MessageRenderSpanKind::ThinkingChannelStartMarker,
-                    None,
-                    Some("assistant"),
-                    Some(MessageRenderChannel::Thinking),
-                );
-                output.push(
-                    "\n\n",
-                    MessageRenderSpanKind::ContentSeparator,
-                    None,
-                    Some("assistant"),
-                    Some(MessageRenderChannel::Thinking),
-                );
-                output.push(
-                    "</think>",
-                    MessageRenderSpanKind::ThinkingChannelEndMarker,
-                    None,
-                    Some("assistant"),
-                    Some(MessageRenderChannel::Thinking),
-                );
-                output.push(
-                    "\n\n",
-                    MessageRenderSpanKind::ContentSeparator,
-                    None,
-                    Some("assistant"),
-                    None,
-                );
+    render_qwen_messages_prompt_for_template(
+        messages,
+        QwenTemplate::Generic,
+        preserve_thinking,
+        append_generation_prompt,
+        generation_mode,
+    )
+}
+
+/// Render ordinary chat messages through the shared Qwen renderer for a
+/// resolved template. `Generic` keeps the legacy unpinned ChatML bytes;
+/// pinned templates follow the released Jinja (see `open_responses::render`).
+pub(crate) fn render_qwen_messages_prompt_for_template(
+    messages: &[ChatMessage],
+    template: QwenTemplate,
+    preserve_thinking: bool,
+    append_generation_prompt: bool,
+    generation_mode: QwenGenerationMode,
+) -> AnnotatedMessageRender {
+    let mut request = ServeRequest {
+        template,
+        strip_history_thinking: !preserve_thinking,
+        no_thinking: generation_mode == QwenGenerationMode::NoThinking,
+        thinking_requested: generation_mode == QwenGenerationMode::Thinking,
+        ..ServeRequest::default()
+    };
+    for (index, message) in messages.iter().enumerate() {
+        match message.role.as_str() {
+            "system" if index == 0 => {
+                request.model_request.system = Some(message.content.clone());
+                request.model_request.system_source = Some(SystemSource::System);
             }
-        }
-        if generation_mode == QwenGenerationMode::Thinking {
-            output.push(
-                "\n",
-                MessageRenderSpanKind::ContentSeparator,
-                None,
-                Some("assistant"),
-                Some(MessageRenderChannel::Thinking),
-            );
+            "user" => request
+                .model_request
+                .turns
+                .push(Turn::User(message.content.clone())),
+            "assistant" => {
+                let (reasoning, visible) = match message
+                    .reasoning_content
+                    .as_deref()
+                    .or(message.reasoning.as_deref())
+                {
+                    Some(reasoning) => (Some(reasoning.to_owned()), message.content.clone()),
+                    None if preserve_thinking => {
+                        let split = split_reasoning(&message.content);
+                        (split.reasoning.map(str::to_owned), split.visible.to_owned())
+                    }
+                    None => {
+                        // Legacy strip_think semantics: leading whitespace
+                        // before the block is ignored and the visible tail is
+                        // trimmed; content without a block is verbatim.
+                        let split = split_reasoning(message.content.trim_start());
+                        match split.reasoning {
+                            Some(reasoning) => {
+                                (Some(reasoning.to_owned()), split.visible.trim().to_owned())
+                            }
+                            None => (None, message.content.clone()),
+                        }
+                    }
+                };
+                request.model_request.turns.push(Turn::Assistant {
+                    reasoning,
+                    visible,
+                    calls: Vec::new(),
+                });
+            }
+            other => panic!(
+                "ordinary Qwen chat rendering does not accept role {other:?} at message {index}"
+            ),
         }
     }
-    output.finish()
+    let rendered = render_qwen_serve_prompt_annotated_with(&request, append_generation_prompt);
+    AnnotatedMessageRender {
+        text: rendered.text,
+        spans: rendered
+            .spans
+            .into_iter()
+            .map(|span| MessageRenderSpan {
+                kind: match span.kind {
+                    QwenServePromptSpanKind::MessageStartMarker => {
+                        MessageRenderSpanKind::MessageStartMarker
+                    }
+                    QwenServePromptSpanKind::Role => MessageRenderSpanKind::Role,
+                    QwenServePromptSpanKind::ContentSeparator => {
+                        MessageRenderSpanKind::ContentSeparator
+                    }
+                    QwenServePromptSpanKind::MessageContent
+                    | QwenServePromptSpanKind::AssistantReasoningContent
+                    | QwenServePromptSpanKind::ToolDefinitionContent
+                    | QwenServePromptSpanKind::ToolCallContent
+                    | QwenServePromptSpanKind::ToolResultContent => {
+                        MessageRenderSpanKind::MessageContent
+                    }
+                    QwenServePromptSpanKind::MessageEndMarker => {
+                        MessageRenderSpanKind::MessageEndMarker
+                    }
+                    QwenServePromptSpanKind::GeneratedAssistantStartMarker => {
+                        MessageRenderSpanKind::GeneratedAssistantStartMarker
+                    }
+                    QwenServePromptSpanKind::GeneratedAssistantRole => {
+                        MessageRenderSpanKind::GeneratedAssistantRole
+                    }
+                    QwenServePromptSpanKind::ThinkingChannelStartMarker => {
+                        MessageRenderSpanKind::ThinkingChannelStartMarker
+                    }
+                    QwenServePromptSpanKind::ThinkingChannelEndMarker => {
+                        MessageRenderSpanKind::ThinkingChannelEndMarker
+                    }
+                    QwenServePromptSpanKind::ReasoningInstructionContent => {
+                        MessageRenderSpanKind::ReasoningInstructionContent
+                    }
+                },
+                message_index: span.message_index,
+                role: span.role.map(|role| role.as_str().to_owned()),
+                channel: span.channel.and_then(|channel| match channel {
+                    QwenServePromptChannel::Thinking => Some(MessageRenderChannel::Thinking),
+                    _ => None,
+                }),
+                byte_start: span.byte_start,
+                byte_end: span.byte_end,
+            })
+            .collect(),
+    }
 }
 
 #[allow(dead_code)]
@@ -1212,9 +1217,24 @@ pub(crate) fn render_qwen38_single_turn_prompt(
     render_qwen38_messages_prompt_with_generation(&messages, true, generation_mode)
 }
 
+#[allow(dead_code)]
 pub(crate) fn render_qwen_single_turn_prompt(
     user: &str,
     system: Option<&str>,
+    generation_mode: QwenGenerationMode,
+) -> String {
+    render_qwen_single_turn_prompt_for_template(
+        user,
+        system,
+        QwenTemplate::Generic,
+        generation_mode,
+    )
+}
+
+pub(crate) fn render_qwen_single_turn_prompt_for_template(
+    user: &str,
+    system: Option<&str>,
+    template: QwenTemplate,
     generation_mode: QwenGenerationMode,
 ) -> String {
     let mut messages = Vec::with_capacity(usize::from(system.is_some()) + 1);
@@ -1230,7 +1250,7 @@ pub(crate) fn render_qwen_single_turn_prompt(
         content: user.into(),
         ..Default::default()
     });
-    render_qwen_messages_prompt_with_generation(&messages, false, true, generation_mode)
+    render_qwen_messages_prompt_for_template(&messages, template, false, true, generation_mode).text
 }
 
 #[allow(dead_code)]
@@ -1400,6 +1420,7 @@ fn require_no_reasoning_field(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn strip_think(text: &str) -> String {
     let trimmed = text.trim_start();
     if let Some(rest) = trimmed.strip_prefix("<think>")
@@ -1627,21 +1648,32 @@ mod tests {
             message("assistant", "<think>hidden</think>done"),
             message("user", "two"),
         ];
-        let prefix = concat!(
-            "<|im_start|>system\nBe exact.<|im_end|>\n",
-            "<|im_start|>user\none<|im_end|>\n",
-            "<|im_start|>assistant\ndone<|im_end|>\n",
-            "<|im_start|>user\ntwo<|im_end|>\n",
-            "<|im_start|>assistant\n",
-        );
-        for (mode, suffix) in [
-            (QwenGenerationMode::Auto, ""),
-            (QwenGenerationMode::Thinking, "<think>\n"),
-            (QwenGenerationMode::NoThinking, "<think>\n\n</think>\n\n"),
+        // No-thinking sessions re-render history assistant turns with the
+        // preclosed block the model consumed (serve normative fixture
+        // `qwen_no_thinking_preclosed_history_stable`).
+        for (mode, history, suffix) in [
+            (QwenGenerationMode::Auto, "", ""),
+            (QwenGenerationMode::Thinking, "", "<think>\n"),
+            (
+                QwenGenerationMode::NoThinking,
+                "<think>\n\n</think>\n\n",
+                "<think>\n\n</think>\n\n",
+            ),
         ] {
+            let expected = format!(
+                concat!(
+                    "<|im_start|>system\nBe exact.<|im_end|>\n",
+                    "<|im_start|>user\none<|im_end|>\n",
+                    "<|im_start|>assistant\n{history}done<|im_end|>\n",
+                    "<|im_start|>user\ntwo<|im_end|>\n",
+                    "<|im_start|>assistant\n{suffix}",
+                ),
+                history = history,
+                suffix = suffix,
+            );
             let render =
                 render_qwen_messages_prompt_with_generation_annotated(&messages, false, true, mode);
-            assert_eq!(render.text, format!("{prefix}{suffix}"));
+            assert_eq!(render.text, expected);
             assert_eq!(
                 render.text,
                 render_qwen_messages_prompt_with_generation(&messages, false, true, mode)
@@ -2549,8 +2581,25 @@ mod tests {
             let name = case["name"].as_str().expect("case name");
             if case.get("normative_for").is_some() {
                 // Frozen ahead of the serve/S2 renderers (SERVE.md gate 4,
-                // fixture-before-renderer); not consumable by the existing
-                // generic renderer.
+                // fixture-before-renderer); asserted by the serve tests.
+                continue;
+            }
+            if let Some(divergence) = case.get("documented_divergence") {
+                // A negative example: the bytes a naive renderer would emit.
+                // The shared renderer must NOT produce them.
+                let messages: Vec<ChatMessage> =
+                    serde_json::from_value(case["messages"].clone()).expect("messages");
+                let rendered = render_qwen_messages_prompt_with_generation(
+                    &messages,
+                    false,
+                    true,
+                    QwenGenerationMode::NoThinking,
+                );
+                assert_ne!(
+                    rendered,
+                    case["prompt"].as_str().expect("case prompt"),
+                    "{name}: {divergence}"
+                );
                 continue;
             }
             let messages: Vec<ChatMessage> = serde_json::from_value(case["messages"].clone())
@@ -2574,7 +2623,7 @@ mod tests {
             );
             consumed += 1;
         }
-        assert_eq!(consumed, 7, "consumable case census");
+        assert_eq!(consumed, 6, "consumable case census");
     }
 
     #[test]

@@ -1,0 +1,235 @@
+{
+  "schema": "qwen.chat_template_oracle",
+  "schema_version": 1,
+  "engine": "jinja2 3.1.4 ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)",
+  "template": "qwen36_a3b_chat_template.jinja",
+  "template_sha256": "55d4931433fe502b794226ee7f4d206a6bdd436ac9f80eb7d8ebb4c639f9ea0c",
+  "cases": [
+    {
+      "id": "user_thinking",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "system_user_thinking",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Be concise."
+          },
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\nBe concise.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "user_no_thinking",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true,
+        "enable_thinking": false
+      },
+      "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "padded_content_trims",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "  Be concise.\n"
+          },
+          {
+            "role": "user",
+            "content": "\n Hi \n"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\nBe concise.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "history_strips_reasoning_before_last_user",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "<think>\nthinking\n</think>\n\nAnswer one"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "history_reasoning_content_field_stripped",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one",
+            "reasoning_content": "thinking"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "history_preserve_thinking",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one",
+            "reasoning_content": "thinking"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true,
+        "preserve_thinking": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\n<think>\nthinking\n</think>\n\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "history_preserve_inline_think",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "<think>\n  thinking \n</think>\n\nAnswer one"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true,
+        "preserve_thinking": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\n<think>\nthinking\n</think>\n\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "history_no_thinking_mode",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true,
+        "enable_thinking": false
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "two_system_messages_merge",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "A"
+          },
+          {
+            "role": "system",
+            "content": "B"
+          },
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\nA\nB<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "developer_role_as_system",
+      "input": {
+        "messages": [
+          {
+            "role": "developer",
+            "content": "Dev"
+          },
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\nDev<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "empty_system_omitted",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "   "
+          },
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    }
+  ]
+}

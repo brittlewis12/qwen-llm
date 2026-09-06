@@ -14,10 +14,14 @@
 //!    consumed, keeping prompt-boundary prefix stability (the naive strip
 //!    rendering is the documented divergence case).
 //!
-//! The validated Qwen3.8 identity currently renders through this same
-//! generic path, exactly as the legacy CLI does (S0 exercised q38 through
-//! it); the bespoke Qwen3.8 pre-closed-history renderer remains a modern
-//! `qwen run` surface and is out of S1 serve scope.
+//! Pinned templates (`QwenTemplate::verified()`) follow the released Jinja
+//! byte for byte where the two invariants above allow: content is trimmed,
+//! the generation suffix is always `<think>\n` or the preclosed block (the
+//! bare suffix exists only for unpinned ChatML), and preserved reasoning
+//! replays in the canonical `<think>\n{reasoning}\n</think>\n\n{content}`
+//! form, which is byte-identical to the exact inverse for well-formed
+//! output. Oracle: `tests/fixtures/qwen36_chat_template_oracle_v1.json`,
+//! rendered by `scripts/reference/render_qwen_chat_template.py`.
 
 use super::items::{QwenTemplate, ServeRequest};
 use super::tool_parse::{ParsedCall, render_calls};
@@ -29,6 +33,63 @@ const IM_END: &str = "<|im_end|>";
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
 const PRECLOSED_THINK: &str = "<think>\n\n</think>\n\n";
+
+/// What follows `<|im_start|>assistant\n` in the generation suffix, which
+/// also fixes the initial state of the output parser.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QwenGeneration {
+    /// Legacy unpinned ChatML: the model emits `<think>` itself if it wants to.
+    Bare,
+    /// `<think>\n`: the model continues inside an open think block.
+    PreOpen,
+    /// `<think>\n\n</think>\n\n`: thinking suppressed.
+    PreClosed,
+}
+
+/// Resolve the generation suffix for a bound request from its template's
+/// released default and the request's explicit controls.
+pub(crate) fn qwen_generation(request: &ServeRequest) -> QwenGeneration {
+    if request.no_thinking {
+        return QwenGeneration::PreClosed;
+    }
+    match request.template {
+        QwenTemplate::Qwen38 => match qwen38_generation_mode(request) {
+            Some(Qwen38GenerationMode::NoThinking) => QwenGeneration::PreClosed,
+            _ => QwenGeneration::PreOpen,
+        },
+        QwenTemplate::Qwen36 => QwenGeneration::PreOpen,
+        QwenTemplate::Qwen35 => {
+            if request.thinking_requested {
+                QwenGeneration::PreOpen
+            } else {
+                QwenGeneration::PreClosed
+            }
+        }
+        QwenTemplate::Generic => {
+            if request.thinking_requested {
+                QwenGeneration::PreOpen
+            } else {
+                QwenGeneration::Bare
+            }
+        }
+    }
+}
+
+fn push_open_thinking(output: &mut AnnotatedPromptBuilder, context: SpanContext) {
+    let thinking = context.channel(Some(QwenServePromptChannel::Thinking));
+    output.push(
+        THINK_OPEN,
+        QwenServePromptSpanKind::ThinkingChannelStartMarker,
+        thinking,
+        None,
+    );
+    output.push(
+        "\n",
+        QwenServePromptSpanKind::ContentSeparator,
+        thinking,
+        None,
+    );
+}
 
 /// Split raw generated text into (reasoning, visible) at the first
 /// `</think>`. Exact-inverse contract: when the reasoning is `Some` and
@@ -459,7 +520,9 @@ fn push_visible_and_calls(
     context: SpanContext,
     visible: &str,
     calls: &[ToolCall],
+    trim: bool,
 ) {
+    let visible = if trim { visible.trim() } else { visible };
     output.push(
         visible,
         QwenServePromptSpanKind::MessageContent,
@@ -502,31 +565,61 @@ fn push_assistant_body(
     calls: &[ToolCall],
     no_thinking: bool,
     strip_history_thinking: bool,
+    verified: bool,
 ) {
     if no_thinking {
         push_preclosed_thinking(output, context);
     } else if let Some(reasoning) = reasoning.filter(|_| !strip_history_thinking) {
         let thinking = context.channel(Some(QwenServePromptChannel::Thinking));
-        output.push(
-            THINK_OPEN,
-            QwenServePromptSpanKind::ThinkingChannelStartMarker,
-            thinking,
-            None,
-        );
-        output.push(
-            reasoning,
-            QwenServePromptSpanKind::AssistantReasoningContent,
-            thinking,
-            None,
-        );
-        output.push(
-            THINK_CLOSE,
-            QwenServePromptSpanKind::ThinkingChannelEndMarker,
-            thinking,
-            None,
-        );
+        if verified {
+            // Released form: `<think>\n{reasoning|trim}\n</think>\n\n{content}`.
+            push_open_thinking(output, context);
+            output.push(
+                reasoning.trim(),
+                QwenServePromptSpanKind::AssistantReasoningContent,
+                thinking,
+                None,
+            );
+            output.push(
+                "\n",
+                QwenServePromptSpanKind::ContentSeparator,
+                thinking,
+                None,
+            );
+            output.push(
+                THINK_CLOSE,
+                QwenServePromptSpanKind::ThinkingChannelEndMarker,
+                thinking,
+                None,
+            );
+            output.push(
+                "\n\n",
+                QwenServePromptSpanKind::ContentSeparator,
+                context,
+                None,
+            );
+        } else {
+            output.push(
+                THINK_OPEN,
+                QwenServePromptSpanKind::ThinkingChannelStartMarker,
+                thinking,
+                None,
+            );
+            output.push(
+                reasoning,
+                QwenServePromptSpanKind::AssistantReasoningContent,
+                thinking,
+                None,
+            );
+            output.push(
+                THINK_CLOSE,
+                QwenServePromptSpanKind::ThinkingChannelEndMarker,
+                thinking,
+                None,
+            );
+        }
     }
-    push_visible_and_calls(output, context, visible, calls);
+    push_visible_and_calls(output, context, visible, calls, verified);
 }
 
 /// Render the full prompt for a validated request, including the
@@ -538,7 +631,17 @@ pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
 pub(crate) fn render_qwen_serve_prompt_annotated(
     request: &ServeRequest,
 ) -> AnnotatedQwenServePrompt {
+    render_qwen_serve_prompt_annotated_with(request, true)
+}
+
+/// Render with or without the trailing generation suffix (transcript-only
+/// rendering is used by the census tooling).
+pub(crate) fn render_qwen_serve_prompt_annotated_with(
+    request: &ServeRequest,
+    append_generation: bool,
+) -> AnnotatedQwenServePrompt {
     let mut output = AnnotatedPromptBuilder::default();
+    let verified = request.template.verified();
     let qwen38_mode = qwen38_generation_mode(request);
     let effort_instruction = qwen38_mode.and_then(|mode| match mode {
         Qwen38GenerationMode::Thinking(effort) => effort.instruction(),
@@ -549,7 +652,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
         render_tools_system_block(
             &request.model_request.tools,
             effort_instruction,
-            qwen38_mode.is_some(),
+            verified,
             request.model_request.system.as_deref(),
             request
                 .model_request
@@ -581,7 +684,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
                 }
             }
             output.push(
-                if qwen38_mode.is_some() {
+                if verified {
                     system
                 } else {
                     request.model_request.system.as_deref().unwrap_or("")
@@ -603,6 +706,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
             Turn::User(text) => {
                 let context = SpanContext::message(message_index, QwenServePromptRole::User, None);
                 push_message_header(&mut output, context, false);
+                let text = if verified { text.trim() } else { text.as_str() };
                 output.push(text, QwenServePromptSpanKind::MessageContent, context, None);
                 push_message_end(&mut output, context);
             }
@@ -633,6 +737,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
                         request.no_thinking
                             || matches!(qwen38_mode, Some(Qwen38GenerationMode::NoThinking)),
                         request.strip_history_thinking,
+                        verified,
                     );
                 }
                 pending_tool_labels = calls.iter().map(|call| call.name.clone()).collect();
@@ -659,7 +764,11 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
                         None,
                     );
                     output.push(
-                        &result.output,
+                        if verified {
+                            result.output.trim()
+                        } else {
+                            result.output.as_str()
+                        },
                         QwenServePromptSpanKind::ToolResultContent,
                         context.tool_call(result_index),
                         pending_tool_labels.get(result_index).cloned(),
@@ -677,27 +786,15 @@ pub(crate) fn render_qwen_serve_prompt_annotated(
         }
         message_index += 1;
     }
+    if !append_generation {
+        return output.finish();
+    }
     let generated = SpanContext::generated(None);
     push_message_header(&mut output, generated, true);
-    match qwen38_mode {
-        Some(Qwen38GenerationMode::Thinking(_)) => {
-            let thinking = generated.channel(Some(QwenServePromptChannel::Thinking));
-            output.push(
-                THINK_OPEN,
-                QwenServePromptSpanKind::ThinkingChannelStartMarker,
-                thinking,
-                None,
-            );
-            output.push(
-                "\n",
-                QwenServePromptSpanKind::ContentSeparator,
-                thinking,
-                None,
-            );
-        }
-        Some(Qwen38GenerationMode::NoThinking) => push_preclosed_thinking(&mut output, generated),
-        None if request.no_thinking => push_preclosed_thinking(&mut output, generated),
-        None => {}
+    match qwen_generation(request) {
+        QwenGeneration::PreOpen => push_open_thinking(&mut output, generated),
+        QwenGeneration::PreClosed => push_preclosed_thinking(&mut output, generated),
+        QwenGeneration::Bare => {}
     }
     output.finish()
 }
@@ -1124,6 +1221,112 @@ mod tests {
             "system text after tools must be trimmed:\n{rendered}"
         );
         assert_eq!(rendered.matches(xhigh).count(), 1);
+    }
+
+    /// Digest-verified Qwen3.6 rendering matches the released Jinja byte for
+    /// byte on every oracle case, except the one documented divergence
+    /// (no-thinking history keeps the preclosed block the model consumed).
+    #[test]
+    fn qwen36_matches_jinja_oracle_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/qwen36_chat_template_oracle_v1.json"
+        ))
+        .expect("parse oracle fixture");
+        assert_eq!(fixture["schema"], "qwen.chat_template_oracle");
+        let mut checked = 0usize;
+        for case in fixture["cases"].as_array().expect("cases") {
+            let id = case["id"].as_str().expect("id");
+            let input = &case["input"];
+            let expected = case["rendered"].as_str().expect("rendered");
+            let mut request = ServeRequest {
+                template: QwenTemplate::Qwen36,
+                no_thinking: input["enable_thinking"] == json!(false),
+                strip_history_thinking: input["preserve_thinking"] != json!(true),
+                ..ServeRequest::default()
+            };
+            let mut systems = Vec::new();
+            for message in input["messages"].as_array().expect("messages") {
+                let role = message["role"].as_str().expect("role");
+                let content = message["content"].as_str().unwrap_or("").to_owned();
+                match role {
+                    "system" | "developer" => systems.push(content),
+                    "user" => request.model_request.turns.push(Turn::User(content)),
+                    "assistant" => {
+                        let reasoning = message["reasoning_content"].as_str().map(str::to_owned);
+                        let (reasoning, visible) = match reasoning {
+                            Some(reasoning) => (Some(reasoning), content),
+                            None => {
+                                let split = split_reasoning(&content);
+                                (split.reasoning.map(str::to_owned), split.visible.to_owned())
+                            }
+                        };
+                        request.model_request.turns.push(Turn::Assistant {
+                            reasoning,
+                            visible,
+                            calls: Vec::new(),
+                        });
+                    }
+                    other => panic!("{id}: unexpected role {other}"),
+                }
+            }
+            if systems.len() > 1 {
+                // Open Responses input rejects a second system item; the
+                // template's merge rule has no producer here.
+                continue;
+            }
+            request.model_request.system = systems.pop();
+            let rendered = render_qwen_serve_prompt(&request);
+            if id == "history_no_thinking_mode" {
+                // Documented divergence (`qwen_no_thinking_preclosed_history_stable`).
+                assert_eq!(
+                    rendered,
+                    expected.replacen(
+                        "<|im_start|>assistant\nAnswer one",
+                        "<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer one",
+                        1
+                    ),
+                    "{id}"
+                );
+            } else {
+                assert_eq!(rendered, expected, "{id}");
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 11, "oracle case census");
+    }
+
+    /// The generation suffix and the output parser's initial state agree.
+    #[test]
+    fn generation_suffix_matches_parser_initial_state() {
+        for (template, no_thinking, thinking_requested, expected) in [
+            (QwenTemplate::Qwen36, false, false, QwenGeneration::PreOpen),
+            (QwenTemplate::Qwen36, true, false, QwenGeneration::PreClosed),
+            (
+                QwenTemplate::Qwen35,
+                false,
+                false,
+                QwenGeneration::PreClosed,
+            ),
+            (QwenTemplate::Qwen35, false, true, QwenGeneration::PreOpen),
+            (QwenTemplate::Generic, false, false, QwenGeneration::Bare),
+            (QwenTemplate::Generic, false, true, QwenGeneration::PreOpen),
+            (QwenTemplate::Qwen38, false, false, QwenGeneration::PreOpen),
+        ] {
+            let request = ServeRequest {
+                template,
+                no_thinking,
+                thinking_requested,
+                ..ServeRequest::default()
+            };
+            assert_eq!(qwen_generation(&request), expected, "{template:?}");
+            let rendered = render_qwen_serve_prompt(&request);
+            let tail = rendered.rsplit_once("<|im_start|>assistant\n").unwrap().1;
+            match expected {
+                QwenGeneration::PreOpen => assert_eq!(tail, "<think>\n"),
+                QwenGeneration::PreClosed => assert_eq!(tail, PRECLOSED_THINK),
+                QwenGeneration::Bare => assert_eq!(tail, ""),
+            }
+        }
     }
 
     /// Anti-drift: serve's renderer must agree byte-for-byte with the CLI

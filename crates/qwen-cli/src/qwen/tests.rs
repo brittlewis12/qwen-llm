@@ -388,12 +388,41 @@ fn dflash_long_policy_prices_probes_and_requires_sustained_reentry() {
 }
 
 #[test]
-fn dflash_fallback_density_does_not_change_short_context_policy() {
+fn dflash_short_policy_does_not_credit_exact_replay_as_saved_work() {
     let mut state = DflashAdaptiveState::default();
-    for _ in 0..DFLASH_LONG_FALLBACK_WINDOW {
+    for _ in 0..DFLASH_ALPHA_WINDOW {
         state.record_spec_step(4, true, false, true, false, false, 8_000);
     }
+    assert_eq!(state.reason, Some(DflashBackoffReason::Fallback));
+    assert!(state.alpha_window.iter().all(|&accepted| accepted == 4));
+
+    for _ in 0..DFLASH_ALPHA_WINDOW {
+        state.record_spec_step(4, false, true, true, false, false, 8_000);
+    }
     assert_eq!(state.reason, None);
+    assert_eq!(state.fallback_window.len(), DFLASH_ALPHA_WINDOW);
+    state.prepare_mode(true);
+    assert!(state.alpha_window.is_empty());
+    assert!(state.fallback_window.is_empty());
+}
+
+#[test]
+fn dflash_short_saved_work_preserves_clean_and_sparse_fallback_winners() {
+    for sampled in [false, true] {
+        let mut losing = DflashAdaptiveState::default();
+        let mut winning = DflashAdaptiveState::default();
+        for _ in 0..DFLASH_ALPHA_WINDOW.max(DFLASH_SAMPLED_ALPHA_WINDOW) {
+            losing.record_spec_step(1, false, false, true, sampled, false, 8_000);
+            winning.record_spec_step(3, false, false, true, sampled, false, 8_000);
+        }
+        assert_eq!(losing.reason, Some(DflashBackoffReason::Acceptance));
+        assert_eq!(winning.reason, None);
+    }
+    let mut sparse = DflashAdaptiveState::default();
+    for i in 0..DFLASH_ALPHA_WINDOW {
+        sparse.record_spec_step(6, i % 8 == 0, false, true, false, false, 8_000);
+    }
+    assert_eq!(sparse.reason, None);
 }
 
 #[test]

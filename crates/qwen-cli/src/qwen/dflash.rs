@@ -294,11 +294,29 @@ impl DflashAdaptiveState {
         if self.alpha_window.len() > window_size {
             self.alpha_window.remove(0);
         }
+        self.fallback_window.push(fallback_ran);
+        if self.fallback_window.len() > window_size {
+            self.fallback_window.remove(0);
+        }
         if self.alpha_window.len() == window_size {
             let mean_emitted =
                 1.0 + self.alpha_window.iter().sum::<usize>() as f64 / window_size as f64;
-            if mean_emitted < dflash_breakeven(position) - DFLASH_ALPHA_OFF_MARGIN {
-                self.reason = Some(DflashBackoffReason::Acceptance);
+            // Exact fallback repeats every committed target row serially;
+            // those accepted tokens save no target evaluations.
+            let mean_saved = self
+                .alpha_window
+                .iter()
+                .zip(&self.fallback_window)
+                .map(|(&accepted, &fallback)| if fallback { 0 } else { accepted + 1 })
+                .sum::<usize>() as f64
+                / window_size as f64;
+            let threshold = dflash_breakeven(position) - DFLASH_ALPHA_OFF_MARGIN;
+            if mean_saved < threshold {
+                self.reason = Some(if mean_emitted < threshold {
+                    DflashBackoffReason::Acceptance
+                } else {
+                    DflashBackoffReason::Fallback
+                });
             } else if self.backoff_active() {
                 self.reason = None;
             }

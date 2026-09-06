@@ -377,10 +377,17 @@ because client model-pickers probe it).
   the generation suffix is always `<think>\n` or the preclosed block, and
   preserved reasoning replays as `<think>\n{reasoning}\n</think>\n\n{content}`.
   Qwen3.6 thinks unless `x_qwen.no_thinking`; Qwen3.5's released default is
-  no-thinking. The two documented divergences stand: no-thinking history keeps
-  the preclosed block, and a second system item is rejected rather than merged.
-  Unpinned ChatML keeps the legacy generic contract (bare suffix, verbatim
-  content) rather than guessing. `qwen run` renders through the same code.
+  no-thinking (its template has no `preserve_thinking` at all, so preserve is
+  a serve policy there). Documented divergences: history assistant turns keep
+  the preclosed block in a no-thinking session (which is what the released
+  template itself renders for preserved empty reasoning), a second system
+  item is rejected rather than merged, and the template's
+  `last_query_index` rule (reasoning kept only for assistant turns after the
+  final user query) is not applied until tool continuation lands. Trimming
+  follows Python `str.strip()`. Unpinned ChatML keeps the legacy generic
+  contract (bare suffix, verbatim content) rather than guessing; an
+  unrecognized Qwen3.8 or Flash-Next template fails startup. `qwen run`,
+  `qwen-lens`, `qwen-bench`, and `qwen-census` render through the same code.
 - Preserve/strip rendering policy: preserve is the default for the validated
   Qwen3.6 identity (owner position, Amendment 1 of S0; economics measured in S0
   G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 uses

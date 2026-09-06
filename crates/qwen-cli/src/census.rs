@@ -6,13 +6,16 @@ mod messages;
 mod model_request;
 mod open_responses;
 mod payload_redundancy;
+#[allow(dead_code)]
+mod prompt_template;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
 use messages::{
-    ChatMessage, MessagesThinkingMode, messages_auto_preserve_thinking, parse_messages_input,
-    render_qwen_messages_prompt, strip_think,
+    ChatMessage, MessagesThinkingMode, QwenGenerationMode, messages_auto_preserve_thinking,
+    parse_messages_input, render_qwen_messages_prompt_for_template, strip_think,
 };
+use open_responses::items::QwenTemplate;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::Model;
 use qwen_llm::metal_forward::{
@@ -209,7 +212,14 @@ fn main() -> Result<()> {
         Value::Null
     } else {
         let tokenizer = Tokenizer::from_gguf(&gguf).context("construct native GGUF tokenizer")?;
-        conversation_census(&args.model, &args.messages, args.thinking, &tokenizer)?
+        let template = crate::prompt_template::qwen_template_for_gguf(&gguf)?;
+        conversation_census(
+            &args.model,
+            &args.messages,
+            args.thinking,
+            template,
+            &tokenizer,
+        )?
     };
 
     let ignored_environment_overrides = ["QWEN_NATIVE_QUANT_EMBED", "QWEN_MOE_ROUTER_F16"]
@@ -494,12 +504,13 @@ fn conversation_census(
     model_path: &Path,
     paths: &[PathBuf],
     policy: ThinkingPolicy,
+    template: QwenTemplate,
     tokenizer: &Tokenizer,
 ) -> Result<Value> {
     let mut files = Vec::with_capacity(paths.len());
     for (ordinal, path) in paths.iter().enumerate() {
         files.push(load_conversation_file(
-            model_path, ordinal, path, policy, tokenizer,
+            model_path, ordinal, path, policy, template, tokenizer,
         )?);
     }
 
@@ -582,6 +593,7 @@ fn load_conversation_file(
     ordinal: usize,
     path: &Path,
     policy: ThinkingPolicy,
+    template: QwenTemplate,
     tokenizer: &Tokenizer,
 ) -> Result<ConversationFile> {
     let raw = std::fs::read_to_string(path)
@@ -616,16 +628,30 @@ fn load_conversation_file(
         if message.role != "assistant" {
             continue;
         }
-        let prompt_text = render_qwen_messages_prompt(
+        let prompt_text = render_qwen_messages_prompt_for_template(
             &messages[..assistant_message_index],
+            template,
             preserve_thinking,
             true,
-        );
-        let completed_text = render_qwen_messages_prompt(
+            QwenGenerationMode::Auto,
+        )
+        .with_context(|| format!("render request {} in {}", turns.len(), path.display()))?
+        .text;
+        let completed_text = render_qwen_messages_prompt_for_template(
             &messages[..=assistant_message_index],
+            template,
             preserve_thinking,
             false,
-        );
+            QwenGenerationMode::Auto,
+        )
+        .with_context(|| {
+            format!(
+                "render completed turn {} in {}",
+                turns.len(),
+                path.display()
+            )
+        })?
+        .text;
         let prompt_tokens = tokenizer
             .encode(&prompt_text, false)
             .with_context(|| format!("tokenize request {} in {}", turns.len(), path.display()))?;

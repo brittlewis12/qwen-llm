@@ -1,0 +1,76 @@
+[
+ {
+  "id": "user_default_no_thinking",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "add_generation_prompt": true
+ },
+ {
+  "id": "user_explicit_thinking",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": true
+ },
+ {
+  "id": "history_default",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true
+ },
+ {
+  "id": "history_explicit_thinking_preserve",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one",
+    "reasoning_content": "thinking"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": true,
+  "preserve_thinking": true
+ },
+ {
+  "id": "system_user_default",
+  "messages": [
+   {
+    "role": "system",
+    "content": " Be concise. "
+   },
+   {
+    "role": "user",
+    "content": " Hi "
+   }
+  ],
+  "add_generation_prompt": true
+ }
+]

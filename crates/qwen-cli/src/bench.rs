@@ -63,6 +63,8 @@ mod prefix_cache;
 mod prefix_cache_vt_ab;
 #[path = "bench/proj_micro.rs"]
 mod proj_micro;
+#[allow(dead_code)]
+mod prompt_template;
 mod q4_mma_ceiling;
 mod response_shape_runtime;
 #[path = "bench/roofline.rs"]

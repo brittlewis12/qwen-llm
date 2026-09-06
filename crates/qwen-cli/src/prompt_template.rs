@@ -105,15 +105,34 @@ pub(crate) fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelProm
 pub(crate) fn serve_qwen_template(
     family: qwen_llm::model_family::ModelFamily,
     gguf: &GgufFile,
-) -> crate::open_responses::items::QwenTemplate {
+) -> Result<crate::open_responses::items::QwenTemplate> {
     use crate::open_responses::items::QwenTemplate;
     if crate::messages::supports_qwen38_release_prompt_protocol(family, gguf) {
-        return QwenTemplate::Qwen38;
+        return Ok(QwenTemplate::Qwen38);
     }
-    match resolve_qwen_prompt_template(family.architecture_name(), gguf) {
-        Ok(QwenPromptTemplate::Qwen35) => QwenTemplate::Qwen35,
-        Ok(QwenPromptTemplate::Qwen36) => QwenTemplate::Qwen36,
-        _ => QwenTemplate::Generic,
+    Ok(
+        match resolve_qwen_prompt_template(family.architecture_name(), gguf)? {
+            QwenPromptTemplate::Qwen35 => QwenTemplate::Qwen35,
+            QwenPromptTemplate::Qwen36 => QwenTemplate::Qwen36,
+            QwenPromptTemplate::Qwen38
+            | QwenPromptTemplate::Qwen4Next
+            | QwenPromptTemplate::UnverifiedChatMl => QwenTemplate::Generic,
+        },
+    )
+}
+
+/// Template for any loaded GGUF: Qwen families resolve by digest; other
+/// families render nothing through the Qwen renderer and get `Generic`.
+pub(crate) fn qwen_template_for_gguf(
+    gguf: &GgufFile,
+) -> Result<crate::open_responses::items::QwenTemplate> {
+    match qwen_llm::model_family::ModelFamily::detect(gguf) {
+        Some(
+            family @ (qwen_llm::model_family::ModelFamily::Qwen35
+            | qwen_llm::model_family::ModelFamily::Qwen35Moe
+            | qwen_llm::model_family::ModelFamily::Qwen4Exp),
+        ) => serve_qwen_template(family, gguf),
+        _ => Ok(crate::open_responses::items::QwenTemplate::Generic),
     }
 }
 

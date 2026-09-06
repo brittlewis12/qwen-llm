@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::model_request::{SystemSource, Turn};
+use crate::model_request::{SystemSource, ToolResult, Turn};
 use crate::open_responses::items::{QwenTemplate, ServeRequest};
 use crate::open_responses::render::{
     QwenServePromptChannel, QwenServePromptSpanKind, render_qwen_serve_prompt_annotated_with,
@@ -363,67 +363,41 @@ pub(crate) fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThi
 pub(crate) fn load_messages_prompt(
     path: &Path,
     max_messages: Option<usize>,
+    template: QwenTemplate,
     thinking_mode: MessagesThinkingMode,
     append_generation_prompt: bool,
 ) -> Result<String> {
-    load_messages_prompt_with_policy(path, max_messages, thinking_mode, append_generation_prompt)
-        .map(|(prompt, _)| prompt)
+    load_messages_prompt_with_policy(
+        path,
+        max_messages,
+        template,
+        thinking_mode,
+        append_generation_prompt,
+    )
+    .map(|(prompt, _)| prompt)
 }
 
 pub(crate) fn load_messages_prompt_with_policy(
     path: &Path,
     max_messages: Option<usize>,
+    template: QwenTemplate,
     thinking_mode: MessagesThinkingMode,
     append_generation_prompt: bool,
-) -> Result<(String, bool)> {
-    load_messages_prompt_with_policy_and_generation(
-        path,
-        max_messages,
-        thinking_mode,
-        append_generation_prompt,
-        QwenGenerationMode::Auto,
-    )
-}
-
-pub(crate) fn load_messages_prompt_with_policy_and_generation(
-    path: &Path,
-    max_messages: Option<usize>,
-    thinking_mode: MessagesThinkingMode,
-    append_generation_prompt: bool,
-    generation_mode: QwenGenerationMode,
 ) -> Result<(String, bool)> {
     let (messages, meta) = load_messages_input(path, max_messages)?;
-    render_loaded_qwen_messages(
-        &messages,
-        &meta,
-        thinking_mode,
-        append_generation_prompt,
-        generation_mode,
-    )
-}
-
-fn render_loaded_qwen_messages(
-    messages: &[ChatMessage],
-    meta: &serde_json::Value,
-    thinking_mode: MessagesThinkingMode,
-    append_generation_prompt: bool,
-    generation_mode: QwenGenerationMode,
-) -> Result<(String, bool)> {
     let preserve_thinking = match thinking_mode {
         MessagesThinkingMode::Preserve => true,
         MessagesThinkingMode::Strip => false,
-        MessagesThinkingMode::Auto => messages_auto_preserve_thinking(meta),
+        MessagesThinkingMode::Auto => messages_auto_preserve_thinking(&meta),
     };
-    let prompt = if generation_mode == QwenGenerationMode::Auto {
-        render_qwen_messages_prompt(messages, preserve_thinking, append_generation_prompt)
-    } else {
-        render_qwen_messages_prompt_with_generation(
-            messages,
-            preserve_thinking,
-            append_generation_prompt,
-            generation_mode,
-        )
-    };
+    let prompt = render_qwen_messages_prompt_for_template(
+        &messages,
+        template,
+        preserve_thinking,
+        append_generation_prompt,
+        QwenGenerationMode::Auto,
+    )?
+    .text;
     Ok((prompt, preserve_thinking))
 }
 
@@ -742,6 +716,8 @@ fn validate_strict_messages(
     Ok(validated)
 }
 
+/// Legacy unpinned-ChatML wrapper kept for probes and tests.
+#[allow(dead_code)]
 pub(crate) fn render_qwen_messages_prompt(
     messages: &[ChatMessage],
     preserve_thinking: bool,
@@ -751,6 +727,8 @@ pub(crate) fn render_qwen_messages_prompt(
         .text
 }
 
+/// Legacy unpinned-ChatML wrapper kept for probes and tests.
+#[allow(dead_code)]
 pub(crate) fn render_qwen_messages_prompt_annotated(
     messages: &[ChatMessage],
     preserve_thinking: bool,
@@ -764,6 +742,8 @@ pub(crate) fn render_qwen_messages_prompt_annotated(
     )
 }
 
+/// Legacy unpinned-ChatML wrapper kept for probes and tests.
+#[allow(dead_code)]
 pub(crate) fn render_qwen_messages_prompt_with_generation(
     messages: &[ChatMessage],
     preserve_thinking: bool,
@@ -779,6 +759,8 @@ pub(crate) fn render_qwen_messages_prompt_with_generation(
     .text
 }
 
+/// Legacy unpinned-ChatML wrapper kept for probes and tests.
+#[allow(dead_code)]
 pub(crate) fn render_qwen_messages_prompt_with_generation_annotated(
     messages: &[ChatMessage],
     preserve_thinking: bool,
@@ -792,18 +774,47 @@ pub(crate) fn render_qwen_messages_prompt_with_generation_annotated(
         append_generation_prompt,
         generation_mode,
     )
+    .expect("ordinary chat roles (system/developer, user, assistant, tool)")
+}
+
+/// Split assistant content the way the released Qwen templates do: at the
+/// first `</think>`, taking the text after the last `<think>` before it as
+/// reasoning and the text after the last `</think>` as content, each with
+/// surrounding newlines removed as the template's `lstrip`/`rstrip` do.
+pub(crate) fn template_split_think(content: &str) -> (Option<String>, String) {
+    if !content.contains("</think>") {
+        return (None, content.to_owned());
+    }
+    let before_close = content.split("</think>").next().unwrap_or("");
+    let reasoning = before_close
+        .trim_end_matches('\n')
+        .rsplit("<think>")
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('\n')
+        .to_owned();
+    let visible = content
+        .rsplit("</think>")
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('\n')
+        .to_owned();
+    (Some(reasoning), visible)
 }
 
 /// Render ordinary chat messages through the shared Qwen renderer for a
 /// resolved template. `Generic` keeps the legacy unpinned ChatML bytes;
 /// pinned templates follow the released Jinja (see `open_responses::render`).
+/// Accepts the roles the released templates accept: a leading `system` or
+/// `developer`, `user`, `assistant`, and `tool` (consecutive results are
+/// coalesced into one tool-response turn).
 pub(crate) fn render_qwen_messages_prompt_for_template(
     messages: &[ChatMessage],
     template: QwenTemplate,
     preserve_thinking: bool,
     append_generation_prompt: bool,
     generation_mode: QwenGenerationMode,
-) -> AnnotatedMessageRender {
+) -> Result<AnnotatedMessageRender> {
     let mut request = ServeRequest {
         template,
         strip_history_thinking: !preserve_thinking,
@@ -813,9 +824,13 @@ pub(crate) fn render_qwen_messages_prompt_for_template(
     };
     for (index, message) in messages.iter().enumerate() {
         match message.role.as_str() {
-            "system" if index == 0 => {
+            "system" | "developer" if index == 0 => {
                 request.model_request.system = Some(message.content.clone());
-                request.model_request.system_source = Some(SystemSource::System);
+                request.model_request.system_source = Some(if message.role == "system" {
+                    SystemSource::System
+                } else {
+                    SystemSource::Developer
+                });
             }
             "user" => request
                 .model_request
@@ -828,6 +843,7 @@ pub(crate) fn render_qwen_messages_prompt_for_template(
                     .or(message.reasoning.as_deref())
                 {
                     Some(reasoning) => (Some(reasoning.to_owned()), message.content.clone()),
+                    None if template.verified() => template_split_think(&message.content),
                     None if preserve_thinking => {
                         let split = split_reasoning(&message.content);
                         (split.reasoning.map(str::to_owned), split.visible.to_owned())
@@ -851,13 +867,27 @@ pub(crate) fn render_qwen_messages_prompt_for_template(
                     calls: Vec::new(),
                 });
             }
-            other => panic!(
-                "ordinary Qwen chat rendering does not accept role {other:?} at message {index}"
+            "tool" => {
+                let result = ToolResult {
+                    call_id: String::new(),
+                    name: String::new(),
+                    output: message.content.clone(),
+                };
+                match request.model_request.turns.last_mut() {
+                    Some(Turn::ToolResults(results)) => results.push(result),
+                    _ => request
+                        .model_request
+                        .turns
+                        .push(Turn::ToolResults(vec![result])),
+                }
+            }
+            other => bail!(
+                "ordinary Qwen chat rendering does not accept role {other:?} at message {index} (system/developer must lead; then user, assistant, tool)"
             ),
         }
     }
     let rendered = render_qwen_serve_prompt_annotated_with(&request, append_generation_prompt);
-    AnnotatedMessageRender {
+    Ok(AnnotatedMessageRender {
         text: rendered.text,
         spans: rendered
             .spans
@@ -907,7 +937,7 @@ pub(crate) fn render_qwen_messages_prompt_for_template(
                 byte_end: span.byte_end,
             })
             .collect(),
-    }
+    })
 }
 
 #[allow(dead_code)]
@@ -1250,7 +1280,9 @@ pub(crate) fn render_qwen_single_turn_prompt_for_template(
         content: user.into(),
         ..Default::default()
     });
-    render_qwen_messages_prompt_for_template(&messages, template, false, true, generation_mode).text
+    render_qwen_messages_prompt_for_template(&messages, template, false, true, generation_mode)
+        .expect("single-turn roles are system/user")
+        .text
 }
 
 #[allow(dead_code)]
@@ -1567,6 +1599,55 @@ mod tests {
             &json!({ "model": "/models/Qwen3.5-27B-Q4_K_M.gguf" })
         ));
         assert!(!messages_auto_preserve_thinking(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn template_conversion_accepts_released_roles_and_rejects_others() {
+        let messages = vec![
+            message("developer", " Dev "),
+            message("user", "Call it"),
+            message(
+                "assistant",
+                "<tool_call>\n<function=ping>\n</function>\n</tool_call>",
+            ),
+            message("tool", " pong "),
+            message("tool", "pong2"),
+            message("user", "Thanks"),
+        ];
+        let rendered = render_qwen_messages_prompt_for_template(
+            &messages,
+            QwenTemplate::Qwen36,
+            true,
+            true,
+            QwenGenerationMode::Auto,
+        )
+        .expect("released roles render");
+        assert!(
+            rendered
+                .text
+                .starts_with("<|im_start|>system\nDev<|im_end|>\n")
+        );
+        assert!(rendered.text.contains(
+            "<|im_start|>user\n<tool_response>\npong\n</tool_response>\n<tool_response>\npong2\n</tool_response><|im_end|>\n"
+        ));
+        let error = render_qwen_messages_prompt_for_template(
+            &[message("user", "a"), message("system", "late")],
+            QwenTemplate::Qwen36,
+            true,
+            true,
+            QwenGenerationMode::Auto,
+        )
+        .expect_err("late system is rejected, not silently dropped");
+        assert!(error.to_string().contains("role \"system\""));
+        assert_eq!(
+            template_split_think("foo</think>bar"),
+            (Some("foo".into()), "bar".into())
+        );
+        assert_eq!(
+            template_split_think("<think>\n r \n</think>\n\nv"),
+            (Some(" r ".into()), "v".into())
+        );
+        assert_eq!(template_split_think("plain"), (None, "plain".into()));
     }
 
     #[test]
@@ -2238,6 +2319,43 @@ mod tests {
             .status()
             .expect("run chat fixture drift gate");
         assert!(status.success(), "chat fixtures drifted from references");
+    }
+
+    /// jinja2 is fetched by `uv` on first run; hermetic otherwise.
+    #[test]
+    #[ignore = "runs the jinja2 oracle via uv to detect fixture drift"]
+    fn qwen_chat_template_oracle_fixtures_have_no_drift() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("resolve repository root");
+        for (template, cases, fixture) in [
+            (
+                "qwen36_a3b_chat_template.jinja",
+                "qwen36_chat_template_oracle_cases.json",
+                "qwen36_chat_template_oracle_v1.json",
+            ),
+            (
+                "qwen35_chat_template.jinja",
+                "qwen35_chat_template_oracle_cases.json",
+                "qwen35_chat_template_oracle_v1.json",
+            ),
+        ] {
+            let fixtures = "crates/qwen-cli/tests/fixtures";
+            let status = std::process::Command::new("uv")
+                .args([
+                    "run",
+                    "scripts/reference/render_qwen_chat_template.py",
+                    &format!("{fixtures}/templates/{template}"),
+                    &format!("{fixtures}/{cases}"),
+                    "--check",
+                    &format!("{fixtures}/{fixture}"),
+                ])
+                .current_dir(&repository_root)
+                .status()
+                .expect("run oracle drift gate");
+            assert!(status.success(), "{fixture} drifted from {template}");
+        }
     }
 
     #[test]

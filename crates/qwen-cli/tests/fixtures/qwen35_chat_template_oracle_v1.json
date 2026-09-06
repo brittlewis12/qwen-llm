@@ -1,0 +1,98 @@
+{
+  "schema": "qwen.chat_template_oracle",
+  "schema_version": 1,
+  "engine": "jinja2 3.1.4 ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)",
+  "template": "qwen35_chat_template.jinja",
+  "template_sha256": "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
+  "cases": [
+    {
+      "id": "user_default_no_thinking",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "user_explicit_thinking",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true,
+        "enable_thinking": true
+      },
+      "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "history_default",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "history_explicit_thinking_preserve",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one",
+            "reasoning_content": "thinking"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true,
+        "enable_thinking": true,
+        "preserve_thinking": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "system_user_default",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": " Be concise. "
+          },
+          {
+            "role": "user",
+            "content": " Hi "
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\nBe concise.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    }
+  ]
+}

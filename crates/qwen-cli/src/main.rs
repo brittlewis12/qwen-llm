@@ -543,7 +543,7 @@ fn prepare_modern_run_prompt(
     let qwen38 = supports_qwen38_prompt_protocol(family, gguf);
     // Pinned Qwen3.5/3.6 templates render their released bytes; unpinned
     // ChatML keeps the legacy generic contract.
-    let qwen_template = prompt_template::serve_qwen_template(family, gguf);
+    let qwen_template = prompt_template::serve_qwen_template(family, gguf)?;
 
     let no_thinking = run.no_thinking;
     let qwen38_generation_mode =
@@ -613,7 +613,7 @@ fn prepare_modern_run_prompt(
                         } else {
                             QwenGenerationMode::Auto
                         },
-                    )
+                    )?
                     .text
                 }
                 ModelFamily::Qwen4Exp => {
@@ -744,9 +744,11 @@ fn prompt_text(args: &Args) -> Result<(String, PromptSource, bool)> {
         ));
     }
     if let Some(path) = args.messages.as_ref() {
+        // Legacy flat --messages keeps the unpinned generic contract.
         let (prompt, preserves_assistant_content) = load_messages_prompt_with_policy(
             path,
             args.messages_max,
+            crate::open_responses::items::QwenTemplate::Generic,
             messages_thinking_mode(
                 args.messages_preserve_thinking,
                 args.messages_strip_thinking,

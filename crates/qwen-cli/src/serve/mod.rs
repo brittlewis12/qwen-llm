@@ -218,7 +218,8 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     // with the generic ChatML contract (no effort instruction, no
     // preclosed history), silently diverging from upstream.
     let template =
-        crate::prompt_template::serve_qwen_template(family.expect("family checked above"), &gguf);
+        crate::prompt_template::serve_qwen_template(family.expect("family checked above"), &gguf)
+            .context("resolve the loaded model's chat template")?;
     let no_thinking_supported =
         crate::supports_qwen_no_thinking_prompt(family.expect("family checked above"), &gguf);
     drop(gguf);

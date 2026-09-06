@@ -1,7 +1,7 @@
 use crate::messages::{
     AnnotatedMessageRender, ChatMessage, MessageRenderSpanKind, Qwen38GenerationMode,
     Qwen38ReasoningEffort, QwenGenerationMode, parse_strict_messages_input,
-    render_qwen_messages_prompt_with_generation_annotated,
+    render_qwen_messages_prompt_for_template,
     render_qwen38_messages_prompt_with_generation_annotated,
 };
 use crate::open_responses::bind_qwen_request;
@@ -789,7 +789,17 @@ pub(crate) fn validate_lens_input_spec(spec: LensInputSpec<'_>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn detect_qwen_message_protocol(
+/// Serve-renderer template for a resolved prompt protocol.
+pub(crate) fn serve_template_for_protocol(protocol: QwenPromptTemplate) -> QwenTemplate {
+    match protocol {
+        QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next => QwenTemplate::Qwen38,
+        QwenPromptTemplate::Qwen35 => QwenTemplate::Qwen35,
+        QwenPromptTemplate::Qwen36 => QwenTemplate::Qwen36,
+        QwenPromptTemplate::UnverifiedChatMl => QwenTemplate::Generic,
+    }
+}
+
+fn detect_qwen_message_protocol(
     family: ModelFamily,
     gguf: &GgufFile,
 ) -> Result<QwenPromptTemplate> {
@@ -932,12 +942,7 @@ fn prepare_qwen_open_responses_input(
     let request = parse_request(&body).map_err(open_responses_error)?;
     validate_open_responses_execution_controls(&request)?;
     let protocol = detect_qwen_message_protocol(family, gguf)?;
-    let template = match protocol {
-        QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next => QwenTemplate::Qwen38,
-        QwenPromptTemplate::Qwen35
-        | QwenPromptTemplate::Qwen36
-        | QwenPromptTemplate::UnverifiedChatMl => QwenTemplate::Generic,
-    };
+    let template = serve_template_for_protocol(protocol);
     let no_thinking_supported = protocol != QwenPromptTemplate::UnverifiedChatMl;
     let mut request = bind_qwen_request(&request, template, no_thinking_supported)
         .map_err(open_responses_error)?;
@@ -1104,12 +1109,13 @@ fn render_qwen_structured_messages(
     let mode = resolve_qwen_message_mode(protocol, requested)?;
     let (rendered, renderer) = match mode {
         ResolvedMessageMode::Qwen36(mode) => (
-            render_qwen_messages_prompt_with_generation_annotated(
+            render_qwen_messages_prompt_for_template(
                 messages,
+                serve_template_for_protocol(protocol),
                 protocol == QwenPromptTemplate::Qwen36,
                 true,
                 mode,
-            ),
+            )?,
             protocol.renderer_name(),
         ),
         ResolvedMessageMode::Qwen38(mode) => (
@@ -1692,7 +1698,18 @@ mod tests {
         let (qwen36, _, _) =
             render_qwen_structured_messages(&messages, QwenPromptTemplate::Qwen36, None).unwrap();
         assert!(!qwen35.text.contains("private"));
-        assert!(qwen36.text.contains("<think>private</think>answer"));
+        // Pinned Qwen3.6 replays kept reasoning in the released form.
+        assert!(
+            qwen36
+                .text
+                .contains("<|im_start|>assistant\n<think>\nprivate\n</think>\n\nanswer<|im_end|>")
+        );
+        assert!(qwen36.text.ends_with("<|im_start|>assistant\n<think>\n"));
+        assert!(
+            qwen35
+                .text
+                .ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        );
     }
 
     #[test]
@@ -1729,7 +1746,7 @@ mod tests {
         assert_eq!(mode.artifact_name(), "auto");
         assert_eq!(
             generic,
-            render_qwen_messages_prompt_with_generation_annotated(
+            crate::messages::render_qwen_messages_prompt_with_generation_annotated(
                 &messages,
                 false,
                 true,
@@ -2220,7 +2237,7 @@ mod tests {
 
     #[test]
     fn span_mapping_requires_exact_structural_token_boundaries() {
-        let rendered = render_qwen_messages_prompt_with_generation_annotated(
+        let rendered = crate::messages::render_qwen_messages_prompt_with_generation_annotated(
             &[ChatMessage {
                 role: "user".into(),
                 content: "\n\nhello".into(),

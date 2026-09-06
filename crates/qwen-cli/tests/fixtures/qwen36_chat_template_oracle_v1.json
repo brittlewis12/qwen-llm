@@ -230,6 +230,81 @@
         "add_generation_prompt": true
       },
       "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "history_preserve_empty_reasoning",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one",
+            "reasoning_content": ""
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true,
+        "preserve_thinking": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "history_close_tag_without_open",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "foo</think>bar"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true,
+        "preserve_thinking": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\n<think>\nfoo\n</think>\n\nbar<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "whitespace_only_user",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "   \n"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "control_separator_whitespace_trims",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "\u001cBe concise.\u001f"
+          },
+          {
+            "role": "user",
+            "content": " Hi "
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\nBe concise.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
     }
   ]
 }

@@ -75,6 +75,13 @@ pub(crate) fn qwen_generation(request: &ServeRequest) -> QwenGeneration {
     }
 }
 
+/// Python `str.strip()` semantics, which Jinja's `|trim` delegates to:
+/// Unicode `White_Space` plus the U+001C..=U+001F separators that Rust's
+/// `str::trim` leaves in place.
+pub(crate) fn jinja_trim(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
+
 fn push_open_thinking(output: &mut AnnotatedPromptBuilder, context: SpanContext) {
     let thinking = context.channel(Some(QwenServePromptChannel::Thinking));
     output.push(
@@ -425,7 +432,7 @@ fn render_tools_system_block(
         context,
         None,
     );
-    if let Some(system) = system.filter(|text| !text.trim().is_empty()) {
+    if let Some(system) = system.filter(|text| !jinja_trim(text).is_empty()) {
         output.push(
             "\n\n",
             QwenServePromptSpanKind::ContentSeparator,
@@ -433,7 +440,11 @@ fn render_tools_system_block(
             None,
         );
         output.push(
-            if trim_system { system.trim() } else { system },
+            if trim_system {
+                jinja_trim(system)
+            } else {
+                system
+            },
             QwenServePromptSpanKind::MessageContent,
             context,
             system_source.map(str::to_owned),
@@ -522,7 +533,7 @@ fn push_visible_and_calls(
     calls: &[ToolCall],
     trim: bool,
 ) {
-    let visible = if trim { visible.trim() } else { visible };
+    let visible = if trim { jinja_trim(visible) } else { visible };
     output.push(
         visible,
         QwenServePromptSpanKind::MessageContent,
@@ -531,7 +542,7 @@ fn push_visible_and_calls(
     );
     for (call_index, call) in calls.iter().enumerate() {
         let separator = if call_index == 0 {
-            (!visible.trim().is_empty()).then_some("\n\n")
+            (!jinja_trim(visible).is_empty()).then_some("\n\n")
         } else {
             Some("\n")
         };
@@ -575,7 +586,7 @@ fn push_assistant_body(
             // Released form: `<think>\n{reasoning|trim}\n</think>\n\n{content}`.
             push_open_thinking(output, context);
             output.push(
-                reasoning.trim(),
+                jinja_trim(reasoning),
                 QwenServePromptSpanKind::AssistantReasoningContent,
                 thinking,
                 None,
@@ -642,6 +653,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
 ) -> AnnotatedQwenServePrompt {
     let mut output = AnnotatedPromptBuilder::default();
     let verified = request.template.verified();
+    let generation = qwen_generation(request);
     let qwen38_mode = qwen38_generation_mode(request);
     let effort_instruction = qwen38_mode.and_then(|mode| match mode {
         Qwen38GenerationMode::Thinking(effort) => effort.instruction(),
@@ -663,8 +675,13 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
         );
         message_index += 1;
     } else if effort_instruction.is_some() || request.model_request.system.is_some() {
-        let system = request.model_request.system.as_deref().unwrap_or("").trim();
-        if effort_instruction.is_some() || !system.is_empty() {
+        let raw_system = request.model_request.system.as_deref().unwrap_or("");
+        let system = if verified {
+            jinja_trim(raw_system)
+        } else {
+            raw_system
+        };
+        if effort_instruction.is_some() || !jinja_trim(raw_system).is_empty() {
             let context = SpanContext::message(message_index, QwenServePromptRole::System, None);
             push_message_header(&mut output, context, false);
             if let Some(instruction) = effort_instruction {
@@ -684,11 +701,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
                 }
             }
             output.push(
-                if verified {
-                    system
-                } else {
-                    request.model_request.system.as_deref().unwrap_or("")
-                },
+                system,
                 QwenServePromptSpanKind::MessageContent,
                 context,
                 request
@@ -706,7 +719,11 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
             Turn::User(text) => {
                 let context = SpanContext::message(message_index, QwenServePromptRole::User, None);
                 push_message_header(&mut output, context, false);
-                let text = if verified { text.trim() } else { text.as_str() };
+                let text = if verified {
+                    jinja_trim(text)
+                } else {
+                    text.as_str()
+                };
                 output.push(text, QwenServePromptSpanKind::MessageContent, context, None);
                 push_message_end(&mut output, context);
             }
@@ -722,7 +739,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
                 if qwen38_mode.is_some() && calls.is_empty() {
                     push_preclosed_thinking(&mut output, context);
                     output.push(
-                        visible.trim(),
+                        jinja_trim(visible),
                         QwenServePromptSpanKind::MessageContent,
                         context,
                         None,
@@ -734,8 +751,11 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
                         reasoning.as_deref(),
                         visible,
                         calls,
-                        request.no_thinking
-                            || matches!(qwen38_mode, Some(Qwen38GenerationMode::NoThinking)),
+                        // History assistant turns re-render the block the
+                        // model consumed in this session's generation mode
+                        // (preclosed for no-thinking and for Qwen3.5's
+                        // released default).
+                        generation == QwenGeneration::PreClosed,
                         request.strip_history_thinking,
                         verified,
                     );
@@ -765,7 +785,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
                     );
                     output.push(
                         if verified {
-                            result.output.trim()
+                            jinja_trim(&result.output)
                         } else {
                             result.output.as_str()
                         },
@@ -791,7 +811,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
     }
     let generated = SpanContext::generated(None);
     push_message_header(&mut output, generated, true);
-    match qwen_generation(request) {
+    match generation {
         QwenGeneration::PreOpen => push_open_thinking(&mut output, generated),
         QwenGeneration::PreClosed => push_preclosed_thinking(&mut output, generated),
         QwenGeneration::Bare => {}
@@ -1223,76 +1243,122 @@ mod tests {
         assert_eq!(rendered.matches(xhigh).count(), 1);
     }
 
-    /// Digest-verified Qwen3.6 rendering matches the released Jinja byte for
-    /// byte on every oracle case, except the one documented divergence
-    /// (no-thinking history keeps the preclosed block the model consumed).
-    #[test]
-    fn qwen36_matches_jinja_oracle_fixture() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/qwen36_chat_template_oracle_v1.json"
-        ))
-        .expect("parse oracle fixture");
+    /// Build the serve request an oracle case describes, or `None` when the
+    /// Open Responses layer would reject the shape (a second system item).
+    fn oracle_request(template: QwenTemplate, input: &serde_json::Value) -> Option<ServeRequest> {
+        let mut request = ServeRequest {
+            template,
+            no_thinking: input["enable_thinking"] == json!(false),
+            thinking_requested: input["enable_thinking"] == json!(true),
+            strip_history_thinking: input["preserve_thinking"] != json!(true),
+            ..ServeRequest::default()
+        };
+        let mut systems = Vec::new();
+        for message in input["messages"].as_array().expect("messages") {
+            let role = message["role"].as_str().expect("role");
+            let content = message["content"].as_str().unwrap_or("").to_owned();
+            match role {
+                "system" | "developer" => systems.push(content),
+                "user" => request.model_request.turns.push(Turn::User(content)),
+                "assistant" => {
+                    let reasoning = message["reasoning_content"].as_str().map(str::to_owned);
+                    let (reasoning, visible) = match reasoning {
+                        Some(reasoning) => (Some(reasoning), content),
+                        None => {
+                            // Items carry reasoning separately; inline tags are
+                            // what the CLI conversion splits (template rule).
+                            let (reasoning, visible) =
+                                crate::messages::template_split_think(&content);
+                            (reasoning, visible)
+                        }
+                    };
+                    request.model_request.turns.push(Turn::Assistant {
+                        reasoning,
+                        visible,
+                        calls: Vec::new(),
+                    });
+                }
+                other => panic!("unexpected role {other}"),
+            }
+        }
+        if systems.len() > 1 {
+            return None;
+        }
+        request.model_request.system = systems.pop();
+        Some(request)
+    }
+
+    fn assert_oracle_fixture(
+        fixture_json: &str,
+        template: QwenTemplate,
+        divergences: &[(&str, fn(&str) -> String)],
+        expected_checked: usize,
+    ) {
+        let fixture: serde_json::Value = serde_json::from_str(fixture_json).expect("fixture");
         assert_eq!(fixture["schema"], "qwen.chat_template_oracle");
         let mut checked = 0usize;
         for case in fixture["cases"].as_array().expect("cases") {
             let id = case["id"].as_str().expect("id");
-            let input = &case["input"];
             let expected = case["rendered"].as_str().expect("rendered");
-            let mut request = ServeRequest {
-                template: QwenTemplate::Qwen36,
-                no_thinking: input["enable_thinking"] == json!(false),
-                strip_history_thinking: input["preserve_thinking"] != json!(true),
-                ..ServeRequest::default()
-            };
-            let mut systems = Vec::new();
-            for message in input["messages"].as_array().expect("messages") {
-                let role = message["role"].as_str().expect("role");
-                let content = message["content"].as_str().unwrap_or("").to_owned();
-                match role {
-                    "system" | "developer" => systems.push(content),
-                    "user" => request.model_request.turns.push(Turn::User(content)),
-                    "assistant" => {
-                        let reasoning = message["reasoning_content"].as_str().map(str::to_owned);
-                        let (reasoning, visible) = match reasoning {
-                            Some(reasoning) => (Some(reasoning), content),
-                            None => {
-                                let split = split_reasoning(&content);
-                                (split.reasoning.map(str::to_owned), split.visible.to_owned())
-                            }
-                        };
-                        request.model_request.turns.push(Turn::Assistant {
-                            reasoning,
-                            visible,
-                            calls: Vec::new(),
-                        });
-                    }
-                    other => panic!("{id}: unexpected role {other}"),
-                }
-            }
-            if systems.len() > 1 {
-                // Open Responses input rejects a second system item; the
-                // template's merge rule has no producer here.
+            let Some(request) = oracle_request(template, &case["input"]) else {
                 continue;
-            }
-            request.model_request.system = systems.pop();
+            };
             let rendered = render_qwen_serve_prompt(&request);
-            if id == "history_no_thinking_mode" {
-                // Documented divergence (`qwen_no_thinking_preclosed_history_stable`).
-                assert_eq!(
-                    rendered,
-                    expected.replacen(
-                        "<|im_start|>assistant\nAnswer one",
-                        "<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer one",
-                        1
-                    ),
-                    "{id}"
-                );
-            } else {
-                assert_eq!(rendered, expected, "{id}");
+            match divergences.iter().find(|(name, _)| *name == id) {
+                Some((_, transform)) => assert_eq!(rendered, transform(expected), "{id}"),
+                None => assert_eq!(rendered, expected, "{id}"),
             }
             checked += 1;
         }
-        assert_eq!(checked, 11, "oracle case census");
+        assert_eq!(checked, expected_checked, "oracle case census");
+    }
+
+    fn preclose_history(expected: &str) -> String {
+        expected.replacen(
+            "<|im_start|>assistant\nAnswer one",
+            "<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer one",
+            1,
+        )
+    }
+
+    fn preserve_history(expected: &str) -> String {
+        expected.replacen(
+            "<|im_start|>assistant\nAnswer one",
+            "<|im_start|>assistant\n<think>\nthinking\n</think>\n\nAnswer one",
+            1,
+        )
+    }
+
+    /// Digest-verified Qwen3.6 rendering matches the released Jinja byte for
+    /// byte on every oracle case except the documented divergence: history
+    /// assistant turns in a no-thinking session keep the preclosed block the
+    /// model consumed (`qwen_no_thinking_preclosed_history_stable`).
+    #[test]
+    fn qwen36_matches_jinja_oracle_fixture() {
+        assert_oracle_fixture(
+            include_str!("../../tests/fixtures/qwen36_chat_template_oracle_v1.json"),
+            QwenTemplate::Qwen36,
+            &[("history_no_thinking_mode", preclose_history)],
+            15,
+        );
+    }
+
+    /// Qwen3.5's released template has no `preserve_thinking`; it strips all
+    /// prior reasoning and, by default, suppresses thinking. Serve keeps its
+    /// prefix-stability policy for history (preclosed in the default
+    /// no-thinking session, canonical replay under preserve), which are the
+    /// two documented divergences here.
+    #[test]
+    fn qwen35_matches_jinja_oracle_fixture() {
+        assert_oracle_fixture(
+            include_str!("../../tests/fixtures/qwen35_chat_template_oracle_v1.json"),
+            QwenTemplate::Qwen35,
+            &[
+                ("history_default", preclose_history),
+                ("history_explicit_thinking_preserve", preserve_history),
+            ],
+            5,
+        );
     }
 
     /// The generation suffix and the output parser's initial state agree.

@@ -31,6 +31,9 @@ pub(crate) fn run_tok(args: TokArgs) -> Result<()> {
             load_messages_prompt(
                 &path,
                 messages_max,
+                crate::prompt_template::qwen_template_for_gguf(
+                    &GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?,
+                )?,
                 messages_thinking_mode(messages_preserve_thinking, messages_strip_thinking),
                 !messages_no_generation_prompt,
             )?,

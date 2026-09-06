@@ -498,6 +498,7 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
         let prompt = load_messages_prompt(
             &path,
             messages_max,
+            crate::prompt_template::qwen_template_for_gguf(loaded.gguf())?,
             messages_thinking_mode(messages_preserve_thinking, messages_strip_thinking),
             !messages_no_generation_prompt,
         )?;

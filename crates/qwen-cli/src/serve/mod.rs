@@ -222,7 +222,15 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             .context("resolve the loaded model's chat template")?;
     let no_thinking_supported =
         crate::supports_qwen_no_thinking_prompt(family.expect("family checked above"), &gguf);
-    let declared_context = gguf.declared_context_length().ok();
+    // Deriving the default ceiling from the model requires readable context
+    // metadata; an explicit --max-context-tokens does not.
+    let declared_context = match invocation.max_context_tokens {
+        Some(_) => None,
+        None => Some(
+            gguf.declared_context_length()
+                .context("read the model's declared context length for the serve ceiling")?,
+        ),
+    };
     drop(gguf);
     crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;

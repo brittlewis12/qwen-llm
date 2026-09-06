@@ -398,9 +398,11 @@ because client model-pickers probe it).
 - Tools on pinned templates render the way every released client feeds
   `tool | tojson`: the OpenAI-shaped `{"type": "function", "function": {...}}`
   object with Python's `", "`/`": "` separators (Transformers and llama.cpp
-  agree), and replayed call arguments follow the template's value rule
-  (mappings/sequences as spaced JSON, scalars via Python `str()`: `True`,
-  `None`, numbers verbatim). The released `last_query_index` rule applies:
+  agree), numbers in Python float repr (`10000000000.0`, `1e-07`), and
+  replayed call arguments follow each template's own value rule: Qwen3.6
+  passes non-container scalars through Jinja `string` (`True`/`None`),
+  Qwen3.5 and Qwen3.8 pass every non-string through `tojson` (`true`/`null`).
+  Every rule is pinned by the per-template jinja2 oracle fixtures. The released `last_query_index` rule applies:
   assistant turns after the final user query keep their think block (empty
   if no reasoning) even under strip. The unpinned generic contract keeps
   the compact flat form frozen in `serve_tool_render_fixtures_v1.json`.

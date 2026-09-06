@@ -527,6 +527,59 @@
         ]
       },
       "rendered": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"f\", \"description\": \"é ü\", \"parameters\": {\"type\": \"object\"}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nGo<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=f>\n<parameter=b>\nTrue\n</parameter>\n<parameter=n>\n2\n</parameter>\n<parameter=x>\n2.5\n</parameter>\n<parameter=z>\nNone\n</parameter>\n<parameter=s>\nstr\n</parameter>\n<parameter=l>\n[1, \"a\", null]\n</parameter>\n<parameter=o>\n{\"k\": \"v\", \"u\": \"é\"}\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "python_number_repr",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Go"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "f",
+                  "arguments": {
+                    "big": 10000000000.0,
+                    "small": 1e-07,
+                    "one": 1.0,
+                    "neg": -2.5e+16,
+                    "frac": 0.001,
+                    "int": 12345678901234567890
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "ok"
+          }
+        ],
+        "add_generation_prompt": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "f",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "default": 10000000000.0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "rendered": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"f\", \"parameters\": {\"type\": \"object\", \"properties\": {\"x\": {\"default\": 10000000000.0}}}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nGo<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=f>\n<parameter=big>\n10000000000.0\n</parameter>\n<parameter=small>\n1e-07\n</parameter>\n<parameter=one>\n1.0\n</parameter>\n<parameter=neg>\n-2.5e+16\n</parameter>\n<parameter=frac>\n0.001\n</parameter>\n<parameter=int>\n12345678901234567890\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
     }
   ]
 }

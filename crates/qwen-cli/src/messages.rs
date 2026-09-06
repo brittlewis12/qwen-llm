@@ -611,8 +611,9 @@ pub(crate) fn parse_messages_input(
 #[allow(dead_code)]
 struct StrictChatMessage {
     role: String,
+    /// `null` (OpenAI-style assistant tool-call messages) reads as empty.
     #[serde(default)]
-    content: String,
+    content: Option<String>,
     /// Assistant reasoning history (OpenAI/SGLang field name).
     #[serde(default)]
     reasoning_content: Option<String>,
@@ -744,6 +745,12 @@ fn parse_strict_tool_call(
     let object = call.as_object().with_context(|| {
         format!("message {message_index} in {source}: tool_calls[{call_index}] must be an object")
     })?;
+    if let Some(kind) = object.get("type") {
+        ensure!(
+            kind.as_str() == Some("function"),
+            "message {message_index} in {source}: tool_calls[{call_index}] has unsupported type {kind}"
+        );
+    }
     let function = match object.get("function") {
         Some(function) => function.as_object().with_context(|| {
             format!("message {message_index} in {source}: tool_calls[{call_index}].function must be an object")
@@ -798,33 +805,38 @@ fn validate_strict_messages(
         bail!("messages input {source} contains no messages");
     }
 
-    #[derive(Clone, Copy, PartialEq)]
+    #[derive(Clone, PartialEq)]
     enum Expect {
         User,
         Assistant,
-        /// Tool results still owed for the preceding assistant's calls.
-        ToolResults(usize),
+        /// Results still owed, in call order, for the preceding assistant's
+        /// calls: `(call_id, name)`.
+        ToolResults(Vec<(String, String)>),
     }
     let mut expect = Expect::User;
     let mut saw_user = false;
     let mut validated = Vec::with_capacity(messages.len());
     for (index, message) in messages.into_iter().enumerate() {
         let mut tool_calls = Vec::new();
+        let content = message.content.unwrap_or_default();
         ensure!(
             message.role == "assistant" || message.tool_calls.is_none(),
             "message {index} in {source} has role {:?} but carries tool_calls",
             message.role
         );
-        match (message.role.as_str(), expect) {
+        ensure!(
+            message.role == "tool" || (message.tool_call_id.is_none() && message.name.is_none()),
+            "message {index} in {source} has role {:?} but carries tool_call_id/name",
+            message.role
+        );
+        match (message.role.as_str(), &expect) {
             ("system" | "developer", Expect::User) if index == 0 => {}
             ("user", Expect::User) => {
                 expect = Expect::Assistant;
                 saw_user = true;
             }
             ("assistant", Expect::Assistant) => {
-                if message.content.trim_start().starts_with("<think>")
-                    || message.content.contains("</think>")
-                {
+                if content.trim_start().starts_with("<think>") || content.contains("</think>") {
                     bail!(
                         "message {index} in {source} contains inline assistant thinking; pass reasoning history as `reasoning_content` instead"
                     );
@@ -835,21 +847,48 @@ fn validate_strict_messages(
                     "message {index} in {source} carries tool_calls but the document declares no tools"
                 );
                 for (call_index, call) in calls.iter().enumerate() {
-                    tool_calls.push(parse_strict_tool_call(
-                        call, index, call_index, tools, source,
-                    )?);
+                    let call = parse_strict_tool_call(call, index, call_index, tools, source)?;
+                    ensure!(
+                        tool_calls
+                            .iter()
+                            .all(|existing: &ToolCall| existing.call_id != call.call_id),
+                        "message {index} in {source}: duplicate tool call id {:?}",
+                        call.call_id
+                    );
+                    tool_calls.push(call);
                 }
                 expect = if tool_calls.is_empty() {
                     Expect::User
                 } else {
-                    Expect::ToolResults(tool_calls.len())
+                    Expect::ToolResults(
+                        tool_calls
+                            .iter()
+                            .map(|call| (call.call_id.clone(), call.name.clone()))
+                            .collect(),
+                    )
                 };
             }
             ("tool", Expect::ToolResults(owed)) => {
-                expect = if owed == 1 {
+                // Results answer the owed calls in order; a supplied id or
+                // name must agree with the call it answers.
+                let (call_id, name) = owed.first().cloned().expect("owed non-empty");
+                if let Some(supplied) = message.tool_call_id.as_deref() {
+                    ensure!(
+                        supplied == call_id,
+                        "message {index} in {source}: tool result answers {supplied:?} but call {call_id:?} is next in order"
+                    );
+                }
+                if let Some(supplied) = message.name.as_deref() {
+                    ensure!(
+                        supplied == name,
+                        "message {index} in {source}: tool result names {supplied:?} but call {call_id:?} invoked {name:?}"
+                    );
+                }
+                let remaining: Vec<_> = owed[1..].to_vec();
+                expect = if remaining.is_empty() {
                     Expect::Assistant
                 } else {
-                    Expect::ToolResults(owed - 1)
+                    Expect::ToolResults(remaining)
                 };
             }
             (role, expect) => {
@@ -859,13 +898,13 @@ fn validate_strict_messages(
                     Expect::ToolResults(_) => "tool",
                 };
                 bail!(
-                    "message {index} in {source} has role {role:?}; expected {expected:?} (system/developer may lead; user and assistant alternate; each assistant tool call is followed by one tool result)"
+                    "message {index} in {source} has role {role:?}; expected {expected:?} (system/developer may lead; user and assistant alternate; each assistant tool call is followed by one tool result, in call order)"
                 );
             }
         }
         validated.push(ChatMessage {
             role: message.role,
-            content: message.content,
+            content,
             reasoning_content: message.reasoning_content,
             tool_calls,
             ..Default::default()
@@ -881,9 +920,29 @@ fn validate_strict_messages(
             "messages input {source} must end with a user turn or a completed tool-result round before generation"
         ),
         Expect::ToolResults(owed) => bail!(
-            "messages input {source} ends with {owed} tool result(s) still owed for the last assistant's tool calls"
+            "messages input {source} ends with {} tool result(s) still owed for the last assistant's tool calls",
+            owed.len()
         ),
     }
+}
+
+/// Strict ordinary chat only: the tool surface is rejected. Shared by every
+/// consumer that renders without tool support (Lens).
+#[allow(dead_code)]
+pub(crate) fn parse_strict_ordinary_chat_input(
+    raw: &str,
+    source: &str,
+) -> Result<Vec<ChatMessage>> {
+    let chat = parse_strict_messages_input(raw, source)?;
+    ensure!(
+        chat.tools.is_empty()
+            && chat
+                .messages
+                .iter()
+                .all(|message| message.role != "tool" && message.tool_calls.is_empty()),
+        "messages input {source} must be ordinary chat; tools and tool history are not supported here"
+    );
+    Ok(chat.messages)
 }
 
 /// Legacy unpinned-ChatML wrapper kept for probes and tests.
@@ -1088,21 +1147,36 @@ pub(crate) fn render_qwen_chat_for_template(
         }
     }
     let rendered = render_qwen_serve_prompt_annotated_with(&request, append_generation_prompt);
-    // The serve renderer numbers every rendered block, including a system
-    // block it synthesizes for tools or a reasoning instruction. Span
-    // consumers (lens plans) address authored input messages, so a
-    // synthesized block maps to `None` and later blocks shift back by one.
+    // The serve renderer numbers rendered blocks; span consumers (lens plans)
+    // address authored input messages. Build the rendered-block -> authored
+    // index table: a synthesized system block (tools or a reasoning
+    // instruction without an authored system) maps to `None`, an omitted
+    // empty authored system consumes no block, and consecutive tool results
+    // coalesce into one block attributed to the first result.
     let authored_system = messages
         .first()
         .is_some_and(|message| matches!(message.role.as_str(), "system" | "developer"));
-    let synthesized_system = !authored_system
-        && rendered.spans.iter().any(|span| {
-            span.message_index == Some(0) && span.role == Some(QwenServePromptRole::System)
-        });
-    let map_index = |span: &QwenServePromptSpan| match (synthesized_system, span.message_index) {
-        (true, Some(0)) if span.role == Some(QwenServePromptRole::System) => None,
-        (true, Some(index)) => Some(index - 1),
-        (_, index) => index,
+    let rendered_system = rendered.spans.iter().any(|span| {
+        span.message_index == Some(0) && span.role == Some(QwenServePromptRole::System)
+    });
+    let mut block_to_authored: Vec<Option<usize>> = Vec::new();
+    if rendered_system {
+        block_to_authored.push(authored_system.then_some(0));
+    }
+    let mut previous_role: Option<&str> = None;
+    for (index, message) in messages.iter().enumerate() {
+        if index == 0 && authored_system {
+            continue;
+        }
+        let coalesced = message.role == "tool" && previous_role == Some("tool");
+        if !coalesced {
+            block_to_authored.push(Some(index));
+        }
+        previous_role = Some(message.role.as_str());
+    }
+    let map_index = |span: &QwenServePromptSpan| -> Option<usize> {
+        span.message_index
+            .and_then(|block| block_to_authored.get(block).copied().flatten())
     };
     Ok(AnnotatedMessageRender {
         text: rendered.text,
@@ -1889,6 +1963,130 @@ mod tests {
     }
 
     #[test]
+    fn strict_tool_documents_link_results_to_calls() {
+        let tools = r#"[{"type":"function","function":{"name":"a"}},{"type":"function","function":{"name":"b"}}]"#;
+        let ok = format!(
+            r#"{{"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":null,"tool_calls":[{{"id":"c1","type":"function","function":{{"name":"a","arguments":"{{}}"}}}},{{"id":"c2","type":"function","function":{{"name":"b","arguments":{{}}}}}}]}},{{"role":"tool","tool_call_id":"c1","name":"a","content":"ra"}},{{"role":"tool","tool_call_id":"c2","content":"rb"}}],"tools":{tools}}}"#
+        );
+        let chat = parse_strict_messages_input(&ok, "test").expect("linked results parse");
+        assert_eq!(chat.messages[1].tool_calls.len(), 2);
+        assert_eq!(chat.messages[1].content, "");
+        for (raw, expected) in [
+            (
+                format!(
+                    r#"{{"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":"","tool_calls":[{{"id":"c1","function":{{"name":"a","arguments":{{}}}}}},{{"id":"c2","function":{{"name":"b","arguments":{{}}}}}}]}},{{"role":"tool","tool_call_id":"c2","content":"rb"}},{{"role":"tool","tool_call_id":"c1","content":"ra"}}],"tools":{tools}}}"#
+                ),
+                "next in order",
+            ),
+            (
+                format!(
+                    r#"{{"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":"","tool_calls":[{{"id":"c1","function":{{"name":"a","arguments":{{}}}}}}]}},{{"role":"tool","name":"b","content":"r"}}],"tools":{tools}}}"#
+                ),
+                "invoked \"a\"",
+            ),
+            (
+                format!(
+                    r#"{{"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":"","tool_calls":[{{"id":"c1","function":{{"name":"a","arguments":{{}}}}}},{{"id":"c1","function":{{"name":"b","arguments":{{}}}}}}]}},{{"role":"tool","content":"r"}},{{"role":"tool","content":"r"}}],"tools":{tools}}}"#
+                ),
+                "duplicate tool call id",
+            ),
+            (
+                format!(
+                    r#"{{"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":"","tool_calls":[{{"type":"custom","function":{{"name":"a","arguments":{{}}}}}}]}},{{"role":"tool","content":"r"}}],"tools":{tools}}}"#
+                ),
+                "unsupported type",
+            ),
+            (
+                r#"[{"role":"user","content":"go","tool_call_id":"c1"}]"#.to_string(),
+                "carries tool_call_id/name",
+            ),
+        ] {
+            let error = parse_strict_messages_input(&raw, "test")
+                .expect_err("must reject")
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn span_mapping_tracks_authored_indices_through_omitted_and_coalesced_blocks() {
+        // Empty authored system is omitted by the pinned template; user is
+        // still authored index 1.
+        let rendered = render_qwen_messages_prompt_for_template(
+            &[message("system", "   "), message("user", "A")],
+            QwenTemplate::Qwen36,
+            true,
+            true,
+            QwenGenerationMode::Auto,
+        )
+        .unwrap();
+        let user = rendered
+            .spans
+            .iter()
+            .find(|span| span.role.as_deref() == Some("user"))
+            .unwrap();
+        assert_eq!(user.message_index, Some(1));
+        // Coalesced tool results keep the first result's authored index and
+        // the following assistant/user keep theirs.
+        let messages = vec![
+            message("user", "go"),
+            ChatMessage {
+                role: "assistant".into(),
+                content: "".into(),
+                tool_calls: vec![
+                    ToolCall {
+                        call_id: "1".into(),
+                        name: "f".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        call_id: "2".into(),
+                        name: "f".into(),
+                        arguments: "{}".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+            message("tool", "a"),
+            message("tool", "b"),
+            message("user", "next"),
+        ];
+        let tools = [ToolDefinition {
+            name: "f".into(),
+            description: None,
+            parameters: serde_json::Value::Null,
+            strict: None,
+        }];
+        let rendered = render_qwen_chat_for_template(
+            &messages,
+            &tools,
+            QwenTemplate::Qwen36,
+            true,
+            true,
+            QwenGenerationMode::Auto,
+            None,
+        )
+        .unwrap();
+        let user_indices: Vec<_> = rendered
+            .spans
+            .iter()
+            .filter(|span| {
+                span.role.as_deref() == Some("user")
+                    && span.kind == MessageRenderSpanKind::MessageStartMarker
+            })
+            .map(|span| span.message_index)
+            .collect();
+        // synthesized tools block -> None; user 0; tool-results block -> 2; user 4
+        assert_eq!(user_indices, vec![Some(0), Some(2), Some(4)]);
+        let system = rendered
+            .spans
+            .iter()
+            .find(|span| span.role.as_deref() == Some("system"))
+            .unwrap();
+        assert_eq!(system.message_index, None);
+    }
+
+    #[test]
     fn strict_messages_accept_only_the_ordinary_chat_subset() {
         for raw in [
             r#"[{"role":"user","content":"hello"}]"#,
@@ -2369,6 +2567,11 @@ mod tests {
                 "qwen35_chat_template.jinja",
                 "qwen35_chat_template_oracle_cases.json",
                 "qwen35_chat_template_oracle_v1.json",
+            ),
+            (
+                "qwen38_27b_chat_template.jinja",
+                "qwen38_chat_template_oracle_cases.json",
+                "qwen38_chat_template_oracle_v1.json",
             ),
         ] {
             let fixtures = "crates/qwen-cli/tests/fixtures";

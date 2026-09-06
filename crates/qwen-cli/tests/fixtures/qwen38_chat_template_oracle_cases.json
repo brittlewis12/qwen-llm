@@ -1,0 +1,173 @@
+[
+ {
+  "id": "user_xhigh_default",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "add_generation_prompt": true
+ },
+ {
+  "id": "system_user_low",
+  "messages": [
+   {
+    "role": "system",
+    "content": " Be terse. "
+   },
+   {
+    "role": "user",
+    "content": " Hi "
+   }
+  ],
+  "add_generation_prompt": true,
+  "reasoning_effort": "low"
+ },
+ {
+  "id": "user_medium",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "add_generation_prompt": true,
+  "reasoning_effort": "medium"
+ },
+ {
+  "id": "user_no_thinking",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false
+ },
+ {
+  "id": "tools_xhigh_with_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Be terse."
+   },
+   {
+    "role": "user",
+    "content": "Ping."
+   }
+  ],
+  "add_generation_prompt": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "Ping it",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "host": {
+        "type": "string"
+       },
+       "timeout": {
+        "type": "number",
+        "default": 1e-07
+       }
+      },
+      "required": [
+       "host"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "two_rounds_tojson_scalars",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Go"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "r1",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "f",
+       "arguments": {
+        "b": true,
+        "n": 2,
+        "x": 2.5,
+        "z": null,
+        "s": "str",
+        "l": [
+         1,
+         "a",
+         null
+        ],
+        "o": {
+         "k": "v"
+        },
+        "big": 10000000000.0,
+        "one": 1.0
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "ok"
+   },
+   {
+    "role": "assistant",
+    "content": "Then",
+    "reasoning_content": "r2",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "f",
+       "arguments": {}
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "f",
+       "arguments": {
+        "s": "again"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "a"
+   },
+   {
+    "role": "tool",
+    "content": "b"
+   }
+  ],
+  "add_generation_prompt": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "f",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ }
+]

@@ -24,7 +24,18 @@
 //! rendered by `scripts/reference/render_qwen_chat_template.py`.
 
 use super::items::{QwenTemplate, ServeRequest};
-use super::tool_parse::{ParsedCall, python_json, render_calls_for};
+use super::tool_parse::{ArgumentStyle, ParsedCall, python_json, render_calls_for};
+
+impl QwenTemplate {
+    /// Argument stringification of the released template.
+    pub(crate) fn argument_style(self) -> ArgumentStyle {
+        match self {
+            Self::Generic => ArgumentStyle::Compact,
+            Self::Qwen36 => ArgumentStyle::PythonStr,
+            Self::Qwen35 | Self::Qwen38 => ArgumentStyle::ToJson,
+        }
+    }
+}
 use crate::messages::{Qwen38GenerationMode, Qwen38ReasoningEffort};
 use crate::model_request::{ToolCall, ToolDefinition, Turn};
 
@@ -540,8 +551,9 @@ fn push_visible_and_calls(
     context: SpanContext,
     visible: &str,
     calls: &[ToolCall],
-    trim: bool,
+    template: QwenTemplate,
 ) {
+    let trim = template.verified();
     let visible = if trim { jinja_trim(visible) } else { visible };
     output.push(
         visible,
@@ -569,7 +581,7 @@ fn push_visible_and_calls(
                 .expect("validated function_call arguments object"),
         };
         output.push(
-            &render_calls_for("", &[parsed], trim),
+            &render_calls_for("", &[parsed], template.argument_style()),
             QwenServePromptSpanKind::ToolCallContent,
             context.tool_call(call_index),
             Some(call.name.clone()),
@@ -585,8 +597,9 @@ fn push_assistant_body(
     calls: &[ToolCall],
     no_thinking: bool,
     strip_history_thinking: bool,
-    verified: bool,
+    template: QwenTemplate,
 ) {
+    let verified = template.verified();
     if no_thinking {
         push_preclosed_thinking(output, context);
     } else if let Some(reasoning) = reasoning.filter(|_| !strip_history_thinking) {
@@ -639,7 +652,7 @@ fn push_assistant_body(
             );
         }
     }
-    push_visible_and_calls(output, context, visible, calls, verified);
+    push_visible_and_calls(output, context, visible, calls, template);
 }
 
 /// Render the full prompt for a validated request, including the
@@ -780,7 +793,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
                         // released default).
                         generation == QwenGeneration::PreClosed,
                         request.strip_history_thinking && !(verified && after_last_query),
-                        verified,
+                        request.template,
                     );
                 }
                 pending_tool_labels = calls.iter().map(|call| call.name.clone()).collect();
@@ -1274,6 +1287,7 @@ mod tests {
             no_thinking: input["enable_thinking"] == json!(false),
             thinking_requested: input["enable_thinking"] == json!(true),
             strip_history_thinking: input["preserve_thinking"] != json!(true),
+            reasoning_effort: input["reasoning_effort"].as_str().map(str::to_owned),
             ..ServeRequest::default()
         };
         if let Some(tools) = input["tools"].as_array() {
@@ -1401,7 +1415,19 @@ mod tests {
             include_str!("../../tests/fixtures/qwen36_chat_template_oracle_v1.json"),
             QwenTemplate::Qwen36,
             &[("history_no_thinking_mode", preclose_history)],
-            19,
+            20,
+        );
+    }
+
+    /// Digest-verified Qwen3.8 rendering: effort instruction placement,
+    /// preclosed history, and `tojson` argument scalars (`true`/`null`).
+    #[test]
+    fn qwen38_matches_jinja_oracle_fixture() {
+        assert_oracle_fixture(
+            include_str!("../../tests/fixtures/qwen38_chat_template_oracle_v1.json"),
+            QwenTemplate::Qwen38,
+            &[],
+            6,
         );
     }
 

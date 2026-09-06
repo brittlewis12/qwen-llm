@@ -3,8 +3,9 @@
 Extracted verbatim from `tokenizer.chat_template` GGUF metadata on
 2026-08-18. These are reference oracles for the hand-frozen cases in
 `../serve_render_fixtures_v1.json` (the unpinned/legacy ChatML contract).
-`../qwen36_chat_template_oracle_v1.json` and `../qwen35_chat_template_oracle_v1.json`
-are rendered *from* the Qwen3.6 and Qwen3.5 files
+`../qwen36_chat_template_oracle_v1.json`, `../qwen35_chat_template_oracle_v1.json`,
+and `../qwen38_chat_template_oracle_v1.json` are rendered *from* the Qwen3.6,
+Qwen3.5, and Qwen3.8 files
 by `scripts/reference/render_qwen_chat_template.py` (jinja2, the engine
 Transformers uses) and pins the released bytes for the digest-verified
 Qwen3.6 template; regenerate with `--check` to detect drift.

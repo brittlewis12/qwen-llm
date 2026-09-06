@@ -1,0 +1,198 @@
+{
+  "schema": "qwen.chat_template_oracle",
+  "schema_version": 1,
+  "engine": "jinja2 3.1.4 ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)",
+  "template": "qwen38_27b_chat_template.jinja",
+  "template_sha256": "701ba13a085c0c1b5e05414dec1aa3069904f962beee36f0899e441720b83974",
+  "cases": [
+    {
+      "id": "user_xhigh_default",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "system_user_low",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": " Be terse. "
+          },
+          {
+            "role": "user",
+            "content": " Hi "
+          }
+        ],
+        "add_generation_prompt": true,
+        "reasoning_effort": "low"
+      },
+      "rendered": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.\n\nBe terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "user_medium",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true,
+        "reasoning_effort": "medium"
+      },
+      "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "user_no_thinking",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "add_generation_prompt": true,
+        "enable_thinking": false
+      },
+      "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "tools_xhigh_with_system",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Be terse."
+          },
+          {
+            "role": "user",
+            "content": "Ping."
+          }
+        ],
+        "add_generation_prompt": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "ping",
+              "description": "Ping it",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "host": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "default": 1e-07
+                  }
+                },
+                "required": [
+                  "host"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"ping\", \"description\": \"Ping it\", \"parameters\": {\"type\": \"object\", \"properties\": {\"host\": {\"type\": \"string\"}, \"timeout\": {\"type\": \"number\", \"default\": 1e-07}}, \"required\": [\"host\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nBe terse.<|im_end|>\n<|im_start|>user\nPing.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "two_rounds_tojson_scalars",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Go"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "r1",
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "f",
+                  "arguments": {
+                    "b": true,
+                    "n": 2,
+                    "x": 2.5,
+                    "z": null,
+                    "s": "str",
+                    "l": [
+                      1,
+                      "a",
+                      null
+                    ],
+                    "o": {
+                      "k": "v"
+                    },
+                    "big": 10000000000.0,
+                    "one": 1.0
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "ok"
+          },
+          {
+            "role": "assistant",
+            "content": "Then",
+            "reasoning_content": "r2",
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "f",
+                  "arguments": {}
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "f",
+                  "arguments": {
+                    "s": "again"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "a"
+          },
+          {
+            "role": "tool",
+            "content": "b"
+          }
+        ],
+        "add_generation_prompt": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "f",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          }
+        ]
+      },
+      "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"f\", \"parameters\": {\"type\": \"object\"}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nGo<|im_end|>\n<|im_start|>assistant\n<think>\nr1\n</think>\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=n>\n2\n</parameter>\n<parameter=x>\n2.5\n</parameter>\n<parameter=z>\nnull\n</parameter>\n<parameter=s>\nstr\n</parameter>\n<parameter=l>\n[1, \"a\", null]\n</parameter>\n<parameter=o>\n{\"k\": \"v\"}\n</parameter>\n<parameter=big>\n10000000000.0\n</parameter>\n<parameter=one>\n1.0\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nr2\n</think>\n\nThen\n\n<tool_call>\n<function=f>\n</function>\n</tool_call>\n<tool_call>\n<function=f>\n<parameter=s>\nagain\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\na\n</tool_response>\n<tool_response>\nb\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+    }
+  ]
+}

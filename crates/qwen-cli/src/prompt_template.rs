@@ -108,6 +108,17 @@ pub(crate) fn serve_qwen_template(
 ) -> Result<crate::open_responses::items::QwenTemplate> {
     use crate::open_responses::items::QwenTemplate;
     if crate::messages::supports_qwen38_release_prompt_protocol(family, gguf) {
+        // The metadata identity alone never proved the template bytes; the
+        // digest must be the released Qwen3.8 (or Flash-Next) template.
+        let digest = chat_template_digest(gguf)?;
+        ensure!(
+            matches!(
+                classify_qwen_digest(family.architecture_name(), digest),
+                Some(QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next)
+            ),
+            "model declares a Qwen3.8 identity but its chat template SHA-256 {} is not the released template; use --raw-prompt for exact untemplated input",
+            digest_hex(digest)
+        );
         return Ok(QwenTemplate::Qwen38);
     }
     Ok(

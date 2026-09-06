@@ -123,9 +123,73 @@ fn decode_parameter_value(raw: &str) -> Value {
 /// Structured re-render of parsed calls (normalized template glue; the
 /// verbatim path renders retained raw bytes instead). Fixture:
 /// `qwen36_assistant_*` cases.
+/// Python's `repr(float)` for a JSON number: shortest round-trip digits,
+/// fixed notation for exponents in `-4..16`, otherwise `d.ddde±XX` with a
+/// two-digit signed exponent, and always at least one fractional digit.
+/// Integer-looking JSON numbers keep their text (Python parses them as
+/// `int`).
+pub(crate) fn python_number(number: &serde_json::Number) -> String {
+    let text = number.to_string();
+    if !text.contains(['.', 'e', 'E']) {
+        return text;
+    }
+    let Ok(value) = text.parse::<f64>() else {
+        return text;
+    };
+    if !value.is_finite() {
+        return text;
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0.0".into()
+        } else {
+            "0.0".into()
+        };
+    }
+    // Shortest round-trip digits and decimal exponent from Rust's `{:e}`.
+    let sci = format!("{value:e}");
+    let (mantissa, exponent) = sci.split_once('e').expect("scientific form");
+    let exponent: i32 = exponent.parse().expect("exponent");
+    let negative = mantissa.starts_with('-');
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    if (-4..16).contains(&exponent) {
+        if exponent >= 0 {
+            let int_len = exponent as usize + 1;
+            if digits.len() <= int_len {
+                out.push_str(&digits);
+                out.push_str(&"0".repeat(int_len - digits.len()));
+                out.push_str(".0");
+            } else {
+                out.push_str(&digits[..int_len]);
+                out.push('.');
+                out.push_str(&digits[int_len..]);
+            }
+        } else {
+            out.push_str("0.");
+            out.push_str(&"0".repeat((-exponent - 1) as usize));
+            out.push_str(&digits);
+        }
+    } else {
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if exponent < 0 { '-' } else { '+' });
+        out.push_str(&format!("{:02}", exponent.abs()));
+    }
+    out
+}
+
 /// Serialize a JSON value the way Python's `json.dumps(ensure_ascii=False)`
 /// does with default separators (`", "` and `": "`), which is what both
-/// Transformers' and llama.cpp's `tojson` filters emit. Key order is kept.
+/// Transformers' and llama.cpp's `tojson` filters emit. Key order is kept;
+/// numbers follow Python float repr.
 pub(crate) fn python_json(value: &Value) -> String {
     fn write(value: &Value, out: &mut String) {
         match value {
@@ -151,6 +215,7 @@ pub(crate) fn python_json(value: &Value) -> String {
                 }
                 out.push(']');
             }
+            Value::Number(number) => out.push_str(&python_number(number)),
             scalar => out.push_str(&serde_json::to_string(scalar).expect("serialize scalar")),
         }
     }
@@ -159,37 +224,42 @@ pub(crate) fn python_json(value: &Value) -> String {
     out
 }
 
-/// Render one parameter value as the released Qwen templates do: mappings and
-/// sequences through `tojson`, everything else through Jinja's `string`
-/// filter (Python `str()`: `True`/`False`/`None`, numbers verbatim, strings
-/// as-is).
-fn python_parameter_value(value: &Value) -> String {
-    match value {
-        Value::Object(_) | Value::Array(_) => python_json(value),
-        Value::String(text) => text.clone(),
-        Value::Bool(true) => "True".into(),
-        Value::Bool(false) => "False".into(),
-        Value::Null => "None".into(),
-        Value::Number(number) => number.to_string(),
-    }
+/// How a released template stringifies non-string call arguments.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArgumentStyle {
+    /// Legacy unpinned contract: compact JSON for non-strings.
+    Compact,
+    /// Qwen3.6: `tojson` for mappings/sequences, Jinja `string` (Python
+    /// `str()`: `True`/`False`/`None`) for other scalars.
+    PythonStr,
+    /// Qwen3.5 and Qwen3.8: `tojson` for every non-string value.
+    ToJson,
 }
 
-/// Legacy unpinned rendering: compact JSON for non-string values.
-fn compact_parameter_value(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => serde_json::to_string(other).expect("serialize value"),
+fn parameter_value(value: &Value, style: ArgumentStyle) -> String {
+    match (style, value) {
+        (_, Value::String(text)) => text.clone(),
+        (ArgumentStyle::Compact, other) => serde_json::to_string(other).expect("serialize value"),
+        (ArgumentStyle::ToJson, other) => python_json(other),
+        (ArgumentStyle::PythonStr, Value::Object(_) | Value::Array(_)) => python_json(value),
+        (ArgumentStyle::PythonStr, Value::Bool(true)) => "True".into(),
+        (ArgumentStyle::PythonStr, Value::Bool(false)) => "False".into(),
+        (ArgumentStyle::PythonStr, Value::Null) => "None".into(),
+        (ArgumentStyle::PythonStr, Value::Number(number)) => python_number(number),
     }
 }
 
 pub(crate) fn render_calls(visible: &str, calls: &[ParsedCall]) -> String {
-    render_calls_for(visible, calls, false)
+    render_calls_for(visible, calls, ArgumentStyle::Compact)
 }
 
-/// Render assistant tool calls in the XML-parameter form. `released` selects
-/// the pinned templates' Python value semantics; `false` keeps the legacy
-/// compact form frozen in `serve_tool_render_fixtures_v1.json`.
-pub(crate) fn render_calls_for(visible: &str, calls: &[ParsedCall], released: bool) -> String {
+/// Render assistant tool calls in the XML-parameter form with the argument
+/// stringification of the given template family.
+pub(crate) fn render_calls_for(
+    visible: &str,
+    calls: &[ParsedCall],
+    style: ArgumentStyle,
+) -> String {
     let mut output = String::from(visible);
     for (index, call) in calls.iter().enumerate() {
         if index == 0 {
@@ -207,11 +277,7 @@ pub(crate) fn render_calls_for(visible: &str, calls: &[ParsedCall], released: bo
             output.push_str(PARAM_OPEN);
             output.push_str(key);
             output.push_str(">\n");
-            output.push_str(&if released {
-                python_parameter_value(value)
-            } else {
-                compact_parameter_value(value)
-            });
+            output.push_str(&parameter_value(value, style));
             output.push_str(PARAM_CLOSE);
         }
         output.push_str(FUNCTION_CLOSE);
@@ -223,6 +289,34 @@ pub(crate) fn render_calls_for(visible: &str, calls: &[ParsedCall], released: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_number_matches_python_repr() {
+        for (json, expected) in [
+            ("1e10", "10000000000.0"),
+            ("1e-7", "1e-07"),
+            ("1.0", "1.0"),
+            ("1.00", "1.0"),
+            ("-0.0", "-0.0"),
+            ("0.0", "0.0"),
+            ("2.5", "2.5"),
+            ("-2.5e16", "-2.5e+16"),
+            ("1e16", "1e+16"),
+            ("123456789012345.6", "123456789012345.6"),
+            ("0.001", "0.001"),
+            ("0.0001", "0.0001"),
+            ("0.00001", "1e-05"),
+            ("12345678901234567890", "12345678901234567890"),
+            ("42", "42"),
+        ] {
+            let value: Value = serde_json::from_str(json).unwrap();
+            let Value::Number(number) = value else {
+                panic!()
+            };
+            assert_eq!(python_number(&number), expected, "{json}");
+        }
+    }
+
     use serde_json::json;
 
     fn fixture() -> Value {

@@ -4,7 +4,6 @@
 mod messages;
 #[allow(dead_code)]
 mod model_request;
-#[allow(dead_code)]
 mod open_responses;
 mod payload_redundancy;
 

@@ -51,7 +51,6 @@ mod moe_micro;
 #[path = "bench/mtp.rs"]
 mod mtp;
 mod muse_glimmer_request_bench;
-#[allow(dead_code)]
 mod open_responses;
 #[path = "bench/pld.rs"]
 mod pld;

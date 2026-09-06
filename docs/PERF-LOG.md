@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Serve Terminal-Off Setup Elision HOLD
+
+- `0dd6b6c2` bypassed drafter seed/verifier setup for requests already beyond the
+  hard context stop, retaining serial capture and future checkpoint tails.
+  Ten focused CPU tests and short greedy/seeded-sampled endpoint pilots pass.
+- Natural 24,194-token Qwen3.8-27B Q8_0 + DFlash2 Q8_0 release A-B-B-A retains
+  every output hash and usage/cache count, including pending-token and EOS
+  continuation. Warm exact-hit 64-output wall saves only 1.06%; its TTFT control
+  spread is 33.28%. The apparent 3.01% fresh-wall gain has 7.39% control spread.
+- Long followup nominally clears the 20 ms alternative screen (28.636 ms TTFT
+  saving), but the reverse pair does not reproduce it. This is a narrow screen
+  positive, not a robust promotion or formal all-cell KILL. Prototype removed at
+  `61559330`; no default behavior changes. Memory benefit was not certified.
+- Evidence: `docs/bench/2026-09-06-serve-terminal-off/RESULT.md`. Raw attempts
+  remain under the dedicated worktree's `target/profiles/request-elision/`.
+
 ## 2026-09-03 - Flash-Next Selected Packed QSA Default-On
 
 Status: `QWEN4EXP_PACKED_SELECTED_QSA` flipped from default-off to default-on.

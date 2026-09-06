@@ -537,7 +537,7 @@ fn prepare_modern_run_prompt(
     {
         ensure!(
             supports_qwen_no_thinking_prompt(family, gguf),
-            "--no-thinking is currently supported only for Qwen3.6 35B A3B, Qwen3.8 27B, and Qwen3.8-Flash-Next models with a compatible qwen35 prompt protocol; omit --no-thinking to use this model's default generation behavior"
+            "--no-thinking requires a model whose chat template is pinned (released Qwen3.5, Qwen3.6, Qwen3.8, or Qwen3.8-Flash-Next templates); this model's template is unrecognized, so omit --no-thinking to use its default generation behavior"
         );
     }
     let qwen38 = supports_qwen38_prompt_protocol(family, gguf);
@@ -673,8 +673,13 @@ fn resolve_qwen38_generation_mode(
     Ok(Some(Qwen38GenerationMode::Thinking(effort)))
 }
 
+/// `--no-thinking` is a template transition, so any model whose chat
+/// template digest is pinned supports it by construction (Qwen3.5, 3.6,
+/// 3.8, Flash-Next). Unpinned ChatML has no proven preclosed suffix.
 pub(crate) fn supports_qwen_no_thinking_prompt(family: ModelFamily, gguf: &GgufFile) -> bool {
-    messages::supports_qwen36_no_thinking_prompt_protocol(family, gguf)
+    prompt_template::serve_qwen_template(family, gguf)
+        .map(|template| template.verified())
+        .unwrap_or(false)
         || supports_qwen38_prompt_protocol(family, gguf)
 }
 

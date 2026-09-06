@@ -91,9 +91,12 @@ Contract:
   continues inside an open think block; output starts with reasoning text);
   pinned Qwen3.5 templates default to the released no-thinking suffix.
 - `--no-thinking` is a prompt-rendering guarantee, not an output filter, and is
-  rejected with raw input. On the exact validated Qwen3.6 and Qwen3.8
-  model/tokenizer surfaces it selects the tested preclosed thinking suffix and
-  fails closed elsewhere. Qwen3.8 otherwise uses its upstream xhigh transition.
+  rejected with raw input. On any model whose chat template digest is pinned
+  (Qwen3.5, Qwen3.6, Qwen3.8, Flash-Next) it selects the released preclosed
+  thinking suffix; unrecognized templates fail closed. (Until 2026-09-06 this
+  was restricted to an exact Qwen3.6-35B-A3B metadata tuple, the only surface
+  the transition had been tested on.) Qwen3.8 otherwise uses its upstream
+  xhigh transition.
   DeepSeek ordinary chat is already non-thinking, so the flag is an idempotent
   guarantee there.
 - `--reasoning-effort` is resolved by model family for structured
@@ -160,7 +163,8 @@ direction subject to these gates:
 - perform cheap validation and GGUF family detection before consuming stdin;
 - keep modern generation values as optional overlays on canonical defaults;
 - fail closed on unsupported modern message semantics;
-- constrain Qwen no-thinking to a tested metadata tuple; and
+- constrain Qwen no-thinking to a tested metadata tuple (since widened to any
+  pinned template digest); and
 - prepare prompt bytes before model residency without introducing a second
   tokenizer path.
 

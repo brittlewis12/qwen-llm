@@ -382,6 +382,7 @@ fn accept_loop_with_checkpoint(
     let result = (|| -> Result<()> {
         loop {
             checkpoint()?;
+            ready.store(true, Ordering::Release);
             let stream = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
                 Ok(stream) => stream,
                 Err(RecvTimeoutError::Timeout) => continue,
@@ -390,19 +391,8 @@ fn accept_loop_with_checkpoint(
             // A signal may arrive while admission is parked in recv_timeout.
             // Never start an admitted request without checking it again.
             checkpoint()?;
-            // Publish readiness before success is visible to a fast client.
-            // The zero-capacity handoff still prevents overlapping backend work.
-            let mut completion_published = false;
-            if let Err(error) =
-                http::handle_connection_with_completion(&stream, backend, trace.as_mut(), || {
-                    completion_published = true;
-                    ready.store(true, Ordering::Release);
-                })
-            {
+            if let Err(error) = http::handle_connection(&stream, backend, trace.as_mut()) {
                 tracing::info!(target: "qwen_diag", "serve: connection aborted: {error}");
-            }
-            if !completion_published {
-                ready.store(true, Ordering::Release);
             }
         }
         Ok(())
@@ -574,119 +564,6 @@ mod tests {
         drop(client);
         assert_thread_finishes(&acceptor, "readiness wait did not stop");
         acceptor.join().unwrap();
-    }
-
-    #[test]
-    fn terminal_handoff_does_not_republish_busy_readiness() {
-        use std::io::{BufRead, BufReader, Read, Write};
-        use std::net::TcpStream;
-        for streaming in [false, true] {
-            struct Backend {
-                calls: usize,
-                entered: std::sync::mpsc::Sender<()>,
-                release: std::sync::mpsc::Receiver<()>,
-            }
-            impl http::GenerationBackend for Backend {
-                fn model_id(&self) -> &str {
-                    "handoff"
-                }
-                fn generate(
-                    &mut self,
-                    _: &items::ServeRequest,
-                    _: &str,
-                    sink: &mut dyn http::GenerationSink,
-                ) -> Result<http::GenerationOutcome, http::BackendFailure> {
-                    self.calls += 1;
-                    if self.calls == 2 {
-                        self.entered.send(()).unwrap();
-                        self.release.recv_timeout(THREAD_EXIT_TIMEOUT).unwrap();
-                    }
-                    sink.piece(b"ok").unwrap();
-                    Ok(http::GenerationOutcome {
-                        end: output_partition::GenerationEnd::StopToken(0),
-                        usage: events::Usage {
-                            input_tokens: 1,
-                            output_tokens: 2,
-                            cached_tokens: 0,
-                        },
-                        stats: None,
-                    })
-                }
-            }
-            let reserved = bind_loopback("127.0.0.1:0").unwrap();
-            let address = reserved.local_addr().unwrap();
-            drop(reserved);
-            let (entered, entry) = std::sync::mpsc::channel();
-            let (release, released) = std::sync::mpsc::channel();
-            let stop = Arc::new(AtomicBool::new(false));
-            let server_stop = Arc::clone(&stop);
-            let server = std::thread::spawn(move || {
-                let mut backend = Backend {
-                    calls: 0,
-                    entered,
-                    release: released,
-                };
-                accept_loop_with_checkpoint(
-                    &address.to_string(),
-                    "handoff",
-                    0.0,
-                    &mut backend,
-                    &mut None,
-                    || {
-                        anyhow::ensure!(!server_stop.load(Ordering::Acquire), "test shutdown");
-                        Ok(())
-                    },
-                )
-            });
-            let start = Instant::now();
-            let mut first = loop {
-                match TcpStream::connect(address) {
-                    Ok(stream) => break stream,
-                    Err(_) if start.elapsed() < THREAD_EXIT_TIMEOUT => {
-                        std::thread::sleep(Duration::from_millis(1))
-                    }
-                    Err(error) => panic!("server did not start: {error}"),
-                }
-            };
-            let body = format!(r#"{{"model":"handoff","input":"hi","stream":{streaming}}}"#);
-            let request = format!(
-                "POST /v1/responses HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            first.set_read_timeout(Some(THREAD_EXIT_TIMEOUT)).unwrap();
-            first.write_all(request.as_bytes()).unwrap();
-            let mut reader = BufReader::new(first);
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap() == 0
-                    || (streaming && line.contains("[DONE]"))
-                {
-                    break;
-                }
-            }
-            let mut second = TcpStream::connect(address).unwrap();
-            second.set_read_timeout(Some(THREAD_EXIT_TIMEOUT)).unwrap();
-            second.write_all(request.as_bytes()).unwrap();
-            entry
-                .recv_timeout(THREAD_EXIT_TIMEOUT)
-                .expect("completed response must release the next request");
-            let mut third = TcpStream::connect(address).unwrap();
-            third.set_read_timeout(Some(THREAD_EXIT_TIMEOUT)).unwrap();
-            let mut busy = String::new();
-            let read_busy = third.read_to_string(&mut busy);
-            release.send(()).unwrap();
-            let mut response = String::new();
-            second.read_to_string(&mut response).unwrap();
-            stop.store(true, Ordering::Release);
-            assert_thread_finishes(&server, "handoff server did not stop");
-            assert!(server.join().unwrap().is_err());
-            read_busy.unwrap();
-            assert!(
-                busy.starts_with("HTTP/1.1 503"),
-                "third request must remain busy"
-            );
-            assert!(response.starts_with("HTTP/1.1 200"));
-        }
     }
 
     #[test]

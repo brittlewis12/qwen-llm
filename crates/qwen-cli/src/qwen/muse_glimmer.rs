@@ -77,60 +77,12 @@ pub(crate) fn validate_muse_glimmer_generation_mode(
     explicit: ExplicitCliOptions,
     invocation: &cli::Invocation,
 ) -> Result<()> {
-    let mut unsupported = deepseek_v4_shared_unsupported_options(args, explicit);
-    if args.requests_jsonl.is_some() {
-        unsupported.push("--requests-jsonl");
-    }
-    if args.batch_size.is_some() {
-        unsupported.push("--batch-size");
-    }
-    if args.concurrency.is_some() {
-        unsupported.push("--concurrency");
-    }
-    if args.execution_mode.is_some() {
-        unsupported.push("--execution-mode");
-    }
-    if args.drafter.is_some() {
-        unsupported.push("--drafter (Muse DFlash2 integration is not active yet)");
-    }
-    if args.durable_prefix_cache.is_some() {
-        unsupported.push("--durable-prefix-cache");
-    }
-    if explicit.durable_prefix_cache_max_mib {
-        unsupported.push("--durable-prefix-cache-max-mib");
-    }
-    if explicit.durable_prefix_cache_max_entry_mib {
-        unsupported.push("--durable-prefix-cache-max-entry-mib");
-    }
-    if explicit.durable_prefix_cache_min_tokens {
-        unsupported.push("--durable-prefix-cache-min-tokens");
-    }
-    if args.request_stats_jsonl.is_some() {
-        unsupported.push("--request-stats-jsonl");
-    }
-    if args.sampling_attribution {
-        unsupported.push("--sampling-attribution");
-    }
-    if args.sampled_structural {
-        unsupported.push("--sampled-structural");
-    }
-    if args.trace_request.is_some() {
-        unsupported.push("--trace-request");
-    }
-    if args.messages_preserve_thinking || args.messages_strip_thinking {
-        unsupported.push("legacy message thinking controls");
-    }
-    if args.reasoning.is_some() || args.preserve_reasoning {
-        unsupported.push("DeepSeek V4 reasoning controls");
-    }
-    if args.deepseek_v4_snapshot.is_some() {
-        unsupported.push("--deepseek-v4-snapshot");
-    }
-    ensure!(
-        !explicit.deepseek_v4_multigroup_selector
-            && args.deepseek_v4_multigroup_selector == DeepSeekV4MultigroupSelectorArg::Auto,
-        "--deepseek-v4-multigroup-selector applies only to DeepSeek V4"
+    let mut unsupported = serial_lane_unsupported_options(
+        args,
+        explicit,
+        "--drafter (Muse DFlash2 integration is not active yet)",
     );
+    ensure_no_deepseek_v4_only_options(args, explicit, &mut unsupported)?;
     ensure!(
         unsupported.is_empty(),
         "Muse Glimmer currently supports request-shaped serial text generation only; unsupported options: {}",

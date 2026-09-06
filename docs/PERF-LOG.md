@@ -26,6 +26,9 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   at `daa4ff5b`; no default changes. Relative-path observer failure and sole GPU
   attempt remain under `target/profiles/restored-tail-crossover/`.
 - Evidence: `docs/bench/2026-09-06-restored-tail-crossover/RESULT.md`.
+- Rebase includes `a5385e0c`, which admits the pinned Unsloth-patched template
+  for dense Qwen3.8. This removes the earlier artifact blocker on current main,
+  not the measured policy regressions or this screen's memory failure.
 
 ## 2026-09-06 - Serial CLI Prefill Lifetime Resource KEEP
 

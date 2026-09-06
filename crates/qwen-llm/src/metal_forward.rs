@@ -14361,6 +14361,25 @@ pub fn encode_mat_mat_dispatch(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
+    encode_mat_mat_dispatch_with_policy(ctx, enc, weight, x, y, n_in, n_out, n_query, true)
+}
+
+/// Prompt GEMM dispatch with an explicit choice about the Qwen-tuned
+/// `n_query == 1` mat-vec shortcut. Families that pin a bitwise matrix
+/// lineage at N=1 (DeepSeek V4 packed prefill) pass `false` so a Qwen
+/// routing decision cannot change their arithmetic.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_dispatch_with_policy(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+    allow_n1_mat_vec: bool,
+) -> Result<(), MfError> {
     validate_f32_q8_mat_mat_addressing(weight.dtype, n_in, n_out, n_query)?;
     // v0.77: n_query == 1 is exactly the mat-vec contract (x = [n_in],
     // y = [n_out]) — route to the production single-token kernels (c=1).
@@ -14371,7 +14390,7 @@ pub fn encode_mat_mat_dispatch(
     // every n_eff_override=1 caller (adaptive-N tails, MTP packet tails).
     // Exactness: mat-vec is E0, tighter than the tile it replaces.
     // Rollback: QWEN_MATMAT_N1_MATVEC=0.
-    if matmat_n1_matvec_enabled() && n_query == 1 {
+    if allow_n1_mat_vec && matmat_n1_matvec_enabled() && n_query == 1 {
         return encode_mat_vec_dispatch(ctx, enc, weight, x, y, n_in, n_out);
     }
 

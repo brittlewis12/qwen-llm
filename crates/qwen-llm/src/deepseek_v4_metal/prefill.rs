@@ -1983,8 +1983,12 @@ fn encode_batch_projection(
         )
         .map_err(DeepSeekV4MetalError::Metal);
     }
-    crate::metal_forward::encode_mat_mat_dispatch(
-        ctx, enc, weight, input, output, n_in, n_out, n_tokens,
+    // DeepSeek's packed projections pin a bitwise matrix-tile lineage at
+    // every N (the N=1 scalar-lineage gates); do not inherit the Qwen-tuned
+    // N=1 mat-vec shortcut, which changed the accumulation order in
+    // 940516a8 and turned those gates red.
+    crate::metal_forward::encode_mat_mat_dispatch_with_policy(
+        ctx, enc, weight, input, output, n_in, n_out, n_tokens, false,
     )
     .map_err(|error| match error {
         crate::metal_forward::MfError::Metal(error) => DeepSeekV4MetalError::Metal(error),

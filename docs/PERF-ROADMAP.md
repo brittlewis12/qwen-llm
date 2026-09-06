@@ -480,6 +480,16 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 phase-dead scratch work keeps only ordinary serial CLI release:
+the 8,840-input/64-output Qwen3.6 Q4 packet removes 1.364 GB of Metal allocation
+at first delivery, with +1.194% request wall and unchanged sampled peak. This
+is a resource result, not a cold/TTFT/admission win. DFlash request wall +3.091%
+misses the resource guard; served release has only a correctness pair, and
+prompt lookup's historical architecture gate rejects the available witnesses.
+Those lifetimes remain unchanged. Independent review supports the narrow scope
+and prioritizes localizing warm small-tail TTFT over widening these held paths.
+Evidence: `docs/bench/2026-09-06-cli-prefill-lifetime/RESULT.md`.
+
 2026-09-06 replay-debit follow-up is INCONCLUSIVE, prototype removed. Current
 template admission rejects the installed Qwen3.8 dense artifact's Flash-Next
 digest; the alternative Qwen3.6/legacy-drafter pilot restores serially and never

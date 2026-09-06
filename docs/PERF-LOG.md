@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Serial CLI Prefill Lifetime Resource KEEP
+
+- `4d5f8834` releases phase-dead scratch across CLI and serve; adversarial
+  review and measured guards narrow it at `c3ba57e4` to ordinary serial CLI
+  decode only. DFlash/shadow, prompt lookup, serve, and admission retain their
+  original behavior. Existing pre-drop allocation metrics keep their meaning.
+- Qwen3.6-27B Q4, 8,840 input / 64 output, release A-B-B-A removes exactly
+  1,364,262,912 Metal allocated bytes at first stdout flush in both orders.
+  No-spec sampled maximum and post-state-drop floor are unchanged. This is
+  generation-phase allocation, not RSS/residency/peak/admission or latency.
+- No-spec complete request wall regresses 1.194%, TTFT 1.306%, within the 3%
+  resource guard. Apparent process-wall saving has asymmetric file warming
+  and 5.566% control spread: no cold-win authority. Spec request wall regresses
+  3.091%; its favorable +2.739% process-clock guard cannot override that miss.
+  Spec widening is HOLD; serve lacks balanced timing and lookup is unadmitted.
+- Eight long CLI token streams and 16 served text/cache/status witnesses agree.
+  Packed keep/drop logits and KV/GDN snapshots/continuation are bit-exact on
+  0.8B and 27B Q4. Final scoped candidate passes 372 CLI tests and short/long
+  allocation checks; final shadow retains the baseline allocation envelope.
+- Independent audit, patch review and disposition jam are recorded with the
+  evidence: `docs/bench/2026-09-06-cli-prefill-lifetime/RESULT.md`. All failed
+  observers and raw attempts remain in `target/profiles/prefill-lifetime/`.
+
 ## 2026-09-06 - Short-Context Replay Debit INCONCLUSIVE
 
 - `259f4ade` tests zero saved target rows for exact-replay packets instead of

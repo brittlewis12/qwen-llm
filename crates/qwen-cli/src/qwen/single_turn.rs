@@ -613,6 +613,7 @@ pub(crate) fn execute_single_turn_request(
     let pipeline_cache_prefill_exit =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
     let after_prefill_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
+    let mut scratch = Some(scratch);
 
     let stdout_handle = std::io::stdout();
     let mut stdout = stdout_handle.lock();
@@ -663,21 +664,22 @@ pub(crate) fn execute_single_turn_request(
             }
             let dflash_scratch =
                 allocate_dflash_decode_scratch(loaded, head, sampling_config.temperature > 0.0)?;
-            // Shadow-reference probe (QWEN_DFLASH_SHADOW_PROBE=1): a second
-            // sequence prefilled through the plain serial path replays every
-            // committed token alongside the speculative loop and compares the
-            // reference argmax against the packed-verify row-0 argmax. Costs
-            // a full serial decode on top of speculation; diagnostics only.
+            // Shadow-reference probe: a second sequence replays the committed
+            // stream against the packed verifier; retain its prefill workspace.
             let shadow_probe = std::env::var_os("QWEN_DFLASH_SHADOW_PROBE").is_some();
             let mut shadow = if shadow_probe {
-                // The shadow replays the full serial path, so it needs the
-                // whole prompt plus generation, not the windowed capacity.
                 let shadow_capacity = prompt_ids.len() + args.tokens + 16;
                 let mut shadow_sequence = loaded
                     .create_sequence(SequenceConfig::new(shadow_capacity))
                     .context("allocate shadow probe sequence")?;
-                crate::prefill_span(&forward, &mut shadow_sequence, &mut scratch, &prompt_ids, 0)
-                    .context("shadow probe prefill")?;
+                crate::prefill_span(
+                    &forward,
+                    &mut shadow_sequence,
+                    scratch.as_mut().expect("DFlash retains prefill scratch"),
+                    &prompt_ids,
+                    0,
+                )
+                .context("shadow probe prefill")?;
                 Some(shadow_sequence)
             } else {
                 None
@@ -779,6 +781,7 @@ pub(crate) fn execute_single_turn_request(
             sequence = result.sequence;
             (result.generation, Some(result.stats), None, None)
         } else {
+            drop(scratch.take());
             let mut on_token = |token| {
                 let callback_t0 = Instant::now();
                 write!(stdout, "{}", tokenizer.decode_piece(token))?;

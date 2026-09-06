@@ -480,6 +480,14 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 request-boundary screen: terminal-Off DFlash setup elision is HOLD,
+prototype removed. Natural 24,194-token Q8 release A-B-B-A preserves all output
+and cache counts, but warm exact-hit 64-output wall saves only 1.06%. A 28.636 ms
+followup TTFT screen positive does not reproduce in the reverse pair; noisy
+fresh/exact-TTFT rows confer no broader authority. Do not widen from eliminated
+allocations/commands alone. See `2026-09-06-serve-terminal-off/RESULT.md` under
+`docs/bench/`; the hard context policy and production path are unchanged.
+
 Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a
 k3 adversarial review produced a new force-ranked serve queue. The measured
 fact: 33 serial requests at 66K-133K ctx run 8.35-12.4 tps because speculation

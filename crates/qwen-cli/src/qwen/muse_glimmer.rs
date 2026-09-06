@@ -15,7 +15,8 @@ pub(crate) fn prepare_muse_glimmer_prompt(
             );
             let reasoning_strength = run
                 .reasoning_effort
-                .map(resolve_muse_glimmer_reasoning_strength);
+                .map(resolve_muse_glimmer_reasoning_strength)
+                .transpose()?;
             match run.acquire_input()? {
                 cli::AcquiredRunInput::RawPrompt(text) => Ok(MuseGlimmerPreparedPrompt {
                     text,
@@ -63,13 +64,18 @@ pub(crate) fn prepare_muse_glimmer_prompt(
 
 pub(crate) fn resolve_muse_glimmer_reasoning_strength(
     requested: cli::RunReasoningEffort,
-) -> MuseGlimmerReasoningStrength {
-    match requested {
+) -> Result<MuseGlimmerReasoningStrength> {
+    Ok(match requested {
         cli::RunReasoningEffort::Low => MuseGlimmerReasoningStrength::Low,
         cli::RunReasoningEffort::Medium => MuseGlimmerReasoningStrength::Medium,
         cli::RunReasoningEffort::High => MuseGlimmerReasoningStrength::High,
         cli::RunReasoningEffort::Xhigh => MuseGlimmerReasoningStrength::Xhigh,
-    }
+        cli::RunReasoningEffort::Max => {
+            bail!(
+                "--reasoning-effort max is a DeepSeek V4 tier; Muse Glimmer accepts low, medium, high, xhigh"
+            )
+        }
+    })
 }
 
 pub(crate) fn validate_muse_glimmer_generation_mode(

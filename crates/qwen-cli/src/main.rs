@@ -548,6 +548,16 @@ fn prepare_modern_run_prompt(
     let no_thinking = run.no_thinking;
     let qwen38_generation_mode =
         resolve_qwen38_generation_mode(qwen38, no_thinking, run.reasoning_effort)?;
+    let deepseek_v4_options = match family {
+        ModelFamily::DeepSeek4 => resolve_deepseek_v4_run_options(run.reasoning_effort)?,
+        _ => {
+            ensure!(
+                run.reasoning_effort.is_none() || qwen38,
+                "--reasoning-effort applies to Qwen3.8 (low/medium/xhigh), DeepSeek V4 (low/high/max), and Muse Glimmer; this model has no reasoning-effort control"
+            );
+            DeepSeekV4EncodeOptions::default()
+        }
+    };
     let input = run.acquire_input()?;
     let (text, source) = match input {
         cli::AcquiredRunInput::RawPrompt(prompt) => (prompt, PromptSource::Inline),
@@ -583,7 +593,7 @@ fn prepare_modern_run_prompt(
                 ModelFamily::DeepSeek4 => render_deepseek_v4_0731_single_turn_prompt(
                     &user,
                     system.as_deref(),
-                    DeepSeekV4EncodeOptions::default(),
+                    deepseek_v4_options,
                 )
                 .context("render DeepSeek V4 0731 user request")?,
                 ModelFamily::MuseGlimmer => {
@@ -648,11 +658,10 @@ fn prepare_modern_run_prompt(
                         "DeepSeek V4 ordinary chat does not accept tools, tool calls, or tool results"
                     )
                 }
-                ModelFamily::DeepSeek4 => render_deepseek_v4_0731_messages_prompt(
-                    &messages,
-                    DeepSeekV4EncodeOptions::default(),
-                )
-                .context("render strict DeepSeek V4 0731 messages")?,
+                ModelFamily::DeepSeek4 => {
+                    render_deepseek_v4_0731_messages_prompt(&messages, deepseek_v4_options)
+                        .context("render strict DeepSeek V4 0731 messages")?
+                }
                 ModelFamily::MuseGlimmer => {
                     bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
                 }
@@ -676,10 +685,6 @@ fn resolve_qwen38_generation_mode(
         !(no_thinking && reasoning_effort.is_some()),
         "--reasoning-effort cannot be combined with --no-thinking"
     );
-    ensure!(
-        reasoning_effort.is_none() || qwen38,
-        "--reasoning-effort is currently supported only for Qwen3.8 27B and Qwen3.8-Flash-Next models with a compatible qwen35 prompt protocol"
-    );
     if !qwen38 {
         return Ok(None);
     }
@@ -689,12 +694,34 @@ fn resolve_qwen38_generation_mode(
     let effort = match reasoning_effort.unwrap_or(cli::RunReasoningEffort::Xhigh) {
         cli::RunReasoningEffort::Low => Qwen38ReasoningEffort::Low,
         cli::RunReasoningEffort::Medium => Qwen38ReasoningEffort::Medium,
-        cli::RunReasoningEffort::High => {
-            bail!("--reasoning-effort high is supported by Muse Glimmer, not Qwen3.8")
+        cli::RunReasoningEffort::High | cli::RunReasoningEffort::Max => {
+            bail!(
+                "--reasoning-effort high/max are not Qwen3.8 levels (Qwen3.8 accepts low, medium, xhigh)"
+            )
         }
         cli::RunReasoningEffort::Xhigh => Qwen38ReasoningEffort::Xhigh,
     };
     Ok(Some(Qwen38GenerationMode::Thinking(effort)))
+}
+
+/// DeepSeek V4 thinking tier for `qwen run`: absent means ordinary chat;
+/// thinking tiers preserve replayed reasoning, as serve does.
+fn resolve_deepseek_v4_run_options(
+    reasoning_effort: Option<cli::RunReasoningEffort>,
+) -> Result<DeepSeekV4EncodeOptions> {
+    let reasoning = match reasoning_effort {
+        None => DeepSeekV4Reasoning::None,
+        Some(cli::RunReasoningEffort::Low) => DeepSeekV4Reasoning::Low,
+        Some(cli::RunReasoningEffort::High) => DeepSeekV4Reasoning::High,
+        Some(cli::RunReasoningEffort::Max) => DeepSeekV4Reasoning::Max,
+        Some(other) => {
+            bail!("--reasoning-effort {other:?} is not a DeepSeek V4 tier (accepts low, high, max)")
+        }
+    };
+    Ok(DeepSeekV4EncodeOptions {
+        reasoning,
+        preserve_reasoning: !matches!(reasoning, DeepSeekV4Reasoning::None),
+    })
 }
 
 /// `--no-thinking` is a template transition, so any model whose chat

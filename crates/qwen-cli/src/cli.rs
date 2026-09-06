@@ -100,6 +100,7 @@ pub(crate) enum RunReasoningEffort {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 #[derive(Debug)]
@@ -179,7 +180,8 @@ pub(crate) struct RunArgs {
     no_thinking: bool,
 
     /// Reasoning depth. Muse accepts low/medium/high/xhigh and defaults to high;
-    /// Qwen3.8 accepts low/medium/xhigh and defaults to xhigh.
+    /// Qwen3.8 accepts low/medium/xhigh and defaults to xhigh. DeepSeek V4
+    /// accepts low/high/max thinking tiers and defaults to ordinary chat.
     #[arg(
         long,
         value_name = "EFFORT",
@@ -461,7 +463,7 @@ mod tests {
             assert_eq!(run.reasoning_effort, Some(expected));
         }
 
-        for value in ["max", "none", "unknown"] {
+        for value in ["none", "unknown"] {
             assert!(
                 Args::try_parse_from([
                     "qwen",
@@ -484,7 +486,7 @@ mod tests {
         run.write_long_help(&mut help).unwrap();
         let help = String::from_utf8(help).unwrap();
         assert!(help.contains("--reasoning-effort <EFFORT>"));
-        assert!(help.contains("possible values: low, medium, high, xhigh"));
+        assert!(help.contains("possible values: low, medium, high, xhigh, max"));
         assert!(help.contains("Muse accepts low/medium/high/xhigh"));
     }
 

@@ -129,7 +129,10 @@ fn muse_glimmer_reasoning_strength_preserves_all_released_levels() {
             MuseGlimmerReasoningStrength::Xhigh,
         ),
     ] {
-        assert_eq!(resolve_muse_glimmer_reasoning_strength(requested), expected);
+        assert_eq!(
+            resolve_muse_glimmer_reasoning_strength(requested).unwrap(),
+            expected
+        );
     }
 }
 
@@ -1129,17 +1132,29 @@ fn qwen38_reasoning_effort_resolver_is_typed_and_fail_closed() {
         resolve_qwen38_generation_mode(true, false, Some(cli::RunReasoningEffort::High))
             .unwrap_err()
             .to_string()
-            .contains("supported by Muse Glimmer")
+            .contains("not Qwen3.8 levels")
     );
     assert_eq!(
         resolve_qwen38_generation_mode(true, true, None).unwrap(),
         Some(Qwen38GenerationMode::NoThinking)
     );
+    // Non-Qwen3.8 families resolve their own effort vocabulary; the Qwen3.8
+    // resolver simply stands aside.
+    assert_eq!(
+        resolve_qwen38_generation_mode(false, false, Some(cli::RunReasoningEffort::Low)).unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_deepseek_v4_run_options(Some(cli::RunReasoningEffort::Max))
+            .unwrap()
+            .reasoning,
+        DeepSeekV4Reasoning::Max
+    );
+    assert!(resolve_deepseek_v4_run_options(Some(cli::RunReasoningEffort::Xhigh)).is_err());
     assert!(
-        resolve_qwen38_generation_mode(false, false, Some(cli::RunReasoningEffort::Low))
-            .unwrap_err()
-            .to_string()
-            .contains("supported only for Qwen3.8 27B and Qwen3.8-Flash-Next")
+        !resolve_deepseek_v4_run_options(None)
+            .unwrap()
+            .preserve_reasoning
     );
     assert_eq!(
         resolve_qwen38_generation_mode(false, false, None).unwrap(),

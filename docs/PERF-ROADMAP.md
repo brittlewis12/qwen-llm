@@ -480,6 +480,14 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 replay-debit follow-up is INCONCLUSIVE, prototype removed. Current
+template admission rejects the installed Qwen3.8 dense artifact's Flash-Next
+digest; the alternative Qwen3.6/legacy-drafter pilot restores serially and never
+exercises fallback accounting. Its small timing differences carry no causal
+authority. Require admitted artifacts and active-path witnesses before another
+controller packet; do not weaken the template gate to resume historical Q8
+timing. Full attempt/revert details are in PERF-LOG.
+
 2026-09-06 restored pending-checkpoint DFlash admission is HOLD. Comparing
 capture length with consumed rather than matched position enables the previously
 serial continuations, but Q8 A-B-B-A exposes a policy tradeoff: code 128-output

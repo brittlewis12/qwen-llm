@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Short-Context Replay Debit INCONCLUSIVE
+
+- `259f4ade` tests zero saved target rows for exact-replay packets instead of
+  crediting their accepted tokens. Raw acceptance, verifier guards, windows,
+  thresholds, probe cadence, and explicit-long policy remain unchanged.
+  Admission-only control `be838797` and candidate share refreshed main
+  `6ec93f0c`; 14 focused CPU tests pass, including sparse/clean winners,
+  replay-heavy backoff, recovery, sampled clean accounting, and long policies.
+- Q8 control exits before model load: the installed dense Qwen3.8 artifact has
+  Flash-Next template digest `12827f24...f9aaadce`, rejected by the current
+  architecture-scoped template gate. No gate or artifact was weakened.
+- Dissimilar Qwen3.6 Q4 + matching legacy Q8 drafter first rejects the observer's
+  Qwen3.8-only reasoning.effort control. Repaired requests use the pinned
+  template's x_qwen.no_thinking. Both eight-response processes then complete;
+  all 16 texts/hashes, usage/cache counts, and completion statuses agree.
+- Logs show every restored Qwen3.6 turn remains serial; fresh short turns each
+  use one packet without fallback. Thus the changed controller is unexercised.
+  Code wall `6968.825 -> 6930.031 ms` and prose `7334.141 -> 7100.957 ms` have
+  no causal optimization authority. Stop before reversal or prompt fishing.
+- Replay debit removed at `9044cf5c`, temporary admission at `133c5fba`.
+  INCONCLUSIVE, not performance KILL; no runtime promotion. All failed and
+  repaired attempts/protocols remain in the dedicated worktree under
+  `target/profiles/dflash-replay-debit/`. Reopening needs an admitted target
+  artifact and a witnessed active fallback lane before endpoint timing.
+
 ## 2026-09-06 - Restored DFlash Admission HOLD
 
 - `f12bc2f9` corrects consumed-versus-matched capture admission for completed

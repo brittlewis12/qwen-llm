@@ -96,3 +96,8 @@ pub mod workspace_lens;
 /// `../../kernels/*.metal`. Empty until the first kernel is added.
 pub(crate) const KERNELS_METALLIB: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/kernels.metallib"));
+/// Bench/research-only probe kernels from `../../kernels/research/*.metal`,
+/// loaded lazily on the first pipeline miss so product startup never touches
+/// them.
+pub(crate) const KERNELS_RESEARCH_METALLIB: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/kernels_research.metallib"));

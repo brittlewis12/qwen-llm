@@ -39,7 +39,7 @@ use objc2_metal::{
     MTLComputeCommandEncoder, MTLComputePassDescriptor, MTLComputePipelineState, MTLCounter,
     MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor,
     MTLCounterSamplingPoint, MTLCounterSet, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLDispatchType, MTLFence, MTLLibrary, MTLResource, MTLResourceOptions, MTLSize,
+    MTLDispatchType, MTLFence, MTLFunction, MTLLibrary, MTLResource, MTLResourceOptions, MTLSize,
     MTLStorageMode,
 };
 use objc2_metal_performance_shaders::{

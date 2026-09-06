@@ -21,14 +21,33 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed={}", watched_kernels_dir.display());
     println!("cargo:rerun-if-changed=build.rs");
 
-    if !kernels_dir.exists() {
-        // No kernels yet; emit an empty stub so lib.rs can include_bytes!().
-        let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
-        std::fs::write(out_dir.join("kernels.metallib"), [])?;
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
+    // Product kernels live at the top level; bench/research-only probes under
+    // kernels/research/ compile into a second metallib the runtime loads
+    // lazily, so the product library stays an honest inventory.
+    compile_metallib(&kernels_dir, &watched_kernels_dir, &out_dir, "kernels")?;
+    compile_metallib(
+        &kernels_dir.join("research"),
+        &watched_kernels_dir.join("research"),
+        &out_dir,
+        "kernels_research",
+    )?;
+    Ok(())
+}
+
+fn compile_metallib(
+    dir: &PathBuf,
+    watched_dir: &PathBuf,
+    out_dir: &PathBuf,
+    name: &str,
+) -> anyhow::Result<()> {
+    let metallib = out_dir.join(format!("{name}.metallib"));
+    if !dir.exists() {
+        std::fs::write(&metallib, [])?;
         return Ok(());
     }
-
-    let mut metal_files: Vec<PathBuf> = std::fs::read_dir(&kernels_dir)?
+    println!("cargo:rerun-if-changed={}", watched_dir.display());
+    let mut metal_files: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("metal"))
@@ -37,27 +56,20 @@ fn main() -> anyhow::Result<()> {
     for path in &metal_files {
         println!(
             "cargo:rerun-if-changed={}",
-            watched_kernels_dir
-                .join(path.file_name().unwrap())
-                .display()
+            watched_dir.join(path.file_name().unwrap()).display()
         );
     }
-
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
-
     if metal_files.is_empty() {
-        std::fs::write(out_dir.join("kernels.metallib"), [])?;
+        std::fs::write(&metallib, [])?;
         return Ok(());
     }
-
     let air_files: Vec<PathBuf> = metal_files
         .iter()
         .map(|src| {
             let stem = src.file_stem().unwrap().to_string_lossy();
-            out_dir.join(format!("{stem}.air"))
+            out_dir.join(format!("{name}_{stem}.air"))
         })
         .collect();
-
     for (src, air) in metal_files.iter().zip(air_files.iter()) {
         let status = Command::new("xcrun")
             .args(["-sdk", "macosx", "metal", "-c"])
@@ -71,8 +83,6 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("metal compile failed for {}", src.display());
         }
     }
-
-    let metallib = out_dir.join("kernels.metallib");
     let status = Command::new("xcrun")
         .args(["-sdk", "macosx", "metallib"])
         .args(&air_files)
@@ -80,8 +90,7 @@ fn main() -> anyhow::Result<()> {
         .arg(&metallib)
         .status()?;
     if !status.success() {
-        anyhow::bail!("metallib link failed");
+        anyhow::bail!("metallib link failed for {name}");
     }
-
     Ok(())
 }

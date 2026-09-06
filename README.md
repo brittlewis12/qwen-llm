@@ -123,7 +123,9 @@ architecture plan.
 crates/qwen-llm/  engine library
 crates/qwen-cli/  qwen, qwen-bench, qwen-tok, qwen-census,
                   qwen-grammar-oracle, and qwen-lens
-kernels/          Metal compute shaders compiled into an embedded metallib
+kernels/          Metal compute shaders compiled into the embedded product metallib;
+                  kernels/research/ holds bench-only probes in a second metallib
+                  loaded lazily on first use
 docs/             runtime contracts, research notes, and evidence packets
 ```
 

@@ -331,6 +331,8 @@ pub struct MetalContext {
     pub device: Device,
     pub queue: Queue,
     pub library: Library,
+    /// Research/bench probe kernels, loaded on first miss (see `pipeline`).
+    research_library: Arc<Mutex<Option<Library>>>,
     pub(crate) pso_cache: Arc<Mutex<MetalPipelineCache>>,
     pub(crate) _process_lease: Arc<MetalProcessLease>,
 }
@@ -550,6 +552,7 @@ impl MetalContext {
             device,
             queue,
             library,
+            research_library: Arc::new(Mutex::new(None)),
             pso_cache: Arc::new(Mutex::new(MetalPipelineCache::default())),
             _process_lease: process_lease,
         })
@@ -564,13 +567,34 @@ impl MetalContext {
             device: self.device.clone(),
             queue,
             library: self.library.clone(),
+            research_library: self.research_library.clone(),
             pso_cache: self.pso_cache.clone(),
             _process_lease: self._process_lease.clone(),
         })
     }
 
+    /// Resolve a function from the research metallib, loading it on first use.
+    fn research_function(
+        &self,
+        name: &NSString,
+    ) -> Result<Option<Retained<ProtocolObject<dyn MTLFunction>>>, MetalError> {
+        let mut slot = self.research_library.lock();
+        if slot.is_none() {
+            let bytes = crate::KERNELS_RESEARCH_METALLIB;
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            *slot = Some(load_library(&self.device, bytes)?);
+        }
+        Ok(slot
+            .as_ref()
+            .and_then(|library| library.newFunctionWithName(name)))
+    }
+
     /// Look up a kernel function by name, compiling its pipeline state
-    /// object on first request and caching it thereafter.
+    /// object on first request and caching it thereafter. Product kernels
+    /// come from the embedded product metallib; bench/research probes fall
+    /// back to the research metallib.
     pub fn pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {
         census_record_pso(name);
         let metrics_enabled = {
@@ -585,11 +609,17 @@ impl MetalContext {
         };
         let miss_t0 = metrics_enabled.then(std::time::Instant::now);
         let func_name = NSString::from_str(name);
-        let Some(function) = self.library.newFunctionWithName(&func_name) else {
-            if let Some(start) = miss_t0 {
-                self.record_pipeline_miss_wall(start.elapsed(), None);
-            }
-            return Err(MetalError::NoFunction(name.to_string()));
+        let function = match self.library.newFunctionWithName(&func_name) {
+            Some(function) => function,
+            None => match self.research_function(&func_name)? {
+                Some(function) => function,
+                None => {
+                    if let Some(start) = miss_t0 {
+                        self.record_pipeline_miss_wall(start.elapsed(), None);
+                    }
+                    return Err(MetalError::NoFunction(name.to_string()));
+                }
+            },
         };
         let compiler_t0 = metrics_enabled.then(std::time::Instant::now);
         let pso_result = self

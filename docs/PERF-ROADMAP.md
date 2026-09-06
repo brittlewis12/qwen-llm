@@ -480,6 +480,17 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 restored pending-checkpoint DFlash admission is HOLD. Comparing
+capture length with consumed rather than matched position enables the previously
+serial continuations, but Q8 A-B-B-A exposes a policy tradeoff: code 128-output
+wall saves 43.151%/36.919%, while blue two-output loses 11.755%/19.548% and prose
+loses 16.909%/20.659% (prose control spread 5.225%, no stable effect authority).
+Prose pays 21 exact fallbacks over 39 packets without backoff; below-16K control
+ignores that replay cost. Prototype reverted, Q4 promotion replay deferred.
+This elevates charged fallback/probe economics as the prerequisite to restoring
+this capability, not another verifier tile or a content-specific selector.
+Evidence: `docs/bench/2026-09-06-serve-restored-dflash/RESULT.md`.
+
 2026-09-06 serial-tail allocation is now prefix-aware for dense 1-48-forward
 suffixes, including pending-token consumption. It removes 1.31/3.40 GB of
 actual Metal allocations at the measured 8K/32K short-tail shapes without

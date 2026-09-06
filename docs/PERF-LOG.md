@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Restored DFlash Admission HOLD
+
+- `f12bc2f9` corrects consumed-versus-matched capture admission for completed
+  checkpoints: the emitted pending token is captured by subsequent prefill,
+  not the restored tail. Q8 release A-B-B-A preserves all 32 endpoint texts,
+  usage/cache counts, statuses, and subsequent continuation boundaries.
+- Code 128-output wall saves 43.151%/36.919% in the two orders (median 39.967%,
+  4.441% control spread). Blue two-output wall instead loses 11.755%/19.548%.
+  Prose loses 16.909%/20.659%; 5.225% control spread withholds stable effect
+  authority, not the safety objection. Code TTFT is not improved.
+- Prose runs 39 speculative steps with 21 exact fallbacks and no backoff;
+  below-16K acceptance-only control ignores 4.48/4.57 seconds of serial replay.
+  Code runs 19 steps with two fallbacks. Admission correctness alone is not a
+  product optimization; candidate reverted at `01d24ccd`, Q4 promotion replay
+  not run after the Q8 regressions decide HOLD. 101 serve CPU tests pass.
+- Evidence: `docs/bench/2026-09-06-serve-restored-dflash/RESULT.md`. Reopening
+  requires charged fallback/probe economics, unchanged exactness guards, and
+  dissimilar quantization, not a broader default based on code-only acceptance.
+
 ## 2026-09-06 - Dense Serial-Tail Scratch Omission KEEP
 
 - `6c2a3ba1` omits unused matrix scratch when dense serve requires 1-48 actual

@@ -633,6 +633,20 @@ pub(crate) fn execute_single_turn_request(
     let mut dflash_stats: Option<DflashDecodeStats> = None;
     let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) =
         if let Some(head) = dflash_head {
+            // Shadow prefill is the last consumer of the prompt scratch.
+            let shadow_probe = std::env::var_os("QWEN_DFLASH_SHADOW_PROBE").is_some();
+            let mut shadow = if shadow_probe {
+                let shadow_capacity = prompt_ids.len() + args.tokens + 16;
+                let mut shadow_sequence = loaded
+                    .create_sequence(SequenceConfig::new(shadow_capacity))
+                    .context("allocate shadow probe sequence")?;
+                crate::prefill_span(&forward, &mut shadow_sequence, &mut scratch, &prompt_ids, 0)
+                    .context("shadow probe prefill")?;
+                Some(shadow_sequence)
+            } else {
+                None
+            };
+            drop(scratch);
             // v0.77 DFlash speculative decode. Seed the drafter's cross-context
             // with the captured prompt hiddens, then verify greedy or sampled
             // proposals against the packed target forward.
@@ -663,25 +677,6 @@ pub(crate) fn execute_single_turn_request(
             }
             let dflash_scratch =
                 allocate_dflash_decode_scratch(loaded, head, sampling_config.temperature > 0.0)?;
-            // Shadow-reference probe (QWEN_DFLASH_SHADOW_PROBE=1): a second
-            // sequence prefilled through the plain serial path replays every
-            // committed token alongside the speculative loop and compares the
-            // reference argmax against the packed-verify row-0 argmax. Costs
-            // a full serial decode on top of speculation; diagnostics only.
-            let shadow_probe = std::env::var_os("QWEN_DFLASH_SHADOW_PROBE").is_some();
-            let mut shadow = if shadow_probe {
-                // The shadow replays the full serial path, so it needs the
-                // whole prompt plus generation, not the windowed capacity.
-                let shadow_capacity = prompt_ids.len() + args.tokens + 16;
-                let mut shadow_sequence = loaded
-                    .create_sequence(SequenceConfig::new(shadow_capacity))
-                    .context("allocate shadow probe sequence")?;
-                crate::prefill_span(&forward, &mut shadow_sequence, &mut scratch, &prompt_ids, 0)
-                    .context("shadow probe prefill")?;
-                Some(shadow_sequence)
-            } else {
-                None
-            };
             let result = generate_dflash(
                 loaded,
                 &forward,
@@ -754,6 +749,7 @@ pub(crate) fn execute_single_turn_request(
             dflash_stats = Some(result.stats);
             (result.generation, None, None, None)
         } else if args.prompt_lookup {
+            drop(scratch);
             let result = generate_prompt_lookup(
                 loaded,
                 &forward,
@@ -779,6 +775,7 @@ pub(crate) fn execute_single_turn_request(
             sequence = result.sequence;
             (result.generation, Some(result.stats), None, None)
         } else {
+            drop(scratch);
             let mut on_token = |token| {
                 let callback_t0 = Instant::now();
                 write!(stdout, "{}", tokenizer.decode_piece(token))?;
@@ -1018,7 +1015,6 @@ pub(crate) fn execute_single_turn_request(
         )
     });
     drop(sequence);
-    drop(scratch);
     let after_state_drop_allocated =
         timing_enabled.then(|| loaded.context().current_allocated_size());
     if let (Some(store), Some(prepared)) = (durable_store, durable_prepared.as_ref()) {

@@ -1016,6 +1016,10 @@ impl GenerationBackend for EngineBackend {
             speculate = false;
         }
 
+        // Prefill and its possible fresh retry have finished; snapshots and
+        // decode own their state independently of the matrix workspace.
+        drop(scratch);
+
         // Prompt-boundary capture into the RAM cache (skip when this exact
         // prompt was already an exact hit). The capture window buffer holds
         // the prompt's trailing columns; publish them as the drafter tail.
@@ -1725,6 +1729,108 @@ mod tests {
                 allocated_bytes[0] - allocated_bytes[1]
             );
         }
+    }
+
+    #[test]
+    #[ignore = "loads a local model and checks Metal scratch teardown"]
+    fn released_prefill_scratch_preserves_snapshot_and_continuation() {
+        struct Sink;
+        impl GenerationSink for Sink {
+            fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+                panic!("prefill must not emit")
+            }
+            fn tick(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let model = std::env::var("QWEN_NO_TAIL_TEST_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
+        let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
+        let loaded = runtime.load_model(&model).unwrap();
+        let tokens = loaded
+            .tokenizer()
+            .unwrap()
+            .encode("The quick brown fox jumps over the lazy dog.", false)
+            .unwrap();
+        let prompt: Vec<_> = tokens.iter().copied().cycle().take(65).collect();
+        let forward = loaded.forward();
+        let mut states = Vec::new();
+        let mut retained_scratch = None;
+        let mut logits = Vec::new();
+        for release in [false, true] {
+            let (chunk, mut scratch, mut sequence) =
+                allocate_serve_request_state(&loaded, prompt.len(), 80, true).unwrap();
+            logits.push(
+                prefill_remaining(
+                    &loaded,
+                    &forward,
+                    None,
+                    false,
+                    &prompt,
+                    chunk,
+                    &mut sequence,
+                    &mut scratch,
+                    &mut None,
+                    &mut Sink,
+                )
+                .unwrap_or_else(|_| panic!("packed prefill"))
+                .unwrap(),
+            );
+            if release {
+                let before = loaded.context().current_allocated_size();
+                drop(scratch);
+                assert!(loaded.context().current_allocated_size() < before);
+            } else {
+                retained_scratch = scratch;
+            }
+            states.push(sequence);
+        }
+        assert!(
+            logits[0]
+                .iter()
+                .zip(&logits[1])
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        let pending = prompt[0];
+        for consumed in [false, true] {
+            let mut snapshots = Vec::new();
+            let mut continuation_logits = Vec::new();
+            for sequence in &mut states {
+                let mut history = prompt.clone();
+                if consumed {
+                    continuation_logits.push(
+                        forward
+                            .single_token(pending, sequence.position() as u32, unsafe {
+                                sequence.metal_session_mut()
+                            })
+                            .unwrap(),
+                    );
+                    sequence.advance_by(1).unwrap();
+                    history.push(pending);
+                }
+                snapshots.push(
+                    sequence
+                        .metal_session()
+                        .snapshot(loaded.snapshot_identity(sequence).unwrap(), history, None)
+                        .unwrap(),
+                );
+            }
+            let (a, b) = (&snapshots[0], &snapshots[1]);
+            assert_eq!(a.kv_n_pos, b.kv_n_pos);
+            assert!(a.kv_k_arena == b.kv_k_arena);
+            assert!(a.kv_v_arena == b.kv_v_arena);
+            assert!(a.gdn_conv_arena == b.gdn_conv_arena);
+            assert!(a.gdn_state_arena == b.gdn_state_arena);
+            if consumed {
+                assert!(
+                    continuation_logits[0]
+                        .iter()
+                        .zip(&continuation_logits[1])
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                );
+            }
+        }
+        drop(retained_scratch);
     }
 
     #[test]

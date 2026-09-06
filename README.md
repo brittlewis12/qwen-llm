@@ -47,6 +47,7 @@ Use `run` for an ordinary model-templated request:
 ./target/release/qwen run -m Qwen3.8-27B.gguf --reasoning-effort low --user "Explain this"
 ./target/release/qwen run -m Qwen3.8-Flash-Next.gguf --no-thinking --user "Explain this"
 ./target/release/qwen run -m Muse-Glimmer-30B-Q8_0.gguf --reasoning-effort xhigh --user "Explain this"
+./target/release/qwen run -m DeepSeek-V4-Flash.gguf --reasoning-effort high --user "Explain this"
 ```
 
 Structured messages accept either a strict bare array or

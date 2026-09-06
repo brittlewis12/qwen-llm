@@ -101,10 +101,12 @@ Contract:
   guarantee there.
 - `--reasoning-effort` is resolved by model family for structured
   `--user`/`--messages` input. Validated Qwen3.8 accepts
-  `low|medium|xhigh`, defaults to upstream xhigh, and rejects `high`. Muse
-  Glimmer accepts exact `low|medium|high|xhigh` reasoning strengths and defaults
-  to `high`. Unknown values, raw input, and `--no-thinking` combinations fail
-  closed.
+  `low|medium|xhigh` and defaults to upstream xhigh; Muse Glimmer accepts
+  exact `low|medium|high|xhigh` reasoning strengths and defaults to `high`;
+  DeepSeek V4 accepts its `low|high|max` thinking tiers (preserving replayed
+  reasoning) and defaults to ordinary chat. Each family rejects the other
+  families' levels by name rather than coercing; raw input and
+  `--no-thinking` combinations fail closed.
 - Muse Glimmer uses the released `temperature=1`, `top_p=.95`, `top_k=64`,
   `min_p=0` preset. Each explicitly supplied sampling flag overrides only its
   corresponding field; the request seed remains explicit and deterministic.

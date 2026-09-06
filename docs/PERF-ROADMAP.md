@@ -480,6 +480,15 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 restored suffix32 screen exposes a packed-workspace blocker:
+1262.563 ms serial versus 252.341 ms construction+packed execution, but
+323,256,320 bytes fails the 128 MiB gate before numerical/greedy validation.
+All-layer transposed V accounts for 289,669,120 logical bytes (89.61% of total).
+This prioritizes auditing single-block VT lifetimes before changing the 48-row
+serve threshold; one-slot arithmetic estimates 51,691,520 bytes but is not a
+priced implementation. Preserve multi-chunk VT reuse and all existing default
+policies. Evidence: `docs/bench/2026-09-06-restored-tail-crossover/RESULT.md`.
+
 2026-09-06 phase-dead scratch work keeps only ordinary serial CLI release:
 the 8,840-input/64-output Qwen3.6 Q4 packet removes 1.364 GB of Metal allocation
 at first delivery, with +1.194% request wall and unchanged sampled peak. This

@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Restored Suffix Crossover Memory Screen FAIL
+
+- Test-only `5e58fee4` compares 32 actual forwards after a common 8,808-token
+  consumed checkpoint (8,809 matched including pending). Qwen3.6 Q4 release:
+  serial prefill 1262.563 ms versus packed 252.137 ms plus 0.204 ms allocation.
+  The approximate 5.003x phase ratio is not an endpoint speedup claim.
+- Query32/full-key8840 scratch costs 323,256,320 bytes, above the frozen
+  128 MiB gate. Stop before logits/state cosine and 64-token continuation:
+  no numerical/greedy promotion authority. Model-free scope boundaries pass.
+- Static attribution identifies 289,669,120 logical VT bytes retained across
+  all16 attention layers: 89.61% of observed workspace, independent of query
+  width. One-slot substitution estimates 51,691,520 bytes, not a measured or
+  priced plan. A single-block storage-lifetime mechanism is the prerequisite,
+  not a looser memory gate or global serial-threshold reduction.
+- Independent review challenges and then corrects an overly strong CPU-wait
+  requirement: serial tracked GPU ordering may suffice, but every VT consumer
+  still needs an alias/lifetime audit before implementation. Prototype removed
+  at `daa4ff5b`; no default changes. Relative-path observer failure and sole GPU
+  attempt remain under `target/profiles/restored-tail-crossover/`.
+- Evidence: `docs/bench/2026-09-06-restored-tail-crossover/RESULT.md`.
+
 ## 2026-09-06 - Serial CLI Prefill Lifetime Resource KEEP
 
 - `4d5f8834` releases phase-dead scratch across CLI and serve; adversarial

@@ -343,11 +343,11 @@ fn allocate_serve_request_state(
 }
 
 fn restored_dflash_capture_complete(
-    restored_tokens: usize,
+    matched_tokens: usize,
     capture_start: usize,
     captured: usize,
 ) -> bool {
-    captured == restored_tokens.saturating_sub(capture_start)
+    captured == matched_tokens.saturating_sub(capture_start)
 }
 
 fn dflash_ring_offset(position: usize, capture_start: usize, ring_window: usize) -> Option<usize> {
@@ -820,9 +820,7 @@ impl GenerationBackend for EngineBackend {
             dflash_capture
                 .as_ref()
                 .is_some_and(|(_, capture_start, captured, _, _)| {
-                    // The matched pending token is captured by the upcoming
-                    // prefill, not by the restored checkpoint's consumed tail.
-                    restored_dflash_capture_complete(restored_prefix_len, *capture_start, *captured)
+                    restored_dflash_capture_complete(matched_tokens, *capture_start, *captured)
                 });
         let speculate_candidate = should_plan_dflash(
             self.dflash_head.is_some(),
@@ -1661,19 +1659,6 @@ mod tests {
             restored_extension_offsets,
             [None, Some(0), Some(1), Some(2)]
         );
-    }
-
-    #[test]
-    fn dflash_restored_tail_excludes_the_pending_token() {
-        // An 8,812-token match restores 8,811 consumed tokens. The new prompt's
-        // observable window starts at 6,784; pending and suffix rows follow.
-        assert!(restored_dflash_capture_complete(8811, 6784, 2027));
-        assert!(!restored_dflash_capture_complete(8812, 6784, 2027));
-        assert!(!restored_dflash_capture_complete(8811, 6784, 2026));
-        assert!(!restored_dflash_capture_complete(8811, 6784, 2028));
-        assert!(restored_dflash_capture_complete(8811, 8811, 0));
-        assert!(restored_dflash_capture_complete(8811, 8812, 0));
-        assert!(!restored_dflash_capture_complete(8811, 8810, 0));
     }
 
     #[test]

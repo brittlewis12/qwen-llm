@@ -196,7 +196,13 @@ fn classify_qwen_digest(architecture: &str, digest: [u8; 32]) -> Option<QwenProm
             "qwen35" | "qwen35moe",
             QWEN36_CHAT_TEMPLATE_SHA256 | QWEN36_ALTERNATE_CHAT_TEMPLATE_SHA256,
         ) => Some(QwenPromptTemplate::Qwen36),
-        ("qwen35", QWEN38_CHAT_TEMPLATE_SHA256) => Some(QwenPromptTemplate::Qwen38),
+        // The Unsloth-patched Qwen3.8 template (developer merge, `high` alias,
+        // stricter argument checks) ships in both the dense Qwen3.8 Q8_0
+        // repack and Flash-Next; it renders identically to the canonical
+        // template on the supported subset (qwen38 oracle cases).
+        ("qwen35", QWEN38_CHAT_TEMPLATE_SHA256 | QWEN4NEXT_CHAT_TEMPLATE_SHA256) => {
+            Some(QwenPromptTemplate::Qwen38)
+        }
         ("qwen4exp", QWEN4NEXT_CHAT_TEMPLATE_SHA256) => Some(QwenPromptTemplate::Qwen4Next),
         _ => None,
     }
@@ -254,8 +260,14 @@ mod tests {
             classify_qwen_digest("qwen35moe", QWEN38_CHAT_TEMPLATE_SHA256),
             None
         );
+        // The Unsloth-patched template ships in the dense Qwen3.8 Q8_0 repack
+        // too and renders identically on the supported subset.
         assert_eq!(
             classify_qwen_digest("qwen35", QWEN4NEXT_CHAT_TEMPLATE_SHA256),
+            Some(QwenPromptTemplate::Qwen38)
+        );
+        assert_eq!(
+            classify_qwen_digest("qwen35moe", QWEN4NEXT_CHAT_TEMPLATE_SHA256),
             None
         );
     }

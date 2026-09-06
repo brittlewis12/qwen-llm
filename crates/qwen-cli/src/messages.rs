@@ -2589,6 +2589,27 @@ mod tests {
                 .expect("run oracle drift gate");
             assert!(status.success(), "{fixture} drifted from {template}");
         }
+        // The Unsloth-patched Qwen3.8 template (dense Q8_0 repack and
+        // Flash-Next) must keep rendering the canonical fixture bytes.
+        let status = std::process::Command::new("uv")
+            .args([
+                "run",
+                "scripts/reference/render_qwen_chat_template.py",
+                "crates/qwen-cli/tests/fixtures/templates/qwen38_27b_unsloth_chat_template.jinja",
+                "crates/qwen-cli/tests/fixtures/qwen38_chat_template_oracle_cases.json",
+            ])
+            .current_dir(&repository_root)
+            .output()
+            .expect("render unsloth qwen38 template");
+        let rendered: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        let canonical: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/qwen38_chat_template_oracle_v1.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            rendered["cases"], canonical["cases"],
+            "unsloth qwen38 template diverged"
+        );
     }
 
     #[test]

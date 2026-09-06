@@ -82,6 +82,21 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 - Evidence: `docs/bench/2026-09-06-serve-terminal-off/RESULT.md`. Raw attempts
   remain under the dedicated worktree's `target/profiles/request-elision/`.
 
+## 2026-09-06 - DeepSeek V4 N=1 Packed Lineage Restored
+
+Status: the five `deepseek_v4_metal::prefill` packed-grouped gates that were
+red on main are green again; no kernel changed.
+
+- Bisected (sibling worktree, `git bisect run`) to `940516a8` (2026-08-19),
+  which routes every `n_query == 1` in `encode_mat_mat_dispatch` to the
+  Qwen single-token mat-vec kernels. DeepSeek's packed projections share
+  that dispatcher, so their N=1 accumulation order changed by a few ulps
+  (cosine `0.99999999999996`, relative RMS `2.8e-7`) against gates that pin
+  bitwise scalar lineage.
+- Fix: `encode_mat_mat_dispatch_with_policy(.., allow_n1_mat_vec)`; DeepSeek
+  passes `false`. Qwen keeps the 5.2x packed-verify win unchanged. A family
+  must not inherit another family's tuned routing when it pins arithmetic.
+
 ## 2026-09-03 - Flash-Next Selected Packed QSA Default-On
 
 Status: `QWEN4EXP_PACKED_SELECTED_QSA` flipped from default-off to default-on.

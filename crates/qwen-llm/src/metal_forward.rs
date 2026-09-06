@@ -7844,6 +7844,17 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(Vec<f32>, TokenProfile), MfError> {
+        self.single_token_profiled_concurrent_gdn_dense_with_tail(token_id, position, session, true)
+    }
+
+    fn single_token_profiled_concurrent_gdn_dense_with_tail(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        emit_logits: bool,
+    ) -> Result<(Vec<f32>, TokenProfile), MfError> {
+        session.ensure_usable()?;
         let arch = &self.model.arch;
         if arch.kind != ArchKind::Dense {
             return Err(MfError::UnsupportedMoe);
@@ -7930,7 +7941,7 @@ impl<'a> MetalForward<'a> {
             }
         }
 
-        {
+        if emit_logits {
             let enc = KernelEncoder::begin(&cmd_buf);
             encode_rms_norm_mul_f32(
                 self.ctx,
@@ -7968,11 +7979,16 @@ impl<'a> MetalForward<'a> {
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
-        let mut out = vec![0.0f32; arch.vocab_size as usize];
-        unsafe {
-            let src = session.logits.buffer.contents().as_ptr() as *const f32;
-            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
-        }
+        let out = if emit_logits {
+            let mut out = vec![0.0f32; arch.vocab_size as usize];
+            unsafe {
+                let src = session.logits.buffer.contents().as_ptr() as *const f32;
+                std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+            }
+            out
+        } else {
+            Vec::new()
+        };
         let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
         Ok((
             out,
@@ -10833,6 +10849,13 @@ impl<'a> MetalForward<'a> {
         session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
             return Err(MfError::UnsupportedMoe);
+        }
+        if concurrent_gdn_dense_decode_enabled() {
+            return self
+                .single_token_profiled_concurrent_gdn_dense_with_tail(
+                    token_id, position, session, false,
+                )
+                .map(|_| ());
         }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
@@ -22941,8 +22964,15 @@ mod tests {
     /// the per-token captures across the prompt and compare.
     #[test]
     fn no_tail_prefill_matches_full_tail() {
-        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let override_path = std::env::var("QWEN_NO_TAIL_TEST_MODEL").ok();
+        let model_path = override_path
+            .as_deref()
+            .unwrap_or("/Users/tito/models/Qwen3.5-0.8B.F32.gguf");
         if !std::path::Path::new(model_path).exists() {
+            assert!(
+                override_path.is_none(),
+                "explicit no-tail fixture is missing"
+            );
             eprintln!("[no-tail-prefill] skipped — fixture missing");
             return;
         }
@@ -23002,6 +23032,12 @@ mod tests {
         assert_eq!(
             max_abs, 0.0,
             "logits must match BIT-EXACTLY (max|Δ|={max_abs:e})"
+        );
+        assert!(
+            last_a
+                .iter()
+                .zip(&last_b)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
         );
 
         // Multi-hidden capture must also be bit-exact across all prefill
@@ -23091,6 +23127,39 @@ mod tests {
             max_abs_h, 0.0,
             "accumulated multi-hidden must match BIT-EXACTLY (max|Δ|={max_abs_h:e})"
         );
+        assert!(
+            accum_a
+                .iter()
+                .zip(&accum_b)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        for (a, b) in [(&s_a, &s_b), (&s2_a, &s2_b)] {
+            let identity = a.snapshot_identity(1, 2);
+            let a = a
+                .snapshot(identity.clone(), ids.clone(), None)
+                .expect("snapshot A");
+            let b = b.snapshot(identity, ids.clone(), None).expect("snapshot B");
+            assert_eq!(a.kv_n_pos, b.kv_n_pos);
+            assert!(a.kv_k_arena == b.kv_k_arena, "K state differs");
+            assert!(a.kv_v_arena == b.kv_v_arena, "V state differs");
+            assert!(
+                a.gdn_conv_arena == b.gdn_conv_arena,
+                "convolution state differs"
+            );
+            assert!(
+                a.gdn_state_arena == b.gdn_state_arena,
+                "recurrent state differs"
+            );
+        }
+        for (a, b) in [(&mut s_a, &mut s_b), (&mut s2_a, &mut s2_b)] {
+            let a = mf
+                .single_token(ids[0], n as u32, a)
+                .expect("continuation A");
+            let b = mf
+                .single_token(ids[0], n as u32, b)
+                .expect("continuation B");
+            assert!(a.iter().zip(&b).all(|(a, b)| a.to_bits() == b.to_bits()));
+        }
     }
 
     /// Validate a single full-attention block end-to-end on Metal vs the

@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Serve Head Elision And Readiness KEEP
+
+- `ae9115d2` removes discarded dense serial-prefill heads while preserving plain
+  concurrent-GDN topology and hidden captures. Separate release A-B-B-A improves
+  48-token prose TTFT 4.334% on Q4 no-spec and 4.278% on Q8/DFlash; 128-output
+  request-wall gains are only 0.774%/1.223%. Engaged sampled rows also pass.
+  Final logits, captures, KV/GDN bytes, and continuation are bit-exact in focused
+  0.8B F32 / 27B Q4 / 27B Q8 tests; CLI tails 1/2/16/48 pass.
+- Tiny cache-hit variability exposed the 50 ms acceptor sleep. `f7061e86`
+  combines readiness waiting with clearing macOS-inherited O_NONBLOCK. The first
+  readiness prototype exposed request-read resets; a completion-handoff repair
+  was falsified and removed. Delayed-byte regression reproduces the inherited
+  flag and verifies the narrow fix. No ownership/queue change survives.
+- Final balanced packets complete all 160 responses. Median-of-process-median
+  cached TTFT/wall moves Q8/DFlash `56.448/232.862 -> 15.237/174.151 ms` and
+  0.8B Q4 no-spec `43.256/58.591 -> 2.895/8.005 ms`. Each lane has two processes
+  per arm and 16 hits per process. This is not a decode t/s claim: Q8 long-output
+  wall guard medians are +1.42% to +2.15%, within 3% but not strict Pareto.
+- 99 serve tests pass; the ignored GPU tail test was run separately. All failed
+  acquisition attempts remain under `target/profiles/request-elision/` in the
+  dedicated worktree. Evidence: `docs/bench/2026-09-06-serve-request-elision/RESULT.md`.
+
 ## 2026-09-06 - Serve Terminal-Off Setup Elision HOLD
 
 - `0dd6b6c2` bypassed drafter seed/verifier setup for requests already beyond the

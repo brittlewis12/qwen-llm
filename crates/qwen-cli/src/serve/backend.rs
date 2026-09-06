@@ -383,6 +383,7 @@ fn prefill_remaining(
                 let position = start + offset;
                 let position_u32 = u32::try_from(position)
                     .map_err(|_| ServeError::server_error("position overflow"))?;
+                let skip_tail = serial_capture_supported && position + 1 < prompt_ids.len();
                 let logits = match (dflash_head, dflash_capture.as_mut()) {
                     (Some(head), Some((dst, capture_start, captured, n_features, _ring)))
                         if position >= *capture_start =>
@@ -393,24 +394,46 @@ fn prefill_remaining(
                             (capture_offset * *n_features) as u64,
                             vec![*n_features as u64],
                         );
-                        let logits = forward
-                            .single_token_with_multi_hidden(
-                                token,
-                                position_u32,
-                                unsafe { sequence.metal_session_mut() },
-                                &head.target_layer_ids,
-                                &view,
-                            )
-                            .map_err(|error| {
-                                ServeError::server_error(format!(
-                                    "serial tail capture prefill: {error:#}"
-                                ))
-                            })?;
+                        let logits = if skip_tail {
+                            forward
+                                .single_token_with_multi_hidden_no_tail(
+                                    token,
+                                    position_u32,
+                                    unsafe { sequence.metal_session_mut() },
+                                    &head.target_layer_ids,
+                                    &view,
+                                )
+                                .map(|()| None)
+                        } else {
+                            forward
+                                .single_token_with_multi_hidden(
+                                    token,
+                                    position_u32,
+                                    unsafe { sequence.metal_session_mut() },
+                                    &head.target_layer_ids,
+                                    &view,
+                                )
+                                .map(Some)
+                        }
+                        .map_err(|error| {
+                            ServeError::server_error(format!(
+                                "serial tail capture prefill: {error:#}"
+                            ))
+                        })?;
                         *captured += 1;
                         logits
                     }
+                    _ if skip_tail => forward
+                        .single_token_no_tail(token, position_u32, unsafe {
+                            sequence.metal_session_mut()
+                        })
+                        .map(|()| None)
+                        .map_err(|error| {
+                            ServeError::server_error(format!("serial no-tail prefill: {error:#}"))
+                        })?,
                     _ => forward
                         .single_token(token, position_u32, unsafe { sequence.metal_session_mut() })
+                        .map(Some)
                         .map_err(|error| {
                             ServeError::server_error(format!("serial tail prefill: {error:#}"))
                         })?,
@@ -418,7 +441,7 @@ fn prefill_remaining(
                 sequence
                     .advance_by(1)
                     .map_err(|error| ServeError::server_error(format!("advance: {error:#}")))?;
-                prompt_logits = Some(logits);
+                prompt_logits = logits;
             }
             break;
         }
@@ -1578,6 +1601,7 @@ mod tests {
         assert!(use_serial_tail(48, 48, true, true));
         assert!(!use_serial_tail(48, 48, true, false));
         assert!(use_serial_tail(48, 48, false, false));
+        assert!(!use_serial_tail(49, 48, false, true));
         assert!(should_plan_dflash(true, 0, false, true));
         assert!(!should_plan_dflash(true, 0, false, false));
         assert!(!should_plan_dflash(true, 1, false, true));
@@ -1600,6 +1624,94 @@ mod tests {
             restored_extension_offsets,
             [None, Some(0), Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    #[ignore = "loads a local model and runs serial Metal work"]
+    fn serial_prefill_tail_keeps_final_logits_and_persistent_state() {
+        struct Sink;
+        impl GenerationSink for Sink {
+            fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+                panic!("prefill must not emit")
+            }
+            fn tick(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let model = std::env::var("QWEN_NO_TAIL_TEST_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
+        let runtime = qwen_llm::runtime::Runtime::metal().expect("Metal runtime");
+        let loaded = runtime.load_model(&model).expect("explicit local fixture");
+        let tokens = loaded
+            .tokenizer()
+            .unwrap()
+            .encode("The quick brown fox jumps over the lazy dog.", false)
+            .unwrap();
+        let forward = loaded.forward();
+        for prefix in [0, 8] {
+            for tail in [1, 2, 16, 48] {
+                let prompt: Vec<_> = tokens.iter().copied().cycle().take(prefix + tail).collect();
+                let mut reference = loaded
+                    .create_sequence(SequenceConfig::new(prompt.len() + 2))
+                    .unwrap();
+                let mut candidate = loaded
+                    .create_sequence(SequenceConfig::new(prompt.len() + 2))
+                    .unwrap();
+                let mut expected = Vec::new();
+                for (position, &token) in prompt.iter().enumerate() {
+                    expected = forward
+                        .single_token(token, position as u32, unsafe {
+                            reference.metal_session_mut()
+                        })
+                        .unwrap();
+                    reference.advance_by(1).unwrap();
+                    if position < prefix {
+                        forward
+                            .single_token(token, position as u32, unsafe {
+                                candidate.metal_session_mut()
+                            })
+                            .unwrap();
+                        candidate.advance_by(1).unwrap();
+                    }
+                }
+                let actual = prefill_remaining(
+                    &loaded,
+                    &forward,
+                    None,
+                    false,
+                    &prompt,
+                    1024,
+                    &mut candidate,
+                    &mut None,
+                    &mut None,
+                    &mut Sink,
+                )
+                .unwrap_or_else(|_| panic!("prefill prefix={prefix} tail={tail}"))
+                .expect("final prompt row must produce logits");
+                assert_eq!(candidate.position(), prompt.len());
+                assert_eq!(actual.len(), expected.len());
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&expected)
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                );
+                let identity = loaded.snapshot_identity(&reference).unwrap();
+                let a = reference
+                    .metal_session()
+                    .snapshot(identity.clone(), prompt.clone(), None)
+                    .unwrap();
+                let b = candidate
+                    .metal_session()
+                    .snapshot(identity, prompt, None)
+                    .unwrap();
+                assert_eq!(a.kv_n_pos, b.kv_n_pos);
+                assert!(a.kv_k_arena == b.kv_k_arena);
+                assert!(a.kv_v_arena == b.kv_v_arena);
+                assert!(a.gdn_conv_arena == b.gdn_conv_arena);
+                assert!(a.gdn_state_arena == b.gdn_state_arena);
+            }
+        }
     }
 
     #[test]

@@ -485,6 +485,9 @@ fn write_json_response(stream: &mut &TcpStream, status: u16, body: &Value) -> io
 }
 
 pub(crate) fn configure_stream(stream: &TcpStream) -> io::Result<()> {
+    // BSD accept can inherit the listener's nonblocking flag. Request reads
+    // must wait for arriving bytes under the existing deadline, not return EAGAIN.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))
 }
@@ -938,6 +941,38 @@ mod tests {
                 }),
             })
         }
+    }
+
+    #[test]
+    fn accepted_nonblocking_socket_waits_for_request_bytes() {
+        use std::os::fd::AsRawFd;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let inherited = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+        assert!(inherited >= 0);
+        eprintln!(
+            "accepted inherited O_NONBLOCK={}",
+            inherited & libc::O_NONBLOCK != 0
+        );
+        stream.set_nonblocking(true).unwrap();
+        configure_stream(&stream).unwrap();
+        let configured = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+        assert!(configured >= 0);
+        assert_eq!(configured & libc::O_NONBLOCK, 0);
+        let (entered, entry) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            read_http_request_with_deadline(&stream, Duration::from_secs(2))
+        });
+        entry.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        client
+            .write_all(b"GET /v1/models HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            .unwrap();
+        let request = server.join().unwrap().unwrap().unwrap();
+        assert_eq!(request.path, "/v1/models");
     }
 
     fn roundtrip(mut backend: MockBackend, request: &str) -> String {

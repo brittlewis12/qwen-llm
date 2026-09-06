@@ -480,6 +480,17 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 banked request-boundary wins: dense serial tails now omit non-final
+norm/head/readback while retaining concurrent-GDN topology and drafter captures.
+The measured 48-token TTFT gain is 4.334% Q4 no-spec / 4.278% Q8-DFlash, not a
+4% full-request claim. HTTP admission now waits on socket readiness instead of
+sleeping 50 ms and explicitly clears inherited nonblocking mode before request
+reads. Final cached Q8/DFlash TTFT/wall moves `56.448/232.862 -> 15.237/174.151 ms`;
+the small dense guard also passes. Long-output wall guards permit up to 2.15%
+observed regression, so retain the endpoint-specific scope. See
+`docs/bench/2026-09-06-serve-request-elision/RESULT.md`. Reprice warm small-tail
+TTFT against this transport baseline before another allocation/kernel design.
+
 2026-09-06 request-boundary screen: terminal-Off DFlash setup elision is HOLD,
 prototype removed. Natural 24,194-token Q8 release A-B-B-A preserves all output
 and cache counts, but warm exact-hit 64-output wall saves only 1.06%. A 28.636 ms

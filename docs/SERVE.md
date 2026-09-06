@@ -255,8 +255,11 @@ startup. Muse requires an explicit startup default:
   Qwen identities. DS4 applies its separate renderer rules. Muse accepts
   `low`, `medium`, `high`, and `xhigh`, defaulting to `high`.
 - `x_qwen` extension object — `seed`, `top_k`, and `min_p` are generation
-  controls for every served family. `no_thinking` is accepted only for the same
-  validated Qwen3.6 no-thinking and Qwen3.8 identities as `qwen run`; DS4 uses
+  controls for every served family. `no_thinking` renders the released
+  preclosed suffix on any pinned Qwen template (Qwen3.5/3.6/3.8), the same
+  rule as `qwen run --no-thinking`; `thinking: true` requests the released
+  `<think>\n` opener on templates whose default is no-thinking (Qwen3.5) and
+  is a no-op where thinking is already the default. DS4 uses
   `reasoning.effort` instead, while Muse directs callers to effort `low`.
   This is a documented implementor extension.
 - `stream` — SSE when true, single JSON response otherwise.

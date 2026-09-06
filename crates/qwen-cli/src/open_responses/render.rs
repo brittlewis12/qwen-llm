@@ -1423,6 +1423,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn x_qwen_thinking_opens_the_block_on_qwen35() {
+        let body = json!({"model": "m", "input": [{"role": "user", "content": "Hi"}],
+                          "x_qwen": {"thinking": true}});
+        let mut request = parse_request(&body).expect("parses");
+        request.template = QwenTemplate::Qwen35;
+        assert!(render_qwen_serve_prompt(&request).ends_with("<|im_start|>assistant\n<think>\n"));
+        request.thinking_requested = false;
+        assert!(render_qwen_serve_prompt(&request).ends_with(PRECLOSED_THINK));
+        let both = json!({"model": "m", "input": [{"role": "user", "content": "Hi"}],
+                          "x_qwen": {"thinking": true, "no_thinking": true}});
+        let request = parse_request(&both).expect("parses");
+        assert!(
+            crate::open_responses::bind_qwen_request(&request, QwenTemplate::Qwen35, true).is_err()
+        );
+    }
+
     /// The generation suffix and the output parser's initial state agree.
     #[test]
     fn generation_suffix_matches_parser_initial_state() {

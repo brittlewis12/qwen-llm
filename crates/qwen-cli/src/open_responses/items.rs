@@ -477,6 +477,17 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
                         )
                     })?
                 }
+                // Explicit thinking for templates whose released default is
+                // no-thinking (Qwen3.5). A no-op on templates that already
+                // think by default; rejected together with no_thinking.
+                "thinking" => {
+                    request.thinking_requested = value.as_bool().ok_or_else(|| {
+                        ServeError::invalid_request(
+                            Some("x_qwen.thinking"),
+                            "x_qwen.thinking must be a boolean",
+                        )
+                    })?
+                }
                 "history_thinking" => match value.as_str() {
                     Some("preserve") => {}
                     Some("strip") => request.strip_history_thinking = true,

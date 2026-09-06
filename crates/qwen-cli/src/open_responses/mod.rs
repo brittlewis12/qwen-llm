@@ -15,6 +15,18 @@ pub(crate) fn bind_qwen_request(
 ) -> Result<ServeRequest, ServeError> {
     let mut request = request.clone();
     request.template = template;
+    if request.thinking_requested && request.no_thinking {
+        return Err(ServeError::invalid_request(
+            Some("x_qwen.thinking"),
+            "x_qwen.thinking cannot be combined with x_qwen.no_thinking",
+        ));
+    }
+    if request.thinking_requested && !template.verified() {
+        return Err(ServeError::invalid_request(
+            Some("x_qwen.thinking"),
+            "x_qwen.thinking requires a pinned Qwen template",
+        ));
+    }
     if request.no_thinking && !no_thinking_supported {
         return Err(ServeError::invalid_request(
             Some("x_qwen.no_thinking"),

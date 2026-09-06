@@ -1124,6 +1124,12 @@ pub struct PreparedPrefixCacheLookup {
 }
 
 impl PreparedPrefixCacheLookup {
+    /// Position restored into the destination sequence. A matched pending token
+    /// remains unconsumed and must be included in the caller's prefill suffix.
+    pub fn restored_prefix_len(&self) -> usize {
+        self.restored_prefix_len
+    }
+
     pub fn is_exact_with_final_logits(&self) -> bool {
         self.exact
             && self.restored_prefix_len == self.matched_prefix_len

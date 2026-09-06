@@ -305,6 +305,43 @@ fn should_plan_dflash(
     has_head && dense && (matched_tokens == 0 || restore_capture_complete)
 }
 
+fn needs_prefill_scratch(
+    dense: bool,
+    prompt_tokens: usize,
+    restored_tokens: usize,
+    exact_with_logits: bool,
+) -> bool {
+    !exact_with_logits
+        && !(dense
+            && prompt_tokens
+                .checked_sub(restored_tokens)
+                .is_some_and(|remaining| (1..=SERIAL_TAIL_THRESHOLD).contains(&remaining)))
+}
+
+fn allocate_serve_request_state(
+    loaded: &LoadedModel,
+    prompt_tokens: usize,
+    capacity: usize,
+    needs_scratch: bool,
+) -> anyhow::Result<(usize, Option<MetalDFlashLayerMajorScratch>, Sequence)> {
+    if needs_scratch {
+        let allocated = crate::allocate_prefill_request_state(
+            loaded,
+            crate::PrefillChunkArg::Auto,
+            prompt_tokens,
+            capacity,
+            true,
+        )?;
+        Ok((allocated.chunk, Some(allocated.scratch), allocated.sequence))
+    } else {
+        Ok((
+            crate::baseline_prefill_chunk(prompt_tokens),
+            None,
+            loaded.create_sequence(SequenceConfig::new(capacity))?,
+        ))
+    }
+}
+
 fn restored_dflash_capture_complete(
     matched_tokens: usize,
     capture_start: usize,
@@ -597,10 +634,18 @@ impl GenerationBackend for EngineBackend {
         let exact_cached = cached_lookup
             .as_ref()
             .is_some_and(|lookup| lookup.is_exact_with_final_logits());
-        // Exact-final-logits hits allocate only a destination session. Every
-        // other request admits the maximum production prefill topology,
-        // including deferred MoE fallback packs.
-        let prefill_scratch_upper_bytes = if exact_cached {
+        let dense = self.loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
+        let needs_scratch = needs_prefill_scratch(
+            dense,
+            prompt_ids.len(),
+            cached_lookup
+                .as_ref()
+                .map_or(0, |lookup| lookup.restored_prefix_len()),
+            exact_cached,
+        );
+        // The retained lookup pins the restore boundary through allocation.
+        // Packed execution still admits its complete fallback topology.
+        let prefill_scratch_upper_bytes = if !needs_scratch {
             0
         } else {
             let legacy_chunk = crate::baseline_prefill_chunk(prompt_ids.len());
@@ -648,31 +693,11 @@ impl GenerationBackend for EngineBackend {
         }
 
         let alloc_t0 = Instant::now();
-        let (mut chunk, mut scratch, mut sequence) = if exact_cached {
-            let sequence = self
-                .loaded
-                .create_sequence(SequenceConfig::new(capacity))
+        let (mut chunk, mut scratch, mut sequence) =
+            allocate_serve_request_state(&self.loaded, prompt_ids.len(), capacity, needs_scratch)
                 .map_err(|error| {
-                    ServeError::server_error(format!("allocate request sequence: {error:#}"))
-                })?;
-            (
-                crate::baseline_prefill_chunk(prompt_ids.len()),
-                None,
-                sequence,
-            )
-        } else {
-            let allocated = crate::allocate_prefill_request_state(
-                &self.loaded,
-                crate::PrefillChunkArg::Auto,
-                prompt_ids.len(),
-                capacity,
-                true,
-            )
-            .map_err(|error| {
                 ServeError::server_error(format!("allocate request state: {error:#}"))
             })?;
-            (allocated.chunk, Some(allocated.scratch), allocated.sequence)
-        };
         let mut alloc_ms = alloc_t0.elapsed().as_secs_f64() * 1e3;
         let forward = self.loaded.forward();
 
@@ -699,7 +724,6 @@ impl GenerationBackend for EngineBackend {
         // fresh during serial decode. Allocated before the speculate decision
         // so restored requests can publish a tail for the NEXT turn even when
         // this one stays serial.
-        let dense = self.loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
         let restore_tail = restore
             .as_ref()
             .and_then(|restore| restore.capture_tail.clone());
@@ -939,12 +963,11 @@ impl GenerationBackend for EngineBackend {
                 drop(scratch.take());
                 drop(sequence);
                 let retry_alloc_t0 = Instant::now();
-                let allocated = crate::allocate_prefill_request_state(
+                let allocated = allocate_serve_request_state(
                     &self.loaded,
-                    crate::PrefillChunkArg::Auto,
                     prompt_ids.len(),
                     capacity,
-                    true,
+                    needs_scratch,
                 )
                 .map_err(|retry_error| {
                     ServeError::server_error(format!(
@@ -952,9 +975,7 @@ impl GenerationBackend for EngineBackend {
                     ))
                 })?;
                 alloc_ms += retry_alloc_t0.elapsed().as_secs_f64() * 1e3;
-                chunk = allocated.chunk;
-                scratch = Some(allocated.scratch);
-                sequence = allocated.sequence;
+                (chunk, scratch, sequence) = allocated;
                 prompt_logits = prefill_remaining(
                     &self.loaded,
                     &forward,
@@ -1641,6 +1662,72 @@ mod tests {
     }
 
     #[test]
+    fn serial_tail_scratch_plan_uses_consumed_not_matched_tokens() {
+        for restored in [0, 8192, 32768] {
+            for tail in [1, 2, 16, 48] {
+                assert!(!needs_prefill_scratch(
+                    true,
+                    restored + tail,
+                    restored,
+                    false
+                ));
+                assert!(needs_prefill_scratch(
+                    false,
+                    restored + tail,
+                    restored,
+                    false
+                ));
+            }
+            assert!(needs_prefill_scratch(true, restored + 49, restored, false));
+            assert!(needs_prefill_scratch(true, restored, restored, false));
+            assert!(!needs_prefill_scratch(true, restored, restored, true));
+            assert!(!needs_prefill_scratch(false, restored, restored, true));
+        }
+        // The matched pending token is still one of the 49 rows to execute.
+        assert!(needs_prefill_scratch(true, 8193 + 48, 8192, false));
+        assert!(!needs_prefill_scratch(true, 8193 + 47, 8192, false));
+        assert!(needs_prefill_scratch(true, 8, 9, false));
+    }
+
+    #[test]
+    #[ignore = "loads a local model and prices real Metal request allocations"]
+    fn serial_tail_scratch_allocation_inventory() {
+        let model = std::env::var("QWEN_NO_TAIL_TEST_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
+        let runtime = qwen_llm::runtime::Runtime::metal().expect("Metal runtime");
+        let loaded = runtime.load_model(&model).expect("explicit local fixture");
+        for prompt_tokens in [32, 8192 + 16, 32768 + 16] {
+            let mut allocated_bytes = Vec::new();
+            for needs_scratch in [true, false] {
+                let before = loaded.context().current_allocated_size();
+                let state = allocate_serve_request_state(
+                    &loaded,
+                    prompt_tokens,
+                    prompt_tokens + 128,
+                    needs_scratch,
+                )
+                .unwrap();
+                assert_eq!(state.1.is_some(), needs_scratch);
+                let allocated = loaded
+                    .context()
+                    .current_allocated_size()
+                    .checked_sub(before)
+                    .unwrap();
+                allocated_bytes.push(allocated);
+                drop(state);
+                assert_eq!(loaded.context().current_allocated_size(), before);
+            }
+            assert!(allocated_bytes[0] > allocated_bytes[1]);
+            eprintln!(
+                "serial-tail-allocation prompt={prompt_tokens} baseline={} candidate={} removed={}",
+                allocated_bytes[0],
+                allocated_bytes[1],
+                allocated_bytes[0] - allocated_bytes[1]
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "loads a local model and runs serial Metal work"]
     fn serial_prefill_tail_keeps_final_logits_and_persistent_state() {
         struct Sink;
@@ -1668,9 +1755,14 @@ mod tests {
                 let mut reference = loaded
                     .create_sequence(SequenceConfig::new(prompt.len() + 2))
                     .unwrap();
-                let mut candidate = loaded
-                    .create_sequence(SequenceConfig::new(prompt.len() + 2))
-                    .unwrap();
+                let (chunk, mut scratch, mut candidate) = allocate_serve_request_state(
+                    &loaded,
+                    prompt.len(),
+                    prompt.len() + 2,
+                    needs_prefill_scratch(true, prompt.len(), prefix, false),
+                )
+                .unwrap();
+                assert!(scratch.is_none());
                 let mut expected = Vec::new();
                 for (position, &token) in prompt.iter().enumerate() {
                     expected = forward
@@ -1694,9 +1786,9 @@ mod tests {
                     None,
                     false,
                     &prompt,
-                    1024,
+                    chunk,
                     &mut candidate,
-                    &mut None,
+                    &mut scratch,
                     &mut None,
                     &mut Sink,
                 )
@@ -1725,6 +1817,52 @@ mod tests {
                 assert!(a.gdn_conv_arena == b.gdn_conv_arena);
                 assert!(a.gdn_state_arena == b.gdn_state_arena);
             }
+        }
+        let prompt: Vec<_> = tokens.iter().copied().cycle().take(57).collect();
+        let mut source = loaded.create_sequence(SequenceConfig::new(64)).unwrap();
+        for (position, &token) in prompt[..8].iter().enumerate() {
+            forward
+                .single_token(token, position as u32, unsafe {
+                    source.metal_session_mut()
+                })
+                .unwrap();
+            source.advance_by(1).unwrap();
+        }
+        let checkpoint = loaded
+            .prepare_checkpoint_boundary(
+                &source,
+                prompt[..8].to_vec(),
+                Some(prompt[8]),
+                None,
+                None,
+                0,
+            )
+            .unwrap();
+        loaded
+            .cache_prepared_checkpoint_strict(&checkpoint)
+            .unwrap()
+            .expect("cache insertion");
+        for length in [9, 56, 57] {
+            let lookup = loaded
+                .lookup_cached_prefix(&prompt[..length])
+                .expect("pending-token lookup");
+            assert_eq!(lookup.restored_prefix_len(), 8);
+            assert!(!lookup.is_exact_with_final_logits());
+            let needs_scratch = needs_prefill_scratch(
+                true,
+                length,
+                lookup.restored_prefix_len(),
+                lookup.is_exact_with_final_logits(),
+            );
+            assert_eq!(needs_scratch, length == 57);
+            let (_, scratch, mut restored) =
+                allocate_serve_request_state(&loaded, length, 64, needs_scratch).unwrap();
+            assert_eq!(scratch.is_some(), length == 57);
+            let report = loaded
+                .restore_prepared_cached_prefix(lookup, &mut restored, &prompt[..length])
+                .unwrap();
+            assert_eq!(report.matched_prefix_len, 9);
+            assert_eq!(restored.position(), 8);
         }
     }
 

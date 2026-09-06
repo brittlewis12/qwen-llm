@@ -222,6 +222,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             .context("resolve the loaded model's chat template")?;
     let no_thinking_supported =
         crate::supports_qwen_no_thinking_prompt(family.expect("family checked above"), &gguf);
+    let declared_context = gguf.declared_context_length().ok();
     drop(gguf);
     crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
@@ -236,16 +237,27 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         )
         .with_context(|| format!("load model {}", invocation.model.display()))?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    // Admission ceiling: explicit, else the smaller of the hard default and
+    // the model's declared context length.
+    let (context_ceiling, context_source) = match (invocation.max_context_tokens, declared_context)
+    {
+        (Some(explicit), _) => (explicit, "explicit"),
+        (None, Some(declared)) if declared < DEFAULT_SERVE_MAX_CONTEXT_TOKENS => {
+            (declared, "declared_context_length")
+        }
+        (None, _) => (DEFAULT_SERVE_MAX_CONTEXT_TOKENS, "default_hard_ceiling"),
+    };
     let mut backend = backend::EngineBackend::new(
         loaded,
         model_id.clone(),
         invocation.max_tokens.unwrap_or(DEFAULT_SERVE_MAX_TOKENS),
         invocation.max_context_tokens,
+        context_ceiling,
         invocation.drafter.as_deref(),
         template,
         no_thinking_supported,
     )?;
-    tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={} context_source={} snapshot_cache_bytes={}", invocation.max_context_tokens.unwrap_or(DEFAULT_SERVE_MAX_CONTEXT_TOKENS), if invocation.max_context_tokens.is_some() { "explicit" } else { "default_hard_ceiling" }, snapshot_cache_bytes);
+    tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} snapshot_cache_bytes={snapshot_cache_bytes}");
     crate::shutdown::checkpoint()?;
 
     accept_loop(

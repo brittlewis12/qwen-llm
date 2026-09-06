@@ -110,6 +110,10 @@ One new subcommand:
 ```sh
 qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   [--max-context-tokens N] [--snapshot-cache-mib 4096] [--drafter GGUF]
+# Qwen: without --max-context-tokens the admission ceiling is the smaller of the
+# 262,144 hard default and the GGUF's declared context length; --drafter is
+# accepted for dense targets only (an MoE target fails startup rather than
+# silently running serially)
 # DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
 # Muse Glimmer requires both --max-context-tokens and --max-tokens; admitted
 # capacity may extend through its declared 131,072-token context.

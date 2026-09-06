@@ -185,6 +185,9 @@ pub(crate) struct EngineBackend {
     model_id: String,
     default_max_tokens: usize,
     max_context_tokens: Option<usize>,
+    /// Effective admission ceiling: the explicit `--max-context-tokens`, else
+    /// the smaller of the hard default and the model's declared context.
+    context_ceiling: usize,
     template: super::items::QwenTemplate,
     no_thinking_supported: bool,
     /// DFlash drafter (v0.77 speculative decode). Speculation requires
@@ -203,11 +206,16 @@ impl EngineBackend {
         model_id: String,
         default_max_tokens: usize,
         max_context_tokens: Option<usize>,
+        context_ceiling: usize,
         drafter: Option<&std::path::Path>,
         template: super::items::QwenTemplate,
         no_thinking_supported: bool,
     ) -> anyhow::Result<Self> {
         let tokenizer = loaded.tokenizer().context("initialize serve tokenizer")?;
+        anyhow::ensure!(
+            drafter.is_none() || loaded.arch().kind == qwen_llm::model::ArchKind::Dense,
+            "serve DFlash speculation currently supports dense targets only; this MoE model would run serially, so omit --drafter"
+        );
         let dflash_head = match drafter {
             Some(path) => {
                 let t0 = Instant::now();
@@ -241,6 +249,7 @@ impl EngineBackend {
             model_id,
             default_max_tokens,
             max_context_tokens,
+            context_ceiling,
             template,
             no_thinking_supported,
             dflash_head,
@@ -322,11 +331,12 @@ fn request_capacity(
     prompt_tokens: usize,
     generation_tokens: usize,
     configured_limit: Option<usize>,
+    context_ceiling: usize,
 ) -> Result<usize, &'static str> {
     let required = prompt_tokens
         .checked_add(generation_tokens)
         .ok_or("prompt plus generation token count overflow")?;
-    let limit = configured_limit.unwrap_or(super::DEFAULT_SERVE_MAX_CONTEXT_TOKENS);
+    let limit = configured_limit.unwrap_or(context_ceiling);
     if required > limit {
         return Err("request exceeds max context token limit");
     }
@@ -565,18 +575,22 @@ impl GenerationBackend for EngineBackend {
             .and_then(|key| self.dflash_prefix_replay.lookup(key));
 
         // Context admission fails closed (S0 F3 == spec truncation:"disabled").
-        let capacity = request_capacity(prompt_ids.len(), max_tokens, self.max_context_tokens)
-            .map_err(|message| {
-                ServeError::invalid_request(
-                    Some("max_output_tokens"),
-                    format!(
-                        "{message}: max context {} is smaller than prompt {} + generation {max_tokens}",
-                        self.max_context_tokens
-                            .unwrap_or(super::DEFAULT_SERVE_MAX_CONTEXT_TOKENS),
-                        prompt_ids.len(),
-                    ),
-                )
-            })?;
+        let capacity = request_capacity(
+            prompt_ids.len(),
+            max_tokens,
+            self.max_context_tokens,
+            self.context_ceiling,
+        )
+        .map_err(|message| {
+            ServeError::invalid_request(
+                Some("max_output_tokens"),
+                format!(
+                    "{message}: max context {} is smaller than prompt {} + generation {max_tokens}",
+                    self.context_ceiling,
+                    prompt_ids.len(),
+                ),
+            )
+        })?;
 
         let restore_t0 = Instant::now();
         let cached_lookup = self.loaded.lookup_cached_prefix(&prompt_ids);
@@ -1733,9 +1747,13 @@ mod tests {
 
     #[test]
     fn default_context_cap_is_finite_but_allocates_per_request() {
-        assert_eq!(request_capacity(133_000, 1_000, None), Ok(134_016));
-        assert_eq!(request_capacity(100, 20, None), Ok(136));
-        assert!(request_capacity(super::super::DEFAULT_SERVE_MAX_CONTEXT_TOKENS, 1, None).is_err());
-        assert_eq!(request_capacity(100, 20, Some(1024)), Ok(1024));
+        const HARD: usize = super::super::DEFAULT_SERVE_MAX_CONTEXT_TOKENS;
+        assert_eq!(request_capacity(133_000, 1_000, None, HARD), Ok(134_016));
+        assert_eq!(request_capacity(100, 20, None, HARD), Ok(136));
+        assert!(request_capacity(HARD, 1, None, HARD).is_err());
+        assert_eq!(request_capacity(100, 20, Some(1024), HARD), Ok(1024));
+        // A model declaring a shorter context lowers the default ceiling.
+        assert!(request_capacity(40_000, 1, None, 32_768).is_err());
+        assert_eq!(request_capacity(100, 20, None, 32_768), Ok(136));
     }
 }

@@ -480,6 +480,16 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 serial-tail allocation is now prefix-aware for dense 1-48-forward
+suffixes, including pending-token consumption. It removes 1.31/3.40 GB of
+actual Metal allocations at the measured 8K/32K short-tail shapes without
+retile or KV-capacity changes. Multi-turn Q8+drafter/Q4 output and cache gates
+pass; Q4 fresh-long wall has a disclosed 2.934% regression. This is primarily
+a resource/admission win, not a universal latency win. The Q8 restored turns
+in this packet run serial even with the drafter loaded; do not transfer its
+4.297% code-request wall result to active speculation. Evidence:
+`docs/bench/2026-09-06-serve-serial-tail-scratch/RESULT.md`.
+
 2026-09-06 banked request-boundary wins: dense serial tails now omit non-final
 norm/head/readback while retaining concurrent-GDN topology and drafter captures.
 The measured 48-token TTFT gain is 4.334% Q4 no-spec / 4.278% Q8-DFlash, not a

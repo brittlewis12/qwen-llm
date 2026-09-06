@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Dense Serial-Tail Scratch Omission KEEP
+
+- `6c2a3ba1` omits unused matrix scratch when dense serve requires 1-48 actual
+  forwards. Admission and fresh DFlash fallback share the plan. The retained
+  lookup exposes consumed position, not matched length including pending token;
+  exact hits, MoE, packed widths, and arithmetic retain their contracts.
+- Committed Q8 allocation inventory removes 20,365,312 bytes at prompt 32,
+  1,310,654,464 at 8K+16, and 3,399,417,856 at 32K+16. These are actual Metal
+  allocation deltas with return-to-baseline after drop, not RSS/residency claims.
+- Release A-B-B-A on Q8+drafter and Q4 no-drafter preserves all 56 output hashes
+  and usage/cache counts across an 8,810-token seed and multi-turn continuations.
+  Q8 code continuation wall improves 4.297% with 1.066% control spread, but those
+  restored requests report serial decode, not active speculation. Noisy TTFT and
+  cache/packed rows receive no speedup authority. Q4 fresh-long wall regresses
+  2.934%, within the 3% guard; this is a resource promotion, not strict Pareto.
+- 100 serve tests pass; separately executed GPU tests lock final logits, KV/GDN
+  bytes, and actual pending-token restore at the 48/49 allocation boundary.
+  Evidence: `docs/bench/2026-09-06-serve-serial-tail-scratch/RESULT.md`.
+
 ## 2026-09-06 - Serve Head Elision And Readiness KEEP
 
 - `ae9115d2` removes discarded dense serial-prefill heads while preserving plain

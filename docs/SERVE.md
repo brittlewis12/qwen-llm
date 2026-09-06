@@ -388,6 +388,15 @@ because client model-pickers probe it).
   contract (bare suffix, verbatim content) rather than guessing; an
   unrecognized Qwen3.8 or Flash-Next template fails startup. `qwen run`,
   `qwen-lens`, `qwen-bench`, and `qwen-census` render through the same code.
+- Tools on pinned templates render the way every released client feeds
+  `tool | tojson`: the OpenAI-shaped `{"type": "function", "function": {...}}`
+  object with Python's `", "`/`": "` separators (Transformers and llama.cpp
+  agree), and replayed call arguments follow the template's value rule
+  (mappings/sequences as spaced JSON, scalars via Python `str()`: `True`,
+  `None`, numbers verbatim). The released `last_query_index` rule applies:
+  assistant turns after the final user query keep their think block (empty
+  if no reasoning) even under strip. The unpinned generic contract keeps
+  the compact flat form frozen in `serve_tool_render_fixtures_v1.json`.
 - Preserve/strip rendering policy: preserve is the default for the validated
   Qwen3.6 identity (owner position, Amendment 1 of S0; economics measured in S0
   G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 uses

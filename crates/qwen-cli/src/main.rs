@@ -52,8 +52,8 @@ use messages::{
     Qwen38ReasoningEffort, QwenGenerationMode, load_deepseek_v4_0731_messages_prompt,
     load_messages_prompt_with_policy, messages_thinking_mode, parse_strict_messages_input,
     render_deepseek_v4_0731_messages_prompt, render_deepseek_v4_0731_single_turn_prompt,
-    render_qwen_messages_prompt_for_template, render_qwen_single_turn_prompt_for_template,
-    render_qwen38_messages_prompt_with_generation, render_qwen38_single_turn_prompt,
+    render_qwen_chat_for_template, render_qwen_single_turn_prompt_for_template,
+    render_qwen38_single_turn_prompt,
 };
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use qwen_llm::checkpoint_identity::{
@@ -593,26 +593,45 @@ fn prepare_modern_run_prompt(
             (prompt, PromptSource::Messages)
         }
         cli::AcquiredRunInput::Messages { document, source } => {
-            let messages = parse_strict_messages_input(&document, &source)?;
+            let chat = parse_strict_messages_input(&document, &source)?;
+            let messages = chat.messages;
+            let has_tool_surface = !chat.tools.is_empty()
+                || messages
+                    .iter()
+                    .any(|message| message.role == "tool" || !message.tool_calls.is_empty());
             let prompt = match family {
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp if qwen38 => {
-                    render_qwen38_messages_prompt_with_generation(
+                    render_qwen_chat_for_template(
                         &messages,
+                        &chat.tools,
+                        crate::open_responses::items::QwenTemplate::Qwen38,
                         true,
-                        qwen38_generation_mode.expect("validated Qwen3.8 mode"),
-                    )
+                        true,
+                        QwenGenerationMode::Auto,
+                        Some(qwen38_generation_mode.expect("validated Qwen3.8 mode")),
+                    )?
+                    .text
                 }
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
-                    render_qwen_messages_prompt_for_template(
+                    ensure!(
+                        qwen_template.verified() || !has_tool_surface,
+                        "tools and tool history require a model whose chat template is pinned (released Qwen3.5/3.6/3.8 templates); this model's template is unrecognized"
+                    );
+                    // Pinned templates follow the serve owner position and
+                    // preserve replayed reasoning; the legacy generic contract
+                    // strips it.
+                    render_qwen_chat_for_template(
                         &messages,
+                        &chat.tools,
                         qwen_template,
-                        false,
+                        qwen_template.verified(),
                         true,
                         if no_thinking {
                             QwenGenerationMode::NoThinking
                         } else {
                             QwenGenerationMode::Auto
                         },
+                        None,
                     )?
                     .text
                 }
@@ -622,6 +641,11 @@ fn prepare_modern_run_prompt(
                     bail!(
                         "Qwen3.8-Flash-Next chat rendering does not support the declared {}; use --raw-prompt for untemplated input",
                         failure.as_str(),
+                    )
+                }
+                ModelFamily::DeepSeek4 if has_tool_surface => {
+                    bail!(
+                        "DeepSeek V4 ordinary chat does not accept tools, tool calls, or tool results"
                     )
                 }
                 ModelFamily::DeepSeek4 => render_deepseek_v4_0731_messages_prompt(

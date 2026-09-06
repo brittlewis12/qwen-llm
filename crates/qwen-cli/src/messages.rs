@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
 use serde::Deserialize;
@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::model_request::{SystemSource, ToolResult, Turn};
+use crate::model_request::{SystemSource, ToolCall, ToolDefinition, ToolResult, Turn};
 use crate::open_responses::items::{QwenTemplate, ServeRequest};
 use crate::open_responses::render::{
     QwenServePromptChannel, QwenServePromptSpanKind, render_qwen_serve_prompt_annotated_with,
@@ -26,6 +26,9 @@ pub(crate) struct ChatMessage {
     #[serde(default, flatten)]
     #[allow(dead_code)]
     pub(crate) extra: BTreeMap<String, serde_json::Value>,
+    /// Structured tool calls validated by the strict `qwen run` parser.
+    #[serde(skip)]
+    pub(crate) tool_calls: Vec<ToolCall>,
 }
 
 /// DeepSeek V4 0731 reasoning selection for `--messages` encoding.
@@ -227,6 +230,15 @@ pub(crate) enum Qwen38ReasoningEffort {
 }
 
 impl Qwen38ReasoningEffort {
+    /// Open Responses `reasoning.effort` spelling.
+    pub(crate) fn wire_name(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::Xhigh => "xhigh",
+        }
+    }
+
     pub(crate) fn instruction(self) -> Option<&'static str> {
         match self {
             Self::Low => Some(QWEN38_REASONING_EFFORT_LOW),
@@ -637,7 +649,20 @@ pub(crate) fn parse_messages_input(
 #[allow(dead_code)]
 struct StrictChatMessage {
     role: String,
+    #[serde(default)]
     content: String,
+    /// Assistant reasoning history (OpenAI/SGLang field name).
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// OpenAI-shaped `{"type":"function","function":{"name","arguments"}}`
+    /// or flat `{"name","arguments"}` calls on an assistant turn.
+    #[serde(default)]
+    tool_calls: Option<Vec<serde_json::Value>>,
+    /// Accepted on tool results for OpenAI-shaped documents; not rendered.
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -645,64 +670,242 @@ struct StrictChatMessage {
 #[allow(dead_code)]
 struct StrictMessagesWrapper {
     messages: Vec<StrictChatMessage>,
+    /// OpenAI-shaped `{"type":"function","function":{...}}` or flat
+    /// `{"name",...}` tool definitions rendered into the system block.
+    #[serde(default)]
+    tools: Option<Vec<serde_json::Value>>,
+}
+
+/// A validated ordinary-chat or tool-continuation document for `qwen run`.
+#[derive(Debug, Default)]
+#[allow(dead_code)]
+pub(crate) struct StrictChat {
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) tools: Vec<ToolDefinition>,
 }
 
 #[allow(dead_code)]
-pub(crate) fn parse_strict_messages_input(raw: &str, source: &str) -> Result<Vec<ChatMessage>> {
+pub(crate) fn parse_strict_messages_input(raw: &str, source: &str) -> Result<StrictChat> {
     let value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|error| anyhow!("parse messages input {source}: {error}"))?;
-    let strict = match value {
-        serde_json::Value::Array(_) => serde_json::from_value(value)
-            .map_err(|error| anyhow!("parse bare messages array from {source}: {error}"))?,
+    let (strict, tools) = match value {
+        serde_json::Value::Array(_) => (
+            serde_json::from_value(value)
+                .map_err(|error| anyhow!("parse bare messages array from {source}: {error}"))?,
+            Vec::new(),
+        ),
         serde_json::Value::Object(_) => {
             let wrapper: StrictMessagesWrapper = serde_json::from_value(value)
                 .map_err(|error| anyhow!("parse messages wrapper from {source}: {error}"))?;
-            wrapper.messages
+            let tools = wrapper
+                .tools
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+                .map(|(index, tool)| parse_strict_tool_definition(tool, index, source))
+                .collect::<Result<Vec<_>>>()?;
+            (wrapper.messages, tools)
         }
         other => bail!(
             "messages input {source} must be a message array or {{\"messages\":[...]}}, got {other}"
         ),
     };
-    validate_strict_messages(strict, source)
+    let messages = validate_strict_messages(strict, &tools, source)?;
+    Ok(StrictChat { messages, tools })
+}
+
+fn parse_strict_tool_definition(
+    tool: &serde_json::Value,
+    index: usize,
+    source: &str,
+) -> Result<ToolDefinition> {
+    let object = tool
+        .as_object()
+        .with_context(|| format!("tool {index} in {source} must be an object"))?;
+    let function = match object.get("function") {
+        Some(function) => function
+            .as_object()
+            .with_context(|| format!("tool {index} in {source}: function must be an object"))?,
+        None => object,
+    };
+    if let Some(kind) = object.get("type").and_then(|kind| kind.as_str()) {
+        ensure!(
+            kind == "function",
+            "tool {index} in {source} has unsupported type {kind:?}"
+        );
+    }
+    let name = function
+        .get("name")
+        .and_then(|name| name.as_str())
+        .with_context(|| format!("tool {index} in {source} is missing a string name"))?;
+    ensure!(
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')),
+        "tool {index} in {source} has an invalid name {name:?}"
+    );
+    let description = match function.get("description") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => Some(text.clone()),
+        Some(_) => bail!("tool {index} in {source}: description must be a string"),
+    };
+    let parameters = function
+        .get("parameters")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    ensure!(
+        parameters.is_null() || parameters.is_object(),
+        "tool {index} in {source}: parameters must be an object"
+    );
+    let strict = match function.get("strict") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Bool(value)) => Some(*value),
+        Some(_) => bail!("tool {index} in {source}: strict must be a boolean"),
+    };
+    Ok(ToolDefinition {
+        name: name.to_owned(),
+        description,
+        parameters,
+        strict,
+    })
+}
+
+fn parse_strict_tool_call(
+    call: &serde_json::Value,
+    message_index: usize,
+    call_index: usize,
+    tools: &[ToolDefinition],
+    source: &str,
+) -> Result<ToolCall> {
+    let object = call.as_object().with_context(|| {
+        format!("message {message_index} in {source}: tool_calls[{call_index}] must be an object")
+    })?;
+    let function = match object.get("function") {
+        Some(function) => function.as_object().with_context(|| {
+            format!("message {message_index} in {source}: tool_calls[{call_index}].function must be an object")
+        })?,
+        None => object,
+    };
+    let name = function
+        .get("name")
+        .and_then(|name| name.as_str())
+        .with_context(|| {
+            format!(
+                "message {message_index} in {source}: tool_calls[{call_index}] is missing a name"
+            )
+        })?;
+    ensure!(
+        tools.iter().any(|tool| tool.name == name),
+        "message {message_index} in {source}: tool_calls[{call_index}] names undeclared tool {name:?}"
+    );
+    let arguments = match function.get("arguments") {
+        None | Some(serde_json::Value::Null) => serde_json::Map::new(),
+        Some(serde_json::Value::Object(map)) => map.clone(),
+        Some(serde_json::Value::String(text)) => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .with_context(|| {
+                format!("message {message_index} in {source}: tool_calls[{call_index}].arguments must be a JSON object")
+            })?,
+        Some(_) => bail!(
+            "message {message_index} in {source}: tool_calls[{call_index}].arguments must be an object or JSON string"
+        ),
+    };
+    let call_id = object
+        .get("id")
+        .or_else(|| object.get("call_id"))
+        .and_then(|id| id.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("call_{message_index}_{call_index}"));
+    Ok(ToolCall {
+        call_id,
+        name: name.to_owned(),
+        arguments: serde_json::Value::Object(arguments).to_string(),
+    })
 }
 
 #[allow(dead_code)]
 fn validate_strict_messages(
     messages: Vec<StrictChatMessage>,
+    tools: &[ToolDefinition],
     source: &str,
 ) -> Result<Vec<ChatMessage>> {
     if messages.is_empty() {
         bail!("messages input {source} contains no messages");
     }
 
-    let mut expect_user = true;
+    #[derive(Clone, Copy, PartialEq)]
+    enum Expect {
+        User,
+        Assistant,
+        /// Tool results still owed for the preceding assistant's calls.
+        ToolResults(usize),
+    }
+    let mut expect = Expect::User;
     let mut saw_user = false;
     let mut validated = Vec::with_capacity(messages.len());
     for (index, message) in messages.into_iter().enumerate() {
-        match message.role.as_str() {
-            "system" if index == 0 && expect_user => {}
-            "user" if expect_user => {
-                expect_user = false;
+        let mut tool_calls = Vec::new();
+        ensure!(
+            message.role == "assistant" || message.tool_calls.is_none(),
+            "message {index} in {source} has role {:?} but carries tool_calls",
+            message.role
+        );
+        match (message.role.as_str(), expect) {
+            ("system" | "developer", Expect::User) if index == 0 => {}
+            ("user", Expect::User) => {
+                expect = Expect::Assistant;
                 saw_user = true;
             }
-            "assistant" if !expect_user => {
-                if message.content.trim_start().starts_with("<think>") {
+            ("assistant", Expect::Assistant) => {
+                if message.content.trim_start().starts_with("<think>")
+                    || message.content.contains("</think>")
+                {
                     bail!(
-                        "message {index} in {source} contains structured assistant thinking; modern `qwen run --messages` does not yet represent reasoning history. Use the legacy --messages interface if those semantics are intentional"
+                        "message {index} in {source} contains inline assistant thinking; pass reasoning history as `reasoning_content` instead"
                     );
                 }
-                expect_user = true;
+                let calls = message.tool_calls.as_deref().unwrap_or_default();
+                ensure!(
+                    calls.is_empty() || !tools.is_empty(),
+                    "message {index} in {source} carries tool_calls but the document declares no tools"
+                );
+                for (call_index, call) in calls.iter().enumerate() {
+                    tool_calls.push(parse_strict_tool_call(
+                        call, index, call_index, tools, source,
+                    )?);
+                }
+                expect = if tool_calls.is_empty() {
+                    Expect::User
+                } else {
+                    Expect::ToolResults(tool_calls.len())
+                };
             }
-            role => {
-                let expected = if expect_user { "user" } else { "assistant" };
+            ("tool", Expect::ToolResults(owed)) => {
+                expect = if owed == 1 {
+                    Expect::Assistant
+                } else {
+                    Expect::ToolResults(owed - 1)
+                };
+            }
+            (role, expect) => {
+                let expected = match expect {
+                    Expect::User => "user",
+                    Expect::Assistant => "assistant",
+                    Expect::ToolResults(_) => "tool",
+                };
                 bail!(
-                    "message {index} in {source} has role {role:?}; expected {expected:?} in the strict ordinary-chat subset"
+                    "message {index} in {source} has role {role:?}; expected {expected:?} (system/developer may lead; user and assistant alternate; each assistant tool call is followed by one tool result)"
                 );
             }
         }
         validated.push(ChatMessage {
             role: message.role,
             content: message.content,
+            reasoning_content: message.reasoning_content,
+            tool_calls,
             ..Default::default()
         });
     }
@@ -710,10 +913,15 @@ fn validate_strict_messages(
     if !saw_user {
         bail!("messages input {source} requires at least one user turn");
     }
-    if expect_user {
-        bail!("messages input {source} must end with a user turn before generation");
+    match expect {
+        Expect::Assistant => Ok(validated),
+        Expect::User => bail!(
+            "messages input {source} must end with a user turn or a completed tool-result round before generation"
+        ),
+        Expect::ToolResults(owed) => bail!(
+            "messages input {source} ends with {owed} tool result(s) still owed for the last assistant's tool calls"
+        ),
     }
-    Ok(validated)
 }
 
 /// Legacy unpinned-ChatML wrapper kept for probes and tests.
@@ -815,13 +1023,44 @@ pub(crate) fn render_qwen_messages_prompt_for_template(
     append_generation_prompt: bool,
     generation_mode: QwenGenerationMode,
 ) -> Result<AnnotatedMessageRender> {
+    render_qwen_chat_for_template(
+        messages,
+        &[],
+        template,
+        preserve_thinking,
+        append_generation_prompt,
+        generation_mode,
+        None,
+    )
+}
+
+/// Render a validated chat with declared tools. `qwen38_mode` supplies the
+/// Qwen3.8 effort/no-thinking controls when the template is Qwen3.8.
+pub(crate) fn render_qwen_chat_for_template(
+    messages: &[ChatMessage],
+    tools: &[ToolDefinition],
+    template: QwenTemplate,
+    preserve_thinking: bool,
+    append_generation_prompt: bool,
+    generation_mode: QwenGenerationMode,
+    qwen38_mode: Option<Qwen38GenerationMode>,
+) -> Result<AnnotatedMessageRender> {
+    let (no_thinking, reasoning_effort) = match qwen38_mode {
+        Some(Qwen38GenerationMode::NoThinking) => (true, None),
+        Some(Qwen38GenerationMode::Thinking(effort)) => {
+            (false, Some(effort.wire_name().to_owned()))
+        }
+        None => (generation_mode == QwenGenerationMode::NoThinking, None),
+    };
     let mut request = ServeRequest {
         template,
         strip_history_thinking: !preserve_thinking,
-        no_thinking: generation_mode == QwenGenerationMode::NoThinking,
+        no_thinking,
+        reasoning_effort,
         thinking_requested: generation_mode == QwenGenerationMode::Thinking,
         ..ServeRequest::default()
     };
+    request.model_request.tools = tools.to_vec();
     for (index, message) in messages.iter().enumerate() {
         match message.role.as_str() {
             "system" | "developer" if index == 0 => {
@@ -864,7 +1103,7 @@ pub(crate) fn render_qwen_messages_prompt_for_template(
                 request.model_request.turns.push(Turn::Assistant {
                     reasoning,
                     visible,
-                    calls: Vec::new(),
+                    calls: message.tool_calls.clone(),
                 });
             }
             "tool" => {
@@ -1928,7 +2167,7 @@ mod tests {
             r#"[{"role":"user","content":"hello"}]"#,
             r#"{"messages":[{"role":"system","content":"Be exact."},{"role":"user","content":"one"},{"role":"assistant","content":"done"},{"role":"user","content":"two"}]}"#,
         ] {
-            let messages = parse_strict_messages_input(raw, "test").unwrap();
+            let messages = parse_strict_messages_input(raw, "test").unwrap().messages;
             assert_eq!(messages.last().unwrap().role, "user");
             assert!(messages.iter().all(|message| message.extra.is_empty()));
         }
@@ -1940,11 +2179,19 @@ mod tests {
             ),
             (
                 r#"[{"role":"user","content":"hello","tool_calls":[]}]"#,
-                "unknown field",
+                "carries tool_calls",
             ),
             (
-                r#"{"messages":[{"role":"user","content":"hello"}],"tools":[]}"#,
-                "unknown field",
+                r#"{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"","tool_calls":[{"function":{"name":"ping","arguments":{}}}]},{"role":"tool","content":"pong"}]}"#,
+                "declares no tools",
+            ),
+            (
+                r#"{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"","tool_calls":[{"function":{"name":"nope","arguments":{}}}]},{"role":"tool","content":"pong"}],"tools":[{"type":"function","function":{"name":"ping"}}]}"#,
+                "undeclared tool",
+            ),
+            (
+                r#"{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"","tool_calls":[{"function":{"name":"ping","arguments":{}}},{"function":{"name":"ping","arguments":{}}}]},{"role":"tool","content":"pong"}],"tools":[{"type":"function","function":{"name":"ping"}}]}"#,
+                "still owed",
             ),
             (
                 r#"[{"role":"user","content":[{"type":"image_url","image_url":{"url":"image.jpg"}}]}]"#,
@@ -1952,7 +2199,7 @@ mod tests {
             ),
             (
                 r#"[{"role":"developer","content":"hello"}]"#,
-                "expected \"user\"",
+                "requires at least one user turn",
             ),
             (
                 r#"[{"role":"tool","content":"result"}]"#,
@@ -1964,11 +2211,11 @@ mod tests {
             ),
             (
                 r#"[{"role":"user","content":"one"},{"role":"assistant","content":"done"}]"#,
-                "must end with a user turn",
+                "must end with a user turn or a completed tool-result round",
             ),
             (
                 r#"[{"role":"user","content":"one"},{"role":"assistant","content":"<think>hidden</think>done"},{"role":"user","content":"two"}]"#,
-                "does not yet represent reasoning history",
+                "inline assistant thinking",
             ),
         ];
         for (raw, expected) in cases {
@@ -2321,6 +2568,62 @@ mod tests {
         assert!(status.success(), "chat fixtures drifted from references");
     }
 
+    /// The `qwen run --messages` path (strict parser + shared renderer)
+    /// reproduces the released Qwen3.6 template on every oracle case whose
+    /// document shape the strict subset accepts, including both two-round
+    /// tool cases. Divergences are the documented serve policies.
+    #[test]
+    fn run_messages_match_qwen36_jinja_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/qwen36_chat_template_oracle_v1.json"
+        ))
+        .unwrap();
+        let mut checked = Vec::new();
+        for case in fixture["cases"].as_array().unwrap() {
+            let id = case["id"].as_str().unwrap();
+            let input = &case["input"];
+            let expected = case["rendered"].as_str().unwrap();
+            let document = serde_json::json!({
+                "messages": input["messages"],
+                "tools": input["tools"].as_array().cloned().unwrap_or_default(),
+            });
+            let Ok(chat) = parse_strict_messages_input(&document.to_string(), id) else {
+                continue; // shapes the strict subset rejects (two systems, ends on assistant)
+            };
+            let generation_mode = if input["enable_thinking"] == serde_json::json!(false) {
+                QwenGenerationMode::NoThinking
+            } else {
+                QwenGenerationMode::Auto
+            };
+            let preserve = input["preserve_thinking"] == serde_json::json!(true);
+            let rendered = render_qwen_chat_for_template(
+                &chat.messages,
+                &chat.tools,
+                QwenTemplate::Qwen36,
+                preserve,
+                true,
+                generation_mode,
+                None,
+            )
+            .unwrap()
+            .text;
+            let expected = match id {
+                "history_no_thinking_mode" => expected.replacen(
+                    "<|im_start|>assistant\nAnswer one",
+                    "<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer one",
+                    1,
+                ),
+                _ => expected.to_owned(),
+            };
+            assert_eq!(rendered, expected, "{id}");
+            checked.push(id);
+        }
+        assert!(checked.contains(&"two_rounds_strip"), "{checked:?}");
+        assert!(checked.contains(&"two_rounds_then_user"), "{checked:?}");
+        assert!(checked.contains(&"scalar_params"), "{checked:?}");
+        assert!(checked.len() >= 15, "{checked:?}");
+    }
+
     /// jinja2 is fetched by `uv` on first run; hermetic otherwise.
     #[test]
     #[ignore = "runs the jinja2 oracle via uv to detect fixture drift"]
@@ -2488,6 +2791,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: "assistant".into(),
@@ -2495,6 +2799,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: "assistant".into(),
@@ -2502,6 +2807,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: "assistant".into(),
@@ -2509,6 +2815,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
         ];
 
@@ -2543,6 +2850,7 @@ mod tests {
             reasoning: None,
             reasoning_content: None,
             extra: Default::default(),
+            tool_calls: Vec::new(),
         }];
         let mut raw_promoted = raw_transcript.clone();
         normalize_deepseek_v4_inline_thinking(
@@ -2577,6 +2885,7 @@ mod tests {
             reasoning: None,
             reasoning_content: None,
             extra: Default::default(),
+            tool_calls: Vec::new(),
         }];
         let error = format!(
             "{:#}",
@@ -2599,6 +2908,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: "assistant".into(),
@@ -2606,6 +2916,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: "user".into(),
@@ -2613,6 +2924,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
         ];
         let mut promoted = messages.clone();
@@ -2643,6 +2955,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: "assistant".into(),
@@ -2650,6 +2963,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: "user".into(),
@@ -2657,6 +2971,7 @@ mod tests {
                 reasoning: None,
                 reasoning_content: None,
                 extra: Default::default(),
+                tool_calls: Vec::new(),
             },
         ];
         normalize_deepseek_v4_inline_thinking(

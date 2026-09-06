@@ -896,9 +896,17 @@ pub(crate) fn prepare_qwen_model_messages_bytes(
 ) -> Result<PreparedLensInput> {
     let raw = std::str::from_utf8(bytes)
         .with_context(|| format!("read captured Lens messages {source} as UTF-8"))?;
-    let messages = parse_strict_messages_input(raw, source)?;
+    let chat = parse_strict_messages_input(raw, source)?;
+    ensure!(
+        chat.tools.is_empty()
+            && chat
+                .messages
+                .iter()
+                .all(|message| message.role != "tool" && message.tool_calls.is_empty()),
+        "Lens messages input {source} must be ordinary chat; tools and tool history are not supported"
+    );
     let protocol = detect_qwen_message_protocol(family, gguf)?;
-    prepare_qwen_messages(&messages, protocol, message_mode, tokenizer)
+    prepare_qwen_messages(&chat.messages, protocol, message_mode, tokenizer)
 }
 
 fn prepare_qwen_messages(
@@ -1191,7 +1199,7 @@ fn acquire_structured_messages(
         (None, Some(path)) => {
             let source = path.display().to_string();
             let raw = read_messages_document(path)?;
-            parse_strict_messages_input(&raw, &source)
+            parse_strict_messages_input(&raw, &source).map(|chat| chat.messages)
         }
         _ => bail!("structured Lens input requires exactly one of --user or --messages"),
     }

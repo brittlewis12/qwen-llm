@@ -24,7 +24,7 @@
 //! rendered by `scripts/reference/render_qwen_chat_template.py`.
 
 use super::items::{QwenTemplate, ServeRequest};
-use super::tool_parse::{ParsedCall, render_calls};
+use super::tool_parse::{ParsedCall, python_json, render_calls_for};
 use crate::messages::{Qwen38GenerationMode, Qwen38ReasoningEffort};
 use crate::model_request::{ToolCall, ToolDefinition, Turn};
 
@@ -379,7 +379,7 @@ const TOOLS_FORMAT_INSTRUCTION: &str = concat!(
 fn render_tools_system_block(
     tools: &[ToolDefinition],
     effort_instruction: Option<&str>,
-    trim_system: bool,
+    released: bool,
     system: Option<&str>,
     system_source: Option<&str>,
     message_index: usize,
@@ -407,22 +407,35 @@ fn render_tools_system_block(
         String::from("# Tools\n\nYou have access to the following functions:\n\n<tools>");
     for tool in tools {
         tools_content.push('\n');
-        let mut entry = serde_json::Map::new();
-        entry.insert("type".into(), serde_json::json!("function"));
-        entry.insert("name".into(), serde_json::json!(tool.name));
+        let mut function = serde_json::Map::new();
+        function.insert("name".into(), serde_json::json!(tool.name));
         if let Some(description) = tool.description.as_deref() {
-            entry.insert("description".into(), serde_json::json!(description));
+            function.insert("description".into(), serde_json::json!(description));
         }
         if !tool.parameters.is_null() {
-            entry.insert("parameters".into(), tool.parameters.clone());
+            function.insert("parameters".into(), tool.parameters.clone());
         }
         if let Some(strict) = tool.strict {
-            entry.insert("strict".into(), serde_json::json!(strict));
+            function.insert("strict".into(), serde_json::json!(strict));
         }
-        tools_content.push_str(
-            &serde_json::to_string(&serde_json::Value::Object(entry))
-                .expect("serialize tool definition"),
-        );
+        if released {
+            // Pinned templates: the OpenAI-shaped object every released client
+            // passes to `tool | tojson`, with Python's separators (what both
+            // Transformers and llama.cpp emit).
+            let mut entry = serde_json::Map::new();
+            entry.insert("type".into(), serde_json::json!("function"));
+            entry.insert("function".into(), serde_json::Value::Object(function));
+            tools_content.push_str(&python_json(&serde_json::Value::Object(entry)));
+        } else {
+            // Legacy unpinned contract frozen in serve_tool_render_fixtures_v1.
+            let mut entry = serde_json::Map::new();
+            entry.insert("type".into(), serde_json::json!("function"));
+            entry.extend(function);
+            tools_content.push_str(
+                &serde_json::to_string(&serde_json::Value::Object(entry))
+                    .expect("serialize tool definition"),
+            );
+        }
     }
     tools_content.push_str("\n</tools>");
     tools_content.push_str(TOOLS_FORMAT_INSTRUCTION);
@@ -440,11 +453,7 @@ fn render_tools_system_block(
             None,
         );
         output.push(
-            if trim_system {
-                jinja_trim(system)
-            } else {
-                system
-            },
+            if released { jinja_trim(system) } else { system },
             QwenServePromptSpanKind::MessageContent,
             context,
             system_source.map(str::to_owned),
@@ -560,7 +569,7 @@ fn push_visible_and_calls(
                 .expect("validated function_call arguments object"),
         };
         output.push(
-            &render_calls("", &[parsed]),
+            &render_calls_for("", &[parsed], trim),
             QwenServePromptSpanKind::ToolCallContent,
             context.tool_call(call_index),
             Some(call.name.clone()),
@@ -714,7 +723,16 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
         }
     }
     let mut pending_tool_labels = Vec::new();
-    for turn in &request.model_request.turns {
+    // Released rule: reasoning on assistant turns after the last real user
+    // query (i.e. tool-continuation turns) is kept even when history
+    // thinking is stripped.
+    let last_user_index = request
+        .model_request
+        .turns
+        .iter()
+        .rposition(|turn| matches!(turn, Turn::User(_)));
+    for (turn_index, turn) in request.model_request.turns.iter().enumerate() {
+        let after_last_query = last_user_index.is_some_and(|last| turn_index > last);
         match turn {
             Turn::User(text) => {
                 let context = SpanContext::message(message_index, QwenServePromptRole::User, None);
@@ -745,10 +763,15 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
                         None,
                     );
                 } else {
+                    // After the last real user query the released template
+                    // always emits the think block, empty if no reasoning.
+                    let reasoning = reasoning
+                        .as_deref()
+                        .or((verified && after_last_query).then_some(""));
                     push_assistant_body(
                         &mut output,
                         context,
-                        reasoning.as_deref(),
+                        reasoning,
                         visible,
                         calls,
                         // History assistant turns re-render the block the
@@ -756,7 +779,7 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
                         // (preclosed for no-thinking and for Qwen3.5's
                         // released default).
                         generation == QwenGeneration::PreClosed,
-                        request.strip_history_thinking,
+                        request.strip_history_thinking && !(verified && after_last_query),
                         verified,
                     );
                 }
@@ -1253,6 +1276,17 @@ mod tests {
             strip_history_thinking: input["preserve_thinking"] != json!(true),
             ..ServeRequest::default()
         };
+        if let Some(tools) = input["tools"].as_array() {
+            for tool in tools {
+                let function = &tool["function"];
+                request.model_request.tools.push(ToolDefinition {
+                    name: function["name"].as_str().expect("tool name").into(),
+                    description: function["description"].as_str().map(str::to_owned),
+                    parameters: function.get("parameters").cloned().unwrap_or(Value::Null),
+                    strict: function["strict"].as_bool(),
+                });
+            }
+        }
         let mut systems = Vec::new();
         for message in input["messages"].as_array().expect("messages") {
             let role = message["role"].as_str().expect("role");
@@ -1272,11 +1306,39 @@ mod tests {
                             (reasoning, visible)
                         }
                     };
+                    let calls = message["tool_calls"]
+                        .as_array()
+                        .map(|calls| {
+                            calls
+                                .iter()
+                                .enumerate()
+                                .map(|(index, call)| ToolCall {
+                                    call_id: format!("c{index}"),
+                                    name: call["function"]["name"].as_str().unwrap().into(),
+                                    arguments: call["function"]["arguments"].to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     request.model_request.turns.push(Turn::Assistant {
                         reasoning,
                         visible,
-                        calls: Vec::new(),
+                        calls,
                     });
+                }
+                "tool" => {
+                    let result = crate::model_request::ToolResult {
+                        call_id: String::new(),
+                        name: String::new(),
+                        output: content,
+                    };
+                    match request.model_request.turns.last_mut() {
+                        Some(Turn::ToolResults(results)) => results.push(result),
+                        _ => request
+                            .model_request
+                            .turns
+                            .push(Turn::ToolResults(vec![result])),
+                    }
                 }
                 other => panic!("unexpected role {other}"),
             }
@@ -1339,7 +1401,7 @@ mod tests {
             include_str!("../../tests/fixtures/qwen36_chat_template_oracle_v1.json"),
             QwenTemplate::Qwen36,
             &[("history_no_thinking_mode", preclose_history)],
-            15,
+            19,
         );
     }
 

@@ -123,7 +123,73 @@ fn decode_parameter_value(raw: &str) -> Value {
 /// Structured re-render of parsed calls (normalized template glue; the
 /// verbatim path renders retained raw bytes instead). Fixture:
 /// `qwen36_assistant_*` cases.
+/// Serialize a JSON value the way Python's `json.dumps(ensure_ascii=False)`
+/// does with default separators (`", "` and `": "`), which is what both
+/// Transformers' and llama.cpp's `tojson` filters emit. Key order is kept.
+pub(crate) fn python_json(value: &Value) -> String {
+    fn write(value: &Value, out: &mut String) {
+        match value {
+            Value::Object(map) => {
+                out.push('{');
+                for (index, (key, item)) in map.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&serde_json::to_string(key).expect("serialize key"));
+                    out.push_str(": ");
+                    write(item, out);
+                }
+                out.push('}');
+            }
+            Value::Array(items) => {
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    write(item, out);
+                }
+                out.push(']');
+            }
+            scalar => out.push_str(&serde_json::to_string(scalar).expect("serialize scalar")),
+        }
+    }
+    let mut out = String::new();
+    write(value, &mut out);
+    out
+}
+
+/// Render one parameter value as the released Qwen templates do: mappings and
+/// sequences through `tojson`, everything else through Jinja's `string`
+/// filter (Python `str()`: `True`/`False`/`None`, numbers verbatim, strings
+/// as-is).
+fn python_parameter_value(value: &Value) -> String {
+    match value {
+        Value::Object(_) | Value::Array(_) => python_json(value),
+        Value::String(text) => text.clone(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Null => "None".into(),
+        Value::Number(number) => number.to_string(),
+    }
+}
+
+/// Legacy unpinned rendering: compact JSON for non-string values.
+fn compact_parameter_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).expect("serialize value"),
+    }
+}
+
 pub(crate) fn render_calls(visible: &str, calls: &[ParsedCall]) -> String {
+    render_calls_for(visible, calls, false)
+}
+
+/// Render assistant tool calls in the XML-parameter form. `released` selects
+/// the pinned templates' Python value semantics; `false` keeps the legacy
+/// compact form frozen in `serve_tool_render_fixtures_v1.json`.
+pub(crate) fn render_calls_for(visible: &str, calls: &[ParsedCall], released: bool) -> String {
     let mut output = String::from(visible);
     for (index, call) in calls.iter().enumerate() {
         if index == 0 {
@@ -141,10 +207,11 @@ pub(crate) fn render_calls(visible: &str, calls: &[ParsedCall]) -> String {
             output.push_str(PARAM_OPEN);
             output.push_str(key);
             output.push_str(">\n");
-            match value {
-                Value::String(text) => output.push_str(text),
-                other => output.push_str(&serde_json::to_string(other).expect("serialize value")),
-            }
+            output.push_str(&if released {
+                python_parameter_value(value)
+            } else {
+                compact_parameter_value(value)
+            });
             output.push_str(PARAM_CLOSE);
         }
         output.push_str(FUNCTION_CLOSE);

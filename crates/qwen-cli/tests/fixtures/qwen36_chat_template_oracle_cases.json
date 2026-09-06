@@ -251,5 +251,215 @@
    }
   ],
   "add_generation_prompt": true
+ },
+ {
+  "id": "tools_openai_shape",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Ping."
+   }
+  ],
+  "add_generation_prompt": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "Ping it",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "host": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "host"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "two_rounds_strip",
+  "messages": [
+   {
+    "role": "user",
+    "content": "List /tmp then /var."
+   },
+   {
+    "role": "assistant",
+    "content": "Listing now.",
+    "reasoning_content": "Use fs.list.",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "fs.list",
+       "arguments": {
+        "path": "/tmp"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "a.txt\nb.txt"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "Now /var.",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "fs.list",
+       "arguments": {
+        "path": "/var",
+        "opts": {
+         "all": true
+        },
+        "n": 2
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "fs.list",
+       "arguments": {
+        "path": "/etc"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "log"
+   },
+   {
+    "role": "tool",
+    "content": "tmp"
+   }
+  ],
+  "add_generation_prompt": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "fs.list",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "two_rounds_then_user",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Calling.",
+    "reasoning_content": "r1",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "ping",
+       "arguments": {}
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "pong"
+   },
+   {
+    "role": "assistant",
+    "content": "Done.",
+    "reasoning_content": "r2"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "scalar_params",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Go"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "f",
+       "arguments": {
+        "b": true,
+        "n": 2,
+        "x": 2.5,
+        "z": null,
+        "s": "str",
+        "l": [
+         1,
+         "a",
+         null
+        ],
+        "o": {
+         "k": "v",
+         "u": "é"
+        }
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "ok"
+   }
+  ],
+  "add_generation_prompt": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "f",
+     "description": "é ü",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
  }
 ]

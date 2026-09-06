@@ -6666,7 +6666,8 @@ mod tests {
             std::str::from_utf8(&captured.bytes).unwrap(),
             &captured.path.display().to_string(),
         )
-        .unwrap();
+        .unwrap()
+        .messages;
         assert_eq!(parsed[0].content, "original");
 
         let symlink = root.join("messages-link.json");

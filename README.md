@@ -50,8 +50,10 @@ Use `run` for an ordinary model-templated request:
 ```
 
 Structured messages accept either a strict bare array or
-`{ "messages": [...] }`. Muse accepts the shared ATEM wrapper with tools,
-reasoning history, and tool results. `-` reads one complete JSON document from
+`{ "messages": [...], "tools": [...] }` with OpenAI-shaped tool definitions,
+assistant `tool_calls`, `tool` results, and `reasoning_content` on pinned Qwen
+templates. Muse accepts the shared ATEM wrapper with tools, reasoning history,
+and tool results. `-` reads one complete JSON document from
 stdin:
 
 ```sh

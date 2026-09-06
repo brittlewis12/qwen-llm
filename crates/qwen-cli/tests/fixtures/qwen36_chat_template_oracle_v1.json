@@ -305,6 +305,228 @@
         "add_generation_prompt": true
       },
       "rendered": "<|im_start|>system\nBe concise.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "tools_openai_shape",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Ping."
+          }
+        ],
+        "add_generation_prompt": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "ping",
+              "description": "Ping it",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "host"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "rendered": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"ping\", \"description\": \"Ping it\", \"parameters\": {\"type\": \"object\", \"properties\": {\"host\": {\"type\": \"string\"}}, \"required\": [\"host\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nPing.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "two_rounds_strip",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "List /tmp then /var."
+          },
+          {
+            "role": "assistant",
+            "content": "Listing now.",
+            "reasoning_content": "Use fs.list.",
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "fs.list",
+                  "arguments": {
+                    "path": "/tmp"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "a.txt\nb.txt"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Now /var.",
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "fs.list",
+                  "arguments": {
+                    "path": "/var",
+                    "opts": {
+                      "all": true
+                    },
+                    "n": 2
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "fs.list",
+                  "arguments": {
+                    "path": "/etc"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "log"
+          },
+          {
+            "role": "tool",
+            "content": "tmp"
+          }
+        ],
+        "add_generation_prompt": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "fs.list",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          }
+        ]
+      },
+      "rendered": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"fs.list\", \"parameters\": {\"type\": \"object\"}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nList /tmp then /var.<|im_end|>\n<|im_start|>assistant\n<think>\nUse fs.list.\n</think>\n\nListing now.\n\n<tool_call>\n<function=fs.list>\n<parameter=path>\n/tmp\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\na.txt\nb.txt\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nNow /var.\n</think>\n\n<tool_call>\n<function=fs.list>\n<parameter=path>\n/var\n</parameter>\n<parameter=opts>\n{\"all\": true}\n</parameter>\n<parameter=n>\n2\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=fs.list>\n<parameter=path>\n/etc\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nlog\n</tool_response>\n<tool_response>\ntmp\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "two_rounds_then_user",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Calling.",
+            "reasoning_content": "r1",
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "ping",
+                  "arguments": {}
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "pong"
+          },
+          {
+            "role": "assistant",
+            "content": "Done.",
+            "reasoning_content": "r2"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "ping",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          }
+        ]
+      },
+      "rendered": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"ping\", \"parameters\": {\"type\": \"object\"}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\nCalling.\n\n<tool_call>\n<function=ping>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\npong\n</tool_response><|im_end|>\n<|im_start|>assistant\nDone.<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "scalar_params",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Go"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "f",
+                  "arguments": {
+                    "b": true,
+                    "n": 2,
+                    "x": 2.5,
+                    "z": null,
+                    "s": "str",
+                    "l": [
+                      1,
+                      "a",
+                      null
+                    ],
+                    "o": {
+                      "k": "v",
+                      "u": "é"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "ok"
+          }
+        ],
+        "add_generation_prompt": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "f",
+              "description": "é ü",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          }
+        ]
+      },
+      "rendered": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"f\", \"description\": \"é ü\", \"parameters\": {\"type\": \"object\"}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nGo<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=f>\n<parameter=b>\nTrue\n</parameter>\n<parameter=n>\n2\n</parameter>\n<parameter=x>\n2.5\n</parameter>\n<parameter=z>\nNone\n</parameter>\n<parameter=s>\nstr\n</parameter>\n<parameter=l>\n[1, \"a\", null]\n</parameter>\n<parameter=o>\n{\"k\": \"v\", \"u\": \"é\"}\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
     }
   ]
 }

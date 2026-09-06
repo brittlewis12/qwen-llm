@@ -1016,10 +1016,6 @@ impl GenerationBackend for EngineBackend {
             speculate = false;
         }
 
-        // Prefill and its possible fresh retry have finished; snapshots and
-        // decode own their state independently of the matrix workspace.
-        drop(scratch);
-
         // Prompt-boundary capture into the RAM cache (skip when this exact
         // prompt was already an exact hit). The capture window buffer holds
         // the prompt's trailing columns; publish them as the drafter tail.

@@ -1094,3 +1094,196 @@ pub(crate) fn host_page_size() -> Result<usize, MetalError> {
 pub fn host_page_size_bytes() -> Result<usize, MetalError> {
     host_page_size()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metal::test_support::*;
+
+    #[test]
+    fn process_lease_rejects_overlap_and_recovers_after_release() {
+        let fixture = LeaseFixture::new();
+        let first = open_metal_process_lease(&fixture.0, false).expect("acquire first lease");
+        let error = open_metal_process_lease(&fixture.0, false)
+            .err()
+            .expect("overlapping lease must fail");
+        let MetalError::ProcessLease(detail) = error else {
+            panic!("unexpected overlap error: {error}");
+        };
+        assert!(detail.contains("another qwen process owns"));
+        assert!(detail.contains(&format!("pid={}", std::process::id())));
+        drop(first);
+        let second = open_metal_process_lease(&fixture.0, false)
+            .expect("lease must recover after owner release");
+        drop(second);
+    }
+
+    #[test]
+    fn process_lease_owner_fields_are_single_line_and_bounded() {
+        let dirty = format!("bad value\n{}", "x".repeat(1_024));
+        let cleaned = lease_owner_field(&dirty);
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains(' '));
+        assert_eq!(cleaned.len(), 512);
+    }
+
+    #[test]
+    fn process_lease_owner_display_cannot_inject_lines() {
+        let dirty = "pid=1\nforged=owner\t\u{1b}[31m";
+        let cleaned = lease_owner_display(dirty);
+        assert_eq!(cleaned, "pid=1_forged=owner___31m");
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains('\t'));
+    }
+
+    #[test]
+    fn wired_memory_guard_rejects_half_of_physical_memory() {
+        assert!(!host_wired_memory_is_unsafe(0, 128));
+        assert!(!host_wired_memory_is_unsafe(63, 128));
+        assert!(host_wired_memory_is_unsafe(64, 128));
+        assert!(!host_wired_memory_is_unsafe(u64::MAX, 0));
+    }
+
+    #[test]
+    fn cpu_only_admission_bytes_do_not_consume_metal_headroom() {
+        let signals = MetalMemorySignals {
+            recommended_max_bytes: 1_000,
+            current_allocated_bytes: 700,
+            process_limit_remaining_bytes: Some(1_000),
+        };
+        let decision = evaluate_metal_memory_admission_with_cpu_bytes(200, 400, 50, signals, false);
+        assert!(decision.admitted);
+        assert_eq!(decision.required_bytes, Some(650));
+        assert_eq!(decision.working_set_headroom_bytes, Some(300));
+
+        let denied = evaluate_metal_memory_admission_with_cpu_bytes(200, 800, 50, signals, false);
+        assert!(!denied.admitted);
+        assert_eq!(
+            denied.reason,
+            MetalMemoryAdmissionReason::ProcessInsufficient
+        );
+    }
+
+    #[test]
+    fn metal_memory_admission_requires_both_advisory_budgets() {
+        let exact =
+            evaluate_metal_memory_admission(400, 100, memory_signals(1500, 1000, Some(500)), false);
+        assert!(exact.admitted);
+        assert_eq!(
+            exact.reason,
+            MetalMemoryAdmissionReason::AdmittedWithProcessBudget
+        );
+        assert_eq!(exact.required_bytes, Some(500));
+        assert_eq!(exact.working_set_headroom_bytes, Some(500));
+
+        for (signals, reason) in [
+            (
+                memory_signals(1499, 1000, Some(500)),
+                MetalMemoryAdmissionReason::WorkingSetInsufficient,
+            ),
+            (
+                memory_signals(1500, 1000, Some(499)),
+                MetalMemoryAdmissionReason::ProcessInsufficient,
+            ),
+            (
+                memory_signals(1499, 1000, Some(499)),
+                MetalMemoryAdmissionReason::BothInsufficient,
+            ),
+            (
+                memory_signals(1000, 1000, Some(500)),
+                MetalMemoryAdmissionReason::WorkingSetInsufficient,
+            ),
+            (
+                memory_signals(999, 1000, Some(500)),
+                MetalMemoryAdmissionReason::InvalidWorkingSetSignal,
+            ),
+            (
+                memory_signals(1500, 1000, Some(0)),
+                MetalMemoryAdmissionReason::ProcessSignalUnavailable,
+            ),
+            (
+                memory_signals(1500, 1000, None),
+                MetalMemoryAdmissionReason::ProcessSignalUnavailable,
+            ),
+        ] {
+            let decision = evaluate_metal_memory_admission(400, 100, signals, false);
+            assert!(!decision.admitted);
+            assert_eq!(decision.reason, reason);
+        }
+    }
+
+    #[test]
+    fn metal_memory_admission_fails_closed_on_required_overflow() {
+        let decision = evaluate_metal_memory_admission(
+            u64::MAX,
+            1,
+            memory_signals(u64::MAX, 1, Some(u64::MAX)),
+            false,
+        );
+        assert!(!decision.admitted);
+        assert_eq!(decision.required_bytes, None);
+        assert_eq!(
+            decision.reason,
+            MetalMemoryAdmissionReason::RequiredBytesOverflow
+        );
+    }
+
+    #[test]
+    fn metal_memory_admission_omits_zero_process_budget_only_when_allowed() {
+        let signals = memory_signals(1500, 1000, Some(0));
+        let admitted = evaluate_metal_memory_admission(400, 100, signals, true);
+        assert!(admitted.admitted);
+        assert_eq!(
+            admitted.reason,
+            MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+        );
+        let denied = evaluate_metal_memory_admission(400, 100, signals, false);
+        assert!(!denied.admitted);
+        assert_eq!(
+            denied.reason,
+            MetalMemoryAdmissionReason::ProcessSignalUnavailable
+        );
+    }
+
+    #[test]
+    fn metal_memory_admission_rejects_zero_required_with_zero_headroom() {
+        let decision =
+            evaluate_metal_memory_admission(0, 0, memory_signals(1000, 1000, Some(1)), false);
+        assert!(!decision.admitted);
+        assert_eq!(
+            decision.reason,
+            MetalMemoryAdmissionReason::WorkingSetInsufficient
+        );
+    }
+
+    #[test]
+    fn metal_memory_probes_are_available_on_product_host() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::NoDevice | MetalError::EmptyLibrary) => return,
+            Err(error) => panic!("Metal context: {error}"),
+        };
+        let signals = ctx.memory_signals();
+        assert!(signals.recommended_max_bytes > 0);
+        eprintln!("[metal-memory-signals] {signals:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_memory_probes_match_local_m4_max() {
+        let ctx = MetalContext::new().expect("Metal context");
+        let signals = ctx.memory_signals();
+        assert_eq!(signals.recommended_max_bytes, 103_079_215_104);
+        assert_eq!(signals.process_limit_remaining_bytes, Some(0));
+    }
+
+    #[test]
+    fn metal_context_initializes() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        eprintln!("[metal] {}", ctx.describe());
+    }
+}

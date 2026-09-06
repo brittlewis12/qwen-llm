@@ -344,6 +344,8 @@ mod norm;
 mod research;
 mod rope;
 mod tensor;
+#[cfg(test)]
+mod test_support;
 mod testing;
 #[cfg(test)]
 mod tests;

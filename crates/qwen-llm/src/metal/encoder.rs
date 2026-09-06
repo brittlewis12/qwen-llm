@@ -424,3 +424,71 @@ impl Drop for BlitEncoder {
         self.finish();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_encoder_drop_closes_validation_error_pass() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let embed = MetalTensor::zeros_f32(&ctx, vec![8]).unwrap();
+        let wrong_ids = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        {
+            let enc = KernelEncoder::begin(&cmd);
+            let error = encode_get_rows_f32(&ctx, &enc, &embed, &wrong_ids, &output, 1, 4)
+                .expect_err("F32 IDs must be rejected");
+            assert!(matches!(error, MetalError::BadShape { .. }));
+        }
+        let enc = KernelEncoder::begin(&cmd);
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        assert!(cmd.error().is_none(), "command failed: {:?}", cmd.error());
+    }
+
+    #[test]
+    fn kernel_encoder_drop_closes_panicking_pass() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _enc = KernelEncoder::begin(&cmd);
+            panic!("synthetic encoder unwind");
+        }));
+        assert!(panic.is_err());
+        let enc = KernelEncoder::begin(&cmd);
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        assert!(cmd.error().is_none(), "command failed: {:?}", cmd.error());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn concurrent_hazard_guard_ignores_serial_encoders() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let a = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+        let enc = KernelEncoder::begin(&cmd);
+        // Serial encoders order dispatches; write-then-read is the normal
+        // dataflow and must not trip the guard.
+        enc.note_write(&a);
+        enc.note_read(&a);
+        enc.note_write(&a);
+        enc.end();
+    }
+}

@@ -2419,3 +2419,1426 @@ pub(crate) fn validate_compact_f32_tensor(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metal::test_support::*;
+
+    #[test]
+    fn mps_two_pass_topk_matches_cpu_at_full_vocabulary_width() {
+        // Exercise the rounded mask-dispatch tail as well as full vocabulary width.
+        const ROWS: usize = 3;
+        const COLUMNS: usize = 248_320;
+        const PASS_K: usize = 16;
+        const RESULT_K: usize = 25;
+        const PRIME: usize = 1_000_003;
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("initialize Metal: {error}"),
+        };
+        let mut host = Vec::with_capacity(ROWS * COLUMNS);
+        for row in 0..ROWS {
+            for column in 0..COLUMNS {
+                host.push(((column * 48_271 + row * 17) % PRIME) as f32);
+            }
+        }
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&host),
+            vec![ROWS as u64, COLUMNS as u64],
+            GgmlType::F32,
+        )
+        .expect("input tensor");
+        let first_ids =
+            MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, PASS_K as u64]).expect("first IDs");
+        let first_values =
+            MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, PASS_K as u64]).expect("first values");
+        let second_ids =
+            MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, PASS_K as u64]).expect("second IDs");
+        let second_values =
+            MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, PASS_K as u64]).expect("second values");
+        let command = ctx.queue.commandBuffer().expect("command buffer");
+        let started = std::time::Instant::now();
+        encode_mps_topk16_f32(
+            &ctx,
+            &command,
+            &input,
+            &first_ids,
+            &first_values,
+            ROWS,
+            COLUMNS,
+        )
+        .expect("first top-k pass");
+        let encoder = KernelEncoder::begin(&command);
+        encode_mask_row_indices_f32(&ctx, &encoder, &input, &first_ids, ROWS, COLUMNS, PASS_K)
+            .expect("mask first-pass IDs");
+        encoder.end();
+        encode_mps_topk16_f32(
+            &ctx,
+            &command,
+            &input,
+            &second_ids,
+            &second_values,
+            ROWS,
+            COLUMNS,
+        )
+        .expect("second top-k pass");
+        command.commit();
+        command.waitUntilCompleted();
+        let elapsed = started.elapsed();
+        assert_eq!(
+            command.status(),
+            objc2_metal::MTLCommandBufferStatus::Completed,
+            "MPS top-k command failed: {:?}",
+            command.error()
+        );
+
+        let read_ids = |tensor: &MetalTensor| unsafe {
+            std::slice::from_raw_parts(
+                tensor.buffer.contents().as_ptr().cast::<i32>(),
+                ROWS * PASS_K,
+            )
+            .to_vec()
+        };
+        let first_ids = read_ids(&first_ids);
+        let second_ids = read_ids(&second_ids);
+        let first_values = read_back_f32(&first_values.buffer, ROWS * PASS_K);
+        let second_values = read_back_f32(&second_values.buffer, ROWS * PASS_K);
+        for row in 0..ROWS {
+            let mut candidates = Vec::with_capacity(2 * PASS_K);
+            for (ids, values) in [(&first_ids, &first_values), (&second_ids, &second_values)] {
+                for column in 0..PASS_K {
+                    let offset = row * PASS_K + column;
+                    candidates.push((ids[offset] as usize, values[offset]));
+                }
+            }
+            candidates.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            let mut expected = Vec::<(usize, f32)>::with_capacity(RESULT_K);
+            for column in 0..COLUMNS {
+                let value = host[row * COLUMNS + column];
+                let insertion = expected.partition_point(|&(id, score)| {
+                    score > value || (score == value && id < column)
+                });
+                if insertion < RESULT_K {
+                    expected.insert(insertion, (column, value));
+                    if expected.len() > RESULT_K {
+                        expected.pop();
+                    }
+                }
+            }
+            assert_eq!(&candidates[..RESULT_K], expected.as_slice(), "row {row}");
+        }
+        eprintln!(
+            "MPS two-pass top-25 rows={ROWS} columns={COLUMNS} wall_ms={:.3}",
+            elapsed.as_secs_f64() * 1e3
+        );
+    }
+
+    #[test]
+    fn get_rows_q6_k_gpu_matches_cpu_with_offsets_and_rejects_bad_inputs() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        const N_VOCAB: usize = 3;
+        const N_COLS: usize = 512;
+        let mut weight_bytes = Vec::new();
+        let mut decoded = vec![0.0f32; N_VOCAB * N_COLS];
+        for row in 0..N_VOCAB {
+            for block_index in 0..2 {
+                let (block, values) = encode_q6_k_block(
+                    if (row + block_index) % 2 == 0 {
+                        0.5
+                    } else {
+                        -0.25
+                    },
+                    row * 2 + block_index,
+                );
+                weight_bytes.extend_from_slice(&block);
+                let start = row * N_COLS + block_index * 256;
+                decoded[start..start + 256].copy_from_slice(&values);
+            }
+        }
+        let desc = TensorDesc {
+            name: "q6_k_test".into(),
+            shape: vec![N_COLS as u64, N_VOCAB as u64],
+            dtype: GgmlType::Q6_K,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: weight_bytes.len() as u64,
+        };
+        let codec_decoded = crate::codec::dequant_to_f32(&desc, &weight_bytes)
+            .expect("llama.cpp Q6_K reference dequantization");
+        assert_eq!(decoded, codec_decoded);
+        let decoded = codec_decoded;
+        let embed = offset_tensor(
+            &ctx,
+            32,
+            &weight_bytes,
+            19,
+            vec![N_COLS as u64, N_VOCAB as u64],
+            GgmlType::Q6_K,
+        );
+        let row_ids = [2i32, -1, 0, 3];
+        let ids = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&row_ids),
+            12,
+            vec![row_ids.len() as u64],
+            GgmlType::I32,
+        );
+        let output_bytes = vec![0u8; row_ids.len() * N_COLS * size_of::<f32>()];
+        let y = offset_tensor(
+            &ctx,
+            32,
+            &output_bytes,
+            20,
+            vec![(row_ids.len() * N_COLS) as u64],
+            GgmlType::F32,
+        );
+        one_shot(&ctx, |enc| {
+            encode_get_rows_f32(&ctx, enc, &embed, &ids, &y, row_ids.len(), N_COLS)
+        })
+        .expect("Q6_K get_rows");
+
+        let actual = tensor_f32_at_offset(&y);
+        for (lookup_row, &row_id) in row_ids.iter().enumerate() {
+            let output_row = &actual[lookup_row * N_COLS..(lookup_row + 1) * N_COLS];
+            if row_id >= 0 && (row_id as usize) < N_VOCAB {
+                let expected = &decoded[row_id as usize * N_COLS..(row_id as usize + 1) * N_COLS];
+                assert_eq!(output_row, expected);
+            } else {
+                assert!(output_row.iter().all(|&value| value == 0.0));
+            }
+        }
+
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .expect("validation command buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        assert!(encode_get_rows_f32(&ctx, &enc, &embed, &ids, &y, row_ids.len(), 255).is_err());
+        let mut short_embed = embed.clone();
+        short_embed.offset = short_embed.buffer.length() as u64 - 1;
+        assert!(
+            encode_get_rows_f32(&ctx, &enc, &short_embed, &ids, &y, row_ids.len(), N_COLS).is_err()
+        );
+        let mut misaligned_embed = embed.clone();
+        misaligned_embed.offset += 1;
+        assert!(
+            encode_get_rows_f32(
+                &ctx,
+                &enc,
+                &misaligned_embed,
+                &ids,
+                &y,
+                row_ids.len(),
+                N_COLS,
+            )
+            .is_err()
+        );
+        let mut short_ids = ids.clone();
+        short_ids.offset = short_ids.buffer.length() as u64 - 1;
+        assert!(
+            encode_get_rows_f32(&ctx, &enc, &embed, &short_ids, &y, row_ids.len(), N_COLS).is_err()
+        );
+        let mut wrong_ids_dtype = ids.clone();
+        wrong_ids_dtype.dtype = GgmlType::F32;
+        assert!(
+            encode_get_rows_f32(
+                &ctx,
+                &enc,
+                &embed,
+                &wrong_ids_dtype,
+                &y,
+                row_ids.len(),
+                N_COLS,
+            )
+            .is_err()
+        );
+        enc.end();
+    }
+
+    #[test]
+    fn get_rows_iq4_nl_gpu_matches_cpu_with_ple_width_and_offsets() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        const N_VOCAB: usize = 3;
+        const N_COLS: usize = 160;
+        const BLOCKS_PER_ROW: usize = N_COLS / 32;
+        let mut weight_bytes = Vec::new();
+        let mut hand_decoded = vec![0.0f32; N_VOCAB * N_COLS];
+        for row in 0..N_VOCAB {
+            for block_index in 0..BLOCKS_PER_ROW {
+                let ordinal = row * BLOCKS_PER_ROW + block_index;
+                let sign = if ordinal.is_multiple_of(2) { 1.0 } else { -1.0 };
+                let d = sign * (ordinal % 7 + 1) as f32 / 1024.0;
+                let (block, values) = encode_iq4_nl_block(d, ordinal);
+                weight_bytes.extend_from_slice(&block);
+                let start = row * N_COLS + block_index * 32;
+                hand_decoded[start..start + 32].copy_from_slice(&values);
+            }
+        }
+        let desc = TensorDesc {
+            name: "iq4_nl_ple_rows".into(),
+            shape: vec![N_COLS as u64, N_VOCAB as u64],
+            dtype: GgmlType::IQ4_NL,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: weight_bytes.len() as u64,
+        };
+        let codec_decoded = crate::codec::dequant_to_f32(&desc, &weight_bytes)
+            .expect("llama.cpp IQ4_NL reference dequantization");
+        assert!(
+            hand_decoded
+                .iter()
+                .zip(&codec_decoded)
+                .all(|(hand, codec)| hand.to_bits() == codec.to_bits()),
+            "synthetic IQ4_NL encoder disagrees with llama.cpp"
+        );
+
+        let embed = offset_tensor(
+            &ctx,
+            30,
+            &weight_bytes,
+            19,
+            vec![N_COLS as u64, N_VOCAB as u64],
+            GgmlType::IQ4_NL,
+        );
+        let row_ids = [2i32, -1, 0, N_VOCAB as i32, 1, 1];
+        let ids = offset_tensor(
+            &ctx,
+            12,
+            bytemuck::cast_slice(&row_ids),
+            13,
+            vec![row_ids.len() as u64],
+            GgmlType::I32,
+        );
+        let y = offset_tensor(
+            &ctx,
+            20,
+            &vec![0u8; row_ids.len() * N_COLS * size_of::<f32>()],
+            29,
+            vec![(row_ids.len() * N_COLS) as u64],
+            GgmlType::F32,
+        );
+        one_shot(&ctx, |enc| {
+            encode_get_rows_f32(&ctx, enc, &embed, &ids, &y, row_ids.len(), N_COLS)
+        })
+        .expect("IQ4_NL get_rows");
+
+        let actual = tensor_f32_at_offset(&y);
+        for (lookup_row, &row_id) in row_ids.iter().enumerate() {
+            let output_row = &actual[lookup_row * N_COLS..(lookup_row + 1) * N_COLS];
+            if row_id >= 0 && (row_id as usize) < N_VOCAB {
+                let expected =
+                    &codec_decoded[row_id as usize * N_COLS..(row_id as usize + 1) * N_COLS];
+                let max_abs = output_row
+                    .iter()
+                    .zip(expected)
+                    .map(|(candidate, reference)| (candidate - reference).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(max_abs <= 1e-6, "row {lookup_row} max_abs={max_abs}");
+            } else {
+                assert!(output_row.iter().all(|&value| value == 0.0));
+            }
+        }
+        assert!(
+            actual[4 * N_COLS..5 * N_COLS]
+                .iter()
+                .zip(&actual[5 * N_COLS..6 * N_COLS])
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+        );
+        assert_offset_guards(&embed, 30, 19);
+        assert_offset_guards(&ids, 12, 13);
+        assert_offset_guards(&y, 20, 29);
+
+        let command = ctx.queue.commandBuffer().expect("validation command");
+        let encoder = KernelEncoder::begin(&command);
+        let malformed_embed = MetalTensor {
+            shape: vec![31, N_VOCAB as u64],
+            ..embed.clone()
+        };
+        let malformed_output = MetalTensor::zeros_f32(&ctx, vec![(row_ids.len() * 31) as u64])
+            .expect("malformed output");
+        assert!(
+            encode_get_rows_f32(
+                &ctx,
+                &encoder,
+                &malformed_embed,
+                &ids,
+                &malformed_output,
+                row_ids.len(),
+                31,
+            )
+            .is_err()
+        );
+        let mut misaligned_embed = embed.clone();
+        misaligned_embed.offset += 1;
+        assert!(
+            encode_get_rows_f32(
+                &ctx,
+                &encoder,
+                &misaligned_embed,
+                &ids,
+                &y,
+                row_ids.len(),
+                N_COLS,
+            )
+            .is_err()
+        );
+        encoder.end();
+    }
+
+    #[test]
+    fn post_block_interventions_match_f32_cpu_oracles_at_realistic_hidden_size() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const H: usize = 6_656;
+        let x_values: Vec<f32> = (0..H)
+            .map(|i| ((i * 19 + 5) % 257) as f32 / 128.0 - 1.0)
+            .collect();
+        let direction_values: Vec<f32> = (0..H)
+            .map(|i| ((i * 23 + 7) % 251) as f32 / 125.0 - 1.0)
+            .collect();
+        let source_values: Vec<f32> = (0..H)
+            .map(|i| ((i * 29 + 11) % 241) as f32 / 120.0 - 1.0)
+            .collect();
+        let target_values: Vec<f32> = (0..H)
+            .map(|i| ((i * 31 + 13) % 239) as f32 / 119.0 - 1.0)
+            .collect();
+        let direction = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&direction_values),
+            vec![H as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let source = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&source_values),
+            vec![H as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let target = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&target_values),
+            vec![H as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let run = |intervention: PostBlockIntervention<'_>| {
+            let x = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x_values),
+                vec![H as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_post_block_intervention_f32(&ctx, enc, &x, &intervention)
+            })
+            .unwrap();
+            tensor_f32_at_offset(&x)
+        };
+        let coefficient = 0.375f32;
+        let fixed = run(PostBlockIntervention::Fixed {
+            layer: 0,
+            direction: &direction,
+            coefficient,
+        });
+        let residual_l2 = run(PostBlockIntervention::ResidualL2Relative {
+            layer: 0,
+            direction: &direction,
+            coefficient,
+        });
+        let projection = run(PostBlockIntervention::Projection {
+            layer: 0,
+            direction: &direction,
+            coefficient,
+        });
+        let source_to_target = run(PostBlockIntervention::SourceToTarget {
+            layer: 0,
+            source: &source,
+            target: &target,
+            coefficient,
+        });
+        let x_l2 = x_values
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        let x_dot_direction: f32 = x_values
+            .iter()
+            .zip(&direction_values)
+            .map(|(x, direction)| x * direction)
+            .sum();
+        let x_dot_source: f32 = x_values
+            .iter()
+            .zip(&source_values)
+            .map(|(x, source)| x * source)
+            .sum();
+        let expected = [
+            x_values
+                .iter()
+                .zip(&direction_values)
+                .map(|(x, direction)| *x + coefficient * direction)
+                .collect::<Vec<_>>(),
+            x_values
+                .iter()
+                .zip(&direction_values)
+                .map(|(x, direction)| *x + coefficient * x_l2 * direction)
+                .collect::<Vec<_>>(),
+            x_values
+                .iter()
+                .zip(&direction_values)
+                .map(|(x, direction)| *x - coefficient * x_dot_direction * direction)
+                .collect::<Vec<_>>(),
+            x_values
+                .iter()
+                .zip(source_values.iter().zip(&target_values))
+                .map(|(x, (source, target))| *x + coefficient * x_dot_source * (target - source))
+                .collect::<Vec<_>>(),
+        ];
+        for (name, actual, expected) in [
+            ("fixed", fixed, &expected[0]),
+            ("residual-l2", residual_l2, &expected[1]),
+            ("projection", projection, &expected[2]),
+            ("source-to-target", source_to_target, &expected[3]),
+        ] {
+            let max_abs = actual
+                .iter()
+                .zip(expected)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            let tolerance = if name == "residual-l2" { 1e-3 } else { 2e-5 };
+            assert!(
+                max_abs <= tolerance,
+                "{name}: max|delta|={max_abs} exceeds F32 tolerance {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn elementwise_silu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let x: Vec<f32> = (-50..50).map(|i| i as f32 * 0.1).collect();
+        let n = x.len();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let gpu = one_shot_f32_out(&ctx, n, |enc, y| encode_silu_f32(&ctx, enc, &x_t, y));
+        for (i, &v) in x.iter().enumerate() {
+            let expected = v / (1.0 + (-v).exp());
+            assert!(
+                (gpu[i] - expected).abs() < 1e-5,
+                "silu[{i}] {v} -> {} vs {}",
+                gpu[i],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn elementwise_sigmoid_softplus() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let x: Vec<f32> = (-30..30).map(|i| i as f32 * 0.5).collect();
+        let n = x.len();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        let sig = one_shot_f32_out(&ctx, n, |enc, y| encode_sigmoid_f32(&ctx, enc, &x_t, y));
+        let sp = one_shot_f32_out(&ctx, n, |enc, y| encode_softplus_f32(&ctx, enc, &x_t, y));
+
+        for (i, &v) in x.iter().enumerate() {
+            let exp_sig = 1.0 / (1.0 + (-v).exp());
+            assert!((sig[i] - exp_sig).abs() < 1e-5);
+            let exp_sp = if v > 20.0 {
+                v
+            } else if v < -20.0 {
+                v.exp()
+            } else {
+                (1.0 + v.exp()).ln()
+            };
+            assert!((sp[i] - exp_sp).abs() < 1e-5);
+        }
+    }
+
+    /// Fused K+V scatter (one dispatch writes both caches) must produce
+    /// identical bytes to the two-dispatch sequence.
+    #[test]
+    fn scatter_kv_fused_matches_unfused() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let kv_dim = 4 * 256; // n_kv_heads * head_dim for 27B
+        let cap = 64usize;
+
+        let k_src: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+            .collect();
+        let v_src: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.07)
+            .collect();
+        let k_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&k_src),
+            vec![kv_dim as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let v_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&v_src),
+            vec![kv_dim as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        for &dst_off_slot in &[0usize, 7, 31, 63] {
+            let dst_off = dst_off_slot * kv_dim;
+
+            // --- Reference: two unfused dispatches ---
+            let k_ref = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_ref = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_f16(&ctx, enc, &k_src_t, &k_ref, dst_off, kv_dim)?;
+                encode_scatter_offset_f32_to_f16(&ctx, enc, &v_src_t, &v_ref, dst_off, kv_dim)
+            })
+            .unwrap();
+
+            // --- Fused: one dispatch ---
+            let k_fused = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_fused = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_f16_kv(
+                    &ctx, enc, &k_src_t, &v_src_t, &k_fused, &v_fused, dst_off, kv_dim,
+                )
+            })
+            .unwrap();
+
+            // Compare F16 bytes directly (must be byte-identical).
+            let n_bytes = cap * kv_dim * 2;
+            let k_ref_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(k_ref.buffer.contents().as_ptr() as *const u8, n_bytes)
+            };
+            let k_fused_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(k_fused.buffer.contents().as_ptr() as *const u8, n_bytes)
+            };
+            let v_ref_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(v_ref.buffer.contents().as_ptr() as *const u8, n_bytes)
+            };
+            let v_fused_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(v_fused.buffer.contents().as_ptr() as *const u8, n_bytes)
+            };
+            assert_eq!(
+                k_ref_bytes, k_fused_bytes,
+                "K mismatch at slot={dst_off_slot}"
+            );
+            assert_eq!(
+                v_ref_bytes, v_fused_bytes,
+                "V mismatch at slot={dst_off_slot}"
+            );
+            eprintln!("[scatter_kv_fused slot={dst_off_slot}] byte-identical to unfused");
+        }
+    }
+
+    #[test]
+    fn scatter_kv_q8_matches_ref_quant() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let kv_dim = 4 * 256usize;
+        let cap = 8usize;
+        let k_src: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.03125)
+            .collect();
+        let v_src: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.046875)
+            .collect();
+        let k_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&k_src),
+            vec![kv_dim as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let v_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&v_src),
+            vec![kv_dim as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        for &dst_off_slot in &[0usize, 3, 7] {
+            let dst_off = dst_off_slot * kv_dim;
+            let k_q8 = MetalTensor::zeros_q8_0(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_q8 = MetalTensor::zeros_q8_0(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_q8_0_kv(
+                    &ctx, enc, &k_src_t, &v_src_t, &k_q8, &v_q8, dst_off, kv_dim,
+                )
+            })
+            .unwrap();
+
+            let q8_block_bytes = 34usize;
+            let blocks_per_row = kv_dim / 32;
+            let total_bytes = cap * blocks_per_row * q8_block_bytes;
+            let k_gpu: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    k_q8.buffer.contents().as_ptr() as *const u8,
+                    total_bytes,
+                )
+            };
+            let v_gpu: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    v_q8.buffer.contents().as_ptr() as *const u8,
+                    total_bytes,
+                )
+            };
+
+            let mut k_ref = vec![0u8; total_bytes];
+            let mut v_ref = vec![0u8; total_bytes];
+            let block_base = dst_off / 32;
+            for (src, dst) in [(&k_src, &mut k_ref), (&v_src, &mut v_ref)] {
+                for blk in 0..blocks_per_row {
+                    let src_blk = &src[blk * 32..(blk + 1) * 32];
+                    let amax = src_blk.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+                    let d = amax / 127.0f32;
+                    let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+                    let dst_blk = (block_base + blk) * q8_block_bytes;
+                    let dh = half::f16::from_f32(d).to_bits().to_le_bytes();
+                    dst[dst_blk..dst_blk + 2].copy_from_slice(&dh);
+                    for j in 0..32 {
+                        dst[dst_blk + 2 + j] = ((src_blk[j] * id).round() as i8) as u8;
+                    }
+                }
+            }
+
+            assert_eq!(
+                k_gpu,
+                k_ref.as_slice(),
+                "Q8 K mismatch at slot={dst_off_slot}"
+            );
+            assert_eq!(
+                v_gpu,
+                v_ref.as_slice(),
+                "Q8 V mismatch at slot={dst_off_slot}"
+            );
+            eprintln!("[scatter_kv_q8 slot={dst_off_slot}] byte-identical to ref quantization");
+        }
+    }
+
+    #[test]
+    fn elementwise_add_mul_silu_mul_sigmoid_mul() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n = 17408usize; // FFN dim — exercise the realistic shape
+        let a: Vec<f32> = (0..n).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+        let b: Vec<f32> = (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.2).collect();
+        let a_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&a),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let b_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&b),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        let added = one_shot_f32_out(&ctx, n, |enc, y| encode_add_f32(&ctx, enc, &a_t, &b_t, y));
+        for i in 0..n {
+            assert!((added[i] - (a[i] + b[i])).abs() < 1e-5);
+        }
+        let muled = one_shot_f32_out(&ctx, n, |enc, y| encode_mul_f32(&ctx, enc, &a_t, &b_t, y));
+        for i in 0..n {
+            assert!((muled[i] - (a[i] * b[i])).abs() < 1e-5);
+        }
+        let silumul = one_shot_f32_out(&ctx, n, |enc, y| {
+            encode_silu_mul_f32(&ctx, enc, &a_t, &b_t, y)
+        });
+        for i in 0..n {
+            let silu_a = a[i] / (1.0 + (-a[i]).exp());
+            assert!(
+                (silumul[i] - silu_a * b[i]).abs() < 1e-5,
+                "silu_mul[{i}] = {} vs {}",
+                silumul[i],
+                silu_a * b[i]
+            );
+        }
+
+        let sigmul = one_shot_f32_out(&ctx, n, |enc, y| {
+            encode_sigmoid_mul_f32(&ctx, enc, &a_t, &b_t, y)
+        });
+        for i in 0..n {
+            let sig_a = 1.0 / (1.0 + (-a[i]).exp());
+            assert!(
+                (sigmul[i] - sig_a * b[i]).abs() < 1e-5,
+                "sigmoid_mul[{i}] = {} vs {}",
+                sigmul[i],
+                sig_a * b[i]
+            );
+        }
+    }
+
+    #[test]
+    fn elementwise_add_inplace() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n = 5120usize;
+        let a: Vec<f32> = (0..n).map(|i| (i as f32) * 1e-3).collect();
+        let b: Vec<f32> = (0..n).map(|i| -(i as f32) * 2e-3).collect();
+        let a_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&a),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let b_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&b),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(&ctx, |enc| encode_add_inplace_f32(&ctx, enc, &a_t, &b_t)).unwrap();
+        let result = read_back_f32(&a_t.buffer, n);
+        for i in 0..n {
+            assert!((result[i] - (a[i] + b[i])).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn softmax_matches_cpu() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        // Cover small (one warp) to large (multi-warp reduce) shapes.
+        for &n in &[16usize, 256, 4096, 32768] {
+            let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.01).sin()).collect();
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| encode_softmax_inplace_f32(&ctx, enc, &x_t)).unwrap();
+            let gpu = read_back_f32(&x_t.buffer, n);
+
+            // CPU reference.
+            let mut cpu = x.clone();
+            let m = cpu.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut s = 0.0f32;
+            for v in cpu.iter_mut() {
+                *v = (*v - m).exp();
+                s += *v;
+            }
+            for v in cpu.iter_mut() {
+                *v /= s;
+            }
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let total: f32 = gpu.iter().sum();
+            assert!((total - 1.0).abs() < 1e-4, "softmax sum n={n}: {total}");
+            assert!(max_abs < 1e-5, "softmax n={n} max|Δ|={max_abs}");
+        }
+    }
+
+    #[test]
+    fn get_rows_flat_f32_matches_cpu_and_guards_ids() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let vocab = 100usize;
+        let n_cols = 64usize;
+        let embed: Vec<f32> = (0..vocab * n_cols).map(|i| i as f32 * 0.001).collect();
+        let ids: Vec<i32> = vec![3, 17, 42, 99, -1, vocab as i32];
+        let n_rows = ids.len();
+
+        let embed_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&embed),
+            vec![(n_cols * vocab) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let ids_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![n_rows as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let y_t = MetalTensor::zeros_f32(&ctx, vec![n_rows as u64, n_cols as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_get_rows_f32(&ctx, enc, &embed_t, &ids_t, &y_t, n_rows, n_cols)
+        })
+        .unwrap();
+        let gpu = read_back_f32(&y_t.buffer, n_rows * n_cols);
+        for r in 0..n_rows {
+            for i in 0..n_cols {
+                let expected = if ids[r] < 0 || ids[r] as usize >= vocab {
+                    0.0
+                } else {
+                    embed[ids[r] as usize * n_cols + i]
+                };
+                let got = gpu[r * n_cols + i];
+                assert!(
+                    (got - expected).abs() < 1e-7,
+                    "get_rows row={r} ids={} col={i}: {got} vs {expected}",
+                    ids[r]
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local 27B Q4_K fixture"]
+    fn get_rows_q4_k_matches_selected_cpu_rows() {
+        quantized_get_rows_fixture(
+            "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            GgmlType::Q4_K,
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local A3B Q8_0 embedding fixture"]
+    fn get_rows_q8_0_matches_selected_cpu_rows() {
+        quantized_get_rows_fixture(
+            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            GgmlType::Q8_0,
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local Ridge 27B Q6_K embedding fixture"]
+    fn get_rows_q6_k_matches_selected_cpu_rows() {
+        quantized_get_rows_fixture(
+            "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
+            GgmlType::Q6_K,
+            true,
+        );
+    }
+
+    /// v0.432 equivalence gate: the fused strided gate epilogue
+    /// (`out = x / (1 + e^-gate)`) vs the old split + sigmoid-into-temp +
+    /// mul (`out = x * (1 / (1 + e^-gate))`). Different last-ulp rounding
+    /// (division vs reciprocal-multiply), so tolerance-based, tight.
+    #[test]
+    fn sigmoid_mul_gate_strided_matches_split_path() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let (n_heads, head_dim) = (24usize, 256usize);
+        let full: Vec<f32> = (0..n_heads * 2 * head_dim)
+            .map(|i| ((i % 37) as f32 - 18.0) * 5e-2)
+            .collect();
+        let x: Vec<f32> = (0..n_heads * head_dim)
+            .map(|i| ((i % 29) as f32 - 14.0) * 4e-2)
+            .collect();
+        let full_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&full),
+            vec![(n_heads * 2 * head_dim) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_heads * head_dim) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let q_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        let gate_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        let sig_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        let y_split = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        let y_fused = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_split_q_gate_f32(&ctx, enc, &full_t, &q_t, &gate_t, n_heads, head_dim)?;
+            encode_sigmoid_f32(&ctx, enc, &gate_t, &sig_t)?;
+            encode_mul_f32(&ctx, enc, &x_t, &sig_t, &y_split)
+        })
+        .unwrap();
+        one_shot(&ctx, |enc| {
+            encode_sigmoid_mul_gate_strided_f32(
+                &ctx,
+                enc,
+                &full_t,
+                &x_t,
+                &y_fused,
+                n_heads,
+                head_dim,
+                2 * head_dim,
+                head_dim,
+            )
+        })
+        .unwrap();
+        let a = read_back_f32(&y_split.buffer, n_heads * head_dim);
+        let b = read_back_f32(&y_fused.buffer, n_heads * head_dim);
+        let max_abs = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_abs < 1e-6,
+            "fused strided gate epilogue diverged beyond ulp scale: max|Δ|={max_abs:.3e}"
+        );
+    }
+
+    #[test]
+    fn argmax_rejects_f32_output_metadata() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let input = MetalTensor::zeros_f32(&ctx, vec![2]).unwrap();
+        let wrong_output = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        assert!(encode_argmax_f32(&ctx, &enc, &input, &wrong_output, 1, 2).is_err());
+        assert!(encode_argmax_f32_greedy(&ctx, &enc, &input, &wrong_output, 1, 2).is_err());
+        enc.end();
+    }
+
+    #[test]
+    fn greedy_argmax_matches_sampler_total_order_contract() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        fn run(ctx: &MetalContext, x: &[f32], n_rows: usize, n: usize) -> Vec<i32> {
+            assert_eq!(x.len(), n_rows * n);
+            let xt = MetalTensor {
+                buffer: ctx.buffer_from(x).expect("input buffer"),
+                offset: 0,
+                shape: vec![n_rows as u64, n as u64],
+                dtype: crate::tensor::GgmlType::F32,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            };
+            let ot = MetalTensor::zeros_i32(ctx, vec![n_rows as u64]).expect("output buffer");
+            let cmd = ctx.queue.commandBuffer().expect("command buffer");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_argmax_f32_greedy(ctx, &enc, &xt, &ot, n_rows, n).expect("encode greedy argmax");
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            unsafe {
+                let ptr = ot.buffer.contents().as_ptr() as *const i32;
+                (0..n_rows).map(|row| *ptr.add(row)).collect()
+            }
+        }
+
+        fn cpu(row: &[f32]) -> i32 {
+            if let Some(token) = row.iter().position(|value| value.is_nan()) {
+                return !(token as i32);
+            }
+            let mut best = 0usize;
+            for token in 1..row.len() {
+                if row[token].total_cmp(&row[best]) == std::cmp::Ordering::Greater {
+                    best = token;
+                }
+            }
+            best as i32
+        }
+
+        let rows = [
+            [1.0, 4.0, 2.0, 3.0, -1.0, -2.0, -3.0, -4.0],
+            [5.0, 1.0, 5.0, 0.0, 5.0, 2.0, 5.0, 3.0],
+            [-0.0, 0.0, -0.0, -1.0, -2.0, -3.0, -4.0, -5.0],
+            [
+                f32::INFINITY,
+                1.0,
+                f32::INFINITY,
+                0.0,
+                -1.0,
+                -2.0,
+                -3.0,
+                -4.0,
+            ],
+            [f32::NEG_INFINITY; 8],
+            [0.0, f32::NAN, 2.0, f32::NAN, 4.0, 5.0, 6.0, 7.0],
+            [f32::NAN; 8],
+            [
+                f32::from_bits(1),
+                -f32::from_bits(1),
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                2.0,
+                -2.0,
+            ],
+        ];
+        let flat: Vec<f32> = rows.into_iter().flatten().collect();
+        let got = run(&ctx, &flat, rows.len(), rows[0].len());
+        let expected: Vec<i32> = flat.chunks(rows[0].len()).map(cpu).collect();
+        assert_eq!(got, expected);
+        assert_eq!(got[1], 0, "finite ties choose the lowest token id");
+        assert_eq!(got[2], 1, "+0 outranks -0 under total_cmp");
+        assert_eq!(got[4], 0, "equal -inf chooses the lowest token id");
+        assert_eq!(got[5], !1, "lowest NaN token is encoded");
+        assert_eq!(got[6], !0, "all-NaN row reports token zero");
+
+        for n in [1usize, 31, 32, 33, 1023, 1025] {
+            let mut row = vec![-1.0f32; n];
+            row[n / 2] = 3.0;
+            row[n - 1] = 3.0;
+            assert_eq!(
+                run(&ctx, &row, 1, n),
+                vec![(n / 2) as i32],
+                "boundary row length {n}"
+            );
+        }
+
+        let mut wide = vec![0.0f32; 4096];
+        wide[100] = 9.0;
+        wide[2500] = 9.0;
+        wide[3999] = 9.0;
+        assert_eq!(run(&ctx, &wide, 1, wide.len()), vec![100]);
+        wide[2500] = f32::NAN;
+        wide[100] = f32::NAN;
+        assert_eq!(run(&ctx, &wide, 1, wide.len()), vec![!100]);
+
+        let mut vocab = vec![0.0f32; 248_320];
+        let mut state = 0xc0ffeeu32;
+        for value in &mut vocab {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            *value = (state as i32) as f32 * 1e-9;
+        }
+        assert_eq!(run(&ctx, &vocab, 1, vocab.len()), vec![cpu(&vocab)]);
+    }
+
+    /// H5.3a GPU argmax — bit-exact match to CPU argmax with lowest-index
+    /// tie-breaking, including the explicit edge cases:
+    /// * tie at row start (idx 0 wins)
+    /// * tie at row end
+    /// * single-element row
+    /// * row larger than 1024 (tests cross-simdgroup reduce path)
+    /// * vocab-sized row (V=248320; the actual production shape)
+    /// * negative-infinity entries (production lm_head won't have these,
+    ///   but defensive)
+    #[test]
+    fn argmax_matches_cpu_with_tie_to_lowest_index() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        // Helper: encode-only argmax + readback for tests.
+        fn run(ctx: &MetalContext, x: &[f32], n_rows: usize, n: usize) -> Vec<i32> {
+            assert_eq!(x.len(), n_rows * n);
+            let xb = ctx.buffer_from(x).expect("xb");
+            let xt = MetalTensor {
+                buffer: xb,
+                offset: 0,
+                shape: vec![n_rows as u64, n as u64],
+                dtype: crate::tensor::GgmlType::F32,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            };
+            let ot = MetalTensor::zeros_i32(ctx, vec![n_rows as u64]).expect("ob");
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_argmax_f32(ctx, &enc, &xt, &ot, n_rows, n).expect("encode argmax");
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            unsafe {
+                let p = ot.buffer.contents().as_ptr() as *const i32;
+                (0..n_rows).map(|i| *p.add(i)).collect()
+            }
+        }
+
+        fn cpu_argmax_lowest_idx(row: &[f32]) -> i32 {
+            let mut best = f32::NEG_INFINITY;
+            let mut idx: i32 = 0;
+            for (i, &v) in row.iter().enumerate() {
+                if v > best {
+                    best = v;
+                    idx = i as i32;
+                }
+            }
+            idx
+        }
+
+        // 1. Single-element row.
+        {
+            let x = vec![3.5f32];
+            let got = run(&ctx, &x, 1, 1);
+            assert_eq!(got, vec![0]);
+        }
+
+        // 2. Tie at row start: x = [5.0, 1.0, 5.0, 5.0, 0.0]. Lowest idx
+        //    among matches = 0.
+        {
+            let x = vec![5.0f32, 1.0, 5.0, 5.0, 0.0];
+            let got = run(&ctx, &x, 1, 5);
+            assert_eq!(got, vec![0], "tie at start should pick idx 0");
+        }
+
+        // 3. Tie at row end (max only at the last position).
+        {
+            let x = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
+            let got = run(&ctx, &x, 1, 5);
+            assert_eq!(got, vec![4]);
+        }
+
+        // 4. Tie spread across the row at multiple distant positions.
+        {
+            let mut x = vec![0.0f32; 4096];
+            x[100] = 9.0;
+            x[2500] = 9.0;
+            x[3999] = 9.0;
+            let got = run(&ctx, &x, 1, 4096);
+            assert_eq!(got, vec![100], "spread tie should pick lowest idx");
+        }
+
+        // 5. Multi-row batch: argmax independently per row.
+        {
+            let n = 1024;
+            let n_rows = 5;
+            let mut x = vec![0.0f32; n_rows * n];
+            for r in 0..n_rows {
+                // Place the max for row r at idx (r * 137) % n.
+                let idx = (r * 137) % n;
+                x[r * n + idx] = 1.0 + (r as f32) * 0.1;
+            }
+            let got = run(&ctx, &x, n_rows, n);
+            for r in 0..n_rows {
+                let want = cpu_argmax_lowest_idx(&x[r * n..(r + 1) * n]);
+                assert_eq!(got[r], want, "row {r}");
+            }
+        }
+
+        // 6. Random fuzz at vocab-sized row (the production shape).
+        {
+            let n = 248_320usize;
+            let n_rows = 16;
+            let mut x = vec![0.0f32; n_rows * n];
+            // Deterministic pseudo-random fill.
+            let mut s: u32 = 0xc0ffeeu32;
+            for v in x.iter_mut() {
+                s = s.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                *v = (s as i32) as f32 * 1e-9;
+            }
+            let got = run(&ctx, &x, n_rows, n);
+            for r in 0..n_rows {
+                let want = cpu_argmax_lowest_idx(&x[r * n..(r + 1) * n]);
+                assert_eq!(got[r], want, "vocab row {r}");
+            }
+        }
+
+        // 7. Negative-infinity entries (defensive — production lm_head
+        //    won't produce these but the kernel must not get confused).
+        {
+            let mut x = vec![f32::NEG_INFINITY; 1024];
+            x[42] = -1e9;
+            x[500] = -1e10; // smaller than 42's value
+            let got = run(&ctx, &x, 1, 1024);
+            assert_eq!(got, vec![42]);
+        }
+
+        // 8. All-zero row (every position ties); lowest index = 0.
+        {
+            let x = vec![0.0f32; 1024];
+            let got = run(&ctx, &x, 1, 1024);
+            assert_eq!(got, vec![0], "all-tie should pick idx 0");
+        }
+
+        // 9. All -INFINITY row (degenerate but well-defined): every
+        //    position ties at -inf, lowest idx wins. Per codex H5.3a
+        //    review: this returns idx 0, NOT -1. Production lm_head
+        //    cannot produce all -inf, but documenting the contract.
+        {
+            let x = vec![f32::NEG_INFINITY; 1024];
+            let got = run(&ctx, &x, 1, 1024);
+            assert_eq!(
+                got,
+                vec![0],
+                "all -INFINITY: kernel ties at -inf, lowest idx 0 wins"
+            );
+        }
+
+        // 10. All NaN row: IEEE comparison `a > b` is FALSE for any
+        //     NaN operand, so the per-lane scan never updates from
+        //     `best_val=-INF, best_idx=UINT_MAX`. simd_max also returns
+        //     NaN; (NaN == NaN) is false, so lane_idx stays UINT_MAX
+        //     for every lane, simd_min(UINT_MAX) = UINT_MAX, cast to
+        //     i32 = -1.
+        //
+        //     Production lm_head does not produce NaN under correct
+        //     numerics. Treat this as a "this kernel returns -1
+        //     deterministically when the entire row is unranked";
+        //     callers should not feed it NaN rows.
+        {
+            let x = vec![f32::NAN; 1024];
+            let got = run(&ctx, &x, 1, 1024);
+            assert_eq!(
+                got,
+                vec![-1],
+                "all-NaN: kernel returns -1 (UINT_MAX cast); document only — production should never see this"
+            );
+        }
+    }
+
+    #[test]
+    fn argmax_top2_matches_lowest_index_and_reports_exact_gap() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        fn run(ctx: &MetalContext, x: &[f32], n_rows: usize, n: usize) -> (Vec<i32>, Vec<f32>) {
+            assert_eq!(x.len(), n_rows * n);
+            let xb = ctx.buffer_from(x).expect("xb");
+            let xt = MetalTensor {
+                buffer: xb,
+                offset: 0,
+                shape: vec![n_rows as u64, n as u64],
+                dtype: crate::tensor::GgmlType::F32,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            };
+            let ot = MetalTensor::zeros_i32(ctx, vec![n_rows as u64]).expect("ob");
+            let gt = MetalTensor::zeros_f32(ctx, vec![n_rows as u64]).expect("gb");
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_argmax_top2_f32(ctx, &enc, &xt, &ot, &gt, n_rows, n)
+                .expect("encode argmax top2");
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            unsafe {
+                let pi = ot.buffer.contents().as_ptr() as *const i32;
+                let pg = gt.buffer.contents().as_ptr() as *const f32;
+                let idx = (0..n_rows).map(|i| *pi.add(i)).collect();
+                let gap = (0..n_rows).map(|i| *pg.add(i)).collect();
+                (idx, gap)
+            }
+        }
+
+        fn cpu_top2(row: &[f32]) -> (i32, f32) {
+            let mut v1 = f32::NEG_INFINITY;
+            let mut i1 = 0usize;
+            let mut v2 = f32::NEG_INFINITY;
+            for (i, &v) in row.iter().enumerate() {
+                if v > v1 {
+                    v2 = v1;
+                    v1 = v;
+                    i1 = i;
+                } else if v > v2 {
+                    v2 = v;
+                }
+            }
+            (i1 as i32, v1 - v2)
+        }
+
+        // Distinct max, duplicate max (gap 0), single element (+inf),
+        // all-equal (gap 0), negative max, signed zero, boundary widths.
+        let rows: Vec<Vec<f32>> = vec![
+            vec![1.0, 4.0, 2.0, 3.0, -1.0, -2.0, -3.0, -4.0],
+            vec![5.0, 1.0, 5.0, 0.0, 5.0, 2.0, 5.0, 3.0],
+            vec![7.0],
+            vec![2.0, 2.0, 2.0, 2.0],
+            vec![-8.0, -9.0, -7.0, -9.5],
+            vec![-0.0, 0.0, -0.0, -1.0],
+        ];
+        let n_rows = rows.len();
+        let n = 8;
+        let mut flat = Vec::with_capacity(n_rows * n);
+        let mut expected = Vec::with_capacity(n_rows);
+        for row in &rows {
+            assert!(row.len() <= n);
+            let mut padded = row.clone();
+            padded.resize(n, f32::NEG_INFINITY);
+            flat.extend_from_slice(&padded);
+            expected.push(cpu_top2(&padded));
+        }
+        let (idx, gap) = run(&ctx, &flat, n_rows, n);
+        for (r, &(ei, eg)) in expected.iter().enumerate() {
+            assert_eq!(idx[r], ei, "row {r} idx");
+            if eg.is_finite() {
+                assert_eq!(gap[r], eg, "row {r} gap");
+            } else {
+                assert!(gap[r].is_infinite() && gap[r] > 0.0, "row {r} +inf gap");
+            }
+        }
+
+        // Boundary widths with a duplicated max: lowest index wins, gap 0
+        // (width 1 collapses to a single element: gap +inf).
+        for width in [1usize, 31, 32, 33, 1023, 1025] {
+            let mut row = vec![-1.0f32; width];
+            row[width / 2] = 3.0;
+            row[width - 1] = 3.0;
+            let (idx, gap) = run(&ctx, &row, 1, width);
+            assert_eq!(idx, vec![(width / 2) as i32], "boundary width {width} idx");
+            if width == 1 {
+                assert!(gap[0].is_infinite() && gap[0] > 0.0, "boundary width 1 gap");
+            } else {
+                assert_eq!(gap, vec![0.0], "boundary width {width} gap");
+            }
+        }
+    }
+}

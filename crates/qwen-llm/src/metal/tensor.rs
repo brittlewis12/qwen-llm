@@ -1095,3 +1095,372 @@ impl MetalTensor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metal::test_support::*;
+
+    #[test]
+    fn allocation_census_records_realized_storage() {
+        let ctx = MetalContext::new().expect("create Metal context");
+        allocation_census_begin();
+        let first = ctx
+            .buffer_uninit(17)
+            .expect("allocate uninitialized buffer");
+        let second = ctx.buffer_from(&[1u32, 2]).expect("allocate copied buffer");
+        let rows = allocation_census_take();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].requested_bytes, 17);
+        assert_eq!(rows[0].buffer_length, first.length() as u64);
+        assert_eq!(rows[0].storage_mode, "shared");
+        assert_eq!(rows[1].requested_bytes, 8);
+        assert_eq!(rows[1].buffer_length, second.length() as u64);
+        assert_eq!(rows[1].storage_mode, "shared");
+        assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn gguf_backing_classification_is_typed_and_fail_closed() {
+        let geometry = GgufBackingGeometry::new(0, 160, 64, 32).unwrap();
+        assert_eq!(geometry.mapped_len(), 160);
+        assert_eq!(geometry.mmap_offset(), 0);
+        assert_eq!(geometry.exposed_len(), 128);
+        assert_eq!(geometry.page_size(), 64);
+        assert_eq!(geometry.required_alignment(), 32);
+        assert_eq!(
+            geometry.classify(&f32_desc("ok", 0, 32, 8)).unwrap(),
+            GgufBackingEligibility::Eligible
+        );
+        assert_eq!(
+            geometry.classify(&f32_desc("tail", 0, 96, 9)).unwrap(),
+            GgufBackingEligibility::FinalPartialPage
+        );
+        assert_eq!(
+            geometry.classify(&f32_desc("shard", 1, 32, 8)).unwrap(),
+            GgufBackingEligibility::WrongShard
+        );
+        assert_eq!(
+            geometry.classify(&f32_desc("align", 0, 36, 8)).unwrap(),
+            GgufBackingEligibility::BindingMisalignment
+        );
+        assert_eq!(
+            geometry.classify(&f32_desc("outside", 0, 160, 8)).unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+
+        let mut malformed = f32_desc("malformed", 0, 32, 8);
+        malformed.n_bytes -= 1;
+        assert!(geometry.classify(&malformed).is_err());
+        assert!(GgufBackingGeometry::new(0, 160, 0, 32).is_err());
+        assert!(GgufBackingGeometry::new(0, 160, 64, 0).is_err());
+        assert!(GgufBackingGeometry::new(0, 32, 64, 32).is_err());
+
+        let window = GgufBackingGeometry::new_window(0, 256, 64, 128, 64, 32).unwrap();
+        assert_eq!(window.mapped_len(), 256);
+        assert_eq!(window.mmap_offset(), 64);
+        assert_eq!(window.exposed_len(), 128);
+        assert_eq!(
+            window.classify(&f32_desc("before", 0, 32, 8)).unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+        assert_eq!(
+            window.classify(&f32_desc("inside", 0, 96, 8)).unwrap(),
+            GgufBackingEligibility::Eligible
+        );
+        assert_eq!(
+            window.classify(&f32_desc("after", 0, 192, 8)).unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+        assert_eq!(
+            window
+                .classify(&f32_desc("after-misaligned", 0, 196, 8))
+                .unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+        let earlier = GgufBackingGeometry::new_window(0, 160, 0, 64, 64, 32).unwrap();
+        assert_eq!(
+            earlier
+                .classify(&f32_desc("outside-earlier", 0, 96, 9))
+                .unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+        let terminal = GgufBackingGeometry::new_window(0, 160, 64, 64, 64, 32).unwrap();
+        assert_eq!(
+            terminal
+                .classify(&f32_desc("terminal-tail", 0, 96, 9))
+                .unwrap(),
+            GgufBackingEligibility::FinalPartialPage
+        );
+        assert!(GgufBackingGeometry::new_window(0, 256, 32, 64, 64, 32).is_err());
+        assert!(GgufBackingGeometry::new_window(0, 256, 64, 96, 64, 32).is_err());
+        assert!(GgufBackingGeometry::new_window(0, 256, 192, 128, 64, 32).is_err());
+    }
+
+    #[test]
+    fn retained_storage_plan_is_order_independent_and_window_bounded() {
+        let a = f32_desc("a", 0, 32, 8);
+        let b = f32_desc("b", 0, 64, 16);
+        let c = f32_desc("c", 0, 128, 8);
+        let requests = [&c, &a, &b];
+        let plan = plan_retained_storage(&[192], &requests, 64, 130, 32).unwrap();
+        assert_retained_plan_invariants(&plan, &requests, &[192]);
+
+        assert_eq!(plan.usable_window_length, 128);
+        assert_eq!(plan.windows.len(), 2);
+        assert_eq!(
+            plan.windows,
+            vec![
+                RetainedStorageWindow {
+                    shard_idx: 0,
+                    mmap_offset: 0,
+                    length: 128,
+                },
+                RetainedStorageWindow {
+                    shard_idx: 0,
+                    mmap_offset: 128,
+                    length: 64,
+                },
+            ]
+        );
+        assert_eq!(
+            plan.entries[0].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 1,
+                buffer_offset: 0,
+            }
+        );
+        assert_eq!(
+            plan.entries[1].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 0,
+                buffer_offset: 32,
+            }
+        );
+        assert_eq!(
+            plan.entries[2].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 0,
+                buffer_offset: 64,
+            }
+        );
+        assert_eq!(plan.unique_view_bytes, 128);
+        assert_eq!(plan.logical_view_bytes, 128);
+        assert_eq!(plan.unique_fallback_bytes, 0);
+        assert_eq!(plan.alias_bytes, 0);
+
+        let permutation = [&b, &c, &a];
+        let permuted = plan_retained_storage(&[192], &permutation, 64, 130, 32).unwrap();
+        assert_retained_plan_invariants(&permuted, &permutation, &[192]);
+        assert_eq!(plan.windows, permuted.windows);
+        for name in ["a", "b", "c"] {
+            let original = plan
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap();
+            let permuted = permuted
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap();
+            assert_eq!(original.disposition, permuted.disposition);
+        }
+
+        let crossing_a = f32_desc("crossing-a", 0, 0, 24);
+        let crossing_b = f32_desc("crossing-b", 0, 96, 16);
+        let crossing =
+            plan_retained_storage(&[192], &[&crossing_a, &crossing_b], 64, 128, 32).unwrap();
+        assert_retained_plan_invariants(&crossing, &[&crossing_a, &crossing_b], &[192]);
+        assert_eq!(crossing.windows.len(), 2);
+        assert_eq!(crossing.windows[0].mmap_offset, 0);
+        assert_eq!(crossing.windows[0].length, 128);
+        assert_eq!(crossing.windows[1].mmap_offset, 64);
+        assert_eq!(crossing.windows[1].length, 128);
+        assert_eq!(
+            crossing.entries[1].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 1,
+                buffer_offset: 32,
+            }
+        );
+    }
+
+    #[test]
+    fn retained_storage_plan_classifies_fallbacks_and_aliases() {
+        let view = f32_desc("view", 1, 64, 8);
+        let missing = f32_desc("missing", 3, 0, 8);
+        let tail = f32_desc("tail", 0, 96, 16);
+        let outside = f32_desc("outside", 0, 160, 8);
+        let misaligned = f32_desc("misaligned", 0, 36, 8);
+        let too_large = f32_desc("too-large", 2, 32, 32);
+        let requests = [
+            &view,
+            &view,
+            &missing,
+            &tail,
+            &outside,
+            &misaligned,
+            &too_large,
+        ];
+        let plan = plan_retained_storage(&[160, 256, 256], &requests, 64, 128, 32).unwrap();
+        assert_retained_plan_invariants(&plan, &requests, &[160, 256, 256]);
+
+        assert_eq!(
+            plan.entries[0].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 0,
+                buffer_offset: 0,
+            }
+        );
+        assert_eq!(
+            plan.entries[1].disposition,
+            RetainedStorageDisposition::Alias {
+                source_request_index: 0,
+            }
+        );
+        let reasons = plan
+            .entries
+            .iter()
+            .filter_map(|entry| match entry.disposition {
+                RetainedStorageDisposition::CopyFallback { reason } => Some(reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            vec![
+                RetainedStorageFallback::MissingShard,
+                RetainedStorageFallback::FinalPartialPage,
+                RetainedStorageFallback::OutsideShard,
+                RetainedStorageFallback::BindingMisalignment,
+                RetainedStorageFallback::TensorExceedsWindow,
+            ]
+        );
+        assert_eq!(plan.unique_view_bytes, 32);
+        assert_eq!(plan.logical_view_bytes, 64);
+        assert_eq!(plan.unique_fallback_bytes, 288);
+        assert_eq!(plan.alias_bytes, 32);
+
+        let tail_alias = plan_retained_storage(&[160], &[&tail, &tail], 64, 128, 32).unwrap();
+        assert_eq!(tail_alias.unique_fallback_bytes, 64);
+        assert_eq!(tail_alias.alias_bytes, 64);
+        assert_eq!(
+            tail_alias.entries[1].disposition,
+            RetainedStorageDisposition::Alias {
+                source_request_index: 0,
+            }
+        );
+
+        let shard_zero = f32_desc("shard-zero", 0, 32, 8);
+        let shard_one = f32_desc("shard-one", 1, 64, 8);
+        let multi_requests = [&shard_one, &shard_zero];
+        let multi = plan_retained_storage(&[128, 192], &multi_requests, 64, 128, 32).unwrap();
+        assert_retained_plan_invariants(&multi, &multi_requests, &[128, 192]);
+        assert_eq!(multi.windows.len(), 2);
+        assert_eq!(multi.windows[0].shard_idx, 0);
+        assert_eq!(multi.windows[1].shard_idx, 1);
+    }
+
+    #[test]
+    fn retained_storage_plan_rejects_malformed_inputs() {
+        let valid = f32_desc("valid", 0, 64, 16);
+        assert!(plan_retained_storage(&[128], &[&valid], 0, 128, 32).is_err());
+        assert!(plan_retained_storage(&[128], &[&valid], 64, 63, 32).is_err());
+        assert!(plan_retained_storage(&[128], &[&valid], 64, 128, 0).is_err());
+        assert!(plan_retained_storage(&[128], &[&valid], 64, 128, 128).is_err());
+
+        let mut malformed = valid.clone();
+        malformed.n_bytes -= 1;
+        assert!(plan_retained_storage(&[128], &[&malformed], 64, 128, 32).is_err());
+
+        let empty = f32_desc("empty", 0, 0, 0);
+        assert!(plan_retained_storage(&[128], &[&empty], 64, 128, 32).is_err());
+
+        let alias_a = f32_desc("alias-a", 0, 64, 8);
+        let mut alias_b = alias_a.clone();
+        alias_b.name = "alias-b".to_string();
+        alias_b.shape = vec![2, 4];
+        assert!(plan_retained_storage(&[128], &[&alias_a, &alias_b], 64, 128, 32).is_err());
+
+        let overlap_a = f32_desc("overlap-a", 0, 32, 16);
+        let overlap_b = f32_desc("overlap-b", 0, 64, 8);
+        assert!(plan_retained_storage(&[128], &[&overlap_a, &overlap_b], 64, 128, 32).is_err());
+
+        let tail_misaligned = f32_desc("tail-misaligned", 0, 100, 8);
+        let tail_misaligned_plan =
+            plan_retained_storage(&[160], &[&tail_misaligned], 64, 128, 32).unwrap();
+        assert_eq!(
+            tail_misaligned_plan.entries[0].disposition,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::BindingMisalignment,
+            }
+        );
+
+        let tail_oversized = f32_desc("tail-oversized", 0, 64, 24);
+        let tail_oversized_plan =
+            plan_retained_storage(&[160], &[&tail_oversized], 64, 64, 32).unwrap();
+        assert_eq!(
+            tail_oversized_plan.entries[0].disposition,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::TensorExceedsWindow,
+            }
+        );
+    }
+
+    #[test]
+    #[ignore = "requires QWEN_GGUF_NO_COPY_MODEL local single-shard fixture"]
+    fn gguf_no_copy_real_model_coverage_probe() {
+        let path = std::env::var("QWEN_GGUF_NO_COPY_MODEL")
+            .expect("set QWEN_GGUF_NO_COPY_MODEL to a local GGUF");
+        let gguf = crate::gguf::GgufFile::open(&path).expect("open GGUF");
+        assert_eq!(gguf.shard_count(), 1, "coverage probe requires one shard");
+        let page_size = host_page_size().expect("host page size");
+        let geometry = GgufBackingGeometry::new(0, gguf.total_mapped_len(), page_size, 32)
+            .expect("GGUF backing geometry");
+        let mut eligible_bytes = 0u64;
+        let mut crossing = Vec::new();
+        let mut dtype_geometry = std::collections::BTreeMap::new();
+        for desc in &gguf.tensors {
+            let alignment = desc.data_offset & desc.data_offset.wrapping_neg();
+            let entry = dtype_geometry
+                .entry(format!("{:?}", desc.dtype))
+                .or_insert((0usize, 0u64, u64::MAX));
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(desc.n_bytes);
+            entry.2 = entry.2.min(alignment);
+            match geometry.classify(desc).expect("classify tensor") {
+                GgufBackingEligibility::Eligible => {
+                    eligible_bytes = eligible_bytes.saturating_add(desc.n_bytes);
+                }
+                GgufBackingEligibility::FinalPartialPage => {
+                    crossing.push((desc.name.clone(), desc.n_bytes));
+                }
+                other => panic!("unexpected ineligibility for {}: {other:?}", desc.name),
+            }
+        }
+        let total_bytes: u64 = gguf.tensors.iter().map(|desc| desc.n_bytes).sum();
+        let coverage = eligible_bytes as f64 / total_bytes.max(1) as f64;
+        eprintln!(
+            concat!(
+                "[gguf-no-copy-coverage] model={} mapped={} exposed={} page={} ",
+                "suffix={} tensors={} total={} eligible={} coverage={:.8} crossing={:?}"
+            ),
+            path,
+            geometry.mapped_len(),
+            geometry.exposed_len(),
+            geometry.page_size(),
+            geometry.mapped_len() - geometry.exposed_len(),
+            gguf.tensors.len(),
+            total_bytes,
+            eligible_bytes,
+            coverage,
+            crossing,
+        );
+        eprintln!("[gguf-no-copy-dtypes] {dtype_geometry:?}");
+        assert!(
+            coverage >= 0.99,
+            "no-copy coverage {coverage:.6} is below 99%"
+        );
+    }
+}

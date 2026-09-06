@@ -1402,3 +1402,849 @@ pub fn encode_rmsnorm_gated_vjp_f32(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metal::test_support::*;
+
+    #[test]
+    fn rms_norm_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &n in &[1024usize, 5120, 17408] {
+            let x: Vec<f32> = (0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.1).collect();
+            let w: Vec<f32> = (0..n).map(|i| 0.5 + (i % 7) as f32 * 0.1).collect();
+            let eps = 1e-6;
+
+            let cpu = crate::forward::rms_norm_pub(&x, &w, eps);
+            let gpu =
+                rms_norm_mul_f32_readback_for_test(&ctx, &x, &w, eps).expect("metal rms_norm");
+
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!("[rms_norm n={n}] max|Δ|={max_abs:.2e}");
+            assert!(max_abs < 1e-4, "rms_norm n={n}: max|Δ|={max_abs}");
+        }
+    }
+
+    #[test]
+    fn rms_norm_vjp_matches_jacobian_and_relp_rules() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        const N_DIM: usize = 67;
+        const EPS: f32 = 1e-6;
+        for row_count in [1usize, 2, 8] {
+            let x: Vec<f32> = (0..row_count * N_DIM)
+                .map(|index| ((index * 17 + 3) % 43) as f32 * 0.021 - 0.39)
+                .collect();
+            let weight: Vec<f32> = (0..N_DIM)
+                .map(|index| 0.45 + (index % 11) as f32 * 0.07)
+                .collect();
+            let grad_output: Vec<f32> = (0..row_count * N_DIM)
+                .map(|index| ((index * 7 + 1) % 31) as f32 * 0.013 - 0.18)
+                .collect();
+            let mut expected_j = vec![0.0f32; x.len()];
+            let mut expected_r = vec![0.0f32; x.len()];
+            for row in 0..row_count {
+                let base = row * N_DIM;
+                let sumsq: f32 = x[base..base + N_DIM]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum();
+                let scale = (sumsq / N_DIM as f32 + EPS).sqrt().recip();
+                let dot: f32 = (0..N_DIM)
+                    .map(|index| x[base + index] * grad_output[base + index] * weight[index])
+                    .sum();
+                let correction = dot * scale * scale * scale / N_DIM as f32;
+                for index in 0..N_DIM {
+                    let direct = grad_output[base + index] * weight[index] * scale;
+                    expected_j[base + index] = direct - x[base + index] * correction;
+                    expected_r[base + index] = direct;
+                }
+            }
+
+            let actual_j = rms_norm_mul_vjp_rows_f32_readback_for_test(
+                &ctx,
+                &x,
+                &weight,
+                &grad_output,
+                row_count,
+                N_DIM,
+                EPS,
+                RmsNormVjpRule::Jacobian,
+            )
+            .unwrap();
+            let actual_r = rms_norm_mul_vjp_rows_f32_readback_for_test(
+                &ctx,
+                &x,
+                &weight,
+                &grad_output,
+                row_count,
+                N_DIM,
+                EPS,
+                RmsNormVjpRule::RelpDetachedScale,
+            )
+            .unwrap();
+            let max_j = actual_j
+                .iter()
+                .zip(&expected_j)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            let max_r = actual_r
+                .iter()
+                .zip(&expected_r)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_j < 2e-5, "rows={row_count}: Jacobian error {max_j}");
+            assert!(max_r < 2e-5, "rows={row_count}: RelP error {max_r}");
+            assert!(
+                actual_j
+                    .iter()
+                    .zip(&actual_r)
+                    .any(|(jacobian, relp)| (jacobian - relp).abs() > 1e-3),
+                "ordinary and RelP rules unexpectedly coincide"
+            );
+
+            let row = row_count - 1;
+            for index in [0usize, 31, N_DIM - 1] {
+                let epsilon = 1e-4f64;
+                let objective = |delta: f64| {
+                    let base = row * N_DIM;
+                    let sumsq: f64 = (0..N_DIM)
+                        .map(|column| {
+                            let value = f64::from(x[base + column])
+                                + if column == index { delta } else { 0.0 };
+                            value * value
+                        })
+                        .sum();
+                    let scale = (sumsq / N_DIM as f64 + f64::from(EPS)).sqrt().recip();
+                    (0..N_DIM)
+                        .map(|column| {
+                            let value = f64::from(x[base + column])
+                                + if column == index { delta } else { 0.0 };
+                            f64::from(grad_output[base + column])
+                                * value
+                                * scale
+                                * f64::from(weight[column])
+                        })
+                        .sum::<f64>()
+                };
+                let finite_difference =
+                    (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon);
+                let reverse = f64::from(actual_j[row * N_DIM + index]);
+                assert!(
+                    (finite_difference - reverse).abs() < 1e-4,
+                    "rows={row_count} index={index}: finite difference {finite_difference} != {reverse}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn residual_rms_norm_matches_separate_cpu_path() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &n in &[1024usize, 5120, 17408] {
+            let x: Vec<f32> = (0..n).map(|i| ((i % 23) as f32 - 11.0) * 0.07).collect();
+            let r: Vec<f32> = (0..n).map(|i| ((i % 19) as f32 - 9.0) * 0.03).collect();
+            let w: Vec<f32> = (0..n).map(|i| 0.4 + (i % 11) as f32 * 0.05).collect();
+            let eps = 1e-6;
+
+            let x_cpu: Vec<f32> = x.iter().zip(r.iter()).map(|(a, b)| a + b).collect();
+            let y_cpu = crate::forward::rms_norm_pub(&x_cpu, &w, eps);
+            let (x_gpu, y_gpu) = residual_rms_norm_mul_f32_readback_for_test(&ctx, &x, &r, &w, eps)
+                .expect("metal residual_rms_norm");
+
+            let max_x = x_gpu
+                .iter()
+                .zip(x_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let max_y = y_gpu
+                .iter()
+                .zip(y_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!("[residual_rms_norm n={n}] max_x={max_x:.2e} max_y={max_y:.2e}");
+            assert!(max_x == 0.0, "residual add n={n}: max|Δ|={max_x}");
+            assert!(max_y < 1e-4, "residual_rms_norm n={n}: max|Δ|={max_y}");
+        }
+    }
+
+    #[test]
+    fn l2_norm_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &n in &[128usize, 256, 1024] {
+            // include a few that hit the eps clamp (very small magnitudes)
+            let x: Vec<f32> = (0..n).map(|i| (i as f32 * 1e-2).sin()).collect();
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let gpu = one_shot_f32_out(&ctx, n, |enc, y| {
+                encode_l2_norm_f32(&ctx, enc, &x_t, y, 1e-6)
+            });
+
+            // CPU reference: y = x / max(||x||, eps).
+            let sq: f32 = x.iter().map(|v| v * v).sum();
+            let scale = 1.0 / sq.sqrt().max(1e-6);
+            let cpu: Vec<f32> = x.iter().map(|v| v * scale).collect();
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(max_abs < 1e-5, "l2_norm n={n}: max|Δ|={max_abs}");
+        }
+    }
+
+    #[test]
+    fn l2_norm_batched_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128), (8, 256)] {
+            let total = n_heads * head_dim;
+            let x: Vec<f32> = (0..total)
+                .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+                .collect();
+            let eps = 1e-6f32;
+
+            // CPU reference: per head, y_h = x_h / max(||x_h||, eps).
+            let mut cpu = vec![0.0f32; total];
+            for h in 0..n_heads {
+                let off = h * head_dim;
+                let sq: f32 = (0..head_dim).map(|i| x[off + i].powi(2)).sum();
+                let scale = 1.0 / sq.sqrt().max(eps);
+                for i in 0..head_dim {
+                    cpu[off + i] = x[off + i] * scale;
+                }
+            }
+
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![total as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_l2_norm_batched_f32(&ctx, enc, &x_t, &y_t, n_heads, head_dim, eps)
+            })
+            .unwrap();
+            let gpu = read_back_f32(&y_t.buffer, total);
+
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs < 1e-5,
+                "l2_norm_batched n_heads={n_heads} head_dim={head_dim}: max|Δ|={max_abs}"
+            );
+        }
+    }
+
+    #[test]
+    fn l2_norm_pair_batched_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128), (8, 256)] {
+            let total = n_heads * head_dim;
+            let q: Vec<f32> = (0..total)
+                .map(|i| ((i % 29) as f32 - 14.0) * 0.04)
+                .collect();
+            let k: Vec<f32> = (0..total)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.03)
+                .collect();
+            let eps = 1e-6f32;
+
+            let normalize = |x: &[f32]| {
+                let mut out = vec![0.0f32; total];
+                for h in 0..n_heads {
+                    let off = h * head_dim;
+                    let sq: f32 = (0..head_dim).map(|i| x[off + i].powi(2)).sum();
+                    let scale = 1.0 / sq.sqrt().max(eps);
+                    for i in 0..head_dim {
+                        out[off + i] = x[off + i] * scale;
+                    }
+                }
+                out
+            };
+            let q_cpu = normalize(&q);
+            let k_cpu = normalize(&k);
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&k),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let q_y = MetalTensor::zeros_f32(&ctx, vec![total as u64]).unwrap();
+            let k_y = MetalTensor::zeros_f32(&ctx, vec![total as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_l2_norm_pair_batched_f32(
+                    &ctx, enc, &q_t, &q_y, &k_t, &k_y, n_heads, head_dim, eps,
+                )
+            })
+            .unwrap();
+            let q_gpu = read_back_f32(&q_y.buffer, total);
+            let k_gpu = read_back_f32(&k_y.buffer, total);
+
+            let q_max = q_gpu
+                .iter()
+                .zip(q_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let k_max = k_gpu
+                .iter()
+                .zip(k_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                q_max < 1e-5 && k_max < 1e-5,
+                "l2_norm_pair n_heads={n_heads} head_dim={head_dim}: q={q_max} k={k_max}"
+            );
+        }
+    }
+
+    #[test]
+    fn rmsnorm_gated_matches_cpu() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128)] {
+            let total = n_heads * head_dim;
+            let o: Vec<f32> = (0..total)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.05)
+                .collect();
+            let z: Vec<f32> = (0..total).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+            let weight: Vec<f32> = (0..head_dim).map(|i| 0.5 + (i % 5) as f32 * 0.2).collect();
+            let eps = 1e-6;
+
+            let cpu = rmsnorm_gated_cpu_ref(&o, &weight, &z, n_heads, head_dim, eps);
+
+            let o_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&o),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let w_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&weight),
+                vec![head_dim as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let z_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&z),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![total as u64]).unwrap();
+
+            one_shot(&ctx, |enc| {
+                encode_rmsnorm_gated_f32(&ctx, enc, &o_t, &w_t, &z_t, &y_t, n_heads, head_dim, eps)
+            })
+            .unwrap();
+
+            let gpu = read_back_f32(&y_t.buffer, total);
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!("[rmsnorm_gated n_heads={n_heads} head_dim={head_dim}] max|Δ|={max_abs:.2e}");
+            assert!(max_abs < 1e-4, "rmsnorm_gated drift {max_abs}");
+        }
+    }
+
+    #[test]
+    fn l2_norm_vjp_matches_clamp_and_finite_differences() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_HEADS: usize = 4;
+        const HEAD_DIM: usize = 128;
+        const EPS: f32 = 0.5;
+        let mut x = vec![0.0f32; N_HEADS * HEAD_DIM];
+        for (index, value) in x[..HEAD_DIM].iter_mut().enumerate() {
+            *value = ((index * 7 + 3) % 23) as f32 * 0.009 - 0.099;
+        }
+        x[2 * HEAD_DIM] = EPS;
+        x[3 * HEAD_DIM] = EPS * 0.5;
+        let grad_output: Vec<f32> = (0..x.len())
+            .map(|index| ((index * 11 + 1) % 31) as f32 * 0.013 - 0.19)
+            .collect();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![x.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let grad_output_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&grad_output),
+            vec![grad_output.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let grad_input_t = MetalTensor::zeros_f32(&ctx, vec![x.len() as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_l2_norm_vjp_batched_f32(
+                &ctx,
+                encoder,
+                &x_t,
+                &grad_output_t,
+                &grad_input_t,
+                N_HEADS,
+                HEAD_DIM,
+                EPS,
+            )
+        })
+        .unwrap();
+        let actual = read_back_f32(&grad_input_t.buffer, x.len());
+        let mut expected = vec![0.0f64; x.len()];
+        for head in 0..N_HEADS {
+            let base = head * HEAD_DIM;
+            let radius = x[base..base + HEAD_DIM]
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            if radius > f64::from(EPS) {
+                let dot = (0..HEAD_DIM)
+                    .map(|index| f64::from(x[base + index]) * f64::from(grad_output[base + index]))
+                    .sum::<f64>();
+                for index in 0..HEAD_DIM {
+                    expected[base + index] = f64::from(grad_output[base + index]) / radius
+                        - f64::from(x[base + index]) * dot / radius.powi(3);
+                }
+            } else {
+                for index in 0..HEAD_DIM {
+                    expected[base + index] = f64::from(grad_output[base + index]) / f64::from(EPS);
+                }
+            }
+        }
+        let max_abs = actual
+            .iter()
+            .zip(&expected)
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_abs < 2e-5, "L2 VJP error {max_abs}");
+        for head in [1usize, 2, 3] {
+            let base = head * HEAD_DIM;
+            for index in 0..HEAD_DIM {
+                assert_eq!(
+                    actual[base + index].to_bits(),
+                    (grad_output[base + index] / EPS).to_bits(),
+                    "clamped row {head} index {index}"
+                );
+            }
+        }
+
+        let epsilon = 1e-5f64;
+        for index in [0usize, 31, HEAD_DIM - 1] {
+            let objective = |delta: f64| {
+                let mut row = x[..HEAD_DIM]
+                    .iter()
+                    .copied()
+                    .map(f64::from)
+                    .collect::<Vec<_>>();
+                row[index] += delta;
+                let radius = row.iter().map(|value| value * value).sum::<f64>().sqrt();
+                row.iter()
+                    .zip(&grad_output[..HEAD_DIM])
+                    .map(|(value, grad)| value / radius * f64::from(*grad))
+                    .sum::<f64>()
+            };
+            let finite_difference = (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual[index])).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn rmsnorm_gated_vjp_matches_finite_differences() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_HEADS: usize = 3;
+        const HEAD_DIM: usize = 128;
+        const EPS: f32 = HEAD_DIM as f32 * 1e-6;
+        let elements = N_HEADS * HEAD_DIM;
+        let o: Vec<f32> = (0..elements)
+            .map(|index| ((index * 7 + 1) % 37) as f32 * 0.011 - 0.19)
+            .collect();
+        let weight: Vec<f32> = (0..HEAD_DIM)
+            .map(|index| 0.55 + (index % 13) as f32 * 0.037)
+            .collect();
+        let z: Vec<f32> = (0..elements)
+            .map(|index| ((index * 11 + 5) % 43) as f32 * 0.09 - 1.8)
+            .collect();
+        let grad_y: Vec<f32> = (0..elements)
+            .map(|index| ((index * 13 + 3) % 47) as f32 * 0.007 - 0.15)
+            .collect();
+        let tensor = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let o_t = tensor(&o);
+        let weight_t = tensor(&weight);
+        let z_t = tensor(&z);
+        let grad_y_t = tensor(&grad_y);
+        let grad_o_t = MetalTensor::zeros_f32(&ctx, vec![elements as u64]).unwrap();
+        let grad_z_t = MetalTensor::zeros_f32(&ctx, vec![elements as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_rmsnorm_gated_vjp_f32(
+                &ctx, encoder, &o_t, &weight_t, &z_t, &grad_y_t, &grad_o_t, &grad_z_t, N_HEADS,
+                HEAD_DIM, EPS,
+            )
+        })
+        .unwrap();
+        let actual_o = read_back_f32(&grad_o_t.buffer, elements);
+        let actual_z = read_back_f32(&grad_z_t.buffer, elements);
+        let mut expected_o = vec![0.0f64; elements];
+        let mut expected_z = vec![0.0f64; elements];
+        for head in 0..N_HEADS {
+            let base = head * HEAD_DIM;
+            let sumsq = o[base..base + HEAD_DIM]
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>();
+            let scale = (sumsq / HEAD_DIM as f64 + f64::from(EPS)).sqrt().recip();
+            let mut dot = 0.0f64;
+            for index in 0..HEAD_DIM {
+                let offset = base + index;
+                let z_value = f64::from(z[offset]);
+                let sigmoid = 1.0 / (1.0 + (-z_value).exp());
+                let silu = z_value * sigmoid;
+                let grad_normed = f64::from(grad_y[offset]) * silu;
+                dot += f64::from(o[offset]) * grad_normed * f64::from(weight[index]);
+                let normed = f64::from(o[offset]) * scale * f64::from(weight[index]);
+                let silu_derivative = sigmoid * (1.0 + z_value * (1.0 - sigmoid));
+                expected_z[offset] = f64::from(grad_y[offset]) * normed * silu_derivative;
+            }
+            let correction = dot * scale.powi(3) / HEAD_DIM as f64;
+            for index in 0..HEAD_DIM {
+                let offset = base + index;
+                let z_value = f64::from(z[offset]);
+                let silu = z_value / (1.0 + (-z_value).exp());
+                let weighted_grad = f64::from(grad_y[offset]) * silu * f64::from(weight[index]);
+                expected_o[offset] = weighted_grad * scale - f64::from(o[offset]) * correction;
+            }
+        }
+        let max_o = actual_o
+            .iter()
+            .zip(&expected_o)
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        let max_z = actual_z
+            .iter()
+            .zip(&expected_z)
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_o < 3e-5, "gated RMS grad_o error {max_o}");
+        assert!(max_z < 2e-5, "gated RMS grad_z error {max_z}");
+
+        let objective = |o: &[f64], z: &[f64]| {
+            let mut value = 0.0f64;
+            for head in 0..N_HEADS {
+                let base = head * HEAD_DIM;
+                let sumsq = o[base..base + HEAD_DIM]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>();
+                let scale = (sumsq / HEAD_DIM as f64 + f64::from(EPS)).sqrt().recip();
+                for index in 0..HEAD_DIM {
+                    let offset = base + index;
+                    let silu = z[offset] / (1.0 + (-z[offset]).exp());
+                    value += f64::from(grad_y[offset])
+                        * o[offset]
+                        * scale
+                        * f64::from(weight[index])
+                        * silu;
+                }
+            }
+            value
+        };
+        let o64 = o.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let z64 = z.iter().copied().map(f64::from).collect::<Vec<_>>();
+        let epsilon = 1e-5;
+        for &index in &[0usize, 127, 128, elements - 1] {
+            let mut plus = o64.clone();
+            let mut minus = o64.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference =
+                (objective(&plus, &z64) - objective(&minus, &z64)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual_o[index])).abs() < 3e-5);
+
+            let mut plus = z64.clone();
+            let mut minus = z64.clone();
+            plus[index] += epsilon;
+            minus[index] -= epsilon;
+            let finite_difference =
+                (objective(&o64, &plus) - objective(&o64, &minus)) / (2.0 * epsilon);
+            assert!((finite_difference - f64::from(actual_z[index])).abs() < 2e-5);
+        }
+    }
+
+    /// v0.432 equivalence gate: the strided-source batched q-norm reading
+    /// the Q halves of an interleaved `[head_dim Q, head_dim gate]` layout
+    /// must be BIT-IDENTICAL to split_q_gate followed by the compact
+    /// batched q-norm (pure addressing change, same per-row arithmetic).
+    #[test]
+    fn rms_norm_batched_src_strided_matches_split_path_bitwise() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &(n_heads, head_dim) in &[(24usize, 256usize), (16, 256), (8, 64)] {
+            let full: Vec<f32> = (0..n_heads * 2 * head_dim)
+                .map(|i| ((i % 41) as f32 - 20.0) * 3e-2)
+                .collect();
+            let weight: Vec<f32> = (0..head_dim).map(|i| 0.5 + (i % 7) as f32 * 0.1).collect();
+            let full_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&full),
+                vec![(n_heads * 2 * head_dim) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let w_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&weight),
+                vec![head_dim as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let q_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+            let gate_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+            let y_split = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+            let y_strided =
+                MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+            let eps = 1e-6f32;
+            one_shot(&ctx, |enc| {
+                encode_split_q_gate_f32(&ctx, enc, &full_t, &q_t, &gate_t, n_heads, head_dim)?;
+                encode_rms_norm_batched_f32(&ctx, enc, &q_t, &w_t, &y_split, n_heads, head_dim, eps)
+            })
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_rms_norm_batched_src_strided_f32(
+                    &ctx,
+                    enc,
+                    &full_t,
+                    &w_t,
+                    &y_strided,
+                    n_heads,
+                    head_dim,
+                    2 * head_dim,
+                    0,
+                    eps,
+                )
+            })
+            .unwrap();
+            let a = read_back_f32(&y_split.buffer, n_heads * head_dim);
+            let b = read_back_f32(&y_strided.buffer, n_heads * head_dim);
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "strided q-norm not bit-identical at [{i}] (n_heads={n_heads}, \
+                     head_dim={head_dim}): split={x} strided={y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qk_rms_norm_rope_fused_matches_composed_path() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let n_q = 24;
+        let n_k = 4;
+        let head_dim = 256;
+        let n_rot = 64;
+        let eps = 1e-6f32;
+        let theta = 10_000_000.0f32;
+        for &(n_tokens, start_position) in
+            &[(1usize, 0u32), (8, 65_531), (128, 65_536), (8, 1_048_568)]
+        {
+            let q_source: Vec<f32> = (0..n_tokens * n_q * 2 * head_dim)
+                .map(|i| ((i % 41) as f32 - 20.0) * 0.03125)
+                .collect();
+            let k_source: Vec<f32> = (0..n_tokens * n_k * head_dim)
+                .map(|i| ((i % 37) as f32 - 18.0) * 0.046875)
+                .collect();
+            let q_weight: Vec<f32> = (0..head_dim)
+                .map(|i| 0.5 + (i % 11) as f32 * 0.0625)
+                .collect();
+            let k_weight: Vec<f32> = (0..head_dim)
+                .map(|i| 0.625 + (i % 7) as f32 * 0.078125)
+                .collect();
+            let tensor = |values: &[f32]| {
+                MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(values),
+                    vec![values.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap()
+            };
+            let q_src = tensor(&q_source);
+            let k_src = tensor(&k_source);
+            let q_w = tensor(&q_weight);
+            let k_w = tensor(&k_weight);
+            let q_len = n_tokens * n_q * head_dim;
+            let k_len = n_tokens * n_k * head_dim;
+            let q_composed = MetalTensor::zeros_f32(&ctx, vec![q_len as u64]).unwrap();
+            let k_composed = MetalTensor::zeros_f32(&ctx, vec![k_len as u64]).unwrap();
+            let q_fused = MetalTensor::zeros_f32(&ctx, vec![q_len as u64]).unwrap();
+            let k_fused = MetalTensor::zeros_f32(&ctx, vec![k_len as u64]).unwrap();
+
+            one_shot(&ctx, |enc| {
+                encode_rms_norm_batched_src_strided_f32(
+                    &ctx,
+                    enc,
+                    &q_src,
+                    &q_w,
+                    &q_composed,
+                    n_tokens * n_q,
+                    head_dim,
+                    2 * head_dim,
+                    0,
+                    eps,
+                )?;
+                encode_rms_norm_batched_f32(
+                    &ctx,
+                    enc,
+                    &k_src,
+                    &k_w,
+                    &k_composed,
+                    n_tokens * n_k,
+                    head_dim,
+                    eps,
+                )?;
+                encode_rope_neox_f32_packed_consecutive(
+                    &ctx,
+                    enc,
+                    &q_composed,
+                    n_tokens,
+                    n_q,
+                    head_dim,
+                    n_rot,
+                    start_position,
+                    theta,
+                )?;
+                encode_rope_neox_f32_packed_consecutive(
+                    &ctx,
+                    enc,
+                    &k_composed,
+                    n_tokens,
+                    n_k,
+                    head_dim,
+                    n_rot,
+                    start_position,
+                    theta,
+                )
+            })
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_qk_rms_norm_rope_f32_packed_consecutive(
+                    &ctx,
+                    enc,
+                    &q_src,
+                    &q_w,
+                    &q_fused,
+                    &k_src,
+                    &k_w,
+                    &k_fused,
+                    n_tokens,
+                    n_q,
+                    n_k,
+                    head_dim,
+                    n_rot,
+                    start_position,
+                    eps,
+                    theta,
+                )
+            })
+            .unwrap();
+
+            let q_baseline = read_back_f32(&q_composed.buffer, q_len);
+            let k_baseline = read_back_f32(&k_composed.buffer, k_len);
+            let q_candidate = read_back_f32(&q_fused.buffer, q_len);
+            let k_candidate = read_back_f32(&k_fused.buffer, k_len);
+            let q_max = max_abs_diff(&q_baseline, &q_candidate);
+            let k_max = max_abs_diff(&k_baseline, &k_candidate);
+            eprintln!(
+                "[qk-norm-rope] N={n_tokens} start={start_position} q_max={q_max:.3e} k_max={k_max:.3e}"
+            );
+            assert_finite(
+                &q_candidate,
+                &format!("fused norm+RoPE Q for N={n_tokens} start={start_position}"),
+            );
+            assert_finite(
+                &k_candidate,
+                &format!("fused norm+RoPE K for N={n_tokens} start={start_position}"),
+            );
+            assert_bitwise_equal(
+                &q_baseline,
+                &q_candidate,
+                &format!("fused norm+RoPE Q for N={n_tokens} start={start_position}"),
+            );
+            assert_bitwise_equal(
+                &k_baseline,
+                &k_candidate,
+                &format!("fused norm+RoPE K for N={n_tokens} start={start_position}"),
+            );
+        }
+    }
+}

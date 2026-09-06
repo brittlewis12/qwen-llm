@@ -3475,3 +3475,2380 @@ pub fn encode_attn_matrix_kqv_direct_v_f32(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metal::test_support::*;
+
+    #[test]
+    fn attn_v4_q8_kv_close_to_f16_kv() {
+        run_attn_v4_q8_kv_compare("g6-main", 24, 4, 4096, 64, 32, None);
+    }
+
+    #[test]
+    fn attn_v4_q8_group8_main_close_to_f16_kv() {
+        run_attn_v4_q8_kv_compare("g8-main", 16, 2, 2048, 32, 32, Some(8));
+    }
+
+    #[test]
+    fn attn_v4_q8_group8_subgroup_close_to_f16_kv() {
+        run_attn_v4_q8_kv_compare("g8-t2", 16, 2, 8192, 64, 64, Some(2));
+        run_attn_v4_q8_kv_compare("g8-t4", 16, 2, 16384, 128, 64, Some(4));
+    }
+
+    /// v0.433 triage repro for the `attn_v4_matches_naive_f16kv` load-flake:
+    /// NaN-prime the o/ml partials scratch before dispatch at the exact
+    /// config that failed under parallel-suite load (`group=4 n_pos=1024
+    /// nwg=64 C=16`, cos=0.9662). `zeros_f32` is documented-uninitialized,
+    /// so isolated runs see fresh zero pages while loaded runs see recycled
+    /// garbage; if any kernel cell is read without being written, this test
+    /// fails deterministically instead of 50%-of-suite-runs.
+    #[test]
+    fn attn_v4_partials_fully_written_nan_prime() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let hd = 256usize;
+        // The observed failing config plus its close neighbors.
+        let cases: &[(usize, usize, usize, usize, usize)] = &[
+            // (n_q, n_kv, n_pos, nwg, tile_c)
+            (8, 2, 1024, 64, 16),
+            (8, 2, 1024, 64, 32),
+            (8, 2, 1024, 128, 16),
+            (8, 2, 1024, 256, 16),
+            (24, 4, 1024, 64, 16),
+        ];
+        for &(n_q, n_kv, n_pos, nwg, tile_c) in cases {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+            let y_naive_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_f16kv_f32(
+                    &ctx, enc, &q_t, &k_cache, &v_cache, &y_naive_t, n_q, n_kv, hd, n_pos,
+                )
+            })
+            .unwrap();
+            let y_naive = read_back_f32(&y_naive_t.buffer, n_q * hd);
+
+            let o_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * hd) as u64]).unwrap();
+            let ml_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * 2) as u64]).unwrap();
+            let y_v4_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            // NaN-prime everything the kernels are supposed to fully write.
+            unsafe {
+                for t in [&o_partial, &ml_partial, &y_v4_t] {
+                    let p = t.buffer.contents().as_ptr() as *mut f32;
+                    for i in 0..t.n_elements() as usize {
+                        *p.add(i) = f32::NAN;
+                    }
+                }
+            }
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    enc,
+                    &q_t,
+                    &k_cache,
+                    &v_cache,
+                    &o_partial,
+                    &ml_partial,
+                    &y_v4_t,
+                    n_q,
+                    n_kv,
+                    hd,
+                    n_pos,
+                    nwg,
+                    tile_c,
+                )
+            })
+            .unwrap();
+            let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
+            let nan_count = y_v4.iter().filter(|x| x.is_nan()).count();
+            let max_abs = y_v4
+                .iter()
+                .zip(y_naive.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!(
+                "[v4-nan-prime group={group} n_pos={n_pos} nwg={nwg} C={tile_c}] \
+                 nans={nan_count} max|Δ|={max_abs:.2e}"
+            );
+            assert_eq!(
+                nan_count, 0,
+                "v4 output contains NaN after NaN-priming partials: some partial \
+                 cell is read without being written (group={group} n_pos={n_pos} \
+                 nwg={nwg} C={tile_c})"
+            );
+            assert!(
+                max_abs < 5e-3,
+                "v4 diverged from naive with NaN-primed partials: max|Δ|={max_abs} \
+                 (group={group} n_pos={n_pos} nwg={nwg} C={tile_c})"
+            );
+        }
+    }
+
+    /// v4 flash-attn (GQA-dedup + online softmax + split-K) vs production
+    /// `attn_decode_f16kv_f32`. Same F16 K/V inputs, multiple n_pos and NWG
+    /// settings. Must produce numerically equivalent outputs (cos > 0.9999;
+    /// max|Δ| ~1e-3 — the bound expected from F32 reorder noise across
+    /// completely different reduction orderings).
+    #[test]
+    fn attn_v4_matches_naive_f16kv() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let hd = 256usize;
+        // Cover the currently-supported specializations:
+        // small dense (GROUP=4), 27B dense (GROUP=6), 35B A3B (GROUP=8),
+        // 122B A10B (GROUP=16).
+        let shapes: &[(usize, usize)] = &[(8, 2), (24, 4), (16, 2), (32, 2)];
+
+        for &(n_q, n_kv) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            let cases: &[(usize, usize)] = &[
+                (1, 1),
+                (32, 1),
+                (32, 2),
+                (64, 1),
+                (256, 4),
+                (1024, 8),
+                (1024, 64),
+                (1024, 128),
+                (1024, 256),
+                (4096, 16),
+                (4096, 64),
+            ];
+
+            for &(n_pos, nwg) in cases {
+                // Synthesize Q (F32) and K, V (F32 scratch → F16 cache).
+                let q: Vec<f32> = (0..n_q * hd)
+                    .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                    .collect();
+                let cap = n_pos.max(64);
+                let k_f32: Vec<f32> = (0..cap * kv_dim)
+                    .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                    .collect();
+                let v_f32: Vec<f32> = (0..cap * kv_dim)
+                    .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                    .collect();
+
+                let q_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&q),
+                    vec![(n_q * hd) as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                // Build F16 KV cache by scattering F32 source into a F16 dest.
+                let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+                let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+                // Use scatter to convert F32 → F16 in cache.
+                for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                    let src_t = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(src_f32.as_slice()),
+                        vec![src_f32.len() as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    one_shot(&ctx, |enc| {
+                        encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                    })
+                    .unwrap();
+                }
+
+                // --- Reference: naive f16kv kernel ---
+                let y_naive_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_attn_decode_f16kv_f32(
+                        &ctx, enc, &q_t, &k_cache, &v_cache, &y_naive_t, n_q, n_kv, hd, n_pos,
+                    )
+                })
+                .unwrap();
+                let y_naive = read_back_f32(&y_naive_t.buffer, n_q * hd);
+
+                // --- v4: allocate partials, dispatch main + reduce ---
+                let o_partial =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * hd) as u64]).unwrap();
+                let ml_partial =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * 2) as u64]).unwrap();
+                let y_v4_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+
+                // Sweep all three tile-C variants — each must match naive within
+                // fp32 reorder noise (cos > 0.9999, max|Δ| < 5e-3).
+                for &tile_c in &[16usize, 32, 64, 128] {
+                    one_shot(&ctx, |enc| {
+                        encode_attn_decode_v4_f32(
+                            &ctx,
+                            enc,
+                            &q_t,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial,
+                            &ml_partial,
+                            &y_v4_t,
+                            n_q,
+                            n_kv,
+                            hd,
+                            n_pos,
+                            nwg,
+                            tile_c,
+                        )
+                    })
+                    .unwrap();
+                    let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
+                    let max_abs = y_v4
+                        .iter()
+                        .zip(y_naive.iter())
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0f32, f32::max);
+                    let dot: f64 = y_v4
+                        .iter()
+                        .zip(y_naive.iter())
+                        .map(|(a, b)| (*a as f64) * (*b as f64))
+                        .sum();
+                    let na: f64 = y_v4.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+                    let nb: f64 = y_naive
+                        .iter()
+                        .map(|x| (*x as f64).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    let cos = dot / (na * nb);
+                    eprintln!(
+                        "[v4 group={group:>2} n_q={n_q:>2} n_kv={n_kv:>2} n_pos={n_pos:>4} nwg={nwg:>2} C={tile_c:>2}] max|Δ|={max_abs:.2e}  cos={cos:.6}"
+                    );
+                    assert!(
+                        cos > 0.9999,
+                        "v4(group={group}, C={tile_c}) vs naive cos too low at n_pos={n_pos} nwg={nwg}: cos={cos}"
+                    );
+                    assert!(
+                        max_abs < 5e-3,
+                        "v4(group={group}, C={tile_c}) vs naive max|Δ| too high at n_pos={n_pos} nwg={nwg}: {max_abs}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attn_matrix_vt_dispatch_groups_cover_exact_thread_range() {
+        for total in [1usize, 255, 256, 257] {
+            assert_eq!(attn_matrix_vt_threadgroups(total, false).unwrap(), total);
+            assert_eq!(
+                attn_matrix_vt_threadgroups(total, true).unwrap(),
+                total.div_ceil(ATTN_MATRIX_VT_THREADS)
+            );
+        }
+        assert!(attn_matrix_vt_threadgroups(0, false).is_err());
+        let legacy_max = (u32::MAX as usize + 1) / ATTN_MATRIX_VT_THREADS;
+        assert_eq!(
+            attn_matrix_vt_threadgroups(legacy_max, false).unwrap(),
+            legacy_max
+        );
+        assert!(attn_matrix_vt_threadgroups(legacy_max + 1, false).is_err());
+        assert!(attn_matrix_vt_threadgroups(u32::MAX as usize, true).is_ok());
+        assert!(attn_matrix_vt_threadgroups(u32::MAX as usize + 1, true).is_err());
+    }
+
+    #[test]
+    fn attn_matrix_vt_scoped_override_restores_and_rejects_nesting() {
+        let _serial = ATTN_MATRIX_VT_SCOPE_TEST_LOCK.lock().unwrap();
+        let baseline = attn_matrix_vt_compact_dispatch_enabled().unwrap();
+        assert_eq!(
+            with_attn_matrix_vt_compact_dispatch_override(!baseline, || {
+                attn_matrix_vt_compact_dispatch_enabled()
+            })
+            .unwrap()
+            .unwrap(),
+            !baseline
+        );
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+
+        let nested = with_attn_matrix_vt_compact_dispatch_override(true, || {
+            with_attn_matrix_vt_compact_dispatch_override(false, || ())
+        })
+        .unwrap();
+        assert!(nested.is_err());
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+
+        let cross_thread = with_attn_matrix_vt_compact_dispatch_override(true, || {
+            std::thread::spawn(attn_matrix_vt_compact_dispatch_enabled)
+                .join()
+                .unwrap()
+        })
+        .unwrap();
+        assert!(cross_thread.is_err());
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+
+        let panicked = std::panic::catch_unwind(|| {
+            let _ = with_attn_matrix_vt_compact_dispatch_override(!baseline, || {
+                panic!("exercise override unwind restoration")
+            });
+        });
+        assert!(panicked.is_err());
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+    }
+
+    #[test]
+    fn attn_matrix_vt_dispatch_capture_is_exact_and_scoped() {
+        let _serial = ATTN_MATRIX_VT_SCOPE_TEST_LOCK.lock().unwrap();
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const ROWS: usize = 257;
+        let cache = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![0x3555u16; ROWS]),
+            vec![ROWS as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let make_vt = || {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&vec![0x3aaau16; ROWS]),
+                vec![ROWS as u64],
+                GgmlType::F16,
+            )
+            .unwrap()
+        };
+
+        for (compact, expected_groups) in [(false, ROWS), (true, ROWS.div_ceil(256))] {
+            let vt = make_vt();
+            let (encoded, capture) = with_attn_matrix_vt_compact_dispatch_override(compact, || {
+                capture_attn_matrix_vt_dispatches(|| {
+                    one_shot(&ctx, |enc| {
+                        encode_attn_matrix_transpose_v_f16(
+                            &ctx, enc, &cache, &vt, 0, ROWS, ROWS, 1, ROWS, 1, 1,
+                        )
+                    })
+                })
+            })
+            .unwrap()
+            .unwrap();
+            encoded.unwrap();
+            assert!(capture.owner_thread.starts_with("ThreadId("));
+            assert_eq!(
+                capture.stats,
+                AttnMatrixVtDispatchStats {
+                    calls: 1,
+                    row_sum: ROWS as u64,
+                    element_sum: ROWS as u64,
+                    threadgroup_sum: expected_groups as u64,
+                    compact_calls: u64::from(compact),
+                    legacy_calls: u64::from(!compact),
+                    base_pos_sum: 0,
+                    n_pos_sum: ROWS as u64,
+                }
+            );
+        }
+
+        let (nested, outer) =
+            capture_attn_matrix_vt_dispatches(|| capture_attn_matrix_vt_dispatches(|| ())).unwrap();
+        assert!(nested.is_err());
+        assert_eq!(outer.stats, AttnMatrixVtDispatchStats::default());
+
+        let (cross_thread, capture) = capture_attn_matrix_vt_dispatches(|| {
+            std::thread::spawn(|| record_attn_matrix_vt_dispatch(0, 1, 1, 1, 1, true))
+                .join()
+                .unwrap()
+        })
+        .unwrap();
+        assert!(cross_thread.is_err());
+        assert_eq!(capture.stats, AttnMatrixVtDispatchStats::default());
+
+        let panicked = std::panic::catch_unwind(|| {
+            let _ = capture_attn_matrix_vt_dispatches(|| panic!("exercise capture unwind"));
+        });
+        assert!(panicked.is_err());
+        let (_, capture) = capture_attn_matrix_vt_dispatches(|| ()).unwrap();
+        assert_eq!(capture.stats, AttnMatrixVtDispatchStats::default());
+    }
+
+    #[test]
+    fn attn_matrix_vt_compact_dispatch_matches_legacy_nonzero_span() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const SENTINEL: u16 = 0x3555;
+
+        // Exact thread totals 255, 256, and 257. The first two also exercise
+        // multiple KV heads and dimensions; all use nonzero base and padding.
+        for &(n_kv, head_dim, n_rows) in &[(3usize, 5usize, 17usize), (2, 8, 16), (1, 1, 257)] {
+            let base_pos = 2usize;
+            let n_pos = base_pos + n_rows + 1;
+            let vt_stride = n_pos + 3;
+            let kv_dim = n_kv * head_dim;
+            let total = kv_dim * n_rows;
+            assert!([255, 256, 257].contains(&total));
+            let cache: Vec<u16> = (0..n_pos * kv_dim)
+                .map(|i| half::f16::from_f32(((i % 31) as f32 - 15.0) * 0.03125).to_bits())
+                .collect();
+            let cache_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&cache),
+                vec![cache.len() as u64],
+                GgmlType::F16,
+            )
+            .unwrap();
+            let make_vt = || {
+                MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&vec![SENTINEL; kv_dim * vt_stride]),
+                    vec![(kv_dim * vt_stride) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap()
+            };
+            let legacy = make_vt();
+            let compact = make_vt();
+
+            for (dst, compact_dispatch) in [(&legacy, false), (&compact, true)] {
+                one_shot(&ctx, |enc| {
+                    encode_attn_matrix_transpose_v_f16_mode(
+                        &ctx,
+                        enc,
+                        &cache_t,
+                        dst,
+                        base_pos,
+                        n_rows,
+                        n_pos,
+                        kv_dim,
+                        vt_stride,
+                        n_kv,
+                        head_dim,
+                        compact_dispatch,
+                    )
+                })
+                .unwrap();
+            }
+
+            let mut expected = vec![SENTINEL; kv_dim * vt_stride];
+            for pos in base_pos..base_pos + n_rows {
+                for flat_d in 0..kv_dim {
+                    expected[flat_d * vt_stride + pos] = cache[pos * kv_dim + flat_d];
+                }
+            }
+            assert_eq!(read_back_u16(&legacy), expected);
+            assert_eq!(read_back_u16(&compact), expected);
+
+            let cmd = ctx
+                .queue
+                .commandBuffer()
+                .expect("validation command buffer");
+            let enc = KernelEncoder::begin(&cmd);
+            assert!(
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx,
+                    &enc,
+                    &cache_t,
+                    &compact,
+                    base_pos,
+                    n_rows,
+                    n_pos,
+                    kv_dim - 1,
+                    vt_stride,
+                    n_kv,
+                    head_dim,
+                    true,
+                )
+                .is_err()
+            );
+            let mut short_cache = cache_t.clone();
+            short_cache.shape = vec![((base_pos + n_rows) * kv_dim - 1) as u64];
+            assert!(
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx,
+                    &enc,
+                    &short_cache,
+                    &compact,
+                    base_pos,
+                    n_rows,
+                    n_pos,
+                    kv_dim,
+                    vt_stride,
+                    n_kv,
+                    head_dim,
+                    true,
+                )
+                .is_err()
+            );
+            let mut short_vt = compact.clone();
+            let exact_vt_end = (kv_dim - 1) * vt_stride + base_pos + n_rows;
+            short_vt.shape = vec![(exact_vt_end - 1) as u64];
+            assert!(
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx, &enc, &cache_t, &short_vt, base_pos, n_rows, n_pos, kv_dim, vt_stride,
+                    n_kv, head_dim, true,
+                )
+                .is_err()
+            );
+            assert!(
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx,
+                    &enc,
+                    &cache_t,
+                    &compact,
+                    usize::MAX,
+                    1,
+                    n_pos,
+                    kv_dim,
+                    vt_stride,
+                    n_kv,
+                    head_dim,
+                    true,
+                )
+                .is_err()
+            );
+            enc.end();
+        }
+    }
+
+    #[test]
+    fn attn_matrix_vt_prefix_rebuild_preserves_scattered_suffix() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const PREFIX: usize = 5;
+        const CHUNK: usize = 3;
+        const N_KV: usize = 2;
+        const HEAD_DIM: usize = 8;
+        const VT_PADDING: usize = 3;
+        const SENTINELS: [u16; 3] = [0x3555, 0x3aaa, 0x3999];
+
+        let n_pos = PREFIX + CHUNK;
+        let vt_stride = n_pos + VT_PADDING;
+        let kv_dim = N_KV * HEAD_DIM;
+        let cache_elems = n_pos * kv_dim;
+        let vt_elems = kv_dim * vt_stride;
+        let initial_cache: Vec<u16> = (0..cache_elems)
+            .map(|i| half::f16::from_f32(((i % 29) as f32 - 14.0) * 0.03125).to_bits())
+            .collect();
+        let current_f32: Vec<f32> = (0..CHUNK * kv_dim)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.0625)
+            .collect();
+        let current_f16: Vec<u16> = current_f32
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect();
+        let current = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&current_f32),
+            vec![current_f32.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let mut expected_cache = initial_cache.clone();
+        expected_cache[PREFIX * kv_dim..].copy_from_slice(&current_f16);
+
+        let make_cache = || {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&initial_cache),
+                vec![cache_elems as u64],
+                GgmlType::F16,
+            )
+            .unwrap()
+        };
+        let mut arms = Vec::new();
+        for &sentinel in &SENTINELS {
+            let cache_k = make_cache();
+            let cache_v = make_cache();
+            let vt = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&vec![sentinel; vt_elems]),
+                vec![vt_elems as u64],
+                GgmlType::F16,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_f16_kv_vt(
+                    &ctx,
+                    enc,
+                    &current,
+                    &current,
+                    &cache_k,
+                    &cache_v,
+                    &vt,
+                    PREFIX * kv_dim,
+                    CHUNK * kv_dim,
+                    PREFIX,
+                    kv_dim,
+                    HEAD_DIM,
+                    vt_stride,
+                )
+            })
+            .unwrap();
+            assert_eq!(read_back_u16(&cache_k), expected_cache);
+            assert_eq!(read_back_u16(&cache_v), expected_cache);
+            let scattered_vt = read_back_u16(&vt);
+            for row in 0..CHUNK {
+                for flat_d in 0..kv_dim {
+                    assert_eq!(
+                        scattered_vt[flat_d * vt_stride + PREFIX + row],
+                        current_f16[row * kv_dim + flat_d]
+                    );
+                }
+            }
+            arms.push((cache_v, vt, sentinel));
+        }
+
+        let divergent_suffix: Vec<f32> = current_f32.iter().map(|&value| value + 1.0).collect();
+        let divergent_suffix_f16: Vec<u16> = divergent_suffix
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect();
+        let divergent_suffix_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&divergent_suffix),
+            vec![divergent_suffix.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(&ctx, |enc| {
+            encode_scatter_offset_f32_to_f16(
+                &ctx,
+                enc,
+                &divergent_suffix_t,
+                &arms[2].0,
+                PREFIX * kv_dim,
+                divergent_suffix.len(),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            &read_back_u16(&arms[2].0)[PREFIX * kv_dim..],
+            divergent_suffix_f16.as_slice()
+        );
+
+        for (index, (cache_v, vt, _)) in arms.iter().enumerate() {
+            let (rows, compact) = match index {
+                0 => (n_pos, false),
+                1 => (n_pos, true),
+                _ => (PREFIX, true),
+            };
+            one_shot(&ctx, |enc| {
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx, enc, cache_v, vt, 0, rows, n_pos, kv_dim, vt_stride, N_KV, HEAD_DIM,
+                    compact,
+                )
+            })
+            .unwrap();
+        }
+
+        for (index, (_, vt, sentinel)) in arms.iter().enumerate() {
+            let mut expected_vt = vec![*sentinel; vt_elems];
+            for pos in 0..n_pos {
+                for flat_d in 0..kv_dim {
+                    expected_vt[flat_d * vt_stride + pos] = if index == 2 && pos >= PREFIX {
+                        current_f16[(pos - PREFIX) * kv_dim + flat_d]
+                    } else {
+                        expected_cache[pos * kv_dim + flat_d]
+                    };
+                }
+            }
+            assert_eq!(read_back_u16(vt), expected_vt);
+        }
+    }
+
+    #[test]
+    fn attn_matrix_prefix_only_vt_rebuild_matches_full_attention() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const PREFIX: usize = 47;
+        const CHUNK: usize = 17;
+        const N_Q: usize = 24;
+        const N_KV: usize = 4;
+        const HEAD_DIM: usize = 256;
+        const SENTINEL: u16 = 0x3555;
+
+        let n_pos = PREFIX + CHUNK;
+        let group = N_Q / N_KV;
+        let kv_dim = N_KV * HEAD_DIM;
+        let vt_stride = n_pos + 3;
+        let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
+        let q: Vec<f32> = (0..CHUNK * N_Q * HEAD_DIM)
+            .map(|i| round_f16(((i % 31) as f32 - 15.0) * 0.01))
+            .collect();
+        let k: Vec<f32> = (0..n_pos * kv_dim)
+            .map(|i| round_f16(((i % 23) as f32 - 11.0) * 0.015))
+            .collect();
+        let v: Vec<f32> = (0..n_pos * kv_dim)
+            .map(|i| round_f16(((i % 17) as f32 - 8.0) * 0.02))
+            .collect();
+        let k_f16: Vec<u16> = k
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect();
+        let v_f16: Vec<u16> = v
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect();
+        let mut restored_k = vec![SENTINEL; n_pos * kv_dim];
+        let mut restored_v = vec![SENTINEL; n_pos * kv_dim];
+        restored_k[..PREFIX * kv_dim].copy_from_slice(&k_f16[..PREFIX * kv_dim]);
+        restored_v[..PREFIX * kv_dim].copy_from_slice(&v_f16[..PREFIX * kv_dim]);
+
+        let tensor_f32 = |data: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(data),
+                vec![data.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let tensor_f16 = |data: &[u16]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(data),
+                vec![data.len() as u64],
+                GgmlType::F16,
+            )
+            .unwrap()
+        };
+        let q_t = tensor_f32(&q);
+        let current_k = tensor_f32(&k[PREFIX * kv_dim..]);
+        let current_v = tensor_f32(&v[PREFIX * kv_dim..]);
+        let full_k = tensor_f16(&k_f16);
+        let full_v = tensor_f16(&v_f16);
+        let rebuilt_k = tensor_f16(&restored_k);
+        let rebuilt_v = tensor_f16(&restored_v);
+        let make_vt = || tensor_f16(&vec![SENTINEL; kv_dim * vt_stride]);
+        let full_vt = make_vt();
+        let rebuilt_vt = make_vt();
+
+        let make_scores =
+            || MetalTensor::zeros_f16(&ctx, vec![(CHUNK * N_Q * n_pos) as u64]).unwrap();
+        let make_ml = || {
+            MetalTensor::zeros_f32(&ctx, vec![attn_matrix_ml_elems(CHUNK, N_Q, n_pos) as u64])
+                .unwrap()
+        };
+        let full_scores = make_scores();
+        let full_ml = make_ml();
+        let full_out = MetalTensor::zeros_f32(&ctx, vec![(CHUNK * N_Q * HEAD_DIM) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_attn_matrix_transpose_v_f16(
+                &ctx, enc, &full_v, &full_vt, 0, n_pos, n_pos, kv_dim, vt_stride, N_KV, HEAD_DIM,
+            )?;
+            encode_attn_matrix_kq_online_f32(
+                &ctx,
+                enc,
+                &q_t,
+                &full_k,
+                &full_scores,
+                &full_ml,
+                CHUNK,
+                PREFIX,
+                n_pos,
+                kv_dim,
+                N_Q,
+                N_KV,
+                group,
+                HEAD_DIM,
+                true,
+            )?;
+            encode_attn_matrix_kqv_norm_f32(
+                &ctx,
+                enc,
+                &full_scores,
+                &full_ml,
+                &full_vt,
+                &full_out,
+                CHUNK,
+                PREFIX,
+                n_pos,
+                vt_stride,
+                N_Q,
+                N_KV,
+                group,
+                HEAD_DIM,
+                true,
+            )
+        })
+        .unwrap();
+
+        let rebuilt_scores = make_scores();
+        let rebuilt_ml = make_ml();
+        let rebuilt_out =
+            MetalTensor::zeros_f32(&ctx, vec![(CHUNK * N_Q * HEAD_DIM) as u64]).unwrap();
+        let rebuilt_prefix_rows =
+            crate::metal_dflash::attn_matrix_vt_prefix_rebuild_rows(true, 0, PREFIX)
+                .expect("restored prefix requires a V_T rebuild");
+        one_shot(&ctx, |enc| {
+            encode_scatter_offset_f32_to_f16_kv_vt(
+                &ctx,
+                enc,
+                &current_k,
+                &current_v,
+                &rebuilt_k,
+                &rebuilt_v,
+                &rebuilt_vt,
+                PREFIX * kv_dim,
+                CHUNK * kv_dim,
+                PREFIX,
+                kv_dim,
+                HEAD_DIM,
+                vt_stride,
+            )?;
+            encode_attn_matrix_transpose_v_f16(
+                &ctx,
+                enc,
+                &rebuilt_v,
+                &rebuilt_vt,
+                0,
+                rebuilt_prefix_rows,
+                n_pos,
+                kv_dim,
+                vt_stride,
+                N_KV,
+                HEAD_DIM,
+            )?;
+            encode_attn_matrix_kq_online_f32(
+                &ctx,
+                enc,
+                &q_t,
+                &rebuilt_k,
+                &rebuilt_scores,
+                &rebuilt_ml,
+                CHUNK,
+                PREFIX,
+                n_pos,
+                kv_dim,
+                N_Q,
+                N_KV,
+                group,
+                HEAD_DIM,
+                true,
+            )?;
+            encode_attn_matrix_kqv_norm_f32(
+                &ctx,
+                enc,
+                &rebuilt_scores,
+                &rebuilt_ml,
+                &rebuilt_vt,
+                &rebuilt_out,
+                CHUNK,
+                PREFIX,
+                n_pos,
+                vt_stride,
+                N_Q,
+                N_KV,
+                group,
+                HEAD_DIM,
+                true,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(read_back_u16(&rebuilt_k), k_f16);
+        assert_eq!(read_back_u16(&rebuilt_v), v_f16);
+        assert_eq!(read_back_u16(&rebuilt_vt), read_back_u16(&full_vt));
+        assert_eq!(
+            read_back_f32(&rebuilt_out.buffer, CHUNK * N_Q * HEAD_DIM),
+            read_back_f32(&full_out.buffer, CHUNK * N_Q * HEAD_DIM)
+        );
+    }
+
+    /// Model-free screen preregistered in
+    /// `docs/bench/2026-08-17-qwen-vt-rebuild-ceiling/README.md`.
+    #[test]
+    #[ignore]
+    fn attn_matrix_vt_environment_probe() {
+        let ctx = MetalContext::new().expect("Metal context for V_T environment probe");
+        println!(
+            "VT_ENV_JSON {}",
+            serde_json::json!({
+                "schema_version": 1,
+                "test": "metal::tests::attn_matrix_vt_environment_probe",
+                "device_registry_id": ctx.device.registryID(),
+                "device": ctx.device.name().to_string(),
+                "max_buffer_length": ctx.device.maxBufferLength(),
+                "recommended_max_working_set_size": ctx.recommended_max_working_set_size(),
+            })
+        );
+    }
+
+    /// Model-free screen preregistered in
+    /// `docs/bench/2026-08-17-qwen-vt-rebuild-ceiling/README.md`.
+    #[test]
+    #[ignore]
+    fn attn_matrix_vt_rebuild_screen() {
+        const N_LAYERS: usize = 16;
+        const N_KV: usize = 4;
+        const HEAD_DIM: usize = 256;
+
+        struct Bank {
+            src: Vec<MetalTensor>,
+            dst: Vec<MetalTensor>,
+        }
+
+        fn parse_usize(name: &str) -> usize {
+            let raw = std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+            raw.parse::<usize>()
+                .unwrap_or_else(|_| panic!("invalid {name}={raw:?}"))
+        }
+
+        fn fill_tensor(tensor: &MetalTensor, byte: u8) {
+            assert_eq!(tensor.dtype, GgmlType::F16);
+            assert_eq!(tensor.buffer.storageMode(), MTLStorageMode::Shared);
+            assert_eq!(tensor.offset, 0);
+            let n_bytes = tensor.n_bytes() as usize;
+            assert!(n_bytes <= tensor.buffer.length());
+            unsafe {
+                std::ptr::write_bytes(tensor.buffer.contents().as_ptr() as *mut u8, byte, n_bytes);
+            }
+        }
+
+        fn allocate_bank(
+            ctx: &MetalContext,
+            name: &str,
+            elems_per_layer: usize,
+            bytes_per_layer: usize,
+            src_byte: u8,
+            dst_byte: u8,
+        ) -> Bank {
+            let mut src = Vec::with_capacity(N_LAYERS);
+            let mut dst = Vec::with_capacity(N_LAYERS);
+            for layer in 0..N_LAYERS {
+                let src_layer = MetalTensor::zeros_f16(ctx, vec![elems_per_layer as u64])
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "allocate bank={name} layer={layer} role=src bytes={bytes_per_layer}: {error}"
+                        )
+                    });
+                let dst_layer = MetalTensor::zeros_f16(ctx, vec![elems_per_layer as u64])
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "allocate bank={name} layer={layer} role=dst bytes={bytes_per_layer}: {error}"
+                        )
+                    });
+                fill_tensor(&src_layer, src_byte);
+                fill_tensor(&dst_layer, dst_byte);
+                src.push(src_layer);
+                dst.push(dst_layer);
+            }
+            Bank { src, dst }
+        }
+
+        fn run_span(
+            ctx: &MetalContext,
+            bank: &Bank,
+            label: &str,
+            base_pos: usize,
+            rows: usize,
+            n_pos: usize,
+            kv_dim: usize,
+            compact: bool,
+        ) -> (f64, f64) {
+            let cmd = ctx
+                .queue
+                .commandBuffer()
+                .expect("V_T rebuild command buffer");
+            let enc = KernelEncoder::begin(&cmd);
+            for layer in 0..N_LAYERS {
+                encode_attn_matrix_transpose_v_f16_mode(
+                    ctx,
+                    &enc,
+                    &bank.src[layer],
+                    &bank.dst[layer],
+                    base_pos,
+                    rows,
+                    n_pos,
+                    kv_dim,
+                    n_pos,
+                    N_KV,
+                    HEAD_DIM,
+                    compact,
+                )
+                .unwrap();
+            }
+            enc.end();
+            let wall_start = std::time::Instant::now();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            let wall_ms = wall_start.elapsed().as_secs_f64() * 1e3;
+            let status = cmd.status();
+            let error = cmd.error();
+            assert!(
+                status == objc2_metal::MTLCommandBufferStatus::Completed && error.is_none(),
+                "V_T command failed arm={label} status={status:?} error={error:?}"
+            );
+            let gpu_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            assert!(wall_ms.is_finite() && wall_ms > 0.0);
+            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
+            (wall_ms, gpu_ms)
+        }
+
+        fn prep_overlap(
+            ctx: &MetalContext,
+            bank: &Bank,
+            prefix: usize,
+            chunk: usize,
+            n_pos: usize,
+            kv_dim: usize,
+        ) {
+            let _ = run_span(ctx, bank, "PREP_D2", prefix, chunk, n_pos, kv_dim, true);
+        }
+
+        let mode = std::env::var("QWEN_VT_REBUILD_MODE")
+            .unwrap_or_else(|_| panic!("missing QWEN_VT_REBUILD_MODE"));
+        let prefix = parse_usize("QWEN_VT_REBUILD_PREFIX");
+        let chunk = parse_usize("QWEN_VT_REBUILD_CHUNK");
+        match mode.as_str() {
+            "dispatch" => {
+                assert!([512, 2048, 8192].contains(&prefix));
+                assert_eq!(chunk, 128);
+            }
+            "compact" => {
+                assert!([8192, 16384, 32768].contains(&prefix));
+                assert_eq!(chunk, 128);
+            }
+            "overlap" => {
+                assert_eq!(prefix, 32768);
+                assert_eq!(chunk, 1024);
+            }
+            _ => panic!("invalid QWEN_VT_REBUILD_MODE={mode:?}"),
+        }
+
+        let n_pos = prefix.checked_add(chunk).unwrap();
+        let kv_dim = N_KV * HEAD_DIM;
+        let elems_per_layer = n_pos.checked_mul(kv_dim).unwrap();
+        let bytes_per_layer = elems_per_layer.checked_mul(2).unwrap();
+        let total_requested_bytes = bytes_per_layer
+            .checked_mul(N_LAYERS)
+            .and_then(|value| value.checked_mul(4))
+            .unwrap();
+        let ctx = MetalContext::new().expect("Metal context for V_T rebuild screen");
+        let max_buffer_length = ctx.device.maxBufferLength();
+        assert!(
+            bytes_per_layer <= max_buffer_length,
+            "V_T layer bytes {bytes_per_layer} exceed maxBufferLength {max_buffer_length}"
+        );
+        let allocated_before = ctx.current_allocated_size();
+        let bank_x = allocate_bank(&ctx, "X", elems_per_layer, bytes_per_layer, 0x3c, 0xa5);
+        let bank_y = allocate_bank(&ctx, "Y", elems_per_layer, bytes_per_layer, 0x38, 0x5a);
+        let allocated_after = ctx.current_allocated_size();
+
+        println!(
+            "VT_REBUILD_JSON {}",
+            serde_json::json!({
+                "kind": "meta",
+                "schema_version": 2,
+                "mode": mode,
+                "prefix": prefix,
+                "chunk": chunk,
+                "n_pos": n_pos,
+                "vt_stride": n_pos,
+                "layers": N_LAYERS,
+                "n_kv": N_KV,
+                "head_dim": HEAD_DIM,
+                "kv_dim": kv_dim,
+                "device_registry_id": ctx.device.registryID(),
+                "device": ctx.device.name().to_string(),
+                "max_buffer_length": max_buffer_length,
+                "recommended_max_working_set_size": ctx.recommended_max_working_set_size(),
+                "bytes_per_layer_buffer": bytes_per_layer,
+                "total_requested_bytes": total_requested_bytes,
+                "allocated_before": allocated_before,
+                "allocated_after": allocated_after,
+            })
+        );
+
+        let arm_spec = |role: &str| -> (&str, bool, usize) {
+            match (mode.as_str(), role) {
+                ("dispatch", "A") => ("D0", false, n_pos),
+                ("dispatch", "B") => ("D1", true, n_pos),
+                ("overlap", "A") => ("D1", true, n_pos),
+                ("overlap", "B") => ("D2", true, prefix),
+                ("compact", "S") => ("D1", true, n_pos),
+                _ => panic!("invalid mode/role {mode}/{role}"),
+            }
+        };
+        let bank = |name: &str| -> &Bank {
+            match name {
+                "X" => &bank_x,
+                "Y" => &bank_y,
+                _ => panic!("invalid bank {name}"),
+            }
+        };
+        let run_role = |role: &str, bank_name: &str| -> (f64, f64) {
+            let (arm, compact, rows) = arm_spec(role);
+            if mode == "overlap" {
+                prep_overlap(&ctx, bank(bank_name), prefix, chunk, n_pos, kv_dim);
+            }
+            run_span(&ctx, bank(bank_name), arm, 0, rows, n_pos, kv_dim, compact)
+        };
+
+        let warmups: Vec<(&str, &str)> = match mode.as_str() {
+            "dispatch" => vec![("A", "X"), ("B", "Y"), ("A", "Y"), ("B", "X")],
+            "compact" => vec![("S", "X"), ("S", "Y")],
+            "overlap" => vec![("A", "X"), ("B", "Y"), ("A", "Y"), ("B", "X")],
+            _ => unreachable!(),
+        };
+        for (role, bank_name) in warmups {
+            let _ = run_role(role, bank_name);
+        }
+
+        let paired_schedule = [
+            [("A", "X"), ("B", "Y")],
+            [("B", "X"), ("A", "Y")],
+            [("B", "Y"), ("A", "X")],
+            [("A", "Y"), ("B", "X")],
+            [("A", "X"), ("B", "Y")],
+            [("B", "X"), ("A", "Y")],
+        ];
+        let single_banks = ["X", "Y", "Y", "X", "X", "Y"];
+
+        if mode == "compact" {
+            for (sample_idx, bank_name) in single_banks.iter().enumerate() {
+                let (wall_ms, gpu_ms) = run_role("S", bank_name);
+                let (arm, compact, rows) = arm_spec("S");
+                let logical_bytes = (N_LAYERS as u64)
+                    .checked_mul(kv_dim as u64)
+                    .and_then(|value| value.checked_mul(rows as u64))
+                    .and_then(|value| value.checked_mul(4))
+                    .unwrap();
+                let total = kv_dim.checked_mul(rows).unwrap();
+                let threadgroups = attn_matrix_vt_threadgroups(total, compact).unwrap();
+                println!(
+                    "VT_REBUILD_JSON {}",
+                    serde_json::json!({
+                        "kind": "arm",
+                        "schema_version": 2,
+                        "mode": mode,
+                        "prefix": prefix,
+                        "chunk": chunk,
+                        "sample": sample_idx + 1,
+                        "role": "S",
+                        "arm": arm,
+                        "bank": bank_name,
+                        "base_pos": 0,
+                        "rows": rows,
+                        "threadgroups_per_layer": threadgroups,
+                        "thread_slots_per_layer": threadgroups * ATTN_MATRIX_VT_THREADS,
+                        "logical_bytes": logical_bytes,
+                        "wall_ms": wall_ms,
+                        "gpu_ms": gpu_ms,
+                        "gb_s": logical_bytes as f64 / (gpu_ms * 1e6),
+                    })
+                );
+            }
+        } else {
+            for (pair_idx, pair) in paired_schedule.iter().enumerate() {
+                let order = format!("{}{}", pair[0].0, pair[1].0);
+                for (sequence_idx, &(role, bank_name)) in pair.iter().enumerate() {
+                    let (wall_ms, gpu_ms) = run_role(role, bank_name);
+                    let (arm, compact, rows) = arm_spec(role);
+                    let logical_bytes = (N_LAYERS as u64)
+                        .checked_mul(kv_dim as u64)
+                        .and_then(|value| value.checked_mul(rows as u64))
+                        .and_then(|value| value.checked_mul(4))
+                        .unwrap();
+                    let total = kv_dim.checked_mul(rows).unwrap();
+                    let threadgroups = attn_matrix_vt_threadgroups(total, compact).unwrap();
+                    println!(
+                        "VT_REBUILD_JSON {}",
+                        serde_json::json!({
+                            "kind": "arm",
+                            "schema_version": 2,
+                            "mode": mode,
+                            "prefix": prefix,
+                            "chunk": chunk,
+                            "pair": pair_idx + 1,
+                            "order": order,
+                            "sequence": sequence_idx + 1,
+                            "role": role,
+                            "arm": arm,
+                            "bank": bank_name,
+                            "base_pos": 0,
+                            "rows": rows,
+                            "threadgroups_per_layer": threadgroups,
+                            "thread_slots_per_layer": threadgroups * ATTN_MATRIX_VT_THREADS,
+                            "logical_bytes": logical_bytes,
+                            "wall_ms": wall_ms,
+                            "gpu_ms": gpu_ms,
+                            "gb_s": logical_bytes as f64 / (gpu_ms * 1e6),
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    /// Micro-oracle for the non-flash matrix-attention sidecar
+    /// (`kernel_attn_matrix_{transpose_v,kq,softmax,kqv}_f32`): the packed
+    /// prefill attention body. Previously this path had only end-to-end
+    /// coverage (27B G6 prefix gate + runtime packed oracle); this gate pins
+    /// the kernels in isolation against a CPU f64 reference across all four
+    /// production group shapes, full/edge tile geometries, and mid-sequence
+    /// `base_pos > 0` chunks (including the tiny-chunk/long-prefix shape).
+    ///
+    /// Also asserts `causal_skip` on/off produce bitwise-identical output:
+    /// skipped KQ tiles are exactly the rows the softmax zero-masks, and
+    /// skipped KQV K-tiles multiply exact-zero probs.
+    #[test]
+    fn attn_matrix_path_matches_cpu_reference() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let hd = 256usize;
+        // (n_q, n_kv): G4 small dense, G6 27B, G8 A3B, G16 A10B.
+        let shapes: &[(usize, usize)] = &[(8, 2), (24, 4), (16, 2), (32, 2)];
+        // (n_rows, base_pos); n_pos = base_pos + n_rows as in production
+        // (chunk attends to the whole prefix incl. itself).
+        //  - (32, 0): first chunk, n_pos < 64 → KQ edge tiles
+        //  - (64, 0): full 64-pos KQ tile; N edge depends on group
+        //  - (17, 47): odd everything (M/N edge tiles, base_pos > 0)
+        //  - (128, 896): full tiles, mid-sequence, n_pos = 1024
+        //  - (8, 1016): tiny chunk over long prefix (prefix-gate shape)
+        //  - (100, 156): n_pos = 256; N edge for G6/G4, full N for G8/G16
+        let cases: &[(usize, usize)] = &[
+            (32, 0),
+            (64, 0),
+            (17, 47),
+            (128, 896),
+            (8, 1016),
+            (100, 156),
+        ];
+
+        for &(n_q, n_kv) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            for &(n_rows, base_pos) in cases {
+                let n_pos = base_pos + n_rows;
+                let round16 = |x: f32| half::f16::from_f32(x).to_f32();
+                let q: Vec<f32> = (0..n_rows * n_q * hd)
+                    .map(|i| round16(((i % 31) as f32 - 15.0) * 1e-2 + ((i % 7) as f32) * 3e-3))
+                    .collect();
+                let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+                    .map(|i| round16(((i % 23) as f32 - 11.0) * 1.5e-2))
+                    .collect();
+                let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+                    .map(|i| round16(((i % 17) as f32 - 8.0) * 2e-2))
+                    .collect();
+
+                let q_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&q),
+                    vec![(n_rows * n_q * hd) as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+                let v_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+                for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                    let src_t = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(src_f32.as_slice()),
+                        vec![src_f32.len() as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    one_shot(&ctx, |enc| {
+                        encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                    })
+                    .unwrap();
+                }
+                let vt_stride = n_pos;
+                let v_t =
+                    MetalTensor::zeros_f16(&ctx, vec![(n_kv * hd * vt_stride) as u64]).unwrap();
+                let scores =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * n_rows * group * n_pos) as u64])
+                        .unwrap();
+                let out_t = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+
+                let run_path = |causal_skip: bool| -> Vec<f32> {
+                    one_shot(&ctx, |enc| {
+                        encode_attn_matrix_transpose_v_f16(
+                            &ctx, enc, &v_cache, &v_t, 0, n_pos, n_pos, kv_dim, vt_stride, n_kv, hd,
+                        )?;
+                        encode_attn_matrix_kq_f32(
+                            &ctx,
+                            enc,
+                            &q_t,
+                            &k_cache,
+                            &scores,
+                            n_rows,
+                            base_pos,
+                            n_pos,
+                            kv_dim,
+                            n_q,
+                            n_kv,
+                            group,
+                            hd,
+                            causal_skip,
+                        )?;
+                        encode_attn_matrix_softmax_f32(
+                            &ctx, enc, &scores, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
+                        )?;
+                        encode_attn_matrix_kqv_f32(
+                            &ctx,
+                            enc,
+                            &scores,
+                            &v_t,
+                            &out_t,
+                            n_rows,
+                            base_pos,
+                            n_pos,
+                            vt_stride,
+                            n_q,
+                            n_kv,
+                            group,
+                            hd,
+                            causal_skip,
+                        )
+                    })
+                    .unwrap();
+                    read_back_f32(&out_t.buffer, n_rows * n_q * hd)
+                };
+
+                let y_gpu = run_path(true);
+                let y_ref = cpu_matrix_attn_reference(
+                    &q, &k_f32, &v_f32, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
+                );
+
+                let max_abs = y_gpu
+                    .iter()
+                    .zip(y_ref.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                let dot: f64 = y_gpu
+                    .iter()
+                    .zip(y_ref.iter())
+                    .map(|(a, b)| (*a as f64) * (*b as f64))
+                    .sum();
+                let na: f64 = y_gpu
+                    .iter()
+                    .map(|x| (*x as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                let nb: f64 = y_ref
+                    .iter()
+                    .map(|x| (*x as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                let cos = dot / (na * nb);
+                eprintln!(
+                    "[matrix group={group:>2} n_rows={n_rows:>4} base={base_pos:>4} n_pos={n_pos:>4}] max|Δ|={max_abs:.2e}  cos={cos:.7}"
+                );
+                assert!(
+                    cos > 0.9999,
+                    "matrix path vs CPU ref cos too low (group={group} n_rows={n_rows} base={base_pos}): {cos}"
+                );
+                assert!(
+                    max_abs < 5e-3,
+                    "matrix path vs CPU ref max|Δ| too high (group={group} n_rows={n_rows} base={base_pos}): {max_abs}"
+                );
+
+                // causal_skip must be a pure perf feature: bitwise-identical out.
+                if matches!((n_rows, base_pos), (64, 0) | (8, 1016)) {
+                    let y_noskip = run_path(false);
+                    assert!(
+                        y_gpu == y_noskip,
+                        "causal_skip changed matrix attention output (group={group} n_rows={n_rows} base={base_pos})"
+                    );
+                }
+
+                // Two-pass online kernels: KQ folds the softmax into its
+                // epilogue (F16 P~ + (m,l) sidecar), KQV normalizes during
+                // staging. Must sit in the same envelope vs the CPU reference
+                // (the P~ half demotion mirrors the sidecar's half probs).
+                let scores_h_t =
+                    MetalTensor::zeros_f16(&ctx, vec![(n_kv * n_rows * group * n_pos) as u64])
+                        .unwrap();
+                let ml_t = MetalTensor::zeros_f32(
+                    &ctx,
+                    vec![attn_matrix_ml_elems(n_rows, n_q, n_pos) as u64],
+                )
+                .unwrap();
+                let fused_t =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_attn_matrix_kq_online_f32(
+                        &ctx,
+                        enc,
+                        &q_t,
+                        &k_cache,
+                        &scores_h_t,
+                        &ml_t,
+                        n_rows,
+                        base_pos,
+                        n_pos,
+                        kv_dim,
+                        n_q,
+                        n_kv,
+                        group,
+                        hd,
+                        true,
+                    )?;
+                    encode_attn_matrix_kqv_norm_f32(
+                        &ctx,
+                        enc,
+                        &scores_h_t,
+                        &ml_t,
+                        &v_t,
+                        &fused_t,
+                        n_rows,
+                        base_pos,
+                        n_pos,
+                        vt_stride,
+                        n_q,
+                        n_kv,
+                        group,
+                        hd,
+                        true,
+                    )
+                })
+                .unwrap();
+                let y_fused = read_back_f32(&fused_t.buffer, n_rows * n_q * hd);
+                let fmax_abs = y_fused
+                    .iter()
+                    .zip(y_ref.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                let fdot: f64 = y_fused
+                    .iter()
+                    .zip(y_ref.iter())
+                    .map(|(a, b)| (*a as f64) * (*b as f64))
+                    .sum();
+                let fna: f64 = y_fused
+                    .iter()
+                    .map(|x| (*x as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                let fcos = fdot / (fna * nb);
+                let gpu_max_abs = y_fused
+                    .iter()
+                    .zip(y_gpu.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                eprintln!(
+                    "[online group={group:>2} n_rows={n_rows:>4} base={base_pos:>4} n_pos={n_pos:>4}] max|Δ|={fmax_abs:.2e}  cos={fcos:.7}  vs3k|Δ|={gpu_max_abs:.2e}"
+                );
+                assert!(
+                    fcos > 0.9999,
+                    "online matrix attn vs CPU ref cos too low (group={group} n_rows={n_rows} base={base_pos}): {fcos}"
+                );
+                assert!(
+                    fmax_abs < 5e-3,
+                    "online matrix attn vs CPU ref max|Δ| too high (group={group} n_rows={n_rows} base={base_pos}): {fmax_abs}"
+                );
+                assert!(
+                    gpu_max_abs < 5e-3,
+                    "online vs 3-kernel matrix attn diverged (group={group} n_rows={n_rows} base={base_pos}): {gpu_max_abs}"
+                );
+
+                if (n_rows, base_pos) == (100, 156) {
+                    let query_cap = 32usize;
+                    let tiled_scores =
+                        MetalTensor::zeros_f16(&ctx, vec![(query_cap * n_q * n_pos) as u64])
+                            .unwrap();
+                    let tiled_ml = MetalTensor::zeros_f32(
+                        &ctx,
+                        vec![attn_matrix_ml_elems(query_cap, n_q, n_pos) as u64],
+                    )
+                    .unwrap();
+                    let tiled_out =
+                        MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+                    one_shot(&ctx, |enc| {
+                        for row_base in (0..n_rows).step_by(query_cap) {
+                            let rows_n = (n_rows - row_base).min(query_cap);
+                            let q_rows = q_t.view_subrange(
+                                (row_base * n_q * hd) as u64,
+                                vec![(rows_n * n_q * hd) as u64],
+                            );
+                            let out_rows = tiled_out.view_subrange(
+                                (row_base * n_q * hd) as u64,
+                                vec![(rows_n * n_q * hd) as u64],
+                            );
+                            let scores_rows =
+                                tiled_scores.view_subrange(0, vec![(rows_n * n_q * n_pos) as u64]);
+                            let ml_rows = tiled_ml.view_subrange(
+                                0,
+                                vec![attn_matrix_ml_elems(rows_n, n_q, n_pos) as u64],
+                            );
+                            let tile_base_pos = base_pos + row_base;
+                            encode_attn_matrix_kq_online_f32(
+                                &ctx,
+                                enc,
+                                &q_rows,
+                                &k_cache,
+                                &scores_rows,
+                                &ml_rows,
+                                rows_n,
+                                tile_base_pos,
+                                n_pos,
+                                kv_dim,
+                                n_q,
+                                n_kv,
+                                group,
+                                hd,
+                                true,
+                            )?;
+                            encode_attn_matrix_kqv_norm_f32(
+                                &ctx,
+                                enc,
+                                &scores_rows,
+                                &ml_rows,
+                                &v_t,
+                                &out_rows,
+                                rows_n,
+                                tile_base_pos,
+                                n_pos,
+                                vt_stride,
+                                n_q,
+                                n_kv,
+                                group,
+                                hd,
+                                true,
+                            )?;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                    let y_tiled = read_back_f32(&tiled_out.buffer, n_rows * n_q * hd);
+                    let tiled_max_abs = y_tiled
+                        .iter()
+                        .zip(y_fused.iter())
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0f32, f32::max);
+                    assert!(
+                        tiled_max_abs < 5e-5,
+                        concat!(
+                            "tiled vs untiled online attention diverged ",
+                            "(group={}): {}"
+                        ),
+                        group,
+                        tiled_max_abs
+                    );
+                }
+            }
+        }
+    }
+
+    /// Kill-gate microbench for the two-pass online-softmax matrix attention
+    /// kernels vs the three-kernel sidecar (KQ + softmax + KQV) at production
+    /// chunk shapes. The promotion bar is >= 1.2x on the summed sidecar time.
+    /// Vᵀ transpose/maintenance is excluded from both sides: both variants
+    /// consume the same Vᵀ sidecar, so its upkeep cancels.
+    ///
+    /// `cargo test -p qwen-llm --release attn_matrix_online_vs_sidecar_microbench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn attn_matrix_online_vs_sidecar_microbench() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let hd = 256usize;
+
+        fn timed_gpu<F>(ctx: &MetalContext, iters: usize, encode: F) -> f64
+        where
+            F: Fn(&KernelEncoder) -> Result<(), MetalError>,
+        {
+            let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+            let enc = KernelEncoder::begin(&cmd_buf);
+            for _ in 0..iters {
+                encode(&enc).unwrap();
+            }
+            enc.end();
+            let t0 = std::time::Instant::now();
+            cmd_buf.commit();
+            cmd_buf.waitUntilCompleted();
+            t0.elapsed().as_secs_f64() / iters as f64
+        }
+
+        // (n_q, n_kv, n_rows, n_pos, label)
+        let shapes: &[(usize, usize, usize, usize, &str)] = &[
+            (16, 2, 1024, 4096, "G8/A3B chunk@pp4096"),
+            (16, 2, 1024, 16384, "G8/A3B chunk@pp16384"),
+            (24, 4, 1024, 4096, "G6/27B chunk@pp4096"),
+            (24, 4, 1024, 16384, "G6/27B chunk@pp16384"),
+            (32, 2, 1024, 1024, "G16/A10B chunk@pp1024"),
+            (32, 2, 1024, 4096, "G16/A10B chunk@pp4096"),
+        ];
+
+        for &(n_q, n_kv, n_rows, n_pos, label) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            let base_pos = n_pos - n_rows;
+
+            let q: Vec<f32> = (0..n_rows * n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let kv_f32: Vec<f32> = (0..n_pos * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_rows * n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            for dst in [&k_cache, &v_cache] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(kv_f32.as_slice()),
+                    vec![kv_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, kv_f32.len())
+                })
+                .unwrap();
+            }
+            let vt_stride = n_pos;
+            let v_t = MetalTensor::zeros_f16(&ctx, vec![(n_kv * hd * vt_stride) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_matrix_transpose_v_f16(
+                    &ctx, enc, &v_cache, &v_t, 0, n_pos, n_pos, kv_dim, vt_stride, n_kv, hd,
+                )
+            })
+            .unwrap();
+            let scores =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * n_rows * group * n_pos) as u64]).unwrap();
+            let scores_h =
+                MetalTensor::zeros_f16(&ctx, vec![(n_kv * n_rows * group * n_pos) as u64]).unwrap();
+            let ml =
+                MetalTensor::zeros_f32(&ctx, vec![attn_matrix_ml_elems(n_rows, n_q, n_pos) as u64])
+                    .unwrap();
+            let out_3k = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+            let out_fused = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+
+            let encode_3k = |enc: &KernelEncoder| -> Result<(), MetalError> {
+                encode_attn_matrix_kq_f32(
+                    &ctx, enc, &q_t, &k_cache, &scores, n_rows, base_pos, n_pos, kv_dim, n_q, n_kv,
+                    group, hd, true,
+                )?;
+                encode_attn_matrix_softmax_f32(
+                    &ctx, enc, &scores, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
+                )?;
+                encode_attn_matrix_kqv_f32(
+                    &ctx, enc, &scores, &v_t, &out_3k, n_rows, base_pos, n_pos, vt_stride, n_q,
+                    n_kv, group, hd, true,
+                )
+            };
+            let encode_fused = |enc: &KernelEncoder| -> Result<(), MetalError> {
+                encode_attn_matrix_kq_online_f32(
+                    &ctx, enc, &q_t, &k_cache, &scores_h, &ml, n_rows, base_pos, n_pos, kv_dim,
+                    n_q, n_kv, group, hd, true,
+                )?;
+                encode_attn_matrix_kqv_norm_f32(
+                    &ctx, enc, &scores_h, &ml, &v_t, &out_fused, n_rows, base_pos, n_pos,
+                    vt_stride, n_q, n_kv, group, hd, true,
+                )
+            };
+
+            // Warmup + correctness spot at production size.
+            one_shot(&ctx, |enc| encode_3k(enc)).unwrap();
+            one_shot(&ctx, |enc| encode_fused(enc)).unwrap();
+            let y3k = read_back_f32(&out_3k.buffer, n_rows * n_q * hd);
+            let yfused = read_back_f32(&out_fused.buffer, n_rows * n_q * hd);
+            let max_abs = y3k
+                .iter()
+                .zip(yfused.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs < 5e-3,
+                "fused vs sidecar diverged at {label}: max|Δ|={max_abs}"
+            );
+
+            let iters = 8usize;
+            let mut t3k = f64::INFINITY;
+            let mut tfused = f64::INFINITY;
+            let mut tkq = f64::INFINITY;
+            let mut tsm = f64::INFINITY;
+            let mut tkqv = f64::INFINITY;
+            for _ in 0..3 {
+                t3k = t3k.min(timed_gpu(&ctx, iters, encode_3k));
+                tfused = tfused.min(timed_gpu(&ctx, iters, encode_fused));
+                tkq = tkq.min(timed_gpu(&ctx, iters, |enc| {
+                    encode_attn_matrix_kq_f32(
+                        &ctx, enc, &q_t, &k_cache, &scores, n_rows, base_pos, n_pos, kv_dim, n_q,
+                        n_kv, group, hd, true,
+                    )
+                }));
+                tsm = tsm.min(timed_gpu(&ctx, iters, |enc| {
+                    encode_attn_matrix_softmax_f32(
+                        &ctx, enc, &scores, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
+                    )
+                }));
+                tkqv = tkqv.min(timed_gpu(&ctx, iters, |enc| {
+                    encode_attn_matrix_kqv_f32(
+                        &ctx, enc, &scores, &v_t, &out_3k, n_rows, base_pos, n_pos, vt_stride, n_q,
+                        n_kv, group, hd, true,
+                    )
+                }));
+            }
+            eprintln!(
+                "[{label:>22}] 3k={:8.3} ms (kq={:.3} sm={:.3} kqv={:.3})  online2p={:8.3} ms  ratio={:.2}x  vs|Δ|={max_abs:.2e}",
+                t3k * 1e3,
+                tkq * 1e3,
+                tsm * 1e3,
+                tkqv * 1e3,
+                tfused * 1e3,
+                t3k / tfused
+            );
+        }
+    }
+
+    /// Focused correctness gate for the A3B group-8 long-context subgroup path.
+    ///
+    /// Run in a fresh process with one of:
+    ///
+    /// - `QWEN_ATTN_V4_G8_TILE=4 cargo test -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv --release -- --ignored --nocapture`
+    /// - `QWEN_ATTN_V4_G8_TILE=2 cargo test -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv --release -- --ignored --nocapture`
+    ///
+    /// The env var is intentionally process-global (`OnceLock`) so this test stays
+    /// ignored and single-purpose.
+    #[test]
+    #[ignore]
+    fn attn_v4_group8_subgroup_matches_naive_f16kv() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n_q = 16usize;
+        let n_kv = 2usize;
+        let hd = 256usize;
+        let kv_dim = n_kv * hd;
+        for &(n_pos, nwg, tile_c) in &[(4096usize, 64usize, 64usize), (6144, 64, 64)] {
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let cap = n_pos;
+            let k_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+
+            let y_naive_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_f16kv_f32(
+                    &ctx, enc, &q_t, &k_cache, &v_cache, &y_naive_t, n_q, n_kv, hd, n_pos,
+                )
+            })
+            .unwrap();
+            let y_naive = read_back_f32(&y_naive_t.buffer, n_q * hd);
+
+            let o_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * (n_q / n_kv) * hd) as u64])
+                    .unwrap();
+            let ml_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * (n_q / n_kv) * 2) as u64]).unwrap();
+            let y_v4_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    enc,
+                    &q_t,
+                    &k_cache,
+                    &v_cache,
+                    &o_partial,
+                    &ml_partial,
+                    &y_v4_t,
+                    n_q,
+                    n_kv,
+                    hd,
+                    n_pos,
+                    nwg,
+                    tile_c,
+                )
+            })
+            .unwrap();
+            let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
+            let max_abs = y_v4
+                .iter()
+                .zip(y_naive.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let dot: f64 = y_v4
+                .iter()
+                .zip(y_naive.iter())
+                .map(|(a, b)| (*a as f64) * (*b as f64))
+                .sum();
+            let na: f64 = y_v4.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            let nb: f64 = y_naive
+                .iter()
+                .map(|x| (*x as f64).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let cos = dot / (na * nb);
+            eprintln!(
+                "[v4-g8-subgroup n_pos={n_pos:>5} nwg={nwg:>2} C={tile_c:>2}] max|Δ|={max_abs:.2e} cos={cos:.6}"
+            );
+            assert!(
+                cos > 0.9999,
+                "group8 subgroup cos too low at n_pos={n_pos}: {cos}"
+            );
+            assert!(
+                max_abs < 5e-3,
+                "group8 subgroup max|Δ| too high at n_pos={n_pos}: {max_abs}"
+            );
+        }
+    }
+
+    /// Prompt-native packed-attention microproof for the A3B long-context shape.
+    ///
+    /// Compares the new packed multi-query microkernel against repeated
+    /// decode-shaped `attn_v4` calls using the same subgroup setting
+    /// (`g8_t2`) and the same F16 KV cache.
+    #[test]
+    #[ignore]
+    fn attn_v4_prefill_g8_t2_q2_c64_vs_decode_loop() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        const N_Q: usize = 16;
+        const N_KV: usize = 2;
+        const HD: usize = 256;
+        const N_ROWS: usize = 128;
+        const NWG: usize = 64;
+        const TILE_C: usize = 64;
+        let kv_dim = N_KV * HD;
+
+        for &base_pos in &[16384usize, 32768] {
+            let n_pos = base_pos + N_ROWS;
+            let q_rows: Vec<f32> = (0..N_ROWS * N_Q * HD)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q_rows),
+                vec![(N_ROWS * N_Q * HD) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+
+            let out_baseline =
+                MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * N_Q * HD) as u64]).unwrap();
+            let out_packed =
+                MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * N_Q * HD) as u64]).unwrap();
+            let o_partial_row =
+                MetalTensor::zeros_f32(&ctx, vec![(N_KV * NWG * (N_Q / N_KV) * HD) as u64])
+                    .unwrap();
+            let ml_partial_row =
+                MetalTensor::zeros_f32(&ctx, vec![(N_KV * NWG * (N_Q / N_KV) * 2) as u64]).unwrap();
+            let o_partial_packed = MetalTensor::zeros_f32(
+                &ctx,
+                vec![(N_ROWS * N_KV * NWG * (N_Q / N_KV) * HD) as u64],
+            )
+            .unwrap();
+            let ml_partial_packed =
+                MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * N_KV * NWG * (N_Q / N_KV) * 2) as u64])
+                    .unwrap();
+
+            let t = Instant::now();
+            with_attn_v4_group_tile_override(2, || {
+                one_shot(&ctx, |enc| {
+                    for row in 0..N_ROWS {
+                        let q_row =
+                            q_t.view_subrange((row * N_Q * HD) as u64, vec![(N_Q * HD) as u64]);
+                        let out_row = out_baseline
+                            .view_subrange((row * N_Q * HD) as u64, vec![(N_Q * HD) as u64]);
+                        encode_attn_decode_v4_f32(
+                            &ctx,
+                            enc,
+                            &q_row,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial_row,
+                            &ml_partial_row,
+                            &out_row,
+                            N_Q,
+                            N_KV,
+                            HD,
+                            base_pos + row + 1,
+                            NWG,
+                            TILE_C,
+                        )
+                        .unwrap();
+                    }
+                    Ok(())
+                })
+            })
+            .unwrap();
+            let baseline_wall = t.elapsed().as_secs_f64() * 1e3;
+
+            let t = Instant::now();
+            one_shot(&ctx, |enc| {
+                encode_attn_prefill_v4_g8_t2_q2_c64_f32(
+                    &ctx,
+                    enc,
+                    &q_t,
+                    &k_cache,
+                    &v_cache,
+                    &o_partial_packed,
+                    &ml_partial_packed,
+                    &out_packed,
+                    N_ROWS,
+                    base_pos,
+                    NWG,
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+            let packed_wall = t.elapsed().as_secs_f64() * 1e3;
+
+            let baseline = read_back_f32(&out_baseline.buffer, N_ROWS * N_Q * HD);
+            let packed = read_back_f32(&out_packed.buffer, N_ROWS * N_Q * HD);
+            let max_abs = packed
+                .iter()
+                .zip(baseline.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let dot: f64 = packed
+                .iter()
+                .zip(baseline.iter())
+                .map(|(a, b)| (*a as f64) * (*b as f64))
+                .sum();
+            let na: f64 = packed
+                .iter()
+                .map(|x| (*x as f64).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let nb: f64 = baseline
+                .iter()
+                .map(|x| (*x as f64).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let cos = dot / (na * nb);
+            eprintln!(
+                "[v4-prefill-a3b base_pos={base_pos:>5} rows={N_ROWS:>3}] decode_loop={baseline_wall:7.2} ms packed={packed_wall:7.2} ms speedup={:.3} max|Δ|={max_abs:.2e} cos={cos:.6}",
+                baseline_wall / packed_wall
+            );
+            assert!(
+                cos > 0.99999,
+                "prefill packed cos too low at base_pos={base_pos}: {cos}"
+            );
+            assert!(
+                max_abs < 2e-3,
+                "prefill packed max|Δ| too high at base_pos={base_pos}: {max_abs}"
+            );
+        }
+    }
+
+    /// Bench: sweep NWG (split-K count) across context lengths to discover
+    /// the optimal NWG for our shape on the host GPU. Compares against the
+    /// naive f16kv kernel.
+    ///
+    /// Run with: `cargo test --release --lib -p qwen-llm attn_v4_nwg_sweep
+    /// --ignored -- --nocapture`
+    #[test]
+    #[ignore]
+    fn attn_v4_nwg_sweep() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-bench] {}", ctx.describe());
+
+        let n_q = 24usize;
+        let n_kv = 4usize;
+        let hd = 256usize;
+        let kv_dim = n_kv * hd;
+        const GROUP: usize = 6;
+
+        let n_iters = 200usize; // chained dispatches per command buffer
+        let warmup = 20usize;
+
+        // Each context length we want to characterize.
+        // Past 16K we skip naive_f16kv (cap'd) and only run v4 NWG sweep.
+        for &n_pos in &[64usize, 256, 1024, 4096, 8192, 16384, 32768, 65536, 131072] {
+            let cap = n_pos.max(64);
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let k_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+
+            // ----- Naive f16kv baseline (skip if past tg-mem cap ~7000) -----
+            let naive_works = n_pos * std::mem::size_of::<f32>() <= 28 * 1024;
+            if naive_works {
+                let bench = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_f16kv_f32(
+                            &ctx, &enc, &q_t, &k_cache, &v_cache, &y_t, n_q, n_kv, hd, n_pos,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let wall = t.elapsed().as_secs_f64() * 1e3;
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[n_pos={n_pos:>5} {label}] {n}× chained: wall={wall:7.2} ms  gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+                // Warmup
+                bench("naive_f16kv_warmup", warmup);
+                bench("naive_f16kv       ", n_iters);
+            } else {
+                eprintln!("[n_pos={n_pos:>5} naive_f16kv       ] skipped (past tg-mem cap)");
+            }
+
+            // ----- v4: sweep NWG -----
+            for &nwg in &[1usize, 2, 4, 8, 16, 32] {
+                let o_partial =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * hd) as u64]).unwrap();
+                let ml_partial =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * 2) as u64]).unwrap();
+                let bench = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_f32(
+                            &ctx,
+                            &enc,
+                            &q_t,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial,
+                            &ml_partial,
+                            &y_t,
+                            n_q,
+                            n_kv,
+                            hd,
+                            n_pos,
+                            nwg,
+                            32, // tile_c — NWG sweep holds tile constant
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let wall = t.elapsed().as_secs_f64() * 1e3;
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[n_pos={n_pos:>5} {label} nwg={nwg:>2}] {n}× chained: wall={wall:7.2} ms  gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+                bench("v4_warmup           ", warmup);
+                bench("v4                  ", n_iters);
+            }
+            eprintln!();
+        }
+    }
+
+    /// Bench: sweep TILE-C (KV positions per inner softmax tile) at
+    /// production NWG settings. Per Codex's review, GQA-dedup raises
+    /// arithmetic intensity per K row, which may shift the optimal C
+    /// away from llama.cpp's vec-kernel default of 32.
+    ///
+    /// Run with: `cargo test --release --lib -p qwen-llm
+    /// attn_v4_tile_c_sweep -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn attn_v4_tile_c_sweep() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-c-sweep] {}", ctx.describe());
+
+        let n_q = 24usize;
+        let n_kv = 4usize;
+        let hd = 256usize;
+        let kv_dim = n_kv * hd;
+        const GROUP: usize = 6;
+
+        let n_iters = 200usize;
+        let warmup = 20usize;
+
+        // For each ctx, use the production NWG heuristic (16 below 256, 32 above).
+        for &n_pos in &[64usize, 256, 1024, 4096, 16384, 65536, 131072] {
+            let nwg = if n_pos < 256 { 16usize } else { 32usize };
+            let cap = n_pos.max(64);
+
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let k_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            let o_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * hd) as u64]).unwrap();
+            let ml_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * 2) as u64]).unwrap();
+
+            for &tile_c in &[16usize, 32, 64, 128] {
+                let bench = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_f32(
+                            &ctx,
+                            &enc,
+                            &q_t,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial,
+                            &ml_partial,
+                            &y_t,
+                            n_q,
+                            n_kv,
+                            hd,
+                            n_pos,
+                            nwg,
+                            tile_c,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let wall = t.elapsed().as_secs_f64() * 1e3;
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] {n}× chained: wall={wall:7.2} ms  gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+                bench("warmup", warmup);
+                bench("bench ", n_iters);
+            }
+            eprintln!();
+        }
+    }
+
+    /// Attn-v4 decode bandwidth audit (2026-08-22): synthetic session at a
+    /// large kv_n_pos, one `encode_attn_decode_v4_f32` call, kernel timing
+    /// only. Reports achieved GB/s against the 474 GB/s stream so the
+    /// long-context attention anomaly (serial ~130 GB/s, verify ~80 GB/s at
+    /// 130K) can be attributed. Sweep with env:
+    /// QWEN_ATTN_AUDIT_CTX (default 131072), QWEN_ATTN_AUDIT_MODEL
+    /// (default Qwen3.8-27B-Q8_0), QWEN_ATTN_V4_NWG, QWEN_ATTN_V4_TILE_C.
+    #[test]
+    #[ignore = "slow real-model GPU audit; run explicitly"]
+    fn attn_decode_v4_bandwidth_audit_130k() {
+        let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.8-27B-Q8_0.gguf".into());
+        if !std::path::Path::new(&model_path).exists() {
+            eprintln!("[attn-audit] skipped — model missing");
+            return;
+        }
+        let n_pos: usize = std::env::var("QWEN_ATTN_AUDIT_CTX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(131_072);
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&model_path).expect("open model");
+        let m = crate::loader::Model::from_gguf(&g).expect("load model");
+        let mm = crate::metal_forward::MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mut sess =
+            crate::metal_forward::MetalSession::fresh(&ctx, &mm, n_pos + 16).expect("session");
+        for kp in sess.kv_n_pos.iter_mut() {
+            *kp = n_pos;
+        }
+        fill_audit_f16(&sess.kv_k[0], 1);
+        fill_audit_f16(&sess.kv_v[0], 2);
+        let arch = &m.arch;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_q = arch.n_q_heads as usize;
+        let n_kv = arch.n_kv_heads as usize;
+        let group = n_q / n_kv;
+        if head_dim != 256 || !matches!(group, 4 | 6 | 8 | 16) {
+            eprintln!("[attn-audit] skipped — unsupported shape");
+            return;
+        }
+        let nwg = crate::metal::attn_v4_choose_nwg(n_pos, group);
+        let tile_c = crate::metal::attn_v4_choose_tile_c(n_pos, group);
+        let q = MetalTensor::zeros_f32(&ctx, vec![(n_q * head_dim) as u64]).expect("q");
+        let attn_o = MetalTensor::zeros_f32(&ctx, vec![(n_q * head_dim) as u64]).expect("o");
+        let cmd = ctx.queue.commandBuffer().expect("cmd");
+        let enc = KernelEncoder::begin(&cmd);
+        encode_attn_decode_v4_f32(
+            &ctx,
+            &enc,
+            &q,
+            &sess.kv_k[0],
+            &sess.kv_v[0],
+            &sess.attn_v4_o_partial,
+            &sess.attn_v4_ml_partial,
+            &attn_o,
+            n_q,
+            n_kv,
+            head_dim,
+            n_pos,
+            nwg,
+            tile_c,
+        )
+        .expect("encode attn v4");
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+        let bytes = n_pos as f64 * (n_kv * head_dim * 2) as f64 * 2.0;
+        let gbps = bytes / 1e9 / (ms / 1e3);
+        eprintln!(
+            "[attn-audit] ctx={n_pos} group={group} nwg={nwg} tile_c={tile_c} gpu_ms={ms:.3} gb={:.2} gbps={gbps:.1}",
+            bytes / 1e9
+        );
+    }
+}

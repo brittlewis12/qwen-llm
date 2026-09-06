@@ -6061,3 +6061,2686 @@ pub fn encode_moe_route_bucket_slots_f32(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metal::test_support::*;
+
+    #[test]
+    #[ignore]
+    fn mxfp4_f32_matrix_tile_k216_n4096_all_expert_floor() {
+        run_mxfp4_f32_matrix_tile_k216_bucket_floor(24_576, [216; 2], 114, 600.0, 600.0, 0.75);
+    }
+
+    #[test]
+    fn mat_mat_f32_router_e8p32_strict_matches_generic_bits() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let n_in = 4096usize;
+        let n_out = 160usize;
+        let mut state = 0x8b8b_8b8b_u32;
+        let mut sample = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 * (1.0 / 16_777_216.0) - 0.5) * 0.25
+        };
+        let weight = (0..n_in * n_out).map(|_| sample()).collect::<Vec<_>>();
+        let weight_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&weight),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::F32,
+        )
+        .expect("weight tensor");
+        let short_weight = MetalTensor::zeros_f32(&ctx, vec![(n_in * n_out - 1) as u64])
+            .expect("short weight tensor");
+        let validation_x =
+            MetalTensor::zeros_f32(&ctx, vec![n_in as u64]).expect("validation input");
+        let validation_y =
+            MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("validation output");
+        let command = ctx.queue.commandBuffer().expect("validation command");
+        let encoder = KernelEncoder::begin(&command);
+        assert!(
+            encode_mat_mat_f32_router_e8p32_strict(
+                &ctx,
+                &encoder,
+                &short_weight,
+                &validation_x,
+                &validation_y,
+                n_in,
+                n_out,
+                1,
+            )
+            .is_err()
+        );
+        encoder.end();
+
+        for n_query in [1usize, 32, 128, 512, 2048, 4096] {
+            let x = (0..n_in * n_query).map(|_| sample()).collect::<Vec<_>>();
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n_query as u64, n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("input tensor");
+            let generic = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64])
+                .expect("generic output");
+            let strict = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64])
+                .expect("strict output");
+            one_shot(&ctx, |enc| {
+                encode_mat_mat_f32(&ctx, enc, &weight_t, &x_t, &generic, n_in, n_out, n_query)?;
+                encode_mat_mat_f32_router_e8p32_strict(
+                    &ctx, enc, &weight_t, &x_t, &strict, n_in, n_out, n_query,
+                )
+            })
+            .expect("router differential");
+
+            let generic = read_back_f32(&generic.buffer, n_out * n_query);
+            let strict = read_back_f32(&strict.buffer, n_out * n_query);
+            if let Some((index, (expected, actual))) = generic
+                .iter()
+                .zip(&strict)
+                .enumerate()
+                .find(|(_, (expected, actual))| expected.to_bits() != actual.to_bits())
+            {
+                panic!(
+                    "n_query={n_query} output {index} differs: generic={expected:?} strict={actual:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn moe_grouped_finalizer_matches_cpu() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let n_out = 512usize;
+        let topk = 4usize;
+        let n_tokens = 2usize;
+        let expert_out: Vec<f32> = (0..n_tokens * topk * n_out)
+            .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+            .collect();
+        let weights: Vec<f32> = (0..n_tokens * topk)
+            .map(|i| 0.1 + (i % topk) as f32 * 0.1)
+            .collect();
+        let shared_gate = vec![0.65f32, 0.35];
+        let shared_out: Vec<f32> = (0..n_tokens * n_out)
+            .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+            .collect();
+        let x_init: Vec<f32> = (0..n_tokens * n_out)
+            .map(|i| ((i % 13) as f32 - 6.0) * 3e-2)
+            .collect();
+        let expected: Vec<f32> = (0..n_tokens * n_out)
+            .map(|i| {
+                let token = i / n_out;
+                let routed: f32 = (0..topk)
+                    .map(|slot| {
+                        weights[token * topk + slot]
+                            * expert_out[(token * topk + slot) * n_out + i % n_out]
+                    })
+                    .sum();
+                x_init[i] + routed + shared_gate[token] * shared_out[i]
+            })
+            .collect();
+
+        let expert_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&expert_out),
+            vec![(n_tokens * topk * n_out) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let weights_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&weights),
+            vec![(n_tokens * topk) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let gate_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&shared_gate),
+            vec![n_tokens as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let shared_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&shared_out),
+            vec![(n_tokens * n_out) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x_init),
+            vec![(n_tokens * n_out) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(&ctx, |enc| {
+            encode_moe_grouped_finalizer_f32(
+                &ctx, enc, &expert_t, &weights_t, &gate_t, &shared_t, &x_t, n_out, topk, n_tokens,
+            )
+        })
+        .unwrap();
+        let gpu = read_back_f32(&x_t.buffer, n_tokens * n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(expected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(max_abs < 1e-6, "grouped finalizer drift {max_abs}");
+    }
+
+    #[test]
+    fn moe_iq4_decode_matches_cpu_at_flash_next_geometry() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        run_iq4_moe_decode_case(&ctx, 2_560, 640, 2_560, 2, &[1, 0]);
+    }
+
+    #[test]
+    fn moe_iq4_decode_addresses_all_512_experts_and_odd_output_tail() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        run_iq4_moe_decode_case(&ctx, 256, 32, 65, 512, &[511, 257, 0]);
+    }
+
+    #[test]
+    fn moe_iq4_decode_rejects_unsafe_tensor_contracts() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_IN: usize = 256;
+        const N_FFN: usize = 32;
+        const N_HIDDEN: usize = 65;
+        const N_EXPERT: usize = 2;
+        let gate_bytes = synthetic_iq4_xs_bank(N_IN, N_FFN, N_EXPERT, 17);
+        let up_bytes = synthetic_iq4_xs_bank(N_IN, N_FFN, N_EXPERT, 31);
+        let down_bytes = synthetic_iq4_nl_bank(N_FFN, N_HIDDEN, N_EXPERT, 47);
+        let gate = MetalTensor::from_bytes(
+            &ctx,
+            &gate_bytes,
+            vec![N_IN as u64, N_FFN as u64, N_EXPERT as u64],
+            GgmlType::IQ4_XS,
+        )
+        .unwrap();
+        let up = MetalTensor::from_bytes(
+            &ctx,
+            &up_bytes,
+            vec![N_IN as u64, N_FFN as u64, N_EXPERT as u64],
+            GgmlType::IQ4_XS,
+        )
+        .unwrap();
+        let down = MetalTensor::from_bytes(
+            &ctx,
+            &down_bytes,
+            vec![N_FFN as u64, N_HIDDEN as u64, N_EXPERT as u64],
+            GgmlType::IQ4_NL,
+        )
+        .unwrap();
+        let input = MetalTensor::zeros_f32(&ctx, vec![N_IN as u64]).unwrap();
+        let indices =
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&[0i32]), vec![1], GgmlType::I32)
+                .unwrap();
+        let inner = MetalTensor::zeros_f32(&ctx, vec![N_FFN as u64]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![N_HIDDEN as u64]).unwrap();
+        let half_input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![half::f16::ZERO; N_IN]),
+            vec![N_IN as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let half_indices = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[half::f16::ZERO]),
+            vec![1],
+            GgmlType::F16,
+        )
+        .unwrap();
+
+        let command = ctx.queue.commandBuffer().expect("validation command");
+        let encoder = KernelEncoder::begin(&command);
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &half_input,
+                &indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &input,
+                &half_indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let mut read_only_inner = inner.clone();
+        read_only_inner.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &input,
+                &indices,
+                &read_only_inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let mut short_input = input.clone();
+        short_input.offset = 4;
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &short_input,
+                &indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let mut misaligned_gate = gate.clone();
+        misaligned_gate.offset = 1;
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &misaligned_gate,
+                &up,
+                &input,
+                &indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let overflow_dimension = u32::MAX as usize - 255;
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &input,
+                &indices,
+                &inner,
+                overflow_dimension,
+                overflow_dimension,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            encode_moe_swiglu_iq4_xs_f32(
+                &ctx,
+                &encoder,
+                &gate,
+                &up,
+                &input,
+                &indices,
+                &inner,
+                N_IN,
+                N_FFN,
+                N_EXPERT,
+                N_EXPERT + 1,
+            )
+            .is_err()
+        );
+
+        let mut read_only_output = output.clone();
+        read_only_output.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        assert!(
+            encode_moe_down_iq4_nl_f32(
+                &ctx,
+                &encoder,
+                &down,
+                &inner,
+                &indices,
+                &read_only_output,
+                N_FFN,
+                N_HIDDEN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let padded_inner = MetalTensor::zeros_f32(&ctx, vec![(N_FFN + 1) as u64]).unwrap();
+        let misaligned_inner = padded_inner.view_subrange(1, vec![N_FFN as u64]);
+        assert!(
+            encode_moe_down_iq4_nl_f32_fast(
+                &ctx,
+                &encoder,
+                &down,
+                &misaligned_inner,
+                &indices,
+                &output,
+                N_FFN,
+                N_HIDDEN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        let mut short_down = down.clone();
+        short_down.offset = 2;
+        assert!(
+            encode_moe_down_iq4_nl_f32(
+                &ctx,
+                &encoder,
+                &short_down,
+                &inner,
+                &indices,
+                &output,
+                N_FFN,
+                N_HIDDEN,
+                N_EXPERT,
+                1,
+            )
+            .is_err()
+        );
+        encoder.end();
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_mat_vec_iq3_xxs_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q3_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE gate tensor");
+        let n_in = t.shape[0] as usize;
+        let n_out = t.shape[1] as usize;
+        let n_expert = t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let row_stride = (n_in / 256) * 98;
+        let expert_stride = n_out * row_stride;
+        let all_bytes = g.slice(t);
+        let expert_bytes = &all_bytes[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_gate_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_out as u64],
+            dtype: GgmlType::IQ3_XXS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_bytes.len() as u64,
+        };
+        let w_f32 = crate::codec::dequant_to_f32(&expert_desc, expert_bytes).expect("dequant");
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.0075)
+            .collect();
+        let cpu = crate::forward::mat_vec_pub(&w_f32, n_in, n_out, &x);
+
+        let w_t = MetalTensor::from_gguf_tensor(&ctx, t, all_bytes).expect("native weight");
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let expert_i = expert as i32;
+        let topk_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert_i]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let out_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_mat_vec_iq3_xxs_f32(
+                &ctx, enc, &w_t, &x_t, &topk_t, &out_t, n_in, n_out, n_expert, 1,
+            )
+        })
+        .expect("gpu iq3 matvec");
+        let gpu = read_back_f32(&out_t.buffer, n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[moe-iq3-oracle] max|delta|={max_abs:.3e}");
+        assert!(max_abs < 2e-4, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_swiglu_iq3_xxs_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q3_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3-direct-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let row_stride = (n_in / 256) * 98;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let up_expert_bytes = &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::IQ3_XXS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, &x);
+        let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, &x);
+        let mut cpu = vec![0.0f32; n_ffn];
+        for i in 0..n_ffn {
+            let g = gate[i];
+            cpu[i] = (g / (1.0 + (-g).exp())) * up[i];
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let expert_i = expert as i32;
+        let topk_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert_i]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let out_gpu = MetalTensor::zeros_f32(&ctx, vec![n_ffn as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_xxs_f32(
+                &ctx, enc, &gate_gpu, &up_gpu, &x_gpu, &topk_gpu, &out_gpu, n_in, n_ffn, n_expert,
+                1,
+            )
+        })
+        .expect("gpu direct iq3 swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3-direct-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+
+        let out_fast_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![n_ffn as u64]).expect("fast out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_xxs_f32_fast(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &topk_gpu,
+                &out_fast_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                1,
+            )
+        })
+        .expect("gpu fast direct iq3 swiglu");
+        let fast = read_back_f32(&out_fast_gpu.buffer, n_ffn);
+        let fast_max_abs = fast
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let fast_dot: f64 = fast
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let nf: f64 = fast.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let fast_cos = fast_dot / (nf.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3-fast-swiglu-oracle] cos={fast_cos:.6} max|delta|={fast_max_abs:.3e}");
+        assert!(fast_cos > 0.999, "fast cos={fast_cos}");
+        assert!(fast_max_abs < 2e-2, "fast max|delta|={fast_max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_grouped_swiglu_iq3_xxs_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q3_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let n_tokens = 32usize;
+        let topk = 1usize;
+        let row_stride = (n_in / 256) * 98;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let up_expert_bytes = &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::IQ3_XXS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+        let x: Vec<f32> = (0..n_tokens * n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let mut cpu = vec![0.0f32; n_tokens * n_ffn];
+        for token in 0..n_tokens {
+            let x_tok = &x[token * n_in..(token + 1) * n_in];
+            let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, x_tok);
+            let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, x_tok);
+            for i in 0..n_ffn {
+                let g = gate[i];
+                cpu[token * n_ffn + i] = (g / (1.0 + (-g).exp())) * up[i];
+            }
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_tokens * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let mut counts = vec![0i32; n_expert];
+        counts[expert] = n_tokens as i32;
+        let mut ids = vec![0i32; n_expert * n_tokens];
+        for token in 0..n_tokens {
+            ids[expert * n_tokens + token] = token as i32;
+        }
+        let counts_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&counts),
+            vec![n_expert as u64],
+            GgmlType::F32,
+        )
+        .expect("counts tensor");
+        let ids_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![(n_expert * n_tokens) as u64],
+            GgmlType::F32,
+        )
+        .expect("ids tensor");
+        let out_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_ffn) as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &counts_gpu,
+                &ids_gpu,
+                &out_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                topk,
+                n_tokens,
+            )
+        })
+        .expect("gpu grouped iq3 swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_mat_vec_iq3_s_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3s-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_S)
+            .expect("missing IQ3_S MoE gate tensor");
+        let n_in = t.shape[0] as usize;
+        let n_out = t.shape[1] as usize;
+        let n_expert = t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let row_stride = (n_in / 256) * 110;
+        let expert_stride = n_out * row_stride;
+        let all_bytes = g.slice(t);
+        let expert_bytes = &all_bytes[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_gate_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_out as u64],
+            dtype: GgmlType::IQ3_S,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_bytes.len() as u64,
+        };
+        let w_f32 = crate::codec::dequant_to_f32(&expert_desc, expert_bytes).expect("dequant");
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.0075)
+            .collect();
+        let cpu = crate::forward::mat_vec_pub(&w_f32, n_in, n_out, &x);
+
+        let w_t = MetalTensor::from_gguf_tensor(&ctx, t, all_bytes).expect("native weight");
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let expert_i = expert as i32;
+        let topk_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert_i]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let out_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_mat_vec_iq3_s_f32(
+                &ctx, enc, &w_t, &x_t, &topk_t, &out_t, n_in, n_out, n_expert, 1,
+            )
+        })
+        .expect("gpu iq3s matvec");
+        let gpu = read_back_f32(&out_t.buffer, n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[moe-iq3s-oracle] max|delta|={max_abs:.3e}");
+        assert!(max_abs < 2e-4, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_swiglu_iq3_s_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3s-direct-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_S)
+            .expect("missing IQ3_S MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::IQ3_S)
+            .expect("missing IQ3_S MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let row_stride = (n_in / 256) * 110;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let up_expert_bytes = &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::IQ3_S,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, &x);
+        let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, &x);
+        let mut cpu = vec![0.0f32; n_ffn];
+        for i in 0..n_ffn {
+            let g = gate[i];
+            cpu[i] = (g / (1.0 + (-g).exp())) * up[i];
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let expert_i = expert as i32;
+        let topk_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert_i]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let out_gpu = MetalTensor::zeros_f32(&ctx, vec![n_ffn as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_s_f32(
+                &ctx, enc, &gate_gpu, &up_gpu, &x_gpu, &topk_gpu, &out_gpu, n_in, n_ffn, n_expert,
+                1,
+            )
+        })
+        .expect("gpu direct iq3s swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3s-direct-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+
+        let out_fast_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![n_ffn as u64]).expect("fast out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_s_f32_fast(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &topk_gpu,
+                &out_fast_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                1,
+            )
+        })
+        .expect("gpu fast direct iq3s swiglu");
+        let fast = read_back_f32(&out_fast_gpu.buffer, n_ffn);
+        let fast_max_abs = fast
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let fast_dot: f64 = fast
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let nf: f64 = fast.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let fast_cos = fast_dot / (nf.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3s-fast-swiglu-oracle] cos={fast_cos:.6} max|delta|={fast_max_abs:.3e}");
+        assert!(fast_cos > 0.999, "fast cos={fast_cos}");
+        assert!(fast_max_abs < 2e-2, "fast max|delta|={fast_max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_grouped_swiglu_iq3_s_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3s-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_S)
+            .expect("missing IQ3_S MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::IQ3_S)
+            .expect("missing IQ3_S MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let n_tokens = 32usize;
+        let topk = 1usize;
+        let row_stride = (n_in / 256) * 110;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let up_expert_bytes = &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::IQ3_S,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+        let x: Vec<f32> = (0..n_tokens * n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let mut cpu = vec![0.0f32; n_tokens * n_ffn];
+        for token in 0..n_tokens {
+            let x_tok = &x[token * n_in..(token + 1) * n_in];
+            let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, x_tok);
+            let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, x_tok);
+            for i in 0..n_ffn {
+                let g = gate[i];
+                cpu[token * n_ffn + i] = (g / (1.0 + (-g).exp())) * up[i];
+            }
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_tokens * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let mut counts = vec![0i32; n_expert];
+        counts[expert] = n_tokens as i32;
+        let mut ids = vec![0i32; n_expert * n_tokens];
+        for token in 0..n_tokens {
+            ids[expert * n_tokens + token] = token as i32;
+        }
+        let counts_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&counts),
+            vec![n_expert as u64],
+            GgmlType::F32,
+        )
+        .expect("counts tensor");
+        let ids_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![(n_expert * n_tokens) as u64],
+            GgmlType::F32,
+        )
+        .expect("ids tensor");
+        let out_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_ffn) as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_s_f32_grouped_slots_n16(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &counts_gpu,
+                &ids_gpu,
+                &out_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                topk,
+                n_tokens,
+            )
+        })
+        .expect("gpu grouped iq3s swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3s-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_grouped_down_iq4_xs_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq4xs-down-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let down_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_down_exps.weight" && t.dtype == GgmlType::IQ4_XS)
+            .expect("missing IQ4_XS MoE down tensor");
+        let n_in = down_t.shape[0] as usize;
+        let n_out = down_t.shape[1] as usize;
+        let n_expert = down_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let n_tokens = 32usize;
+        let row_stride = (n_in / 256) * 136;
+        let expert_stride = n_out * row_stride;
+        let down_bytes_all = g.slice(down_t);
+        let down_expert_bytes =
+            &down_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_down_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_out as u64],
+            dtype: GgmlType::IQ4_XS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let down_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, down_expert_bytes).expect("down dequant");
+        let x: Vec<f32> = (0..n_tokens * n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let mut cpu = vec![0.0f32; n_tokens * n_out];
+        for token in 0..n_tokens {
+            let x_tok = &x[token * n_in..(token + 1) * n_in];
+            let y = crate::forward::mat_vec_pub(&down_f32, n_in, n_out, x_tok);
+            cpu[token * n_out..(token + 1) * n_out].copy_from_slice(&y);
+        }
+
+        let down_gpu = MetalTensor::from_gguf_tensor(&ctx, down_t, down_bytes_all).expect("down");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_tokens * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let mut counts = vec![0i32; n_expert];
+        counts[expert] = n_tokens as i32;
+        let mut ids = vec![0i32; n_expert * n_tokens];
+        for token in 0..n_tokens {
+            ids[expert * n_tokens + token] = token as i32;
+        }
+        let counts_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&counts),
+            vec![n_expert as u64],
+            GgmlType::F32,
+        )
+        .expect("counts tensor");
+        let ids_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![(n_expert * n_tokens) as u64],
+            GgmlType::F32,
+        )
+        .expect("ids tensor");
+        let out_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_out) as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_down_iq4_xs_f32_grouped_slots(
+                &ctx,
+                enc,
+                &down_gpu,
+                &x_gpu,
+                &counts_gpu,
+                &ids_gpu,
+                &out_gpu,
+                n_in,
+                n_out,
+                n_expert,
+                n_tokens,
+            )
+        })
+        .expect("gpu grouped iq4xs down");
+        let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq4xs-down-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+
+        let topk_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert as i32]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let x_one = x_gpu.view_subrange(0, vec![n_in as u64]);
+        let out_fast_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("fast out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_down_iq4_xs_f32_fast(
+                &ctx,
+                enc,
+                &down_gpu,
+                &x_one,
+                &topk_gpu,
+                &out_fast_gpu,
+                n_in,
+                n_out,
+                n_expert,
+                1,
+            )
+        })
+        .expect("gpu fast iq4xs down");
+        let fast = read_back_f32(&out_fast_gpu.buffer, n_out);
+        let fast_max_abs = fast
+            .iter()
+            .zip(cpu[..n_out].iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let fast_dot: f64 = fast
+            .iter()
+            .zip(cpu[..n_out].iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let nf: f64 = fast.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc_fast: f64 = cpu[..n_out].iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let fast_cos = fast_dot / (nf.sqrt() * nc_fast.sqrt()).max(1e-12);
+        eprintln!("[moe-iq4xs-fast-down-oracle] cos={fast_cos:.6} max|delta|={fast_max_abs:.3e}");
+        assert!(fast_cos > 0.999, "fast cos={fast_cos}");
+        assert!(fast_max_abs < 2e-2, "fast max|delta|={fast_max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_swiglu_q6_k_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q6_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q6_K.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-q6-direct-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::Q6_K)
+            .expect("missing Q6_K MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::Q6_K)
+            .expect("missing Q6_K MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let topk = 2usize;
+        let experts = [7usize.min(n_expert - 1), n_expert - 1];
+        let row_stride = (n_in / 256) * 210;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let mut cpu = vec![0.0f32; topk * n_ffn];
+        for (slot, expert) in experts.iter().copied().enumerate() {
+            let gate_expert_bytes =
+                &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+            let up_expert_bytes =
+                &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+            let expert_desc = crate::tensor::TensorDesc {
+                name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+                shape: vec![n_in as u64, n_ffn as u64],
+                dtype: GgmlType::Q6_K,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: expert_stride as u64,
+            };
+            let gate_f32 = crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes)
+                .expect("gate dequant");
+            let up_f32 =
+                crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+            let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, &x);
+            let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, &x);
+            for i in 0..n_ffn {
+                let g = gate[i];
+                cpu[slot * n_ffn + i] = (g / (1.0 + (-g).exp())) * up[i];
+            }
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let topk_i32 = [experts[0] as i32, experts[1] as i32];
+        let topk_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&topk_i32),
+            vec![topk as u64],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let out_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(topk * n_ffn) as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_q6_K_f32(
+                &ctx, enc, &gate_gpu, &up_gpu, &x_gpu, &topk_gpu, &out_gpu, n_in, n_ffn, n_expert,
+                topk,
+            )
+        })
+        .expect("gpu direct q6 swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, topk * n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-q6-direct-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_grouped_swiglu_q6_k_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q6_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q6_K.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-q6-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::Q6_K)
+            .expect("missing Q6_K MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::Q6_K)
+            .expect("missing Q6_K MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let n_tokens = 16usize;
+        let topk = 1usize;
+        let row_stride = (n_in / 256) * 210;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let up_expert_bytes = &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::Q6_K,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+        let x: Vec<f32> = (0..n_tokens * n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let mut cpu = vec![0.0f32; n_tokens * n_ffn];
+        for token in 0..n_tokens {
+            let x_tok = &x[token * n_in..(token + 1) * n_in];
+            let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, x_tok);
+            let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, x_tok);
+            for i in 0..n_ffn {
+                let g = gate[i];
+                cpu[token * n_ffn + i] = (g / (1.0 + (-g).exp())) * up[i];
+            }
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_tokens * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let mut counts = vec![0i32; n_expert];
+        counts[expert] = n_tokens as i32;
+        let mut ids = vec![0i32; n_expert * n_tokens];
+        for token in 0..n_tokens {
+            ids[expert * n_tokens + token] = token as i32;
+        }
+        let counts_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&counts),
+            vec![n_expert as u64],
+            GgmlType::F32,
+        )
+        .expect("counts tensor");
+        let ids_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![(n_expert * n_tokens) as u64],
+            GgmlType::F32,
+        )
+        .expect("ids tensor");
+        let out_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_ffn) as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_q6_K_f32_grouped_slots_n16(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &counts_gpu,
+                &ids_gpu,
+                &out_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                topk,
+                n_tokens,
+            )
+        })
+        .expect("gpu grouped q6 swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-q6-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_q8_0_swiglu_down_weighted_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q8_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q8_0.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-q8-direct-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::Q8_0)
+            .expect("missing Q8_0 MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::Q8_0)
+            .expect("missing Q8_0 MoE up tensor");
+        let down_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_down_exps.weight" && t.dtype == GgmlType::Q8_0)
+            .expect("missing Q8_0 MoE down tensor");
+
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let h = down_t.shape[1] as usize;
+        let experts = [7usize.min(n_expert - 1), n_expert - 1];
+        let topk = experts.len();
+        let top_w = [0.35f32, 0.65f32];
+        let gate_row_stride = (n_in / 32) * 34;
+        let gate_expert_stride = n_ffn * gate_row_stride;
+        let down_row_stride = (n_ffn / 32) * 34;
+        let down_expert_stride = h * down_row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let down_bytes_all = g.slice(down_t);
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let gate_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_gate_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::Q8_0,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: gate_expert_stride as u64,
+        };
+        let down_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_down_exps.weight.expert_oracle".into(),
+            shape: vec![n_ffn as u64, h as u64],
+            dtype: GgmlType::Q8_0,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: down_expert_stride as u64,
+        };
+        let mut cpu_inner = vec![0.0f32; topk * n_ffn];
+        let mut cpu_down = vec![0.0f32; h];
+        for (slot, expert) in experts.iter().copied().enumerate() {
+            let gate_expert_bytes =
+                &gate_bytes_all[expert * gate_expert_stride..(expert + 1) * gate_expert_stride];
+            let up_expert_bytes =
+                &up_bytes_all[expert * gate_expert_stride..(expert + 1) * gate_expert_stride];
+            let down_expert_bytes =
+                &down_bytes_all[expert * down_expert_stride..(expert + 1) * down_expert_stride];
+            let gate_f32 =
+                crate::codec::dequant_to_f32(&gate_desc, gate_expert_bytes).expect("gate dequant");
+            let up_f32 =
+                crate::codec::dequant_to_f32(&gate_desc, up_expert_bytes).expect("up dequant");
+            let down_f32 =
+                crate::codec::dequant_to_f32(&down_desc, down_expert_bytes).expect("down dequant");
+            let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, &x);
+            let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, &x);
+            for i in 0..n_ffn {
+                let g = gate[i];
+                cpu_inner[slot * n_ffn + i] = (g / (1.0 + (-g).exp())) * up[i];
+            }
+            let down = crate::forward::mat_vec_pub(
+                &down_f32,
+                n_ffn,
+                h,
+                &cpu_inner[slot * n_ffn..(slot + 1) * n_ffn],
+            );
+            for i in 0..h {
+                cpu_down[i] += top_w[slot] * down[i];
+            }
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let down_gpu = MetalTensor::from_gguf_tensor(&ctx, down_t, down_bytes_all).expect("down");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let topk_i32 = [experts[0] as i32, experts[1] as i32];
+        let topk_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&topk_i32),
+            vec![topk as u64],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let topw_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&top_w),
+            vec![topk as u64],
+            GgmlType::F32,
+        )
+        .expect("top weights tensor");
+        let inner_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(topk * n_ffn) as u64]).expect("inner tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_q8_0_f32(
+                &ctx, enc, &gate_gpu, &up_gpu, &x_gpu, &topk_gpu, &inner_gpu, n_in, n_ffn,
+                n_expert, topk,
+            )
+        })
+        .expect("gpu direct q8 swiglu");
+        let gpu_inner = read_back_f32(&inner_gpu.buffer, topk * n_ffn);
+        let inner_max = gpu_inner
+            .iter()
+            .zip(cpu_inner.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let inner_dot: f64 = gpu_inner
+            .iter()
+            .zip(cpu_inner.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let inner_ng: f64 = gpu_inner.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let inner_nc: f64 = cpu_inner.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let inner_cos = inner_dot / (inner_ng.sqrt() * inner_nc.sqrt()).max(1e-12);
+        eprintln!("[moe-q8-direct-swiglu-oracle] cos={inner_cos:.6} max|delta|={inner_max:.3e}");
+        assert!(inner_cos > 0.999, "inner cos={inner_cos}");
+        assert!(inner_max < 2e-2, "inner max|delta|={inner_max}");
+
+        let down_gpu_out = MetalTensor::zeros_f32(&ctx, vec![h as u64]).expect("down out");
+        one_shot(&ctx, |enc| {
+            encode_moe_down_weighted_sum_q8_0_f32(
+                &ctx,
+                enc,
+                &down_gpu,
+                &inner_gpu,
+                &topk_gpu,
+                &topw_gpu,
+                &down_gpu_out,
+                n_ffn,
+                h,
+                n_expert,
+                topk,
+            )
+        })
+        .expect("gpu direct q8 down weighted sum");
+        let gpu_down = read_back_f32(&down_gpu_out.buffer, h);
+        let down_max = gpu_down
+            .iter()
+            .zip(cpu_down.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let down_dot: f64 = gpu_down
+            .iter()
+            .zip(cpu_down.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let down_ng: f64 = gpu_down.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let down_nc: f64 = cpu_down.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let down_cos = down_dot / (down_ng.sqrt() * down_nc.sqrt()).max(1e-12);
+        eprintln!("[moe-q8-direct-down-oracle] cos={down_cos:.6} max|delta|={down_max:.3e}");
+        assert!(down_cos > 0.999, "down cos={down_cos}");
+        assert!(down_max < 2e-2, "down max|delta|={down_max}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_grouped_q8_0_swiglu_down_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q8_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q8_0.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-q8-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::Q8_0)
+            .expect("missing Q8_0 MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::Q8_0)
+            .expect("missing Q8_0 MoE up tensor");
+        let down_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_down_exps.weight" && t.dtype == GgmlType::Q8_0)
+            .expect("missing Q8_0 MoE down tensor");
+
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let h = down_t.shape[1] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let n_tokens = 16usize;
+        let topk = 1usize;
+        let gate_row_stride = (n_in / 32) * 34;
+        let gate_expert_stride = n_ffn * gate_row_stride;
+        let down_row_stride = (n_ffn / 32) * 34;
+        let down_expert_stride = h * down_row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let down_bytes_all = g.slice(down_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * gate_expert_stride..(expert + 1) * gate_expert_stride];
+        let up_expert_bytes =
+            &up_bytes_all[expert * gate_expert_stride..(expert + 1) * gate_expert_stride];
+        let down_expert_bytes =
+            &down_bytes_all[expert * down_expert_stride..(expert + 1) * down_expert_stride];
+        let gate_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_gate_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::Q8_0,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: gate_expert_stride as u64,
+        };
+        let down_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_down_exps.weight.expert_oracle".into(),
+            shape: vec![n_ffn as u64, h as u64],
+            dtype: GgmlType::Q8_0,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: down_expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&gate_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 = crate::codec::dequant_to_f32(&gate_desc, up_expert_bytes).expect("up dequant");
+        let down_f32 =
+            crate::codec::dequant_to_f32(&down_desc, down_expert_bytes).expect("down dequant");
+        let x: Vec<f32> = (0..n_tokens * n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let mut cpu_inner = vec![0.0f32; n_tokens * n_ffn];
+        let mut cpu_down = vec![0.0f32; n_tokens * h];
+        for token in 0..n_tokens {
+            let x_tok = &x[token * n_in..(token + 1) * n_in];
+            let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, x_tok);
+            let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, x_tok);
+            for i in 0..n_ffn {
+                let g = gate[i];
+                cpu_inner[token * n_ffn + i] = (g / (1.0 + (-g).exp())) * up[i];
+            }
+            let down = crate::forward::mat_vec_pub(
+                &down_f32,
+                n_ffn,
+                h,
+                &cpu_inner[token * n_ffn..(token + 1) * n_ffn],
+            );
+            cpu_down[token * h..(token + 1) * h].copy_from_slice(&down);
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let down_gpu = MetalTensor::from_gguf_tensor(&ctx, down_t, down_bytes_all).expect("down");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_tokens * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let mut counts = vec![0i32; n_expert];
+        counts[expert] = n_tokens as i32;
+        let mut ids = vec![0i32; n_expert * n_tokens];
+        for token in 0..n_tokens {
+            ids[expert * n_tokens + token] = token as i32;
+        }
+        let counts_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&counts),
+            vec![n_expert as u64],
+            GgmlType::F32,
+        )
+        .expect("counts tensor");
+        let ids_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![(n_expert * n_tokens) as u64],
+            GgmlType::F32,
+        )
+        .expect("ids tensor");
+        let inner_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_ffn) as u64]).expect("inner tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_q8_0_f32_grouped_slots_n16(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &counts_gpu,
+                &ids_gpu,
+                &inner_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                topk,
+                n_tokens,
+            )
+        })
+        .expect("gpu grouped q8 swiglu");
+        let gpu_inner = read_back_f32(&inner_gpu.buffer, n_tokens * n_ffn);
+        let dot_inner: f64 = gpu_inner
+            .iter()
+            .zip(cpu_inner.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng_inner: f64 = gpu_inner.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc_inner: f64 = cpu_inner.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos_inner = dot_inner / (ng_inner.sqrt() * nc_inner.sqrt()).max(1e-12);
+        let max_inner = gpu_inner
+            .iter()
+            .zip(cpu_inner.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[moe-q8-swiglu-oracle] cos={cos_inner:.6} max|delta|={max_inner:.3e}");
+        assert!(cos_inner > 0.999, "inner cos={cos_inner}");
+        assert!(max_inner < 2e-2, "inner max|delta|={max_inner}");
+
+        let cpu_inner_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&cpu_inner),
+            vec![(n_tokens * n_ffn) as u64],
+            GgmlType::F32,
+        )
+        .expect("cpu inner tensor");
+        let down_out_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(n_tokens * h) as u64]).expect("down out");
+        one_shot(&ctx, |enc| {
+            encode_moe_down_q8_0_f32_grouped_slots(
+                &ctx,
+                enc,
+                &down_gpu,
+                &cpu_inner_gpu,
+                &counts_gpu,
+                &ids_gpu,
+                &down_out_gpu,
+                n_ffn,
+                h,
+                n_expert,
+                n_tokens,
+            )
+        })
+        .expect("gpu grouped q8 down");
+        let gpu_down = read_back_f32(&down_out_gpu.buffer, n_tokens * h);
+        let dot_down: f64 = gpu_down
+            .iter()
+            .zip(cpu_down.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng_down: f64 = gpu_down.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc_down: f64 = cpu_down.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos_down = dot_down / (ng_down.sqrt() * nc_down.sqrt()).max(1e-12);
+        let max_down = gpu_down
+            .iter()
+            .zip(cpu_down.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[moe-q8-down-oracle] cos={cos_down:.6} max|delta|={max_down:.3e}");
+        assert!(cos_down > 0.999, "down cos={cos_down}");
+        assert!(max_down < 2e-2, "down max|delta|={max_down}");
+    }
+
+    /// Focused long-context v4 NWG sweep for the MoE shapes we now care
+    /// about: A3B (group=8) and 122B-A10B (group=16). Synthetic K/V is
+    /// enough because we're tuning the attention kernel itself, not model
+    /// semantics.
+    #[test]
+    #[ignore]
+    fn attn_v4_nwg_sweep_moe_shapes() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-moe-nwg] {}", ctx.describe());
+
+        let hd = 256usize;
+        let n_iters = 120usize;
+        let warmup = 16usize;
+        let shapes: &[(usize, usize, &str)] = &[(16, 2, "a3b"), (32, 2, "122b")];
+
+        for &(n_q, n_kv, label_shape) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            for &n_pos in &[4096usize, 8192, 16384, 32768] {
+                let cap = n_pos;
+                let q: Vec<f32> = (0..n_q * hd)
+                    .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                    .collect();
+                let k_f32: Vec<f32> = (0..cap * kv_dim)
+                    .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                    .collect();
+                let v_f32: Vec<f32> = (0..cap * kv_dim)
+                    .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                    .collect();
+
+                let q_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&q),
+                    vec![(n_q * hd) as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+                let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+                for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                    let src_t = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(src_f32.as_slice()),
+                        vec![src_f32.len() as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    one_shot(&ctx, |enc| {
+                        encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                    })
+                    .unwrap();
+                }
+                let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+
+                for &nwg in &[4usize, 8, 16, 32, 64] {
+                    let o_partial =
+                        MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * hd) as u64])
+                            .unwrap();
+                    let ml_partial =
+                        MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * 2) as u64])
+                            .unwrap();
+                    let bench = |label: &str, n: usize| {
+                        let cmd = ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        for _ in 0..n {
+                            encode_attn_decode_v4_f32(
+                                &ctx,
+                                &enc,
+                                &q_t,
+                                &k_cache,
+                                &v_cache,
+                                &o_partial,
+                                &ml_partial,
+                                &y_t,
+                                n_q,
+                                n_kv,
+                                hd,
+                                n_pos,
+                                nwg,
+                                32,
+                            )
+                            .unwrap();
+                        }
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                        eprintln!(
+                            "[v4-moe-nwg {label_shape} group={group:>2} n_pos={n_pos:>6} nwg={nwg:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                            gpu / n as f64
+                        );
+                    };
+                    bench("warmup", warmup);
+                    bench("bench ", n_iters);
+                }
+                eprintln!();
+            }
+        }
+    }
+
+    /// Focused long-context tile-C sweep for the same MoE shapes. Uses the
+    /// production-default NWG=32 at these contexts unless data says otherwise.
+    #[test]
+    #[ignore]
+    fn attn_v4_tile_c_sweep_moe_shapes() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-moe-c] {}", ctx.describe());
+
+        let hd = 256usize;
+        let n_iters = 120usize;
+        let warmup = 16usize;
+        let shapes: &[(usize, usize, &str)] = &[(16, 2, "a3b"), (32, 2, "122b")];
+
+        for &(n_q, n_kv, label_shape) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            for &n_pos in &[4096usize, 8192, 16384, 32768] {
+                for &nwg in &[32usize, 64] {
+                    let cap = n_pos;
+                    let q: Vec<f32> = (0..n_q * hd)
+                        .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                        .collect();
+                    let k_f32: Vec<f32> = (0..cap * kv_dim)
+                        .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                        .collect();
+                    let v_f32: Vec<f32> = (0..cap * kv_dim)
+                        .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                        .collect();
+
+                    let q_t = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(&q),
+                        vec![(n_q * hd) as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    let k_cache =
+                        MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+                    let v_cache =
+                        MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+                    for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                        let src_t = MetalTensor::from_bytes(
+                            &ctx,
+                            bytemuck::cast_slice(src_f32.as_slice()),
+                            vec![src_f32.len() as u64],
+                            GgmlType::F32,
+                        )
+                        .unwrap();
+                        one_shot(&ctx, |enc| {
+                            encode_scatter_offset_f32_to_f16(
+                                &ctx,
+                                enc,
+                                &src_t,
+                                dst,
+                                0,
+                                src_f32.len(),
+                            )
+                        })
+                        .unwrap();
+                    }
+                    let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+                    let o_partial =
+                        MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * hd) as u64])
+                            .unwrap();
+                    let ml_partial =
+                        MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * 2) as u64])
+                            .unwrap();
+
+                    for &tile_c in &[16usize, 32, 64, 128] {
+                        let bench = |label: &str, n: usize| {
+                            let cmd = ctx.queue.commandBuffer().expect("cmd");
+                            let enc = KernelEncoder::begin(&cmd);
+                            for _ in 0..n {
+                                encode_attn_decode_v4_f32(
+                                    &ctx,
+                                    &enc,
+                                    &q_t,
+                                    &k_cache,
+                                    &v_cache,
+                                    &o_partial,
+                                    &ml_partial,
+                                    &y_t,
+                                    n_q,
+                                    n_kv,
+                                    hd,
+                                    n_pos,
+                                    nwg,
+                                    tile_c,
+                                )
+                                .unwrap();
+                            }
+                            enc.end();
+                            cmd.commit();
+                            cmd.waitUntilCompleted();
+                            let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                            eprintln!(
+                                "[v4-moe-c {label_shape} group={group:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                                gpu / n as f64
+                            );
+                        };
+                        bench("warmup", warmup);
+                        bench("bench ", n_iters);
+                    }
+                    eprintln!();
+                }
+            }
+        }
+    }
+
+    /// Split the v4 attention kernel into main and reduce passes so we can
+    /// see which part actually dominates at realistic long contexts for the
+    /// MoE shapes. This is synthetic, but it uses the real kernel bodies and
+    /// exact production shapes for A3B (group=8) and 122B (group=16).
+    #[test]
+    #[ignore]
+    fn attn_v4_main_reduce_breakdown_moe_shapes() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-main-reduce] {}", ctx.describe());
+
+        let hd = 256usize;
+        let n_iters = 120usize;
+        let warmup = 16usize;
+        let shapes: &[(usize, usize, &str, &[usize])] = &[
+            (16, 2, "a3b", &[4096, 16384, 32768]),
+            (32, 2, "122b", &[4096, 16384, 32768]),
+        ];
+
+        for &(n_q, n_kv, label_shape, ctxs) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            for &n_pos in ctxs {
+                let nwg = attn_v4_choose_nwg(n_pos, group);
+                let tile_c = attn_v4_choose_tile_c(n_pos, group);
+                let cap = n_pos;
+
+                let q: Vec<f32> = (0..n_q * hd)
+                    .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                    .collect();
+                let k_f32: Vec<f32> = (0..cap * kv_dim)
+                    .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                    .collect();
+                let v_f32: Vec<f32> = (0..cap * kv_dim)
+                    .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                    .collect();
+
+                let q_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&q),
+                    vec![(n_q * hd) as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+                let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+                for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                    let src_t = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(src_f32.as_slice()),
+                        vec![src_f32.len() as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    one_shot(&ctx, |enc| {
+                        encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                    })
+                    .unwrap();
+                }
+
+                let o_partial =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * hd) as u64]).unwrap();
+                let ml_partial =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * 2) as u64]).unwrap();
+                let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+
+                let bench_main = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_main_only_f32(
+                            &ctx,
+                            &enc,
+                            &q_t,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial,
+                            &ml_partial,
+                            n_q,
+                            n_kv,
+                            hd,
+                            n_pos,
+                            nwg,
+                            tile_c,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let _t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[v4-main {label_shape} group={group:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>3} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+
+                one_shot(&ctx, |enc| {
+                    encode_attn_decode_v4_main_only_f32(
+                        &ctx,
+                        enc,
+                        &q_t,
+                        &k_cache,
+                        &v_cache,
+                        &o_partial,
+                        &ml_partial,
+                        n_q,
+                        n_kv,
+                        hd,
+                        n_pos,
+                        nwg,
+                        tile_c,
+                    )
+                })
+                .unwrap();
+
+                let bench_reduce = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_reduce_only_f32(
+                            &ctx,
+                            &enc,
+                            &o_partial,
+                            &ml_partial,
+                            &y_t,
+                            n_q,
+                            n_kv,
+                            hd,
+                            nwg,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let _t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[v4-reduce {label_shape} group={group:>2} n_pos={n_pos:>6} nwg={nwg:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+
+                bench_main("warmup", warmup);
+                bench_main("bench ", n_iters);
+                bench_reduce("warmup", warmup);
+                bench_reduce("bench ", n_iters);
+                eprintln!();
+            }
+        }
+    }
+
+    /// Synthetic head-major F16 K/V proof for the long-context MoE v4 attention
+    /// body. This is intentionally not a production cache layout: it isolates the
+    /// address-stride question before any prefill/session sidecar work.
+    #[test]
+    #[ignore]
+    fn attn_v4_head_major_main_reduce_breakdown_moe_shapes() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-hm-main-reduce] {}", ctx.describe());
+
+        fn cosine(a: &[f32], b: &[f32]) -> f64 {
+            let mut dot = 0.0f64;
+            let mut aa = 0.0f64;
+            let mut bb = 0.0f64;
+            for (&x, &y) in a.iter().zip(b) {
+                let x = x as f64;
+                let y = y as f64;
+                dot += x * y;
+                aa += x * x;
+                bb += y * y;
+            }
+            dot / (aa.sqrt() * bb.sqrt()).max(1e-30)
+        }
+
+        fn max_abs(a: &[f32], b: &[f32]) -> f32 {
+            a.iter()
+                .zip(b)
+                .map(|(&x, &y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        }
+
+        let hd = 256usize;
+        let n_iters = 96usize;
+        let warmup = 12usize;
+        let shapes: &[(usize, usize, &str, &[usize])] = &[
+            (16, 2, "a3b", &[8192, 16384, 32768]),
+            (32, 2, "a10b", &[8192, 16384, 32768]),
+        ];
+
+        for &(n_q, n_kv, label_shape, ctxs) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            for &n_pos in ctxs {
+                let nwg = attn_v4_choose_nwg(n_pos, group);
+                let tile_c = attn_v4_choose_tile_c(n_pos, group);
+                let group_tile = attn_v4_choose_group_tile(n_pos, group);
+                assert!(
+                    (group, group_tile, tile_c) == (8, 2, 64)
+                        || (group, group_tile, tile_c) == (16, 4, 64)
+                        || (group, group_tile, tile_c) == (16, 4, 128),
+                    "unexpected group/group_tile/tile_c {group}/{group_tile}/{tile_c}"
+                );
+
+                let q: Vec<f32> = (0..n_q * hd)
+                    .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                    .collect();
+                let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+                    .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                    .collect();
+                let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+                    .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                    .collect();
+
+                let k_tok_h: Vec<half::f16> =
+                    k_f32.iter().copied().map(half::f16::from_f32).collect();
+                let v_tok_h: Vec<half::f16> =
+                    v_f32.iter().copied().map(half::f16::from_f32).collect();
+                let mut k_hm_h = vec![half::f16::ZERO; k_tok_h.len()];
+                let mut v_hm_h = vec![half::f16::ZERO; v_tok_h.len()];
+                for pos in 0..n_pos {
+                    for kvh in 0..n_kv {
+                        let src = pos * kv_dim + kvh * hd;
+                        let dst = (kvh * n_pos + pos) * hd;
+                        k_hm_h[dst..dst + hd].copy_from_slice(&k_tok_h[src..src + hd]);
+                        v_hm_h[dst..dst + hd].copy_from_slice(&v_tok_h[src..src + hd]);
+                    }
+                }
+
+                let q_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&q),
+                    vec![(n_q * hd) as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let k_tok = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&k_tok_h),
+                    vec![(n_pos * kv_dim) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap();
+                let v_tok = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&v_tok_h),
+                    vec![(n_pos * kv_dim) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap();
+                let k_hm = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&k_hm_h),
+                    vec![(n_pos * kv_dim) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap();
+                let v_hm = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&v_hm_h),
+                    vec![(n_pos * kv_dim) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap();
+
+                let partial_elems = n_kv * nwg * group * hd;
+                let ml_elems = n_kv * nwg * group * 2;
+                let o_tok = MetalTensor::zeros_f32(&ctx, vec![partial_elems as u64]).unwrap();
+                let ml_tok = MetalTensor::zeros_f32(&ctx, vec![ml_elems as u64]).unwrap();
+                let y_tok = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+                let o_hm = MetalTensor::zeros_f32(&ctx, vec![partial_elems as u64]).unwrap();
+                let ml_hm = MetalTensor::zeros_f32(&ctx, vec![ml_elems as u64]).unwrap();
+                let y_hm = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+
+                one_shot(&ctx, |enc| {
+                    encode_attn_decode_v4_main_only_f32(
+                        &ctx, enc, &q_t, &k_tok, &v_tok, &o_tok, &ml_tok, n_q, n_kv, hd, n_pos,
+                        nwg, tile_c,
+                    )?;
+                    encode_attn_decode_v4_reduce_only_f32(
+                        &ctx, enc, &o_tok, &ml_tok, &y_tok, n_q, n_kv, hd, nwg,
+                    )
+                })
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_attn_decode_v4_main_only_f32_head_major(
+                        &ctx, enc, &q_t, &k_hm, &v_hm, &o_hm, &ml_hm, n_q, n_kv, hd, n_pos, nwg,
+                        tile_c,
+                    )?;
+                    encode_attn_decode_v4_reduce_only_f32(
+                        &ctx, enc, &o_hm, &ml_hm, &y_hm, n_q, n_kv, hd, nwg,
+                    )
+                })
+                .unwrap();
+                let y_tok_v = read_back_f32(&y_tok.buffer, n_q * hd);
+                let y_hm_v = read_back_f32(&y_hm.buffer, n_q * hd);
+                eprintln!(
+                    "[v4-hm-correct {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2}] cos={:.8} max_abs={:.3e}",
+                    cosine(&y_tok_v, &y_hm_v),
+                    max_abs(&y_tok_v, &y_hm_v)
+                );
+
+                let bench_tok = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_main_only_f32(
+                            &ctx, &enc, &q_t, &k_tok, &v_tok, &o_tok, &ml_tok, n_q, n_kv, hd,
+                            n_pos, nwg, tile_c,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let _t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[v4-main-token {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+                let bench_hm = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_main_only_f32_head_major(
+                            &ctx, &enc, &q_t, &k_hm, &v_hm, &o_hm, &ml_hm, n_q, n_kv, hd, n_pos,
+                            nwg, tile_c,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let _t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[v4-main-hmajor {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+
+                bench_tok("warmup", warmup);
+                bench_hm("warmup", warmup);
+                bench_tok("bench ", n_iters);
+                bench_hm("bench ", n_iters);
+                eprintln!();
+            }
+        }
+    }
+
+    /// Split the prompt-native packed prefill kernels into main and reduce
+    /// passes so we can see how much of the remaining packed-attention wall is
+    /// still the F32 partial spill/reduce path.
+    #[test]
+    #[ignore]
+    fn attn_prefill_v4_main_reduce_breakdown_moe_shapes() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[prefill-v4-main-reduce] {}", ctx.describe());
+
+        let hd = 256usize;
+        let n_iters = 96usize;
+        let warmup = 12usize;
+        let rows_set = [4usize, 8usize];
+        let shapes: &[(usize, usize, &str, &[usize])] = &[
+            (16, 2, "a3b", &[4096, 16384, 32768]),
+            (32, 2, "122b", &[4096, 16384, 32768]),
+        ];
+
+        for &(n_q, n_kv, label_shape, ctxs) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            for &n_rows in &rows_set {
+                for &base_pos in ctxs {
+                    let n_pos = base_pos + n_rows;
+                    let nwg = attn_v4_choose_nwg(n_pos, group);
+
+                    let q: Vec<f32> = (0..n_rows * n_q * hd)
+                        .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                        .collect();
+                    let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+                        .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                        .collect();
+                    let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+                        .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                        .collect();
+
+                    let q_t = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(&q),
+                        vec![(n_rows * n_q * hd) as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    let k_cache =
+                        MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+                    let v_cache =
+                        MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+                    for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                        let src_t = MetalTensor::from_bytes(
+                            &ctx,
+                            bytemuck::cast_slice(src_f32.as_slice()),
+                            vec![src_f32.len() as u64],
+                            GgmlType::F32,
+                        )
+                        .unwrap();
+                        one_shot(&ctx, |enc| {
+                            encode_scatter_offset_f32_to_f16(
+                                &ctx,
+                                enc,
+                                &src_t,
+                                dst,
+                                0,
+                                src_f32.len(),
+                            )
+                        })
+                        .unwrap();
+                    }
+
+                    let o_partial = MetalTensor::zeros_f32(
+                        &ctx,
+                        vec![(n_rows * n_kv * nwg * group * hd) as u64],
+                    )
+                    .unwrap();
+                    let ml_partial = MetalTensor::zeros_f32(
+                        &ctx,
+                        vec![(n_rows * n_kv * nwg * group * 2) as u64],
+                    )
+                    .unwrap();
+                    let y_t =
+                        MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+
+                    let bench_main = |label: &str, n: usize| {
+                        let cmd = ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        for _ in 0..n {
+                            match group {
+                                8 => encode_attn_prefill_v4_g8_t2_q2_c64_main_only_f32(
+                                    &ctx,
+                                    &enc,
+                                    &q_t,
+                                    &k_cache,
+                                    &v_cache,
+                                    &o_partial,
+                                    &ml_partial,
+                                    n_rows,
+                                    base_pos,
+                                    nwg,
+                                ),
+                                16 => encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
+                                    &ctx,
+                                    &enc,
+                                    &q_t,
+                                    &k_cache,
+                                    &v_cache,
+                                    &o_partial,
+                                    &ml_partial,
+                                    n_rows,
+                                    base_pos,
+                                    nwg,
+                                ),
+                                _ => unreachable!(),
+                            }
+                            .unwrap();
+                        }
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                        eprintln!(
+                            "[prefill-v4-main {label_shape} rows={n_rows:>2} group={group:>2} base_pos={base_pos:>6} nwg={nwg:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                            gpu / n as f64
+                        );
+                    };
+
+                    one_shot(&ctx, |enc| match group {
+                        8 => encode_attn_prefill_v4_g8_t2_q2_c64_main_only_f32(
+                            &ctx,
+                            enc,
+                            &q_t,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial,
+                            &ml_partial,
+                            n_rows,
+                            base_pos,
+                            nwg,
+                        ),
+                        16 => encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
+                            &ctx,
+                            enc,
+                            &q_t,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial,
+                            &ml_partial,
+                            n_rows,
+                            base_pos,
+                            nwg,
+                        ),
+                        _ => unreachable!(),
+                    })
+                    .unwrap();
+
+                    let bench_reduce = |label: &str, n: usize| {
+                        let cmd = ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        for _ in 0..n {
+                            match group {
+                                8 => encode_attn_prefill_v4_g8_t2_q2_c64_reduce_only_f32(
+                                    &ctx,
+                                    &enc,
+                                    &o_partial,
+                                    &ml_partial,
+                                    &y_t,
+                                    n_rows,
+                                    nwg,
+                                ),
+                                16 => encode_attn_prefill_v4_g16_t4_q2_c64_reduce_only_f32(
+                                    &ctx,
+                                    &enc,
+                                    &o_partial,
+                                    &ml_partial,
+                                    &y_t,
+                                    n_rows,
+                                    nwg,
+                                ),
+                                _ => unreachable!(),
+                            }
+                            .unwrap();
+                        }
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                        eprintln!(
+                            "[prefill-v4-reduce {label_shape} rows={n_rows:>2} group={group:>2} base_pos={base_pos:>6} nwg={nwg:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                            gpu / n as f64
+                        );
+                    };
+
+                    bench_main("warmup", warmup);
+                    bench_main("bench ", n_iters);
+                    bench_reduce("warmup", warmup);
+                    bench_reduce("bench ", n_iters);
+                    eprintln!();
+                }
+            }
+        }
+    }
+}

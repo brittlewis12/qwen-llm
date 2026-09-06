@@ -10,6 +10,7 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
 pub(crate) const MANIFEST_NAME: &str = "lens.json";
 pub(crate) const PAYLOAD_NAME: &str = "transport.f16le";
 pub(crate) const PROFILE_NAME: &str = "eyes_ml_muse_glimmer_30b_j_v1";
+const MATCHED_J_PROFILE_NAME: &str = "brittlewis12_muse_glimmer_30b_j_pile10k25_v1";
 const R_PROFILE_NAME: &str = "brittlewis12_muse_glimmer_30b_r_pile10k25_v1";
 
 const SOURCE_REPOSITORY: &str = "eyes-ml/Muse-Glimmer-30B_jacobian-lens";
@@ -21,6 +22,18 @@ const DATA_PICKLE_SHA256: &str = "f187e6221a2c5540769e3af89d4e0ea81159a1c98a7a1d
 const SERIALIZATION_ID: &str = "1371680345541892666311410627619629120835";
 const ARCHIVE_ROOT: &str = "Muse-Glimmer-30B_jacobian_lens";
 const PAYLOAD_BLAKE3: &str = "64f50f387a56a4533631e62789a896e759f0ebbdb3a9fdbae45898a5dc8a2794";
+const MATCHED_J_SOURCE_REPOSITORY: &str = "brittlewis12/muse-glimmer-30b-r-lens-checkpoints";
+const MATCHED_J_SOURCE_REVISION: &str = "4f73cadc74ab26263f3860888a2c274cce452951";
+const MATCHED_J_SOURCE_FILENAME: &str = "muse-glimmer-30b-j-lens.pt";
+const MATCHED_J_SOURCE_BYTES: u64 = 4_518_856_730;
+const MATCHED_J_SOURCE_SHA256: &str =
+    "4d8f0cad7623216df5a4d0632cd07a184fe2fb3c9902811c81c8c122086d7d69";
+const MATCHED_J_DATA_PICKLE_SHA256: &str =
+    "5d5e86d1628d7cba8e645b415cb05271a02f95fc998a0dd19040678a4fa57972";
+const MATCHED_J_SERIALIZATION_ID: &str = "1371680345541892666310359746187447669417";
+const MATCHED_J_ARCHIVE_ROOT: &str = ".muse-glimmer-30b-j-lens.pt.tmp";
+const MATCHED_J_PAYLOAD_BLAKE3: &str =
+    "edd5b07de8a9dcc8897904bebd764f73c03790845062588a4f9dabb481ec19e2";
 const R_SOURCE_REPOSITORY: &str = "brittlewis12/muse-glimmer-30b-r-lens-checkpoints";
 const R_SOURCE_REVISION: &str = "b406c8465c9a49657e30af07753cd08ae7f96f56";
 const R_SOURCE_FILENAME: &str = "muse-glimmer-30b-r-lens.pt";
@@ -93,6 +106,60 @@ const MATRIX_BLAKE3: [&str; SOURCE_LAYER_COUNT] = [
     "ca84caa1dbcf0af8bdf9242b56ebb2eba548201cf60b8fad460c5d88b9e36027",
 ];
 
+const MATCHED_J_MATRIX_BLAKE3: [&str; SOURCE_LAYER_COUNT] = [
+    "d4d6f1634c3d7a54e1e4fcea4b304b1a8df894bfef538a1cbdfd78875fd8ee46",
+    "00e028eb0f140f437fc5d74f48264d311326402242fb4e8b4062985745cc236d",
+    "de373cd04cdcb02baa5e22460678e4123bca9a7dccfe83c3f5e7453f8c15ebee",
+    "af0b622a746a0c0a1fb668ed16b7f3c6b894c047d99774b31e23a8ca9331ad52",
+    "d12411463dd35795d08cf78303f243663766e276916eeacf6baf13573e54d9dd",
+    "c6cf4a7004a4b70975481bca452e169b2073f5d07411fd1940f8b4bdf3245a21",
+    "484e7c1457c01d2610f066636b0cfb005433398d5a7a7e93f4d865ab4ecedbe0",
+    "4814b199110f74ce181030b848403ec9c1720cad14b7710f55b62ca9d264e97c",
+    "82b0f145a10fcfae2693b2ce7f05ac043cefe2426e5274b5ae01639985b5bd2e",
+    "10ad6d77ffb527de3b467d03db6a19f86d72c63f0f0207b3c3cf829120324bd2",
+    "4c6b9996e22fb940823289a8d71592f7fc050a0e9f4e6411c7f04c2426601e08",
+    "5dfd6c6ccae8bbdbb0766f775dcf9834cadc591c29d9d32791108067466874a8",
+    "aa256f7c2978ec674f45f43ac6827f4f1c7d38ec8f058cd24c797a8cf3288146",
+    "7244a3c4cbd0e89d706ea9bae4b279f1f2b904490d166ecc91e1042eeaa2cab5",
+    "bdebfb0f62a46e478bc7b465af0dedc8a0c09b23b7ff52e06979e2da643a09cf",
+    "0de6eb204a3f564855c21a7273b7708d7570d9e9f366a8d1e6cfcdc2eb8cdab2",
+    "faac874df243cd6288f7f37a24b8be60bf6302ea50a7fd8f6e12b7d893692585",
+    "f6e017ea9c3304c96f7333a342a2209f139a1222672f93f9057d40f54c7419a4",
+    "d5d572a550790e7cf2c1a379931972ef58e13c78864825f737a07aae96e5c181",
+    "003cee8a866d6ccb68e49d8acc355a5e7bde55b18c5cff10d4579f2db43f8069",
+    "9264d98d2af3bd931e5fe79889094fba23db75c85ce1f93180cdd4d781ed2a96",
+    "6f13c9ab065be8a96d335ad135a3b28eb7cd3825da94b2bdd0a9967b3593edf9",
+    "8c7f858ef77f3fb84458eda1e3e9c27d95d4bdfe1fc756c814a9671684c2ba78",
+    "627ce3beeefb60690b847052ce2e72edfaf5bd7905c1d38abb3ced24b1fd5b93",
+    "ac051a6bcf976b7dc33ceff24443757890396a3f898ad930ce487700841b2ffd",
+    "4e871d13861155169598d17c25dd0743ce42e43a6d07c9630af7f827ebd0e023",
+    "25282b838738615839d3983060ebd616728bc00ef7bdfc6a175c8c3b36f2f4c7",
+    "505e4639d668f8e7d5a37efe51571ca1339feeb077c917cc6ebb34894dc9c329",
+    "ae6345003a28d327c670f58523376b9798c6cb66605035dcb0272c7911396d20",
+    "a0a8a1adda19a7b7d6c0297804fe58d2c7128a315054025f8112cc988c73588c",
+    "93a652feee21021b39fcb486fa96c10fb2b8db17167f8a2bb9a109a7e96ab226",
+    "a194396fecce52f74d375b406210dc2f4f9264c2aed9f9b55194fc0c6f0305ba",
+    "d512b36d452eef14ab291093396da7ea34bf84703a847edfcf77b79d84861244",
+    "8ac62b517df6738fbb441b4f181a4974dc91bcd29ab59190593f1a2ea9e2dca1",
+    "dc7e9fcb0769aca82ad51b4a2fcacdb355233160f76ca90d4f87bb31c013243e",
+    "66ce68a1bbb75face6ffe72d6e98cb8f935a1479fad69f92c0f64d0fd80f4654",
+    "7d48ed5a71f3aaa29af8671d6e9169cf2875ce47ac94ff1dcb1452de54bafe31",
+    "636618f9bb1629627e10dbe749e9ebc85af27bdcd0dcfb4afaed2746f7ea757d",
+    "d90e53d1505375cf1b2e93c11ffe3b276355c989805db550d7ba95081dbcd2cd",
+    "54d7c1bb7cc64f464e969a4976a86abe7db479181c2f3f3577ac17dbd12bc1e8",
+    "7245974b440c83d40bcdcf576c56b43eccd5d2138c8f2d44708f9bbc9be76209",
+    "769771a2e722ec5042ccf613d98ed0752773f5fbc37e520d38b091e13a3d7fe0",
+    "a39d86a30517ccbb965202114b818c6a625354e4c510482c33789f3e58e147cf",
+    "c779a3c84203d2c21122389efc5325a89bc2ce748c568e17613fa8249801b3c3",
+    "af20efa29e1edc8bb09a6a0a264f5b7d364a75b6beac2fb35aa0774963ab7184",
+    "4ef7aa217650b19b78787fdfa00e725bc7fe8eb615e9b5bbfa89f3becd7f6ec8",
+    "c0b5871ced9791fddff9b8ae39f76980ef94d4b8329c85e210491dfeb4e36353",
+    "ef4a5d267781d26f5c8e9daa4c0ea0c08eed2c01290bbb423b7897ac5da9734b",
+    "5ddf3c1d62774c6e221bcc8458abff18581d32be9cdf8b48226c6f41af0ee20f",
+    "041309aa9290dfe96af8e49beb1c130f9bace58f1d27f085e7a6007639735678",
+    IDENTITY_MATRIX_BLAKE3,
+];
+
 const R_MATRIX_BLAKE3: [&str; SOURCE_LAYER_COUNT] = [
     "ebb330b82ddd4c7159d67c6134465463ddbfee662cbce2b6d55e62544a649a32",
     "f342b8fa4bb8ee583ad63da237d1a8fbf0ce7c6678b55a4f5531e3419389ff57",
@@ -150,6 +217,7 @@ const R_MATRIX_BLAKE3: [&str; SOURCE_LAYER_COUNT] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProfileId {
     EyesMlMuseGlimmer30bJ,
+    BrittLewisMuseGlimmer30bJ,
     BrittLewisMuseGlimmer30bR,
 }
 
@@ -232,7 +300,7 @@ pub(crate) struct Profile {
     transfer: TransferClaims,
 }
 
-const PROFILES: [Profile; 2] = [
+const PROFILES: [Profile; 3] = [
     Profile {
         id: ProfileId::EyesMlMuseGlimmer30bJ,
         name: PROFILE_NAME,
@@ -289,6 +357,81 @@ const PROFILES: [Profile; 2] = [
             serialized_dtype: "float16",
             stop_rule: "smoothed_delta_mean_below_1e-3_after_at_least_100_prompts",
             convergence_status: "not_reached_at_900_prompts_final_smoothed_delta_approximately_1.5e-3",
+            modality: "text_only",
+        },
+        transfer: TransferClaims {
+            binding: "published_checkpoint_geometry_transfer",
+            deployed_checkpoint_policy: "supported_muse_release_geometry_and_output_contract_requires_explicit_acknowledgement",
+            validation_status: "unvalidated",
+            image_token_status: "unvalidated_text_only_fit",
+        },
+    },
+    Profile {
+        id: ProfileId::BrittLewisMuseGlimmer30bJ,
+        name: MATCHED_J_PROFILE_NAME,
+        method: "J",
+        rule_contract: "jlens.jacobian.ordinary_autograd.v1",
+        target_layer: 50,
+        source_repository: MATCHED_J_SOURCE_REPOSITORY,
+        source_revision: MATCHED_J_SOURCE_REVISION,
+        source_filename: MATCHED_J_SOURCE_FILENAME,
+        source_bytes: MATCHED_J_SOURCE_BYTES,
+        source_sha256: MATCHED_J_SOURCE_SHA256,
+        source_license: "no_separate_license_declared_private_research_asset",
+        archive: ArchiveClaims {
+            root: MATCHED_J_ARCHIVE_ROOT,
+            layout: ArchiveLayout::LayerStorages,
+            data_pickle_sha256: MATCHED_J_DATA_PICKLE_SHA256,
+            serialization_id: Some(MATCHED_J_SERIALIZATION_ID),
+            identity_layer_index: Some(50),
+        },
+        expected_payload_blake3: MATCHED_J_PAYLOAD_BLAKE3,
+        matrix_blake3: &MATCHED_J_MATRIX_BLAKE3,
+        model: ModelClaims {
+            base_model: "meta-models/Muse-Glimmer-30B",
+            fitted_checkpoint: "meta-models/Muse-Glimmer-30B",
+            fitted_checkpoint_revision: "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+            tokenizer_checkpoint: Some("meta-models/Muse-Glimmer-30B"),
+            tokenizer_revision: Some("a4e59da52a7bc87ae7251dd5545c0dd437c44b68"),
+            output_rmsnorm_epsilon: 1e-5,
+            output_multiplier: 0.19611613513818404,
+            final_logit_softcap: 20.0,
+        },
+        fit: FitClaims {
+            claims_basis: "pinned_source_and_opaque_data_pickle_sha256_with_audited_embedded_provenance",
+            embedded_provenance: true,
+            fitter: "brittlewis12/jacobian-lens/jlens",
+            fitter_revision: "934ab205d0f130fb8d6f5c1224adea6fd42bffdb",
+            transformers_revision: "42ca97014c85d71a88ad60d55f08cb9fb4d26e2c",
+            recipe_id: Some(
+                "blank-bhatia-nanda.muse_glimmer_30b.j_lens.pile10k25.penultimate.skip4.t128.v1",
+            ),
+            dataset: "NeelNanda/pile-10k",
+            dataset_revision: Some("127bfedcd5047750df5ccf3a12979a47bfa0bafa"),
+            split: "train",
+            corpus_preparation: "raw_text_add_bos_right_truncate_to_128_tokens",
+            corpus_selection: Some("dataset_order_rows_0_through_24_unfiltered_unshuffled"),
+            corpus_text_sha256: Some(
+                "c026d7b8d3382f740a34cb3f00339ac16dd4854a81cf5eb19c7f604ee96f8632",
+            ),
+            corpus_token_ids_sha256: Some(
+                "86146f01f323971a9bde07767b3f2e6bda241be3bc36c095d8e90f15d1c4734e",
+            ),
+            estimator_contract: Some(
+                "jlens.causal_all_valid_targets.mean_valid_source_positions.exclude_final_position.v2",
+            ),
+            arithmetic_contract: Some(
+                "jlens.model_dtype_forward_and_cotangent.fp32_cpu_rows_and_accumulator.v1",
+            ),
+            n_prompts: 25,
+            max_sequence_length: 128,
+            skip_first: 4,
+            valid_positions_per_prompt: None,
+            dim_batch: 4,
+            model_execution_dtype: "bfloat16",
+            serialized_dtype: "float16",
+            stop_rule: "fixed_25_prompt_recipe_require_all_prompts_no_early_stop",
+            convergence_status: "complete_fixed_recipe_not_convergence_measured",
             modality: "text_only",
         },
         transfer: TransferClaims {
@@ -926,6 +1069,53 @@ mod tests {
         let mut changed = manifest.clone();
         changed.payload.matrices[17].blake3 = "00".repeat(32);
         assert!(validate_manifest(&changed).is_err());
+    }
+
+    #[test]
+    fn canonical_matched_j_profile_binds_recipe_identity_and_payload() {
+        let matched_j = profile(ProfileId::BrittLewisMuseGlimmer30bJ);
+        assert!(valid_profile_definition(matched_j));
+        assert_eq!(
+            profile_for_source(MATCHED_J_SOURCE_BYTES, MATCHED_J_SOURCE_SHA256)
+                .unwrap()
+                .id,
+            ProfileId::BrittLewisMuseGlimmer30bJ
+        );
+        assert_eq!(matched_j.archive_spec().root, MATCHED_J_ARCHIVE_ROOT);
+        assert_eq!(matched_j.archive_spec().identity_layer_index, Some(50));
+
+        let manifest = canonical_manifest(matched_j, canonical_payload(matched_j));
+        validate_manifest(&manifest).unwrap();
+        assert_eq!(manifest.profile, MATCHED_J_PROFILE_NAME);
+        assert_eq!(manifest.transport.method, "J");
+        assert_eq!(
+            manifest.transport.rule_contract,
+            "jlens.jacobian.ordinary_autograd.v1"
+        );
+        assert_eq!(manifest.transport.target_layer, 50);
+        assert_eq!(
+            manifest.transport.source_layers,
+            (0..51).collect::<Vec<_>>()
+        );
+        assert_eq!(manifest.payload.blake3, MATCHED_J_PAYLOAD_BLAKE3);
+        assert_eq!(manifest.payload.matrices[50].blake3, IDENTITY_MATRIX_BLAKE3);
+        assert_eq!(
+            manifest.model.fitted_checkpoint_revision,
+            "a4e59da52a7bc87ae7251dd5545c0dd437c44b68"
+        );
+        assert_eq!(manifest.fit.n_prompts, 25);
+        assert_eq!(manifest.fit.skip_first, 4);
+        assert_eq!(manifest.fit.dim_batch, 4);
+        assert!(manifest.fit.embedded_provenance);
+        assert_eq!(matched_j.fit.fitter, "brittlewis12/jacobian-lens/jlens");
+        assert_eq!(
+            profile(ProfileId::BrittLewisMuseGlimmer30bR).fit.fitter,
+            "anthropics/jacobian-lens/jlens"
+        );
+        assert_eq!(
+            manifest.fit.recipe_id.as_deref(),
+            Some("blank-bhatia-nanda.muse_glimmer_30b.j_lens.pile10k25.penultimate.skip4.t128.v1")
+        );
     }
 
     #[test]

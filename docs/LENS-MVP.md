@@ -133,8 +133,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 ## Honest Boundaries
 
-- Muse fitting remains capped at T16 by its separate fixed-scratch bank. T16 is
-  an implementation smoke lane, not parity with published T128 fitting.
+- Native Metal Muse fitting remains capped at T16 by its separate fixed-scratch
+  bank. T16 is an implementation smoke lane, not parity with published T128
+  fitting.
 - Published Qwen transports were fitted against BF16 model execution and stored
   as F16. GGUF transfer is explicit: Qwen3.8 late-layer Q8 agreement is strong;
   Qwen3.6 Q4 has bounded local J/R qualification, not broad equivalence.
@@ -142,10 +143,9 @@ UI, generic plugin systems, and production hardening are out of scope.
   `source_to_target` remains a separate directed displacement for compatibility.
 - No complete method-matched R asset currently exists for Qwen3.8. Qwen3.6 has
   the released T128/skip-4/target-62 matched J/R pair plus its separate real
-  template asset. Muse now has a complete first-25-Pile/T128/skip-4/target-50 R
-  asset, but it is not a matched pair with the eyes-ml J asset, whose corpus and
-  target differ. Cross-method Muse deltas therefore require a newly matched J
-  fit rather than treating the two available assets as controlled counterparts.
+  template asset. Muse has a complete first-25-Pile/T128/skip-4/target-50
+  matched J/R pair with the same pinned model/dependency stack and corpus
+  protocol on one fitter lineage.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
 - Strict Lens messages match the normal run lane's system/user/assistant subset;
@@ -154,15 +154,14 @@ UI, generic plugin systems, and production hardening are out of scope.
   input to one model-visible system role, while artifact labels retain the input
   source. Raw text and literal IDs remain the path for malformed or forged
   structure and make no genuine-channel claim.
-- The published Muse J and R lenses were fitted on text-only BF16 execution;
-  the J used 900 Wikitext prompts and target 51, while R used 25 fixed Pile
-  documents and target 50. Q8 use and image-token positions remain explicitly
-  unvalidated transfers. The importer is profile-owned and can normalize either
-  separate matrix storages or one contiguous rank-3 storage without executing
-  pickle.
-- Muse's best T16 R256 engine projects to roughly `4.93h` for 6,656 rows and 25
-  prompts; merely linear T128 scaling is about `39.5h`, before its required
-  tiled-attention redesign. A paper-comparable full Muse fit is deadline-closed.
+- The published eyes-ml Muse J remains a separate 900-Wikitext, target-51
+  artifact and is not interchangeable with the matched pair. All published
+  Muse profiles were fitted on text-only BF16 execution; Q8 use and image-token
+  positions remain explicitly unvalidated transfers. The importer is
+  profile-owned and never executes pickle.
+- Native Metal Muse fitting remains a small-shape correctness lane. Full T128
+  matched production uses the pinned CUDA fitter; the runtime consumes its
+  normalized artifacts without coupling inference to that fitting stack.
 - Native Qwen3.8 full-R fitting is correct at T128 but not currently economical:
   a measured B8/all-source prompt takes `167.65s` of VJP, projecting the matched
   25-prompt, 5,120-row asset to roughly 31 days.
@@ -172,21 +171,21 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 ## Active Gate
 
-The shortest honest full-R and intervention-parity path is complete through the
-released Qwen3.6 pair plus canonical coordinate swap. No native full-fitting
-lane remains credible for this deadline. The current output lane prioritizes
-artifact-first offline inspection and comparison over speculative fitting or a
-resident service.
+The shortest honest full-R and intervention-parity paths are complete through
+the released Qwen3.6 pair, the matched Muse pair, and canonical coordinate swap.
+No additional native full-fitting lane remains credible for this deadline. The
+current output lane prioritizes artifact-first offline inspection and comparison
+over speculative fitting or a resident service.
 
 ## Deferred
 
-REST, corpus-scale batching, Flash-Next lens fitting, native Muse T128, and native
-full-Qwen block-operator optimization remain post-deadline unless requirements
-or available mechanisms materially change. A bounded Neuronpedia extraction
-spike found its current J-lens components coupled to application providers and
-string/probability data contracts; browser work waits for a passive,
-token-ID/score-aware component seam rather than importing auth/database product
-infrastructure.
+REST, corpus-scale batching, Flash-Next lens fitting, native Metal Muse T128,
+and native full-Qwen block-operator optimization remain post-deadline unless
+requirements or available mechanisms materially change. A bounded Neuronpedia
+extraction spike found its current J-lens components coupled to application
+providers and string/probability data contracts; browser work waits for a
+passive, token-ID/score-aware component seam rather than importing auth/database
+product infrastructure.
 
 Keep this file concise and update it in place. It is a capability and scope
 ledger, not a work log.

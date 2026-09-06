@@ -2181,7 +2181,7 @@ fn k0s_four_arm_model_head_contract_is_shared_immutable_session_local_state() {
     assert!(decoder.contains("pub head: &'a MetalDFlashHead"));
     assert!(decoder.contains("pub session: MetalDFlashSession"));
 
-    let forward_source = include_str!("../metal_forward.rs");
+    let forward_source = include_str!("../metal_forward/mod.rs");
     let forward = forward_source
         .split("pub struct MetalForward<'a>")
         .nth(1)

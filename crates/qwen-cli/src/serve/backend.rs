@@ -291,8 +291,13 @@ fn should_plan_dflash(
     matched_tokens: usize,
     restore_capture_complete: bool,
     dense: bool,
+    prompt_tokens: usize,
+    off_ctx: usize,
 ) -> bool {
-    has_head && dense && (matched_tokens == 0 || restore_capture_complete)
+    has_head
+        && dense
+        && prompt_tokens < off_ctx
+        && (matched_tokens == 0 || restore_capture_complete)
 }
 
 fn restored_dflash_capture_complete(
@@ -517,6 +522,14 @@ impl GenerationBackend for EngineBackend {
         // Validate all user-controlled sampling values before tokenization,
         // request-state allocation, prefix restore, or model execution.
         let mut sampler = request_sampler(request)?;
+        let dflash_off_ctx = self
+            .dflash_head
+            .as_ref()
+            .map(|_| crate::configured_dflash_off_ctx())
+            .transpose()
+            .map_err(|error| {
+                ServeError::server_error(format!("DFlash context policy: {error:#}"))
+            })?;
         // Rendered ChatML carries its own special-token markers; matches the
         // legacy messages path (prompt_add_special_tokens = false).
         let tokenize_t0 = Instant::now();
@@ -765,7 +778,11 @@ impl GenerationBackend for EngineBackend {
             matched_tokens,
             restore_capture_complete,
             dense,
+            prompt_ids.len(),
+            dflash_off_ctx.unwrap_or(0),
         ) && dflash_capture.is_some();
+        // Hard context Off cannot re-enter during this request. Keep the capture
+        // ring for future restores, but avoid drafter setup and verifier scratch.
         // Optional DFlash state is admitted only after restore establishes an
         // eligible capture window. Denial disables speculation rather than
         // rejecting an otherwise viable serial request.
@@ -1577,13 +1594,13 @@ mod tests {
         assert!(use_serial_tail(48, 48, true, true));
         assert!(!use_serial_tail(48, 48, true, false));
         assert!(use_serial_tail(48, 48, false, false));
-        assert!(should_plan_dflash(true, 0, false, true));
-        assert!(!should_plan_dflash(true, 0, false, false));
-        assert!(!should_plan_dflash(true, 1, false, true));
-        assert!(should_plan_dflash(true, 5, true, true));
-        assert!(!should_plan_dflash(true, 5, true, false));
-        assert!(!should_plan_dflash(true, 5, false, true));
-        assert!(!should_plan_dflash(false, 0, true, true));
+        assert!(should_plan_dflash(true, 0, false, true, 8, 16));
+        assert!(!should_plan_dflash(true, 0, false, false, 8, 16));
+        assert!(!should_plan_dflash(true, 1, false, true, 8, 16));
+        assert!(should_plan_dflash(true, 5, true, true, 8, 16));
+        assert!(!should_plan_dflash(true, 5, true, false, 8, 16));
+        assert!(!should_plan_dflash(true, 5, false, true, 8, 16));
+        assert!(!should_plan_dflash(false, 0, true, true, 8, 16));
         assert!(restored_dflash_capture_complete(5, 0, 5));
         assert!(!restored_dflash_capture_complete(5, 0, 0));
         assert!(restored_dflash_capture_complete(5, 10, 0));
@@ -1599,6 +1616,49 @@ mod tests {
             restored_extension_offsets,
             [None, Some(0), Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn dflash_hard_context_stop_skips_request_setup() {
+        let off_ctx = crate::DFLASH_OFF_CTX_DEFAULT;
+        for matched in [0, off_ctx - 1] {
+            assert!(should_plan_dflash(
+                true,
+                matched,
+                true,
+                true,
+                off_ctx - 1,
+                off_ctx
+            ));
+            assert!(!should_plan_dflash(
+                true, matched, true, true, off_ctx, off_ctx
+            ));
+            assert!(!should_plan_dflash(
+                true,
+                matched,
+                true,
+                true,
+                off_ctx + 1,
+                off_ctx
+            ));
+            assert!(should_plan_dflash(
+                true,
+                matched,
+                true,
+                true,
+                off_ctx + 1,
+                2 * off_ctx
+            ));
+        }
+        assert!(!should_plan_dflash(true, 0, false, true, 1, 0));
+        assert!(should_plan_dflash(
+            true,
+            0,
+            false,
+            true,
+            off_ctx,
+            usize::MAX
+        ));
     }
 
     #[test]

@@ -23,7 +23,7 @@
 use super::backend::request_sampler;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
-use super::output_partition::OutputProtocol;
+use super::output_partition::{OutputProtocol, ToolGrammar};
 use super::render_ds4;
 use crate::DeepSeekV4MultigroupSelectorPlan;
 use anyhow::Context as _;
@@ -243,7 +243,8 @@ impl GenerationBackend for DeepSeekV4Backend {
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
         OutputProtocol::Qwen {
             preopened_reasoning: render_ds4::preopens_reasoning(request).unwrap_or(false),
-            parse_tools: false,
+            parse_tools: !request.model_request.tools.is_empty(),
+            tool_grammar: ToolGrammar::DeepSeekDsml,
         }
     }
 

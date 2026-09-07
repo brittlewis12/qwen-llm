@@ -10,7 +10,7 @@
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{QwenTemplate, ServeError, ServeRequest};
-use super::output_partition::{GenerationEnd, OutputProtocol};
+use super::output_partition::{GenerationEnd, OutputProtocol, ToolGrammar};
 use anyhow::Context as _;
 use objc2_metal::MTLBuffer;
 use qwen_llm::gguf::GgufFile;
@@ -683,6 +683,7 @@ impl GenerationBackend for EngineBackend {
         OutputProtocol::Qwen {
             preopened_reasoning: preopens(self.template, request),
             parse_tools: true,
+            tool_grammar: ToolGrammar::QwenXml,
         }
     }
 

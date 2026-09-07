@@ -12,6 +12,7 @@ use crate::open_responses::render::{
     QwenServePromptChannel, QwenServePromptRole, QwenServePromptSpan, QwenServePromptSpanKind,
     render_qwen_serve_prompt_annotated_with, split_reasoning,
 };
+use crate::open_responses::tool_parse::python_json;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct ChatMessage {
@@ -73,6 +74,9 @@ const DEEPSEEK_V4_USER: &str = "<｜User｜>";
 const DEEPSEEK_V4_ASSISTANT: &str = "<｜Assistant｜>";
 const DEEPSEEK_V4_THINK_START: &str = "<think>";
 const DEEPSEEK_V4_THINK_END: &str = "</think>";
+pub(crate) const DEEPSEEK_V4_DSML: &str = "｜DSML｜";
+const DEEPSEEK_V4_TOOLS_HEADER: &str = "## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜tool_calls>\" block like the following:\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"$TOOL_NAME\">\n<｜DSML｜parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜parameter>\n...\n</｜DSML｜invoke>\n<｜DSML｜invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n";
+const DEEPSEEK_V4_TOOLS_FOOTER: &str = "\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n";
 const QWEN38_REASONING_EFFORT_XHIGH: &str = "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.";
 const QWEN38_REASONING_EFFORT_LOW: &str = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.";
 #[allow(dead_code)]
@@ -385,7 +389,8 @@ pub(crate) fn load_deepseek_v4_0731_messages_prompt(
     let (mut messages, meta) = load_messages_input(path, max_messages)?;
     normalize_deepseek_v4_inline_thinking(&mut messages, inline_thinking)?;
     validate_deepseek_v4_0731_wrapper_metadata(&meta, options)?;
-    render_deepseek_v4_0731_messages_prompt(&messages, options)
+    // Legacy flat `--messages` carries no tool declarations.
+    render_deepseek_v4_0731_messages_prompt(&messages, &[], options)
 }
 
 /// Policy for assistant-history `content` that embeds a leading inline
@@ -1344,7 +1349,7 @@ pub(crate) fn render_deepseek_v4_0731_single_turn_prompt(
         content: user.into(),
         ..Default::default()
     });
-    render_deepseek_v4_0731_messages_prompt(&messages, options)
+    render_deepseek_v4_0731_messages_prompt(&messages, &[], options)
 }
 
 /// Render the ordinary chat subset of the DeepSeek V4 release encoder,
@@ -1368,17 +1373,27 @@ pub(crate) fn render_deepseek_v4_0731_single_turn_prompt(
 ///   "Absolute maximum" text, max the "Beyond maximum" text); chat mode
 ///   never consults the table.
 ///
-/// This still intentionally excludes tools, developer messages,
-/// latest-reminder, tasks, response formats, and continuation (`wo_eos`)
-/// until their richer schemas have independent byte fixtures. The subset
-/// keeps one structural simplification: because roles must alternate
-/// user/assistant and end with a user turn, the release lookahead transition
-/// rule in `render_message` reduces to "every user turn appends the assistant
-/// transition", and the final user turn is always the conversation's last
-/// user index.
-#[allow(dead_code)]
+/// Tools (byte-pinned against both encoders on the `tools_*` fixture cases):
+/// - Declarations attach to the first system message as `content + "\n\n" +
+///   tools block`, or to an empty system message when none exists; this is
+///   SGLang serving's rule and the GGUF template's, with vLLM serving
+///   diverging by inserting a separate leading system (see the fixture
+///   generator). Each declaration renders `function | tojson` with Python
+///   separators in name/description/parameters/strict order.
+/// - Assistant tool calls render after the content as a DSML block; string
+///   arguments verbatim with `string="true"`, everything else as JSON with
+///   `string="false"`. A tool-calling turn still ends with EOS.
+/// - Tool results merge into one user turn: `<｜User｜>` then each
+///   `<tool_result>…</tool_result>` joined by `"\n\n"`, and a following user
+///   message joins the same turn. Tool results count as the last user turn.
+/// - Any declared tool disables reasoning dropping: thinking mode preserves
+///   every assistant's reasoning whatever `preserve_reasoning` says.
+///
+/// Still excluded: developer messages, latest-reminder, tasks, response
+/// formats, and continuation (`wo_eos`).
 pub(crate) fn render_deepseek_v4_0731_messages_prompt(
     messages: &[ChatMessage],
+    tools: &[ToolDefinition],
     options: DeepSeekV4EncodeOptions,
 ) -> Result<String> {
     let thinking = !matches!(options.reasoning, DeepSeekV4Reasoning::None);
@@ -1390,6 +1405,8 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
     if messages.is_empty() {
         bail!("DeepSeek V4 messages contain no messages");
     }
+    // vLLM `encode_messages`: any tools anywhere disable reasoning dropping.
+    let preserve_reasoning = options.preserve_reasoning || !tools.is_empty();
 
     let mut output = String::from(DEEPSEEK_V4_BOS);
     if thinking {
@@ -1400,7 +1417,22 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
     }
     let mut expect_user = true;
     let mut saw_user = false;
-    let last_index = messages.len() - 1;
+    // Tool results answer the last user turn's position (the encoder merges
+    // them into user messages before locating it).
+    let last_user_like = messages
+        .iter()
+        .rposition(|message| matches!(message.role.as_str(), "user" | "tool"))
+        .unwrap_or(0);
+    let leads_with_system = messages
+        .first()
+        .is_some_and(|message| message.role == "system");
+    if !tools.is_empty() && !leads_with_system {
+        output.push_str("\n\n");
+        output.push_str(&deepseek_v4_tools_block(tools));
+    }
+    // Whether the previous rendered turn was a user-like turn that is still
+    // open (tool results and a following user message share one turn).
+    let mut in_user = false;
 
     for (index, message) in messages.iter().enumerate() {
         if !message.extra.is_empty() {
@@ -1420,25 +1452,59 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
             "system" if index == 0 && expect_user => {
                 require_no_reasoning_field(index, "system", reasoning_field)?;
                 output.push_str(&message.content);
+                if !tools.is_empty() {
+                    output.push_str("\n\n");
+                    output.push_str(&deepseek_v4_tools_block(tools));
+                }
             }
-            "user" if expect_user => {
-                require_no_reasoning_field(index, "user", reasoning_field)?;
-                output.push_str(DEEPSEEK_V4_USER);
-                output.push_str(&message.content);
-                // Subset-reduced release transition rule: every user turn is
-                // followed by an assistant turn or generation (vLLM:336,354).
-                output.push_str(DEEPSEEK_V4_ASSISTANT);
-                let open_thinking = thinking && (options.preserve_reasoning || index == last_index);
-                output.push_str(if open_thinking {
-                    DEEPSEEK_V4_THINK_START
+            "user" | "tool" if expect_user => {
+                require_no_reasoning_field(index, message.role.as_str(), reasoning_field)?;
+                // Only tool results extend an open user turn (the encoder
+                // merges them); back-to-back plain user messages stay outside
+                // the pinned subset.
+                if in_user
+                    && message.role == "user"
+                    && index > 0
+                    && messages[index - 1].role == "user"
+                {
+                    bail!(
+                        "DeepSeek V4 message {index} has role \"user\" directly after another user turn; expected \"assistant\""
+                    );
+                }
+                if in_user {
+                    output.push_str("\n\n");
                 } else {
-                    DEEPSEEK_V4_THINK_END
-                });
-                expect_user = false;
+                    output.push_str(DEEPSEEK_V4_USER);
+                    in_user = true;
+                }
+                if message.role == "tool" {
+                    output.push_str("<tool_result>");
+                    output.push_str(&message.content);
+                    output.push_str("</tool_result>");
+                } else {
+                    output.push_str(&message.content);
+                }
                 saw_user = true;
+                // Release transition rule: a user-like turn appends the
+                // assistant transition when the next message is an assistant
+                // turn or the conversation ends (vLLM:336,354).
+                let next_is_user_like = messages
+                    .get(index + 1)
+                    .is_some_and(|next| matches!(next.role.as_str(), "user" | "tool"));
+                if !next_is_user_like {
+                    output.push_str(DEEPSEEK_V4_ASSISTANT);
+                    let open_thinking = thinking && (preserve_reasoning || index >= last_user_like);
+                    output.push_str(if open_thinking {
+                        DEEPSEEK_V4_THINK_START
+                    } else {
+                        DEEPSEEK_V4_THINK_END
+                    });
+                    expect_user = false;
+                    in_user = false;
+                }
             }
             "assistant" if !expect_user => {
-                if thinking && options.preserve_reasoning {
+                if thinking && preserve_reasoning {
                     // `drop_thinking=False`: reasoning (or empty) closes with
                     // `</think>` before the summary (vLLM:314-316).
                     output.push_str(reasoning_field.unwrap_or(""));
@@ -1447,6 +1513,18 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
                 // chat mode and thinking+drop history intentionally drop the
                 // reasoning field, matching the release encoder.
                 output.push_str(&message.content);
+                if !message.tool_calls.is_empty() {
+                    output.push_str("\n\n<");
+                    output.push_str(DEEPSEEK_V4_DSML);
+                    output.push_str("tool_calls>\n");
+                    for call in &message.tool_calls {
+                        output.push_str(&deepseek_v4_tool_call_dsml(call)?);
+                        output.push('\n');
+                    }
+                    output.push_str("</");
+                    output.push_str(DEEPSEEK_V4_DSML);
+                    output.push_str("tool_calls>");
+                }
                 output.push_str(DEEPSEEK_V4_EOS);
                 expect_user = true;
             }
@@ -1466,6 +1544,52 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
         bail!("DeepSeek V4 messages must end with a user turn before generation");
     }
     Ok(output)
+}
+
+/// The release tools block: header, one `function | tojson` per declaration
+/// (Python separators, name/description/parameters/strict order), footer.
+fn deepseek_v4_tools_block(tools: &[ToolDefinition]) -> String {
+    let mut block = String::from(DEEPSEEK_V4_TOOLS_HEADER);
+    for tool in tools {
+        let mut function = serde_json::Map::new();
+        function.insert("name".into(), serde_json::json!(tool.name));
+        if let Some(description) = tool.description.as_deref() {
+            function.insert("description".into(), serde_json::json!(description));
+        }
+        if !tool.parameters.is_null() {
+            function.insert("parameters".into(), tool.parameters.clone());
+        }
+        if let Some(strict) = tool.strict {
+            function.insert("strict".into(), serde_json::json!(strict));
+        }
+        block.push_str(&python_json(&serde_json::Value::Object(function)));
+        block.push('\n');
+    }
+    block.push_str(DEEPSEEK_V4_TOOLS_FOOTER);
+    block
+}
+
+/// One `<｜DSML｜invoke>` block. Arguments are the replayed JSON object;
+/// string values render verbatim with `string="true"`, everything else as
+/// Python-separated JSON with `string="false"` (vLLM `encode_arguments_to_dsml`).
+fn deepseek_v4_tool_call_dsml(call: &ToolCall) -> Result<String> {
+    let arguments: serde_json::Value = serde_json::from_str(&call.arguments)
+        .with_context(|| format!("tool call {} arguments are not JSON", call.name))?;
+    let serde_json::Value::Object(arguments) = arguments else {
+        bail!("tool call {} arguments must be a JSON object", call.name);
+    };
+    let mut dsml = format!("<{DEEPSEEK_V4_DSML}invoke name=\"{}\">\n", call.name);
+    for (key, value) in &arguments {
+        let (is_string, rendered) = match value {
+            serde_json::Value::String(text) => ("true", text.clone()),
+            other => ("false", python_json(other)),
+        };
+        dsml.push_str(&format!(
+            "<{DEEPSEEK_V4_DSML}parameter name=\"{key}\" string=\"{is_string}\">{rendered}</{DEEPSEEK_V4_DSML}parameter>\n"
+        ));
+    }
+    dsml.push_str(&format!("</{DEEPSEEK_V4_DSML}invoke>"));
+    Ok(dsml)
 }
 
 fn deepseek_v4_message_reasoning(index: usize, message: &ChatMessage) -> Result<Option<&str>> {
@@ -2162,12 +2286,14 @@ mod tests {
             "<｜begin▁of▁sentence｜>Be exact.<｜User｜>Hello<｜Assistant｜></think>"
         );
         assert_eq!(
-            render_deepseek_v4_0731_messages_prompt(&[message("user", "Hello")], chat).unwrap(),
+            render_deepseek_v4_0731_messages_prompt(&[message("user", "Hello")], &[], chat)
+                .unwrap(),
             "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>"
         );
         assert_eq!(
             render_deepseek_v4_0731_messages_prompt(
                 &[message("system", "Be exact."), message("user", "Hello"),],
+                &[],
                 chat
             )
             .unwrap(),
@@ -2181,6 +2307,7 @@ mod tests {
                     message("assistant", "Hi!"),
                     message("user", "上海 🙂"),
                 ],
+                &[],
                 chat
             )
             .unwrap(),
@@ -2205,6 +2332,7 @@ mod tests {
         ];
         let drop = render_deepseek_v4_0731_messages_prompt(
             &history,
+            &[],
             options(DeepSeekV4Reasoning::Low, false),
         )
         .unwrap();
@@ -2217,9 +2345,12 @@ mod tests {
                 "<｜User｜>上海 🙂<｜Assistant｜><think>"
             )
         );
-        let chat =
-            render_deepseek_v4_0731_messages_prompt(&history, DeepSeekV4EncodeOptions::default())
-                .unwrap();
+        let chat = render_deepseek_v4_0731_messages_prompt(
+            &history,
+            &[],
+            DeepSeekV4EncodeOptions::default(),
+        )
+        .unwrap();
         assert_eq!(
             drop.strip_suffix("<think>").unwrap(),
             chat.strip_suffix("</think>").unwrap(),
@@ -2230,6 +2361,7 @@ mod tests {
         // replay `reasoning</think>content`.
         let preserve = render_deepseek_v4_0731_messages_prompt(
             &history,
+            &[],
             options(DeepSeekV4Reasoning::Low, true),
         )
         .unwrap();
@@ -2252,7 +2384,8 @@ mod tests {
                     message("assistant", "done"),
                     message("user", "two"),
                 ],
-                options(DeepSeekV4Reasoning::Low, true),
+                &[],
+                options(DeepSeekV4Reasoning::Low, true)
             )
             .unwrap(),
             concat!(
@@ -2271,6 +2404,7 @@ mod tests {
         };
         let aliased = render_deepseek_v4_0731_messages_prompt(
             &[message("user", "Hello"), alias, message("user", "again")],
+            &[],
             options(DeepSeekV4Reasoning::Low, true),
         )
         .unwrap();
@@ -2282,6 +2416,7 @@ mod tests {
         // Low is byte-identical to bare thinking mode: no effort bytes.
         let low = render_deepseek_v4_0731_messages_prompt(
             &[message("user", "Hello")],
+            &[],
             options(DeepSeekV4Reasoning::Low, false),
         )
         .unwrap();
@@ -2292,6 +2427,7 @@ mod tests {
         // High carries the earlier two-tier encoder's max text.
         let high = render_deepseek_v4_0731_messages_prompt(
             &[message("user", "Hello")],
+            &[],
             options(DeepSeekV4Reasoning::High, false),
         )
         .unwrap();
@@ -2307,6 +2443,7 @@ mod tests {
         // Max carries the stronger current release text.
         let single = render_deepseek_v4_0731_messages_prompt(
             &[message("user", "Hello")],
+            &[],
             options(DeepSeekV4Reasoning::Max, false),
         )
         .unwrap();
@@ -2319,6 +2456,7 @@ mod tests {
         assert!(DEEPSEEK_V4_REASONING_EFFORT_MAX.starts_with("Reasoning Effort: Beyond maximum"));
         let with_system = render_deepseek_v4_0731_messages_prompt(
             &[message("system", "Be exact."), message("user", "Hello")],
+            &[],
             options(DeepSeekV4Reasoning::Max, false),
         )
         .unwrap();
@@ -2331,6 +2469,7 @@ mod tests {
         // Chat mode never consults the effort table.
         let chat = render_deepseek_v4_0731_messages_prompt(
             &[message("user", "Hello")],
+            &[],
             DeepSeekV4EncodeOptions::default(),
         )
         .unwrap();
@@ -2342,6 +2481,7 @@ mod tests {
         // Preserve without thinking is rejected.
         let error = render_deepseek_v4_0731_messages_prompt(
             &[message("user", "Hello")],
+            &[],
             options(DeepSeekV4Reasoning::None, true),
         )
         .unwrap_err()
@@ -2351,10 +2491,13 @@ mod tests {
         // Reasoning fields on non-assistant roles are rejected.
         let mut user = message("user", "Hello");
         user.reasoning = Some("nope".into());
-        let error =
-            render_deepseek_v4_0731_messages_prompt(&[user], DeepSeekV4EncodeOptions::default())
-                .unwrap_err()
-                .to_string();
+        let error = render_deepseek_v4_0731_messages_prompt(
+            &[user],
+            &[],
+            DeepSeekV4EncodeOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("only representable on assistant turns"));
 
         // Conflicting reasoning aliases are rejected.
@@ -2371,6 +2514,7 @@ mod tests {
                 conflicted,
                 message("user", "again"),
             ],
+            &[],
             DeepSeekV4EncodeOptions::default(),
         )
         .unwrap_err()
@@ -2394,8 +2538,8 @@ mod tests {
             options(DeepSeekV4Reasoning::Low, false),
         ] {
             assert_eq!(
-                render_deepseek_v4_0731_messages_prompt(&with_reasoning, opts).unwrap(),
-                render_deepseek_v4_0731_messages_prompt(&without_reasoning, opts).unwrap(),
+                render_deepseek_v4_0731_messages_prompt(&with_reasoning, &[], opts).unwrap(),
+                render_deepseek_v4_0731_messages_prompt(&without_reasoning, &[], opts).unwrap(),
             );
         }
     }
@@ -2412,6 +2556,7 @@ mod tests {
             assert!(
                 render_deepseek_v4_0731_messages_prompt(
                     &messages,
+                    &[],
                     DeepSeekV4EncodeOptions::default()
                 )
                 .is_err()
@@ -2422,20 +2567,26 @@ mod tests {
             {"role": "user", "content": "hello", "reasoning": "hidden"}
         ]))
         .unwrap();
-        let error =
-            render_deepseek_v4_0731_messages_prompt(&messages, DeepSeekV4EncodeOptions::default())
-                .unwrap_err()
-                .to_string();
+        let error = render_deepseek_v4_0731_messages_prompt(
+            &messages,
+            &[],
+            DeepSeekV4EncodeOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("only representable on assistant turns"));
 
         let (messages, _) = parse_messages_input(json!([
             {"role": "user", "content": "hello", "tool_calls": []}
         ]))
         .unwrap();
-        let error =
-            render_deepseek_v4_0731_messages_prompt(&messages, DeepSeekV4EncodeOptions::default())
-                .unwrap_err()
-                .to_string();
+        let error = render_deepseek_v4_0731_messages_prompt(
+            &messages,
+            &[],
+            DeepSeekV4EncodeOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("unsupported fields: tool_calls"));
     }
 
@@ -2446,11 +2597,98 @@ mod tests {
         ))
         .expect("parse chat fixture JSON");
         let cases = fixture["cases"].as_array().expect("fixture cases");
-        assert_eq!(cases.len(), 17, "fixture case census");
+        assert_eq!(cases.len(), 26, "fixture case census");
+        let mut tool_cases = 0;
         for case in cases {
             let name = case["name"].as_str().expect("case name");
-            let messages: Vec<ChatMessage> = serde_json::from_value(case["messages"].clone())
-                .unwrap_or_else(|error| panic!("parse {name} messages: {error}"));
+            // Tool cases are client-shaped (top-level `tools`, OpenAI tool
+            // calls and `tool` results) and go through the strict `run
+            // --messages` parser, the same path a user takes. Chat cases keep
+            // the direct deserialization that also exercises the
+            // `reasoning`/`reasoning_content` alias handling.
+            let (messages, tools): (Vec<ChatMessage>, Vec<ToolDefinition>) = if case
+                .get("tools")
+                .is_some()
+            {
+                // The generator writes both `reasoning` (vLLM) and
+                // `reasoning_content` (SGLang/OpenAI) so each encoder reads
+                // its own; clients send the OpenAI key, which is what the
+                // strict parser accepts.
+                let mut client_messages = case["messages"].clone();
+                for message in client_messages.as_array_mut().expect("messages array") {
+                    message
+                        .as_object_mut()
+                        .expect("message object")
+                        .remove("reasoning");
+                }
+                let document = serde_json::json!({
+                    "messages": client_messages,
+                    "tools": case["tools"],
+                });
+                tool_cases += 1;
+                match parse_strict_messages_input(&document.to_string(), name) {
+                    Ok(chat) => (chat.messages, chat.tools),
+                    // The strict subset requires an assistant turn after a
+                    // completed tool round; the encoders accept a user turn
+                    // there (merged into the same user-like turn). Pin that
+                    // case at the renderer level from the client shape.
+                    Err(_) if name == "tools_chat_one_round_then_user" => {
+                        let messages = client_messages
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|message| ChatMessage {
+                                role: message["role"].as_str().unwrap().to_owned(),
+                                content: message["content"].as_str().unwrap_or("").to_owned(),
+                                reasoning_content: message["reasoning_content"]
+                                    .as_str()
+                                    .map(str::to_owned),
+                                tool_calls: message["tool_calls"]
+                                    .as_array()
+                                    .map(|calls| {
+                                        calls
+                                            .iter()
+                                            .map(|call| ToolCall {
+                                                call_id: call["id"].as_str().unwrap().to_owned(),
+                                                name: call["function"]["name"]
+                                                    .as_str()
+                                                    .unwrap()
+                                                    .to_owned(),
+                                                arguments: call["function"]["arguments"]
+                                                    .as_str()
+                                                    .unwrap()
+                                                    .to_owned(),
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
+                                ..Default::default()
+                            })
+                            .collect();
+                        let tools =
+                            serde_json::from_value::<Vec<serde_json::Value>>(case["tools"].clone())
+                                .unwrap()
+                                .into_iter()
+                                .map(|tool| ToolDefinition {
+                                    name: tool["function"]["name"].as_str().unwrap().to_owned(),
+                                    description: tool["function"]["description"]
+                                        .as_str()
+                                        .map(str::to_owned),
+                                    parameters: tool["function"]["parameters"].clone(),
+                                    strict: None,
+                                })
+                                .collect();
+                        (messages, tools)
+                    }
+                    Err(error) => panic!("strict-parse {name}: {error}"),
+                }
+            } else {
+                (
+                    serde_json::from_value(case["messages"].clone())
+                        .unwrap_or_else(|error| panic!("parse {name} messages: {error}")),
+                    Vec::new(),
+                )
+            };
             let thinking_mode = case["thinking_mode"].as_str().expect("thinking mode");
             let effort = case["reasoning_effort"].as_str();
             let reasoning = match (thinking_mode, effort) {
@@ -2464,7 +2702,7 @@ mod tests {
                 reasoning,
                 preserve_reasoning: !case["drop_thinking"].as_bool().expect("drop flag"),
             };
-            let rendered = render_deepseek_v4_0731_messages_prompt(&messages, options)
+            let rendered = render_deepseek_v4_0731_messages_prompt(&messages, &tools, options)
                 .unwrap_or_else(|error| panic!("render {name}: {error}"));
             assert_eq!(
                 rendered,
@@ -2472,6 +2710,10 @@ mod tests {
                 "fixture case {name} diverged from the release encoders"
             );
         }
+        assert_eq!(
+            tool_cases, 9,
+            "every tool case went through the strict parser"
+        );
     }
 
     #[test]
@@ -2888,7 +3130,7 @@ mod tests {
             reasoning: DeepSeekV4Reasoning::Low,
             preserve_reasoning: true,
         };
-        let prompt = render_deepseek_v4_0731_messages_prompt(&promoted, options).unwrap();
+        let prompt = render_deepseek_v4_0731_messages_prompt(&promoted, &[], options).unwrap();
         assert_eq!(
             prompt,
             format!(
@@ -2930,7 +3172,7 @@ mod tests {
             DeepSeekV4InlineThinking::PromoteToReasoning,
         )
         .unwrap();
-        let raw_prompt = render_deepseek_v4_0731_messages_prompt(&raw, options).unwrap();
+        let raw_prompt = render_deepseek_v4_0731_messages_prompt(&raw, &[], options).unwrap();
         assert_eq!(
             raw_prompt,
             format!(
@@ -2941,9 +3183,12 @@ mod tests {
         let mut stripped = messages.clone();
         normalize_deepseek_v4_inline_thinking(&mut stripped, DeepSeekV4InlineThinking::Strip)
             .unwrap();
-        let chat =
-            render_deepseek_v4_0731_messages_prompt(&stripped, DeepSeekV4EncodeOptions::default())
-                .unwrap();
+        let chat = render_deepseek_v4_0731_messages_prompt(
+            &stripped,
+            &[],
+            DeepSeekV4EncodeOptions::default(),
+        )
+        .unwrap();
         assert_eq!(
             chat,
             format!(
@@ -3062,5 +3307,64 @@ mod tests {
             }
         }
         assert_eq!(stability_checked, 5, "stability assertion census");
+    }
+}
+
+#[cfg(test)]
+mod deepseek_v4_dsml_round_trip {
+    use super::*;
+    use crate::open_responses::tool_parse::parse_dsml_emission;
+
+    /// Every assistant tool-call turn in the pinned fixtures, rendered by the
+    /// release encoder contract, parses back to the same name/argument
+    /// objects: the serve output parser and the history renderer agree.
+    #[test]
+    fn rendered_tool_calls_parse_back_to_their_arguments() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/deepseek_v4_0731_chat_fixtures_v1.json"
+        ))
+        .unwrap();
+        let mut checked = 0;
+        for case in fixture["cases"].as_array().unwrap() {
+            for message in case["messages"].as_array().unwrap() {
+                let Some(calls) = message["tool_calls"].as_array() else {
+                    continue;
+                };
+                let tool_calls: Vec<ToolCall> = calls
+                    .iter()
+                    .map(|call| ToolCall {
+                        call_id: call["id"].as_str().unwrap().to_owned(),
+                        name: call["function"]["name"].as_str().unwrap().to_owned(),
+                        arguments: call["function"]["arguments"].as_str().unwrap().to_owned(),
+                    })
+                    .collect();
+                let mut emission = message["content"].as_str().unwrap_or("").to_owned();
+                emission.push_str(&format!("\n\n<{DEEPSEEK_V4_DSML}tool_calls>\n"));
+                for call in &tool_calls {
+                    emission.push_str(&deepseek_v4_tool_call_dsml(call).unwrap());
+                    emission.push('\n');
+                }
+                emission.push_str(&format!("</{DEEPSEEK_V4_DSML}tool_calls>"));
+                let parsed = parse_dsml_emission(&emission);
+                assert_eq!(
+                    parsed.visible,
+                    format!("{}\n\n", message["content"].as_str().unwrap_or(""))
+                );
+                assert_eq!(parsed.calls.len(), tool_calls.len());
+                for (parsed, original) in parsed.calls.iter().zip(&tool_calls) {
+                    assert_eq!(parsed.name, original.name);
+                    let expected: serde_json::Value =
+                        serde_json::from_str(&original.arguments).unwrap();
+                    assert_eq!(
+                        serde_json::Value::Object(parsed.arguments.clone()),
+                        expected,
+                        "case {}",
+                        case["name"]
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "checked {checked} tool-call turns");
     }
 }

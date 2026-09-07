@@ -22,8 +22,12 @@ Encoder sources are read revision-addressed (`git show REV:PATH`) from the
 local checkouts, so working-tree state and current HEAD never matter; the
 pinned revisions only need to exist in each repository's object store.
 
-Only the ordinary chat subset plus release thinking tiers are exercised:
-tools, developer, latest-reminder, tasks, and continuation stay out of scope.
+The ordinary chat subset, the release thinking tiers, and the tool surface
+(declarations attached to the system message as the serving layers do,
+assistant DSML tool calls with string and non-string parameters, tool
+results merged into user turns, and the "tools disable reasoning dropping"
+rule) are exercised. Developer, latest-reminder, tasks, and continuation
+stay out of scope.
 """
 
 from __future__ import annotations
@@ -118,6 +122,110 @@ def system(content: str) -> dict:
     return {"role": "system", "content": content}
 
 
+def tool_result(call_id: str, content: str) -> dict:
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+def tool_call(call_id: str, name: str, arguments: dict) -> dict:
+    # OpenAI shape: arguments travel as a JSON string, as clients send them.
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+
+
+def assistant_calls(content: str, calls: list[dict], reasoning: str | None = None) -> dict:
+    message = assistant(content, reasoning)
+    message["tool_calls"] = calls
+    return message
+
+
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "units": {"type": "string", "enum": ["c", "f"]},
+            },
+            "required": ["city"],
+        },
+    },
+}
+LOOKUP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "lookup",
+        "description": "Look up records; 上海 🙂 in descriptions round-trips.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ids": {"type": "array", "items": {"type": "integer"}},
+                "limit": {"type": "integer"},
+                "exact": {"type": "boolean"},
+            },
+        },
+    },
+}
+
+
+def attach_tools(messages: list[dict], tools: list[dict] | None) -> list[dict]:
+    """Attach a request's top-level `tools` the way SGLang serving does.
+
+    The encoders take tools per message; the serving layers decide where a
+    request's tools land, and the two references disagree:
+
+    - SGLang `serving_chat` (pinned revision) attaches them to the first
+      message when it is a system message, otherwise inserts an empty system
+      message to carry them. The Unsloth GGUF jinja template does the same
+      for an existing system message.
+    - vLLM `deepseek_v4.py` always inserts a *new* content-less system
+      message at index 0, so a client's own system text renders after the
+      tools block.
+
+    SGLang's rule is the one with two-of-three agreement in every case
+    (with jinja when a system message exists, with vLLM when none does), and
+    it is the ordinary OpenAI semantics of tools augmenting the system
+    prompt, so it is the pinned contract. Fixture messages stay in client
+    shape; this function is applied before encoding.
+    """
+    messages = json.loads(json.dumps(messages))
+    if not tools:
+        return messages
+    if not messages or messages[0]["role"] != "system":
+        messages.insert(0, {"role": "system", "content": ""})
+    messages[0]["tools"] = tools
+    return messages
+
+
+TWO_TOOLS = [WEATHER_TOOL, LOOKUP_TOOL]
+TOOLS_DECLARED = [system("Be exact."), user("Weather?")]
+TOOLS_DECLARED_NO_SYSTEM = [user("Weather?")]
+TOOLS_ONE_ROUND = [
+    system("Be exact."),
+    user("Weather in Paris, then look up 1 and 2."),
+    assistant_calls(
+        "",
+        [
+            tool_call("call_1", "get_weather", {"city": "Paris", "units": "c"}),
+            tool_call("call_2", "lookup", {"ids": [1, 2], "limit": 10, "exact": True}),
+        ],
+        reasoning="plan: two calls",
+    ),
+    tool_result("call_1", "18°C"),
+    tool_result("call_2", '{"rows": 2}'),
+]
+TOOLS_ONE_ROUND_THEN_USER = TOOLS_ONE_ROUND + [user("Thanks, summarize.")]
+TOOLS_TWO_ROUNDS = TOOLS_ONE_ROUND + [
+    assistant_calls("Checking Berlin too.", [tool_call("call_3", "get_weather", {"city": "Berlin"})], reasoning="one more"),
+    tool_result("call_3", "12°C"),
+]
+
+
 SINGLE = [user("Hello")]
 SYSTEM_SINGLE = [system("Be exact."), user("Hello")]
 MULTI = [
@@ -145,7 +253,7 @@ MULTI_MISSING_REASONING = [
     user("two"),
 ]
 
-# (name, messages, thinking_mode, reasoning_effort, drop_thinking)
+# (name, messages, thinking_mode, reasoning_effort, drop_thinking[, tools])
 CASES = [
     ("chat_single_user", SINGLE, "chat", None, True),
     ("chat_system_user", SYSTEM_SINGLE, "chat", None, True),
@@ -188,6 +296,17 @@ CASES = [
         "max",
         False,
     ),
+    # Tool surface. `drop_thinking=True` is deliberately passed: the encoders
+    # disable dropping whenever tools are present, and the fixture pins that.
+    ("tools_chat_declared", TOOLS_DECLARED, "chat", None, True, TWO_TOOLS),
+    ("tools_chat_declared_no_system", TOOLS_DECLARED_NO_SYSTEM, "chat", None, True, [WEATHER_TOOL]),
+    ("tools_chat_one_round", TOOLS_ONE_ROUND, "chat", None, True, TWO_TOOLS),
+    ("tools_chat_one_round_then_user", TOOLS_ONE_ROUND_THEN_USER, "chat", None, True, TWO_TOOLS),
+    ("tools_chat_two_rounds", TOOLS_TWO_ROUNDS, "chat", None, True, TWO_TOOLS),
+    ("tools_thinking_declared", TOOLS_DECLARED, "thinking", "low", True, TWO_TOOLS),
+    ("tools_thinking_one_round_keeps_reasoning", TOOLS_ONE_ROUND, "thinking", "low", True, TWO_TOOLS),
+    ("tools_thinking_two_rounds_keeps_reasoning", TOOLS_TWO_ROUNDS, "thinking", "low", True, TWO_TOOLS),
+    ("tools_thinking_high_one_round", TOOLS_ONE_ROUND, "thinking", "high", True, TWO_TOOLS),
 ]
 
 
@@ -220,18 +339,21 @@ def main() -> None:
 def generate(check: bool, vllm_encoding, sglang_encoding) -> None:
     cases = []
     prompts: dict[str, str] = {}
-    for name, messages, thinking_mode, reasoning_effort, drop_thinking in CASES:
+    for case in CASES:
+        name, messages, thinking_mode, reasoning_effort, drop_thinking = case[:5]
+        tools = case[5] if len(case) > 5 else None
+        encoded_messages = attach_tools(messages, tools)
         thinking = thinking_mode == "thinking"
         rendered: dict[str, str] = {}
         rendered["vllm"] = vllm_encoding.encode_messages(
-            json.loads(json.dumps(messages)),
+            json.loads(json.dumps(encoded_messages)),
             thinking_mode=thinking_mode,
             drop_thinking=drop_thinking,
             reasoning_effort=reasoning_effort,
         )
         if not thinking or reasoning_effort in SGLANG_TIER_REMAP:
             rendered["sglang"] = sglang_encoding.encode_messages(
-                json.loads(json.dumps(messages)),
+                json.loads(json.dumps(encoded_messages)),
                 thinking_mode=thinking_mode,
                 drop_thinking=drop_thinking,
                 reasoning_effort=SGLANG_TIER_REMAP[reasoning_effort]
@@ -257,6 +379,7 @@ def generate(check: bool, vllm_encoding, sglang_encoding) -> None:
                 "drop_thinking": drop_thinking,
                 "sources": sorted(rendered),
                 "messages": messages,
+                **({"tools": tools} if tools else {}),
                 "prompt": reference,
             }
         )
@@ -291,6 +414,19 @@ def generate(check: bool, vllm_encoding, sglang_encoding) -> None:
     drop = prompts["thinking_drop_multi_turn"]
     if chat.removesuffix("</think>") != drop.removesuffix("<think>"):
         raise SystemExit("thinking-drop history diverged from chat-mode history")
+
+    # Tools disable reasoning dropping: the "drop" rendering must equal the
+    # preserve rendering of the same conversation.
+    preserve_probe = vllm_encoding.encode_messages(
+        attach_tools(TOOLS_ONE_ROUND, TWO_TOOLS),
+        thinking_mode="thinking",
+        drop_thinking=False,
+        reasoning_effort="low",
+    )
+    if prompts["tools_thinking_one_round_keeps_reasoning"] != preserve_probe:
+        raise SystemExit("tools did not disable reasoning dropping")
+    if "<think>plan: two calls</think>" not in prompts["tools_thinking_one_round_keeps_reasoning"]:
+        raise SystemExit("tool-round reasoning was not preserved verbatim")
 
     fixture = {
         "fixture": "deepseek_v4_0731_chat_fixtures_v1",

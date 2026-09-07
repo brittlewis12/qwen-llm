@@ -701,15 +701,12 @@ fn prepare_modern_run_prompt(
                         failure.as_str(),
                     )
                 }
-                ModelFamily::DeepSeek4 if has_tool_surface => {
-                    bail!(
-                        "DeepSeek V4 ordinary chat does not accept tools, tool calls, or tool results"
-                    )
-                }
-                ModelFamily::DeepSeek4 => {
-                    render_deepseek_v4_0731_messages_prompt(&messages, deepseek_v4_options)
-                        .context("render strict DeepSeek V4 0731 messages")?
-                }
+                ModelFamily::DeepSeek4 => render_deepseek_v4_0731_messages_prompt(
+                    &messages,
+                    &chat.tools,
+                    deepseek_v4_options,
+                )
+                .context("render strict DeepSeek V4 0731 messages")?,
                 ModelFamily::MuseGlimmer => {
                     bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
                 }
@@ -741,7 +738,10 @@ pub(crate) struct QwenUserPromptProtocol {
 
 impl QwenUserPromptProtocol {
     #[cfg(test)]
-    pub(crate) fn for_test(qwen38: bool, template: crate::open_responses::items::QwenTemplate) -> Self {
+    pub(crate) fn for_test(
+        qwen38: bool,
+        template: crate::open_responses::items::QwenTemplate,
+    ) -> Self {
         Self { qwen38, template }
     }
 
@@ -785,7 +785,8 @@ impl QwenUserPromptProtocol {
             !no_thinking || self.pinned(),
             "no-thinking requires a model whose chat template is pinned (released Qwen3.5, Qwen3.6, or Qwen3.8 templates); this model's template is unrecognized, so omit it to use the default generation behavior"
         );
-        let qwen38_mode = resolve_qwen38_generation_mode(self.qwen38, no_thinking, reasoning_effort)?;
+        let qwen38_mode =
+            resolve_qwen38_generation_mode(self.qwen38, no_thinking, reasoning_effort)?;
         ensure!(
             reasoning_effort.is_none() || self.qwen38,
             "reasoning-effort applies to Qwen3.8 (low/medium/xhigh); this model has no reasoning-effort control"

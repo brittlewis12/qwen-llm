@@ -461,3 +461,151 @@ mod tests {
         assert_eq!(parsed.calls.len(), 1);
     }
 }
+
+/// DeepSeek V4 DSML tool calls.
+///
+/// Grammar (vLLM `rust/src/parser/src/tool/deepseek_dsml` at the pinned
+/// revision, whose event model this mirrors): visible prose runs until
+/// `<｜DSML｜tool_calls>`; inside the block each complete
+/// `<｜DSML｜invoke name="…">` … `</｜DSML｜invoke>` yields one call whose
+/// `<｜DSML｜parameter name="…" string="true|false">…</｜DSML｜parameter>`
+/// entries become a JSON object — `string="true"` values verbatim,
+/// `string="false"` values parsed as JSON (falling back to the raw text
+/// when they are not JSON); anything after `</｜DSML｜tool_calls>` is
+/// ignored. Like `parse_emission`, a malformed block returns the whole span
+/// as visible text rather than failing.
+pub(crate) const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
+const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
+const DSML_INVOKE_OPEN: &str = "<｜DSML｜invoke name=\"";
+const DSML_INVOKE_CLOSE: &str = "</｜DSML｜invoke>";
+const DSML_PARAMETER_OPEN: &str = "<｜DSML｜parameter name=\"";
+const DSML_PARAMETER_CLOSE: &str = "</｜DSML｜parameter>";
+
+pub(crate) fn parse_dsml_emission(emission: &str) -> ParsedEmission {
+    let Some(first_call) = emission.find(DSML_TOOL_CALLS_OPEN) else {
+        return ParsedEmission {
+            visible: emission.to_owned(),
+            calls: Vec::new(),
+        };
+    };
+    match parse_dsml_block(&emission[first_call + DSML_TOOL_CALLS_OPEN.len()..]) {
+        Some(calls) if !calls.is_empty() => ParsedEmission {
+            visible: emission[..first_call].to_owned(),
+            calls,
+        },
+        _ => ParsedEmission {
+            visible: emission.to_owned(),
+            calls: Vec::new(),
+        },
+    }
+}
+
+fn parse_dsml_block(mut rest: &str) -> Option<Vec<ParsedCall>> {
+    let mut calls = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        if let Some(_after) = rest.strip_prefix(DSML_TOOL_CALLS_CLOSE) {
+            // Trailing text after the block is ignored (reference: IgnoredRest).
+            return Some(calls);
+        }
+        let after_open = rest.strip_prefix(DSML_INVOKE_OPEN)?;
+        let name_end = after_open.find("\">")?;
+        let name = &after_open[..name_end];
+        if name.is_empty() || name.contains('<') || name.contains('\n') {
+            return None;
+        }
+        let body_region = &after_open[name_end + 2..];
+        let body_end = body_region.find(DSML_INVOKE_CLOSE)?;
+        let arguments = parse_dsml_parameters(&body_region[..body_end])?;
+        calls.push(ParsedCall {
+            name: name.to_owned(),
+            arguments,
+        });
+        rest = &body_region[body_end + DSML_INVOKE_CLOSE.len()..];
+    }
+}
+
+fn parse_dsml_parameters(mut body: &str) -> Option<Map<String, Value>> {
+    let mut arguments = Map::new();
+    loop {
+        body = body.trim_start();
+        if body.is_empty() {
+            return Some(arguments);
+        }
+        let after_open = body.strip_prefix(DSML_PARAMETER_OPEN)?;
+        let key_end = after_open.find('"')?;
+        let key = &after_open[..key_end];
+        if key.is_empty() || key.contains('<') || key.contains('\n') {
+            return None;
+        }
+        let attrs = after_open[key_end + 1..].strip_prefix(" string=\"")?;
+        let is_string = if let Some(rest) = attrs.strip_prefix("true\">") {
+            body = rest;
+            true
+        } else if let Some(rest) = attrs.strip_prefix("false\">") {
+            body = rest;
+            false
+        } else {
+            return None;
+        };
+        let value_end = body.find(DSML_PARAMETER_CLOSE)?;
+        let raw = &body[..value_end];
+        let value = if is_string {
+            Value::String(raw.to_owned())
+        } else {
+            serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+        };
+        arguments.insert(key.to_owned(), value);
+        body = &body[value_end + DSML_PARAMETER_CLOSE.len()..];
+    }
+}
+
+#[cfg(test)]
+mod dsml_tests {
+    use super::*;
+
+    const BLOCK: &str = "Checking.\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter>\n<｜DSML｜parameter name=\"units\" string=\"true\">c</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name=\"lookup\">\n<｜DSML｜parameter name=\"ids\" string=\"false\">[1, 2]</｜DSML｜parameter>\n<｜DSML｜parameter name=\"limit\" string=\"false\">10</｜DSML｜parameter>\n<｜DSML｜parameter name=\"exact\" string=\"false\">true</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+
+    #[test]
+    fn parses_string_and_json_parameters_with_prose_prefix() {
+        let parsed = parse_dsml_emission(BLOCK);
+        assert_eq!(parsed.visible, "Checking.\n\n");
+        assert_eq!(parsed.calls.len(), 2);
+        assert_eq!(parsed.calls[0].name, "get_weather");
+        assert_eq!(parsed.calls[0].arguments["city"], "Paris");
+        assert_eq!(parsed.calls[1].name, "lookup");
+        assert_eq!(parsed.calls[1].arguments["ids"], serde_json::json!([1, 2]));
+        assert_eq!(parsed.calls[1].arguments["limit"], 10);
+        assert_eq!(parsed.calls[1].arguments["exact"], true);
+    }
+
+    #[test]
+    fn string_parameters_are_verbatim_even_when_they_look_like_json() {
+        let text = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"q\" string=\"true\">[1, 2]</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+        let parsed = parse_dsml_emission(text);
+        assert_eq!(parsed.calls[0].arguments["q"], "[1, 2]");
+    }
+
+    #[test]
+    fn trailing_text_after_the_block_is_ignored_and_no_block_is_all_visible() {
+        let parsed = parse_dsml_emission(&format!("{BLOCK}\nstray"));
+        assert_eq!(parsed.calls.len(), 2);
+        let parsed = parse_dsml_emission("plain answer");
+        assert_eq!(parsed.visible, "plain answer");
+        assert!(parsed.calls.is_empty());
+    }
+
+    #[test]
+    fn malformed_blocks_fall_through_as_visible_text() {
+        for text in [
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"q\" string=\"maybe\">x</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\nnot a parameter\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n",
+            "<｜DSML｜tool_calls>\n</｜DSML｜tool_calls>",
+        ] {
+            let parsed = parse_dsml_emission(text);
+            assert_eq!(parsed.visible, text, "{text}");
+            assert!(parsed.calls.is_empty());
+        }
+    }
+}

@@ -6,7 +6,31 @@ use super::partition_muse::MuseAtemPartition;
 use super::tool_parse::parse_emission;
 use super::utf8::Utf8Assembler;
 
-const QWEN_TOOL_OPEN: &str = "<tool_call>";
+/// How a family's tool calls appear in the visible stream: the marker that
+/// opens the first call block, and the parser for the buffered block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolGrammar {
+    /// `<tool_call>{json}</tool_call>` blocks (Qwen released templates).
+    QwenXml,
+    /// `<｜DSML｜tool_calls>` … `</｜DSML｜tool_calls>` (DeepSeek V4).
+    DeepSeekDsml,
+}
+
+impl ToolGrammar {
+    fn open_marker(self) -> &'static str {
+        match self {
+            Self::QwenXml => "<tool_call>",
+            Self::DeepSeekDsml => super::tool_parse::DSML_TOOL_CALLS_OPEN,
+        }
+    }
+
+    fn parse(self, buffer: &str) -> super::tool_parse::ParsedEmission {
+        match self {
+            Self::QwenXml => parse_emission(buffer),
+            Self::DeepSeekDsml => super::tool_parse::parse_dsml_emission(buffer),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GenerationEnd {
@@ -22,9 +46,12 @@ impl GenerationEnd {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OutputProtocol {
+    /// `<think>`-partitioned text with an optional tool block; the Qwen
+    /// families and DeepSeek V4 share this shape and differ in grammar.
     Qwen {
         preopened_reasoning: bool,
         parse_tools: bool,
+        tool_grammar: ToolGrammar,
     },
     MuseAtem {
         eos_token_id: i32,
@@ -44,7 +71,12 @@ impl OutputPartition {
             OutputProtocol::Qwen {
                 preopened_reasoning,
                 parse_tools,
-            } => Self::Qwen(QwenOutputPartition::new(preopened_reasoning, parse_tools)),
+                tool_grammar,
+            } => Self::Qwen(QwenOutputPartition::new(
+                preopened_reasoning,
+                parse_tools,
+                tool_grammar,
+            )),
             OutputProtocol::MuseAtem {
                 eos_token_id,
                 eot_token_id,
@@ -90,13 +122,14 @@ pub(crate) struct QwenOutputPartition {
     reasoning: StreamPartition,
     utf8: Utf8Assembler,
     parse_tools: bool,
+    tool_grammar: ToolGrammar,
     pending_visible: String,
     tool_buffer: String,
     in_tool_span: bool,
 }
 
 impl QwenOutputPartition {
-    fn new(preopened_reasoning: bool, parse_tools: bool) -> Self {
+    fn new(preopened_reasoning: bool, parse_tools: bool, tool_grammar: ToolGrammar) -> Self {
         Self {
             reasoning: if preopened_reasoning {
                 StreamPartition::with_preopened_reasoning()
@@ -105,6 +138,7 @@ impl QwenOutputPartition {
             },
             utf8: Utf8Assembler::new(),
             parse_tools,
+            tool_grammar,
             pending_visible: String::new(),
             tool_buffer: String::new(),
             in_tool_span: false,
@@ -144,7 +178,7 @@ impl QwenOutputPartition {
             return;
         }
         self.pending_visible.push_str(text);
-        if let Some(index) = self.pending_visible.find(QWEN_TOOL_OPEN) {
+        if let Some(index) = self.pending_visible.find(self.tool_grammar.open_marker()) {
             let prose = self.pending_visible[..index].to_owned();
             let calls = self.pending_visible[index..].to_owned();
             self.pending_visible.clear();
@@ -155,7 +189,7 @@ impl QwenOutputPartition {
             self.in_tool_span = true;
             return;
         }
-        let safe = safe_emit_len(&self.pending_visible, QWEN_TOOL_OPEN);
+        let safe = safe_emit_len(&self.pending_visible, self.tool_grammar.open_marker());
         if safe > 0 {
             let text = self.pending_visible[..safe].to_owned();
             self.pending_visible.drain(..safe);
@@ -187,7 +221,7 @@ impl QwenOutputPartition {
             return;
         }
         let buffer = std::mem::take(&mut self.tool_buffer);
-        let parsed = parse_emission(&buffer);
+        let parsed = self.tool_grammar.parse(&buffer);
         if parsed.calls.is_empty() {
             events.push(PartitionEvent::Visible(buffer));
             return;
@@ -230,6 +264,7 @@ mod tests {
             OutputProtocol::Qwen {
                 preopened_reasoning: false,
                 parse_tools: true,
+                tool_grammar: ToolGrammar::QwenXml,
             },
             &[
                 b"<think>plan</think>answer<tool_",
@@ -255,6 +290,7 @@ mod tests {
             OutputProtocol::Qwen {
                 preopened_reasoning: false,
                 parse_tools: false,
+                tool_grammar: ToolGrammar::QwenXml,
             },
             &[call],
             GenerationEnd::StopToken(1),
@@ -273,6 +309,7 @@ mod tests {
             OutputProtocol::Qwen {
                 preopened_reasoning: true,
                 parse_tools: true,
+                tool_grammar: ToolGrammar::QwenXml,
             },
             &[
                 b"plan</think>answer<tool_call>\n<function=ping>\n",
@@ -306,6 +343,7 @@ mod tests {
             OutputProtocol::Qwen {
                 preopened_reasoning: true,
                 parse_tools: false,
+                tool_grammar: ToolGrammar::QwenXml,
             },
             &[b"plan</think><tool_call>\n<function=ping>\n</function>\n</tool_call>"],
             GenerationEnd::StopToken(1),
@@ -333,6 +371,7 @@ mod tests {
         let mut qwen = OutputPartition::new(OutputProtocol::Qwen {
             preopened_reasoning: false,
             parse_tools: true,
+            tool_grammar: ToolGrammar::QwenXml,
         });
         let mut qwen_events = Vec::new();
         qwen.push(b"answer<tool_", &mut qwen_events);

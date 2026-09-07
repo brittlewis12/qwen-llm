@@ -8,7 +8,7 @@
 
 use super::events::{EventWrite, ResponseStream, ServeStats, SseWriter, StopReason, Usage};
 use super::items::{ServeError, ServeRequest, parse_request};
-use super::output_partition::{GenerationEnd, OutputPartition, OutputProtocol};
+use super::output_partition::{GenerationEnd, OutputPartition, OutputProtocol, ToolGrammar};
 use super::render::render_qwen_serve_prompt;
 use serde_json::{Value, json};
 use std::fs::OpenOptions;
@@ -55,6 +55,7 @@ pub(crate) trait GenerationBackend {
         OutputProtocol::Qwen {
             preopened_reasoning: false,
             parse_tools: true,
+            tool_grammar: ToolGrammar::QwenXml,
         }
     }
     /// Family-specific prompt rendering. Defaults to the Qwen ChatML path.
@@ -889,6 +890,7 @@ mod tests {
                 protocol: OutputProtocol::Qwen {
                     preopened_reasoning: false,
                     parse_tools: true,
+                    tool_grammar: ToolGrammar::QwenXml,
                 },
                 fail_with: None,
             }

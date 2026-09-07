@@ -705,7 +705,9 @@ pub(crate) fn envelope_echo(request: &ServeRequest) -> EnvelopeEcho {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serve::output_partition::{GenerationEnd, OutputPartition, OutputProtocol};
+    use crate::serve::output_partition::{
+        GenerationEnd, OutputPartition, OutputProtocol, ToolGrammar,
+    };
 
     fn generation_end(stop_reason: StopReason) -> GenerationEnd {
         match stop_reason {
@@ -718,6 +720,7 @@ mod tests {
         OutputPartition::new(OutputProtocol::Qwen {
             preopened_reasoning: false,
             parse_tools: true,
+            tool_grammar: ToolGrammar::QwenXml,
         })
     }
 

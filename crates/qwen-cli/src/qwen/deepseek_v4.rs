@@ -334,9 +334,6 @@ pub(crate) fn serial_lane_unsupported_options(
     if explicit.durable_prefix_cache_min_tokens {
         unsupported.push("--durable-prefix-cache-min-tokens");
     }
-    if args.request_stats_jsonl.is_some() {
-        unsupported.push("--request-stats-jsonl");
-    }
     if args.sampling_attribution {
         unsupported.push("--sampling-attribution");
     }
@@ -1609,9 +1606,6 @@ pub(crate) fn run_deepseek_v4_single_turn(
         // of phase timings, which can miss inter-phase gaps).
         let total_ms = request_start.elapsed().as_secs_f64() * 1e3;
         let measured = RequestStatsMeasured {
-            prompt_kind,
-            prefill_mode,
-            prefill_chunk_cap: prefill_chunk_tokens as u64,
             input_tokens: prompt_ids.len() as u64,
             output_tokens: generation.tokens.len() as u64,
             transitions: generation.transitions as u64,
@@ -1626,7 +1620,13 @@ pub(crate) fn run_deepseek_v4_single_turn(
             total_ms,
             output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
         };
-        let record = build_deepseek_v4_single_turn_stats_record(&INVOCATION_ID, &measured);
+        let record = build_deepseek_v4_single_turn_stats_record(
+            &INVOCATION_ID,
+            prompt_kind,
+            prefill_mode,
+            prefill_chunk_tokens as u64,
+            &measured,
+        );
         append_jsonl_record(path, &record, "request stats jsonl")?;
     }
     Ok(())
@@ -1634,56 +1634,29 @@ pub(crate) fn run_deepseek_v4_single_turn(
 
 pub(crate) fn build_deepseek_v4_single_turn_stats_record<'a>(
     invocation_id: &'a str,
+    prompt_kind: &'a str,
+    prefill_mode: &'static str,
+    prefill_chunk_cap: u64,
     measured: &RequestStatsMeasured,
 ) -> RequestStatsRequestRecord<'a> {
     // input.kind describes representation (raw vs messages); template surfaces
     // the specific chat-template variant when known (e.g., messages_0731_chat
     // -> kind=messages template=0731_chat).
-    let (input_kind, input_template) = split_ds4_prompt_kind(measured.prompt_kind);
-    RequestStatsRequestRecord {
-        schema: "qwen-llm.request-stats",
-        schema_version: 1,
-        record_type: "request_stats",
+    let (input_kind, input_template) = split_ds4_prompt_kind(prompt_kind);
+    build_single_turn_stats_record(
         invocation_id,
-        request_index: 0,
-        status: RequestStatsStatus::Ok,
-        model: RequestStatsModel {
-            family: "deepseek_v4",
-        },
-        input: RequestStatsInput {
+        0,
+        "deepseek_v4",
+        RequestStatsInput {
             kind: input_kind,
             template: input_template,
         },
-        usage: Some(RequestStatsUsage {
-            input_tokens: measured.input_tokens,
-            output_tokens: measured.output_tokens,
-        }),
-        finish: Some(RequestStatsFinish {
-            reason: measured.stop_reason.into(),
-        }),
-        timing_ms: Some(RequestStatsTiming {
-            total: sanitize_finite_metric(measured.total_ms, "timing_ms.total"),
-            tokenization: sanitize_finite_metric(measured.tokenizer_ms, "timing_ms.tokenization"),
-            prefill: sanitize_finite_metric(measured.prefill_ms, "timing_ms.prefill"),
-            decode: sanitize_finite_metric(measured.decode_ms, "timing_ms.decode"),
-        }),
-        throughput_tps: Some(RequestStatsThroughput {
-            prefill: sanitize_finite_metric(measured.prefill_tps, "throughput_tps.prefill"),
-            decode: sanitize_finite_metric(measured.decode_tps, "throughput_tps.decode"),
-        }),
-        output_fingerprint: Some(RequestStatsOutputFingerprint {
-            algorithm: "sha256-qwen-generated-token-ids-v1",
-            value: measured.output_fingerprint.hex(),
-        }),
-        build: RequestStatsBuild {
-            commit: env!("QWEN_BUILD_COMMIT"),
-            dirty: parse_build_dirty(env!("QWEN_BUILD_DIRTY")),
-        },
-        diagnostics: Some(RequestStatsDiagnostics {
+        measured,
+        Some(RequestStatsDiagnostics {
             deepseek_v4: Some(RequestStatsDeepSeekV4Diagnostics {
                 schema_version: 1,
-                prefill_mode: measured.prefill_mode,
-                prefill_chunk_cap: measured.prefill_chunk_cap,
+                prefill_mode,
+                prefill_chunk_cap,
                 transitions: measured.transitions,
                 transition_tps: sanitize_finite_metric(
                     measured.transition_tps,
@@ -1695,7 +1668,7 @@ pub(crate) fn build_deepseek_v4_single_turn_stats_record<'a>(
                 ),
             }),
         }),
-    }
+    )
 }
 
 /// Split a DeepSeek V4 `prompt_kind` string into (input_kind, template).

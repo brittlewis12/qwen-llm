@@ -746,6 +746,9 @@ pub(crate) struct SingleTurnResult {
     pub(crate) decode_tps: f64,
     pub(crate) transition_tps: f64,
     pub(crate) tokenizer_init_ms: f64,
+    pub(crate) tokenization_ms: f64,
+    pub(crate) decode_ms: f64,
+    pub(crate) total_ms: f64,
 }
 
 pub(crate) fn allocation_delta(current: u64, model_ready: u64) -> i64 {
@@ -1442,10 +1445,10 @@ pub(crate) fn parse_build_dirty(raw: &str) -> bool {
         || trimmed.eq_ignore_ascii_case("no"))
 }
 
+/// The family-neutral measured core of one completed single-turn request.
+/// Every lane already computes these; the record is a projection, not a new
+/// instrument. Family-specific facts travel in `RequestStatsDiagnostics`.
 pub(crate) struct RequestStatsMeasured {
-    pub prompt_kind: &'static str,
-    pub prefill_mode: &'static str,
-    pub prefill_chunk_cap: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub transitions: u64,
@@ -1459,6 +1462,94 @@ pub(crate) struct RequestStatsMeasured {
     pub transition_tps: f64,
     pub total_ms: f64,
     pub output_fingerprint: GeneratedTokenSha256Digest,
+}
+
+/// Build the `qwen-llm.request-stats` v1 record for a completed single-turn
+/// request. `input` is the representation the lane rendered (`raw` /
+/// `messages` plus an optional template label); `diagnostics` is the lane's
+/// own namespaced block, or `None` when it has nothing qualified to add.
+pub(crate) fn build_single_turn_stats_record<'a>(
+    invocation_id: &'a str,
+    request_index: u32,
+    family: &'a str,
+    input: RequestStatsInput<'a>,
+    measured: &RequestStatsMeasured,
+    diagnostics: Option<RequestStatsDiagnostics>,
+) -> RequestStatsRequestRecord<'a> {
+    RequestStatsRequestRecord {
+        schema: "qwen-llm.request-stats",
+        schema_version: 1,
+        record_type: "request_stats",
+        invocation_id,
+        request_index,
+        status: RequestStatsStatus::Ok,
+        model: RequestStatsModel { family },
+        input,
+        usage: Some(RequestStatsUsage {
+            input_tokens: measured.input_tokens,
+            output_tokens: measured.output_tokens,
+        }),
+        finish: Some(RequestStatsFinish {
+            reason: measured.stop_reason.into(),
+        }),
+        timing_ms: Some(RequestStatsTiming {
+            total: sanitize_finite_metric(measured.total_ms, "timing_ms.total"),
+            tokenization: sanitize_finite_metric(measured.tokenizer_ms, "timing_ms.tokenization"),
+            prefill: sanitize_finite_metric(measured.prefill_ms, "timing_ms.prefill"),
+            decode: sanitize_finite_metric(measured.decode_ms, "timing_ms.decode"),
+        }),
+        throughput_tps: Some(RequestStatsThroughput {
+            prefill: sanitize_finite_metric(measured.prefill_tps, "throughput_tps.prefill"),
+            decode: sanitize_finite_metric(measured.decode_tps, "throughput_tps.decode"),
+        }),
+        output_fingerprint: Some(RequestStatsOutputFingerprint {
+            algorithm: "sha256-qwen-generated-token-ids-v1",
+            value: measured.output_fingerprint.hex(),
+        }),
+        build: RequestStatsBuild {
+            commit: env!("QWEN_BUILD_COMMIT"),
+            dirty: parse_build_dirty(env!("QWEN_BUILD_DIRTY")),
+        },
+        diagnostics,
+    }
+}
+
+/// `input.kind` for the common core is restricted to `raw` / `messages`; the
+/// template label is the lane's pinned protocol name when it has one.
+pub(crate) fn request_stats_input(
+    source: PromptSource,
+    template: Option<&'static str>,
+) -> RequestStatsInput<'static> {
+    match source {
+        PromptSource::Inline | PromptSource::File => RequestStatsInput {
+            kind: "raw",
+            template: None,
+        },
+        PromptSource::Messages => RequestStatsInput {
+            kind: "messages",
+            template,
+        },
+    }
+}
+
+/// Append one v1 record to the `--request-stats-jsonl` sidecar.
+pub(crate) fn append_single_turn_stats_record(
+    path: &Path,
+    request_index: u32,
+    family: &str,
+    input: RequestStatsInput<'_>,
+    measured: &RequestStatsMeasured,
+    diagnostics: Option<RequestStatsDiagnostics>,
+) -> Result<()> {
+    let record = build_single_turn_stats_record(
+        &INVOCATION_ID,
+        request_index,
+        family,
+        input,
+        measured,
+        diagnostics,
+    );
+    append_jsonl_record(path, &record, "request stats jsonl")
 }
 
 pub(crate) fn unix_epoch_ms_u64() -> Result<u64> {

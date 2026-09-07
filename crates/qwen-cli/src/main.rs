@@ -153,6 +153,8 @@ struct PreparedPrompt {
     text: String,
     source: PromptSource,
     completed_checkpoint_eligible: bool,
+    /// Rendering protocol label when `source` is `Messages`.
+    template: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -726,6 +728,11 @@ fn prepare_modern_run_prompt(
         text,
         source,
         completed_checkpoint_eligible: false,
+        template: (source == PromptSource::Messages).then(|| match family {
+            ModelFamily::DeepSeek4 => "deepseek_v4",
+            ModelFamily::Qwen4Exp => "qwen38",
+            _ => qwen_template.label(),
+        }),
     })
 }
 

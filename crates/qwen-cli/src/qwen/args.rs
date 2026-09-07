@@ -218,15 +218,15 @@ pub(crate) struct Args {
     #[arg(long, hide_short_help = true)]
     pub(crate) request_stats: Option<PathBuf>,
 
-    /// Append per-request structured stats as JSONL under a common cross-family
-    /// envelope (schema: qwen-llm.request-stats v1).
+    /// Append one structured record per completed single-turn request as
+    /// JSONL under the common cross-family envelope
+    /// (schema: qwen-llm.request-stats v1): status, usage, finish reason,
+    /// timing, throughput, output fingerprint, build identity.
     ///
-    /// Currently implemented by DeepSeek V4 single-turn generation only.
-    /// Other invocation paths (Qwen single-turn, Qwen batch, DS4 batch,
-    /// --info, --deepseek-census-json, model-info) REJECT this flag with a
-    /// fatal error rather than silently ignoring it — mandatory/fail-closed
-    /// telemetry policy. Use --request-stats for legacy stats output on
-    /// paths that support it.
+    /// Supported on every family's single-turn lane (`run`, `-p`,
+    /// `--prompt-file`, `--messages`). Batch lanes (`--requests-jsonl`) and
+    /// non-generating invocations REJECT this flag rather than silently
+    /// ignoring it — fail-closed telemetry policy.
     ///
     /// The envelope has a small stable core plus namespaced backend
     /// extensions under `diagnostics.<family>`.

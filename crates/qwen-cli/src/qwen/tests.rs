@@ -4658,9 +4658,6 @@ fn pipeline_cache_phase_metrics_align_prefill_and_generation() {
 
 fn sample_measured_ok() -> RequestStatsMeasured {
     RequestStatsMeasured {
-        prompt_kind: "messages_0731_chat",
-        prefill_mode: "layer_major_chunks",
-        prefill_chunk_cap: 4096,
         input_tokens: 100,
         output_tokens: 50,
         transitions: 49,
@@ -4680,7 +4677,13 @@ fn sample_measured_ok() -> RequestStatsMeasured {
 #[test]
 fn request_stats_record_v1_envelope_shape_is_stable() {
     let measured = sample_measured_ok();
-    let record = build_deepseek_v4_single_turn_stats_record("inv-42-1234567890", &measured);
+    let record = build_deepseek_v4_single_turn_stats_record(
+        "inv-42-1234567890",
+        "messages_0731_chat",
+        "layer_major_chunks",
+        4096,
+        &measured,
+    );
     let json = serde_json::to_value(&record).unwrap();
 
     // Common core
@@ -4804,7 +4807,13 @@ fn request_stats_non_finite_metrics_coerced_to_zero() {
     measured.transition_tps = f64::NAN;
     measured.load_ms = -100.0;
 
-    let record = build_deepseek_v4_single_turn_stats_record("inv-x", &measured);
+    let record = build_deepseek_v4_single_turn_stats_record(
+        "inv-x",
+        "messages_0731_chat",
+        "layer_major_chunks",
+        4096,
+        &measured,
+    );
     let json = serde_json::to_value(&record).unwrap();
 
     for (parent, child) in [
@@ -4854,7 +4863,13 @@ fn request_stats_fingerprint_matches_literal_known_vector() {
     // in output_fingerprint.value byte-identical.
     let mut measured = sample_measured_ok();
     measured.output_fingerprint = digest;
-    let record = build_deepseek_v4_single_turn_stats_record("inv-y", &measured);
+    let record = build_deepseek_v4_single_turn_stats_record(
+        "inv-y",
+        "messages_0731_chat",
+        "layer_major_chunks",
+        4096,
+        &measured,
+    );
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["output_fingerprint"]["value"], EXPECTED_HEX);
 }
@@ -4879,7 +4894,13 @@ fn request_stats_append_jsonl_serializes_one_line_per_record() {
         let mut m = sample_measured_ok();
         m.input_tokens = i;
         m.output_fingerprint = GeneratedTokenSha256Digest::of(&[i as i32]);
-        let record = build_deepseek_v4_single_turn_stats_record("inv-z", &m);
+        let record = build_deepseek_v4_single_turn_stats_record(
+        "inv-z",
+        "messages_0731_chat",
+        "layer_major_chunks",
+        4096,
+        &m,
+    );
         append_jsonl_record(&path, &record, "test stats").unwrap();
     }
 
@@ -4983,7 +5004,13 @@ fn request_stats_valid_finite_metrics_pass_through_unchanged() {
     // measurement must NOT be zeroed. This catches over-aggressive
     // sanitization.
     let measured = sample_measured_ok();
-    let record = build_deepseek_v4_single_turn_stats_record("inv-v", &measured);
+    let record = build_deepseek_v4_single_turn_stats_record(
+        "inv-v",
+        "messages_0731_chat",
+        "layer_major_chunks",
+        4096,
+        &measured,
+    );
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["timing_ms"]["total"], 3050.6);
     assert_eq!(json["timing_ms"]["tokenization"], 10.5);
@@ -5017,7 +5044,13 @@ fn request_stats_append_jsonl_repairs_partial_prior_tail() {
     std::fs::write(&path, b"{\"partial\":\"orphan_no_newline\"").unwrap();
 
     let measured = sample_measured_ok();
-    let record = build_deepseek_v4_single_turn_stats_record("inv-tail", &measured);
+    let record = build_deepseek_v4_single_turn_stats_record(
+        "inv-tail",
+        "messages_0731_chat",
+        "layer_major_chunks",
+        4096,
+        &measured,
+    );
     append_jsonl_record(&path, &record, "tail-repair test").unwrap();
 
     let contents = std::fs::read_to_string(&path).unwrap();
@@ -5043,7 +5076,13 @@ fn request_stats_measured_total_ms_can_diverge_from_phase_sum() {
     // sum exactly).
     let mut measured = sample_measured_ok();
     measured.total_ms = 9999.9; // arbitrary value, not the phase sum
-    let record = build_deepseek_v4_single_turn_stats_record("inv-t", &measured);
+    let record = build_deepseek_v4_single_turn_stats_record(
+        "inv-t",
+        "messages_0731_chat",
+        "layer_major_chunks",
+        4096,
+        &measured,
+    );
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["timing_ms"]["total"], 9999.9);
     // Phase fields must remain independently measured, not derived.

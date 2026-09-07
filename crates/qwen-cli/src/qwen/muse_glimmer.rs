@@ -275,5 +275,35 @@ pub(crate) fn run_muse_glimmer_single_turn(
         decode_tps,
         request_t0.elapsed().as_secs_f64() * 1e3,
     );
+    if let Some(path) = args.request_stats_jsonl.as_ref() {
+        let transition_tps = if generation.transition_ms > 0.0 {
+            generation.transitions as f64 / (generation.transition_ms / 1e3)
+        } else {
+            0.0
+        };
+        let measured = RequestStatsMeasured {
+            input_tokens: prompt_tokens.len() as u64,
+            output_tokens: generation.tokens.len() as u64,
+            transitions: generation.transitions as u64,
+            stop_reason: generation.stop_reason,
+            tokenizer_ms,
+            load_ms,
+            prefill_ms,
+            prefill_tps,
+            decode_ms: generation.wall_ms,
+            decode_tps,
+            transition_tps,
+            total_ms: request_t0.elapsed().as_secs_f64() * 1e3,
+            output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
+        };
+        append_single_turn_stats_record(
+            path,
+            0,
+            "muse_glimmer",
+            request_stats_input(prepared.source, Some("atem")),
+            &measured,
+            None,
+        )?;
+    }
     Ok(())
 }

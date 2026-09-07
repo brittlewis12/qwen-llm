@@ -11,14 +11,6 @@ pub(crate) fn run_single_turn(
 ) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
-    // --request-stats-jsonl currently only implements DeepSeek V4 single-turn.
-    // Reject rather than silently ignore, so consumers cannot mistakenly rely
-    // on a sidecar that never gets written.
-    ensure!(
-        args.request_stats_jsonl.is_none(),
-        "--request-stats-jsonl is only supported on DeepSeek V4 single-turn generation today; \
-         Qwen single-turn will migrate in a follow-up PR. Use --request-stats for legacy stats output."
-    );
     let sampling = cli_sampling_config(args)?;
     validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
     let durable_store = durable_checkpoint_store(args, staged_integrity)?;
@@ -330,6 +322,50 @@ pub(crate) fn run_single_turn(
             results[0].prompt_ids.len(),
             results[0].generated.len(),
         )?;
+    }
+    if let Some(path) = args.request_stats_jsonl.as_ref() {
+        // Legacy flat --messages renders the unpinned generic contract; `run`
+        // carries the pinned protocol label on its prepared prompt.
+        let template = args
+            .prepared_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.template)
+            .or(Some("generic"));
+        for (index, result) in results.iter().enumerate() {
+            let load_ms = if index == 0 {
+                runtime_and_model_load_ms + result.tokenizer_init_ms
+            } else {
+                0.0
+            };
+            let prefill_tps = if result.prefill_ms > 0.0 {
+                result.prompt_ids.len() as f64 / (result.prefill_ms / 1e3)
+            } else {
+                0.0
+            };
+            let measured = RequestStatsMeasured {
+                input_tokens: result.prompt_ids.len() as u64,
+                output_tokens: result.generated.len() as u64,
+                transitions: result.transitions as u64,
+                stop_reason: result.stop_reason,
+                tokenizer_ms: result.tokenization_ms,
+                load_ms,
+                prefill_ms: result.prefill_ms,
+                prefill_tps,
+                decode_ms: result.decode_ms,
+                decode_tps: result.decode_tps,
+                transition_tps: result.transition_tps,
+                total_ms: result.total_ms,
+                output_fingerprint: GeneratedTokenSha256Digest::of(&result.generated),
+            };
+            append_single_turn_stats_record(
+                path,
+                u32::try_from(index).context("request index exceeds u32")?,
+                "qwen",
+                request_stats_input(result.prompt_source, template),
+                &measured,
+                None,
+            )?;
+        }
     }
 
     Ok(())
@@ -1232,5 +1268,8 @@ pub(crate) fn execute_single_turn_request(
         decode_tps,
         transition_tps,
         tokenizer_init_ms,
+        tokenization_ms,
+        decode_ms: generation.wall_ms,
+        total_ms: total_request_ms,
     })
 }

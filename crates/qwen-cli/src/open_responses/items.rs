@@ -95,6 +95,16 @@ impl QwenTemplate {
     pub(crate) fn verified(self) -> bool {
         self != Self::Generic
     }
+
+    /// Stable protocol label for records and diagnostics.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Qwen35 => "qwen35",
+            Self::Qwen36 => "qwen36",
+            Self::Qwen38 => "qwen38",
+        }
+    }
 }
 
 /// Validated transcript plus generation controls, ready for rendering.

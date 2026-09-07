@@ -343,6 +343,44 @@ pub struct MetalBufferSizeAndAlign {
     pub alignment: u64,
 }
 
+/// Allocation upper bound for one planned shared buffer (see
+/// [`MetalContext::price_shared_buffer_upper`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PricedSharedBuffer {
+    /// Device heap size rounded up to `alignment`.
+    pub priced_upper_bytes: u64,
+    /// `max(device alignment, host page)`; always a power of two.
+    pub alignment: u64,
+}
+
+/// Why a planned shared buffer could not be priced. Rendered without a
+/// buffer name so each planner can prefix its own.
+#[derive(Debug, thiserror::Error)]
+pub enum SharedBufferPricingError {
+    #[error("has zero bytes")]
+    ZeroBytes,
+    #[error("Metal maximum buffer length exceeds u64")]
+    DeviceMaximumUnrepresentable,
+    #[error("requires {logical_bytes} bytes, beyond device maximum {max_buffer_length}")]
+    ExceedsDeviceMaximum {
+        logical_bytes: u64,
+        max_buffer_length: u64,
+    },
+    #[error(
+        "invalid Metal pricing: logical={logical_bytes} priced={priced_size} alignment={alignment} host_page={host_page}"
+    )]
+    InvalidPricing {
+        logical_bytes: u64,
+        priced_size: u64,
+        alignment: u64,
+        host_page: u64,
+    },
+    #[error("aligned Metal pricing overflows u64")]
+    Overflow,
+    #[error(transparent)]
+    Metal(MetalError),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MetalMemorySignals {
     pub recommended_max_bytes: u64,
@@ -534,6 +572,31 @@ impl MetalContext {
                 detail: "priced buffer alignment does not fit u64".into(),
             })?,
         })
+    }
+
+    /// Price one planned shared buffer at its allocation upper bound (see
+    /// [`price_shared_buffer_upper`]), reading the device maximum, the heap
+    /// pricing, and the host page from this context.
+    pub fn price_shared_buffer_upper(
+        &self,
+        logical_bytes: u64,
+    ) -> Result<PricedSharedBuffer, SharedBufferPricingError> {
+        if logical_bytes == 0 {
+            return Err(SharedBufferPricingError::ZeroBytes);
+        }
+        let max_buffer_length = u64::try_from(self.max_buffer_length())
+            .map_err(|_| SharedBufferPricingError::DeviceMaximumUnrepresentable)?;
+        if logical_bytes > max_buffer_length {
+            return Err(SharedBufferPricingError::ExceedsDeviceMaximum {
+                logical_bytes,
+                max_buffer_length,
+            });
+        }
+        let priced = self
+            .shared_buffer_size_and_align(logical_bytes)
+            .map_err(SharedBufferPricingError::Metal)?;
+        let host_page = host_page_size_bytes().map_err(SharedBufferPricingError::Metal)? as u64;
+        price_shared_buffer_upper(logical_bytes, priced, host_page, max_buffer_length)
     }
 
     /// Initialize a Metal context backed by the embedded `kernels.metallib`.
@@ -1125,10 +1188,115 @@ pub fn host_page_size_bytes() -> Result<usize, MetalError> {
     host_page_size()
 }
 
+/// Allocation upper bound for one planned shared buffer: the device heap size
+/// rounded up to the larger of the device alignment and the host page, with
+/// every step checked. This is the arithmetic every family's residency and
+/// session planner performs before admission; it carries no policy
+/// (reserves, budgets, and which buffers to plan stay with the caller).
+/// Pure over its inputs so planners can test it without a device.
+pub fn price_shared_buffer_upper(
+    logical_bytes: u64,
+    priced: MetalBufferSizeAndAlign,
+    host_page: u64,
+    max_buffer_length: u64,
+) -> Result<PricedSharedBuffer, SharedBufferPricingError> {
+    if logical_bytes == 0 {
+        return Err(SharedBufferPricingError::ZeroBytes);
+    }
+    if logical_bytes > max_buffer_length {
+        return Err(SharedBufferPricingError::ExceedsDeviceMaximum {
+            logical_bytes,
+            max_buffer_length,
+        });
+    }
+    if priced.size < logical_bytes
+        || priced.alignment == 0
+        || !priced.alignment.is_power_of_two()
+        || host_page == 0
+        || !host_page.is_power_of_two()
+    {
+        return Err(SharedBufferPricingError::InvalidPricing {
+            logical_bytes,
+            priced_size: priced.size,
+            alignment: priced.alignment,
+            host_page,
+        });
+    }
+    let alignment = priced.alignment.max(host_page);
+    let priced_upper_bytes = priced
+        .size
+        .checked_add(alignment - 1)
+        .map(|bytes| bytes / alignment * alignment)
+        .ok_or(SharedBufferPricingError::Overflow)?;
+    Ok(PricedSharedBuffer {
+        priced_upper_bytes,
+        alignment,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    fn priced(size: u64, alignment: u64) -> MetalBufferSizeAndAlign {
+        MetalBufferSizeAndAlign { size, alignment }
+    }
+
+    #[test]
+    fn shared_buffer_pricing_rounds_to_the_larger_of_device_and_host_alignment() {
+        let out = price_shared_buffer_upper(4_097, priced(4_352, 256), 4_096, 4_097).unwrap();
+        assert_eq!(
+            out,
+            PricedSharedBuffer {
+                priced_upper_bytes: 8_192,
+                alignment: 4_096
+            }
+        );
+        let out = price_shared_buffer_upper(10, priced(16, 16_384), 4_096, u64::MAX).unwrap();
+        assert_eq!(out.alignment, 16_384);
+        assert_eq!(out.priced_upper_bytes, 16_384);
+    }
+
+    #[test]
+    fn shared_buffer_pricing_fails_closed_at_every_boundary() {
+        assert!(matches!(
+            price_shared_buffer_upper(0, priced(1, 1), 4_096, u64::MAX),
+            Err(SharedBufferPricingError::ZeroBytes)
+        ));
+        assert!(matches!(
+            price_shared_buffer_upper(4_098, priced(4_098, 2), 4_096, 4_097),
+            Err(SharedBufferPricingError::ExceedsDeviceMaximum { .. })
+        ));
+        for (logical, size, alignment, host_page) in [
+            (4_097, 4_096, 256, 4_096), // underpriced
+            (1, 1, 3, 4_096),           // device alignment not a power of two
+            (1, 1, 0, 4_096),           // zero device alignment
+            (1, 1, 256, 0),             // zero host page
+            (1, 1, 256, 3),             // host page not a power of two
+        ] {
+            assert!(
+                matches!(
+                    price_shared_buffer_upper(logical, priced(size, alignment), host_page, u64::MAX),
+                    Err(SharedBufferPricingError::InvalidPricing { .. })
+                ),
+                "{logical} {size} {alignment} {host_page}"
+            );
+        }
+        assert!(matches!(
+            price_shared_buffer_upper(u64::MAX, priced(u64::MAX, 2), 4_096, u64::MAX),
+            Err(SharedBufferPricingError::Overflow)
+        ));
+    }
+
+    #[test]
+    fn shared_buffer_pricing_errors_render_without_a_name_so_callers_prefix_theirs() {
+        let error = price_shared_buffer_upper(9, priced(9, 2), 4_096, 8).unwrap_err();
+        assert_eq!(
+            format!("planned Metal buffer \"x\" {error}"),
+            "planned Metal buffer \"x\" requires 9 bytes, beyond device maximum 8"
+        );
+    }
 
     #[test]
     fn process_lease_rejects_overlap_and_recovers_after_release() {

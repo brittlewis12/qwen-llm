@@ -3470,36 +3470,11 @@ fn price_session_allocation(
     host_page_size: u64,
     max_buffer_length: u64,
 ) -> Result<(u64, u64), Qwen4ExpTextSessionError> {
-    if logical_bytes == 0 {
-        return invalid(format!("session allocation {name:?} must be nonzero"));
-    }
-    if logical_bytes > max_buffer_length {
-        return invalid(format!(
-            "session allocation {name:?} requires {logical_bytes} bytes, beyond device maximum {max_buffer_length}"
-        ));
-    }
-    if priced.size < logical_bytes
-        || priced.alignment == 0
-        || !priced.alignment.is_power_of_two()
-        || host_page_size == 0
-        || !host_page_size.is_power_of_two()
-    {
-        return invalid(format!(
-            "invalid Metal pricing for session allocation {name:?}: logical={logical_bytes} priced={} alignment={} host_page={host_page_size}",
-            priced.size, priced.alignment
-        ));
-    }
-    let alignment = priced.alignment.max(host_page_size);
-    let priced_upper_bytes = priced
-        .size
-        .checked_add(alignment - 1)
-        .map(|bytes| bytes / alignment * alignment)
-        .ok_or_else(|| {
-            Qwen4ExpTextSessionError::Invalid(format!(
-                "aligned Metal pricing for session allocation {name:?} overflows u64"
-            ))
-        })?;
-    Ok((priced_upper_bytes, alignment))
+    crate::metal::price_shared_buffer_upper(logical_bytes, priced, host_page_size, max_buffer_length)
+        .map(|priced| (priced.priced_upper_bytes, priced.alignment))
+        .map_err(|error| {
+            Qwen4ExpTextSessionError::Invalid(format!("session allocation {name:?} {error}"))
+        })
 }
 
 fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpTextSessionError> {

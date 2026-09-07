@@ -666,34 +666,9 @@ fn price_shared_buffer(
     logical_bytes: u64,
     name: &str,
 ) -> Result<u64, MuseGlimmerResidencyError> {
-    if logical_bytes == 0 {
-        return invalid(format!("planned Metal buffer {name:?} has zero bytes"));
-    }
-    let max_buffer_length = u64::try_from(ctx.max_buffer_length()).map_err(|_| {
-        MuseGlimmerResidencyError::Invalid("Metal maximum buffer length exceeds u64".into())
-    })?;
-    if logical_bytes > max_buffer_length {
-        return invalid(format!(
-            "planned Metal buffer {name:?} requires {logical_bytes} bytes, beyond device maximum {max_buffer_length}"
-        ));
-    }
-    let priced = ctx.shared_buffer_size_and_align(logical_bytes)?;
-    if priced.size < logical_bytes || priced.alignment == 0 || !priced.alignment.is_power_of_two() {
-        return invalid(format!(
-            "invalid Metal pricing for {name:?}: logical={logical_bytes} priced={} alignment={}",
-            priced.size, priced.alignment
-        ));
-    }
-    let alignment = priced.alignment.max(host_page_size_bytes()? as u64);
-    priced
-        .size
-        .checked_add(alignment - 1)
-        .map(|bytes| bytes / alignment * alignment)
-        .ok_or_else(|| {
-            MuseGlimmerResidencyError::Invalid(format!(
-                "aligned Metal pricing for {name:?} overflows u64"
-            ))
-        })
+    ctx.price_shared_buffer_upper(logical_bytes)
+        .map(|priced| priced.priced_upper_bytes)
+        .map_err(|error| MuseGlimmerResidencyError::Invalid(format!("planned Metal buffer {name:?} {error}")))
 }
 
 fn build_weight_memory_plan(

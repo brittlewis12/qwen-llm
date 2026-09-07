@@ -16,7 +16,6 @@ use crate::metal::{
     encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32, encode_scatter_offset_f32_to_f16_kv,
     encode_sigmoid_mul_f32, encode_silu_mul_f32, encode_topk16_f32,
     evaluate_metal_memory_admission, evaluate_metal_memory_admission_with_cpu_bytes,
-    host_page_size_bytes,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
@@ -311,37 +310,18 @@ impl MuseGlimmerTextSessionMemoryPlan {
         ctx: &MetalContext,
         geometry: &MuseGlimmerTextGeometry,
     ) -> Result<Self, MuseGlimmerTextSessionError> {
-        let page_size = host_page_size_bytes()? as u64;
-        let max_buffer_length = u64::try_from(ctx.max_buffer_length()).map_err(|_| {
-            MuseGlimmerTextSessionError::Invalid("Metal maximum buffer length exceeds u64".into())
-        })?;
         let mut allocations = Vec::new();
         let mut logical_bytes = 0_u64;
         let mut priced_upper_bytes = 0_u64;
         for (name, logical) in session_allocation_specs(geometry)? {
-            if logical == 0 || logical > max_buffer_length {
-                return invalid(format!(
-                    "session allocation {name:?} requires {logical} bytes, outside 1..={max_buffer_length}"
-                ));
-            }
-            let priced = ctx.shared_buffer_size_and_align(logical)?;
-            if priced.size < logical || priced.alignment == 0 || !priced.alignment.is_power_of_two()
-            {
-                return invalid(format!(
-                    "invalid Metal pricing for {name:?}: logical={logical} priced={} alignment={}",
-                    priced.size, priced.alignment
-                ));
-            }
-            let alignment = priced.alignment.max(page_size);
-            let priced_bytes = priced
-                .size
-                .checked_add(alignment - 1)
-                .map(|bytes| bytes / alignment * alignment)
-                .ok_or_else(|| {
+            let priced = ctx
+                .price_shared_buffer_upper(logical)
+                .map_err(|error| {
                     MuseGlimmerTextSessionError::Invalid(format!(
-                        "aligned Metal pricing for {name:?} overflows u64"
+                        "session allocation {name:?} {error}"
                     ))
                 })?;
+            let (priced_bytes, alignment) = (priced.priced_upper_bytes, priced.alignment);
             logical_bytes = logical_bytes.checked_add(logical).ok_or_else(|| {
                 MuseGlimmerTextSessionError::Invalid("session logical byte total overflow".into())
             })?;
@@ -928,31 +908,17 @@ impl MuseGlimmerFullReadoutWorkspacePlan {
             compact_elements * i32_bytes,
             compact_elements * f32_bytes,
         ];
-        let page_size = host_page_size_bytes()? as u64;
-        let max_buffer_length = ctx.max_buffer_length() as u64;
         let mut logical_bytes = 0_u64;
         let mut priced_upper_bytes = 0_u64;
         for logical in specs {
-            if logical == 0 || logical > max_buffer_length {
-                return invalid(format!(
-                    "full-readout workspace allocation {logical} is outside 1..={max_buffer_length} bytes"
-                ));
-            }
-            let priced = ctx.shared_buffer_size_and_align(logical)?;
-            if priced.alignment == 0 || !priced.alignment.is_power_of_two() {
-                return invalid("invalid Metal full-readout workspace alignment");
-            }
-            let alignment = priced.alignment.max(page_size);
-            if priced.size < logical || !alignment.is_power_of_two() {
-                return invalid("invalid Metal full-readout workspace pricing");
-            }
-            let aligned = priced
-                .size
-                .checked_add(alignment - 1)
-                .map(|bytes| bytes / alignment * alignment)
-                .ok_or_else(|| {
-                    MuseGlimmerTextSessionError::Invalid("workspace pricing overflow".into())
-                })?;
+            let aligned = ctx
+                .price_shared_buffer_upper(logical)
+                .map_err(|error| {
+                    MuseGlimmerTextSessionError::Invalid(format!(
+                        "full-readout workspace allocation {error}"
+                    ))
+                })?
+                .priced_upper_bytes;
             logical_bytes = logical_bytes.checked_add(logical).ok_or_else(|| {
                 MuseGlimmerTextSessionError::Invalid("workspace size overflow".into())
             })?;
@@ -966,24 +932,14 @@ impl MuseGlimmerFullReadoutWorkspacePlan {
             .ok_or_else(|| {
                 MuseGlimmerTextSessionError::Invalid("transport reserve overflow".into())
             })?;
-        if transport_logical == 0 || transport_logical > max_buffer_length {
-            return invalid("prepared-transport reserve exceeds Metal buffer limits");
-        }
-        let transport_priced = ctx.shared_buffer_size_and_align(transport_logical)?;
-        if transport_priced.size < transport_logical
-            || transport_priced.alignment == 0
-            || !transport_priced.alignment.is_power_of_two()
-        {
-            return invalid("invalid prepared-transport Metal alignment");
-        }
-        let transport_alignment = transport_priced.alignment.max(page_size);
-        let prepared_transport_reserve_bytes = transport_priced
-            .size
-            .checked_add(transport_alignment - 1)
-            .map(|bytes| bytes / transport_alignment * transport_alignment)
-            .ok_or_else(|| {
-                MuseGlimmerTextSessionError::Invalid("transport reserve pricing overflow".into())
-            })?;
+        let prepared_transport_reserve_bytes = ctx
+            .price_shared_buffer_upper(transport_logical)
+            .map_err(|error| {
+                MuseGlimmerTextSessionError::Invalid(format!(
+                    "prepared-transport reserve {error}"
+                ))
+            })?
+            .priced_upper_bytes;
         Ok(Self {
             row_capacity,
             logical_bytes,

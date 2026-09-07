@@ -480,6 +480,18 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 cost re-ranking finds fresh 19/3 prefill still occupies 85-88% of Q4/Q8
+request wall, while landed Q8 compact-128 prefill is only 3.0-3.25%. A test-only
+fresh packed screen at 19/32/48 passes all six width/model cells: allocation+
+prefill saves 71-89%, actual scratch 11.7-29.1 MB, numerical KV/GDN agreement,
+greedy 3/EOS,64,64 per model. The next bounded serving gate is balanced fresh
+HTTP evidence with no alias machinery and unchanged fallback. No production
+change yet; do not extrapolate fixed-order phase savings. CLI already uses packed
+fresh prefill, so this is not a process-cold CLI optimization or a global ranking
+without deployment frequencies. Evidence:
+`docs/bench/2026-09-06-fresh-short-packed/RESULT.md` and
+`docs/bench/2026-09-06-global-cost-ledger/RESULT.md`.
+
 2026-09-06 single-chunk VT removes the restored-tail workspace blocker: actual
 query-32/key-8840 scratch is 51.7 MB instead of 323.3 MB, bitwise versus full-VT on
 Q4/Q8 including poisoned reuse. Only Qwen3.8/Q8 greedy no-drafter restored

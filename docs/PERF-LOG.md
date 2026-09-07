@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Fresh Short Packed Phase Screen PASS
+
+- Test-only `77182e1a` compares fresh serving serial versus existing single-chunk
+  packed at 19/32/48 tokens, no cache/drafter. Allocation+prefill savings are
+  71.122/80.910/82.266% on Q4 and 83.070/88.179/88.973% on Q8, all above the
+  frozen 25% phase screen. Fixed order, not HTTP or process-cold authority.
+- Actual scratch is 11.70/19.38/29.05 MB; real driver pricing and full-request
+  admission pass the 128 MiB scratch cap. Serial uses zero packed scratch.
+- Prompt logits and every KV/GDN state/conv layer pass cosine >=0.999;
+  worst state cosine 0.9999975749. Greedy output agrees for 3/EOS, 64 and 64
+  tokens per model. No bitwise full-state or distributional claim.
+- Production remains unchanged. Source confirms ordinary CLI already uses
+  packed prefill; this targets fresh serving's <=48 serial policy only.
+  Independent review supports one scoped endpoint packet, not global promotion.
+- CPU mode-observer and request-schema setup failures remain disclosed; final
+  CLI 374 passed, 12 ignored. Evidence:
+  `docs/bench/2026-09-06-fresh-short-packed/RESULT.md`.
+
 ## 2026-09-06 - End-to-End Cost Ledger Re-ranks Fresh Serving
 
 - CPU reconciliation of retained HTTP phases avoids double-counting allocation

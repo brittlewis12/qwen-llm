@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - End-to-End Cost Ledger Re-ranks Fresh Serving
+
+- CPU reconciliation of retained HTTP phases avoids double-counting allocation
+  inside restore. Only about 1.6-2.1 ms remains unattributed before first SSE.
+  Q4/Q8 fresh 19/3 prefill occupies 85.15%/87.92% of full request wall; fresh
+  8810/2 occupies >99%. Landed Q8 compact-128 prefill is now only 3.04-3.25%.
+- This favors testing an existing packed work unit for fresh short serving over
+  more compact Q8 warm-tail polishing. Source audit confirms CLI already uses
+  packed fresh prefill: no disposable-process CLI benefit is inferred.
+- Historical Q4 CLI 8840/64 controls are 86-88% prefill by process wall, but do
+  not price current cold-short or generation-heavy lanes. No cross-model or
+  spec/no-spec speed comparison is made. Independent review supports this scope.
+- Evidence: `docs/bench/2026-09-06-global-cost-ledger/RESULT.md`.
+
 ## 2026-09-06 - Consumed-Tail HTTP Stability Gate INCONCLUSIVE / HOLD
 
 - `6ed6032a` implements separate consumed-extension restore; `0c58d830` adds a

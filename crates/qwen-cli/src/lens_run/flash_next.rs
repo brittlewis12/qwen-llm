@@ -71,6 +71,7 @@ pub(super) fn run_qwen4exp(
     );
     let stop_tokens = stop_tokens.into_iter().collect::<HashSet<_>>();
 
+    crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Flash-Next Lens run")?;
     let mut loaded = Qwen4ExpLoadedModel::load(&context, &gguf, capacity)
         .context("load Flash-Next serial Lens session")?;
@@ -304,6 +305,7 @@ pub(super) fn qwen4exp_forward_event(
     operation_applications: &mut Vec<OperationApplication>,
     native_hyper_captures: &mut Vec<NativeHyperCapture>,
 ) -> Result<Vec<f32>> {
+    crate::shutdown::checkpoint()?;
     let Some((operation, layer)) = qwen4exp_matching_operation(execution, phase)? else {
         return Ok(runner
             .forward_token(token)

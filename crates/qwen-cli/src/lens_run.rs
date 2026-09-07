@@ -403,6 +403,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         gguf.declared_context_length()?,
     )?;
 
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf_with_intent(

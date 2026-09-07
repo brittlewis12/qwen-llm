@@ -128,6 +128,7 @@ pub(crate) fn run(
         "Muse lens execution must not hash model weights"
     );
     let content_id = super::hex(&content.content_id);
+    crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse Lens run")?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, forward_count)
         .context("load Muse Lens runner model")?;
@@ -773,6 +774,7 @@ fn forward_event(
     operation_applications: &mut Vec<OperationApplication>,
     output: &mut Vec<LiveReadout>,
 ) -> Result<Vec<f32>> {
+    crate::shutdown::checkpoint()?;
     let interventions = event_interventions(execution, event)?;
     let borrowed = interventions
         .iter()

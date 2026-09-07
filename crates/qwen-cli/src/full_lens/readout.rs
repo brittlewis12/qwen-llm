@@ -193,6 +193,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         prefix.len(),
     );
 
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf_with_intent(

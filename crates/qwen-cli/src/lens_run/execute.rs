@@ -304,6 +304,7 @@ pub(super) fn forward_event(
     operation_applications: &mut Vec<OperationApplication>,
     live_readouts: &mut Vec<LiveReadout>,
 ) -> Result<Vec<f32>> {
+    crate::shutdown::checkpoint()?;
     let mut interventions = Vec::new();
     for layer in 0..execution.n_layer {
         for &definition_index in event.operation_indices() {

@@ -596,6 +596,7 @@ pub(super) fn run_cohort(args: LensRunArgs) -> Result<()> {
         prefill_execution: args.prefill_execution,
         bounds,
     };
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf_with_intent(
@@ -907,6 +908,7 @@ pub(super) fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result
         gguf.declared_context_length()?,
     )?;
 
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf(gguf, args.model.clone())
@@ -1256,6 +1258,7 @@ pub(super) fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result
     let manifest_reserve_bytes =
         ensure_sweep_cohort_manifest_capacity(&manifest_basis, &preflight_requests)?;
 
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf(gguf, args.model.clone())

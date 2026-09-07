@@ -36,8 +36,10 @@ mod open_responses;
 #[allow(dead_code)]
 mod prompt_template;
 mod published_pt;
+mod shutdown;
 #[allow(dead_code)]
 mod template_lens;
+mod tracing_init;
 use full_lens::{
     CompareTransferArgs, ImportFullArgs, ReadFullArgs, TraceFullArgs, compare_transfer,
     import_full, read_full as read_qwen_full, trace_full as trace_qwen_full,
@@ -572,7 +574,18 @@ struct TokenReadoutManifest {
     provenance: TokenProvenance,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    shutdown::finish(run())
+}
+
+/// Every lens command that reaches Metal runs under cooperative termination:
+/// SIGINT/SIGTERM set a flag that `shutdown::checkpoint` turns into an error at
+/// the next completed-command boundary, so the process unwinds through normal
+/// Metal teardown instead of leaving wired weights behind (the same discipline
+/// as `qwen` and `qwen-bench`).
+fn run() -> Result<()> {
+    shutdown::install()?;
+    tracing_init::install_default_subscriber();
     match Cli::parse().command {
         Command::Compare(args) => lens_compare::run(args),
         Command::Inspect(args) => lens_inspect::run(args),
@@ -632,6 +645,7 @@ fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
     validate_args(&args)?;
     args.output = resolve_output_path(&args.output)?;
     let requests = read_prompt_requests(&args.prompts, args.max_prompts)?;
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_model(&args.model)
@@ -743,6 +757,7 @@ fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
 
     let output_rows: Vec<u32> = (args.row_start..args.row_end).collect();
     for (record_index, prompt) in prompts.iter().enumerate().skip(active.next_record) {
+        crate::shutdown::checkpoint()?;
         if let Some(skipped) = skipped_prompt(prompt, args.skip_first) {
             active.skipped_prompts.push(skipped);
             active.next_record = record_index + 1;
@@ -910,6 +925,7 @@ fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
     )?;
     args.output = resolve_output_path(&args.output)?;
     let requests = read_prompt_requests(&args.prompts, args.max_prompts)?;
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_model(&args.model)
@@ -1057,6 +1073,7 @@ fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
     )?;
 
     for (record_index, prompt) in prompts.iter().enumerate().skip(active.next_record) {
+        crate::shutdown::checkpoint()?;
         if let Some(skipped) = skipped_prompt(prompt, args.skip_first) {
             active.skipped_prompts.push(skipped);
             active.next_record = record_index + 1;

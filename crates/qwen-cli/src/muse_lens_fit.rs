@@ -75,6 +75,7 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
     );
     let content_id = super::hex(&content.content_id);
 
+    crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse lens fitting")?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, args.max_tokens)
         .context("load Muse Glimmer lens model")?;
@@ -109,6 +110,7 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
     let traversed_blocks = ((args.source_layers[0] + 1)..=args.target_layer).collect::<Vec<_>>();
 
     for (index, prompt) in prompts.iter().enumerate() {
+        crate::shutdown::checkpoint()?;
         if let Some(skipped) = super::skipped_prompt(prompt, args.skip_first) {
             skipped_prompts.push(skipped);
             continue;

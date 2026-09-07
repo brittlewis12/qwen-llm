@@ -140,6 +140,7 @@ pub(crate) fn fit_rows(mut args: FitRowsArgs, gguf: GgufFile) -> Result<()> {
     };
     validate_active_state(active, &prompts, &config, value_count)?;
 
+    crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse row fitting")?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, args.max_tokens)
         .context("load Muse Glimmer row-fitting model")?;
@@ -153,6 +154,7 @@ pub(crate) fn fit_rows(mut args: FitRowsArgs, gguf: GgufFile) -> Result<()> {
     let invocation_start = active.next_record;
     let record_range = fit_record_range(active.next_record, prompts.len(), args.records_this_run)?;
     for record_index in record_range {
+        crate::shutdown::checkpoint()?;
         let prompt = &prompts[record_index];
         if let Some(skipped) = super::skipped_prompt(prompt, args.skip_first) {
             active.skipped_prompts.push(skipped);

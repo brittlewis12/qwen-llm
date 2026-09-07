@@ -546,6 +546,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         );
     }
 
+    crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse full readout")?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, prefix.len())
         .context("load Muse model for full readout")?;
@@ -554,6 +555,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         .create_runner(&context)
         .context("create Muse full-readout runner")?;
     for &token in &prefix[..prefix.len() - 1] {
+        crate::shutdown::checkpoint()?;
         runner
             .forward_token(token)
             .context("forward Muse full-readout prefix")?;
@@ -884,6 +886,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .context("Muse trace capture size overflow")?;
     let capture_bytes = muse_trace_capture_bytes(layers.len(), token_ids.len(), hidden_size)?;
 
+    crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse full trace")?;
     let model_load_started = Instant::now();
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, token_ids.len())
@@ -952,6 +955,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     }
     let prefill_started = Instant::now();
     for (position, &token_id) in token_ids.iter().enumerate() {
+        crate::shutdown::checkpoint()?;
         let capture = runner
             .forward_token_capture_post_blocks(token_id as u32, &capture_layers)
             .with_context(|| format!("capture Muse trace position {position}"))?;

@@ -383,6 +383,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         });
     }
 
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let model_load_started = Instant::now();
     let loaded = runtime
@@ -447,6 +448,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         .try_reserve_exact(prepared_inputs.len())
         .context("allocate trace-full captured prompts")?;
     for input in prepared_inputs {
+        crate::shutdown::checkpoint()?;
         let mut sequence = loaded
             .create_sequence(SequenceConfig::new(input.token_ids.len()))
             .with_context(|| {
@@ -464,6 +466,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             .try_reserve_exact(position_tiles.len())
             .context("allocate trace-full request capture tiles")?;
         for tile in &position_tiles {
+            crate::shutdown::checkpoint()?;
             let capture = {
                 let mut workspace_lens = loaded
                     .workspace_lens_session(&mut sequence)

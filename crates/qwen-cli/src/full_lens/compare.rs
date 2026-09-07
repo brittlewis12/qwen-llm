@@ -65,6 +65,7 @@ pub(crate) fn compare_transfer(args: CompareTransferArgs) -> Result<()> {
     );
 
     let model_started = Instant::now();
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_model_with_intent(

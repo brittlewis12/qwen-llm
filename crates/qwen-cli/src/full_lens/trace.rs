@@ -620,6 +620,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
+    crate::shutdown::checkpoint()?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf_with_intent(
@@ -685,6 +686,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let mut packed_prefill_gpu_ms = 0.0f64;
     let mut packed_prefill_wall_ms = 0.0f64;
     for tile in &position_tiles {
+        crate::shutdown::checkpoint()?;
         let capture = {
             let mut workspace_lens = loaded
                 .workspace_lens_session(&mut sequence)

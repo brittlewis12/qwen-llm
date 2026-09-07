@@ -155,6 +155,24 @@ Decision rules:
 
 ## N16 Long-Context Attention Checkpoint - 2026-09-07
 
+The adjacent exact tiled-VT copy experiment improves16-bank GPU time85.26/81.62%
+at8840/32752, but its admitted Q8 restored16 phase is HOLD: controls spread85.309/
+25.673%, far above5%. Warmup payload hashes precede only first measured A, an
+asymmetric conditioning boundary. Full-state/logit bitwise witnesses pass and
+scratch remains35.095/103.547 MB; no flag, promotion or rescue timing packet.
+N8 online matrix remains closed: the older persistent-VT endpoint already lost
+with transpose cost amortized away. Evidence:
+`docs/bench/2026-09-07-tiled-vt-rebuild/RESULT.md`.
+
+The larger source-backed boundary is snapshot publication/restore:32K restore
+alone is113.654-142.007 ms in the retained rows, copying CPU arenas into Metal.
+Prefer a costed ownership/copy-elision falsifier over further transpose tuning.
+A GPU RAM snapshot must charge publication+restore and replace, not silently
+mirror, CPU storage; a retained live continuation must enforce exact consumed
+token identity, capacity, poison and cancellation rules. Both need full cache/
+admission/lifetime accounting and endpoint evidence. No broad no-copy Vec wrapper,
+whole-model residency, immutable-prefix aliasing or inference from noisy means.
+
 The charged one-layer online-matrix attention screen passes: 6.250479 ->3.607279
 GPU ms at32768, N16, G6 24/4/256, including a full-prefix one-layer VT rebuild.
 Saving42.288%, control spread0.409%, incremental actual workspace93,847,552 B;

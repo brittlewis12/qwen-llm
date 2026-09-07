@@ -2806,6 +2806,21 @@ pub(crate) fn encode_attn_matrix_transpose_v_f16_mode(
             ),
         })?;
     let threadgroups = attn_matrix_vt_threadgroups(total, compact_dispatch)?;
+    #[cfg(test)]
+    if compact_dispatch && vt_tiled_pilot::selected() {
+        vt_tiled_pilot::encode(
+            ctx,
+            enc,
+            v_cache,
+            v_t,
+            base_pos_u32,
+            n_rows_u32,
+            kv_dim,
+            kv_stride_u32,
+            vt_stride_u32,
+        );
+        return Ok(());
+    }
     let pso = ctx.pipeline("kernel_attn_matrix_transpose_v_f16")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -3479,6 +3494,15 @@ pub fn encode_attn_matrix_kqv_direct_v_f32(
 #[cfg(test)]
 #[path = "attn_verifier_online_pilot.rs"]
 mod verifier_online_pilot;
+
+#[cfg(test)]
+#[path = "attn_vt_tiled_pilot.rs"]
+mod vt_tiled_pilot;
+
+#[cfg(test)]
+pub(crate) fn with_tiled_vt_pilot<T>(enabled: bool, f: impl FnOnce() -> T) -> (T, usize) {
+    vt_tiled_pilot::with_mode(enabled, f)
+}
 
 #[cfg(test)]
 mod tests {

@@ -74,6 +74,9 @@ tail, including full/partial restore. Prefix KV is bitwise unchanged, and after
 forced pre-block restore plus eight serial replays all persistent state payloads
 agree bitwise. No sampled distribution, serial-oracle logits or generated greedy
 continuation claim follows from teacher-forced A/B agreement.
+At32K the existing fallback margin is0.75; teacher-forced rows6/10/12 are below
+that margin in both arms. Only committed rows can incur the production guard,
+so these gaps do not measure fallback incidence or accepted-chain quality.
 
 Actual Metal allocation, reproduced in both attempts:
 

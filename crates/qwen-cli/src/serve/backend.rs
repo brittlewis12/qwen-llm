@@ -353,7 +353,7 @@ fn fresh_packed_arch(
 }
 
 fn fresh_packed_enabled(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_none_or(|value| value == "1")
+    value.is_some_and(|value| value == "1")
 }
 
 fn fresh_packed_width(

@@ -214,9 +214,9 @@ fn fresh_packed_policy_preserves_cached_sampled_and_unqualified_requests() {
 }
 
 #[test]
-fn fresh_packed_default_and_rollback_are_fail_closed() {
+fn fresh_packed_opt_in_and_rollback_are_fail_closed() {
     use std::ffi::OsStr;
-    assert!(fresh_packed_enabled(None));
+    assert!(!fresh_packed_enabled(None));
     assert!(fresh_packed_enabled(Some(OsStr::new("1"))));
     for value in ["0", "", "true", "yes", "1 ", "01", "invalid"] {
         assert!(!fresh_packed_enabled(Some(OsStr::new(value))));

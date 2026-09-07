@@ -4,6 +4,56 @@ use super::*;
 use objc2_metal::MTLCommandBufferStatus;
 use serde_json::json;
 
+thread_local! {
+    static SELECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn selected() -> bool {
+    SELECTED.with(std::cell::Cell::get)
+}
+
+pub(super) fn with_mode<T>(enabled: bool, f: impl FnOnce() -> T) -> (T, usize) {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SELECTED.with(|value| value.set(self.0));
+        }
+    }
+    let previous = SELECTED.with(|value| value.replace(enabled));
+    let _reset = Reset(previous);
+    let before = CALLS.with(std::cell::Cell::get);
+    let result = f();
+    (result, CALLS.with(std::cell::Cell::get) - before)
+}
+
+pub(super) fn encode(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    dst: &MetalTensor,
+    base: u32,
+    rows: u32,
+    kv_dim: usize,
+    kv_stride: u32,
+    vt_stride: u32,
+) {
+    tiled(
+        ctx,
+        enc,
+        src,
+        dst,
+        &Args {
+            base,
+            rows,
+            kv_dim: kv_dim.try_into().unwrap(),
+            kv_stride,
+            vt_stride,
+        },
+    );
+    CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Args {

@@ -17843,3 +17843,7 @@ mod tests;
 #[cfg(test)]
 #[path = "metal_dflash/online_verify_pilot.rs"]
 mod online_verify_pilot;
+
+#[cfg(test)]
+#[path = "metal_dflash/tiled_vt_prefill_pilot.rs"]
+mod tiled_vt_prefill_pilot;

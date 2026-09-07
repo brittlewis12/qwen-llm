@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - N16 Online Attention Full-Verifier Phase PASS / Product HOLD
+
+- Test-only `8123e74d` plus observer fix `e5e6abd9` primes32752 real Q8 tokens and
+  verifies16 teacher-forced rows. Full packet257.819688 ->216.347709 ms saves
+  16.086%; partial8 restore saves16.865%; forced restore+8serial replay5.696%.
+  All frozen paired gates pass, control spreads0.873/0.366/0.094%.
+- All16 argmaxes agree;401 numerical comparisons pass (worst cosine
+  0.999999850875, largest absolute F16-tail delta0.03125). Prefix KV is unchanged
+  bitwise; forced replay persistent state is bitwise equal. No sampled or
+  generated-continuation authority. Actual existing verifier/layer scratch
+  2,695,266,304 B plus93,847,552 B online workspace; one model/session.
+- Attempt01 fails debug-logits shape validation before any verify execution;
+  one-line repaired observer and original failure are retained. Attempt02 passes;
+  CPU fixture identity and non-test release library check pass. First A warmup
+  verify608-632 ms and global whole-process compression/pageout activity remain
+  disclosed, with no cold/causal interpretation or rescue timing rerun.
+- Independent review confirms phase PASS, not product promotion: current default
+  cutoff16384 excludes32K; calibrated DFlash2 is physical N8, not N16. Verify
+  active artifact/block-size/acceptance economics before any endpoint spend.
+  Production policy, scratch admission and single-chunk-VT rejection stay intact.
+- Evidence: `docs/bench/2026-09-07-full-verifier-online-n16/RESULT.md`.
+
 ## 2026-09-07 - N16 Long-Context Online Attention Primitive PASS
 
 - Test-only `4a8ef407` compares current16 causal V4 rows with existing online

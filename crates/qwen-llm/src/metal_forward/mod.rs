@@ -3031,6 +3031,8 @@ mod attn;
 mod dispatch;
 mod gdn;
 mod moe;
+#[cfg(test)]
+mod native_embedding_pilot;
 mod residency;
 mod session;
 mod support;

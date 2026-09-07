@@ -153,7 +153,32 @@ Decision rules:
   for decision-changing results. A focused regression and ordinary endpoint
   check are preferable to replaying unrelated historical gates.
 
-## N16 Long-Context Attention Checkpoint - 2026-09-07
+## Updated Leverage Map - 2026-09-07
+
+The ranking changes materially for restored requests. This is a next-experiment
+map, not a claim that warm serving is the largest opportunity in every lane.
+
+| Priority | Lane / work to remove | Current authority | Next decision |
+| --- | --- | --- | --- |
+| 1 | Transient prompt publication, serial serving | A4GiB serve cache cannot retain both32K prompt and completed snapshots; prompt capture blocks first token. CPU witness also proves retry and larger-cache counterexamples. | Highest-priority policy falsifier: establish consumers/evictions and cancellation/failure guards before conditional elision. No blanket skip. |
+| 2 | Live continuation / retained state ownership | Owned runtime tracks model provenance, capacity and consumed position; backend still allocates request-local sequences. | Measure exact-history eligibility; preserve poison, capacity, cancellation, cache clear/eviction and branching/regeneration behavior. Position alone is not token-history identity. |
+| 3 | GPU-owned snapshot publication + restore | Model-free32K cycle244.042 ->85.585ms,64.930% saved;8840 control fails, overall two-cell HOLD. All-byte/immutability proofs pass. | No GPU cache rollout or threshold retrofit. Any follow-up must price both directions, driver-sized storage, durable materialization and complete request cost. |
+| Hold | Tiled VT / N16 attention | Strong copy-bank/full-verifier results respectively, but no endpoint promotion authority. N8 persistent-online endpoint remains closed. | Do not rescue noisy tiled controls or manufacture N16 DFlash2 reachability. |
+
+Cold-load remains an independent co-primary track: native Q8 embedding removes
+3.735GB exactly but its latency gate held. Keep named load-stage attribution ahead
+of generic PSO or whole-model residency work. Fresh long prefill and steady decode
+also remain open at the structural level; closed local tile/fusion candidates do
+not establish a global roofline. Reopen those cells with a new arithmetic/byte/
+quality mechanism on an actually selected model-quant-architecture path.
+
+Do not spend effort on fictitious zeroing: `zeros_f32`/`zeros_f16` already allocate
+uninitialized buffers, as do CPU snapshot arenas before capture. Keep weight
+quantization separate from KV dtype; the snapshot experiments use F16 KV even
+when the target model's weights are Q8. Evidence and scope:
+`docs/bench/2026-09-07-snapshot-lifecycle/RESULT.md`.
+
+## Attention Checkpoint - 2026-09-07
 
 The adjacent exact tiled-VT copy experiment improves16-bank GPU time85.26/81.62%
 at8840/32752, but its admitted Q8 restored16 phase is HOLD: controls spread85.309/

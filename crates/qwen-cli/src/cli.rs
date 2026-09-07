@@ -117,7 +117,8 @@ pub(crate) struct RunInvocation {
     generation: GenerationOverrides,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum RunReasoningEffort {
     Low,
     Medium,

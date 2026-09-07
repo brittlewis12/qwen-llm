@@ -1730,6 +1730,13 @@ pub(crate) fn prepare_deepseek_v4_jsonl_request_line(
         request.cache_prefix_tokens.is_none(),
         "request {id} sets cache_prefix_tokens, which DeepSeek V4 requests do not support yet"
     );
+    ensure!(
+        request.user.is_none()
+            && request.system.is_none()
+            && request.no_thinking.is_none()
+            && request.reasoning_effort.is_none(),
+        "request {id}: templated user rows are not supported for DeepSeek V4 batch requests; submit a raw prompt"
+    );
     let prompt = request_prompt(&request, line_no)
         .with_context(|| format!("resolve request {id} prompt at line {line_no}"))?;
     let prompt_ids = tokenizer
@@ -2100,6 +2107,7 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
         };
         let output = RequestOutput {
             id: request.id.clone(),
+            input: JsonlInputLabel::RAW,
             prompt_tokens: request.prompt_tokens,
             generated_tokens: generation.tokens.len(),
             generated_token_sha256: generated_token_sha256(&generation.tokens),

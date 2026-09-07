@@ -216,6 +216,7 @@ impl LaneProgress {
 
 struct Lane {
     id: String,
+    input: JsonlInputLabel,
     prompt_tokens: usize,
     sequence: Sequence,
     progress: LaneProgress,
@@ -240,6 +241,7 @@ fn next_decode_work(active: [bool; WIDTH]) -> DecodeWork {
 
 struct PreparedLane {
     id: String,
+    input: JsonlInputLabel,
     prompt_tokens: usize,
     max_tokens: usize,
     sequence: Sequence,
@@ -529,7 +531,7 @@ pub(super) fn run_file(
     greedy_gpu_mode: GreedyGpuArgmaxMode,
     stdout: &mut impl Write,
 ) -> Result<usize> {
-    let requests = prepare_jsonl_requests(requests_path, tokenizer, args)?;
+    let requests = prepare_jsonl_requests(requests_path, loaded, tokenizer, args)?;
     run_prepared(loaded, tokenizer, &requests, args, greedy_gpu_mode, stdout)
 }
 
@@ -1211,6 +1213,7 @@ fn prepared_lane(
 ) -> PreparedLane {
     PreparedLane {
         id: request.id.clone(),
+        input: request.input,
         prompt_tokens: request.prompt_ids.len(),
         max_tokens,
         sequence,
@@ -1246,6 +1249,7 @@ fn prepare_lane(
     Ok((
         PreparedLane {
             id: request.id.clone(),
+            input: request.input,
             prompt_tokens: request.prompt_ids.len(),
             max_tokens,
             sequence,
@@ -1620,6 +1624,7 @@ fn start_lane(prepared: PreparedLane, tokenizer: &Tokenizer, stop_tokens: &[i32]
     }
     Ok(Lane {
         id: prepared.id,
+        input: prepared.input,
         prompt_tokens: prepared.prompt_tokens,
         sequence: prepared.sequence,
         progress,
@@ -1753,6 +1758,7 @@ fn run_pair(
     };
     let outputs = lanes.map(|lane| RequestOutput {
         id: lane.id,
+        input: lane.input,
         prompt_tokens: lane.prompt_tokens,
         generated_tokens: lane.progress.generated.len(),
         generated_token_sha256: generated_token_sha256(&lane.progress.generated),
@@ -2431,6 +2437,7 @@ fn generate_deepseek_lane(
     let selector_telemetry = lane.session.multigroup_selector_telemetry();
     let output = RequestOutput {
         id: lane.request.id,
+        input: JsonlInputLabel::RAW,
         prompt_tokens: lane.request.prompt_tokens,
         generated_tokens: generation.tokens.len(),
         generated_token_sha256: generated_token_sha256(&generation.tokens),

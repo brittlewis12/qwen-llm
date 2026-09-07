@@ -2,15 +2,90 @@
 
 use super::*;
 
+/// One batch row. Exactly one input form: raw `prompt` / `prompt_file`
+/// (tokenized as given), or templated `user` (+ optional `system`) rendered
+/// through the model's pinned released template — the same renderer as
+/// `qwen run --user`. The rendering controls `no_thinking` and
+/// `reasoning_effort` apply to `user` rows only.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct JsonlRequest {
     pub(crate) id: Option<String>,
     pub(crate) prompt: Option<String>,
     pub(crate) prompt_file: Option<PathBuf>,
+    pub(crate) user: Option<String>,
+    pub(crate) system: Option<String>,
+    pub(crate) no_thinking: Option<bool>,
+    pub(crate) reasoning_effort: Option<cli::RunReasoningEffort>,
     pub(crate) tokens: Option<usize>,
     pub(crate) cache_prefix_tokens: Option<usize>,
     pub(crate) sampling: Option<JsonlSampling>,
+}
+
+/// How a row's prompt was produced; echoed on its output row and carried
+/// into stats with the same `raw` / `messages` vocabulary as the v1 record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct JsonlInputLabel {
+    pub(crate) kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) template: Option<&'static str>,
+}
+
+impl JsonlInputLabel {
+    pub(crate) const RAW: Self = Self {
+        kind: "raw",
+        template: None,
+    };
+}
+
+/// Resolve a row's input form. Returns the prompt text, whether the
+/// tokenizer should add its own specials (never for rendered templates), and
+/// the label. Rejects contradictory shapes explicitly: `deny_unknown_fields`
+/// only catches unknown keys, not a raw row carrying rendering controls.
+pub(crate) fn resolve_jsonl_request_input(
+    request: &JsonlRequest,
+    line: usize,
+    protocol: Option<&crate::QwenUserPromptProtocol>,
+) -> Result<(String, bool, JsonlInputLabel)> {
+    let raw_forms = usize::from(request.prompt.is_some()) + usize::from(request.prompt_file.is_some());
+    let templated = request.user.is_some();
+    ensure!(
+        raw_forms + usize::from(templated) == 1,
+        "request line {line} must carry exactly one of prompt, prompt_file, or user"
+    );
+    if !templated {
+        ensure!(
+            request.system.is_none()
+                && request.no_thinking.is_none()
+                && request.reasoning_effort.is_none(),
+            "request line {line}: system, no_thinking, and reasoning_effort apply to user rows only"
+        );
+        return Ok((request_prompt(request, line)?, true, JsonlInputLabel::RAW));
+    }
+    let protocol = protocol.with_context(|| {
+        format!("request line {line}: templated user rows require an ordinary Qwen model")
+    })?;
+    ensure!(
+        protocol.pinned(),
+        "request line {line}: templated user rows require a model whose chat template is pinned (released Qwen3.5/3.6/3.8); this model's template is unrecognized, so submit a raw prompt instead"
+    );
+    let user = request.user.as_deref().expect("templated row has user");
+    let prompt = protocol
+        .render(
+            user,
+            request.system.as_deref(),
+            request.no_thinking.unwrap_or(false),
+            request.reasoning_effort,
+        )
+        .with_context(|| format!("render request line {line}"))?;
+    Ok((
+        prompt,
+        false,
+        JsonlInputLabel {
+            kind: "messages",
+            template: Some(protocol.label()),
+        },
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -29,6 +104,7 @@ pub(crate) struct PreparedJsonlRequest {
     pub(crate) request: JsonlRequest,
     pub(crate) id: String,
     pub(crate) line: usize,
+    pub(crate) input: JsonlInputLabel,
     pub(crate) prompt_ids: Vec<i32>,
     pub(crate) sampling: SamplingConfig,
     pub(crate) auto_cache_prefix_tokens: Option<usize>,
@@ -124,7 +200,7 @@ pub(crate) fn run_requests_jsonl(
     };
     let auto_mode = args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
     let mut auto_prepared = if auto_mode && requests_path != Path::new("-") {
-        Some(prepare_jsonl_requests(requests_path, &tokenizer, args)?)
+        Some(prepare_jsonl_requests(requests_path, &loaded, &tokenizer, args)?)
     } else {
         None
     };
@@ -384,12 +460,13 @@ pub(crate) fn run_requests_jsonl(
                 "prefix-cache auto admission needs request lookahead; disabled for stdin JSONL"
             );
         }
+        let protocol = jsonl_user_prompt_protocol(&loaded)?;
         for (line_idx, line) in reader.lines().enumerate() {
             shutdown::checkpoint()?;
             let line_no = line_idx + 1;
             let line = line.with_context(|| format!("read requests line {line_no}"))?;
             let Some(prepared_request) =
-                prepare_jsonl_request_line(line_no, &line, &tokenizer, args)?
+                prepare_jsonl_request_line(line_no, &line, &tokenizer, args, protocol.as_ref())?
             else {
                 continue;
             };
@@ -424,7 +501,7 @@ pub(crate) fn run_requests_jsonl(
     } else {
         let mut prepared = match auto_prepared.take() {
             Some(prepared) => prepared,
-            None => prepare_jsonl_requests(requests_path, &tokenizer, args)?,
+            None => prepare_jsonl_requests(requests_path, &loaded, &tokenizer, args)?,
         };
         n_requests += run_prepared_jsonl_serial(
             &loaded,
@@ -499,11 +576,25 @@ pub(crate) fn run_prepared_jsonl_serial(
     Ok(completed)
 }
 
+/// The row-rendering protocol for this loaded model, or `None` when the
+/// family has no ordinary-Qwen chat rendering.
+pub(crate) fn jsonl_user_prompt_protocol(
+    loaded: &LoadedModel,
+) -> Result<Option<crate::QwenUserPromptProtocol>> {
+    let family = match loaded.arch().kind {
+        ArchKind::Dense => ModelFamily::Qwen35,
+        ArchKind::Moe => ModelFamily::Qwen35Moe,
+    };
+    crate::QwenUserPromptProtocol::resolve(family, loaded.gguf())
+}
+
 pub(crate) fn prepare_jsonl_requests(
     requests_path: &Path,
+    loaded: &LoadedModel,
     tokenizer: &Tokenizer,
     args: &Args,
 ) -> Result<Vec<PreparedJsonlRequest>> {
+    let protocol = jsonl_user_prompt_protocol(loaded)?;
     let stdin;
     let reader: Box<dyn BufRead> = if requests_path == Path::new("-") {
         stdin = std::io::stdin();
@@ -520,7 +611,9 @@ pub(crate) fn prepare_jsonl_requests(
         shutdown::checkpoint()?;
         let line_no = line_idx + 1;
         let line = line.with_context(|| format!("read requests line {line_no}"))?;
-        if let Some(request) = prepare_jsonl_request_line(line_no, &line, tokenizer, args)? {
+        if let Some(request) =
+            prepare_jsonl_request_line(line_no, &line, tokenizer, args, protocol.as_ref())?
+        {
             prepared.push(request);
         }
     }
@@ -537,6 +630,7 @@ pub(crate) fn prepare_jsonl_request_line(
     line: &str,
     tokenizer: &Tokenizer,
     args: &Args,
+    protocol: Option<&crate::QwenUserPromptProtocol>,
 ) -> Result<Option<PreparedJsonlRequest>> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -548,9 +642,10 @@ pub(crate) fn prepare_jsonl_request_line(
         .id
         .clone()
         .unwrap_or_else(|| format!("line-{line_no}"));
-    let prompt = request_prompt(&request, line_no)?;
+    let (prompt, tokenizer_specials, input) =
+        resolve_jsonl_request_input(&request, line_no, protocol)?;
     let prompt_ids = tokenizer
-        .encode(&prompt, !args.no_special_tokens)
+        .encode(&prompt, tokenizer_specials && !args.no_special_tokens)
         .context("tokenize prompt")?;
     if prompt_ids.is_empty() {
         bail!("request {id} tokenized to zero tokens");
@@ -560,10 +655,13 @@ pub(crate) fn prepare_jsonl_request_line(
         .with_context(|| format!("validate decode policy for request {id}"))?;
     request.prompt = None;
     request.prompt_file = None;
+    request.user = None;
+    request.system = None;
     Ok(Some(PreparedJsonlRequest {
         request,
         id,
         line: line_no,
+        input,
         prompt_ids,
         sampling,
         auto_cache_prefix_tokens: None,
@@ -969,6 +1067,7 @@ pub(crate) fn run_jsonl_request(
     };
     let output = RequestOutput {
         id: id.to_string(),
+        input: prepared.input,
         prompt_tokens: prompt_ids.len(),
         generated_tokens: generated.len(),
         generated_token_sha256,

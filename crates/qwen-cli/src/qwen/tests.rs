@@ -713,12 +713,17 @@ fn prepared(id: &str, tokens: &[i32]) -> PreparedJsonlRequest {
             id: Some(id.to_string()),
             prompt: None,
             prompt_file: None,
+            user: None,
+            system: None,
+            no_thinking: None,
+            reasoning_effort: None,
             tokens: None,
             cache_prefix_tokens: None,
             sampling: None,
         },
         id: id.to_string(),
         line: 1,
+        input: JsonlInputLabel::RAW,
         prompt_ids: tokens.to_vec(),
         sampling: SamplingConfig::default(),
         auto_cache_prefix_tokens: None,
@@ -5119,4 +5124,125 @@ fn request_stats_fingerprint_newtype_bytes_only_from_of() {
     // Sanity: the digest exposes bytes via `as_bytes()` (test-only) for
     // hex comparison — but that's read-only, not a constructor path.
     assert_eq!(a.as_bytes().len(), 32);
+}
+
+mod jsonl_templated_rows {
+    use crate::open_responses::items::QwenTemplate;
+    use crate::{JsonlInputLabel, JsonlRequest, QwenUserPromptProtocol, resolve_jsonl_request_input};
+
+    fn row(json: &str) -> JsonlRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn pinned() -> QwenUserPromptProtocol {
+        QwenUserPromptProtocol::for_test(false, QwenTemplate::Qwen36)
+    }
+
+    #[test]
+    fn raw_rows_keep_their_bytes_and_tokenizer_specials() {
+        let (prompt, specials, label) =
+            resolve_jsonl_request_input(&row(r#"{"prompt":"  hi  "}"#), 1, Some(&pinned())).unwrap();
+        assert_eq!(prompt, "  hi  ");
+        assert!(specials);
+        assert_eq!(label, JsonlInputLabel::RAW);
+    }
+
+    #[test]
+    fn exactly_one_input_form_is_required() {
+        for json in [
+            r#"{}"#,
+            r#"{"prompt":"a","user":"b"}"#,
+            r#"{"prompt":"a","prompt_file":"/x"}"#,
+        ] {
+            let err = resolve_jsonl_request_input(&row(json), 7, Some(&pinned())).unwrap_err();
+            assert!(err.to_string().contains("exactly one of"), "{json}: {err}");
+        }
+    }
+
+    #[test]
+    fn rendering_controls_are_rejected_on_raw_rows() {
+        for json in [
+            r#"{"prompt":"a","system":"s"}"#,
+            r#"{"prompt":"a","no_thinking":true}"#,
+            r#"{"prompt":"a","reasoning_effort":"low"}"#,
+        ] {
+            let err = resolve_jsonl_request_input(&row(json), 3, Some(&pinned())).unwrap_err();
+            assert!(err.to_string().contains("apply to user rows only"), "{json}: {err}");
+        }
+    }
+
+    #[test]
+    fn user_rows_need_an_ordinary_qwen_pinned_template() {
+        let err = resolve_jsonl_request_input(&row(r#"{"user":"hi"}"#), 2, None).unwrap_err();
+        assert!(err.to_string().contains("require an ordinary Qwen model"), "{err}");
+        let generic = QwenUserPromptProtocol::for_test(false, QwenTemplate::Generic);
+        let err = resolve_jsonl_request_input(&row(r#"{"user":"hi"}"#), 2, Some(&generic)).unwrap_err();
+        assert!(err.to_string().contains("template is pinned"), "{err}");
+    }
+
+    #[test]
+    fn unknown_reasoning_effort_values_fail_at_parse() {
+        assert!(serde_json::from_str::<JsonlRequest>(r#"{"user":"hi","reasoning_effort":"turbo"}"#).is_err());
+        assert!(serde_json::from_str::<JsonlRequest>(r#"{"user":"hi","unknown":1}"#).is_err());
+    }
+
+    #[test]
+    fn effort_requires_qwen38_and_conflicts_with_no_thinking() {
+        let err = resolve_jsonl_request_input(
+            &row(r#"{"user":"hi","reasoning_effort":"low"}"#),
+            4,
+            Some(&pinned()),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no reasoning-effort control"), "{err:#}");
+        let q38 = QwenUserPromptProtocol::for_test(true, QwenTemplate::Qwen38);
+        let err = resolve_jsonl_request_input(
+            &row(r#"{"user":"hi","reasoning_effort":"low","no_thinking":true}"#),
+            4,
+            Some(&q38),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be combined"), "{err:#}");
+    }
+
+    /// Every single-turn `user`/`system` case in the Qwen3.6 oracle, driven
+    /// as a batch row, renders the released bytes and is tokenized without
+    /// added specials.
+    #[test]
+    fn user_rows_render_the_qwen36_oracle_bytes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/qwen36_chat_template_oracle_v1.json"
+        ))
+        .unwrap();
+        let mut checked = 0;
+        for case in fixture["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let messages = input["messages"].as_array().unwrap();
+            let roles: Vec<&str> = messages.iter().map(|m| m["role"].as_str().unwrap()).collect();
+            let shape_ok = matches!(roles.as_slice(), ["user"] | ["system", "user"])
+                && input["tools"].as_array().is_none_or(|t| t.is_empty())
+                && input["preserve_thinking"] != serde_json::json!(true);
+            if !shape_ok {
+                continue;
+            }
+            let user = messages.last().unwrap()["content"].as_str().unwrap();
+            let system = (roles.len() == 2).then(|| messages[0]["content"].as_str().unwrap());
+            let mut row = serde_json::json!({ "user": user });
+            if let Some(system) = system {
+                row["system"] = serde_json::json!(system);
+            }
+            if input["enable_thinking"] == serde_json::json!(false) {
+                row["no_thinking"] = serde_json::json!(true);
+            }
+            let request: JsonlRequest = serde_json::from_value(row).unwrap();
+            let (rendered, specials, label) =
+                resolve_jsonl_request_input(&request, 1, Some(&pinned())).unwrap();
+            assert_eq!(rendered, case["rendered"].as_str().unwrap(), "case {}", case["id"]);
+            assert!(!specials);
+            assert_eq!(label.kind, "messages");
+            assert_eq!(label.template, Some("qwen36"));
+            checked += 1;
+        }
+        assert!(checked >= 5, "expected the single-turn oracle cases, checked {checked}");
+    }
 }

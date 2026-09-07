@@ -39,7 +39,7 @@ DEFAULT_QWEN_BENCH = ROOT / "target" / "release" / "qwen-bench"
 RUN_LOCK = ROOT / "target" / "qualitative" / ".qwen-text-capability-v1.lock"
 BATTERY_ID = "qwen-27b-text-capability-v1"
 PACKET_SEMANTIC_SHA256 = (
-    "87152253314e0ae06877948dfc6dde9652388cb0c3d55048d25c5ab0fdee3a0c"
+    "1bf6f2a1da79314688368b340d00ede6f6bc3447b40494394b94abb74d21193e"
 )
 SEED = 42
 SAMPLING = {
@@ -54,15 +54,10 @@ EFFORT_TASK_IDS = ("c3", "c4", "c6", "c8", "r1", "r4", "j2", "j3")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 ARM_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
 
-QWEN38_REASONING_EFFORT_XHIGH = (
-    "Reasoning effort is set to xhigh. Please think carefully through the task, "
-    "validate key assumptions, consider plausible alternatives, and prioritize "
-    "correctness, consistency, and clarity in the final answer."
-)
-QWEN38_REASONING_EFFORT_LOW = (
-    "Reasoning effort is set to low. Keep your thinking brief and focused, moving "
-    "directly to the conclusion without unnecessary elaboration."
-)
+# Chat rendering is owned by the engine: requests are submitted as templated
+# `user` rows and `qwen --requests-jsonl` renders the released template bytes
+# (pinned against the jinja oracle fixtures) itself. This script carries no
+# copy of any chat template.
 
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "qwen36-q4": {
@@ -909,28 +904,18 @@ def build_tasks() -> list[Task]:
     return tasks
 
 
-def render_no_thinking(user: str) -> str:
-    return (
-        f"<|im_start|>user\n{user.strip()}<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    )
+def no_thinking_row(user: str) -> dict[str, Any]:
+    """A templated batch row rendered by the engine with thinking disabled."""
+    return {"user": user, "no_thinking": True}
 
 
-def render_qwen38_effort(user: str, mode: str) -> str:
+def qwen38_effort_row(user: str, mode: str) -> dict[str, Any]:
+    """A templated batch row for one Qwen3.8 effort mode, rendered by the engine."""
     if mode == "no-thinking":
-        return render_no_thinking(user)
+        return no_thinking_row(user)
     if mode not in {"low", "medium", "xhigh"}:
         raise ValueError(f"unknown Qwen3.8 effort mode {mode!r}")
-    instruction = {
-        "low": QWEN38_REASONING_EFFORT_LOW,
-        "medium": None,
-        "xhigh": QWEN38_REASONING_EFFORT_XHIGH,
-    }[mode]
-    system = f"<|im_start|>system\n{instruction}<|im_end|>\n" if instruction else ""
-    return (
-        f"{system}<|im_start|>user\n{user.strip()}<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n"
-    )
+    return {"user": user, "reasoning_effort": mode}
 
 
 def effort_tokens(task: Task) -> int:
@@ -967,7 +952,7 @@ def build_packet() -> tuple[dict[str, Any], dict[str, bytes]]:
     capability = [
         {
             "id": task.task_id,
-            "prompt": render_no_thinking(task.prompt),
+            **no_thinking_row(task.prompt),
             "tokens": task.tokens,
             "sampling": SAMPLING,
         }
@@ -983,7 +968,7 @@ def build_packet() -> tuple[dict[str, Any], dict[str, bytes]]:
             effort.append(
                 {
                     "id": f"{task_id}--{mode}",
-                    "prompt": render_qwen38_effort(task.prompt, mode),
+                    **qwen38_effort_row(task.prompt, mode),
                     "tokens": effort_tokens(task),
                     "sampling": SAMPLING,
                 }
@@ -993,7 +978,9 @@ def build_packet() -> tuple[dict[str, Any], dict[str, bytes]]:
         profile: jsonl_bytes(rows) for profile, rows in request_rows.items()
     }
     packet = {
-        "schema_version": 1,
+        # v2: request rows are templated `user` rows rendered by the engine;
+        # v1 carried Python-rendered raw prompts.
+        "schema_version": 2,
         "battery_id": BATTERY_ID,
         "interpretation": {
             "capability": "fixed no-thinking text surface; not a general model ceiling",

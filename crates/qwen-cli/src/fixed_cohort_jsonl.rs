@@ -491,6 +491,7 @@ impl LaneProgress {
 struct Lane {
     request_index: usize,
     id: String,
+    input: JsonlInputLabel,
     prompt_tokens: usize,
     sequence: Sequence,
     progress: LaneProgress,
@@ -1969,7 +1970,7 @@ pub(super) fn run_file(
         "--batch-size requires a regular JSONL file, got {}",
         requests_path.display()
     );
-    let requests = prepare_jsonl_requests(requests_path, tokenizer, args)?;
+    let requests = prepare_jsonl_requests(requests_path, loaded, tokenizer, args)?;
     run_prepared(
         loaded,
         tokenizer,
@@ -2753,6 +2754,7 @@ fn prepare_refill_lane(
         Lane {
             request_index,
             id: request.id.clone(),
+            input: request.input,
             prompt_tokens: request.prompt_ids.len(),
             sequence,
             progress,
@@ -2782,6 +2784,7 @@ fn finalize_refill_lane(lane: Lane) -> Result<(usize, RequestOutput)> {
         lane.request_index,
         RequestOutput {
             id: lane.id,
+            input: lane.input,
             prompt_tokens: lane.prompt_tokens,
             generated_tokens: lane.progress.generated.len(),
             generated_token_sha256: generated_token_sha256(&lane.progress.generated),
@@ -3335,6 +3338,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         lanes.push(Lane {
             request_index: slot,
             id: request.id.clone(),
+            input: request.input,
             prompt_tokens: request.prompt_ids.len(),
             sequence,
             progress,
@@ -3436,6 +3440,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             .expect("validated fixed-cohort lane termination");
         outputs.push(RequestOutput {
             id: lane.id,
+            input: lane.input,
             prompt_tokens: lane.prompt_tokens,
             generated_tokens: lane.progress.generated.len(),
             generated_token_sha256: generated_token_sha256(&lane.progress.generated),
@@ -3544,12 +3549,17 @@ mod tests {
                 id: Some(id.to_string()),
                 prompt: None,
                 prompt_file: None,
+                user: None,
+                system: None,
+                no_thinking: None,
+                reasoning_effort: None,
                 tokens: None,
                 cache_prefix_tokens: None,
                 sampling: None,
             },
             id: id.to_string(),
             line: 1,
+            input: JsonlInputLabel::RAW,
             prompt_ids: tokens.to_vec(),
             sampling: SamplingConfig::default(),
             auto_cache_prefix_tokens: None,
@@ -3560,6 +3570,7 @@ mod tests {
     fn output(id: &str) -> RequestOutput {
         RequestOutput {
             id: id.to_string(),
+            input: JsonlInputLabel::RAW,
             prompt_tokens: 1,
             generated_tokens: 1,
             generated_token_sha256: id.to_string(),

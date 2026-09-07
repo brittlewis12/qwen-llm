@@ -1198,6 +1198,7 @@ pub(crate) fn validate_sampled_structural_row(row: &RequestTimingRow) -> Result<
 #[derive(Debug, Serialize)]
 pub(crate) struct RequestOutput {
     pub(crate) id: String,
+    pub(crate) input: JsonlInputLabel,
     pub(crate) prompt_tokens: usize,
     pub(crate) generated_tokens: usize,
     pub(crate) generated_token_sha256: String,

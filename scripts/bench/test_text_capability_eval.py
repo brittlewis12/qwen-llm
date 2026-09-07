@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -26,29 +27,36 @@ class TextCapabilityContractTests(unittest.TestCase):
         self.assertEqual(packet["request_sets"]["effort"]["count"], 32)
         self.assertEqual(
             capability.sha256_bytes(request_bytes["capability"]),
-            "f1c6dc54033d3df96fd1bf9d2550c41df9346c7214c4227104a00675afca82af",
+            "76878a55bbc19b3aa707361c0bf8f150ec7c2c794103fbea6371a69fa39e4fee",
         )
         self.assertEqual(
             capability.sha256_bytes(request_bytes["effort"]),
-            "888f564f3efd95751e7099efe181d2104533f4000394bba55b546f93aa3f69b4",
+            "acf49a3034bdfc2c0951c6474f7456abf57555788f4930869d49c09182a93a36",
         )
 
-    def test_renderers_match_exact_qwen_contracts(self) -> None:
+    def test_rows_delegate_rendering_to_the_engine(self) -> None:
+        # No chat template bytes live in this script; rows name the released
+        # controls and `qwen --requests-jsonl` renders the pinned template.
         self.assertEqual(
-            capability.render_no_thinking(" hello "),
-            "<|im_start|>user\nhello<|im_end|>\n"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            capability.no_thinking_row(" hello "),
+            {"user": " hello ", "no_thinking": True},
         )
-        medium = capability.render_qwen38_effort("hello", "medium")
         self.assertEqual(
-            medium,
-            "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n",
+            capability.qwen38_effort_row("hello", "medium"),
+            {"user": "hello", "reasoning_effort": "medium"},
         )
-        low = capability.render_qwen38_effort("hello", "low")
-        self.assertIn(capability.QWEN38_REASONING_EFFORT_LOW, low)
-        self.assertTrue(low.endswith("<|im_start|>assistant\n<think>\n"))
-        xhigh = capability.render_qwen38_effort("hello", "xhigh")
-        self.assertIn(capability.QWEN38_REASONING_EFFORT_XHIGH, xhigh)
+        self.assertEqual(
+            capability.qwen38_effort_row("hello", "no-thinking"),
+            {"user": "hello", "no_thinking": True},
+        )
+        with self.assertRaises(ValueError):
+            capability.qwen38_effort_row("hello", "turbo")
+        packet, request_bytes = capability.build_packet()
+        self.assertEqual(packet["schema_version"], 2)
+        for line in request_bytes["effort"].splitlines():
+            row = json.loads(line)
+            self.assertNotIn("prompt", row)
+            self.assertIn("user", row)
 
     def test_effort_order_rotates_all_modes_per_task(self) -> None:
         packet, _ = capability.build_packet()

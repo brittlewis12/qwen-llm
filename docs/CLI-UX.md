@@ -254,7 +254,8 @@ compliance.
 - quiet and diagnostic-level guarantees;
 - answer-only or split reasoning/answer presentation;
 - token-budget and default changes;
-- per-request message objects in batch;
+- per-request message *history* objects in batch (single-turn `user` rows
+  landed on 2026-09-07, see below);
 - a `batch` subcommand over the existing raw-only JSONL protocol;
 - aliases, config resolution, and `QWEN_MODEL`;
 - memory-policy changes;
@@ -269,6 +270,18 @@ found that placing it beside templated `run` would invite agents to submit
 `user`, `messages`, or `raw_prompt` rows even though the existing protocol
 accepts only `prompt` or `prompt_file`. The existing `--requests-jsonl` surface
 remains available and was already discoverable in the baseline study.
+
+2026-09-07 update: `--requests-jsonl` rows now accept a templated single-turn
+form — `user` with optional `system`, `no_thinking`, and `reasoning_effort` —
+rendered by the same pinned-template path as `qwen run --user`. Exactly one of
+`prompt`, `prompt_file`, or `user` is required; rendering controls on raw rows
+are rejected; templated rows require an ordinary Qwen model whose template is
+pinned (unpinned ChatML must submit raw prompts); DeepSeek V4 batch rejects
+them. Output rows echo `input: {kind, template}`. This resolves the ambiguity
+the earlier review feared by making the input form structural, and it removed
+the chat-template re-implementation from `scripts/bench/text_capability_eval.py`
+(packet schema v2). Conversation-history rows remain deferred until a named
+consumer migrates.
 
 ## Validation gate
 

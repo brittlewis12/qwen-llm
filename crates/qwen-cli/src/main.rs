@@ -602,8 +602,9 @@ fn prepare_modern_run_prompt(
     let qwen_template = prompt_template::serve_qwen_template(family, gguf)?;
 
     let no_thinking = run.no_thinking;
+    let reasoning_effort = run.reasoning_effort;
     let qwen38_generation_mode =
-        resolve_qwen38_generation_mode(qwen38, no_thinking, run.reasoning_effort)?;
+        resolve_qwen38_generation_mode(qwen38, no_thinking, reasoning_effort)?;
     let deepseek_v4_options = match family {
         ModelFamily::DeepSeek4 => resolve_deepseek_v4_run_options(run.reasoning_effort)?,
         _ => {
@@ -619,24 +620,15 @@ fn prepare_modern_run_prompt(
         cli::AcquiredRunInput::RawPrompt(prompt) => (prompt, PromptSource::Inline),
         cli::AcquiredRunInput::User { system, user } => {
             let prompt = match family {
-                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp if qwen38 => {
-                    render_qwen38_single_turn_prompt(
-                        &user,
-                        system.as_deref(),
-                        qwen38_generation_mode.expect("validated Qwen3.8 mode"),
-                    )
-                }
+                ModelFamily::Qwen4Exp if qwen38 => render_qwen38_single_turn_prompt(
+                    &user,
+                    system.as_deref(),
+                    qwen38_generation_mode.expect("validated Qwen3.8 mode"),
+                ),
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
-                    render_qwen_single_turn_prompt_for_template(
-                        &user,
-                        system.as_deref(),
-                        qwen_template,
-                        if no_thinking {
-                            QwenGenerationMode::NoThinking
-                        } else {
-                            QwenGenerationMode::Auto
-                        },
-                    )
+                    QwenUserPromptProtocol::resolve(family, gguf)?
+                        .expect("ordinary Qwen resolves a user prompt protocol")
+                        .render(&user, system.as_deref(), no_thinking, reasoning_effort)?
                 }
                 ModelFamily::Qwen4Exp => {
                     let failure = qwen4exp_prompt_capability_failure(family, gguf)
@@ -735,6 +727,88 @@ fn prepare_modern_run_prompt(
             _ => qwen_template.label(),
         }),
     })
+}
+
+/// The rendering protocol for ordinary-Qwen `user`(+`system`) requests,
+/// resolved once per model from the GGUF header. `qwen run --user` and
+/// templated `--requests-jsonl` rows render through the same instance so
+/// there is exactly one implementation of the released template bytes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct QwenUserPromptProtocol {
+    qwen38: bool,
+    template: crate::open_responses::items::QwenTemplate,
+}
+
+impl QwenUserPromptProtocol {
+    #[cfg(test)]
+    pub(crate) fn for_test(qwen38: bool, template: crate::open_responses::items::QwenTemplate) -> Self {
+        Self { qwen38, template }
+    }
+
+    /// `None` for families that do not render ordinary-Qwen chat.
+    pub(crate) fn resolve(family: ModelFamily, gguf: &GgufFile) -> Result<Option<Self>> {
+        if !matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            qwen38: supports_qwen38_prompt_protocol(family, gguf),
+            template: prompt_template::serve_qwen_template(family, gguf)?,
+        }))
+    }
+
+    /// Whether the template bytes are pinned to a released model (or the
+    /// Qwen3.8 protocol applies). Unpinned ChatML renders the legacy generic
+    /// contract, which `run` allows and batch rows do not.
+    pub(crate) fn pinned(&self) -> bool {
+        self.qwen38 || self.template.verified()
+    }
+
+    /// Stable protocol label for records.
+    pub(crate) fn label(&self) -> &'static str {
+        if self.qwen38 {
+            "qwen38"
+        } else {
+            self.template.label()
+        }
+    }
+
+    /// Render one user turn with optional system text and the released
+    /// generation controls. Validates the controls against this model.
+    pub(crate) fn render(
+        &self,
+        user: &str,
+        system: Option<&str>,
+        no_thinking: bool,
+        reasoning_effort: Option<cli::RunReasoningEffort>,
+    ) -> Result<String> {
+        ensure!(
+            !no_thinking || self.pinned(),
+            "no-thinking requires a model whose chat template is pinned (released Qwen3.5, Qwen3.6, or Qwen3.8 templates); this model's template is unrecognized, so omit it to use the default generation behavior"
+        );
+        let qwen38_mode = resolve_qwen38_generation_mode(self.qwen38, no_thinking, reasoning_effort)?;
+        ensure!(
+            reasoning_effort.is_none() || self.qwen38,
+            "reasoning-effort applies to Qwen3.8 (low/medium/xhigh); this model has no reasoning-effort control"
+        );
+        Ok(if self.qwen38 {
+            render_qwen38_single_turn_prompt(
+                user,
+                system,
+                qwen38_mode.expect("validated Qwen3.8 mode"),
+            )
+        } else {
+            render_qwen_single_turn_prompt_for_template(
+                user,
+                system,
+                self.template,
+                if no_thinking {
+                    QwenGenerationMode::NoThinking
+                } else {
+                    QwenGenerationMode::Auto
+                },
+            )
+        })
+    }
 }
 
 fn resolve_qwen38_generation_mode(

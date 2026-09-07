@@ -2722,7 +2722,7 @@ fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<(
 fn prepare_refill_lane(
     loaded: &LoadedModel,
     tokenizer: &Tokenizer,
-    scratch: &mut MetalDFlashLayerMajorScratch,
+    scratch: &mut PackedPrefillScratch,
     request_index: usize,
     request: &PreparedJsonlRequest,
     capacity: usize,
@@ -2733,9 +2733,8 @@ fn prepare_refill_lane(
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(capacity))
         .with_context(|| format!("allocate refill sequence for request {request_index}"))?;
-    let forward = loaded.forward();
     let (logits, prefill_ms) =
-        prefill_span(&forward, &mut sequence, scratch, &request.prompt_ids, 0)
+        prefill_owned(loaded, &mut sequence, scratch, &request.prompt_ids, 0)
             .with_context(|| format!("prefill refill request {request_index}"))?;
     let mut sampler = Sampler::new(request.sampling)
         .with_context(|| format!("initialize refill sampler for request {request_index}"))?;
@@ -3186,8 +3185,8 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                     0.0,
                 )
             } else {
-                prefill_span(
-                    &forward,
+                prefill_owned(
+                    loaded,
                     &mut sequences[0],
                     &mut scratch,
                     &requests[0].prompt_ids[file_root_tokens..prefix_len],
@@ -3196,8 +3195,8 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                 .with_context(|| format!("prefill {} prefix above file root", E::DISPLAY_NAME))?
             }
         } else {
-            prefill_span(
-                &forward,
+            prefill_owned(
+                loaded,
                 &mut sequences[0],
                 &mut scratch,
                 &requests[0].prompt_ids[..prefix_len],
@@ -3295,7 +3294,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         for (slot, (request, sequence)) in requests.iter().zip(&mut sequences).enumerate() {
             shutdown::checkpoint()?;
             let (logits, ms) =
-                prefill_span(&forward, sequence, &mut scratch, &request.prompt_ids, 0)
+                prefill_owned(loaded, sequence, &mut scratch, &request.prompt_ids, 0)
                     .with_context(|| format!("prefill {} cohort slot {slot}", E::DISPLAY_NAME))?;
             suffix_prefill_ms += ms;
             prompt_logits.push(logits);

@@ -523,8 +523,8 @@ pub(crate) fn execute_single_turn_request(
         && prefix_len > sequence.position()
     {
         let position = sequence.position();
-        let (logits, ms) = prefill_span(
-            &forward,
+        let (logits, ms) = prefill_owned(
+            loaded,
             &mut sequence,
             &mut scratch,
             &prompt_ids[position..prefix_len],
@@ -586,8 +586,8 @@ pub(crate) fn execute_single_turn_request(
                     MetalTensor::zeros_f32(loaded.context(), vec![(window * n_features) as u64])
                         .context("allocate drafter prefill hidden capture")?;
                 if wstart_rel > 0 {
-                    let (_, plain_ms) = prefill_span(
-                        &forward,
+                    let (_, plain_ms) = prefill_owned(
+                        loaded,
                         &mut sequence,
                         &mut scratch,
                         &prompt_ids[position..position + wstart_rel],
@@ -608,8 +608,8 @@ pub(crate) fn execute_single_turn_request(
                 dflash_prefill_capture = Some((dst, wstart_abs, window, n_features));
                 out
             }
-            None => prefill_span(
-                &forward,
+            None => prefill_owned(
+                loaded,
                 &mut sequence,
                 &mut scratch,
                 &prompt_ids[position..],
@@ -698,8 +698,8 @@ pub(crate) fn execute_single_turn_request(
                 let mut shadow_sequence = loaded
                     .create_sequence(SequenceConfig::new(shadow_capacity))
                     .context("allocate shadow probe sequence")?;
-                crate::prefill_span(
-                    &forward,
+                crate::prefill_owned(
+                    loaded,
                     &mut shadow_sequence,
                     scratch.as_mut().expect("DFlash retains prefill scratch"),
                     &prompt_ids,

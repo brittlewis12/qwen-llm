@@ -521,10 +521,7 @@ pub(crate) fn auto_prefill_reserve(
     Ok((delta, reserve))
 }
 
-pub(crate) struct AllocatedPrefillRequestState<
-    Scratch = MetalDFlashLayerMajorScratch,
-    State = Sequence,
-> {
+pub(crate) struct AllocatedPrefillRequestState<Scratch = PackedPrefillScratch, State = Sequence> {
     pub(crate) chunk: usize,
     pub(crate) decision: Option<PrefillChunkDecision>,
     pub(crate) scratch: Scratch,
@@ -570,20 +567,22 @@ pub(crate) fn allocate_legacy_prefill_scratch(
     loaded: &LoadedModel,
     chunk: usize,
     prompt_tokens: usize,
-) -> Result<MetalDFlashLayerMajorScratch> {
-    MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
-        loaded.context(),
-        loaded.metal_model(),
-        u32::try_from(chunk).context("prefill chunk does not fit u32")?,
-        prompt_tokens.max(chunk),
-    )
-    .context("allocate legacy prefill scratch")
+) -> Result<PackedPrefillScratch> {
+    let plan = loaded
+        .plan_packed_prefill_scratch(
+            u32::try_from(chunk).context("prefill chunk does not fit u32")?,
+            prompt_tokens.max(chunk),
+        )
+        .context("plan legacy prefill scratch")?;
+    loaded
+        .allocate_packed_prefill_scratch(plan)
+        .context("allocate legacy prefill scratch")
 }
 
 impl PrefillRequestAllocator for MetalPrefillRequestAllocator<'_> {
-    type Scratch = MetalDFlashLayerMajorScratch;
+    type Scratch = PackedPrefillScratch;
     type Sequence = Sequence;
-    type Plan = PrefillScratchPlan;
+    type Plan = PackedPrefillScratchPlan;
 
     fn current_allocated_size(&mut self) -> u64 {
         self.loaded.context().current_allocated_size()
@@ -611,17 +610,19 @@ impl PrefillRequestAllocator for MetalPrefillRequestAllocator<'_> {
         let block_size = u32::try_from(profile.outer_chunk)
             .map_err(|error| CandidatePlanFailure::Unavailable(error.to_string()))?;
         let matrix_max_pos = prompt_tokens.max(profile.outer_chunk);
-        let plan = plan_prefill_scratch_with_matrix_max_pos_configured(
-            self.loaded.metal_model(),
-            block_size,
-            matrix_max_pos,
-            PrefillScratchConfig {
-                matrix_query_cap: Some(AUTO_CHUNK_QUERY_ROWS),
-            },
-        )
-        .map_err(|error| CandidatePlanFailure::Unavailable(error.to_string()))?;
-        let decision = price_prefill_plan(self.loaded.context(), profile, prompt_tokens, &plan)
-            .map_err(|error| CandidatePlanFailure::InvalidOrUnpriceable(error.to_string()))?;
+        let plan = self
+            .loaded
+            .plan_packed_prefill_scratch_configured(
+                block_size,
+                matrix_max_pos,
+                PrefillScratchConfig {
+                    matrix_query_cap: Some(AUTO_CHUNK_QUERY_ROWS),
+                },
+            )
+            .map_err(|error| CandidatePlanFailure::Unavailable(error.to_string()))?;
+        let decision =
+            price_prefill_plan(self.loaded.context(), profile, prompt_tokens, plan.inner())
+                .map_err(|error| CandidatePlanFailure::InvalidOrUnpriceable(error.to_string()))?;
         Ok((plan, decision))
     }
 
@@ -630,12 +631,9 @@ impl PrefillRequestAllocator for MetalPrefillRequestAllocator<'_> {
     }
 
     fn allocate_candidate_scratch(&mut self, plan: Self::Plan) -> Result<Self::Scratch> {
-        MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(
-            self.loaded.context(),
-            self.loaded.metal_model(),
-            plan,
-        )
-        .context("allocate admitted auto-prefill scratch")
+        self.loaded
+            .allocate_packed_prefill_scratch(plan)
+            .context("allocate admitted auto-prefill scratch")
     }
 }
 

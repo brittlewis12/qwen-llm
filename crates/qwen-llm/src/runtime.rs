@@ -27,12 +27,12 @@ use crate::metal::{
 use crate::metal_dflash::{
     DFlashError, MetalDFlashLayerMajorScratch, PrefillScratchConfig, PrefillScratchPlan,
     plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_prompt_only_profiled,
+    prefill_tokens_with_multi_hidden,
 };
 use crate::metal_forward::{
     MetalForward, MetalLoadPrefetchAdvice, MetalModel, MetalModelLoadOptions, MetalSession,
     MfError, SessionSnapshot, SnapshotAbi, SnapshotIdentity, SnapshotValidationError,
 };
-use crate::sampling::GreedySelection;
 use crate::model::Arch;
 use crate::moe_batch16::{
     MOE_BATCH16_WIDTH, MoeBatch16Error, MoeBatch16Executor, MoeBatch16PlanTelemetry,
@@ -46,6 +46,7 @@ use crate::qwen_queue2::{
     QWEN_QUEUE2_DYNAMIC_RESERVE_BYTES, QWEN_QUEUE2_WIDTH, QwenQueue2Error, QwenQueue2Executor,
     qwen_queue2_session_upper_bytes,
 };
+use crate::sampling::GreedySelection;
 use crate::tokenizer::{TokError, Tokenizer};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -1361,12 +1362,28 @@ impl LoadedModel {
         block_size: u32,
         matrix_max_pos: usize,
     ) -> Result<PackedPrefillScratchPlan, RuntimeError> {
+        self.plan_packed_prefill_scratch_configured(
+            block_size,
+            matrix_max_pos,
+            PrefillScratchConfig::default(),
+        )
+    }
+
+    /// `plan_packed_prefill_scratch` with an explicit scratch configuration
+    /// (attention query cap and similar), for callers whose chunk policy
+    /// decides those knobs.
+    pub fn plan_packed_prefill_scratch_configured(
+        &self,
+        block_size: u32,
+        matrix_max_pos: usize,
+        config: PrefillScratchConfig,
+    ) -> Result<PackedPrefillScratchPlan, RuntimeError> {
         validate_packed_prefill_block_size(block_size)?;
         let plan = plan_prefill_scratch_with_matrix_max_pos_configured(
             &self.metal_model,
             block_size,
             matrix_max_pos,
-            PrefillScratchConfig::default(),
+            config,
         )?;
         let priced_upper_bytes = plan.priced_upper_bound(|logical_bytes| {
             u64::try_from(
@@ -1484,6 +1501,43 @@ impl LoadedModel {
             }
             Err(error) => {
                 sequence.state.poison("greedy decode step failed");
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Advance one owned sequence through a nonempty packed prompt span and
+    /// return the logits at its final position. Same discipline as
+    /// `prefill_prompt_only`: owner check, usable check, position from the
+    /// sequence, poison on failure, advance on success.
+    pub fn prefill(
+        &self,
+        sequence: &mut Sequence,
+        scratch: &mut PackedPrefillScratch,
+        token_ids: &[i32],
+    ) -> Result<Vec<f32>, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &sequence.owner)?;
+        ensure_same_model_owner(&self.owner, &scratch.owner)?;
+        sequence.state.ensure_usable()?;
+        let start = sequence.position;
+        let (start_u32, end) =
+            checked_packed_prefill_bounds(start, token_ids.len(), sequence.max_context_tokens)?;
+        let result = prefill_tokens_with_multi_hidden(
+            &self.forward(),
+            token_ids,
+            start_u32,
+            &mut sequence.state,
+            &mut scratch.inner,
+            &[],
+            None,
+        );
+        match result {
+            Ok(logits) => {
+                sequence.position = end;
+                Ok(logits)
+            }
+            Err(error) => {
+                sequence.state.poison("packed prefill failed");
                 Err(error.into())
             }
         }
@@ -2142,7 +2196,38 @@ pub struct PackedPrefillScratchPlan {
     owner: Arc<ModelOwnerToken>,
 }
 
+impl PackedPrefillScratch {
+    /// Release the underlying scratch for execution paths the safe facade
+    /// does not cover yet. Scratch holds no sequence state, so this cannot
+    /// break provenance; it only forgoes the owner check on those paths.
+    pub fn into_inner(self) -> MetalDFlashLayerMajorScratch {
+        self.inner
+    }
+}
+
+/// Scratch statistics and the not-yet-wrapped execution entry points
+/// (speculative decode, hidden-state capture, prompt lookup) are reachable
+/// through the raw scratch; see `into_inner` for why that is sound.
+impl std::ops::Deref for PackedPrefillScratch {
+    type Target = MetalDFlashLayerMajorScratch;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for PackedPrefillScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 impl PackedPrefillScratchPlan {
+    /// The underlying plan, for policy code that prices or inspects it.
+    pub fn inner(&self) -> &PrefillScratchPlan {
+        &self.inner
+    }
+
     pub fn block_size(&self) -> u32 {
         self.inner.block_size()
     }

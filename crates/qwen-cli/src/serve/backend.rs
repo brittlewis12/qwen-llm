@@ -447,7 +447,11 @@ fn allocate_serve_request_state(
             capacity,
             true,
         )?;
-        Ok((allocated.chunk, Some(allocated.scratch), allocated.sequence))
+        Ok((
+            allocated.chunk,
+            Some(allocated.scratch.into_inner()),
+            allocated.sequence,
+        ))
     } else {
         Ok((
             crate::baseline_prefill_chunk(prompt_tokens),

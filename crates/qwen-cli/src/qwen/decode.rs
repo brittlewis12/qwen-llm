@@ -182,6 +182,28 @@ pub(crate) fn prefill_span(
     Ok((logits, t0.elapsed().as_secs_f64() * 1e3))
 }
 
+/// `prefill_span` through the runtime's owned facade: the model checks
+/// provenance, takes the position from the sequence, and poisons the state
+/// on failure. `start_position` remains an explicit assertion of what the
+/// caller believes the sequence position is.
+pub(crate) fn prefill_owned(
+    loaded: &LoadedModel,
+    sequence: &mut Sequence,
+    scratch: &mut PackedPrefillScratch,
+    token_ids: &[i32],
+    start_position: usize,
+) -> Result<(Vec<f32>, f64)> {
+    shutdown::checkpoint()?;
+    ensure!(!token_ids.is_empty(), "cannot prefill an empty token span");
+    sequence.check_position(start_position)?;
+    let t0 = Instant::now();
+    let logits = loaded
+        .prefill(sequence, scratch, token_ids)
+        .context("prefill prompt span")?;
+    shutdown::checkpoint()?;
+    Ok((logits, t0.elapsed().as_secs_f64() * 1e3))
+}
+
 pub(crate) const QWEN_PREFIX_FANOUT_EXACT_LCP_ENV: &str = "QWEN_PREFIX_FANOUT_EXACT_LCP";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

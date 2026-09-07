@@ -1357,10 +1357,9 @@ fn prepare_pair(
     {
         plan.selected_prefix_tokens = 0;
         plan.reason = "memory_fallback";
-        let forward = loaded.forward();
         let mut private_prefill_ms = 0.0;
-        let (left_logits, left_ms) = prefill_span(
-            &forward,
+        let (left_logits, left_ms) = prefill_owned(
+            loaded,
             &mut sequences[0],
             &mut scratch,
             &requests[0].prompt_ids,
@@ -1368,8 +1367,8 @@ fn prepare_pair(
         )
         .context("prefill concurrent memory-fallback lane 0")?;
         private_prefill_ms += left_ms;
-        let (right_logits, right_ms) = prefill_span(
-            &forward,
+        let (right_logits, right_ms) = prefill_owned(
+            loaded,
             &mut sequences[1],
             &mut scratch,
             &requests[1].prompt_ids,
@@ -1426,8 +1425,8 @@ fn prepare_pair(
         if prefix_len == file_root_tokens {
             (restored.exact_final_logits, 0.0)
         } else {
-            let (logits, bridge_ms) = prefill_span(
-                &forward,
+            let (logits, bridge_ms) = prefill_owned(
+                loaded,
                 &mut sequences[0],
                 &mut scratch,
                 &requests[0].prompt_ids[file_root_tokens..prefix_len],
@@ -1437,8 +1436,8 @@ fn prepare_pair(
             (Some(logits), bridge_ms)
         }
     } else {
-        let (logits, prefill_ms) = prefill_span(
-            &forward,
+        let (logits, prefill_ms) = prefill_owned(
+            loaded,
             &mut sequences[0],
             &mut scratch,
             &requests[0].prompt_ids[..prefix_len],

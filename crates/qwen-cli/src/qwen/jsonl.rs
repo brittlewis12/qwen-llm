@@ -744,8 +744,8 @@ pub(crate) fn run_jsonl_request(
                 && cache_prefix_needs_extension(prefix_len, restored_prefix_tokens)
             {
                 let prefix_suffix = &prompt_ids[restored_prefix_tokens..prefix_len];
-                let (prefix_logits, ms) = prefill_span(
-                    &forward,
+                let (prefix_logits, ms) = prefill_owned(
+                    loaded,
                     &mut sequence,
                     &mut scratch,
                     prefix_suffix,
@@ -769,14 +769,14 @@ pub(crate) fn run_jsonl_request(
                 } else {
                     let suffix = &prompt_ids[prefix_len..];
                     let (logits, ms) =
-                        prefill_span(&forward, &mut sequence, &mut scratch, suffix, prefix_len)?;
+                        prefill_owned(loaded, &mut sequence, &mut scratch, suffix, prefix_len)?;
                     prefill_ms += ms;
                     logits
                 }
             } else {
                 let suffix = &prompt_ids[restored_prefix_tokens..];
-                let (logits, ms) = prefill_span(
-                    &forward,
+                let (logits, ms) = prefill_owned(
+                    loaded,
                     &mut sequence,
                     &mut scratch,
                     suffix,
@@ -788,7 +788,7 @@ pub(crate) fn run_jsonl_request(
         } else if let Some(prefix_len) = cache_prefix_tokens {
             let prefix = &prompt_ids[..prefix_len];
             let (prefix_logits, ms) =
-                prefill_span(&forward, &mut sequence, &mut scratch, prefix, 0)?;
+                prefill_owned(loaded, &mut sequence, &mut scratch, prefix, 0)?;
             prefill_ms += ms;
 
             let insert_t0 = Instant::now();
@@ -803,12 +803,12 @@ pub(crate) fn run_jsonl_request(
             } else {
                 let suffix = &prompt_ids[prefix_len..];
                 let (logits, ms) =
-                    prefill_span(&forward, &mut sequence, &mut scratch, suffix, prefix_len)?;
+                    prefill_owned(loaded, &mut sequence, &mut scratch, suffix, prefix_len)?;
                 prefill_ms += ms;
                 logits
             }
         } else {
-            let (logits, ms) = prefill_span(&forward, &mut sequence, &mut scratch, prompt_ids, 0)?;
+            let (logits, ms) = prefill_owned(loaded, &mut sequence, &mut scratch, prompt_ids, 0)?;
             prefill_ms += ms;
             logits
         }

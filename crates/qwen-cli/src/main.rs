@@ -88,8 +88,8 @@ use qwen_llm::metal::{
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
     MetalDFlashSession, MetalDFlashVerifyScratch, PrefillScratchConfig, PrefillScratchOverlayStats,
-    PrefillScratchPlan,
-    plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
+    PrefillScratchPlan, plan_prefill_scratch_with_matrix_max_pos_configured,
+    prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::{
     LogitsReadbackProfile, MetalForward, MfError, SnapshotValidationError, StructuralRowEvidence,
@@ -116,8 +116,9 @@ use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpSessionCapacity, Qwen4ExpTokenTiming,
 };
 use qwen_llm::runtime::{
-    LoadedModel, LoadedModelConfig, PrefetchPolicy, PrefetchResidencyProbe, PreparedCheckpoint,
-    Runtime, RuntimeError, Sequence, SequenceConfig, prefetch_opened_gguf,
+    LoadedModel, LoadedModelConfig, PackedPrefillScratch, PackedPrefillScratchPlan, PrefetchPolicy,
+    PrefetchResidencyProbe, PreparedCheckpoint, Runtime, RuntimeError, Sequence, SequenceConfig,
+    prefetch_opened_gguf,
 };
 use qwen_llm::sampling::{
     BoundedTopKEvidence, GreedySelection, SAMPLER_ALGORITHM_VERSION, SampledToken, Sampler,

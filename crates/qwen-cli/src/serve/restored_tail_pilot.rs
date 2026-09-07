@@ -256,6 +256,138 @@ fn recorded_render_boundary_diagnostic() {
     );
 }
 
+#[test]
+#[ignore = "serial Metal replay; requires QWEN_REPLAY_MODEL, QWEN_REPLAY_RECORDING, QWEN_REPLAY_REQUEST_INDEX"]
+fn recorded_completed_checkpoint_witness() {
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let model = std::env::var("QWEN_REPLAY_MODEL").unwrap();
+    let recording = std::path::PathBuf::from(std::env::var("QWEN_REPLAY_RECORDING").unwrap());
+    let index: usize = std::env::var("QWEN_REPLAY_REQUEST_INDEX")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(recording.join("rows.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(index < rows.len().saturating_sub(1));
+    let request = |i| {
+        let value = serde_json::from_str(
+            &std::fs::read_to_string(recording.join(format!("request-{i}.json"))).unwrap(),
+        )
+        .unwrap();
+        crate::open_responses::items::parse_request(&value).unwrap()
+    };
+    let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
+    let loaded = runtime.load_model(&model).unwrap();
+    assert_eq!(loaded.prefix_cache_stats().entries, 0);
+    let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
+    let template = crate::prompt_template::serve_qwen_template(family, loaded.gguf()).unwrap();
+    let no_thinking = crate::supports_qwen_no_thinking_prompt(family, loaded.gguf());
+    let mut backend = EngineBackend::new(
+        loaded,
+        "boundary-witness".into(),
+        128,
+        Some(16384),
+        16384,
+        None,
+        template,
+        no_thinking,
+    )
+    .unwrap();
+    let mut completed_ids = Vec::new();
+    for (i, row) in rows.iter().enumerate().take(index + 1) {
+        let request = request(i);
+        assert_eq!(request_sampler(&request).unwrap().config().temperature, 0.0);
+        let prompt = backend.render_prompt(&request).unwrap();
+        let prompt_ids = backend.tokenizer.encode(&prompt, false).unwrap();
+        if i == index {
+            completed_ids = prompt_ids.clone();
+            completed_ids.extend(
+                backend
+                    .tokenizer
+                    .encode(row["text"].as_str().unwrap(), false)
+                    .unwrap(),
+            );
+            assert!(
+                backend
+                    .loaded
+                    .lookup_cached_prefix(&completed_ids)
+                    .is_none_or(|hit| hit.restored_prefix_len() < completed_ids.len() - 1)
+            );
+        }
+        let outcome = backend
+            .generate(&request, &prompt, &mut Sink)
+            .unwrap_or_else(|_| panic!("replay request {i} failed"));
+        assert_eq!(
+            outcome.usage.input_tokens as u64,
+            row["response"]["usage"]["input_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            outcome.usage.output_tokens as u64,
+            row["response"]["usage"]["output_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            outcome.usage.cached_tokens as u64,
+            row["response"]["usage"]["input_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap()
+        );
+    }
+    let lookup = backend
+        .loaded
+        .lookup_cached_prefix(&completed_ids)
+        .expect("new completed checkpoint");
+    assert_eq!(lookup.restored_prefix_len(), completed_ids.len() - 1);
+    assert!(!lookup.is_exact_with_final_logits());
+    let mut sequence = backend
+        .loaded
+        .create_sequence(SequenceConfig::new(16384))
+        .unwrap();
+    let report = backend
+        .loaded
+        .restore_prepared_cached_prefix(lookup, &mut sequence, &completed_ids)
+        .unwrap();
+    assert!(report.exact);
+    assert_eq!(report.matched_prefix_len, completed_ids.len());
+    assert_eq!(report.restored_prefix_len, completed_ids.len() - 1);
+    assert_eq!(sequence.position(), completed_ids.len() - 1);
+    assert!(report.exact_final_logits.is_none());
+    let next_prompt = backend.render_prompt(&request(index + 1)).unwrap();
+    let next_ids = backend.tokenizer.encode(&next_prompt, false).unwrap();
+    let lcp = completed_ids
+        .iter()
+        .zip(&next_ids)
+        .take_while(|(a, b)| a == b)
+        .count();
+    assert!(
+        lcp >= report.restored_prefix_len,
+        "next prompt changes consumed state"
+    );
+    let next_restored = backend
+        .loaded
+        .lookup_cached_prefix(&next_ids)
+        .map_or(0, |hit| hit.restored_prefix_len());
+    eprintln!(
+        "checkpoint-witness template={template:?} matched={} restored={} pending={} next_prompt={} lcp={lcp} next_restored={next_restored} required_forwards={} consumed_only_forwards={}",
+        report.matched_prefix_len,
+        report.restored_prefix_len,
+        completed_ids.last().unwrap(),
+        next_ids.len(),
+        next_ids.len() - next_restored,
+        next_ids.len() - report.restored_prefix_len
+    );
+}
+
 fn f32_values(bytes: &[u8]) -> Vec<f32> {
     assert_eq!(bytes.len() % 4, 0);
     bytes

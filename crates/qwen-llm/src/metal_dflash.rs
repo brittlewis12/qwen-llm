@@ -6695,6 +6695,8 @@ fn plan_prefill_scratch_inner(
 }
 
 pub struct MetalDFlashLayerMajorScratch {
+    #[cfg(test)]
+    online_verify_pilot: Option<online_verify_pilot::Workspace>,
     /// `[N, H]` F32 — residual stream across N tokens.
     pub x_pack: MetalTensor,
     /// `[N, H]` F32 — post-norm activation across N tokens (reused for
@@ -7346,6 +7348,8 @@ impl MetalDFlashLayerMajorScratch {
         };
 
         let scratch = Self {
+            #[cfg(test)]
+            online_verify_pilot: None,
             x_pack: allocator.f32(ctx, "x_pack", vec![n, h])?,
             h_pack: allocator.f32(ctx, "h_pack", vec![n, h])?,
             mixer_out_pack: allocator.f32(ctx, "mixer_out_pack", vec![n, h])?,
@@ -9663,7 +9667,56 @@ pub fn encode_packed_verify_layer_major_inner(
                         None
                     };
 
-                    if let Some(nwg) = packed_q2_nwg {
+                    #[cfg(test)]
+                    let pilot_handled = if let Some(workspace) = &layer_scratch.online_verify_pilot
+                    {
+                        assert!(shared_kv_shape_ok && n == 16);
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        if !fused_qk_norm_rope {
+                            encode_prefill_qk_rope(
+                                base.ctx,
+                                &enc,
+                                &attn_q_normed_pack,
+                                &attn_k_normed_pack,
+                                n,
+                                n_q,
+                                n_kv,
+                                head_dim,
+                                n_rot,
+                                start_position,
+                                arch.rope_theta,
+                            )?;
+                        }
+                        encode_scatter_offset_f32_to_f16_kv(
+                            base.ctx,
+                            &enc,
+                            &attn_k_normed_pack,
+                            &attn_v_now_pack,
+                            &target_session.kv_k[ai],
+                            &target_session.kv_v[ai],
+                            start_position as usize * kv_dim,
+                            n * kv_dim,
+                        )?;
+                        workspace.encode(
+                            base.ctx,
+                            &enc,
+                            &attn_q_normed_pack,
+                            &target_session.kv_k[ai],
+                            &target_session.kv_v[ai],
+                            &attn_o_pack,
+                            start_position as usize,
+                        )?;
+                        target_session.kv_n_pos[ai] = start_position as usize + n;
+                        enc.end();
+                        true
+                    } else {
+                        false
+                    };
+                    #[cfg(not(test))]
+                    let pilot_handled = false;
+
+                    if pilot_handled {
+                    } else if let Some(nwg) = packed_q2_nwg {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         if !fused_qk_norm_rope {
                             encode_prefill_qk_rope(
@@ -17786,3 +17839,7 @@ const ATTN_PREFILL_V4_PACKED_ROWS: usize = 8;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "metal_dflash/online_verify_pilot.rs"]
+mod online_verify_pilot;

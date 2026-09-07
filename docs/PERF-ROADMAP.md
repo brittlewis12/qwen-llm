@@ -162,13 +162,21 @@ all row numerical checks and the32769 edge pass. This is test-only, not a kernel
 retune, a selector promotion or full-verifier evidence. It differs from closed
 one-pass flash and N2-8 three-pass direct-V paths.
 
-This result earns one bounded full-verifier experiment ahead of lower-ceiling
-warm-tail polish: actual whole scratch/session cost, identical primed state,
-full and partial accept, and exact-replay charges. It does not reopen generic
-skinny-GEMM staging, remove the long-context controller cutoff or weaken the
-single-chunk-VT verifier rejection. Preserve numerical versus bitwise and
-greedy versus sampled authority. Evidence:
-`docs/bench/2026-09-07-verifier-online-n16/RESULT.md`.
+The full-verifier follow-up also passes on an actual32752-token Q8 prefix:
+257.819688 ->216.347709 ms full verification saves16.086%, partial8 saves16.865%,
+and forced restore+8serial replay saves5.696%. All16 argmaxes and numerical state
+gates pass; prefixKV and replay-final state are bitwise. Existing verifier/layer
+scratch is2,695,266,304 B plus93,847,552 B online workspace. Setup-only shape failure,
+first warmup outliers and global host compression remain disclosed. Evidence:
+`docs/bench/2026-09-07-full-verifier-online-n16/RESULT.md`.
+
+Product HOLD is the immediate boundary: default cutoff16384 excludes32K, and the
+calibrated installed DFlash2 artifact has physical N8, not N16. First establish
+actual artifact/block-size reachability and durable fully charged acceptance
+economics. Do not manufacture N16 DFlash2 selection, broaden the controller or
+infer an N8 win from these rows. This does not reopen generic skinny-GEMM staging
+or weaken single-chunk-VT rejection. Keep numerical/bitwise, teacher-forced/
+generated, and greedy/sampled authority separate. No production flag is added.
 
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 

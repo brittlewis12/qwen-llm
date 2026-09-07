@@ -239,7 +239,6 @@ fn verifier_online_n16_attention_screen() {
         pilot.run(&ctx, arm, 1);
     }
     pilot.check();
-    let mut samples = Vec::new();
     for (index, arm) in ["A", "B", "B", "A"].into_iter().enumerate() {
         let (wall, gpu) = pilot.run(&ctx, arm, 8);
         println!(
@@ -249,7 +248,6 @@ fn verifier_online_n16_attention_screen() {
                 "wall_ms": wall, "gpu_ms": gpu, "n_pos": pilot.n_pos,
             })
         );
-        samples.push((wall, gpu));
     }
     pilot.check();
     for arm in ["transpose", "kq", "kqv"] {
@@ -261,22 +259,6 @@ fn verifier_online_n16_attention_screen() {
             })
         );
     }
-    let a = (samples[0].1 + samples[3].1) / 2.0;
-    let b = (samples[1].1 + samples[2].1) / 2.0;
-    let spread = (samples[0].1 - samples[3].1).abs() / a;
-    let saving = 1.0 - b / a;
-    let pass = spread <= 0.05
-        && saving >= 0.20
-        && samples[1].1 <= 0.8 * samples[0].1
-        && samples[2].1 <= 0.8 * samples[3].1;
-    println!(
-        "VERIFY_ONLINE_JSON {}",
-        serde_json::json!({
-            "kind": "decision", "control_gpu_ms": a, "candidate_gpu_ms": b,
-            "control_spread": spread, "saving": saving, "phase_screen_pass": pass,
-            "endpoint_authority": false,
-        })
-    );
     drop(pilot);
     let edge = Pilot::new(&ctx, 32769);
     edge.run(&ctx, "A", 1);

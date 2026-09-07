@@ -323,8 +323,14 @@ fn needs_prefill_scratch(
                 .is_some_and(|remaining| (1..=SERIAL_TAIL_THRESHOLD).contains(&remaining)))
 }
 
-fn restored_packed_tail_arch(arch: &qwen_llm::model::Arch) -> bool {
-    arch.kind == qwen_llm::model::ArchKind::Dense
+fn restored_packed_tail_arch(
+    arch: &qwen_llm::model::Arch,
+    template: QwenTemplate,
+    lm_head_dtype: qwen_llm::tensor::GgmlType,
+) -> bool {
+    template == QwenTemplate::Qwen38
+        && lm_head_dtype == qwen_llm::tensor::GgmlType::Q8_0
+        && arch.kind == qwen_llm::model::ArchKind::Dense
         && arch.n_layer == 64
         && arch.hidden_size == 5120
         && arch.n_q_heads == 24
@@ -363,6 +369,33 @@ fn allocate_single_chunk_request_state(
     )?;
     let sequence = loaded.create_sequence(SequenceConfig::new(capacity))?;
     Ok((chunk, Some(scratch), sequence))
+}
+
+fn admit_optional_tail<P, E>(
+    mut candidate: Option<(P, u64)>,
+    baseline_price: u64,
+    mut admit: impl FnMut(u64) -> Result<qwen_llm::metal::MetalMemoryAdmission, E>,
+) -> Result<(Option<P>, qwen_llm::metal::MetalMemoryAdmission), E> {
+    let mut admission = admit(
+        candidate
+            .as_ref()
+            .map_or(baseline_price, |(_, price)| *price),
+    )?;
+    if !admission.admitted && candidate.take().is_some() {
+        admission = admit(baseline_price)?;
+    }
+    Ok((candidate.map(|(plan, _)| plan), admission))
+}
+
+fn allocate_optional_tail<P, T, E>(
+    candidate: Option<P>,
+    allocate: impl FnOnce(P) -> Result<T, E>,
+    fallback: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    match candidate {
+        Some(plan) => allocate(plan).or_else(|_| fallback()),
+        None => fallback(),
+    }
 }
 
 fn allocate_serve_request_state(
@@ -721,8 +754,12 @@ impl GenerationBackend for EngineBackend {
                     ServeError::server_error(format!("price prefill memory: {error}"))
                 })?
         };
-        let mut packed_tail_plan = restored_packed_tail_width(
-            restored_packed_tail_arch(&self.loaded.arch()),
+        let packed_tail_plan = restored_packed_tail_width(
+            restored_packed_tail_arch(
+                &self.loaded.arch(),
+                self.template,
+                self.loaded.metal_model().lm_head.dtype,
+            ),
             self.dflash_head.is_some(),
             sampler.config().temperature == 0.0,
             prompt_ids.len(),
@@ -753,27 +790,14 @@ impl GenerationBackend for EngineBackend {
                 .ok()?;
             (price <= RESTORED_TAIL_SCRATCH_LIMIT).then_some((plan, price))
         });
-        let mut admission = self
-            .loaded
-            .qwen_execution_memory_admission(
-                1,
-                capacity,
-                packed_tail_plan
-                    .as_ref()
-                    .map_or(prefill_scratch_upper_bytes, |(_, price)| *price),
-                0,
-            )
+        let (packed_tail_plan, admission) =
+            admit_optional_tail(packed_tail_plan, prefill_scratch_upper_bytes, |price| {
+                self.loaded
+                    .qwen_execution_memory_admission(1, capacity, price, 0)
+            })
             .map_err(|error| {
                 ServeError::server_error(format!("price request memory: {error:#}"))
             })?;
-        if !admission.admitted && packed_tail_plan.take().is_some() {
-            admission = self
-                .loaded
-                .qwen_execution_memory_admission(1, capacity, prefill_scratch_upper_bytes, 0)
-                .map_err(|error| {
-                    ServeError::server_error(format!("price serial fallback memory: {error:#}"))
-                })?;
-        }
         if !admission.admitted {
             return Err(ServeError {
                 status: 503,
@@ -792,14 +816,23 @@ impl GenerationBackend for EngineBackend {
         }
 
         let alloc_t0 = Instant::now();
-        let allocation = match packed_tail_plan {
-            Some((plan, _)) => allocate_single_chunk_request_state(&self.loaded, capacity, plan)
-                .or_else(|error| {
+        let allocation = allocate_optional_tail(
+            packed_tail_plan,
+            |plan| {
+                allocate_single_chunk_request_state(&self.loaded, capacity, plan)
+                .inspect_err(|error| {
                     tracing::warn!("serve: single-chunk tail allocation failed; retaining serial prefill: {error:#}");
-                    allocate_serve_request_state(&self.loaded, prompt_ids.len(), capacity, needs_scratch)
-                }),
-            None => allocate_serve_request_state(&self.loaded, prompt_ids.len(), capacity, needs_scratch),
-        };
+                })
+            },
+            || {
+                allocate_serve_request_state(
+                    &self.loaded,
+                    prompt_ids.len(),
+                    capacity,
+                    needs_scratch,
+                )
+            },
+        );
         let (mut chunk, mut scratch, mut sequence) = allocation.map_err(|error| {
             ServeError::server_error(format!("allocate request state: {error:#}"))
         })?;

@@ -38,12 +38,123 @@ fn bounded_restored_tail_plan_preserves_unqualified_lanes() {
     assert_eq!(packed_width(true, false, 13, 6, false), Some(7));
     assert_eq!(packed_width(true, false, 13, 7, false), None);
     let mut arch = qwen_llm::model::QWEN3_27B;
-    assert!(restored_packed_tail_arch(&arch));
+    use qwen_llm::tensor::GgmlType;
+    assert!(restored_packed_tail_arch(
+        &arch,
+        QwenTemplate::Qwen38,
+        GgmlType::Q8_0
+    ));
+    assert!(!restored_packed_tail_arch(
+        &arch,
+        QwenTemplate::Qwen36,
+        GgmlType::Q8_0
+    ));
+    assert!(!restored_packed_tail_arch(
+        &arch,
+        QwenTemplate::Qwen38,
+        GgmlType::Q6_K
+    ));
     arch.mtp_n_hidden_layers = 0;
-    assert!(restored_packed_tail_arch(&arch));
+    assert!(restored_packed_tail_arch(
+        &arch,
+        QwenTemplate::Qwen38,
+        GgmlType::Q8_0
+    ));
     arch.n_layer = 63;
-    assert!(!restored_packed_tail_arch(&arch));
-    assert!(!restored_packed_tail_arch(&qwen_llm::model::QWEN3_0_8B));
+    assert!(!restored_packed_tail_arch(
+        &arch,
+        QwenTemplate::Qwen38,
+        GgmlType::Q8_0
+    ));
+    assert!(!restored_packed_tail_arch(
+        &qwen_llm::model::QWEN3_0_8B,
+        QwenTemplate::Qwen38,
+        GgmlType::Q8_0
+    ));
+}
+
+#[test]
+fn optional_tail_faults_preserve_serial_admission_and_allocation() {
+    use qwen_llm::metal::MetalMemorySignals;
+    use std::cell::Cell;
+    let signals = MetalMemorySignals {
+        recommended_max_bytes: 1024,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes: Some(32),
+    };
+    let mut prices = Vec::new();
+    let (plan, admission) = admit_optional_tail(Some(("packed", 64)), 0, |price| {
+        prices.push(price);
+        Ok::<_, &str>(evaluate_metal_memory_admission(price, 8, signals, false))
+    })
+    .unwrap();
+    assert!(plan.is_none());
+    assert_eq!(prices, [64, 0]);
+    assert_eq!(
+        admission,
+        evaluate_metal_memory_admission(0, 8, signals, false)
+    );
+    assert!(admission.admitted);
+    let (plan, admission) = admit_optional_tail(Some(("packed", 64)), 0, |price| {
+        Ok::<_, &str>(evaluate_metal_memory_admission(
+            price,
+            8,
+            MetalMemorySignals {
+                process_limit_remaining_bytes: Some(1),
+                ..signals
+            },
+            false,
+        ))
+    })
+    .unwrap();
+    assert!(plan.is_none() && !admission.admitted);
+    let (plan, admission) = admit_optional_tail(Some(("packed", 16)), 0, |price| {
+        Ok::<_, &str>(evaluate_metal_memory_admission(price, 8, signals, false))
+    })
+    .unwrap();
+    assert_eq!(plan, Some("packed"));
+    assert!(admission.admitted);
+    assert_eq!(
+        admit_optional_tail(Some(("packed", 16)), 0, |_| Err("signal error")),
+        Err("signal error")
+    );
+
+    let attempts = Cell::new(0);
+    let baseline = vec![0x35u8; 64];
+    let result = allocate_optional_tail(
+        Some("packed"),
+        |plan| {
+            assert_eq!(plan, "packed");
+            attempts.set(attempts.get() + 1);
+            Err::<Vec<u8>, _>("injected allocation failure")
+        },
+        || {
+            attempts.set(attempts.get() + 1);
+            Ok(baseline.clone())
+        },
+    )
+    .unwrap();
+    assert_eq!(result, baseline);
+    assert_eq!(attempts.get(), 2);
+    let retained = allocate_optional_tail(
+        None::<()>,
+        |_| -> Result<Vec<u8>, &str> { panic!("unselected candidate") },
+        || Ok(baseline.clone()),
+    )
+    .unwrap();
+    assert_eq!(retained, baseline);
+    assert_eq!(
+        allocate_optional_tail(
+            Some(()),
+            |_| Ok::<_, &str>(7),
+            || panic!("successful candidate retried")
+        ),
+        Ok(7)
+    );
+    assert_eq!(
+        allocate_optional_tail(Some(()), |_| Err::<(), _>("candidate"), || Err("serial")),
+        Err("serial")
+    );
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {

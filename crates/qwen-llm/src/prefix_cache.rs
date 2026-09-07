@@ -439,6 +439,82 @@ mod tests {
     }
 
     #[test]
+    fn transient_prompt_capture_has_a_budget_and_failure_boundary() {
+        let id = ident(1);
+        let prior = Arc::new(snap(id.clone(), &[10], 96));
+        let prompt = Arc::new(snap(id.clone(), &[10, 11], 192));
+        let mut completed = snap(id.clone(), &[10, 11], 192);
+        completed.pending_token = Some(12);
+        completed.final_logits = None;
+        let completed = Arc::new(completed);
+
+        for both_fit in [false, true] {
+            let budget = if both_fit {
+                prompt.n_bytes() + completed.n_bytes()
+            } else {
+                prompt.n_bytes().max(completed.n_bytes())
+            };
+            let mut captured = PrefixCache::with_max_bytes(budget);
+            let mut elided = PrefixCache::with_max_bytes(budget);
+            for cache in [&mut captured, &mut elided] {
+                assert!(cache.insert_shared_strict(Arc::clone(&prior)));
+                assert!(cache.eligible_strict(prompt.n_bytes()));
+                assert!(cache.eligible_strict(completed.n_bytes()));
+            }
+            assert!(captured.insert_shared_strict(Arc::clone(&prompt)));
+
+            // If generation aborts before publishing completion, a retry differs.
+            assert_eq!(
+                captured
+                    .peek_longest_for_completion(&id, &[10, 11])
+                    .unwrap()
+                    .restored_prefix_len,
+                2
+            );
+            assert_eq!(
+                elided
+                    .peek_longest_for_completion(&id, &[10, 11])
+                    .unwrap()
+                    .restored_prefix_len,
+                1
+            );
+
+            for cache in [&mut captured, &mut elided] {
+                assert!(cache.insert_shared_strict(Arc::clone(&completed)));
+                let hit = cache
+                    .peek_longest_for_completion(&id, &[10, 11, 12, 13])
+                    .unwrap();
+                assert!(Arc::ptr_eq(&hit.snapshot, &completed));
+            }
+            if both_fit {
+                assert_eq!(
+                    captured
+                        .peek_longest_for_completion(&id, &[10, 11])
+                        .unwrap()
+                        .restored_prefix_len,
+                    2
+                );
+                assert_eq!(
+                    elided
+                        .peek_longest_for_completion(&id, &[10, 11])
+                        .unwrap()
+                        .restored_prefix_len,
+                    1
+                );
+            } else {
+                assert_eq!(captured.len(), 1);
+                assert_eq!(elided.len(), 1);
+                assert!(
+                    captured
+                        .peek_longest_for_completion(&id, &[10, 11])
+                        .is_none()
+                );
+                assert!(elided.peek_longest_for_completion(&id, &[10, 11]).is_none());
+            }
+        }
+    }
+
+    #[test]
     fn lookup_prefers_longest_prefix() {
         let id = ident(1);
         let mut cache = PrefixCache::new();

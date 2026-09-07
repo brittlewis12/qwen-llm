@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Q8 Fresh Serving Endpoint PASS, Opt-in KEEP / Automatic HOLD
+
+- `537215bc` tests fresh packed 19-48 on Q4/Q8; independently frozen Q8 A-B-B-A
+  passes every gate. Fresh19 TTFT/wall 1263.159/1391.780 -> 333.724/464.215 ms,
+  saving 73.580%/66.646%. Fresh32-code128 wall saves 16.940%; fresh48-prose128
+  saves 23.115%, both orders passing. Primary spreads <1%; guards pass.
+- Q4 target rows improve but guard512 wall regresses 8.482% against 3%; Q4 stays
+  unsupported even when forced. All 64 paired responses agree in text, full usage,
+  cache accounting and status; only fresh19/32/48 select, all true cache misses.
+- `f5b77787` narrows Q8 and provisionally enables default. Its 16-response check
+  preserves correctness but Q8 first19 TTFT is 1386.080 ms amid 660122 compression /
+  610262 decompression events globally, versus 0 compressions in balanced runs.
+  Whole-process counters do not prove Qwen, first-prefill or PSO causality.
+- `c1133d1b` conservatively retains `QWEN_SERVE_FRESH_PACKED=1` only; absent/0/
+  malformed values disable fresh selection. Original balanced PASS stands; no
+  rescoring, rerun or warm-only gate rewrite. Independent review supports this
+  risk-adjusted rollout after the outlier/counter audit. Existing restored-Q8
+  policy and all cached/sampled/drafter exclusions stay unchanged.
+- Final CLI suite: 376 passed, 13 ignored; flag/profile/fallback tests pass.
+- Evidence and every row: `docs/bench/2026-09-07-fresh-serving-http/RESULT.md`.
+
 ## 2026-09-06 - Fresh Short Packed Phase Screen PASS
 
 - Test-only `77182e1a` compares fresh serving serial versus existing single-chunk

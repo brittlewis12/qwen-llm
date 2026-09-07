@@ -367,6 +367,14 @@ because client model-pickers probe it).
   policy. Packed-vs-serial state is numerical, not bitwise; sampled followups
   can inherit these checkpoints, so this carries no distributional-equivalence
   claim. Measured scope: `docs/bench/2026-09-06-single-chunk-vt/RESULT.md`.
+  `QWEN_SERVE_FRESH_PACKED=1` additionally opts validated Qwen3.8/Q8 dense-27
+  **fresh cache misses** of 19-48 prompt tokens into bounded packed prefill,
+  greedy requests without a drafter only. Unset, `0` and invalid values disable
+  this fresh path; Q4 is unsupported even with `1`. The same 128 MiB scratch cap
+  and serial fallback apply. Q8 passes balanced endpoint gates, but automatic
+  enablement remains held after an unpaired first-request outlier under substantial
+  global compression. No first-request guarantee or sampled-distribution claim.
+  Evidence: `docs/bench/2026-09-07-fresh-serving-http/RESULT.md`.
   Muse currently performs a fresh exact packed prefill in superchunks of up to
   128 tokens with a 16-token packing quantum, followed by a scalar tail, into
   its reset resident session for every request. It reports `cached_tokens=0`,

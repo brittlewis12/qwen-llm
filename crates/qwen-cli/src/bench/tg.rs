@@ -25,13 +25,12 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
         ));
     }
     let json_mode = matches!(output, OutputFormat::Json);
-    macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
     let trace_counts = env_flag_enabled("QWEN_DECODE_TRACE_COUNTS");
 
     let runtime = Runtime::metal().context("init Runtime")?;
-    text_log!("[tg] device: {}", runtime.describe());
+    crate::text_log!(json_mode, "[tg] device: {}", runtime.describe());
     let power = capture_power_snapshot();
-    text_log!("[tg] power: {}", power_snapshot_summary(power.as_ref()));
+    crate::text_log!(json_mode, "[tg] power: {}", power_snapshot_summary(power.as_ref()));
 
     let loaded = runtime
         .load_model(&model)
@@ -55,7 +54,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
         (rng_state % vocab as u64) as i32
     };
 
-    text_log!(
+    crate::text_log!(json_mode, 
         "[tg] model={} n_gen={} runs={} seed={} mode={}{}",
         model.display(),
         n_gen,
@@ -219,7 +218,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
         if let Some(trace) = trace {
             trace_samples.push(trace);
         }
-        text_log!(
+        crate::text_log!(json_mode, 
             "[tg] run {:>2}: wall {:>8.1} ms  gpu {:>8.1} ms  {:>7.2} t/s",
             run_idx + 1,
             wall_ms,
@@ -368,12 +367,11 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
     let prompt =
         prompt.unwrap_or_else(|| "The quick brown fox jumps over the lazy dog".to_string());
     let json_mode = matches!(output, OutputFormat::Json);
-    macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
 
     let ctx = MetalContext::new().context("init MetalContext")?;
-    text_log!("[bench] device: {}", ctx.describe());
+    crate::text_log!(json_mode, "[bench] device: {}", ctx.describe());
     let power = capture_power_snapshot();
-    text_log!("[bench] power: {}", power_snapshot_summary(power.as_ref()));
+    crate::text_log!(json_mode, "[bench] power: {}", power_snapshot_summary(power.as_ref()));
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
@@ -572,7 +570,7 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
         if !decode_token_ms.is_empty() {
             decode_steady_walls.push(steady_ms);
         }
-        text_log!(
+        crate::text_log!(json_mode, 
             "[bench] rep {:>2}: prefill {:>8.1} ms ({:.1} t/s)  decode {:>8.1} ms ({:.1} t/s)",
             rep + 1,
             prefill_wall,
@@ -584,7 +582,7 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
                 0.0
             }
         );
-        text_log!(
+        crate::text_log!(json_mode, 
             "[bench] rep {:>2} request {:>8.1} ms",
             rep + 1,
             request_wall

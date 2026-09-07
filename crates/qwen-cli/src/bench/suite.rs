@@ -291,12 +291,11 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
         return Err(anyhow!("provide at least one --pp or --tg shape"));
     }
     let json_mode = matches!(output, OutputFormat::Json);
-    macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
 
     let runtime = Runtime::metal().context("init Runtime")?;
-    text_log!("[suite] device: {}", runtime.describe());
+    crate::text_log!(json_mode, "[suite] device: {}", runtime.describe());
     let power = capture_power_snapshot();
-    text_log!("[suite] power: {}", power_snapshot_summary(power.as_ref()));
+    crate::text_log!(json_mode, "[suite] power: {}", power_snapshot_summary(power.as_ref()));
 
     let loaded = runtime
         .load_model(&model)
@@ -316,7 +315,7 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
         qwen_env: capture_qwen_env(),
     };
 
-    text_log!(
+    crate::text_log!(json_mode, 
         "[suite] model={} pp={:?} tg={:?} runs={} warmup={} seed={}",
         model.display(),
         pp,
@@ -337,7 +336,7 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             prefill_chunk,
             seed,
         )?;
-        text_log!(
+        crate::text_log!(json_mode, 
             "[suite] {:>8}: {:>8.2} t/s  {:>8.2} ms/token",
             row.test,
             row.avg_ts,
@@ -347,7 +346,7 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
     }
     for &n_gen in &tg {
         let row = run_suite_tg_row(&loaded, &row_ctx, n_gen, runs, no_warmup, seed)?;
-        text_log!(
+        crate::text_log!(json_mode, 
             "[suite] {:>8}: {:>8.2} t/s  {:>8.2} ms/token",
             row.test,
             row.avg_ts,

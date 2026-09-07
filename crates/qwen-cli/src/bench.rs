@@ -187,19 +187,19 @@ type MetalQueue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
 type MetalCommand = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
 type CapturedDownRouteTensors = (usize, Vec<(MetalTensor, MetalTensor, MetalTensor)>);
 
-fn env_flag_enabled(name: &str) -> bool {
-    matches!(
-        std::env::var(name).as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    )
-}
+// The bench binary reads its ad-hoc flags with the library's parsers so the
+// truthy/falsy vocabulary has one definition.
+use qwen_llm::env_flag::{read_default_off as env_flag_enabled, read_default_on as env_flag_default_on};
 
-fn env_flag_default_on(name: &str) -> bool {
-    !matches!(
-        std::env::var(name).as_deref(),
-        Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-    )
+/// Bench text-mode logging: silent when the command emits JSON.
+macro_rules! text_log {
+    ($json_mode:expr, $($t:tt)*) => {
+        if !$json_mode {
+            eprintln!($($t)*);
+        }
+    };
 }
+pub(crate) use text_log;
 
 /// Resolve the effective stop-token set: CLI override if provided,
 /// otherwise the GGUF's declared set. Errors when the GGUF declares

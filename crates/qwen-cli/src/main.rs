@@ -946,6 +946,34 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             }),
         }
     };
+    // Prompt lookup is a run-lane feature whose qualified layout is a header
+    // fact for ordinary Qwen; other families reject the flag outright.
+    let prompt_lookup = match family {
+        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => {
+            match qwen_llm::loader::Model::from_gguf(&gguf)
+                .map_err(|error| error.to_string())
+                .and_then(|model| {
+                    qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
+                }) {
+                Ok(()) => serde_json::json!({ "status": "permitted" }),
+                Err(message) => serde_json::json!({
+                    "status": "unsupported",
+                    "code": "layout_not_qualified",
+                    "message": message,
+                }),
+            }
+        }
+        Some(_) => serde_json::json!({
+            "status": "unsupported",
+            "code": "family_no_prompt_lookup",
+            "message": "--prompt-lookup applies to ordinary Qwen models only",
+        }),
+        None => serde_json::json!({
+            "status": "unsupported",
+            "code": "unknown_family",
+            "message": "--prompt-lookup requires a recognised Qwen target architecture",
+        }),
+    };
     let projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),
@@ -955,6 +983,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "run": project(Lane::CliSingleTurn),
             "serve": project(Lane::Serve),
         },
+        "prompt_lookup": { "run": prompt_lookup },
     });
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())

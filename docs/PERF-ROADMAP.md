@@ -490,10 +490,16 @@ claim for sampled followups inheriting numerical checkpoints, no cold-load gain,
 and no global threshold change. Evidence:
 `docs/bench/2026-09-06-single-chunk-vt/RESULT.md`.
 
-The Q4 packet also observes a 153-row prose replay after a 128-token code answer:
-cache matching falls back to the prior prompt boundary instead of completed
-history. The cause is not yet established. Localize this boundary loss before
-attributing it to rendering or proposing cache/state-lifetime machinery.
+The Q4 153-row replay is now localized through a fresh engine checkpoint:
+completed consumed 8987/pending newline 198 loses only its pending token when
+rendered as history; logical lookup falls back to 8860. Test-only consumed-26
+serial is slower than old 153-row packed (allocation+restore+prefill 1106.831 vs
+952.054 ms). Consumed-26 single-VT is 329.942 ms with 46.1 MB scratch, matching 128 greedy tokens
+and numerical persistent state. This survives a phase screen, not an HTTP gate.
+The next bounded serve experiment is atomic consumed-alias + packed execution,
+with unchanged default logical matching and re-admission of the larger old plan
+on fallback. Do not enable alias-only serial or reopen the broad Q4 selector.
+Evidence: `docs/bench/2026-09-06-consumed-boundary-reuse/RESULT.md`.
 
 2026-09-06 restored suffix32 screen exposes a packed-workspace blocker:
 1262.563 ms serial versus 252.341 ms construction+packed execution, but

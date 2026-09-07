@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Completed-Boundary Work Elision Phase PASS, Serving HOLD
+
+- Fresh engine replay (`667ed282`) proves Q4 completed matched 8988/restored 8987
+  with pending newline 198. Next rendered prompt 9013 drops that unconsumed newline;
+  strict logical lookup falls back to 8860, requiring 153 rather than 26 forwards.
+  Q8 retains its pending token and already requires 27 forwards. Renderer unchanged.
+- Test-only `f71ed463`: old 153-row packed allocation+restore+prefill 952.054 ms,
+  consumed-26 serial 1106.831 ms, consumed-26 single-VT 329.942 ms. Fewer forwards
+  alone regresses; only combined reuse+packed clears the frozen 25% phase screen.
+  Actual/priced candidate scratch 46,071,808/46,502,992 bytes fits 128 MiB.
+- All 128 greedy IDs agree across three arms. Separate persistent-state oracle
+  keeps old KV before 8860 bitwise; worst remaining KV/GDN cosine 0.9999990571.
+  Fixed-order phase evidence only: no HTTP, distributional or cold-load claim.
+- Independent review supports a bounded combined-plan experiment, not serving
+  promotion. Default logical lookup and Q4 selector HOLD remain intact. A future
+  candidate must re-admit the larger original workspace on fallback.
+- CPU diagnostics and Q4/Q8 release witnesses pass; CLI 374 passed, 11 ignored.
+  Evidence: `docs/bench/2026-09-06-consumed-boundary-reuse/RESULT.md`.
+
 ## 2026-09-06 - Qwen3.8 Q8 Restored Packed Tails KEEP
 
 - `f0d1d67b` tests bounded packed restoration; final `f140c206` enables only

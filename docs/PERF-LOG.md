@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - N16 Long-Context Online Attention Primitive PASS
+
+- Test-only `4a8ef407` compares current16 causal V4 rows with existing online
+  matrix KQ/KQV plus full-prefix packet-local VT rebuild at32768, G6 24/4/256.
+  Charged GPU6.250479 ->3.607279 ms saves42.288%; both pairs clear20%, control
+  spread0.409%. No kernel, verifier selector or default policy changes.
+- Incremental actual VT/scores/ml allocation93,847,552 B passes128MiB. Every row
+  cosine>=0.9999999184, maxabs0.000016246; separate32769 edge also passes.
+  One release test passes under an externally held production Metal lease;
+  global compression/decompression, swap and pageout growth are all zero.
+- Independent review supports the distinct work-unit premise and bounded PASS,
+  not an endpoint claim. Full-verifier allocation, state, restore and exact replay
+  remain unmeasured. Do not multiply one-layer savings by16 as authority.
+- Evidence and setup failures: `docs/bench/2026-09-07-verifier-online-n16/RESULT.md`.
+
 ## 2026-09-07 - Dense Q8 Native Embedding CLI Latency HOLD
 
 - Same-binary ordinary-CLI native 0/1 A-B-B-A, 25 input tokens and output1/128.

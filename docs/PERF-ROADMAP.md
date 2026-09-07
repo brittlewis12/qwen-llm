@@ -153,6 +153,23 @@ Decision rules:
   for decision-changing results. A focused regression and ordinary endpoint
   check are preferable to replaying unrelated historical gates.
 
+## N16 Long-Context Attention Checkpoint - 2026-09-07
+
+The charged one-layer online-matrix attention screen passes: 6.250479 ->3.607279
+GPU ms at32768, N16, G6 24/4/256, including a full-prefix one-layer VT rebuild.
+Saving42.288%, control spread0.409%, incremental actual workspace93,847,552 B;
+all row numerical checks and the32769 edge pass. This is test-only, not a kernel
+retune, a selector promotion or full-verifier evidence. It differs from closed
+one-pass flash and N2-8 three-pass direct-V paths.
+
+This result earns one bounded full-verifier experiment ahead of lower-ceiling
+warm-tail polish: actual whole scratch/session cost, identical primed state,
+full and partial accept, and exact-replay charges. It does not reopen generic
+skinny-GEMM staging, remove the long-context controller cutoff or weaken the
+single-chunk-VT verifier rejection. Preserve numerical versus bitwise and
+greedy versus sampled authority. Evidence:
+`docs/bench/2026-09-07-verifier-online-n16/RESULT.md`.
+
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 
 The first MoE checkpoint deliberately uses the scalar, stable 512-way top-10

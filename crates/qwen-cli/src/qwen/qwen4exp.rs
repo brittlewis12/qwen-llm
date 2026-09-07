@@ -73,7 +73,7 @@ pub(crate) fn validate_qwen4exp_generation_mode(
     args: &Args,
     explicit: ExplicitCliOptions,
 ) -> Result<()> {
-    let mut unsupported = serial_lane_unsupported_options(args, explicit, "--drafter");
+    let mut unsupported = serial_lane_unsupported_options(args, explicit);
     ensure_no_deepseek_v4_only_options(args, explicit, &mut unsupported)?;
     ensure!(
         unsupported.is_empty(),

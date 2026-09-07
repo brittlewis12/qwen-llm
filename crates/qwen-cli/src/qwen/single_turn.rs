@@ -7,6 +7,7 @@ pub(crate) fn run_single_turn(
     gguf: GgufFile,
     args: &Args,
     staged_integrity: Option<StagedIntegrityMode>,
+    drafter: Option<crate::drafter_policy::PreparedDrafter>,
 ) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
@@ -48,26 +49,17 @@ pub(crate) fn run_single_turn(
     if args.prompt_lookup {
         ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
     }
-    // v0.77 DFlash speculative decode. The drafter GGUF is opened, bound
-    // against the target arch, and copied to the GPU here; both the CPU
-    // `Model` view and the drafter mmap drop afterwards because
-    // `MetalDFlashHead` owns every weight it needs (plus `config` and
-    // `target_layer_ids`).
-    let dflash_head = match args.drafter.as_ref() {
-        Some(path) => {
+    // v0.77 DFlash speculative decode. Policy and metadata binding were
+    // settled pre-load by `drafter_policy`; only the GPU copy happens here.
+    // The drafter mmap drops afterwards because `MetalDFlashHead` owns every
+    // weight it needs (plus `config` and `target_layer_ids`).
+    let dflash_head = match drafter.as_ref() {
+        Some(prepared) => {
             let t0 = Instant::now();
-            let drafter_gguf =
-                GgufFile::open(path).with_context(|| format!("open drafter {}", path.display()))?;
-            qwen_llm::runtime::prefetch_opened_gguf(&drafter_gguf, &LoadedModelConfig::default());
-            let target_model =
-                Model::from_gguf(loaded.gguf()).context("parse target arch for drafter binding")?;
-            let bound = open_dflash_drafter(&drafter_gguf, &target_model)
-                .with_context(|| format!("bind drafter {}", path.display()))?;
-            let head = MetalDFlashHead::load(loaded.context(), &drafter_gguf, &bound)
-                .context("metal-load drafter")?;
+            let head = prepared.load(loaded.context(), loaded.gguf())?;
             tracing::info!(
                 target: "qwen_diag",
-                drafter = %path.display(),
+                drafter = %prepared.path().display(),
                 block_size = head.config.block_size,
                 dflash2 = head.config.selector_top_k > 0,
                 load_ms = t0.elapsed().as_secs_f64() * 1e3,
@@ -77,6 +69,7 @@ pub(crate) fn run_single_turn(
         }
         None => None,
     };
+    drop(drafter);
     if args.sampling_attribution {
         let arch = loaded.arch();
         let lm_head = &loaded.metal_model().lm_head;

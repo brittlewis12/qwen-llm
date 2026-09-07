@@ -304,11 +304,10 @@ pub(crate) fn shared_unsupported_options(
 
 /// Options a request-shaped serial single-turn lane (Muse Glimmer,
 /// Flash-Next) does not implement, on top of `shared_unsupported_options`.
-/// `drafter_note` lets a family explain why speculation is unavailable.
+/// `--drafter` is settled earlier by `drafter_policy` for every family.
 pub(crate) fn serial_lane_unsupported_options(
     args: &Args,
     explicit: ExplicitCliOptions,
-    drafter_note: &'static str,
 ) -> Vec<&'static str> {
     let mut unsupported = shared_unsupported_options(args, explicit);
     if args.requests_jsonl.is_some() {
@@ -322,9 +321,6 @@ pub(crate) fn serial_lane_unsupported_options(
     }
     if args.execution_mode.is_some() {
         unsupported.push("--execution-mode");
-    }
-    if args.drafter.is_some() {
-        unsupported.push(drafter_note);
     }
     if args.durable_prefix_cache.is_some() {
         unsupported.push("--durable-prefix-cache");

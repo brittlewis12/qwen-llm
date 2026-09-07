@@ -10,6 +10,8 @@ mod decode;
 mod deepseek_v4;
 #[path = "qwen/dflash.rs"]
 mod dflash;
+#[path = "qwen/drafter_policy.rs"]
+mod drafter_policy;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_temporal;
 #[path = "qwen/durable_cache.rs"]
@@ -78,7 +80,6 @@ use qwen_llm::deepseek_v4_metal::{
 };
 use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
     KernelEncoder, MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
     MetalPipelineCacheMetrics, MetalTensor, evaluate_metal_memory_admission,
@@ -178,6 +179,7 @@ fn run() -> Result<()> {
     let invocation = cli::normalize(&mut args);
     let invocation = match invocation {
         cli::Invocation::Serve(serve_invocation) => return serve::run_serve(serve_invocation),
+        cli::Invocation::Info(info) => return run_info(info),
         other => other,
     };
     invocation.apply_option_overrides(&mut args);
@@ -249,6 +251,14 @@ fn run() -> Result<()> {
     let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
     let model_family = ModelFamily::detect(&gguf);
+    // Drafter admission is a header-level decision; settle it (and bind the
+    // drafter's metadata) before any family lane allocates on the GPU.
+    let drafter = drafter_policy::PreparedDrafter::prepare(
+        args.drafter.as_deref(),
+        &gguf,
+        model_family,
+        drafter_policy::Lane::CliSingleTurn,
+    )?;
     if model_family == Some(ModelFamily::MuseGlimmer) {
         return run_muse_glimmer_single_turn(
             &model_path,
@@ -293,7 +303,7 @@ fn run() -> Result<()> {
     }
 
     if has_single_turn_input(&args) {
-        return run_single_turn(&model_path, gguf, &args, staged_integrity);
+        return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
     }
 
     if let Some(path) = args.requests_jsonl.as_ref() {
@@ -855,6 +865,50 @@ use qwen4exp::*;
 use run_options::*;
 use single_turn::*;
 use telemetry::*;
+
+/// `qwen info`: header-only inspection. Text mode is the legacy model
+/// summary; `--json` projects the decisions the binary would make for this
+/// model before loading it. Only drafter admission is projected today; the
+/// shape grows one consumed decision at a time, never as a hand-maintained
+/// capability table.
+fn run_info(info: cli::InfoInvocation) -> Result<()> {
+    if !info.json {
+        return print_model_info(&info.model);
+    }
+    use drafter_policy::{DrafterDecision, DrafterTarget, Lane, resolve_drafter};
+    let gguf = GgufFile::open(&info.model)
+        .with_context(|| format!("open model {}", info.model.display()))?;
+    let family = ModelFamily::detect(&gguf);
+    let project = |lane: Lane| -> serde_json::Value {
+        match resolve_drafter(family, lane, true) {
+            DrafterDecision::NotRequested => unreachable!("projection asks with a request"),
+            DrafterDecision::Permitted(target) => serde_json::json!({
+                "status": "permitted",
+                "target": match target {
+                    DrafterTarget::Dense => "dense",
+                    DrafterTarget::MoeCliSerial => "moe_cli_serial",
+                },
+            }),
+            DrafterDecision::Unsupported(reason) => serde_json::json!({
+                "status": "unsupported",
+                "code": reason.code(),
+                "message": reason.to_string(),
+            }),
+        }
+    };
+    let projection = serde_json::json!({
+        "version": "qwen_info_v1",
+        "model": info.model.display().to_string(),
+        "architecture": gguf.architecture(),
+        "family": family.map(ModelFamily::architecture_name),
+        "drafter": {
+            "run": project(Lane::CliSingleTurn),
+            "serve": project(Lane::Serve),
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&projection)?);
+    Ok(())
+}
 
 fn print_model_info(model_path: &Path) -> Result<()> {
     let gguf = qwen_llm::gguf::GgufFile::open(model_path)?;

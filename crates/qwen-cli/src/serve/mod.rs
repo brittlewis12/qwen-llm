@@ -104,14 +104,9 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
 
 fn muse_serve_limits(
     model_context: usize,
-    has_drafter: bool,
     max_context_tokens: Option<usize>,
     max_tokens: Option<usize>,
 ) -> Result<(usize, usize)> {
-    ensure!(
-        !has_drafter,
-        "--drafter is not supported for Muse Glimmer serve"
-    );
     let context_limit = max_context_tokens.context(
         "Muse Glimmer serve requires --max-context-tokens because its resident session capacity is fixed at startup",
     )?;
@@ -141,6 +136,18 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         supports_serve_family(family),
         "qwen serve supports Qwen3.5/3.6-family, DeepSeek V4, and Muse Glimmer models (docs/SERVE.md)"
     );
+    // Drafter admission is a header-level decision: refuse unsupported
+    // family/shape combinations and bind the drafter's metadata before the
+    // target's weights are loaded. `EngineBackend::new` still performs the
+    // GPU copy from the path; consolidating that reuse waits for the serve
+    // backend to settle.
+    let drafter = crate::drafter_policy::PreparedDrafter::prepare(
+        invocation.drafter.as_deref(),
+        &gguf,
+        family,
+        crate::drafter_policy::Lane::Serve,
+    )?;
+    drop(drafter);
     let mut trace = invocation
         .trace_sse
         .as_deref()
@@ -159,7 +166,6 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             .context("bind Muse Glimmer serve contract")?;
         let (context_limit, default_max_tokens) = muse_serve_limits(
             config.context_length as usize,
-            invocation.drafter.is_some(),
             invocation.max_context_tokens,
             invocation.max_tokens,
         )?;
@@ -187,10 +193,6 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     }
 
     if family == Some(ModelFamily::DeepSeek4) {
-        ensure!(
-            invocation.drafter.is_none(),
-            "--drafter is not supported for DeepSeek V4 serve"
-        );
         // DS4 sizes its session from a forward budget fixed at startup, so
         // serve must be told the context ceiling up front (the CLI's stdin
         // JSONL lane has the same requirement).
@@ -478,18 +480,17 @@ mod tests {
     #[test]
     fn muse_limits_require_explicit_bounded_capacity_and_output_default() {
         assert_eq!(
-            muse_serve_limits(131_072, false, Some(7_168), Some(2_048)).unwrap(),
+            muse_serve_limits(131_072, Some(7_168), Some(2_048)).unwrap(),
             (7168, 2048)
         );
         assert_eq!(
-            muse_serve_limits(131_072, false, Some(131_072), Some(16_384)).unwrap(),
+            muse_serve_limits(131_072, Some(131_072), Some(16_384)).unwrap(),
             (131_072, 16_384)
         );
-        assert!(muse_serve_limits(131_072, true, Some(7_168), Some(2_048)).is_err());
-        assert!(muse_serve_limits(131_072, false, None, Some(2_048)).is_err());
-        assert!(muse_serve_limits(131_072, false, Some(7_168), None).is_err());
-        assert!(muse_serve_limits(131_072, false, Some(131_073), Some(2_048)).is_err());
-        assert!(muse_serve_limits(131_072, false, Some(1_024), Some(2_048)).is_err());
+        assert!(muse_serve_limits(131_072, None, Some(2_048)).is_err());
+        assert!(muse_serve_limits(131_072, Some(7_168), None).is_err());
+        assert!(muse_serve_limits(131_072, Some(131_073), Some(2_048)).is_err());
+        assert!(muse_serve_limits(131_072, Some(1_024), Some(2_048)).is_err());
     }
 
     #[test]

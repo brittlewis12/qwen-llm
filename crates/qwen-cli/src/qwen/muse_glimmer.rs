@@ -58,7 +58,9 @@ pub(crate) fn prepare_muse_glimmer_prompt(
                 add_special_tokens: prompt_add_special_tokens(args, source),
             })
         }
-        cli::Invocation::Serve(_) => bail!("Muse Glimmer serve routing is not implemented"),
+        cli::Invocation::Serve(_) | cli::Invocation::Info(_) => {
+            bail!("Muse Glimmer prompt preparation is a run/legacy path")
+        }
     }
 }
 
@@ -83,11 +85,7 @@ pub(crate) fn validate_muse_glimmer_generation_mode(
     explicit: ExplicitCliOptions,
     invocation: &cli::Invocation,
 ) -> Result<()> {
-    let mut unsupported = serial_lane_unsupported_options(
-        args,
-        explicit,
-        "--drafter (Muse DFlash2 integration is not active yet)",
-    );
+    let mut unsupported = serial_lane_unsupported_options(args, explicit);
     ensure_no_deepseek_v4_only_options(args, explicit, &mut unsupported)?;
     ensure!(
         unsupported.is_empty(),

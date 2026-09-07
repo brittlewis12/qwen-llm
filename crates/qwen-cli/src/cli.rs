@@ -16,6 +16,22 @@ pub(crate) enum Command {
         after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 65536\n  qwen serve -m Muse-Glimmer.gguf --max-context-tokens 7168 --max-tokens 2048\n  qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
     )]
     Serve(ServeArgs),
+    /// Inspect a GGUF header without loading weights or touching the GPU.
+    #[command(
+        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n\n--json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused."
+    )]
+    Info(InfoArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub(crate) struct InfoArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+
+    /// Emit a machine-readable projection instead of the text summary.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -72,6 +88,13 @@ pub(crate) enum Invocation {
     Legacy,
     Run(RunInvocation),
     Serve(ServeInvocation),
+    Info(InfoInvocation),
+}
+
+#[derive(Debug)]
+pub(crate) struct InfoInvocation {
+    pub(crate) model: PathBuf,
+    pub(crate) json: bool,
 }
 
 #[derive(Debug)]
@@ -320,6 +343,10 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
     };
 
     match command {
+        Command::Info(info) => Invocation::Info(InfoInvocation {
+            model: info.model,
+            json: info.json,
+        }),
         Command::Serve(serve) => Invocation::Serve(ServeInvocation {
             model: serve.model,
             addr: serve.addr,

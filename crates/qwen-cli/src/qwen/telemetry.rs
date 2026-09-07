@@ -1198,6 +1198,10 @@ pub(crate) fn validate_sampled_structural_row(row: &RequestTimingRow) -> Result<
 #[derive(Debug, Serialize)]
 pub(crate) struct RequestOutput {
     pub(crate) id: String,
+    /// Source line in the requests JSONL; the stable key for merging
+    /// outcomes back onto inputs.
+    pub(crate) line: usize,
+    pub(crate) status: &'static str,
     pub(crate) input: JsonlInputLabel,
     pub(crate) prompt_tokens: usize,
     pub(crate) generated_tokens: usize,

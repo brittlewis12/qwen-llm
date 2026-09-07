@@ -216,6 +216,7 @@ impl LaneProgress {
 
 struct Lane {
     id: String,
+    line: usize,
     input: JsonlInputLabel,
     prompt_tokens: usize,
     sequence: Sequence,
@@ -241,6 +242,7 @@ fn next_decode_work(active: [bool; WIDTH]) -> DecodeWork {
 
 struct PreparedLane {
     id: String,
+    line: usize,
     input: JsonlInputLabel,
     prompt_tokens: usize,
     max_tokens: usize,
@@ -521,18 +523,6 @@ fn validate_model_family_with_modes(
         }
         None => bail!("--concurrency requires a supported Qwen or DeepSeek V4 model"),
     }
-}
-
-pub(super) fn run_file(
-    loaded: &LoadedModel,
-    tokenizer: &Tokenizer,
-    requests_path: &Path,
-    args: &Args,
-    greedy_gpu_mode: GreedyGpuArgmaxMode,
-    stdout: &mut impl Write,
-) -> Result<usize> {
-    let requests = prepare_jsonl_requests(requests_path, loaded, tokenizer, args)?;
-    run_prepared(loaded, tokenizer, &requests, args, greedy_gpu_mode, stdout)
 }
 
 pub(super) fn run_prepared(
@@ -1213,6 +1203,7 @@ fn prepared_lane(
 ) -> PreparedLane {
     PreparedLane {
         id: request.id.clone(),
+        line: request.line,
         input: request.input,
         prompt_tokens: request.prompt_ids.len(),
         max_tokens,
@@ -1249,6 +1240,7 @@ fn prepare_lane(
     Ok((
         PreparedLane {
             id: request.id.clone(),
+            line: request.line,
             input: request.input,
             prompt_tokens: request.prompt_ids.len(),
             max_tokens,
@@ -1624,6 +1616,7 @@ fn start_lane(prepared: PreparedLane, tokenizer: &Tokenizer, stop_tokens: &[i32]
     }
     Ok(Lane {
         id: prepared.id,
+        line: prepared.line,
         input: prepared.input,
         prompt_tokens: prepared.prompt_tokens,
         sequence: prepared.sequence,
@@ -1758,6 +1751,8 @@ fn run_pair(
     };
     let outputs = lanes.map(|lane| RequestOutput {
         id: lane.id,
+        line: lane.line,
+        status: "ok",
         input: lane.input,
         prompt_tokens: lane.prompt_tokens,
         generated_tokens: lane.progress.generated.len(),
@@ -2437,6 +2432,8 @@ fn generate_deepseek_lane(
     let selector_telemetry = lane.session.multigroup_selector_telemetry();
     let output = RequestOutput {
         id: lane.request.id,
+        line: lane.request.line,
+        status: "ok",
         input: JsonlInputLabel::RAW,
         prompt_tokens: lane.request.prompt_tokens,
         generated_tokens: generation.tokens.len(),

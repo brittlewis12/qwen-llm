@@ -491,6 +491,7 @@ impl LaneProgress {
 struct Lane {
     request_index: usize,
     id: String,
+    line: usize,
     input: JsonlInputLabel,
     prompt_tokens: usize,
     sequence: Sequence,
@@ -1951,30 +1952,21 @@ pub(super) fn validate_model_family(
     Ok(())
 }
 
-pub(super) fn run_file(
+/// Fixed-cohort execution over requests prepared (before load) by the caller.
+pub(super) fn run_prepared_with_batch_size(
     loaded: &LoadedModel,
     tokenizer: &Tokenizer,
-    requests_path: &Path,
+    requests: &[PreparedJsonlRequest],
     args: &Args,
     greedy_gpu_mode: GreedyGpuArgmaxMode,
     stdout: &mut impl Write,
+    batch_size: usize,
 ) -> Result<usize> {
-    let batch_size = args
-        .batch_size
-        .context("fixed-cohort JSONL execution requires --batch-size")?;
     validate_greedy_gpu_mode(greedy_gpu_mode, Some(batch_size))?;
-    let requests_metadata = std::fs::metadata(requests_path)
-        .with_context(|| format!("inspect requests JSONL {}", requests_path.display()))?;
-    ensure!(
-        requests_metadata.is_file(),
-        "--batch-size requires a regular JSONL file, got {}",
-        requests_path.display()
-    );
-    let requests = prepare_jsonl_requests(requests_path, loaded, tokenizer, args)?;
     run_prepared(
         loaded,
         tokenizer,
-        &requests,
+        requests,
         args,
         greedy_gpu_mode,
         stdout,
@@ -2754,6 +2746,7 @@ fn prepare_refill_lane(
         Lane {
             request_index,
             id: request.id.clone(),
+            line: request.line,
             input: request.input,
             prompt_tokens: request.prompt_ids.len(),
             sequence,
@@ -2784,6 +2777,8 @@ fn finalize_refill_lane(lane: Lane) -> Result<(usize, RequestOutput)> {
         lane.request_index,
         RequestOutput {
             id: lane.id,
+            line: lane.line,
+            status: "ok",
             input: lane.input,
             prompt_tokens: lane.prompt_tokens,
             generated_tokens: lane.progress.generated.len(),
@@ -3338,6 +3333,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         lanes.push(Lane {
             request_index: slot,
             id: request.id.clone(),
+            line: request.line,
             input: request.input,
             prompt_tokens: request.prompt_ids.len(),
             sequence,
@@ -3440,6 +3436,8 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             .expect("validated fixed-cohort lane termination");
         outputs.push(RequestOutput {
             id: lane.id,
+            line: lane.line,
+            status: "ok",
             input: lane.input,
             prompt_tokens: lane.prompt_tokens,
             generated_tokens: lane.progress.generated.len(),
@@ -3570,6 +3568,8 @@ mod tests {
     fn output(id: &str) -> RequestOutput {
         RequestOutput {
             id: id.to_string(),
+            line: 1,
+            status: "ok",
             input: JsonlInputLabel::RAW,
             prompt_tokens: 1,
             generated_tokens: 1,

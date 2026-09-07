@@ -5246,3 +5246,98 @@ mod jsonl_templated_rows {
         assert!(checked >= 5, "expected the single-turn oracle cases, checked {checked}");
     }
 }
+
+mod jsonl_typed_preparation {
+    use super::*;
+    use crate::{JsonlRowOutcome, prepare_jsonl_row};
+    use qwen_llm::test_fixtures::QWEN35_0_8B_F32;
+
+    /// A real tokenizer from the smallest local fixture; header-only, no Metal.
+    fn tokenizer() -> Option<(Tokenizer, GgufFile)> {
+        let path = QWEN35_0_8B_F32.path_or_skip()?;
+        let gguf = GgufFile::open(path).ok()?;
+        let tokenizer = Tokenizer::from_gguf(&gguf).ok()?;
+        Some((tokenizer, gguf))
+    }
+
+    fn args(extra: &[&str]) -> Args {
+        let mut argv = vec!["qwen", "--model", "m.gguf", "--requests-jsonl", "r.jsonl"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).unwrap()
+    }
+
+    fn code(outcome: &JsonlRowOutcome) -> Option<(&'static str, String, usize)> {
+        match outcome {
+            JsonlRowOutcome::Failed(failure) => {
+                assert_eq!(failure.status, "error");
+                Some((failure.code, failure.id.clone(), failure.line))
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn malformed_json_is_a_typed_failure_with_a_line_derived_id() {
+        let Some((tokenizer, _)) = tokenizer() else { return };
+        let outcome = prepare_jsonl_row(7, "{not json", &tokenizer, &args(&[]), None);
+        assert_eq!(code(&outcome), Some(("parse", "line-7".into(), 7)));
+    }
+
+    #[test]
+    fn blank_and_comment_lines_are_skipped() {
+        let Some((tokenizer, _)) = tokenizer() else { return };
+        for line in ["", "   ", "# note"] {
+            assert!(matches!(
+                prepare_jsonl_row(1, line, &tokenizer, &args(&[]), None),
+                JsonlRowOutcome::Skipped
+            ));
+        }
+    }
+
+    #[test]
+    fn shape_capacity_and_executor_constraints_fail_at_preparation() {
+        let Some((tokenizer, _)) = tokenizer() else { return };
+        let a = args(&[]);
+        let shape = prepare_jsonl_row(2, r#"{"id":"s","prompt":"a","user":"b"}"#, &tokenizer, &a, None);
+        assert_eq!(code(&shape), Some(("input", "s".into(), 2)));
+        let capacity = prepare_jsonl_row(3, r#"{"id":"c","prompt":"hi","tokens":0}"#, &tokenizer, &a, None);
+        assert_eq!(code(&capacity), Some(("capacity", "c".into(), 3)));
+        let too_big = prepare_jsonl_row(
+            4,
+            r#"{"id":"b","prompt":"hi","tokens":10}"#,
+            &tokenizer,
+            &args(&["--max-context-tokens", "4"]),
+            None,
+        );
+        assert_eq!(code(&too_big), Some(("capacity", "b".into(), 4)));
+        let forced = args(&["--batch-size", "8"]);
+        let sampled = prepare_jsonl_row(
+            5,
+            r#"{"id":"t","prompt":"hi","sampling":{"temperature":0.7}}"#,
+            &tokenizer,
+            &forced,
+            None,
+        );
+        assert_eq!(code(&sampled), Some(("executor_constraint", "t".into(), 5)));
+        let cached = prepare_jsonl_row(
+            6,
+            r#"{"id":"k","prompt":"hi","cache_prefix_tokens":4}"#,
+            &tokenizer,
+            &forced,
+            None,
+        );
+        assert_eq!(code(&cached), Some(("executor_constraint", "k".into(), 6)));
+    }
+
+    #[test]
+    fn a_runnable_row_is_prepared_with_its_source_line() {
+        let Some((tokenizer, _)) = tokenizer() else { return };
+        match prepare_jsonl_row(9, r#"{"id":"ok","prompt":"hi","tokens":4}"#, &tokenizer, &args(&[]), None) {
+            JsonlRowOutcome::Prepared(prepared) => {
+                assert_eq!((prepared.id.as_str(), prepared.line), ("ok", 9));
+                assert!(!prepared.prompt_ids.is_empty());
+            }
+            other => panic!("expected prepared row, got {other:?}"),
+        }
+    }
+}

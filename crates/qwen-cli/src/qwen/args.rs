@@ -117,6 +117,24 @@ pub(crate) struct Args {
     )]
     pub(crate) execution_mode: Option<execution_selector::ExecutionModeArg>,
 
+    /// What a request that cannot be prepared (parse, shape, render,
+    /// tokenize, sampling, capacity, executor constraint) does to the batch.
+    ///
+    /// Every attempted request produces exactly one stdout row carrying its
+    /// source `line`: a success row (`status: ok`) or a failure row
+    /// (`status: error`, stable `code`). `stop` emits the failure row and
+    /// ends the batch; `continue` keeps going and exits nonzero at the end.
+    /// File requests are prepared before the model loads, so under `stop` a
+    /// bad row costs no load. `continue` is serial-lane only for now.
+    #[arg(
+        long,
+        hide_short_help = true,
+        requires = "requests_jsonl",
+        value_enum,
+        default_value_t = RequestErrorPolicy::Stop
+    )]
+    pub(crate) on_request_error: RequestErrorPolicy,
+
     /// Maximum number of tokens to generate.
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
     pub(crate) tokens: usize,

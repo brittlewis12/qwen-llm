@@ -2107,6 +2107,8 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
         };
         let output = RequestOutput {
             id: request.id.clone(),
+            line: request.line,
+            status: "ok",
             input: JsonlInputLabel::RAW,
             prompt_tokens: request.prompt_tokens,
             generated_tokens: generation.tokens.len(),

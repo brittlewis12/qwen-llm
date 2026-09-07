@@ -151,6 +151,33 @@ pub(crate) fn run_requests_jsonl(
          Use --request-stats for legacy per-request stats output."
     );
     cli_sampling_config(args)?;
+    let policy = args.on_request_error;
+    let accelerated_lane = args.batch_size.is_some()
+        || args.concurrency.is_some()
+        || args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
+    ensure!(
+        policy == RequestErrorPolicy::Stop || !accelerated_lane,
+        "--on-request-error continue is supported on the serial lane only; remove --batch-size, --concurrency, or --execution-mode auto"
+    );
+
+    let mut stdout = std::io::stdout().lock();
+    // File requests are prepared from the header before the model loads:
+    // every row is settled (parse, render, tokenize, sampling, capacity,
+    // executor constraints) so a bad row under `stop` costs no load, and the
+    // planners below only ever see rows that can run.
+    let file = if requests_path == Path::new("-") {
+        None
+    } else {
+        let tokenizer = Tokenizer::from_gguf(&gguf).context("load tokenizer")?;
+        let file = prepare_jsonl_file(requests_path, &gguf, &tokenizer, args)?;
+        if policy == RequestErrorPolicy::Stop
+            && let Some(failure) = file.failures.first()
+        {
+            write_jsonl_row(&mut stdout, failure)?;
+            bail!("{}", failure.message);
+        }
+        Some(file)
+    };
 
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
@@ -191,19 +218,19 @@ pub(crate) fn run_requests_jsonl(
         .as_ref()
         .map(|path| open_append_file(path, "request stats"))
         .transpose()?;
-    let mut stdout = std::io::stdout().lock();
     let mut n_requests = 0usize;
+    let mut n_failed = 0usize;
 
     let model_family = match loaded.arch().kind {
         ArchKind::Dense => Some(ModelFamily::Qwen35),
         ArchKind::Moe => Some(ModelFamily::Qwen35Moe),
     };
     let auto_mode = args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
-    let mut auto_prepared = if auto_mode && requests_path != Path::new("-") {
-        Some(prepare_jsonl_requests(requests_path, &loaded, &tokenizer, args)?)
-    } else {
-        None
+    let (mut file_prepared, file_failures) = match file {
+        Some(PreparedJsonlFile { prepared, failures }) => (Some(prepared), failures),
+        None => (None, Vec::new()),
     };
+    let mut auto_prepared = if auto_mode { file_prepared.take() } else { None };
     let auto_selection = if auto_mode {
         let requests = auto_prepared.as_deref().unwrap_or(&[]);
         let all_requests_accelerable = !requests.is_empty()
@@ -397,22 +424,29 @@ pub(crate) fn run_requests_jsonl(
     );
 
     if args.concurrency.is_some() {
-        n_requests += concurrent_jsonl::run_file(
+        let requests = file_prepared
+            .as_deref()
+            .expect("--concurrency requires a regular JSONL file");
+        n_requests += concurrent_jsonl::run_prepared(
             &loaded,
             &tokenizer,
-            requests_path,
+            requests,
             args,
             greedy_gpu_mode,
             &mut stdout,
         )?;
-    } else if args.batch_size.is_some() {
-        n_requests += fixed_cohort_jsonl::run_file(
+    } else if let Some(batch_size) = args.batch_size {
+        let requests = file_prepared
+            .as_deref()
+            .expect("--batch-size requires a regular JSONL file");
+        n_requests += fixed_cohort_jsonl::run_prepared_with_batch_size(
             &loaded,
             &tokenizer,
-            requests_path,
+            requests,
             args,
             greedy_gpu_mode,
             &mut stdout,
+            batch_size,
         )?;
     } else if let Some(selection) = auto_selection
         && selection.selected.accelerated()
@@ -465,11 +499,19 @@ pub(crate) fn run_requests_jsonl(
             shutdown::checkpoint()?;
             let line_no = line_idx + 1;
             let line = line.with_context(|| format!("read requests line {line_no}"))?;
-            let Some(prepared_request) =
-                prepare_jsonl_request_line(line_no, &line, &tokenizer, args, protocol.as_ref())?
-            else {
-                continue;
-            };
+            let prepared_request =
+                match prepare_jsonl_row(line_no, &line, &tokenizer, args, protocol.as_ref()) {
+                    JsonlRowOutcome::Skipped => continue,
+                    JsonlRowOutcome::Prepared(request) => request,
+                    JsonlRowOutcome::Failed(failure) => {
+                        write_jsonl_row(&mut stdout, &failure)?;
+                        if policy == RequestErrorPolicy::Stop {
+                            bail!("{}", failure.message);
+                        }
+                        n_failed += 1;
+                        continue;
+                    }
+                };
             let (output, stats) = run_jsonl_request(
                 &loaded,
                 &tokenizer,
@@ -499,14 +541,16 @@ pub(crate) fn run_requests_jsonl(
             n_requests += 1;
         }
     } else {
-        let mut prepared = match auto_prepared.take() {
-            Some(prepared) => prepared,
-            None => prepare_jsonl_requests(requests_path, &loaded, &tokenizer, args)?,
-        };
-        n_requests += run_prepared_jsonl_serial(
+        let mut prepared = auto_prepared
+            .take()
+            .or(file_prepared)
+            .expect("file requests were prepared before load");
+        n_failed += file_failures.len();
+        n_requests += run_prepared_jsonl_serial_with_failures(
             &loaded,
             &tokenizer,
             &mut prepared,
+            &file_failures,
             args,
             greedy_gpu_mode,
             &mut stdout,
@@ -515,7 +559,7 @@ pub(crate) fn run_requests_jsonl(
     }
 
     ensure!(
-        n_requests > 0,
+        n_requests > 0 || n_failed > 0,
         "requests JSONL {} contained no requests",
         requests_path.display()
     );
@@ -534,46 +578,79 @@ pub(crate) fn run_requests_jsonl(
         stats.indexed_bytes as f64 / 1024.0 / 1024.0,
         stats.max_indexed_bytes as f64 / 1024.0 / 1024.0,
     );
+    ensure!(
+        n_failed == 0,
+        "{n_failed} of {} requests failed to prepare; see the status=error rows on stdout",
+        n_requests + n_failed
+    );
     Ok(())
 }
 
+/// Serial execution that emits preparation failures in source order among
+/// the successes: every failure whose line precedes the next runnable row is
+/// written first, and the remainder after the last row.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_prepared_jsonl_serial(
+pub(crate) fn run_prepared_jsonl_serial_with_failures(
     loaded: &LoadedModel,
     tokenizer: &Tokenizer,
     prepared: &mut [PreparedJsonlRequest],
+    failures: &[JsonlRequestFailure],
     args: &Args,
     greedy_gpu_mode: GreedyGpuArgmaxMode,
     stdout: &mut impl Write,
     stats_file: &mut Option<std::fs::File>,
 ) -> Result<usize> {
     discover_auto_cache_prefixes(prepared, args.cache_prefix_auto_min_tokens);
+    let mut pending = failures.iter().peekable();
     let mut completed = 0usize;
-    for prepared_request in prepared {
-        let (output, stats) =
-            run_jsonl_request(loaded, tokenizer, prepared_request, args, greedy_gpu_mode)
-                .with_context(|| format!("run request {}", prepared_request.id))?;
-
-        serde_json::to_writer(&mut *stdout, &output).context("write request output")?;
-        writeln!(stdout)?;
-        stdout.flush()?;
-
-        if let Some(file) = stats_file.as_mut() {
-            serde_json::to_writer(&mut *file, &stats).context("write request stats")?;
-            writeln!(file)?;
-            file.flush()?;
+    for prepared_request in prepared.iter() {
+        while let Some(failure) = pending.next_if(|failure| failure.line < prepared_request.line) {
+            write_jsonl_row(stdout, failure)?;
         }
-        if let Some(path) = args.trace_request.as_ref() {
-            append_request_trace(
-                path,
-                unix_epoch_ms()?,
-                stats.prompt_tokens,
-                stats.generated_tokens,
-            )?;
-        }
-        completed += 1;
+        completed += run_one_prepared_jsonl_request(
+            loaded,
+            tokenizer,
+            prepared_request,
+            args,
+            greedy_gpu_mode,
+            stdout,
+            stats_file,
+        )?;
+    }
+    for failure in pending {
+        write_jsonl_row(stdout, failure)?;
     }
     Ok(completed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_one_prepared_jsonl_request(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    prepared_request: &PreparedJsonlRequest,
+    args: &Args,
+    greedy_gpu_mode: GreedyGpuArgmaxMode,
+    stdout: &mut impl Write,
+    stats_file: &mut Option<std::fs::File>,
+) -> Result<usize> {
+    let (output, stats) =
+        run_jsonl_request(loaded, tokenizer, prepared_request, args, greedy_gpu_mode)
+            .with_context(|| format!("run request {}", prepared_request.id))?;
+    write_jsonl_row(stdout, &output)?;
+    if let Some(file) = stats_file.as_mut() {
+        serde_json::to_writer(&mut *file, &stats).context("write request stats")?;
+        writeln!(file)?;
+        file.flush()?;
+    }
+    if let Some(path) = args.trace_request.as_ref() {
+        append_request_trace(
+            path,
+            unix_epoch_ms()?,
+            stats.prompt_tokens,
+            stats.generated_tokens,
+        )?;
+    }
+    Ok(1)
 }
 
 /// The row-rendering protocol for this loaded model, or `None` when the
@@ -581,92 +658,210 @@ pub(crate) fn run_prepared_jsonl_serial(
 pub(crate) fn jsonl_user_prompt_protocol(
     loaded: &LoadedModel,
 ) -> Result<Option<crate::QwenUserPromptProtocol>> {
-    let family = match loaded.arch().kind {
-        ArchKind::Dense => ModelFamily::Qwen35,
-        ArchKind::Moe => ModelFamily::Qwen35Moe,
-    };
-    crate::QwenUserPromptProtocol::resolve(family, loaded.gguf())
+    jsonl_user_prompt_protocol_for_gguf(loaded.gguf())
 }
 
-pub(crate) fn prepare_jsonl_requests(
-    requests_path: &Path,
-    loaded: &LoadedModel,
-    tokenizer: &Tokenizer,
-    args: &Args,
-) -> Result<Vec<PreparedJsonlRequest>> {
-    let protocol = jsonl_user_prompt_protocol(loaded)?;
-    let stdin;
-    let reader: Box<dyn BufRead> = if requests_path == Path::new("-") {
-        stdin = std::io::stdin();
-        Box::new(stdin.lock())
-    } else {
-        let requests = std::fs::File::open(requests_path)
-            .with_context(|| format!("open requests JSONL {}", requests_path.display()))?;
-        Box::new(std::io::BufReader::new(requests))
-    };
+/// Header-only form of `jsonl_user_prompt_protocol`, for preparing file
+/// requests before the model loads.
+pub(crate) fn jsonl_user_prompt_protocol_for_gguf(
+    gguf: &GgufFile,
+) -> Result<Option<crate::QwenUserPromptProtocol>> {
+    match ModelFamily::detect(gguf) {
+        Some(family @ (ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)) => {
+            crate::QwenUserPromptProtocol::resolve(family, gguf)
+        }
+        _ => Ok(None),
+    }
+}
 
-    let mut prepared = Vec::new();
-    shutdown::checkpoint()?;
-    for (line_idx, line) in reader.lines().enumerate() {
-        shutdown::checkpoint()?;
-        let line_no = line_idx + 1;
-        let line = line.with_context(|| format!("read requests line {line_no}"))?;
-        if let Some(request) =
-            prepare_jsonl_request_line(line_no, &line, tokenizer, args, protocol.as_ref())?
-        {
-            prepared.push(request);
+/// A row that could not be prepared. Emitted on stdout in place of a success
+/// row so batch consumers see one typed outcome per attempted request.
+/// Preparation failures are the recoverable class (parse, shape, render,
+/// tokenize, sampling policy, capacity, executor constraints); execution,
+/// admission, and I/O failures remain fatal to the batch.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct JsonlRequestFailure {
+    pub(crate) id: String,
+    pub(crate) line: usize,
+    pub(crate) status: &'static str,
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+}
+
+impl JsonlRequestFailure {
+    fn new(id: String, line: usize, code: &'static str, error: &anyhow::Error) -> Self {
+        Self {
+            id,
+            line,
+            status: "error",
+            code,
+            message: format!("{error:#}"),
         }
     }
-    ensure!(
-        !prepared.is_empty(),
-        "requests JSONL {} contained no requests",
-        requests_path.display()
-    );
-    Ok(prepared)
 }
 
-pub(crate) fn prepare_jsonl_request_line(
+/// What preparing one source line produced.
+#[derive(Debug)]
+pub(crate) enum JsonlRowOutcome {
+    /// Blank or `#` comment line.
+    Skipped,
+    Prepared(PreparedJsonlRequest),
+    Failed(JsonlRequestFailure),
+}
+
+/// `--on-request-error`: what a preparation failure does to the batch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+pub(crate) enum RequestErrorPolicy {
+    /// Emit the failure row and stop; nothing after it is attempted.
+    #[default]
+    Stop,
+    /// Emit the failure row and keep going; exit nonzero at the end.
+    Continue,
+}
+
+/// Prepare one source line into a typed outcome. Only reading the line is
+/// the caller's (fatal) concern; everything about the row itself is
+/// reported as a `Failed` outcome with a stable code.
+pub(crate) fn prepare_jsonl_row(
     line_no: usize,
     line: &str,
     tokenizer: &Tokenizer,
     args: &Args,
     protocol: Option<&crate::QwenUserPromptProtocol>,
-) -> Result<Option<PreparedJsonlRequest>> {
+) -> JsonlRowOutcome {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(None);
+        return JsonlRowOutcome::Skipped;
     }
-    let mut request: JsonlRequest =
-        serde_json::from_str(trimmed).with_context(|| format!("parse requests line {line_no}"))?;
-    let id = request
-        .id
-        .clone()
-        .unwrap_or_else(|| format!("line-{line_no}"));
+    let fallback_id = format!("line-{line_no}");
+    let mut request: JsonlRequest = match serde_json::from_str(trimmed) {
+        Ok(request) => request,
+        Err(error) => {
+            return JsonlRowOutcome::Failed(JsonlRequestFailure::new(
+                fallback_id,
+                line_no,
+                "parse",
+                &anyhow::Error::new(error).context(format!("parse requests line {line_no}")),
+            ));
+        }
+    };
+    let id = request.id.clone().unwrap_or(fallback_id);
+    let fail = |code, error: anyhow::Error| {
+        JsonlRowOutcome::Failed(JsonlRequestFailure::new(id.clone(), line_no, code, &error))
+    };
     let (prompt, tokenizer_specials, input) =
-        resolve_jsonl_request_input(&request, line_no, protocol)?;
-    let prompt_ids = tokenizer
-        .encode(&prompt, tokenizer_specials && !args.no_special_tokens)
-        .context("tokenize prompt")?;
-    if prompt_ids.is_empty() {
-        bail!("request {id} tokenized to zero tokens");
+        match resolve_jsonl_request_input(&request, line_no, protocol) {
+            Ok(resolved) => resolved,
+            Err(error) => return fail("input", error),
+        };
+    let prompt_ids = match tokenizer.encode(&prompt, tokenizer_specials && !args.no_special_tokens)
+    {
+        Ok(ids) if ids.is_empty() => {
+            return fail("tokenize", anyhow!("request {id} tokenized to zero tokens"));
+        }
+        Ok(ids) => ids,
+        Err(error) => return fail("tokenize", anyhow::Error::new(error).context("tokenize prompt")),
+    };
+    let sampling = match request_sampling_config(&request, args) {
+        Ok(sampling) => sampling,
+        Err(error) => return fail("sampling", error),
+    };
+    if let Err(error) = validate_sampling_decode_policy(sampling, args.prompt_lookup) {
+        return fail(
+            "sampling",
+            error.context(format!("validate decode policy for request {id}")),
+        );
     }
-    let sampling = request_sampling_config(&request, args)?;
-    validate_sampling_decode_policy(sampling, args.prompt_lookup)
-        .with_context(|| format!("validate decode policy for request {id}"))?;
     request.prompt = None;
     request.prompt_file = None;
     request.user = None;
     request.system = None;
-    Ok(Some(PreparedJsonlRequest {
+    let prepared = PreparedJsonlRequest {
         request,
-        id,
+        id: id.clone(),
         line: line_no,
         input,
         prompt_ids,
         sampling,
         auto_cache_prefix_tokens: None,
         auto_cache_future_hits: 0,
-    }))
+    };
+    // Generation budget and context capacity are row facts; settle them here
+    // so planners and executors only ever see rows that can run.
+    if let Err(error) = jsonl_generation_capacity(&prepared, args) {
+        return fail("capacity", error);
+    }
+    // Forced accelerated executors admit only greedy rows without request
+    // cache controls; report that as a row failure rather than a batch abort.
+    if args.batch_size.is_some() || args.concurrency.is_some() {
+        let executor = if args.batch_size.is_some() {
+            "--batch-size"
+        } else {
+            "--concurrency"
+        };
+        if prepared.request.cache_prefix_tokens.is_some() {
+            return fail(
+                "executor_constraint",
+                anyhow!("request {id} sets cache_prefix_tokens, which is unsupported with {executor}"),
+            );
+        }
+        if prepared.sampling.temperature != 0.0 {
+            return fail(
+                "executor_constraint",
+                anyhow!(
+                    "request {id} uses temperature {}; {executor} currently requires greedy decoding",
+                    prepared.sampling.temperature
+                ),
+            );
+        }
+    }
+    JsonlRowOutcome::Prepared(prepared)
+}
+
+/// Prepared file requests split into the rows that can run and the rows
+/// that cannot, both in source order. Header-only: runs before the model
+/// loads.
+pub(crate) struct PreparedJsonlFile {
+    pub(crate) prepared: Vec<PreparedJsonlRequest>,
+    pub(crate) failures: Vec<JsonlRequestFailure>,
+}
+
+pub(crate) fn prepare_jsonl_file(
+    requests_path: &Path,
+    gguf: &GgufFile,
+    tokenizer: &Tokenizer,
+    args: &Args,
+) -> Result<PreparedJsonlFile> {
+    let protocol = jsonl_user_prompt_protocol_for_gguf(gguf)?;
+    let requests = std::fs::File::open(requests_path)
+        .with_context(|| format!("open requests JSONL {}", requests_path.display()))?;
+    let reader = std::io::BufReader::new(requests);
+    let mut prepared = Vec::new();
+    let mut failures = Vec::new();
+    shutdown::checkpoint()?;
+    for (line_idx, line) in reader.lines().enumerate() {
+        shutdown::checkpoint()?;
+        let line_no = line_idx + 1;
+        let line = line.with_context(|| format!("read requests line {line_no}"))?;
+        match prepare_jsonl_row(line_no, &line, tokenizer, args, protocol.as_ref()) {
+            JsonlRowOutcome::Skipped => {}
+            JsonlRowOutcome::Prepared(request) => prepared.push(request),
+            JsonlRowOutcome::Failed(failure) => failures.push(failure),
+        }
+    }
+    ensure!(
+        !prepared.is_empty() || !failures.is_empty(),
+        "requests JSONL {} contained no requests",
+        requests_path.display()
+    );
+    Ok(PreparedJsonlFile { prepared, failures })
+}
+
+pub(crate) fn write_jsonl_row(stdout: &mut impl Write, row: &impl Serialize) -> Result<()> {
+    serde_json::to_writer(&mut *stdout, row).context("write request output")?;
+    writeln!(stdout)?;
+    stdout.flush()?;
+    Ok(())
 }
 
 pub(crate) fn discover_auto_cache_prefixes(
@@ -1067,6 +1262,8 @@ pub(crate) fn run_jsonl_request(
     };
     let output = RequestOutput {
         id: id.to_string(),
+        line: prepared.line,
+        status: "ok",
         input: prepared.input,
         prompt_tokens: prompt_ids.len(),
         generated_tokens: generated.len(),

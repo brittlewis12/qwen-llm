@@ -170,6 +170,92 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
+#[test]
+#[ignore = "CPU-only; requires QWEN_REPLAY_MODEL and QWEN_REPLAY_RECORDING"]
+fn recorded_render_boundary_diagnostic() {
+    let model = std::env::var("QWEN_REPLAY_MODEL").unwrap();
+    let recording = std::path::PathBuf::from(std::env::var("QWEN_REPLAY_RECORDING").unwrap());
+    let index: usize = std::env::var("QWEN_REPLAY_REQUEST_INDEX")
+        .expect("set QWEN_REPLAY_REQUEST_INDEX to the prior request's zero-based index")
+        .parse()
+        .unwrap();
+    let gguf = GgufFile::open(&model).unwrap();
+    let family = qwen_llm::model_family::ModelFamily::detect(&gguf).unwrap();
+    let template = crate::prompt_template::serve_qwen_template(family, &gguf).unwrap();
+    let tokenizer = Tokenizer::open(&model).unwrap();
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(recording.join("rows.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        index < rows.len().saturating_sub(1),
+        "requires two adjacent recorded requests"
+    );
+    let render = |index| {
+        let value = serde_json::from_str(
+            &std::fs::read_to_string(recording.join(format!("request-{index}.json"))).unwrap(),
+        )
+        .unwrap();
+        let request = crate::open_responses::items::parse_request(&value).unwrap();
+        let request = crate::open_responses::bind_qwen_request(
+            &request,
+            template,
+            crate::supports_qwen_no_thinking_prompt(family, &gguf),
+        )
+        .unwrap();
+        crate::open_responses::render::render_qwen_serve_prompt(&request)
+    };
+    let prior = render(index);
+    let next = render(index + 1);
+    let mut prior_ids = tokenizer.encode(&prior, false).unwrap();
+    let next_ids = tokenizer.encode(&next, false).unwrap();
+    assert_eq!(
+        prior_ids.len() as u64,
+        rows[index]["response"]["usage"]["input_tokens"]
+            .as_u64()
+            .unwrap()
+    );
+    assert_eq!(
+        next_ids.len() as u64,
+        rows[index + 1]["response"]["usage"]["input_tokens"]
+            .as_u64()
+            .unwrap()
+    );
+    let text = rows[index]["text"].as_str().unwrap();
+    let canonical_output = tokenizer.encode(text, false).unwrap();
+    let output_count = canonical_output.len();
+    prior_ids.extend(canonical_output);
+    let lcp = prior_ids
+        .iter()
+        .zip(&next_ids)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let trim_chars = text.chars().count() - text.trim_end().chars().count();
+    eprintln!(
+        "render-boundary template={template:?} recorded_output_tokens={} canonical_output_tokens={output_count} reconstructed_key={} next_prompt={} lcp={lcp} trailing_whitespace={trim_chars}",
+        rows[index]["response"]["usage"]["output_tokens"],
+        prior_ids.len(),
+        next_ids.len()
+    );
+    if let (Some(&old), Some(&new)) = (prior_ids.get(lcp), next_ids.get(lcp)) {
+        eprintln!(
+            "render-boundary first_difference old={old} {:?} new={new} {:?}",
+            tokenizer.decode(&[old]),
+            tokenizer.decode(&[new])
+        );
+    }
+    eprintln!(
+        "render-boundary verbatim_prefix={} trimmed_prefix={} canonical_consumed_prefix_matches={}",
+        next.starts_with(&format!("{prior}{text}")),
+        next.starts_with(&format!("{prior}{}", text.trim_end())),
+        !prior_ids.is_empty() && lcp >= prior_ids.len() - 1
+    );
+    eprintln!(
+        "render-boundary diagnostic only: canonical output IDs are not a witness of actual emitted IDs or stored checkpoint state"
+    );
+}
+
 fn f32_values(bytes: &[u8]) -> Vec<f32> {
     assert_eq!(bytes.len() % 4, 0);
     bytes

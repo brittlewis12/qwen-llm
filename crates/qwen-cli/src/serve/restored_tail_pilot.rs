@@ -386,6 +386,212 @@ fn recorded_completed_checkpoint_witness() {
         next_ids.len() - next_restored,
         next_ids.len() - report.restored_prefix_len
     );
+    drop(sequence);
+    if std::env::var_os("QWEN_REPLAY_COMPARE_TAILS").is_some() {
+        compare_consumed_boundary_tails(&backend.loaded, &completed_ids, &next_ids);
+    }
+}
+
+fn compare_consumed_boundary_tails(loaded: &LoadedModel, completed: &[i32], next: &[i32]) {
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            panic!("prefill emitted")
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let consumed = completed.len() - 1;
+    assert!(next.starts_with(&completed[..consumed]));
+    assert!((7..=32).contains(&(next.len() - consumed)));
+    let forward = loaded.forward();
+    let stops = loaded.gguf().stop_token_ids().unwrap();
+    let mut reference_logits: Option<Vec<f32>> = None;
+    let mut reference_tokens = None;
+    let mut reference_state: Option<qwen_llm::metal_forward::SessionSnapshot> = None;
+    let mut unchanged_prefix = 0;
+    for mode in ["old-packed", "consumed-serial", "consumed-packed"] {
+        let key = if mode == "old-packed" {
+            next
+        } else {
+            completed
+        };
+        let lookup = loaded.lookup_cached_prefix(key).unwrap();
+        let before = loaded.context().current_allocated_size();
+        let start = Instant::now();
+        let (chunk, mut scratch, mut sequence) = if mode == "consumed-packed" {
+            let width = next.len() - consumed;
+            let plan = qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
+                loaded.metal_model(),
+                width as u32,
+                next.len(),
+                PrefillScratchConfig::default(),
+            )
+            .unwrap();
+            let price = plan
+                .priced_upper_bound(|bytes| {
+                    Ok(loaded.context().shared_buffer_size_and_align(bytes)?.size)
+                })
+                .unwrap();
+            assert!(price <= 128 * 1024 * 1024);
+            let scratch = MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(
+                loaded.context(),
+                loaded.metal_model(),
+                plan,
+            )
+            .unwrap();
+            let scratch_bytes = loaded.context().current_allocated_size() - before;
+            assert!(scratch_bytes <= 128 * 1024 * 1024);
+            eprintln!(
+                "consumed-tail mode={mode} scratch_bytes={scratch_bytes} priced_bytes={price}"
+            );
+            (
+                width,
+                Some(scratch),
+                loaded
+                    .create_sequence(SequenceConfig::new(next.len() + 128))
+                    .unwrap(),
+            )
+        } else {
+            allocate_serve_request_state(loaded, next.len(), next.len() + 128, mode == "old-packed")
+                .unwrap()
+        };
+        let allocation_ms = start.elapsed().as_secs_f64() * 1e3;
+        let request_bytes = loaded.context().current_allocated_size() - before;
+        let start = Instant::now();
+        let restored = loaded
+            .restore_prepared_cached_prefix(lookup, &mut sequence, key)
+            .unwrap();
+        assert!(next.starts_with(&key[..restored.restored_prefix_len]));
+        let restore_ms = start.elapsed().as_secs_f64() * 1e3;
+        let start = Instant::now();
+        let mut logits = prefill_remaining(
+            loaded,
+            &forward,
+            None,
+            false,
+            next,
+            chunk,
+            &mut sequence,
+            &mut scratch,
+            &mut None,
+            &mut Sink,
+        )
+        .unwrap_or_else(|_| panic!("{mode} prefill failed"))
+        .unwrap();
+        let prefill_ms = start.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(sequence.position(), next.len());
+        if let Some(reference) = &reference_logits {
+            let cos = cosine(reference, &logits);
+            eprintln!("consumed-tail mode={mode} logits_cos={cos:.10}");
+            assert!(cos >= 0.999);
+        } else {
+            reference_logits = Some(logits.clone());
+        }
+        let snapshot = sequence
+            .metal_session()
+            .snapshot(
+                loaded.snapshot_identity(&sequence).unwrap(),
+                next.to_vec(),
+                None,
+            )
+            .unwrap();
+        if let Some(reference) = &reference_state {
+            let cos = consumed_tail_state_cosine(reference, &snapshot, unchanged_prefix);
+            eprintln!("consumed-tail mode={mode} min_state_cos={cos:.10}");
+            assert!(cos >= 0.999);
+        } else {
+            unchanged_prefix = restored.restored_prefix_len;
+            reference_state = Some(snapshot);
+        }
+        let request = ServeRequest {
+            temperature: Some(0.0),
+            ..ServeRequest::default()
+        };
+        let mut sampler = request_sampler(&request).unwrap();
+        let start = Instant::now();
+        let mut tokens = Vec::new();
+        for step in 0..128 {
+            let token = sampler.sample(&logits).unwrap().token;
+            tokens.push(token);
+            if stops.contains(&token) || step == 127 {
+                break;
+            }
+            logits = forward
+                .single_token(token, sequence.position() as u32, unsafe {
+                    sequence.metal_session_mut()
+                })
+                .unwrap();
+            sequence.advance_by(1).unwrap();
+        }
+        let decode_ms = start.elapsed().as_secs_f64() * 1e3;
+        eprintln!(
+            "consumed-tail mode={mode} restored={} rows={} request_bytes={request_bytes} allocation_ms={allocation_ms:.3} restore_ms={restore_ms:.3} prefill_ms={prefill_ms:.3} decode_ms={decode_ms:.3} tokens={} sha256={}",
+            restored.restored_prefix_len,
+            next.len() - restored.restored_prefix_len,
+            tokens.len(),
+            token_ids_sha256_i32le(&tokens)
+        );
+        if let Some(reference) = &reference_tokens {
+            assert_eq!(reference, &tokens);
+        } else {
+            reference_tokens = Some(tokens);
+        }
+    }
+}
+
+fn consumed_tail_state_cosine(
+    a: &qwen_llm::metal_forward::SessionSnapshot,
+    b: &qwen_llm::metal_forward::SessionSnapshot,
+    unchanged_prefix: usize,
+) -> f64 {
+    assert_eq!(a.identity, b.identity);
+    assert_eq!(a.kv_n_pos, b.kv_n_pos);
+    assert_eq!(a.identity.kv_storage_kind, SnapshotKvStorageKind::F16);
+    let layer_bytes = a.prefix_tokens.len() * a.identity.kv_bytes_per_token as usize;
+    let old_bytes = unchanged_prefix * a.identity.kv_bytes_per_token as usize;
+    let f16_values = |bytes: &[u8]| {
+        bytes
+            .chunks_exact(2)
+            .map(|b| half::f16::from_bits(u16::from_le_bytes(b.try_into().unwrap())).to_f32())
+            .collect::<Vec<_>>()
+    };
+    let mut min_cos = 1.0f64;
+    for (x, y) in [
+        (&a.kv_k_arena, &b.kv_k_arena),
+        (&a.kv_v_arena, &b.kv_v_arena),
+    ] {
+        assert_eq!(x.len(), y.len());
+        assert_eq!(x.len() % layer_bytes, 0);
+        for (x, y) in x.chunks_exact(layer_bytes).zip(y.chunks_exact(layer_bytes)) {
+            assert_eq!(&x[..old_bytes], &y[..old_bytes]);
+            min_cos = min_cos.min(cosine(
+                &f16_values(&x[old_bytes..]),
+                &f16_values(&y[old_bytes..]),
+            ));
+        }
+    }
+    for (x, y, elements) in [
+        (
+            &a.gdn_state_arena,
+            &b.gdn_state_arena,
+            a.identity.gdn_state_elements_per_layer,
+        ),
+        (
+            &a.gdn_conv_arena,
+            &b.gdn_conv_arena,
+            a.identity.gdn_conv_elements_per_layer,
+        ),
+    ] {
+        assert_eq!(x.len(), y.len());
+        let layer_bytes = elements as usize * 4;
+        assert_eq!(x.len() % layer_bytes, 0);
+        for (x, y) in x.chunks_exact(layer_bytes).zip(y.chunks_exact(layer_bytes)) {
+            min_cos = min_cos.min(cosine(&f32_values(x), &f32_values(y)));
+        }
+    }
+    min_cos
 }
 
 fn f32_values(bytes: &[u8]) -> Vec<f32> {

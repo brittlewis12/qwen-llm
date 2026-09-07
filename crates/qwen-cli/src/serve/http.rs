@@ -949,7 +949,18 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (stream, _) = listener.accept().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    super::super::wait_for_connection(&listener).unwrap();
+                }
+                Err(error) => panic!("accept socket-mode test client: {error}"),
+            }
+        };
         let inherited = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
         assert!(inherited >= 0);
         eprintln!(

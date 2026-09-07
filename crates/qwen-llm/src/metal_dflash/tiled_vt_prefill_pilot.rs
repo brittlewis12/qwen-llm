@@ -7,6 +7,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 
+const SUFFIX: usize = 16;
+
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -34,7 +36,7 @@ fn tiled_vt_restored_prefill_phase() {
     );
     let tokenizer = crate::tokenizer::Tokenizer::open(&path).unwrap();
     let tokens = tokenizer.encode(&text, false).unwrap();
-    assert!(tokens.len() >= 32784);
+    assert!(tokens.len() >= 32752 + SUFFIX);
     assert_eq!(
         hash(bytemuck::cast_slice(&tokens[..32752])),
         "2f9c6aedee579283f7a74353e562d9222b15fa8fa1ba9eece73ca339b033398f"
@@ -52,7 +54,26 @@ fn tiled_vt_restored_prefill_phase() {
     let forward = MetalForward::new(&ctx, &metal);
     let mut seed: Option<SessionSnapshot> = None;
     for base in [8840usize, 32752] {
-        let end = base + 32;
+        let end = base + SUFFIX;
+        let admission_plan = plan_single_chunk_prefill_scratch(
+            &metal,
+            SUFFIX as u32,
+            end,
+            PrefillScratchConfig::default(),
+        )
+        .unwrap();
+        let priced = admission_plan
+            .priced_upper_bound(|bytes| Ok(ctx.shared_buffer_size_and_align(bytes)?.size))
+            .unwrap();
+        assert!(
+            priced <= 128 * 1024 * 1024,
+            "outside restored-tail scratch admission"
+        );
+        println!(
+            "VT_PREFILL_JSON {}",
+            json!({"kind":"scratch_price", "base":base,
+            "suffix":SUFFIX, "priced_bytes":priced})
+        );
         let mut prime = MetalSession::fresh(&ctx, &metal, end).unwrap();
         let start_pos = seed.as_ref().map_or(0, |s| s.prefix_len());
         if let Some(previous) = seed.take() {
@@ -95,9 +116,13 @@ fn tiled_vt_restored_prefill_phase() {
             let restore_ms = start.elapsed().as_secs_f64() * 1e3;
             let allocation_start = Instant::now();
             let before = ctx.current_allocated_size();
-            let plan =
-                plan_single_chunk_prefill_scratch(&metal, 32, end, PrefillScratchConfig::default())
-                    .unwrap();
+            let plan = plan_single_chunk_prefill_scratch(
+                &metal,
+                SUFFIX as u32,
+                end,
+                PrefillScratchConfig::default(),
+            )
+            .unwrap();
             let mut scratch =
                 MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(&ctx, &metal, plan).unwrap();
             let scratch_bytes = ctx.current_allocated_size() - before;
@@ -121,7 +146,7 @@ fn tiled_vt_restored_prefill_phase() {
             println!(
                 "VT_PREFILL_JSON {}",
                 json!({"kind":if index<4 {"warmup"} else {"sample"},
-                "base":base, "suffix":32, "index":index, "arm":if enabled {"B"} else {"A"},
+                "base":base, "suffix":SUFFIX, "index":index, "arm":if enabled {"B"} else {"A"},
                 "restore_ms":restore_ms, "allocation_ms":allocation_ms, "prefill_ms":prefill_ms,
                 "total_ms":total_ms, "scratch_bytes":scratch_bytes, "tiled_calls":tiled_calls})
             );

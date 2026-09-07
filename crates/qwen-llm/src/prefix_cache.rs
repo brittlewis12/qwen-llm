@@ -305,6 +305,26 @@ impl PrefixCache {
         None
     }
 
+    pub(crate) fn peek_longest_consumed_extension(
+        &self,
+        identity: &SnapshotIdentity,
+        request_tokens: &[i32],
+    ) -> Option<Arc<SessionSnapshot>> {
+        self.buckets
+            .values()
+            .flatten()
+            .filter(|snapshot| {
+                snapshot.identity == *identity
+                    && consumed_extension_matches(
+                        &snapshot.prefix_tokens,
+                        snapshot.pending_token,
+                        request_tokens,
+                    )
+            })
+            .max_by_key(|snapshot| snapshot.prefix_len())
+            .map(Arc::clone)
+    }
+
     fn lookup_and_touch(
         &mut self,
         identity: &SnapshotIdentity,
@@ -335,6 +355,17 @@ impl PrefixCache {
 }
 
 const HASH_SEED: u64 = 0xcbf29ce484222325;
+
+pub(crate) fn consumed_extension_matches(
+    prefix: &[i32],
+    pending: Option<i32>,
+    request: &[i32],
+) -> bool {
+    !prefix.is_empty()
+        && request.len() > prefix.len()
+        && request.starts_with(prefix)
+        && pending.is_some_and(|token| request[prefix.len()] != token)
+}
 const HASH_PRIME: u64 = 0x100000001b3;
 
 fn hash_tokens(tokens: &[i32]) -> u64 {
@@ -436,6 +467,107 @@ mod tests {
     #[test]
     fn hash_changes_with_tokens() {
         assert_ne!(hash_tokens(&[1, 2, 3]), hash_tokens(&[1, 2, 4]));
+    }
+
+    #[test]
+    fn consumed_extension_is_separate_from_logical_pending_match() {
+        let id = ident(1);
+        let mut cache = PrefixCache::new();
+        let mut snapshot = snap(id.clone(), &[10, 11], 32);
+        snapshot.pending_token = Some(12);
+        snapshot.final_logits = None;
+        let snapshot = Arc::new(snapshot);
+        cache.insert_shared(Arc::clone(&snapshot));
+        let stats = cache.stats();
+        let clock = cache.clock;
+        let hit = cache
+            .peek_longest_consumed_extension(&id, &[10, 11, 99])
+            .unwrap();
+        assert!(Arc::ptr_eq(&snapshot, &hit));
+        assert_eq!(cache.stats(), stats);
+        assert_eq!(cache.clock, clock);
+        assert!(
+            cache
+                .peek_longest_for_completion(&id, &[10, 11, 99])
+                .is_none()
+        );
+        for request in [
+            &[][..],
+            &[10],
+            &[10, 11],
+            &[10, 11, 12],
+            &[10, 11, 12, 13],
+            &[10, 99, 13],
+        ] {
+            assert!(
+                cache
+                    .peek_longest_consumed_extension(&id, request)
+                    .is_none()
+            );
+        }
+        assert!(
+            cache
+                .peek_longest_consumed_extension(&ident(2), &[10, 11, 99])
+                .is_none()
+        );
+        cache.touch_shared(&hit);
+        assert_eq!(cache.clock, clock + 1);
+        assert_eq!(cache.stats(), stats);
+        cache.clear();
+        assert_eq!(hit.prefix_tokens, [10, 11]);
+        assert!(
+            cache
+                .peek_longest_consumed_extension(&id, &[10, 11, 99])
+                .is_none()
+        );
+        cache.touch_shared(&hit);
+        assert_eq!(cache.stats().entries, 0);
+    }
+
+    #[test]
+    fn consumed_extension_requires_pending_and_prefers_longest_state() {
+        let id = ident(1);
+        let mut cache = PrefixCache::new();
+        cache.insert(snap(id.clone(), &[10, 11, 12], 48));
+        let mut empty = snap(id.clone(), &[], 0);
+        empty.pending_token = Some(99);
+        cache.insert(empty);
+        assert!(
+            cache
+                .peek_longest_consumed_extension(&id, &[10, 11, 12, 13])
+                .is_none()
+        );
+        for prefix in [&[10][..], &[10, 11]] {
+            let mut snapshot = snap(id.clone(), prefix, 32);
+            snapshot.pending_token = Some(99);
+            snapshot.final_logits = None;
+            cache.insert(snapshot);
+        }
+        let hit = cache
+            .peek_longest_consumed_extension(&id, &[10, 11, 12, 13])
+            .unwrap();
+        assert_eq!(hit.prefix_len(), 2);
+        assert_eq!(
+            cache
+                .peek_longest_for_completion(&id, &[10, 11, 12, 13])
+                .unwrap()
+                .restored_prefix_len,
+            3
+        );
+        let mut incompatible = id.clone();
+        incompatible.layout_version += 1;
+        assert!(
+            cache
+                .peek_longest_consumed_extension(&incompatible, &[10, 11, 12, 13])
+                .is_none()
+        );
+        incompatible = id.clone();
+        incompatible.tokenizer_id += 1;
+        assert!(
+            cache
+                .peek_longest_consumed_extension(&incompatible, &[10, 11, 12, 13])
+                .is_none()
+        );
     }
 
     #[test]

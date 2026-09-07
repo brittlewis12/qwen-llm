@@ -1123,6 +1123,20 @@ pub struct PreparedPrefixCacheLookup {
     stats_at_lookup: PrefixCacheStats,
 }
 
+/// Explicit state-only reuse of a consumed prefix whose pending token differs.
+/// This is not interchangeable with a logical prefix hit. Callers must arrange
+/// suffix execution before choosing it over their original lookup.
+pub struct PreparedConsumedPrefixLookup {
+    checkpoint: PreparedCheckpoint,
+    stats_at_lookup: PrefixCacheStats,
+}
+
+impl PreparedConsumedPrefixLookup {
+    pub fn restored_prefix_len(&self) -> usize {
+        self.checkpoint.snapshot.prefix_len()
+    }
+}
+
 impl PreparedPrefixCacheLookup {
     /// Position restored into the destination sequence. A matched pending token
     /// remains unconsumed and must be included in the caller's prefill suffix.
@@ -2046,6 +2060,67 @@ impl LoadedModel {
             exact: restored.exact,
             exact_final_logits: restored.exact_final_logits,
             capture_tail: restored.capture_tail,
+            stats_at_lookup: lookup.stats_at_lookup,
+        })
+    }
+
+    /// Find a strict consumed-prefix extension with an unmatched pending token.
+    /// Does not touch LRU or duplicate payloads. Logical lookup remains separate;
+    /// callers must compare restore depths and retain the original fallback.
+    pub fn lookup_cached_consumed_extension(
+        &self,
+        request_tokens: &[i32],
+    ) -> Option<PreparedConsumedPrefixLookup> {
+        let identity = self.snapshot_identity_for_abi(self.metal_model.snapshot_abi());
+        let cache = self.prefix_cache.lock();
+        let snapshot = cache.peek_longest_consumed_extension(&identity, request_tokens)?;
+        Some(PreparedConsumedPrefixLookup {
+            checkpoint: PreparedCheckpoint {
+                owner: Arc::clone(&self.owner),
+                snapshot,
+                max_context_tokens: request_tokens.len(),
+            },
+            stats_at_lookup: cache.stats(),
+        })
+    }
+
+    /// Restore only consumed state, never pending-token logits or capture tails.
+    /// Owner, fresh-sequence, capacity and snapshot ABI checks precede mutation.
+    pub fn restore_prepared_consumed_extension(
+        &self,
+        lookup: PreparedConsumedPrefixLookup,
+        sequence: &mut Sequence,
+        request_tokens: &[i32],
+    ) -> Result<PrefixCacheRestore, RuntimeError> {
+        let prepared = &lookup.checkpoint;
+        ensure_same_model_owner(&self.owner, &prepared.owner)?;
+        self.ensure_owns(sequence)?;
+        sequence.check_position(0)?;
+        sequence.ensure_can_append(request_tokens.len())?;
+        if !crate::prefix_cache::consumed_extension_matches(
+            &prepared.snapshot.prefix_tokens,
+            prepared.snapshot.pending_token,
+            request_tokens,
+        ) {
+            return Err(RuntimeError::PreparedCheckpointRequestMismatch {
+                checkpoint_tokens: prepared.snapshot.prefix_len(),
+                request_tokens: request_tokens.len(),
+            });
+        }
+        let identity = self.snapshot_identity(sequence)?;
+        prepared.snapshot.validate_for_restore(
+            &identity,
+            sequence.max_context_tokens(),
+            Some(self.metal_model.arch.vocab_size as usize),
+        )?;
+        sequence.restore_from_snapshot(&prepared.snapshot, &identity)?;
+        self.prefix_cache.lock().touch_shared(&prepared.snapshot);
+        Ok(PrefixCacheRestore {
+            matched_prefix_len: prepared.snapshot.prefix_len(),
+            restored_prefix_len: prepared.snapshot.prefix_len(),
+            exact: false,
+            exact_final_logits: None,
+            capture_tail: None,
             stats_at_lookup: lookup.stats_at_lookup,
         })
     }

@@ -37,6 +37,8 @@ and maximum absolute error <0.005. Extent32769 is correctness-only, afterward.
 
 GPU means 6.250479 -> 3.607279 ms, saving **42.288%**. Both pairs pass;
 control spread is 0.409%. The one-layer screen passes, not an endpoint gate.
+The retained instrument emits raw timings rather than compiling the experiment's
+performance decision; the original packet's decision record remains in its log.
 Subsequent single-order diagnostics are transpose1.721953, KQ0.528401 and
 KQV1.341734 ms. They are attribution only, not separately selected best times.
 

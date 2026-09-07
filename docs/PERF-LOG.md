@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Consumed-Tail HTTP Stability Gate INCONCLUSIVE / HOLD
+
+- `6ed6032a` implements separate consumed-extension restore; `0c58d830` adds a
+  default-off transactional packed serving candidate. Original lookup stays pinned;
+  candidate failure drops objects before independently re-admitting the old plan.
+  API numerical state/128-token greedy oracle and CPU scope/fault tests pass.
+- Q4 A-B-B-A compact-prose wall 6622.882 -> 5801.080 ms: observed 12.409% saved,
+  paired 15.623%/9.077%, control spread 3.652%. But primary TTFT control spread
+  6.919% exceeds the frozen 5% gate. Packet fails qualification; no retroactive
+  gate change or repeat. Fresh guards pass; all unchanged rows remain reported.
+- All 40 responses agree except intended cached-token accounting 8860 -> 8987
+  on compact-prose only. Both candidates select 26 forwards; no fallbacks occur.
+  Independent review agrees with HOLD, not promotion from the stable wall result.
+- `359e9bf8` removes serving opt-in and `03b49394` removes unused API. Prior
+  test-only phase evidence and Q8 production win remain. Return to global
+  fresh/cold/spec cost ranking rather than extending this warm neighborhood.
+- Evidence: `docs/bench/2026-09-06-consumed-tail-http/RESULT.md`.
+
 ## 2026-09-06 - Completed-Boundary Work Elision Phase PASS, Serving HOLD
 
 - Fresh engine replay (`667ed282`) proves Q4 completed matched 8988/restored 8987

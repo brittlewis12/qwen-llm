@@ -250,6 +250,12 @@ struct GenerationOverrides {
     /// use sparse rejection sampling against the packed target verifier.
     #[arg(long, value_name = "GGUF")]
     drafter: Option<PathBuf>,
+
+    /// Append one `qwen-llm.request-stats` v1 record for this request as
+    /// JSONL: status, usage, finish reason, timing, throughput, output
+    /// fingerprint. Raw stdout is unchanged.
+    #[arg(long, value_name = "PATH")]
+    request_stats_jsonl: Option<PathBuf>,
 }
 
 impl Invocation {
@@ -308,6 +314,9 @@ impl GenerationOverrides {
         }
         if let Some(value) = self.drafter.as_ref() {
             args.drafter = Some(value.clone());
+        }
+        if let Some(value) = self.request_stats_jsonl.as_ref() {
+            args.request_stats_jsonl = Some(value.clone());
         }
     }
 }

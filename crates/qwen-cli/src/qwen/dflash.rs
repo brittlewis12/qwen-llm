@@ -111,8 +111,11 @@ pub(crate) fn verify_fallback_margin(n_pos: usize) -> f32 {
         })
 }
 
+/// Opt-out rollback lever for the batched-verify fallback. Default on; the
+/// falsy vocabulary (`0`/`false`/`no`) disables it. Previously only the
+/// literal `0` counted, so `=false` silently left the fallback enabled.
 pub(crate) fn verify_fallback_enabled() -> bool {
-    std::env::var("QWEN_DFLASH_VERIFY_FALLBACK").map_or(true, |value| value != "0")
+    qwen_llm::env_flag::read_default_on("QWEN_DFLASH_VERIFY_FALLBACK")
 }
 
 /// Ctx-keyed spec-vs-serial break-even in mean emitted tokens/step.

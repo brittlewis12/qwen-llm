@@ -142,6 +142,31 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
     for variable, rel, line, _, lines in consts.values():
         add(variable, "value", rel, line, lines)
 
+    # Test-fixture aliases live in the `test_fixtures` inventory as
+    # `env: &["A", "B"]` arrays rather than literal var_os calls. Each alias
+    # is a `fixture path` knob described by the fixture's id.
+    for rel, text, masked, _, lines in sources:
+        if not rel.endswith("/test_fixtures.rs"):
+            continue
+        for fixture in re.finditer(
+            r"Fixture\s*\{\s*id:\s*\"([^\"]+)\"\s*,\s*env:\s*&\[([^\]]*)\]",
+            masked,
+            re.DOTALL,
+        ):
+            fixture_id, aliases = fixture.groups()
+            for alias in re.finditer(r"\"([A-Z][A-Z0-9_]*)\"", aliases):
+                variable = alias.group(1)
+                if not is_knob(variable):
+                    continue
+                line = line_number(masked, fixture.start(2) + alias.start())
+                item = knobs.get(variable)
+                desc = f"test fixture alias for `{fixture_id}` (see `test_fixtures`)"
+                if item is None:
+                    knobs[variable] = Knob(variable, "fixture path", rel, line, desc)
+                elif item.description == "undocumented":
+                    item.description = desc
+                knobs[variable].families.add("test-fixtures")
+
     for variable, item in knobs.items():
         if len(item.polarities) > 1:
             conflicts.append((variable, ", ".join(sorted(item.polarities)), ", ".join(sorted(item.families)), item.line, item.path))
@@ -178,7 +203,7 @@ def main() -> int:
     else:
         target.write_text(rendered, encoding="utf-8")
     print(f"knobs: {len(knobs)}")
-    print("kinds:", ", ".join(f"{kind}={sum(item.kind == kind for item in knobs.values())}" for kind in ("bool default-on", "bool default-off", "value")))
+    print("kinds:", ", ".join(f"{kind}={sum(item.kind == kind for item in knobs.values())}" for kind in ("bool default-on", "bool default-off", "value", "fixture path")))
     print(f"undocumented: {sum(item.description == 'undocumented' for item in knobs.values())}")
     print("polarity conflicts:", "none" if not conflicts else conflicts)
     return 0

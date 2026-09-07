@@ -321,8 +321,7 @@ fn online_n16_full_verifier_witness() {
         "online_increment_bytes":online_bytes, "actual_total_bytes":ctx.current_allocated_size()-initial,
         "timing_residency":"workspace retained in both arms; one model and session"})
     );
-    let debug =
-        MetalTensor::zeros_f32(&ctx, vec![(N * metal.arch.vocab_size as usize) as u64]).unwrap();
+    let debug = MetalTensor::zeros_f32(&ctx, vec![N as u64, metal.arch.vocab_size as u64]).unwrap();
     let mut witnesses = Vec::new();
     for online in [false, true] {
         seed.restore(&mut session);

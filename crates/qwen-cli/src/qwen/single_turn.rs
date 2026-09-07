@@ -897,16 +897,9 @@ pub(crate) fn execute_single_turn_request(
                         &mut sampler,
                         &mut on_token,
                         |token| {
-                            let position = sequence.position();
-                            let next = forward
-                                .single_token_greedy(
-                                    token,
-                                    u32::try_from(position).context("position does not fit u32")?,
-                                    unsafe { sequence.metal_session_mut() },
-                                )
-                                .context("decode token with GPU greedy selection")?;
-                            sequence.advance_by(1)?;
-                            Ok(next)
+                            loaded
+                                .decode_token_greedy(&mut sequence, token)
+                                .context("decode token with GPU greedy selection")
                         },
                     )?,
                     None,
@@ -921,16 +914,9 @@ pub(crate) fn execute_single_turn_request(
                         &mut sampler,
                         &mut on_token,
                         |token| {
-                            let position = sequence.position();
-                            let next = forward
-                                .single_token(
-                                    token,
-                                    u32::try_from(position).context("position does not fit u32")?,
-                                    unsafe { sequence.metal_session_mut() },
-                                )
-                                .context("decode token")?;
-                            sequence.advance_by(1)?;
-                            Ok(next)
+                            loaded
+                                .decode_token(&mut sequence, token)
+                                .context("decode token")
                         },
                     )?,
                     None,

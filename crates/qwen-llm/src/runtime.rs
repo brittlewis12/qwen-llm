@@ -32,6 +32,7 @@ use crate::metal_forward::{
     MetalForward, MetalLoadPrefetchAdvice, MetalModel, MetalModelLoadOptions, MetalSession,
     MfError, SessionSnapshot, SnapshotAbi, SnapshotIdentity, SnapshotValidationError,
 };
+use crate::sampling::GreedySelection;
 use crate::model::Arch;
 use crate::moe_batch16::{
     MOE_BATCH16_WIDTH, MoeBatch16Error, MoeBatch16Executor, MoeBatch16PlanTelemetry,
@@ -1433,6 +1434,61 @@ impl LoadedModel {
         }
     }
 
+    /// Advance one owned sequence by a single token and return the next
+    /// logits. The sequence's tracked position is the kernel position; a
+    /// failed forward poisons the state so it cannot be snapshotted or
+    /// continued. This is the safe form of the `single_token` +
+    /// `metal_session_mut` + `advance_by` ritual.
+    pub fn decode_token(
+        &self,
+        sequence: &mut Sequence,
+        token_id: i32,
+    ) -> Result<Vec<f32>, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &sequence.owner)?;
+        sequence.state.ensure_usable()?;
+        sequence.ensure_can_append(1)?;
+        let position = sequence_position_u32(sequence)?;
+        match self
+            .forward()
+            .single_token(token_id, position, &mut sequence.state)
+        {
+            Ok(logits) => {
+                sequence.position += 1;
+                Ok(logits)
+            }
+            Err(error) => {
+                sequence.state.poison("decode step failed");
+                Err(error.into())
+            }
+        }
+    }
+
+    /// `decode_token` with the greedy argmax selected on the GPU; returns the
+    /// selection instead of full logits.
+    pub fn decode_token_greedy(
+        &self,
+        sequence: &mut Sequence,
+        token_id: i32,
+    ) -> Result<GreedySelection, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &sequence.owner)?;
+        sequence.state.ensure_usable()?;
+        sequence.ensure_can_append(1)?;
+        let position = sequence_position_u32(sequence)?;
+        match self
+            .forward()
+            .single_token_greedy(token_id, position, &mut sequence.state)
+        {
+            Ok(selection) => {
+                sequence.position += 1;
+                Ok(selection)
+            }
+            Err(error) => {
+                sequence.state.poison("greedy decode step failed");
+                Err(error.into())
+            }
+        }
+    }
+
     /// Create the fixed-width dense-Qwen decode executor over this model.
     ///
     /// The returned wrapper keeps model provenance and logical sequence
@@ -2108,6 +2164,13 @@ fn validate_packed_prefill_block_size(block_size: u32) -> Result<(), RuntimeErro
         return Err(RuntimeError::EmptyPackedPrefillBlock);
     }
     Ok(())
+}
+
+/// The kernel position for the next token of `sequence`, as `u32`.
+fn sequence_position_u32(sequence: &Sequence) -> Result<u32, RuntimeError> {
+    u32::try_from(sequence.position).map_err(|_| RuntimeError::PackedPrefillPositionOverflow {
+        position: sequence.position,
+    })
 }
 
 fn checked_packed_prefill_bounds(

@@ -854,7 +854,7 @@ pub(crate) fn run_jsonl_request(
         (result.generation, generated_text, Some(result.stats))
     } else {
         let (generation, generated_text) = decode_serial(
-            &forward,
+            loaded,
             tokenizer,
             &mut sequence,
             logits,

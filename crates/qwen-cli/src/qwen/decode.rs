@@ -645,7 +645,7 @@ where
 }
 
 pub(crate) fn decode_serial(
-    forward: &MetalForward<'_>,
+    loaded: &LoadedModel,
     tokenizer: &Tokenizer,
     sequence: &mut Sequence,
     logits: Vec<f32>,
@@ -669,16 +669,9 @@ pub(crate) fn decode_serial(
             sampler,
             &mut on_token,
             |token| {
-                let position = sequence.position();
-                let next = forward
-                    .single_token_greedy(
-                        token,
-                        u32::try_from(position).context("position does not fit u32")?,
-                        unsafe { sequence.metal_session_mut() },
-                    )
-                    .context("decode token with GPU greedy selection")?;
-                sequence.advance_by(1)?;
-                Ok(next)
+                loaded
+                    .decode_token_greedy(sequence, token)
+                    .context("decode token with GPU greedy selection")
             },
         )?
     } else {
@@ -688,18 +681,7 @@ pub(crate) fn decode_serial(
             stop_tokens,
             sampler,
             &mut on_token,
-            |token| {
-                let position = sequence.position();
-                let next = forward
-                    .single_token(
-                        token,
-                        u32::try_from(position).context("position does not fit u32")?,
-                        unsafe { sequence.metal_session_mut() },
-                    )
-                    .context("decode token")?;
-                sequence.advance_by(1)?;
-                Ok(next)
-            },
+            |token| loaded.decode_token(sequence, token).context("decode token"),
         )?
     };
     Ok((generation, generated_text))

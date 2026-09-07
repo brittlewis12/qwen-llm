@@ -88,7 +88,7 @@ use qwen_llm::metal::{
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
     MetalDFlashSession, MetalDFlashVerifyScratch, PrefillScratchConfig, PrefillScratchOverlayStats,
-    PrefillScratchPlan, ensure_prompt_lookup_n8_supported,
+    PrefillScratchPlan,
     plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::{
@@ -259,6 +259,19 @@ fn run() -> Result<()> {
         model_family,
         drafter_policy::Lane::CliSingleTurn,
     )?;
+    // Prompt lookup's qualified layout is a header fact; other families
+    // reject the flag in their own pre-load validators.
+    if args.prompt_lookup
+        && matches!(
+            model_family,
+            Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)
+        )
+    {
+        let model = qwen_llm::loader::Model::from_gguf(&gguf)
+            .context("parse target arch for the prompt-lookup gate")?;
+        qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
+            .map_err(anyhow::Error::msg)?;
+    }
     if model_family == Some(ModelFamily::MuseGlimmer) {
         return run_muse_glimmer_single_turn(
             &model_path,
@@ -485,6 +498,36 @@ fn validate_request_before_model_open(args: &Args) -> Result<()> {
         validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
     }
     validate_drafter_decode_policy(args)?;
+    validate_input_files_readable(args)?;
+    Ok(())
+}
+
+/// Every file the request will read must be openable before the model is
+/// loaded. The contents are still read at their existing (timed) sites; this
+/// only refuses to spend a multi-gigabyte load on a path that cannot be read.
+/// `-` means stdin and is not a file.
+fn validate_input_files_readable(args: &Args) -> Result<()> {
+    let candidates = [
+        ("--prompt-file", args.prompt_file.as_deref()),
+        ("--messages", args.messages.as_deref()),
+        ("--requests-jsonl", args.requests_jsonl.as_deref()),
+    ];
+    for (flag, path) in candidates {
+        let Some(path) = path else { continue };
+        if path == Path::new("-") {
+            continue;
+        }
+        let file =
+            std::fs::File::open(path).with_context(|| format!("open {flag} {}", path.display()))?;
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("stat {flag} {}", path.display()))?;
+        ensure!(
+            metadata.is_file(),
+            "{flag} {} is not a regular file",
+            path.display()
+        );
+    }
     Ok(())
 }
 

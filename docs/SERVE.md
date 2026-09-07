@@ -119,7 +119,10 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # capacity may extend through its declared 131,072-token context.
 ```
 
-The listener rejects every resolved non-loopback address. Request bodies are
+The listener rejects every resolved non-loopback address and is bound before
+the model loads, so an unresolvable or busy address fails startup immediately;
+connections that arrive during the load wait in the backlog and are answered
+once the accept loop starts. Request bodies are
 limited to 16 MiB. The whole request read has a 30 s absolute deadline; the
 socket read timeout is 35 s so it cannot preempt that mapping, and writes have a
 30 s timeout. For an optional trace,

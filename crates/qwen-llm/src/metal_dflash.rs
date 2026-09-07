@@ -271,50 +271,97 @@ crate::env_flag!(
     "QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY"
 );
 
-pub fn ensure_prompt_lookup_n8_supported(model: &MetalModel) -> Result<(), String> {
-    if model.arch != crate::model::QWEN3_27B {
+/// Per-block FFN layout facts the prompt-lookup gate inspects. Both the
+/// header-level [`crate::loader::Model`] and the resident [`MetalModel`]
+/// carry exactly these, so the rule is stated once and evaluated at either
+/// stage.
+#[derive(Clone, Copy, Debug)]
+pub struct PromptLookupBlockLayout {
+    pub gate: GgmlType,
+    pub up: GgmlType,
+    pub down: GgmlType,
+    pub moe: bool,
+}
+
+/// The qualified prompt-lookup layout: dense 27B, Q6_K lm_head, Q4_K gate/up,
+/// Q4_K or Q6_K down, no routed experts. Pure over layout facts; no weights.
+pub fn check_prompt_lookup_n8_layout(
+    arch: &crate::model::Arch,
+    lm_head: GgmlType,
+    blocks: impl IntoIterator<Item = PromptLookupBlockLayout>,
+) -> Result<(), String> {
+    if *arch != crate::model::QWEN3_27B {
         return Err(format!(
             "prompt lookup currently requires the dense 27B architecture; loaded {:?}",
-            model.arch.kind
+            arch.kind
         ));
     }
-    if model.lm_head.dtype != GgmlType::Q6_K {
+    if lm_head != GgmlType::Q6_K {
         return Err(format!(
-            "prompt lookup currently requires the validated Q4_K_M layout; lm_head is {:?}",
-            model.lm_head.dtype
+            "prompt lookup currently requires the validated Q4_K_M layout; lm_head is {lm_head:?}"
         ));
     }
-    for (index, block) in model.blocks.iter().enumerate() {
-        let (gate, up, down, moe) = match block {
-            MetalBlock::Gdn(block) => (
-                &block.ffn_gate,
-                &block.ffn_up,
-                &block.ffn_down,
-                block.ffn_moe.as_ref(),
-            ),
-            MetalBlock::Attn(block) => (
-                &block.ffn_gate,
-                &block.ffn_up,
-                &block.ffn_down,
-                block.ffn_moe.as_ref(),
-            ),
-        };
-        if moe.is_some()
-            || gate.dtype != GgmlType::Q4_K
-            || up.dtype != GgmlType::Q4_K
-            || !matches!(down.dtype, GgmlType::Q4_K | GgmlType::Q6_K)
+    for (index, block) in blocks.into_iter().enumerate() {
+        if block.moe
+            || block.gate != GgmlType::Q4_K
+            || block.up != GgmlType::Q4_K
+            || !matches!(block.down, GgmlType::Q4_K | GgmlType::Q6_K)
         {
             return Err(format!(
                 "prompt lookup requires dense-27B Q4_K_M gate/up=Q4_K and down=Q4_K/Q6_K; block \
                  {index} has gate/up/down={:?}/{:?}/{:?}, moe={}",
-                gate.dtype,
-                up.dtype,
-                down.dtype,
-                moe.is_some()
+                block.gate, block.up, block.down, block.moe
             ));
         }
     }
     Ok(())
+}
+
+/// Header-level prompt-lookup gate: answers from the opened GGUF before any
+/// weight is loaded.
+pub fn ensure_prompt_lookup_n8_supported_for_gguf(
+    model: &crate::loader::Model<'_>,
+) -> Result<(), String> {
+    use crate::loader::Block;
+    check_prompt_lookup_n8_layout(
+        &model.arch,
+        model.lm_head.dtype,
+        model.blocks.iter().map(|block| match block {
+            Block::Gdn(block) => PromptLookupBlockLayout {
+                gate: block.ffn_gate.dtype,
+                up: block.ffn_up.dtype,
+                down: block.ffn_down.dtype,
+                moe: block.ffn_moe.is_some(),
+            },
+            Block::Attn(block) => PromptLookupBlockLayout {
+                gate: block.ffn_gate.dtype,
+                up: block.ffn_up.dtype,
+                down: block.ffn_down.dtype,
+                moe: block.ffn_moe.is_some(),
+            },
+        }),
+    )
+}
+
+pub fn ensure_prompt_lookup_n8_supported(model: &MetalModel) -> Result<(), String> {
+    check_prompt_lookup_n8_layout(
+        &model.arch,
+        model.lm_head.dtype,
+        model.blocks.iter().map(|block| match block {
+            MetalBlock::Gdn(block) => PromptLookupBlockLayout {
+                gate: block.ffn_gate.dtype,
+                up: block.ffn_up.dtype,
+                down: block.ffn_down.dtype,
+                moe: block.ffn_moe.is_some(),
+            },
+            MetalBlock::Attn(block) => PromptLookupBlockLayout {
+                gate: block.ffn_gate.dtype,
+                up: block.ffn_up.dtype,
+                down: block.ffn_down.dtype,
+                moe: block.ffn_moe.is_some(),
+            },
+        }),
+    )
 }
 
 crate::env_flag!(default_on dflash_batched_proj_enabled, "QWEN_DFLASH_BATCHED_PROJ");

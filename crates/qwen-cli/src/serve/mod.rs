@@ -148,6 +148,11 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         crate::drafter_policy::Lane::Serve,
     )?;
     drop(drafter);
+    // Bind before loading weights: an unresolvable, non-loopback, or busy
+    // address is a startup error, not something to discover after a
+    // multi-gigabyte load. Connections arriving during load queue in the
+    // kernel backlog and are answered once the accept loop starts.
+    let listener = bind_loopback(&invocation.addr)?;
     let mut trace = invocation
         .trace_sse
         .as_deref()
@@ -183,13 +188,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
         tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0", context_limit, default_max_tokens);
         crate::shutdown::checkpoint()?;
-        return accept_loop(
-            &invocation.addr,
-            &model_id,
-            load_ms,
-            &mut backend,
-            &mut trace,
-        );
+        return accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace);
     }
 
     if family == Some(ModelFamily::DeepSeek4) {
@@ -213,7 +212,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         )?;
         tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} snapshot_cache_bytes={}", context_limit, snapshot_cache_bytes);
         crate::shutdown::checkpoint()?;
-        return accept_loop(&invocation.addr, &model_id, 0.0, &mut backend, &mut trace);
+        return accept_loop(listener, &model_id, 0.0, &mut backend, &mut trace);
     }
     // Resolve the rendering protocol once from the loaded metadata -- the
     // same gate `qwen run` applies. Without this a Qwen3.8 model renders
@@ -270,13 +269,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} snapshot_cache_bytes={snapshot_cache_bytes}");
     crate::shutdown::checkpoint()?;
 
-    accept_loop(
-        &invocation.addr,
-        &model_id,
-        load_ms,
-        &mut backend,
-        &mut trace,
-    )
+    accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace)
 }
 
 fn bind_loopback(addr: &str) -> Result<TcpListener> {
@@ -362,29 +355,28 @@ fn spawn_acceptor(
 /// Serial generation loop shared by every family backend. Acceptance runs on
 /// a separate thread so busy clients can be rejected without moving backend.
 fn accept_loop(
-    addr: &str,
+    listener: TcpListener,
     model_id: &str,
     load_ms: f64,
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
 ) -> Result<()> {
-    accept_loop_with_checkpoint(addr, model_id, load_ms, backend, trace, || {
+    accept_loop_with_checkpoint(listener, model_id, load_ms, backend, trace, || {
         crate::shutdown::checkpoint()
     })
 }
 
 fn accept_loop_with_checkpoint(
-    addr: &str,
+    listener: TcpListener,
     model_id: &str,
     load_ms: f64,
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
     mut checkpoint: impl FnMut() -> Result<()>,
 ) -> Result<()> {
-    let listener = bind_loopback(addr)?;
     let local_addr = listener
         .local_addr()
-        .map_or_else(|_| addr.to_owned(), |addr| addr.to_string());
+        .map_or_else(|_| "<unknown>".to_owned(), |addr| addr.to_string());
     tracing::info!(
         target: "qwen_diag",
         "serve: listening on http://{} model={} load_ms={:.1} (serial; POST /v1/responses, GET /v1/models)",
@@ -518,7 +510,7 @@ mod tests {
             let mut backend = UnreachableBackend;
             let mut trace = None;
             accept_loop_with_checkpoint(
-                "127.0.0.1:0",
+                bind_loopback("127.0.0.1:0").unwrap(),
                 "shutdown-test",
                 0.0,
                 &mut backend,

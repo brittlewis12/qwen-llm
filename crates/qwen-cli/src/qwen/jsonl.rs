@@ -106,9 +106,6 @@ pub(crate) fn run_requests_jsonl(
         prefetch_policy_label(loaded.prefetch_outcome().policy),
         loaded.prefetch_outcome().bytes_returned_total(),
     );
-    if args.prompt_lookup {
-        ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
-    }
     let greedy_gpu_mode = configured_greedy_gpu_argmax_mode();
     let tokenizer = loaded.tokenizer().context("load tokenizer")?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;

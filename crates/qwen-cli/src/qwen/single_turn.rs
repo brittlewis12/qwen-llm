@@ -46,9 +46,6 @@ pub(crate) fn run_single_turn(
             },
         )
         .with_context(|| format!("load model {}", model_path.display()))?;
-    if args.prompt_lookup {
-        ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
-    }
     // v0.77 DFlash speculative decode. Policy and metadata binding were
     // settled pre-load by `drafter_policy`; only the GPU copy happens here.
     // The drafter mmap drops afterwards because `MetalDFlashHead` owns every

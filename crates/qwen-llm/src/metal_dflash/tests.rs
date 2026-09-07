@@ -14797,3 +14797,59 @@ fn windowed_split_capture_equals_full_capture() {
     );
     eprintln!("[f2-split] PASS: split capture == full suffix; drafts bit-identical");
 }
+
+mod prompt_lookup_layout_gate {
+    use super::*;
+    use crate::model::{QWEN3_0_8B, QWEN3_27B};
+
+    fn q4km_block() -> PromptLookupBlockLayout {
+        PromptLookupBlockLayout {
+            gate: GgmlType::Q4_K,
+            up: GgmlType::Q4_K,
+            down: GgmlType::Q6_K,
+            moe: false,
+        }
+    }
+
+    #[test]
+    fn qualified_q4km_layout_passes() {
+        let blocks = (0..64).map(|i| PromptLookupBlockLayout {
+            down: if i % 2 == 0 { GgmlType::Q4_K } else { GgmlType::Q6_K },
+            ..q4km_block()
+        });
+        assert_eq!(
+            check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn non_27b_architecture_is_refused_before_blocks_are_inspected() {
+        let err = check_prompt_lookup_n8_layout(&QWEN3_0_8B, GgmlType::Q6_K, std::iter::empty())
+            .unwrap_err();
+        assert!(err.contains("dense 27B architecture"), "{err}");
+    }
+
+    #[test]
+    fn q8_lm_head_is_refused() {
+        let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q8_0, std::iter::empty())
+            .unwrap_err();
+        assert!(err.contains("lm_head is Q8_0"), "{err}");
+    }
+
+    #[test]
+    fn a_single_offending_block_names_its_index_and_dtypes() {
+        let mut blocks = vec![q4km_block(); 64];
+        blocks[17].gate = GgmlType::Q8_0;
+        let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks).unwrap_err();
+        assert!(err.contains("block 17 has gate/up/down=Q8_0/Q4_K/Q6_K, moe=false"), "{err}");
+    }
+
+    #[test]
+    fn routed_experts_are_refused() {
+        let mut blocks = vec![q4km_block(); 64];
+        blocks[0].moe = true;
+        let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks).unwrap_err();
+        assert!(err.contains("moe=true"), "{err}");
+    }
+}

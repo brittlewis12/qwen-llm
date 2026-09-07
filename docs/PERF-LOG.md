@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Snapshot Lifecycle 32K PASS / Two-Cell HOLD
+
+- Test-only `741c4ef4` charges snapshot allocation/publication, fresh destination
+  allocation and restore, including two GPU waits and128 regions per direction.
+  Ordinary dense27 F16-KV/F32-GDN payloads, no model weights or CPU/GPU mirror.
+- 32K total244.042084 ->85.585000 ms saves64.930%; both pairs>64%, control spread
+  4.333% passes5%. The8840 control spreads8.218%, so the required two-cell gate
+  is HOLD. No rerun, GPU-cache integration, threshold retrofit or endpoint claim.
+- Producer/destination mutation and full-byte restoration oracles pass. At32K,
+  GPU snapshot adds2,303,328,256 driver bytes rather than a CPU arena of that
+  capacity; all three payload owners coexist. This is not a peak-RSS/admission
+  result. Global compression/decompression/swap/pageout growth0; release test passes.
+- Source audit raises a cheaper policy question: serve's4GiB cache cannot retain
+  both32K prompt and completed snapshots. Prompt capture precedes first token;
+  completed publication can evict it before another serialized generation uses it.
+  CPU cache-index witness proves this case AND retry-before-completion/larger-cache
+  counterexamples. No blanket capture removal; actual consumers/abort guards remain.
+- Independent review supports re-ranking publication elision and live ownership
+  ahead of GPU-cache integration, while cold-load/fresh-prefill/decode tracks stay
+  separate. All19 CPU prefix-cache tests and the non-test release check pass.
+  Evidence: `docs/bench/2026-09-07-snapshot-lifecycle/RESULT.md`.
+
 ## 2026-09-07 - Exact Tiled VT Restored Phase HOLD / Bitwise PASS
 
 - Test-only `e3ee25e7` exercises actual Q8 restored16 tails at8840/32752 after

@@ -347,12 +347,13 @@ fn fresh_packed_arch(
     template: QwenTemplate,
     lm_head_dtype: qwen_llm::tensor::GgmlType,
 ) -> bool {
-    use qwen_llm::tensor::GgmlType;
     bounded_packed_dense_arch(arch)
-        && matches!(
-            (template, lm_head_dtype),
-            (QwenTemplate::Qwen36, GgmlType::Q6_K) | (QwenTemplate::Qwen38, GgmlType::Q8_0)
-        )
+        && template == QwenTemplate::Qwen38
+        && lm_head_dtype == qwen_llm::tensor::GgmlType::Q8_0
+}
+
+fn fresh_packed_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_none_or(|value| value == "1")
 }
 
 fn fresh_packed_width(
@@ -789,7 +790,7 @@ impl GenerationBackend for EngineBackend {
                 })?
         };
         let packed_width = fresh_packed_width(
-            std::env::var("QWEN_SERVE_FRESH_PACKED").as_deref() == Ok("1"),
+            fresh_packed_enabled(std::env::var_os("QWEN_SERVE_FRESH_PACKED").as_deref()),
             fresh_packed_arch(
                 &self.loaded.arch(),
                 self.template,

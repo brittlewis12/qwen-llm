@@ -161,7 +161,7 @@ fn optional_tail_faults_preserve_serial_admission_and_allocation() {
 fn fresh_packed_policy_preserves_cached_sampled_and_unqualified_requests() {
     use qwen_llm::tensor::GgmlType;
     let arch = qwen_llm::model::QWEN3_27B;
-    assert!(fresh_packed_arch(
+    assert!(!fresh_packed_arch(
         &arch,
         QwenTemplate::Qwen36,
         GgmlType::Q6_K
@@ -210,6 +210,21 @@ fn fresh_packed_policy_preserves_cached_sampled_and_unqualified_requests() {
             fresh_packed_width(true, true, false, true, true, prompt),
             None
         );
+    }
+}
+
+#[test]
+fn fresh_packed_default_and_rollback_are_fail_closed() {
+    use std::ffi::OsStr;
+    assert!(fresh_packed_enabled(None));
+    assert!(fresh_packed_enabled(Some(OsStr::new("1"))));
+    for value in ["0", "", "true", "yes", "1 ", "01", "invalid"] {
+        assert!(!fresh_packed_enabled(Some(OsStr::new(value))));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(!fresh_packed_enabled(Some(OsStr::from_bytes(&[0xff]))));
     }
 }
 

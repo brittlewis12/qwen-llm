@@ -603,6 +603,167 @@ fn f32_values(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[test]
+#[ignore = "serial Metal pilot; requires QWEN_FRESH_PILOT_MODEL"]
+fn fresh_short_packed_matches_serial() {
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            panic!("prefill emitted")
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
+    let loaded = runtime
+        .load_model(std::env::var("QWEN_FRESH_PILOT_MODEL").unwrap())
+        .unwrap();
+    let tokenizer = loaded.tokenizer().unwrap();
+    let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
+    let template = crate::prompt_template::serve_qwen_template(family, loaded.gguf()).unwrap();
+    let forward = loaded.forward();
+    let stops = loaded.gguf().stop_token_ids().unwrap();
+    for (width, text) in [
+        (19, "Reply with exactly the word violet."),
+        (
+            32,
+            "Write Python that merges two sorted lists without duplicates.",
+        ),
+        (
+            48,
+            "Explain how a binary search tree stores and finds values.",
+        ),
+    ] {
+        let tokens = (0..64).find_map(|padding| {
+                let value = serde_json::json!({"model": "fresh-pilot", "input": format!("{}{text}", "Hello ".repeat(padding)),
+                "max_output_tokens": 64, "temperature": 0, "x_qwen": {"no_thinking": true}});
+            let request = crate::open_responses::items::parse_request(&value).unwrap();
+            let request = crate::open_responses::bind_qwen_request(&request, template,
+                crate::supports_qwen_no_thinking_prompt(family, loaded.gguf())).unwrap();
+            let prompt = crate::open_responses::render::render_qwen_serve_prompt(&request);
+            let ids = tokenizer.encode(&prompt, false).unwrap();
+            (ids.len() == width).then_some(ids)
+        }).expect("valid rendered prompt at requested width");
+        eprintln!(
+            "fresh-pilot width={width} prompt_sha256={}",
+            token_ids_sha256_i32le(&tokens)
+        );
+        let mut states = Vec::new();
+        let mut outputs = Vec::new();
+        let mut costs = Vec::new();
+        for packed in [false, true] {
+            let plan = packed.then(|| {
+                qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
+                    loaded.metal_model(),
+                    width as u32,
+                    width,
+                    PrefillScratchConfig::default(),
+                )
+                .unwrap()
+            });
+            let price = plan.as_ref().map_or(0, |p| {
+                p.priced_upper_bound(|bytes| {
+                    Ok(loaded.context().shared_buffer_size_and_align(bytes)?.size)
+                })
+                .unwrap()
+            });
+            assert!(price <= 128 * 1024 * 1024);
+            assert!(
+                loaded
+                    .qwen_execution_memory_admission(1, width + 64, price, 0)
+                    .unwrap()
+                    .admitted
+            );
+            let before = loaded.context().current_allocated_size();
+            let start = Instant::now();
+            let mut scratch = plan.map(|plan| {
+                MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(
+                    loaded.context(),
+                    loaded.metal_model(),
+                    plan,
+                )
+                .unwrap()
+            });
+            let scratch_bytes = loaded.context().current_allocated_size() - before;
+            assert!(scratch_bytes <= 128 * 1024 * 1024);
+            let mut sequence = loaded
+                .create_sequence(SequenceConfig::new(width + 64))
+                .unwrap();
+            let allocation_ms = start.elapsed().as_secs_f64() * 1e3;
+            let start = Instant::now();
+            let logits = prefill_remaining(
+                &loaded,
+                &forward,
+                None,
+                false,
+                &tokens,
+                width,
+                &mut sequence,
+                &mut scratch,
+                &mut None,
+                &mut Sink,
+            )
+            .unwrap_or_else(|_| panic!("fresh prefill failed"))
+            .unwrap();
+            let prefill_ms = start.elapsed().as_secs_f64() * 1e3;
+            assert_eq!(sequence.position(), width);
+            eprintln!(
+                "fresh-pilot width={width} packed={packed} priced_bytes={price} scratch_bytes={scratch_bytes} allocation_ms={allocation_ms:.3} prefill_ms={prefill_ms:.3}"
+            );
+            costs.push(allocation_ms + prefill_ms);
+            states.push(sequence);
+            outputs.push(logits);
+        }
+        let logits_cos = cosine(&outputs[0], &outputs[1]);
+        let snapshots: Vec<_> = states
+            .iter()
+            .map(|s| {
+                s.metal_session()
+                    .snapshot(loaded.snapshot_identity(s).unwrap(), tokens.clone(), None)
+                    .unwrap()
+            })
+            .collect();
+        let state_cos = consumed_tail_state_cosine(&snapshots[0], &snapshots[1], 0);
+        drop(snapshots);
+        assert!(logits_cos >= 0.999 && state_cos >= 0.999);
+        let request = ServeRequest {
+            temperature: Some(0.0),
+            ..ServeRequest::default()
+        };
+        let mut sampler = request_sampler(&request).unwrap();
+        let mut generated = Vec::new();
+        for step in 0..64 {
+            let next: Vec<_> = outputs
+                .iter()
+                .map(|logits| sampler.sample(logits).unwrap().token)
+                .collect();
+            assert_eq!(next[0], next[1], "width={width} step={step}");
+            generated.push(next[0]);
+            if stops.contains(&next[0]) || step == 63 {
+                break;
+            }
+            for (state, logits) in states.iter_mut().zip(&mut outputs) {
+                *logits = forward
+                    .single_token(next[0], state.position() as u32, unsafe {
+                        state.metal_session_mut()
+                    })
+                    .unwrap();
+                state.advance_by(1).unwrap();
+            }
+        }
+        let saving = 100.0 * (1.0 - costs[1] / costs[0]);
+        eprintln!(
+            "fresh-pilot width={width} logits_cos={logits_cos:.10} min_state_cos={state_cos:.10} greedy_tokens={} phase_saving_pct={saving:.3}",
+            generated.len()
+        );
+        assert!(
+            saving >= 25.0,
+            "fresh packed allocation+prefill misses phase gate"
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires QWEN_TAIL_PILOT_MODEL and QWEN_TAIL_PILOT_PROMPT; serial Metal pilot"]
 fn restored_suffix32_packed_matches_serial_greedy() {
     struct Sink;

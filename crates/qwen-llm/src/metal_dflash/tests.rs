@@ -3018,6 +3018,35 @@ fn prefill_scratch_plan_matches_product_residuals() {
 }
 
 #[test]
+fn fresh_single_chunk_scratch_architecture_screen() {
+    let arch = crate::model::QWEN3_27B;
+    for width in [19, 32, 48] {
+        let mut modes = resolve_prefill_scratch_plan_modes(
+            &arch,
+            width,
+            false,
+            Some(width as usize),
+            Some(PrefillScratchConfig::default()),
+        )
+        .unwrap();
+        modes.single_chunk_vt = true;
+        let plan =
+            build_prefill_scratch_plan_from_arch(&arch, 16, true, width, false, modes).unwrap();
+        // A synthetic 16 KiB rounding screen, not driver pricing or admission.
+        let rounded = plan
+            .priced_upper_bound(|bytes| Ok(bytes.div_ceil(16384) * 16384))
+            .unwrap();
+        assert!(rounded <= 128 * 1024 * 1024);
+        assert_eq!(plan.matrix_max_pos, width as u64);
+        assert_eq!(plan.matrix_query_rows, width);
+        eprintln!(
+            "fresh-plan width={width} logical_bytes={} synthetic_rounded_bytes={rounded}",
+            plan.logical_bytes
+        );
+    }
+}
+
+#[test]
 fn prefill_overlay_backing_plan_allocates_with_matching_type() {
     let ctx = match MetalContext::new() {
         Ok(c) => c,

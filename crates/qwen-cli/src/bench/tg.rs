@@ -30,7 +30,11 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
     let runtime = Runtime::metal().context("init Runtime")?;
     crate::text_log!(json_mode, "[tg] device: {}", runtime.describe());
     let power = capture_power_snapshot();
-    crate::text_log!(json_mode, "[tg] power: {}", power_snapshot_summary(power.as_ref()));
+    crate::text_log!(
+        json_mode,
+        "[tg] power: {}",
+        power_snapshot_summary(power.as_ref())
+    );
 
     let loaded = runtime
         .load_model(&model)
@@ -54,7 +58,8 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
         (rng_state % vocab as u64) as i32
     };
 
-    crate::text_log!(json_mode, 
+    crate::text_log!(
+        json_mode,
         "[tg] model={} n_gen={} runs={} seed={} mode={}{}",
         model.display(),
         n_gen,
@@ -218,7 +223,8 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
         if let Some(trace) = trace {
             trace_samples.push(trace);
         }
-        crate::text_log!(json_mode, 
+        crate::text_log!(
+            json_mode,
             "[tg] run {:>2}: wall {:>8.1} ms  gpu {:>8.1} ms  {:>7.2} t/s",
             run_idx + 1,
             wall_ms,
@@ -371,7 +377,11 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
     let ctx = MetalContext::new().context("init MetalContext")?;
     crate::text_log!(json_mode, "[bench] device: {}", ctx.describe());
     let power = capture_power_snapshot();
-    crate::text_log!(json_mode, "[bench] power: {}", power_snapshot_summary(power.as_ref()));
+    crate::text_log!(
+        json_mode,
+        "[bench] power: {}",
+        power_snapshot_summary(power.as_ref())
+    );
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
@@ -570,7 +580,8 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
         if !decode_token_ms.is_empty() {
             decode_steady_walls.push(steady_ms);
         }
-        crate::text_log!(json_mode, 
+        crate::text_log!(
+            json_mode,
             "[bench] rep {:>2}: prefill {:>8.1} ms ({:.1} t/s)  decode {:>8.1} ms ({:.1} t/s)",
             rep + 1,
             prefill_wall,
@@ -582,7 +593,8 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
                 0.0
             }
         );
-        crate::text_log!(json_mode, 
+        crate::text_log!(
+            json_mode,
             "[bench] rep {:>2} request {:>8.1} ms",
             rep + 1,
             request_wall

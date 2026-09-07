@@ -5130,21 +5130,22 @@ fn request_stats_fingerprint_newtype_bytes_only_from_of() {
 mod jsonl_templated_rows {
     use crate::open_responses::items::QwenTemplate;
     use crate::{
-        JsonlInputLabel, JsonlRequest, QwenUserPromptProtocol, resolve_jsonl_request_input,
+        JsonlInputLabel, JsonlRequest, JsonlRowProtocol, QwenUserPromptProtocol,
+        resolve_jsonl_request_input,
     };
 
     fn row(json: &str) -> JsonlRequest {
         serde_json::from_str(json).unwrap()
     }
 
-    fn pinned() -> QwenUserPromptProtocol {
-        QwenUserPromptProtocol::for_test(false, QwenTemplate::Qwen36)
+    fn pinned() -> JsonlRowProtocol {
+        JsonlRowProtocol::Resolved(QwenUserPromptProtocol::for_test(false, QwenTemplate::Qwen36))
     }
 
     #[test]
     fn raw_rows_keep_their_bytes_and_tokenizer_specials() {
         let (prompt, specials, label) =
-            resolve_jsonl_request_input(&row(r#"{"prompt":"  hi  "}"#), 1, Some(&pinned()))
+            resolve_jsonl_request_input(&row(r#"{"prompt":"  hi  "}"#), 1, &pinned())
                 .unwrap();
         assert_eq!(prompt, "  hi  ");
         assert!(specials);
@@ -5158,7 +5159,7 @@ mod jsonl_templated_rows {
             r#"{"prompt":"a","user":"b"}"#,
             r#"{"prompt":"a","prompt_file":"/x"}"#,
         ] {
-            let err = resolve_jsonl_request_input(&row(json), 7, Some(&pinned())).unwrap_err();
+            let err = resolve_jsonl_request_input(&row(json), 7, &pinned()).unwrap_err();
             assert!(err.to_string().contains("exactly one of"), "{json}: {err}");
         }
     }
@@ -5170,7 +5171,7 @@ mod jsonl_templated_rows {
             r#"{"prompt":"a","no_thinking":true}"#,
             r#"{"prompt":"a","reasoning_effort":"low"}"#,
         ] {
-            let err = resolve_jsonl_request_input(&row(json), 3, Some(&pinned())).unwrap_err();
+            let err = resolve_jsonl_request_input(&row(json), 3, &pinned()).unwrap_err();
             assert!(
                 err.to_string().contains("apply to user rows only"),
                 "{json}: {err}"
@@ -5180,15 +5181,29 @@ mod jsonl_templated_rows {
 
     #[test]
     fn user_rows_need_an_ordinary_qwen_pinned_template() {
-        let err = resolve_jsonl_request_input(&row(r#"{"user":"hi"}"#), 2, None).unwrap_err();
+        let err = resolve_jsonl_request_input(
+            &row(r#"{"user":"hi"}"#),
+            2,
+            &JsonlRowProtocol::NotOrdinaryQwen,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("require an ordinary Qwen model"),
             "{err}"
         );
-        let generic = QwenUserPromptProtocol::for_test(false, QwenTemplate::Generic);
-        let err =
-            resolve_jsonl_request_input(&row(r#"{"user":"hi"}"#), 2, Some(&generic)).unwrap_err();
+        let generic = JsonlRowProtocol::Resolved(QwenUserPromptProtocol::for_test(
+            false,
+            QwenTemplate::Generic,
+        ));
+        let err = resolve_jsonl_request_input(&row(r#"{"user":"hi"}"#), 2, &generic).unwrap_err();
         assert!(err.to_string().contains("template is pinned"), "{err}");
+        // A failed resolution is reported on the templated row that needed
+        // it; raw rows in the same batch are unaffected.
+        let unresolved = JsonlRowProtocol::Unresolved("digest not pinned".into());
+        let err =
+            resolve_jsonl_request_input(&row(r#"{"user":"hi"}"#), 2, &unresolved).unwrap_err();
+        assert!(err.to_string().contains("digest not pinned"), "{err}");
+        assert!(resolve_jsonl_request_input(&row(r#"{"prompt":"hi"}"#), 2, &unresolved).is_ok());
     }
 
     #[test]
@@ -5205,7 +5220,7 @@ mod jsonl_templated_rows {
         let err = resolve_jsonl_request_input(
             &row(r#"{"user":"hi","reasoning_effort":"low"}"#),
             4,
-            Some(&pinned()),
+            &pinned(),
         )
         .unwrap_err();
         assert!(
@@ -5216,7 +5231,7 @@ mod jsonl_templated_rows {
         let err = resolve_jsonl_request_input(
             &row(r#"{"user":"hi","reasoning_effort":"low","no_thinking":true}"#),
             4,
-            Some(&q38),
+            &JsonlRowProtocol::Resolved(q38),
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("cannot be combined"), "{err:#}");
@@ -5256,7 +5271,7 @@ mod jsonl_templated_rows {
             }
             let request: JsonlRequest = serde_json::from_value(row).unwrap();
             let (rendered, specials, label) =
-                resolve_jsonl_request_input(&request, 1, Some(&pinned())).unwrap();
+                resolve_jsonl_request_input(&request, 1, &pinned()).unwrap();
             assert_eq!(
                 rendered,
                 case["rendered"].as_str().unwrap(),
@@ -5277,14 +5292,17 @@ mod jsonl_templated_rows {
 
 mod jsonl_typed_preparation {
     use super::*;
-    use crate::{JsonlRowOutcome, prepare_jsonl_row};
+    use crate::{JsonlRowOutcome, JsonlRowProtocol, prepare_jsonl_row};
     use qwen_llm::test_fixtures::QWEN35_0_8B_F32;
 
-    /// A real tokenizer from the smallest local fixture; header-only, no Metal.
+    /// A real tokenizer from the smallest local fixture; header-only, no
+    /// Metal. Absent fixture skips; a present but unreadable fixture fails.
     fn tokenizer() -> Option<(Tokenizer, GgufFile)> {
         let path = QWEN35_0_8B_F32.path_or_skip()?;
-        let gguf = GgufFile::open(path).ok()?;
-        let tokenizer = Tokenizer::from_gguf(&gguf).ok()?;
+        let gguf = GgufFile::open(&path)
+            .unwrap_or_else(|error| panic!("open fixture {}: {error}", path.display()));
+        let tokenizer = Tokenizer::from_gguf(&gguf)
+            .unwrap_or_else(|error| panic!("tokenizer from {}: {error}", path.display()));
         Some((tokenizer, gguf))
     }
 
@@ -5309,7 +5327,7 @@ mod jsonl_typed_preparation {
         let Some((tokenizer, _)) = tokenizer() else {
             return;
         };
-        let outcome = prepare_jsonl_row(7, "{not json", &tokenizer, &args(&[]), None);
+        let outcome = prepare_jsonl_row(7, "{not json", &tokenizer, &args(&[]), &JsonlRowProtocol::NotOrdinaryQwen);
         assert_eq!(code(&outcome), Some(("parse", "line-7".into(), 7)));
     }
 
@@ -5320,7 +5338,7 @@ mod jsonl_typed_preparation {
         };
         for line in ["", "   ", "# note"] {
             assert!(matches!(
-                prepare_jsonl_row(1, line, &tokenizer, &args(&[]), None),
+                prepare_jsonl_row(1, line, &tokenizer, &args(&[]), &JsonlRowProtocol::NotOrdinaryQwen),
                 JsonlRowOutcome::Skipped
             ));
         }
@@ -5337,7 +5355,7 @@ mod jsonl_typed_preparation {
             r#"{"id":"s","prompt":"a","user":"b"}"#,
             &tokenizer,
             &a,
-            None,
+            &JsonlRowProtocol::NotOrdinaryQwen,
         );
         assert_eq!(code(&shape), Some(("input", "s".into(), 2)));
         let capacity = prepare_jsonl_row(
@@ -5345,7 +5363,7 @@ mod jsonl_typed_preparation {
             r#"{"id":"c","prompt":"hi","tokens":0}"#,
             &tokenizer,
             &a,
-            None,
+            &JsonlRowProtocol::NotOrdinaryQwen,
         );
         assert_eq!(code(&capacity), Some(("capacity", "c".into(), 3)));
         let too_big = prepare_jsonl_row(
@@ -5353,7 +5371,7 @@ mod jsonl_typed_preparation {
             r#"{"id":"b","prompt":"hi","tokens":10}"#,
             &tokenizer,
             &args(&["--max-context-tokens", "4"]),
-            None,
+            &JsonlRowProtocol::NotOrdinaryQwen,
         );
         assert_eq!(code(&too_big), Some(("capacity", "b".into(), 4)));
         let forced = args(&["--batch-size", "8"]);
@@ -5362,7 +5380,7 @@ mod jsonl_typed_preparation {
             r#"{"id":"t","prompt":"hi","sampling":{"temperature":0.7}}"#,
             &tokenizer,
             &forced,
-            None,
+            &JsonlRowProtocol::NotOrdinaryQwen,
         );
         assert_eq!(code(&sampled), Some(("executor_constraint", "t".into(), 5)));
         let cached = prepare_jsonl_row(
@@ -5370,7 +5388,7 @@ mod jsonl_typed_preparation {
             r#"{"id":"k","prompt":"hi","cache_prefix_tokens":4}"#,
             &tokenizer,
             &forced,
-            None,
+            &JsonlRowProtocol::NotOrdinaryQwen,
         );
         assert_eq!(code(&cached), Some(("executor_constraint", "k".into(), 6)));
     }
@@ -5385,7 +5403,7 @@ mod jsonl_typed_preparation {
             r#"{"id":"ok","prompt":"hi","tokens":4}"#,
             &tokenizer,
             &args(&[]),
-            None,
+            &JsonlRowProtocol::NotOrdinaryQwen,
         ) {
             JsonlRowOutcome::Prepared(prepared) => {
                 assert_eq!((prepared.id.as_str(), prepared.line), ("ok", 9));

@@ -156,6 +156,27 @@ pub(crate) fn prefill_span_with_capture(
     Ok((logits, ms))
 }
 
+/// `prefill_span_with_capture` through the owned facade.
+pub(crate) fn prefill_owned_with_capture(
+    loaded: &LoadedModel,
+    sequence: &mut Sequence,
+    scratch: &mut PackedPrefillScratch,
+    token_ids: &[i32],
+    start_position: usize,
+    target_layer_ids: &[u32],
+    hidden_dst: &MetalTensor,
+) -> Result<(Vec<f32>, f64)> {
+    shutdown::checkpoint()?;
+    ensure!(!token_ids.is_empty(), "cannot prefill an empty token span");
+    sequence.check_position(start_position)?;
+    let t0 = Instant::now();
+    let logits = loaded
+        .prefill_with_hidden_capture(sequence, scratch, token_ids, target_layer_ids, hidden_dst)
+        .context("prefill prompt span with drafter hidden capture")?;
+    shutdown::checkpoint()?;
+    Ok((logits, t0.elapsed().as_secs_f64() * 1e3))
+}
+
 pub(crate) fn prefill_span(
     forward: &MetalForward<'_>,
     sequence: &mut Sequence,
@@ -301,9 +322,9 @@ pub(crate) fn choose_private_suffix_execution_mode(
 }
 
 pub(crate) fn prefill_private_suffix(
-    forward: &MetalForward<'_>,
+    loaded: &LoadedModel,
     sequence: &mut Sequence,
-    scratch: &mut MetalDFlashLayerMajorScratch,
+    scratch: &mut PackedPrefillScratch,
     token_ids: &[i32],
     start_position: usize,
 ) -> Result<PrivateSuffixResult> {
@@ -316,7 +337,7 @@ pub(crate) fn prefill_private_suffix(
         token_ids.len(),
     );
     if mode == PrivateSuffixExecutionMode::Packed {
-        let (logits, ms) = prefill_span(forward, sequence, scratch, token_ids, start_position)?;
+        let (logits, ms) = prefill_owned(loaded, sequence, scratch, token_ids, start_position)?;
         return Ok(PrivateSuffixResult {
             logits,
             ms,
@@ -327,27 +348,15 @@ pub(crate) fn prefill_private_suffix(
     shutdown::checkpoint()?;
     sequence.check_position(start_position)?;
     sequence.ensure_can_append(token_ids.len())?;
-    let final_position = start_position
-        .checked_add(token_ids.len() - 1)
-        .context("private suffix final position overflow")?;
-    u32::try_from(final_position).context("private suffix final position does not fit u32")?;
     let t0 = Instant::now();
     let mut logits = None;
-    for (offset, &token) in token_ids.iter().enumerate() {
+    for &token in token_ids {
         shutdown::checkpoint()?;
-        let position = start_position
-            .checked_add(offset)
-            .context("private suffix position overflow")?;
         logits = Some(
-            forward
-                .single_token(
-                    token,
-                    u32::try_from(position).context("private suffix position does not fit u32")?,
-                    unsafe { sequence.metal_session_mut() },
-                )
+            loaded
+                .decode_token(sequence, token)
                 .context("consume private suffix token")?,
         );
-        sequence.advance_by(1)?;
         shutdown::checkpoint()?;
     }
     Ok(PrivateSuffixResult {

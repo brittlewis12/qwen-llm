@@ -118,9 +118,11 @@ pub(crate) fn run_muse_glimmer_single_turn(
     config
         .validate_tokenizer(&tokenizer)
         .context("Muse Glimmer tokenizer contract")?;
+    let encode_t0 = Instant::now();
     let prompt_ids = tokenizer
         .encode(&prepared.text, prepared.add_special_tokens)
         .context("tokenize Muse Glimmer prompt")?;
+    let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
     let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
     let prompt_tokens = prompt_ids
         .into_iter()
@@ -269,20 +271,21 @@ pub(crate) fn run_muse_glimmer_single_turn(
             output_tokens: generation.tokens.len() as u64,
             transitions: generation.transitions as u64,
             stop_reason: generation.stop_reason,
-            tokenizer_ms,
+            // Record semantics: encode-only tokenization; total without load.
+            tokenizer_ms: encode_ms,
             load_ms,
             prefill_ms,
             prefill_tps,
             decode_ms: generation.wall_ms,
             decode_tps,
             transition_tps,
-            total_ms: request_t0.elapsed().as_secs_f64() * 1e3,
+            total_ms: request_t0.elapsed().as_secs_f64() * 1e3 - load_ms,
             output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
         };
         append_single_turn_stats_record(
             path,
             0,
-            "muse_glimmer",
+            ModelFamily::MuseGlimmer.record_label(),
             request_stats_input(prepared.source, Some("atem")),
             &measured,
             None,

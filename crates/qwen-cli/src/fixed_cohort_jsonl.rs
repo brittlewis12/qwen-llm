@@ -3138,7 +3138,6 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         );
     }
 
-    let forward = loaded.forward();
     let prefill_t0 = Instant::now();
     let mut prompt_logits = Vec::with_capacity(WIDTH);
     let mut prefix_snapshot_bytes = 0u64;
@@ -3265,7 +3264,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                 prompt_logits.push(prefix_logits.clone());
             } else {
                 let result = prefill_private_suffix(
-                    &forward,
+                    loaded,
                     &mut sequences[slot],
                     &mut scratch,
                     suffix,

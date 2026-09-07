@@ -415,6 +415,11 @@ pub(crate) fn validate_deepseek_v4_requests_mode(
     explicit: ExplicitCliOptions,
 ) -> Result<()> {
     let mut unsupported = shared_unsupported_options(args, explicit);
+    if args.on_request_error != RequestErrorPolicy::Stop {
+        // DS4 keeps its own preparer and the stop policy; accepting
+        // `continue` silently would be a policy the lane does not honour.
+        unsupported.push("--on-request-error continue");
+    }
     if args.durable_prefix_cache.is_some() {
         unsupported.push("--durable-prefix-cache");
     }
@@ -824,13 +829,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
 ) -> Result<()> {
     validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
-    // Preflight the sidecar in the same open mode as emission (read+append),
-    // and force INVOCATION_ID init here so entropy is required only when
-    // telemetry is requested.
-    if let Some(path) = args.request_stats_jsonl.as_ref() {
-        preflight_request_stats_jsonl(path)?;
-        LazyLock::force(&INVOCATION_ID);
-    }
+    // The sidecar was preflighted with every other input before model open.
     let request_start = std::time::Instant::now();
     let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
     let prefetch_mode = configured_deepseek_v4_prefetch_mode()?;
@@ -883,9 +882,14 @@ pub(crate) fn run_deepseek_v4_single_turn(
     let tokenizer_t0 = Instant::now();
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load DeepSeek V4 tokenizer")?;
     let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
+    let encode_t0 = Instant::now();
     let prompt_ids = tokenizer
         .encode(&prompt, false)
         .context("tokenize raw DeepSeek V4 prompt")?;
+    // Record semantics (shared with every lane): `tokenization` is the
+    // prompt encode alone; `tokenizer_ms` above (construction) stays on the
+    // free-form stats line.
+    let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
     let required_forwards = required_forwards(
         "DeepSeek V4",
         prompt_ids.len(),
@@ -1604,13 +1608,14 @@ pub(crate) fn run_deepseek_v4_single_turn(
     if let Some(path) = args.request_stats_jsonl.as_ref() {
         // Measure total request wall time at the outer boundary (not the sum
         // of phase timings, which can miss inter-phase gaps).
-        let total_ms = request_start.elapsed().as_secs_f64() * 1e3;
+        // Record semantics: `total` is the request wall without model load.
+        let total_ms = request_start.elapsed().as_secs_f64() * 1e3 - load_ms;
         let measured = RequestStatsMeasured {
             input_tokens: prompt_ids.len() as u64,
             output_tokens: generation.tokens.len() as u64,
             transitions: generation.transitions as u64,
             stop_reason: generation.stop_reason,
-            tokenizer_ms,
+            tokenizer_ms: encode_ms,
             load_ms,
             prefill_ms,
             prefill_tps,
@@ -1646,7 +1651,7 @@ pub(crate) fn build_deepseek_v4_single_turn_stats_record<'a>(
     build_single_turn_stats_record(
         invocation_id,
         0,
-        "deepseek_v4",
+        ModelFamily::DeepSeek4.record_label(),
         RequestStatsInput {
             kind: input_kind,
             template: input_template,

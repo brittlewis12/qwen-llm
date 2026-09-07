@@ -116,8 +116,8 @@ pub(super) fn prepare(
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(max_capacity))
         .context("allocate file-root source sequence")?;
-    let (prefix_logits, prefill_ms) = prefill_span(
-        &loaded.forward(),
+    let (prefix_logits, prefill_ms) = prefill_owned(
+        loaded,
         &mut sequence,
         &mut scratch,
         &root_prompt[..prefix_len],

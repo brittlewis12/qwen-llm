@@ -469,7 +469,11 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
     let runtime = Runtime::metal().context("init Runtime")?;
     crate::text_log!(json_mode, "[pp] device: {}", runtime.describe());
     let power = capture_power_snapshot();
-    crate::text_log!(json_mode, "[pp] power: {}", power_snapshot_summary(power.as_ref()));
+    crate::text_log!(
+        json_mode,
+        "[pp] power: {}",
+        power_snapshot_summary(power.as_ref())
+    );
 
     let loaded = runtime
         .load_model(&model)
@@ -530,7 +534,8 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
 
     let mf = loaded.forward();
     let cap = ids.len() + 16;
-    crate::text_log!(json_mode, 
+    crate::text_log!(
+        json_mode,
         "[pp] model={} source={} n_prompt={} runs={} chunk={} tail={}",
         model.display(),
         source_label,
@@ -548,7 +553,8 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
     {
         let (guard, allocations, bytes) =
             pp_register_moe_residency_set(ctx, &mf).context("register MoE residency set")?;
-        crate::text_log!(json_mode, 
+        crate::text_log!(
+            json_mode,
             "[pp] residency: registered {allocations} MoE expert-bank allocations ({:.2} GiB tracked)",
             bytes as f64 / (1024.0 * 1024.0 * 1024.0)
         );
@@ -558,13 +564,19 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
     };
 
     if residency_guard.is_some() && env_flag_enabled("QWEN_PP_WARM_MOE_BANKS") {
-        crate::text_log!(json_mode, "[pp] residency-set active; skipping QWEN_PP_WARM_MOE_BANKS touch pass");
+        crate::text_log!(
+            json_mode,
+            "[pp] residency-set active; skipping QWEN_PP_WARM_MOE_BANKS touch pass"
+        );
     } else if env_flag_enabled("QWEN_PP_WARM_MOE_BANKS")
         && arch.kind == qwen_llm::model::ArchKind::Moe
     {
         let touched =
             pp_warm_moe_weight_banks(ctx, &mf).context("warm grouped MoE weight banks")?;
-        crate::text_log!(json_mode, "[pp] warmup: touched {touched} MoE expert-bank tensors via GPU residency pass");
+        crate::text_log!(
+            json_mode,
+            "[pp] warmup: touched {touched} MoE expert-bank tensors via GPU residency pass"
+        );
     }
 
     if !no_warmup {
@@ -635,7 +647,8 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
         wall_samples.push(wall_ms);
         gpu_samples.push(gpu_ms);
         ts_samples.push(ts);
-        crate::text_log!(json_mode, 
+        crate::text_log!(
+            json_mode,
             "[pp] run {:>2}: wall {:>8.1} ms  gpu {:>8.1} ms  {:>7.2} t/s",
             run_idx + 1,
             wall_ms,
@@ -846,7 +859,8 @@ pub(crate) fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
     let ctx = MetalContext::new().context("init MetalContext")?;
     crate::text_log!(json_mode, "[pp-wait] device: {}", ctx.describe());
     let power = capture_power_snapshot();
-    crate::text_log!(json_mode, 
+    crate::text_log!(
+        json_mode,
         "[pp-wait] power: {}",
         power_snapshot_summary(power.as_ref())
     );
@@ -864,7 +878,8 @@ pub(crate) fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
 
     let mf = MetalForward::new(&ctx, &mm);
     let cap = ids.len() + 16;
-    crate::text_log!(json_mode, 
+    crate::text_log!(
+        json_mode,
         "[pp-wait] model={} n_prompt={} chunk={} tail={} pid={}",
         model.display(),
         ids.len(),
@@ -914,7 +929,10 @@ pub(crate) fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
         shutdown::checkpoint()?;
         std::thread::sleep(Duration::from_millis(25));
     }
-    crate::text_log!(json_mode, "[pp-wait] go signal received; running timed prefill");
+    crate::text_log!(
+        json_mode,
+        "[pp-wait] go signal received; running timed prefill"
+    );
 
     let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
     let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())

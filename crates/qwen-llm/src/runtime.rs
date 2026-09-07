@@ -1543,6 +1543,44 @@ impl LoadedModel {
         }
     }
 
+    /// `prefill` that additionally captures the post-block hidden states of
+    /// `target_layer_ids` into `hidden_dst` (the drafter's cross-context
+    /// seed). Same discipline as `prefill`.
+    pub fn prefill_with_hidden_capture(
+        &self,
+        sequence: &mut Sequence,
+        scratch: &mut PackedPrefillScratch,
+        token_ids: &[i32],
+        target_layer_ids: &[u32],
+        hidden_dst: &crate::metal::MetalTensor,
+    ) -> Result<Vec<f32>, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &sequence.owner)?;
+        ensure_same_model_owner(&self.owner, &scratch.owner)?;
+        sequence.state.ensure_usable()?;
+        let start = sequence.position;
+        let (start_u32, end) =
+            checked_packed_prefill_bounds(start, token_ids.len(), sequence.max_context_tokens)?;
+        let result = prefill_tokens_with_multi_hidden(
+            &self.forward(),
+            token_ids,
+            start_u32,
+            &mut sequence.state,
+            &mut scratch.inner,
+            target_layer_ids,
+            Some(hidden_dst),
+        );
+        match result {
+            Ok(logits) => {
+                sequence.position = end;
+                Ok(logits)
+            }
+            Err(error) => {
+                sequence.state.poison("packed prefill with hidden capture failed");
+                Err(error.into())
+            }
+        }
+    }
+
     /// Create the fixed-width dense-Qwen decode executor over this model.
     ///
     /// The returned wrapper keeps model provenance and logical sequence
@@ -2197,28 +2235,25 @@ pub struct PackedPrefillScratchPlan {
 }
 
 impl PackedPrefillScratch {
-    /// Release the underlying scratch for execution paths the safe facade
-    /// does not cover yet. Scratch holds no sequence state, so this cannot
-    /// break provenance; it only forgoes the owner check on those paths.
+    /// Consume the owner-checked wrapper and release the raw scratch to an
+    /// execution path the facade does not cover. This is the explicit,
+    /// consuming exit from the allocation-provenance guarantee: after it,
+    /// nothing pairs the scratch with the model that planned it. There is
+    /// deliberately no `DerefMut`: shared mutable access would let safe code
+    /// swap raw allocations under mismatched owner tokens. Note the scratch
+    /// is not pure workspace — its transposed-V pack is rebuilt from the
+    /// supplied session on every prefill, which is what keeps reuse sound.
     pub fn into_inner(self) -> MetalDFlashLayerMajorScratch {
         self.inner
     }
 }
 
-/// Scratch statistics and the not-yet-wrapped execution entry points
-/// (speculative decode, hidden-state capture, prompt lookup) are reachable
-/// through the raw scratch; see `into_inner` for why that is sound.
+/// Read-only statistics on the raw scratch stay reachable directly.
 impl std::ops::Deref for PackedPrefillScratch {
     type Target = MetalDFlashLayerMajorScratch;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
-    }
-}
-
-impl std::ops::DerefMut for PackedPrefillScratch {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
     }
 }
 

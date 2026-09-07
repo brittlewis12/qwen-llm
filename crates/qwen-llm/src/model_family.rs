@@ -27,6 +27,19 @@ impl ModelFamily {
             .and_then(Self::from_architecture_name)
     }
 
+    /// Stable family label for records and machine-readable surfaces
+    /// (request-stats `model.family`, `qwen info --json`). Dense and MoE
+    /// ordinary Qwen share one label because they share every contract the
+    /// records describe; `architecture_name` remains the GGUF spelling.
+    pub fn record_label(self) -> &'static str {
+        match self {
+            Self::Qwen35 | Self::Qwen35Moe => "qwen",
+            Self::Qwen4Exp => "qwen4exp",
+            Self::DeepSeek4 => "deepseek_v4",
+            Self::MuseGlimmer => "muse_glimmer",
+        }
+    }
+
     pub fn architecture_name(self) -> &'static str {
         match self {
             Self::Qwen35 => "qwen35",

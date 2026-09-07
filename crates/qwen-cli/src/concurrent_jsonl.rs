@@ -1229,13 +1229,7 @@ fn prepare_lane(
     report_prefill_chunk_decision(allocated.decision.as_ref(), request.prompt_ids.len());
     let mut scratch = allocated.scratch;
     let mut sequence = allocated.sequence;
-    let (logits, prefill_ms) = prefill_span(
-        &loaded.forward(),
-        &mut sequence,
-        &mut scratch,
-        &request.prompt_ids,
-        0,
-    )?;
+    let (logits, prefill_ms) = prefill_owned(loaded, &mut sequence, &mut scratch, &request.prompt_ids, 0)?;
     drop(scratch);
     Ok((
         PreparedLane {
@@ -1399,7 +1393,6 @@ fn prepare_pair(
     }
 
     shutdown::checkpoint()?;
-    let forward = loaded.forward();
     let mut file_root_restores = 0usize;
     let mut file_root_restore_ms = 0.0;
     let (source_prefix_logits, prefix_prefill_ms) = if let Some(file_root) = file_root {
@@ -1528,7 +1521,7 @@ fn prepare_pair(
         source_prefix_logits.expect("validated exact source logits")
     } else {
         let result = prefill_private_suffix(
-            &forward,
+            loaded,
             &mut sequences[0],
             &mut scratch,
             &requests[0].prompt_ids[prefix_len..],
@@ -1553,7 +1546,7 @@ fn prepare_pair(
         target_prefix_logits.expect("validated exact target logits")
     } else {
         let result = prefill_private_suffix(
-            &forward,
+            loaded,
             &mut sequences[1],
             &mut scratch,
             &requests[1].prompt_ids[prefix_len..],

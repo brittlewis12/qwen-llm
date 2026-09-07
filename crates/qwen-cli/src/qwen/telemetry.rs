@@ -1453,6 +1453,13 @@ pub(crate) fn parse_build_dirty(raw: &str) -> bool {
 /// The family-neutral measured core of one completed single-turn request.
 /// Every lane already computes these; the record is a projection, not a new
 /// instrument. Family-specific facts travel in `RequestStatsDiagnostics`.
+///
+/// Field semantics are shared across lanes so records compare:
+/// - `tokenizer_ms` (record `timing_ms.tokenization`): encoding the prompt
+///   only; tokenizer construction is load-time cost.
+/// - `total_ms` (record `timing_ms.total`): request wall from after the
+///   model is resident to the last token; model load is excluded and
+///   reported separately by lanes that measure it.
 pub(crate) struct RequestStatsMeasured {
     pub input_tokens: u64,
     pub output_tokens: u64,

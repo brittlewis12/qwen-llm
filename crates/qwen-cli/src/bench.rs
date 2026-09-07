@@ -189,7 +189,9 @@ type CapturedDownRouteTensors = (usize, Vec<(MetalTensor, MetalTensor, MetalTens
 
 // The bench binary reads its ad-hoc flags with the library's parsers so the
 // truthy/falsy vocabulary has one definition.
-use qwen_llm::env_flag::{read_default_off as env_flag_enabled, read_default_on as env_flag_default_on};
+use qwen_llm::env_flag::{
+    read_default_off as env_flag_enabled, read_default_on as env_flag_default_on,
+};
 
 /// Bench text-mode logging: silent when the command emits JSON.
 macro_rules! text_log {

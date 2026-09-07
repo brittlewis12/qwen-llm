@@ -38,6 +38,26 @@ impl JsonlInputLabel {
     };
 }
 
+/// The templated-row protocol for a batch: resolved, absent for the family,
+/// or failed to resolve. Resolution failures (an unrecognized template on a
+/// model that declares one) must not abort a batch of raw rows; they are
+/// reported on the templated rows that would have needed it.
+pub(crate) enum JsonlRowProtocol {
+    Resolved(crate::QwenUserPromptProtocol),
+    NotOrdinaryQwen,
+    Unresolved(String),
+}
+
+impl JsonlRowProtocol {
+    pub(crate) fn resolve(gguf: &GgufFile) -> Self {
+        match jsonl_user_prompt_protocol_for_gguf(gguf) {
+            Ok(Some(protocol)) => Self::Resolved(protocol),
+            Ok(None) => Self::NotOrdinaryQwen,
+            Err(error) => Self::Unresolved(format!("{error:#}")),
+        }
+    }
+}
+
 /// Resolve a row's input form. Returns the prompt text, whether the
 /// tokenizer should add its own specials (never for rendered templates), and
 /// the label. Rejects contradictory shapes explicitly: `deny_unknown_fields`
@@ -45,9 +65,10 @@ impl JsonlInputLabel {
 pub(crate) fn resolve_jsonl_request_input(
     request: &JsonlRequest,
     line: usize,
-    protocol: Option<&crate::QwenUserPromptProtocol>,
+    protocol: &JsonlRowProtocol,
 ) -> Result<(String, bool, JsonlInputLabel)> {
-    let raw_forms = usize::from(request.prompt.is_some()) + usize::from(request.prompt_file.is_some());
+    let raw_forms =
+        usize::from(request.prompt.is_some()) + usize::from(request.prompt_file.is_some());
     let templated = request.user.is_some();
     ensure!(
         raw_forms + usize::from(templated) == 1,
@@ -62,9 +83,15 @@ pub(crate) fn resolve_jsonl_request_input(
         );
         return Ok((request_prompt(request, line)?, true, JsonlInputLabel::RAW));
     }
-    let protocol = protocol.with_context(|| {
-        format!("request line {line}: templated user rows require an ordinary Qwen model")
-    })?;
+    let protocol = match protocol {
+        JsonlRowProtocol::Resolved(protocol) => protocol,
+        JsonlRowProtocol::NotOrdinaryQwen => {
+            bail!("request line {line}: templated user rows require an ordinary Qwen model")
+        }
+        JsonlRowProtocol::Unresolved(reason) => {
+            bail!("request line {line}: templated user rows need the model's chat template: {reason}")
+        }
+    };
     ensure!(
         protocol.pinned(),
         "request line {line}: templated user rows require a model whose chat template is pinned (released Qwen3.5/3.6/3.8); this model's template is unrecognized, so submit a raw prompt instead"
@@ -169,7 +196,7 @@ pub(crate) fn run_requests_jsonl(
         None
     } else {
         let tokenizer = Tokenizer::from_gguf(&gguf).context("load tokenizer")?;
-        let file = prepare_jsonl_file(requests_path, &gguf, &tokenizer, args)?;
+        let file = prepare_jsonl_file(requests_path, &gguf, &tokenizer, args, policy)?;
         if policy == RequestErrorPolicy::Stop
             && let Some(failure) = file.failures.first()
         {
@@ -230,7 +257,11 @@ pub(crate) fn run_requests_jsonl(
         Some(PreparedJsonlFile { prepared, failures }) => (Some(prepared), failures),
         None => (None, Vec::new()),
     };
-    let mut auto_prepared = if auto_mode { file_prepared.take() } else { None };
+    let mut auto_prepared = if auto_mode {
+        file_prepared.take()
+    } else {
+        None
+    };
     let auto_selection = if auto_mode {
         let requests = auto_prepared.as_deref().unwrap_or(&[]);
         let all_requests_accelerable = !requests.is_empty()
@@ -494,13 +525,13 @@ pub(crate) fn run_requests_jsonl(
                 "prefix-cache auto admission needs request lookahead; disabled for stdin JSONL"
             );
         }
-        let protocol = jsonl_user_prompt_protocol(&loaded)?;
+        let protocol = JsonlRowProtocol::resolve(loaded.gguf());
         for (line_idx, line) in reader.lines().enumerate() {
             shutdown::checkpoint()?;
             let line_no = line_idx + 1;
             let line = line.with_context(|| format!("read requests line {line_no}"))?;
             let prepared_request =
-                match prepare_jsonl_row(line_no, &line, &tokenizer, args, protocol.as_ref()) {
+                match prepare_jsonl_row(line_no, &line, &tokenizer, args, &protocol) {
                     JsonlRowOutcome::Skipped => continue,
                     JsonlRowOutcome::Prepared(request) => request,
                     JsonlRowOutcome::Failed(failure) => {
@@ -653,16 +684,9 @@ fn run_one_prepared_jsonl_request(
     Ok(1)
 }
 
-/// The row-rendering protocol for this loaded model, or `None` when the
-/// family has no ordinary-Qwen chat rendering.
-pub(crate) fn jsonl_user_prompt_protocol(
-    loaded: &LoadedModel,
-) -> Result<Option<crate::QwenUserPromptProtocol>> {
-    jsonl_user_prompt_protocol_for_gguf(loaded.gguf())
-}
-
-/// Header-only form of `jsonl_user_prompt_protocol`, for preparing file
-/// requests before the model loads.
+/// The row-rendering protocol for a model header, or `None` when the family
+/// has no ordinary-Qwen chat rendering. Header-only, so file requests can be
+/// prepared before the model loads.
 pub(crate) fn jsonl_user_prompt_protocol_for_gguf(
     gguf: &GgufFile,
 ) -> Result<Option<crate::QwenUserPromptProtocol>> {
@@ -727,7 +751,7 @@ pub(crate) fn prepare_jsonl_row(
     line: &str,
     tokenizer: &Tokenizer,
     args: &Args,
-    protocol: Option<&crate::QwenUserPromptProtocol>,
+    protocol: &JsonlRowProtocol,
 ) -> JsonlRowOutcome {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -760,7 +784,12 @@ pub(crate) fn prepare_jsonl_row(
             return fail("tokenize", anyhow!("request {id} tokenized to zero tokens"));
         }
         Ok(ids) => ids,
-        Err(error) => return fail("tokenize", anyhow::Error::new(error).context("tokenize prompt")),
+        Err(error) => {
+            return fail(
+                "tokenize",
+                anyhow::Error::new(error).context("tokenize prompt"),
+            );
+        }
     };
     let sampling = match request_sampling_config(&request, args) {
         Ok(sampling) => sampling,
@@ -786,8 +815,9 @@ pub(crate) fn prepare_jsonl_row(
         auto_cache_prefix_tokens: None,
         auto_cache_future_hits: 0,
     };
-    // Generation budget and context capacity are row facts; settle them here
-    // so planners and executors only ever see rows that can run.
+    // Generation budget and context capacity are row facts validated here,
+    // by the one derivation executors also use (`jsonl_generation_capacity`),
+    // so nothing downstream can newly reject a prepared row on them.
     if let Err(error) = jsonl_generation_capacity(&prepared, args) {
         return fail("capacity", error);
     }
@@ -802,7 +832,9 @@ pub(crate) fn prepare_jsonl_row(
         if prepared.request.cache_prefix_tokens.is_some() {
             return fail(
                 "executor_constraint",
-                anyhow!("request {id} sets cache_prefix_tokens, which is unsupported with {executor}"),
+                anyhow!(
+                    "request {id} sets cache_prefix_tokens, which is unsupported with {executor}"
+                ),
             );
         }
         if prepared.sampling.temperature != 0.0 {
@@ -831,8 +863,9 @@ pub(crate) fn prepare_jsonl_file(
     gguf: &GgufFile,
     tokenizer: &Tokenizer,
     args: &Args,
+    policy: RequestErrorPolicy,
 ) -> Result<PreparedJsonlFile> {
-    let protocol = jsonl_user_prompt_protocol_for_gguf(gguf)?;
+    let protocol = JsonlRowProtocol::resolve(gguf);
     let requests = std::fs::File::open(requests_path)
         .with_context(|| format!("open requests JSONL {}", requests_path.display()))?;
     let reader = std::io::BufReader::new(requests);
@@ -843,10 +876,17 @@ pub(crate) fn prepare_jsonl_file(
         shutdown::checkpoint()?;
         let line_no = line_idx + 1;
         let line = line.with_context(|| format!("read requests line {line_no}"))?;
-        match prepare_jsonl_row(line_no, &line, tokenizer, args, protocol.as_ref()) {
+        match prepare_jsonl_row(line_no, &line, tokenizer, args, &protocol) {
             JsonlRowOutcome::Skipped => {}
             JsonlRowOutcome::Prepared(request) => prepared.push(request),
-            JsonlRowOutcome::Failed(failure) => failures.push(failure),
+            JsonlRowOutcome::Failed(failure) => {
+                failures.push(failure);
+                if policy == RequestErrorPolicy::Stop {
+                    // Nothing after the first failure is attempted, including
+                    // reading (and possibly blocking on) later rows.
+                    break;
+                }
+            }
         }
     }
     ensure!(
@@ -941,19 +981,18 @@ pub(crate) fn selected_cache_prefix_from_value(
     (Some(n.min(prompt_len)).filter(|&n| n > 0), source)
 }
 
+/// The one derivation of a row's (generation budget, sequence capacity).
+/// Preparation validates it so executors, which recompute it for planning,
+/// can never newly reject a prepared row on these grounds.
 pub(crate) fn jsonl_generation_capacity(
     prepared: &PreparedJsonlRequest,
     args: &Args,
 ) -> Result<(usize, usize)> {
+    let id = &prepared.id;
+    let prompt_tokens = prepared.prompt_ids.len();
     let n_generate = prepared.request.tokens.unwrap_or(args.tokens);
-    ensure!(
-        n_generate > 0,
-        "tokens must be >= 1 for request {}",
-        prepared.id
-    );
-    let prompt_and_generation = prepared
-        .prompt_ids
-        .len()
+    ensure!(n_generate > 0, "tokens must be >= 1 for request {id}");
+    let prompt_and_generation = prompt_tokens
         .checked_add(n_generate)
         .context("sequence capacity overflow")?;
     let min_capacity = prompt_and_generation
@@ -962,11 +1001,7 @@ pub(crate) fn jsonl_generation_capacity(
     let capacity = args.max_context_tokens.unwrap_or(min_capacity);
     ensure!(
         capacity >= prompt_and_generation,
-        "max context {} is smaller than prompt {} + generation {} for request {}",
-        capacity,
-        prepared.prompt_ids.len(),
-        n_generate,
-        prepared.id,
+        "max context {capacity} is smaller than prompt {prompt_tokens} + generation {n_generate} for request {id}",
     );
     Ok((n_generate, capacity))
 }

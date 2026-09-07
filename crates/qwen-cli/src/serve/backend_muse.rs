@@ -168,8 +168,10 @@ impl GenerationBackend for MuseGlimmerBackend {
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
         // Canonical serial loop (same shape as DeepSeek serve): the stop
-        // token is counted but never written, and a client disconnect is
-        // observed through the piece write that precedes every forward.
+        // token is counted but never written. `tick` runs on every emitted
+        // token because `piece` only touches the socket when the partition
+        // produces an event — a buffered tool block would otherwise hide a
+        // disconnect for its whole length.
         let mut abort: Option<io::Error> = None;
         let generation = {
             let abort = &mut abort;
@@ -182,10 +184,12 @@ impl GenerationBackend for MuseGlimmerBackend {
                     let bytes = tokenizer
                         .try_decode_piece_bytes_exact(token)
                         .with_context(|| format!("decode Muse token {token}"))?;
-                    sink.piece(&bytes).map_err(|error| {
-                        *abort = Some(error);
-                        anyhow::anyhow!("client disconnected during decode")
-                    })
+                    sink.piece(&bytes)
+                        .and_then(|()| sink.tick())
+                        .map_err(|error| {
+                            *abort = Some(error);
+                            anyhow::anyhow!("client disconnected during decode")
+                        })
                 },
                 |token| {
                     let token = crate::checked_token_id(token, vocab_size, "generated")?;
@@ -208,7 +212,12 @@ impl GenerationBackend for MuseGlimmerBackend {
             generation.wall_ms,
             self.capacity,
         );
-        Ok(super::outcome::finish_generation(prompt_ids.len(), &generation, 0, 0.0))
+        Ok(super::outcome::finish_generation(
+            prompt_ids.len(),
+            &generation,
+            0,
+            0.0,
+        ))
     }
 }
 

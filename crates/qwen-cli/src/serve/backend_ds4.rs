@@ -471,10 +471,15 @@ impl DeepSeekV4Backend {
                     let bytes = tokenizer
                         .try_decode_piece_bytes_exact(token)
                         .with_context(|| format!("decode token {token}"))?;
-                    sink.piece(bytes).map_err(|error| {
-                        *abort = Some(error);
-                        anyhow::anyhow!("client disconnected during decode")
-                    })
+                    // `tick` after every piece: a buffered tool block emits
+                    // no partition events, so `piece` alone would not
+                    // observe a disconnect until the block closes.
+                    sink.piece(bytes)
+                        .and_then(|()| sink.tick())
+                        .map_err(|error| {
+                            *abort = Some(error);
+                            anyhow::anyhow!("client disconnected during decode")
+                        })
                 },
                 |token| {
                     let token = crate::checked_token_id(token, vocab_size, "generated")?;

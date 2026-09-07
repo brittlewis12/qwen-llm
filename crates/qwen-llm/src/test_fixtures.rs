@@ -178,21 +178,22 @@ impl Fixture {
         match self.env_override() {
             Err(conflict) => panic!("{conflict}"),
             Ok(Some(resolved)) => {
-                assert!(
-                    resolved.path.is_file(),
-                    "fixture {}: {} names {} which is not a readable file",
-                    self.id,
-                    match resolved.source {
-                        FixtureSource::Env(name) => name,
-                        FixtureSource::Default => "default",
-                    },
-                    resolved.path.display()
-                );
+                if let Err(error) = readable_file(&resolved.path) {
+                    panic!(
+                        "fixture {}: {} names {} which is not a readable file: {error}",
+                        self.id,
+                        match resolved.source {
+                            FixtureSource::Env(name) => name,
+                            FixtureSource::Default => "default",
+                        },
+                        resolved.path.display()
+                    );
+                }
                 Some(resolved.path)
             }
             Ok(None) => {
                 let default = Path::new(self.default_path);
-                default.is_file().then(|| default.to_path_buf())
+                readable_file(default).ok().map(|()| default.to_path_buf())
             }
         }
     }
@@ -209,6 +210,15 @@ impl Fixture {
             )
         })
     }
+}
+
+/// "Readable" means what the loaders need: a regular file that opens.
+fn readable_file(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    std::fs::File::open(path).map(|_| ())
 }
 
 /// Whether `QWEN_REQUIRE_METAL_TESTS` demands that Metal-gated tests run.

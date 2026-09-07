@@ -197,7 +197,7 @@ fn run() -> Result<()> {
     concurrent_jsonl::validate_cli(&args, explicit_options)?;
     if args.request_stats_jsonl.is_some() && args.info {
         bail!(
-            "--request-stats-jsonl is not applicable with --info; only DeepSeek V4 single-turn generation emits the sidecar today"
+            "--request-stats-jsonl is not applicable with --info; it records completed generation requests"
         );
     }
     if args.info {
@@ -219,7 +219,7 @@ fn run() -> Result<()> {
     if args.deepseek_census_json {
         ensure!(
             args.request_stats_jsonl.is_none(),
-            "--request-stats-jsonl is not applicable with --deepseek-census-json; only DeepSeek V4 single-turn generation emits the sidecar today"
+            "--request-stats-jsonl is not applicable with --deepseek-census-json; it records completed generation requests"
         );
         return print_deepseek_v4_census(&model_path);
     }
@@ -240,7 +240,7 @@ fn run() -> Result<()> {
     {
         ensure!(
             args.request_stats_jsonl.is_none(),
-            "--request-stats-jsonl is not applicable without a request; only DeepSeek V4 single-turn generation emits the sidecar today. Provide --prompt, --prompt-file, --messages, or --requests-jsonl."
+            "--request-stats-jsonl is not applicable without a request; provide --prompt, --prompt-file, --messages, or --requests-jsonl"
         );
         return print_model_info(&model_path);
     }
@@ -502,6 +502,13 @@ fn validate_request_before_model_open(args: &Args) -> Result<()> {
     }
     validate_drafter_decode_policy(args)?;
     validate_input_files_readable(args)?;
+    if let Some(path) = args.request_stats_jsonl.as_ref() {
+        // Same open mode as emission (read+append): an unwritable sidecar
+        // must fail here, not after a full load and generation. Forcing the
+        // invocation id here keeps entropy a telemetry-only requirement.
+        preflight_request_stats_jsonl(path)?;
+        LazyLock::force(&INVOCATION_ID);
+    }
     Ok(())
 }
 
@@ -1026,17 +1033,20 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
     // fact for ordinary Qwen; other families reject the flag outright.
     let prompt_lookup = match family {
         Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => {
-            match qwen_llm::loader::Model::from_gguf(&gguf)
-                .map_err(|error| error.to_string())
-                .and_then(|model| {
-                    qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
-                }) {
-                Ok(()) => serde_json::json!({ "status": "permitted" }),
-                Err(message) => serde_json::json!({
+            match qwen_llm::loader::Model::from_gguf(&gguf) {
+                Err(error) => serde_json::json!({
                     "status": "unsupported",
-                    "code": "layout_not_qualified",
-                    "message": message,
+                    "code": "model_unreadable",
+                    "message": error.to_string(),
                 }),
+                Ok(model) => match qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model) {
+                    Ok(()) => serde_json::json!({ "status": "permitted" }),
+                    Err(message) => serde_json::json!({
+                        "status": "unsupported",
+                        "code": "layout_not_qualified",
+                        "message": message,
+                    }),
+                },
             }
         }
         Some(_) => serde_json::json!({
@@ -1054,7 +1064,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),
         "architecture": gguf.architecture(),
-        "family": family.map(ModelFamily::architecture_name),
+        "family": family.map(ModelFamily::record_label),
         "drafter": {
             "run": project(Lane::CliSingleTurn),
             "serve": project(Lane::Serve),

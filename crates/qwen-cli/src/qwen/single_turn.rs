@@ -187,6 +187,7 @@ pub(crate) fn run_single_turn(
         sampling_clock_probe.as_ref(),
         dflash_head.as_ref(),
     )?;
+    append_qwen_single_turn_record(args, 0, &first, runtime_and_model_load_ms)?;
     let mut results = vec![first];
 
     if args.request_timing_warm_followup {
@@ -257,6 +258,7 @@ pub(crate) fn run_single_turn(
             warm.generated == results[0].generated && warm_stop == first_stop,
             "warm follow-up generated tokens or stop reason differ from request 0"
         );
+        append_qwen_single_turn_record(args, 1, &warm, runtime_and_model_load_ms)?;
         results.push(warm);
         for result in &mut results {
             let row = result.row.as_mut().expect("paired timing row");
@@ -323,52 +325,60 @@ pub(crate) fn run_single_turn(
             results[0].generated.len(),
         )?;
     }
-    if let Some(path) = args.request_stats_jsonl.as_ref() {
-        // Legacy flat --messages renders the unpinned generic contract; `run`
-        // carries the pinned protocol label on its prepared prompt.
-        let template = args
-            .prepared_prompt
-            .as_ref()
-            .and_then(|prompt| prompt.template)
-            .or(Some("generic"));
-        for (index, result) in results.iter().enumerate() {
-            let load_ms = if index == 0 {
-                runtime_and_model_load_ms + result.tokenizer_init_ms
-            } else {
-                0.0
-            };
-            let prefill_tps = if result.prefill_ms > 0.0 {
-                result.prompt_ids.len() as f64 / (result.prefill_ms / 1e3)
-            } else {
-                0.0
-            };
-            let measured = RequestStatsMeasured {
-                input_tokens: result.prompt_ids.len() as u64,
-                output_tokens: result.generated.len() as u64,
-                transitions: result.transitions as u64,
-                stop_reason: result.stop_reason,
-                tokenizer_ms: result.tokenization_ms,
-                load_ms,
-                prefill_ms: result.prefill_ms,
-                prefill_tps,
-                decode_ms: result.decode_ms,
-                decode_tps: result.decode_tps,
-                transition_tps: result.transition_tps,
-                total_ms: result.total_ms,
-                output_fingerprint: GeneratedTokenSha256Digest::of(&result.generated),
-            };
-            append_single_turn_stats_record(
-                path,
-                u32::try_from(index).context("request index exceeds u32")?,
-                "qwen",
-                request_stats_input(result.prompt_source, template),
-                &measured,
-                None,
-            )?;
-        }
-    }
-
     Ok(())
+}
+
+/// Write request `index`'s v1 record as soon as it completes, so a later
+/// follow-up or sidecar failure cannot erase evidence of finished work.
+fn append_qwen_single_turn_record(
+    args: &Args,
+    index: usize,
+    result: &SingleTurnResult,
+    runtime_and_model_load_ms: f64,
+) -> Result<()> {
+    let Some(path) = args.request_stats_jsonl.as_ref() else {
+        return Ok(());
+    };
+    // Legacy flat --messages renders the unpinned generic contract; `run`
+    // carries the pinned protocol label on its prepared prompt.
+    let template = args
+        .prepared_prompt
+        .as_ref()
+        .and_then(|prompt| prompt.template)
+        .or(Some("generic"));
+    let load_ms = if index == 0 {
+        runtime_and_model_load_ms + result.tokenizer_init_ms
+    } else {
+        0.0
+    };
+    let prefill_tps = if result.prefill_ms > 0.0 {
+        result.prompt_ids.len() as f64 / (result.prefill_ms / 1e3)
+    } else {
+        0.0
+    };
+    let measured = RequestStatsMeasured {
+        input_tokens: result.prompt_ids.len() as u64,
+        output_tokens: result.generated.len() as u64,
+        transitions: result.transitions as u64,
+        stop_reason: result.stop_reason,
+        tokenizer_ms: result.tokenization_ms,
+        load_ms,
+        prefill_ms: result.prefill_ms,
+        prefill_tps,
+        decode_ms: result.decode_ms,
+        decode_tps: result.decode_tps,
+        transition_tps: result.transition_tps,
+        total_ms: result.total_ms,
+        output_fingerprint: GeneratedTokenSha256Digest::of(&result.generated),
+    };
+    append_single_turn_stats_record(
+        path,
+        u32::try_from(index).context("request index exceeds u32")?,
+        ModelFamily::Qwen35.record_label(),
+        request_stats_input(result.prompt_source, template),
+        &measured,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -596,8 +606,8 @@ pub(crate) fn execute_single_turn_request(
                     prefill_ms += plain_ms;
                 }
                 let wstart_abs = position + wstart_rel;
-                let out = prefill_span_with_capture(
-                    &forward,
+                let out = prefill_owned_with_capture(
+                    loaded,
                     &mut sequence,
                     &mut scratch,
                     &prompt_ids[wstart_abs..],

@@ -457,9 +457,11 @@ pub(crate) fn run_qwen4exp_single_turn(
     let (prompt, prompt_source, _) = prompt_text(args)?;
     let tokenizer_t0 = Instant::now();
     let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;
+    let encode_t0 = Instant::now();
     let prompt_ids = tokenizer
         .encode(&prompt, prompt_add_special_tokens(args, prompt_source))
         .context("tokenize Qwen3.8-Flash-Next prompt")?;
+    let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
     let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
     let required_forwards =
         required_forwards("Qwen3.8-Flash-Next", prompt_ids.len(), args.tokens, None)?;
@@ -872,20 +874,21 @@ pub(crate) fn run_qwen4exp_single_turn(
             output_tokens: generation.tokens.len() as u64,
             transitions: generation.transitions as u64,
             stop_reason: generation.stop_reason,
-            tokenizer_ms,
+            // Record semantics: encode-only tokenization; total without load.
+            tokenizer_ms: encode_ms,
             load_ms,
             prefill_ms,
             prefill_tps,
             decode_ms: generation.wall_ms,
             decode_tps,
             transition_tps,
-            total_ms: request_t0.elapsed().as_secs_f64() * 1e3,
+            total_ms: request_t0.elapsed().as_secs_f64() * 1e3 - load_ms,
             output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
         };
         append_single_turn_stats_record(
             path,
             0,
-            "qwen4exp",
+            ModelFamily::Qwen4Exp.record_label(),
             request_stats_input(prompt_source, Some("qwen38")),
             &measured,
             None,

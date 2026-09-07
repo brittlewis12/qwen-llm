@@ -7,7 +7,8 @@
 use crate::gguf::{GgufError, GgufFile};
 use crate::tensor::{GgmlType, TensorDesc};
 use crate::tokenizer::{
-    MUSE_GLIMMER_RELEASE_TOKENIZER_IDENTITY_SHA256, muse_glimmer_tokenizer_identity_sha256,
+    MUSE_GLIMMER_RELEASE_TOKENIZER_IDENTITY_SHA256, Tokenize,
+    muse_glimmer_tokenizer_identity_sha256,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -87,6 +88,54 @@ pub struct MuseGlimmerConfig {
 }
 
 impl MuseGlimmerConfig {
+    /// The tokenizer must agree with the model on vocabulary size, BOS and
+    /// EOS; every lane that opens a Muse tokenizer checks this before use.
+    pub fn validate_tokenizer(&self, tokenizer: &impl Tokenize) -> Result<(), MuseGlimmerError> {
+        let mismatch = |field, tokenizer: String, model: String| MuseGlimmerError::TokenizerContract {
+            field,
+            tokenizer,
+            model,
+        };
+        if tokenizer.n_vocab() != self.vocab_size {
+            return Err(mismatch(
+                "vocabulary",
+                tokenizer.n_vocab().to_string(),
+                self.vocab_size.to_string(),
+            ));
+        }
+        if tokenizer.bos() != Some(self.bos_token_id as i32) {
+            return Err(mismatch(
+                "BOS",
+                format!("{:?}", tokenizer.bos()),
+                self.bos_token_id.to_string(),
+            ));
+        }
+        if tokenizer.eos() != Some(self.eos_token_id as i32) {
+            return Err(mismatch(
+                "EOS",
+                format!("{:?}", tokenizer.eos()),
+                self.eos_token_id.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The release's producer-declared stop set is exactly `[EOS, EOT]`.
+    pub fn expected_stop_tokens(&self) -> [i32; 2] {
+        [self.eos_token_id as i32, self.eot_token_id as i32]
+    }
+
+    pub fn validate_stop_tokens(&self, stop_tokens: &[i32]) -> Result<(), MuseGlimmerError> {
+        let expected = self.expected_stop_tokens();
+        if stop_tokens != expected {
+            return Err(MuseGlimmerError::StopTokens {
+                expected: expected.to_vec(),
+                actual: stop_tokens.to_vec(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn from_gguf(gguf: &GgufFile) -> Result<Self, MuseGlimmerError> {
         let architecture = gguf.architecture();
         if architecture.as_deref() != Some(ARCHITECTURE_NAME) {
@@ -497,6 +546,14 @@ pub enum MuseGlimmerError {
     InvalidTensorValue { tensor: String, detail: String },
     #[error("unsupported Muse Glimmer artifact dtype profile: {0}")]
     UnsupportedArtifactProfile(String),
+    #[error("Muse Glimmer tokenizer {field} {tokenizer} differs from model {field} {model}")]
+    TokenizerContract {
+        field: &'static str,
+        tokenizer: String,
+        model: String,
+    },
+    #[error("Muse Glimmer release stop tokens must be EOS/EOT {expected:?}, got {actual:?}")]
+    StopTokens { expected: Vec<i32>, actual: Vec<i32> },
     #[error("unexpected Muse Glimmer tensor set: {0:?}")]
     UnexpectedTensors(Vec<String>),
     #[error(transparent)]
@@ -867,6 +924,19 @@ fn invalid(key: &'static str, reason: impl Into<String>) -> MuseGlimmerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_contract_is_exact_and_ordered() {
+        let config = MuseGlimmerConfig::release_reference();
+        let [eos, eot] = config.expected_stop_tokens();
+        assert!(config.validate_stop_tokens(&[eos, eot]).is_ok());
+        for invalid in [vec![eos], vec![eot, eos], vec![eos, eot, 3]] {
+            assert!(matches!(
+                config.validate_stop_tokens(&invalid),
+                Err(MuseGlimmerError::StopTokens { .. })
+            ));
+        }
+    }
 
     #[test]
     fn release_profile_has_exact_geometry_and_schedule() {

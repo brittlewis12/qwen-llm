@@ -115,24 +115,9 @@ pub(crate) fn run_muse_glimmer_single_turn(
 
     let tokenizer_t0 = Instant::now();
     let tokenizer = LlamaCppTokenizer::open(model_path).context("load Muse Glimmer tokenizer")?;
-    ensure!(
-        tokenizer.n_vocab() == config.vocab_size,
-        "Muse Glimmer tokenizer vocabulary {} differs from model vocabulary {}",
-        tokenizer.n_vocab(),
-        config.vocab_size
-    );
-    ensure!(
-        tokenizer.bos() == Some(config.bos_token_id as i32),
-        "Muse Glimmer tokenizer BOS {:?} differs from model BOS {}",
-        tokenizer.bos(),
-        config.bos_token_id
-    );
-    ensure!(
-        tokenizer.eos() == Some(config.eos_token_id as i32),
-        "Muse Glimmer tokenizer EOS {:?} differs from model EOS {}",
-        tokenizer.eos(),
-        config.eos_token_id
-    );
+    config
+        .validate_tokenizer(&tokenizer)
+        .context("Muse Glimmer tokenizer contract")?;
     let prompt_ids = tokenizer
         .encode(&prepared.text, prepared.add_special_tokens)
         .context("tokenize Muse Glimmer prompt")?;
@@ -159,11 +144,9 @@ pub(crate) fn run_muse_glimmer_single_turn(
     let stop_tokens = gguf
         .stop_token_ids()
         .context("load producer-declared Muse Glimmer stop tokens")?;
-    let expected_stop_tokens = vec![config.eos_token_id as i32, config.eot_token_id as i32];
-    ensure!(
-        stop_tokens == expected_stop_tokens,
-        "Muse Glimmer release stop tokens must be EOS/EOT {expected_stop_tokens:?}, got {stop_tokens:?}"
-    );
+    config
+        .validate_stop_tokens(&stop_tokens)
+        .context("Muse Glimmer stop-token contract")?;
     let prefill_packed_tokens = prompt_tokens.len() / MUSE_GLIMMER_PACKED_PREFILL_QUANTUM
         * MUSE_GLIMMER_PACKED_PREFILL_QUANTUM;
     let prefill_scalar_tail_commands = prompt_tokens.len() - prefill_packed_tokens;

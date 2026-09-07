@@ -548,24 +548,9 @@ pub fn run(args: MuseRequestArgs) -> Result<()> {
     let tokenizer =
         LlamaCppTokenizer::open(&args.model).context("load Muse benchmark tokenizer")?;
     let tokenizer_open_ns = elapsed_ns(tokenizer_started);
-    ensure!(
-        tokenizer.n_vocab() == config.vocab_size,
-        "Muse tokenizer vocabulary {} differs from model {}",
-        tokenizer.n_vocab(),
-        config.vocab_size
-    );
-    ensure!(
-        tokenizer.bos() == Some(config.bos_token_id as i32),
-        "Muse tokenizer BOS {:?} differs from model {}",
-        tokenizer.bos(),
-        config.bos_token_id
-    );
-    ensure!(
-        tokenizer.eos() == Some(config.eos_token_id as i32),
-        "Muse tokenizer EOS {:?} differs from model {}",
-        tokenizer.eos(),
-        config.eos_token_id
-    );
+    config
+        .validate_tokenizer(&tokenizer)
+        .context("Muse Glimmer tokenizer contract")?;
 
     let tokenization_started = Instant::now();
     let prompt_token_ids = tokenizer

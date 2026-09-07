@@ -43,27 +43,14 @@ impl MuseGlimmerBackend {
             .context("bind Muse Glimmer release contract for serve")?;
         let tokenizer =
             LlamaCppTokenizer::open(model_path).context("load Muse Glimmer serve tokenizer")?;
-        anyhow::ensure!(
-            tokenizer.n_vocab() == config.vocab_size,
-            "Muse Glimmer tokenizer vocabulary {} differs from model {}",
-            tokenizer.n_vocab(),
-            config.vocab_size,
-        );
-        anyhow::ensure!(
-            tokenizer.bos() == Some(config.bos_token_id as i32),
-            "Muse Glimmer tokenizer BOS {:?} differs from model {}",
-            tokenizer.bos(),
-            config.bos_token_id,
-        );
-        anyhow::ensure!(
-            tokenizer.eos() == Some(config.eos_token_id as i32),
-            "Muse Glimmer tokenizer EOS {:?} differs from model {}",
-            tokenizer.eos(),
-            config.eos_token_id,
-        );
+        config
+            .validate_tokenizer(&tokenizer)
+            .context("Muse Glimmer serve tokenizer contract")?;
         let eos_token_id = config.eos_token_id as i32;
         let eot_token_id = config.eot_token_id as i32;
-        validate_stop_tokens(&gguf.stop_token_ids()?, eos_token_id, eot_token_id)?;
+        config
+            .validate_stop_tokens(&gguf.stop_token_ids()?)
+            .context("Muse Glimmer serve stop-token contract")?;
         let vocab_size = config.vocab_size;
         let profile = config.chat_template_profile;
         let loaded = MuseGlimmerLoadedModel::load(&ctx, &gguf, capacity)
@@ -270,14 +257,6 @@ fn required_forwards(
     Ok(required)
 }
 
-fn validate_stop_tokens(tokens: &[i32], eos: i32, eot: i32) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        tokens == [eos, eot],
-        "Muse Glimmer serve requires producer stop tokens [{eos}, {eot}], got {tokens:?}"
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,13 +267,5 @@ mod tests {
         assert_eq!(required_forwards(10, 3, 12).unwrap(), 12);
         assert!(required_forwards(10, 0, 10).is_err());
         assert!(required_forwards(10, 3, 11).is_err());
-    }
-
-    #[test]
-    fn stop_contract_is_exact_and_ordered() {
-        assert!(validate_stop_tokens(&[1, 2], 1, 2).is_ok());
-        for invalid in [vec![1], vec![2, 1], vec![1, 2, 3]] {
-            assert!(validate_stop_tokens(&invalid, 1, 2).is_err());
-        }
     }
 }

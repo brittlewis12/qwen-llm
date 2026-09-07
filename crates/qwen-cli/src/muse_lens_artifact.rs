@@ -32,25 +32,9 @@ pub(crate) fn validate_tokenizer(
     tokenizer: &impl Tokenize,
     config: &MuseGlimmerConfig,
 ) -> Result<()> {
-    ensure!(
-        tokenizer.n_vocab() == config.vocab_size,
-        "Muse Glimmer tokenizer vocabulary {} differs from model vocabulary {}",
-        tokenizer.n_vocab(),
-        config.vocab_size
-    );
-    ensure!(
-        tokenizer.bos() == Some(config.bos_token_id as i32),
-        "Muse Glimmer tokenizer BOS {:?} differs from model BOS {}",
-        tokenizer.bos(),
-        config.bos_token_id
-    );
-    ensure!(
-        tokenizer.eos() == Some(config.eos_token_id as i32),
-        "Muse Glimmer tokenizer EOS {:?} differs from model EOS {}",
-        tokenizer.eos(),
-        config.eos_token_id
-    );
-    Ok(())
+    config
+        .validate_tokenizer(tokenizer)
+        .context("Muse Glimmer tokenizer contract")
 }
 
 pub(crate) fn serialize_manifest(manifest: &Manifest) -> Result<Vec<u8>> {

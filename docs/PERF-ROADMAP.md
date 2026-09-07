@@ -2422,6 +2422,21 @@ full-history prompt construction, priced together rather than as separate wins.
 
 ## Force-Ranked BS=1 Opportunity Frontier
 
+2026-09-07 dense Qwen3.8/Q8 native-embedding force-path qualification separates
+bytes from latency. Test-only `6e36f048` proves exact 3,734,732,800-byte Metal allocation
+removal plus bitwise gathered rows, prompt/decode logits and KV/GDN state through
+64 greedy tokens. The independent ordinary-CLI output1/128 A-B-B-A reproduces
+the bytes in every child but misses latency gates: output1 first stdout saves
+6.543% against 15%; output128 process wall saves 1.017% against 5%, with first-output
+control spread 6.118%. Loaded generation guard passes. No default expansion or
+same-cell repeat; native `1` remains an existing explicit resource option, not a
+qualified dense-Q8 latency default. Bound MTP is not executed by these witnesses.
+The remaining 3.2-3.6 s runtime/load interval needs source/phase decomposition before
+another copy-scheduling proposal; the ledger does not yet price its serial copy
+fraction. Existing PSO miss cost is about 1-1.7 ms, not a generic optimization lever.
+Evidence: `docs/bench/2026-09-07-native-q8-embedding/RESULT.md` and
+`docs/bench/2026-09-07-native-q8-cli/RESULT.md`.
+
 The active queue is not empty. The exhausted neighborhood is narrower: serial
 N=1, same-model, same-graph, current-layout local retuning. The active frontier is
 work removal, intra-request target-step amortization, and structurally different

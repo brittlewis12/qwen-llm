@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Dense Q8 Native Embedding CLI Latency HOLD
+
+- Same-binary ordinary-CLI native 0/1 A-B-B-A, 25 input tokens and output1/128.
+  All eight children pass the frozen file-warm/host contract, with zero global
+  compression, swap and pageout growth. Outputs/token hashes/usage agree.
+- Output1 first stdout 3766.867 -> 3520.399 ms saves 6.543%, but misses 15%; process
+  exit saves 6.218%, missing 10%. Output128 process wall saves 1.017% (paired
+  -0.048%/2.060%), missing 5%; first-stdout control spread 6.118% also fails.
+  No rerun, reinterpretation or default allowlist expansion.
+- Model-ready Metal allocation falls exactly 3,734,732,800 bytes in every pair:
+  32,321,585,152 -> 28,586,852,352. The resource/bitwise result stands independently
+  of latency failure. Output128 generation guard passes (+0.378% faster); existing
+  PSO miss wall is only about 1-1.7 ms and is not a material lever in this cell.
+- Independent review favors finer cold-load source/phase attribution before
+  broader copy scheduling, not generic PSO, kernel or residency work. Existing
+  `QWEN_NATIVE_QUANT_EMBED=1` remains available; dense Q8 stays auto-unpromoted.
+- Evidence: `docs/bench/2026-09-07-native-q8-cli/RESULT.md`.
+
 ## 2026-09-07 - Dense Q8 Native Embedding Resource / Bitwise PASS
 
 - Test-only `6e36f048` qualifies the existing force path on Qwen3.8-27B-Q8_0.

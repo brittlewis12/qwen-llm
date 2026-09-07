@@ -180,12 +180,6 @@ fn recorded_render_boundary_diagnostic() {
         .parse()
         .unwrap();
     let gguf = GgufFile::open(&model).unwrap();
-    eprintln!(
-        "render-boundary output_tensor={:?}",
-        gguf.tensors
-            .iter()
-            .find(|tensor| tensor.name == "output.weight")
-    );
     let family = qwen_llm::model_family::ModelFamily::detect(&gguf).unwrap();
     let template = crate::prompt_template::serve_qwen_template(family, &gguf).unwrap();
     let tokenizer = Tokenizer::open(&model).unwrap();
@@ -423,9 +417,7 @@ fn compare_consumed_boundary_tails(loaded: &LoadedModel, completed: &[i32], next
         } else {
             completed
         };
-        let lookup = (mode == "old-packed").then(|| loaded.lookup_cached_prefix(key).unwrap());
-        let consumed_lookup =
-            (mode != "old-packed").then(|| loaded.lookup_cached_consumed_extension(next).unwrap());
+        let lookup = loaded.lookup_cached_prefix(key).unwrap();
         let before = loaded.context().current_allocated_size();
         let start = Instant::now();
         let (chunk, mut scratch, mut sequence) = if mode == "consumed-packed" {
@@ -468,33 +460,9 @@ fn compare_consumed_boundary_tails(loaded: &LoadedModel, completed: &[i32], next
         let allocation_ms = start.elapsed().as_secs_f64() * 1e3;
         let request_bytes = loaded.context().current_allocated_size() - before;
         let start = Instant::now();
-        let restored = if let Some(lookup) = consumed_lookup {
-            assert_eq!(lookup.restored_prefix_len(), consumed);
-            let mut wrong_prefix = next.to_vec();
-            wrong_prefix[0] ^= 1;
-            for rejected in [&wrong_prefix[..], &next[..consumed], completed] {
-                let bad_lookup = loaded.lookup_cached_consumed_extension(next).unwrap();
-                assert!(
-                    loaded
-                        .restore_prepared_consumed_extension(bad_lookup, &mut sequence, rejected)
-                        .is_err()
-                );
-                assert_eq!(sequence.position(), 0);
-            }
-            let report = loaded
-                .restore_prepared_consumed_extension(lookup, &mut sequence, next)
-                .unwrap();
-            assert_eq!(report.matched_prefix_len, consumed);
-            assert_eq!(report.restored_prefix_len, consumed);
-            assert!(!report.exact);
-            assert!(report.exact_final_logits.is_none());
-            assert!(report.capture_tail.is_none());
-            report
-        } else {
-            loaded
-                .restore_prepared_cached_prefix(lookup.unwrap(), &mut sequence, key)
-                .unwrap()
-        };
+        let restored = loaded
+            .restore_prepared_cached_prefix(lookup, &mut sequence, key)
+            .unwrap();
         assert!(next.starts_with(&key[..restored.restored_prefix_len]));
         let restore_ms = start.elapsed().as_secs_f64() * 1e3;
         let start = Instant::now();

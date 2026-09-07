@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Exact Tiled VT Rebuild Bank Screen PASS
+
+- Research-only `619d4f03` coalesces input/output raw-u16 copies with a32x32
+  padded threadgroup tile. All65536 raw patterns and subspan/view/padding/guard
+  oracles are bitwise equal to CPU and incumbent. No production selector changes.
+- Sixteen distinct G6 layer banks with one reused VT slot: GPU7.682479 ->1.132292
+  ms at8840 and27.449896 ->5.044646 ms at32752, approximately85.26/81.62% saved.
+  Both paired25% gates pass; control spreads<0.1%. Whole restored-prefill and
+  endpoint effects remain unmeasured; no physical-DRAM bandwidth claim.
+- CPU closure audit kills the N8 transfer before spending GPU: persistent-VT
+  online N8 already failed the8843-token endpoint with transpose amortized away.
+  Cheaper VT does not reopen that path. Focus this exact copy change on existing
+  restored-prefill rebuilds, not fresh prefill's fused scatter or N8 speculation.
+- Independent review and two release tests pass. POD compile failure is retained;
+  all timing runs under the ordinary Metal lease. Evidence:
+  `docs/bench/2026-09-07-tiled-vt-rebuild/RESULT.md`.
+
 ## 2026-09-07 - N16 Online Attention Full-Verifier Phase PASS / Product HOLD
 
 - Test-only `8123e74d` plus observer fix `e5e6abd9` primes32752 real Q8 tokens and

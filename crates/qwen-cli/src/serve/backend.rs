@@ -330,12 +330,46 @@ fn restored_packed_tail_arch(
 ) -> bool {
     template == QwenTemplate::Qwen38
         && lm_head_dtype == qwen_llm::tensor::GgmlType::Q8_0
-        && arch.kind == qwen_llm::model::ArchKind::Dense
+        && bounded_packed_dense_arch(arch)
+}
+
+fn bounded_packed_dense_arch(arch: &qwen_llm::model::Arch) -> bool {
+    arch.kind == qwen_llm::model::ArchKind::Dense
         && arch.n_layer == 64
         && arch.hidden_size == 5120
         && arch.n_q_heads == 24
         && arch.n_kv_heads == 4
         && arch.attn_head_dim == 256
+}
+
+fn fresh_packed_arch(
+    arch: &qwen_llm::model::Arch,
+    template: QwenTemplate,
+    lm_head_dtype: qwen_llm::tensor::GgmlType,
+) -> bool {
+    use qwen_llm::tensor::GgmlType;
+    bounded_packed_dense_arch(arch)
+        && matches!(
+            (template, lm_head_dtype),
+            (QwenTemplate::Qwen36, GgmlType::Q6_K) | (QwenTemplate::Qwen38, GgmlType::Q8_0)
+        )
+}
+
+fn fresh_packed_width(
+    enabled: bool,
+    qualified: bool,
+    has_drafter: bool,
+    greedy: bool,
+    has_cached_prefix: bool,
+    prompt: usize,
+) -> Option<usize> {
+    (enabled
+        && qualified
+        && !has_drafter
+        && greedy
+        && !has_cached_prefix
+        && (19..=48).contains(&prompt))
+    .then_some(prompt)
 }
 
 fn restored_packed_tail_width(
@@ -754,21 +788,35 @@ impl GenerationBackend for EngineBackend {
                     ServeError::server_error(format!("price prefill memory: {error}"))
                 })?
         };
-        let packed_tail_plan = restored_packed_tail_width(
-            restored_packed_tail_arch(
+        let packed_width = fresh_packed_width(
+            std::env::var("QWEN_SERVE_FRESH_PACKED").as_deref() == Ok("1"),
+            fresh_packed_arch(
                 &self.loaded.arch(),
                 self.template,
                 self.loaded.metal_model().lm_head.dtype,
             ),
             self.dflash_head.is_some(),
             sampler.config().temperature == 0.0,
+            cached_lookup.is_some(),
             prompt_ids.len(),
-            cached_lookup
-                .as_ref()
-                .map_or(0, |lookup| lookup.restored_prefix_len()),
-            exact_cached,
         )
-        .and_then(|width| {
+        .or_else(|| {
+            restored_packed_tail_width(
+                restored_packed_tail_arch(
+                    &self.loaded.arch(),
+                    self.template,
+                    self.loaded.metal_model().lm_head.dtype,
+                ),
+                self.dflash_head.is_some(),
+                sampler.config().temperature == 0.0,
+                prompt_ids.len(),
+                cached_lookup
+                    .as_ref()
+                    .map_or(0, |lookup| lookup.restored_prefix_len()),
+                exact_cached,
+            )
+        });
+        let packed_tail_plan = packed_width.and_then(|width| {
             let plan = qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
                 self.loaded.metal_model(),
                 width as u32,
@@ -836,11 +884,16 @@ impl GenerationBackend for EngineBackend {
         let (mut chunk, mut scratch, mut sequence) = allocation.map_err(|error| {
             ServeError::server_error(format!("allocate request state: {error:#}"))
         })?;
-        if scratch
+        if let Some(selected_scratch) = scratch
             .as_ref()
-            .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk())
+            .filter(|s| s.prefill_scratch_plan().is_single_chunk())
         {
-            tracing::info!(target: "qwen_diag", "serve prefill: restored_packed_tail rows={chunk}");
+            if cached_lookup.is_none() {
+                let plan = selected_scratch.prefill_scratch_plan();
+                tracing::info!(target: "qwen_diag", "serve prefill: fresh_packed rows={chunk} query_rows={} matrix_max_pos={}", plan.matrix_query_rows(), plan.matrix_max_pos());
+            } else {
+                tracing::info!(target: "qwen_diag", "serve prefill: restored_packed_tail rows={chunk}");
+            }
         }
         let mut alloc_ms = alloc_t0.elapsed().as_secs_f64() * 1e3;
         let forward = self.loaded.forward();

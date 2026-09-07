@@ -157,6 +157,62 @@ fn optional_tail_faults_preserve_serial_admission_and_allocation() {
     );
 }
 
+#[test]
+fn fresh_packed_policy_preserves_cached_sampled_and_unqualified_requests() {
+    use qwen_llm::tensor::GgmlType;
+    let arch = qwen_llm::model::QWEN3_27B;
+    assert!(fresh_packed_arch(
+        &arch,
+        QwenTemplate::Qwen36,
+        GgmlType::Q6_K
+    ));
+    assert!(fresh_packed_arch(
+        &arch,
+        QwenTemplate::Qwen38,
+        GgmlType::Q8_0
+    ));
+    for (template, dtype) in [
+        (QwenTemplate::Qwen36, GgmlType::Q8_0),
+        (QwenTemplate::Qwen38, GgmlType::Q6_K),
+        (QwenTemplate::Qwen35, GgmlType::Q6_K),
+    ] {
+        assert!(!fresh_packed_arch(&arch, template, dtype));
+    }
+    let mut wrong = arch;
+    wrong.n_layer -= 1;
+    assert!(!fresh_packed_arch(
+        &wrong,
+        QwenTemplate::Qwen36,
+        GgmlType::Q6_K
+    ));
+    for prompt in [0, 1, 18, 19, 20, 31, 32, 47, 48, 49, 8192] {
+        assert_eq!(
+            fresh_packed_width(true, true, false, true, false, prompt),
+            (19..=48).contains(&prompt).then_some(prompt)
+        );
+        assert_eq!(
+            fresh_packed_width(false, true, false, true, false, prompt),
+            None
+        );
+        assert_eq!(
+            fresh_packed_width(true, false, false, true, false, prompt),
+            None
+        );
+        assert_eq!(
+            fresh_packed_width(true, true, true, true, false, prompt),
+            None
+        );
+        assert_eq!(
+            fresh_packed_width(true, true, false, false, false, prompt),
+            None
+        );
+        assert_eq!(
+            fresh_packed_width(true, true, false, true, true, prompt),
+            None
+        );
+    }
+}
+
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     assert_eq!(a.len(), b.len());
     assert!(a.iter().chain(b).all(|v| v.is_finite()));
@@ -761,6 +817,95 @@ fn fresh_short_packed_matches_serial() {
             "fresh packed allocation+prefill misses phase gate"
         );
     }
+}
+
+#[test]
+#[ignore = "CPU fixture builder; requires QWEN_FRESH_PILOT_MODEL and QWEN_FRESH_HTTP_OUT"]
+fn fresh_packed_endpoint_fixture() {
+    use std::io::Write;
+    let model = std::env::var("QWEN_FRESH_PILOT_MODEL").unwrap();
+    let gguf = GgufFile::open(&model).unwrap();
+    let family = qwen_llm::model_family::ModelFamily::detect(&gguf).unwrap();
+    let template = crate::prompt_template::serve_qwen_template(family, &gguf).unwrap();
+    let tokenizer = Tokenizer::open(&model).unwrap();
+    let mut cases = Vec::new();
+    for (name, width, text, maximum, temperature) in [
+        (
+            "fresh-19",
+            19,
+            "Reply with exactly the word violet.",
+            16,
+            0.0,
+        ),
+        (
+            "exact-19",
+            19,
+            "Reply with exactly the word violet.",
+            16,
+            0.0,
+        ),
+        (
+            "fresh-32-code",
+            32,
+            "Write Python that merges two sorted lists without duplicates.",
+            128,
+            0.0,
+        ),
+        (
+            "fresh-48-prose",
+            48,
+            "Explain how a binary search tree stores and finds values.",
+            128,
+            0.0,
+        ),
+        ("guard-18", 18, "Reply with the word amber.", 16, 0.0),
+        (
+            "guard-49",
+            49,
+            "Write Python that computes the greatest common divisor.",
+            128,
+            0.0,
+        ),
+        (
+            "sampled-32",
+            32,
+            "Reply with exactly the word green.",
+            16,
+            0.7,
+        ),
+        (
+            "guard-512",
+            512,
+            "Reply with exactly the word indigo.",
+            16,
+            0.0,
+        ),
+    ] {
+        let (body, ids) = (0..1024).find_map(|padding| {
+            let body = serde_json::json!({"model": "fresh-pilot", "input": format!("{}{text}", "Hello ".repeat(padding)),
+                "max_output_tokens": maximum, "temperature": temperature,
+                "x_qwen": {"no_thinking": true, "seed": 1729}});
+            let request = crate::open_responses::items::parse_request(&body).unwrap();
+            let bound = crate::open_responses::bind_qwen_request(&request, template,
+                crate::supports_qwen_no_thinking_prompt(family, &gguf)).unwrap();
+            let prompt = crate::open_responses::render::render_qwen_serve_prompt(&bound);
+            let ids = tokenizer.encode(&prompt, false).unwrap();
+            (ids.len() == width).then_some((body, ids))
+        }).expect("full rendered request at intended token count");
+        eprintln!(
+            "fresh-fixture name={name} tokens={width} sha256={}",
+            token_ids_sha256_i32le(&ids)
+        );
+        cases.push(serde_json::json!({"name": name, "request": body}));
+    }
+    let path = std::env::var("QWEN_FRESH_HTTP_OUT").unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .unwrap();
+    file.write_all(&serde_json::to_vec_pretty(&cases).unwrap())
+        .unwrap();
 }
 
 #[test]

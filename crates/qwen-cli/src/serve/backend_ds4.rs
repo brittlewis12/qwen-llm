@@ -21,10 +21,9 @@
 //! reports headless generation to the transport (S3-1).
 
 use super::backend::request_sampler;
-use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
-use super::output_partition::{GenerationEnd, OutputProtocol};
+use super::output_partition::OutputProtocol;
 use super::render_ds4;
 use crate::DeepSeekV4MultigroupSelectorPlan;
 use anyhow::Context as _;
@@ -523,52 +522,16 @@ impl DeepSeekV4Backend {
             }
         }
 
-        let (stop_reason, end) = match generation.stop_reason {
-            crate::StopReason::Eos => (
-                StopReason::Eos,
-                GenerationEnd::StopToken(
-                    *generation
-                        .tokens
-                        .last()
-                        .expect("EOS generation includes its terminal token"),
-                ),
-            ),
-            crate::StopReason::TokenLimit => (StopReason::TokenLimit, GenerationEnd::TokenLimit),
-        };
         tracing::info!(
             target: "qwen_diag",
             "serve phases: tokenize_ms={tokenize_ms:.1} session_ms={session_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={capture_ms:.1} family=deepseek_v4",
         );
-        tracing::info!(
-            target: "qwen_diag",
-            "serve stats: version=serve_stats_v1 prompt_tokens={} generated_tokens={} stop_reason={} matched_tokens={} restore_ms={:.1} decode_tps={:.2}",
+        Ok(super::outcome::finish_generation(
             prompt_ids.len(),
-            generation.tokens.len(),
-            match stop_reason {
-                StopReason::Eos => "eos",
-                StopReason::TokenLimit => "token_limit",
-            },
+            &generation,
             matched_tokens,
             restore_ms,
-            if generation.wall_ms > 0.0 {
-                generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
-            } else {
-                0.0
-            },
-        );
-        Ok(GenerationOutcome {
-            end,
-            usage: Usage {
-                input_tokens: prompt_ids.len(),
-                output_tokens: generation.tokens.len(),
-                cached_tokens: matched_tokens,
-            },
-            stats: Some(ServeStats {
-                matched_tokens,
-                restore_ms,
-                prompt_tokens: prompt_ids.len(),
-            }),
-        })
+        ))
     }
 
     fn capture_snapshot(

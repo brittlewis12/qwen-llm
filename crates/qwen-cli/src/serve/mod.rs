@@ -18,6 +18,7 @@ pub(crate) mod backend_ds4;
 pub(crate) mod backend_muse;
 pub(crate) mod events;
 pub(crate) mod http;
+pub(crate) mod outcome;
 pub(crate) mod output_partition;
 pub(crate) mod partition;
 pub(crate) mod partition_muse;

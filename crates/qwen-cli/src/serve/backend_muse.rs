@@ -1,9 +1,8 @@
 //! Resident Muse Glimmer [`GenerationBackend`].
 
-use super::events::{ServeStats, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
-use super::output_partition::{GenerationEnd, OutputProtocol};
+use super::output_partition::OutputProtocol;
 use super::render_muse;
 use anyhow::Context as _;
 use qwen_llm::gguf::GgufFile;
@@ -155,7 +154,7 @@ impl GenerationBackend for MuseGlimmerBackend {
                 "transport aborted during Muse prefill".into()
             })
         });
-        let mut logits = match logits {
+        let logits = match logits {
             Ok(logits) => logits,
             Err(error) => {
                 return Err(match checkpoint_abort {
@@ -168,67 +167,48 @@ impl GenerationBackend for MuseGlimmerBackend {
         };
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
-        let decode_t0 = Instant::now();
-        let mut output_tokens = 0usize;
-        let end = loop {
-            sink.tick().map_err(BackendFailure::Aborted)?;
-            let token = sampler
-                .sample(&logits)
-                .map_err(|error| ServeError::server_error(format!("sample Muse logits: {error}")))?
-                .token;
-            output_tokens += 1;
-            if stop_tokens.contains(&token) {
-                break GenerationEnd::StopToken(token);
-            }
-            let bytes = tokenizer
-                .try_decode_piece_bytes_exact(token)
-                .map_err(|error| {
-                    ServeError::server_error(format!("decode Muse token {token}: {error}"))
-                })?;
-            sink.piece(&bytes).map_err(BackendFailure::Aborted)?;
-            if output_tokens == max_tokens {
-                break GenerationEnd::TokenLimit;
-            }
-            let token = crate::checked_token_id(token, vocab_size, "generated")
-                .map_err(|error| ServeError::server_error(error.to_string()))?;
-            logits = runner.forward_token(token).map_err(|error| {
-                ServeError::server_error(format!("forward Muse token: {error}"))
-            })?;
+        // Canonical serial loop (same shape as DeepSeek serve): the stop
+        // token is counted but never written, and a client disconnect is
+        // observed through the piece write that precedes every forward.
+        let mut abort: Option<io::Error> = None;
+        let generation = {
+            let abort = &mut abort;
+            crate::generate_serial(
+                logits,
+                max_tokens,
+                &stop_tokens,
+                &mut sampler,
+                |token| {
+                    let bytes = tokenizer
+                        .try_decode_piece_bytes_exact(token)
+                        .with_context(|| format!("decode Muse token {token}"))?;
+                    sink.piece(&bytes).map_err(|error| {
+                        *abort = Some(error);
+                        anyhow::anyhow!("client disconnected during decode")
+                    })
+                },
+                |token| {
+                    let token = crate::checked_token_id(token, vocab_size, "generated")?;
+                    runner.forward_token(token).context("forward Muse token")
+                },
+            )
         };
-        let decode_ms = decode_t0.elapsed().as_secs_f64() * 1e3;
+        let generation = match generation {
+            Ok(generation) => generation,
+            Err(error) => {
+                return Err(match abort {
+                    Some(io_error) => BackendFailure::Aborted(io_error),
+                    None => ServeError::server_error(format!("decode: {error:#}")).into(),
+                });
+            }
+        };
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: family=muse_glimmer tokenize_ms={tokenize_ms:.1} prefill_ms={prefill_ms:.1} decode_ms={decode_ms:.1} required_forwards={required} capacity={}",
+            "serve phases: family=muse_glimmer tokenize_ms={tokenize_ms:.1} prefill_ms={prefill_ms:.1} decode_ms={:.1} required_forwards={required} capacity={}",
+            generation.wall_ms,
             self.capacity,
         );
-        tracing::info!(
-            target: "qwen_diag",
-            "serve stats: version=serve_stats_v1 prompt_tokens={} generated_tokens={} stop_reason={} matched_tokens=0 restore_ms=0.0 decode_tps={:.2}",
-            prompt_ids.len(),
-            output_tokens,
-            match end {
-                GenerationEnd::StopToken(_) => "eos",
-                GenerationEnd::TokenLimit => "token_limit",
-            },
-            if decode_ms > 0.0 {
-                output_tokens as f64 / (decode_ms / 1e3)
-            } else {
-                0.0
-            },
-        );
-        Ok(GenerationOutcome {
-            end,
-            usage: Usage {
-                input_tokens: prompt_ids.len(),
-                output_tokens,
-                cached_tokens: 0,
-            },
-            stats: Some(ServeStats {
-                matched_tokens: 0,
-                restore_ms: 0.0,
-                prompt_tokens: prompt_ids.len(),
-            }),
-        })
+        Ok(super::outcome::finish_generation(prompt_ids.len(), &generation, 0, 0.0))
     }
 }
 

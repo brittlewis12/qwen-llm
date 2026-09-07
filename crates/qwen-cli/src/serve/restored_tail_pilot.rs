@@ -1,0 +1,379 @@
+use super::*;
+use qwen_llm::metal_forward::SnapshotKvStorageKind;
+
+fn packed_width(
+    dense: bool,
+    has_drafter: bool,
+    prompt: usize,
+    restored: usize,
+    exact: bool,
+) -> Option<usize> {
+    let remaining = prompt.checked_sub(restored)?;
+    (dense && !has_drafter && !exact && restored > 0 && (7..=32).contains(&remaining))
+        .then_some(remaining)
+}
+
+#[test]
+fn bounded_restored_tail_plan_preserves_unqualified_lanes() {
+    for prefix in [8, 8192, 32768] {
+        for tail in [1, 6, 7, 16, 32, 33, 48, 49] {
+            assert_eq!(
+                packed_width(true, false, prefix + tail, prefix, false),
+                (7..=32).contains(&tail).then_some(tail)
+            );
+            assert_eq!(
+                packed_width(false, false, prefix + tail, prefix, false),
+                None
+            );
+            assert_eq!(packed_width(true, true, prefix + tail, prefix, false), None);
+            assert_eq!(packed_width(true, false, prefix + tail, prefix, true), None);
+            assert_eq!(packed_width(true, false, tail, 0, false), None);
+        }
+    }
+    assert_eq!(packed_width(true, false, 10, 11, false), None);
+    // Seven matches include one pending token: six consumed tokens plus a
+    // seven-row suffix is eligible, while incorrectly using matches is not.
+    assert_eq!(packed_width(true, false, 13, 6, false), Some(7));
+    assert_eq!(packed_width(true, false, 13, 7, false), None);
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    assert!(a.iter().chain(b).all(|v| v.is_finite()));
+    let dot: f64 = a.iter().zip(b).map(|(&a, &b)| a as f64 * b as f64).sum();
+    let norm = |v: &[f32]| v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>();
+    let (aa, bb) = (norm(a), norm(b));
+    if aa == 0.0 && bb == 0.0 {
+        1.0
+    } else {
+        dot / (aa * bb).sqrt()
+    }
+}
+
+fn f32_values(bytes: &[u8]) -> Vec<f32> {
+    assert_eq!(bytes.len() % 4, 0);
+    bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect()
+}
+
+#[test]
+#[ignore = "requires QWEN_TAIL_PILOT_MODEL and QWEN_TAIL_PILOT_PROMPT; serial Metal pilot"]
+fn restored_suffix32_packed_matches_serial_greedy() {
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            panic!("prefill emitted")
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let model = std::env::var("QWEN_TAIL_PILOT_MODEL").unwrap();
+    let prompt = std::fs::read_to_string(std::env::var("QWEN_TAIL_PILOT_PROMPT").unwrap()).unwrap();
+    let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
+    let loaded = runtime.load_model(&model).unwrap();
+    assert_eq!(loaded.arch().kind, qwen_llm::model::ArchKind::Dense);
+    let tokens = loaded.tokenizer().unwrap().encode(&prompt, false).unwrap();
+    let prefix = tokens.len().checked_sub(32).unwrap();
+    assert!(prefix >= 8192);
+    let width = packed_width(true, false, tokens.len(), prefix, false).unwrap();
+    let forward = loaded.forward();
+    let (_, mut prefix_scratch, mut builder) =
+        allocate_serve_request_state(&loaded, prefix, tokens.len() + 64, true).unwrap();
+    crate::prefill_span(
+        &forward,
+        &mut builder,
+        prefix_scratch.as_mut().unwrap(),
+        &tokens[..prefix],
+        0,
+    )
+    .unwrap();
+    let checkpoint = loaded
+        .prepare_checkpoint_boundary(
+            &builder,
+            tokens[..prefix].to_vec(),
+            Some(tokens[prefix]),
+            None,
+            None,
+            0,
+        )
+        .unwrap();
+    loaded
+        .cache_prepared_checkpoint_strict(&checkpoint)
+        .unwrap()
+        .expect("cache insertion");
+    drop(builder);
+    drop(prefix_scratch);
+
+    let mut states = Vec::new();
+    let mut logits = Vec::new();
+    let mut times = Vec::new();
+    let mut reusable_scratch = None;
+    for mode in ["serial", "full-vt", "single-vt", "single-vt-reuse"] {
+        let packed = mode != "serial";
+        let single = mode.starts_with("single-vt");
+        let mut sequence = loaded
+            .create_sequence(SequenceConfig::new(tokens.len() + 64))
+            .unwrap();
+        let lookup = loaded.lookup_cached_prefix(&tokens).unwrap();
+        assert_eq!(lookup.restored_prefix_len(), prefix);
+        let report = loaded
+            .restore_prepared_cached_prefix(lookup, &mut sequence, &tokens)
+            .unwrap();
+        assert_eq!(report.matched_prefix_len, prefix + 1);
+        assert_eq!(sequence.position(), prefix);
+        let before = loaded.context().current_allocated_size();
+        let start = Instant::now();
+        let mut scratch = if mode == "single-vt-reuse" {
+            reusable_scratch.take()
+        } else if packed {
+            let planner = if single {
+                qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch
+            } else {
+                plan_prefill_scratch_with_matrix_max_pos_configured
+            };
+            let plan = planner(
+                loaded.metal_model(),
+                width as u32,
+                tokens.len(),
+                PrefillScratchConfig::default(),
+            )
+            .unwrap();
+            let priced = plan
+                .priced_upper_bound(|bytes| {
+                    Ok(loaded.context().shared_buffer_size_and_align(bytes)?.size)
+                })
+                .unwrap();
+            eprintln!("tail-pilot mode={mode} priced_upper_bytes={priced}");
+            if single {
+                assert!(priced <= 128 * 1024 * 1024);
+            }
+            Some(
+                MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(
+                    loaded.context(),
+                    loaded.metal_model(),
+                    plan,
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let bytes = loaded.context().current_allocated_size() - before;
+        if let Some(scratch) = &scratch {
+            let plan = scratch.prefill_scratch_plan();
+            assert_eq!(plan.block_size(), width as u32);
+            assert_eq!(plan.matrix_query_rows(), width as u32);
+            assert_eq!(plan.matrix_max_pos(), tokens.len() as u64);
+        }
+        let allocation_ms = start.elapsed().as_secs_f64() * 1e3;
+        if single {
+            let scratch = scratch.as_mut().unwrap();
+            let before = sequence
+                .metal_session()
+                .snapshot(
+                    loaded.snapshot_identity(&sequence).unwrap(),
+                    tokens[..prefix].to_vec(),
+                    None,
+                )
+                .unwrap();
+            for bad in [&tokens[prefix..prefix], &tokens[prefix - 1..]] {
+                let error = qwen_llm::metal_dflash::prefill_tokens_with_multi_hidden(
+                    &forward,
+                    bad,
+                    prefix as u32,
+                    unsafe { sequence.metal_session_mut() },
+                    scratch,
+                    &[],
+                    None,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("single-chunk"));
+            }
+            let after = sequence
+                .metal_session()
+                .snapshot(
+                    loaded.snapshot_identity(&sequence).unwrap(),
+                    tokens[..prefix].to_vec(),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(before.kv_n_pos, after.kv_n_pos);
+            assert_eq!(before.kv_k_arena, after.kv_k_arena);
+            assert_eq!(before.kv_v_arena, after.kv_v_arena);
+            assert_eq!(before.gdn_state_arena, after.gdn_state_arena);
+            assert_eq!(before.gdn_conv_arena, after.gdn_conv_arena);
+            if mode == "single-vt-reuse" {
+                let vt = &scratch.attn_matrix_vt_pack;
+                unsafe {
+                    std::ptr::write_bytes(
+                        (vt.buffer.contents().as_ptr() as *mut u8).add(vt.offset as usize),
+                        0x7e,
+                        vt.n_bytes() as usize,
+                    );
+                }
+            }
+        }
+        let start = Instant::now();
+        let out = if packed {
+            crate::prefill_span(
+                &forward,
+                &mut sequence,
+                scratch.as_mut().unwrap(),
+                &tokens[prefix..],
+                prefix,
+            )
+            .unwrap()
+            .0
+        } else {
+            prefill_remaining(
+                &loaded,
+                &forward,
+                None,
+                false,
+                &tokens,
+                width,
+                &mut sequence,
+                &mut scratch,
+                &mut None,
+                &mut Sink,
+            )
+            .unwrap_or_else(|_| panic!("serial prefill"))
+            .unwrap()
+        };
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        eprintln!(
+            "tail-pilot mode={mode} prefix={prefix} suffix={width} scratch_bytes={bytes} allocation_ms={allocation_ms:.3} prefill_ms={ms:.3}"
+        );
+        assert!(
+            !single || bytes <= 128 * 1024 * 1024,
+            "suffix scratch exceeds 128 MiB screen"
+        );
+        assert_eq!(sequence.position(), tokens.len());
+        times.push(ms + allocation_ms);
+        logits.push(out);
+        states.push(sequence);
+        if mode == "single-vt" {
+            reusable_scratch = scratch;
+        }
+    }
+    for other in [2, 3] {
+        assert!(
+            logits[1]
+                .iter()
+                .zip(&logits[other])
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "VT sharing changed packed logits"
+        );
+    }
+    let logits_cos = cosine(&logits[0], &logits[2]);
+    eprintln!(
+        "tail-pilot logits_cos={logits_cos:.10} phase_speedup={:.3}",
+        times[0] / times[2]
+    );
+    assert!(logits_cos >= 0.999);
+    let snapshots: Vec<_> = states
+        .iter()
+        .map(|s| {
+            s.metal_session()
+                .snapshot(loaded.snapshot_identity(s).unwrap(), tokens.clone(), None)
+                .unwrap()
+        })
+        .collect();
+    for other in [2, 3] {
+        let (a, b) = (&snapshots[1], &snapshots[other]);
+        assert_eq!(a.kv_n_pos, b.kv_n_pos);
+        assert_eq!(a.kv_k_arena, b.kv_k_arena);
+        assert_eq!(a.kv_v_arena, b.kv_v_arena);
+        assert_eq!(a.gdn_state_arena, b.gdn_state_arena);
+        assert_eq!(a.gdn_conv_arena, b.gdn_conv_arena);
+    }
+    eprintln!(
+        "tail-pilot full-VT/single-VT/poisoned-reuse logits and persistent state bitwise equal"
+    );
+    let (a, b) = (&snapshots[0], &snapshots[2]);
+    assert_eq!(a.kv_n_pos, b.kv_n_pos);
+    assert_eq!(a.identity, b.identity);
+    assert_eq!(a.identity.kv_storage_kind, SnapshotKvStorageKind::F16);
+    let layer_bytes = tokens.len() * a.identity.kv_bytes_per_token as usize;
+    let restored_bytes = prefix * a.identity.kv_bytes_per_token as usize;
+    let f16_values = |bytes: &[u8]| {
+        bytes
+            .chunks_exact(2)
+            .map(|b| half::f16::from_bits(u16::from_le_bytes(b.try_into().unwrap())).to_f32())
+            .collect::<Vec<_>>()
+    };
+    let mut min_cos = 1.0f64;
+    for (x, y) in [
+        (&a.kv_k_arena, &b.kv_k_arena),
+        (&a.kv_v_arena, &b.kv_v_arena),
+    ] {
+        for (x, y) in x.chunks_exact(layer_bytes).zip(y.chunks_exact(layer_bytes)) {
+            assert_eq!(&x[..restored_bytes], &y[..restored_bytes]);
+            min_cos = min_cos.min(cosine(
+                &f16_values(&x[restored_bytes..]),
+                &f16_values(&y[restored_bytes..]),
+            ));
+        }
+    }
+    for (x, y, elements) in [
+        (
+            &a.gdn_state_arena,
+            &b.gdn_state_arena,
+            a.identity.gdn_state_elements_per_layer,
+        ),
+        (
+            &a.gdn_conv_arena,
+            &b.gdn_conv_arena,
+            a.identity.gdn_conv_elements_per_layer,
+        ),
+    ] {
+        for (x, y) in x
+            .chunks_exact(elements as usize * 4)
+            .zip(y.chunks_exact(elements as usize * 4))
+        {
+            min_cos = min_cos.min(cosine(&f32_values(x), &f32_values(y)));
+        }
+    }
+    eprintln!("tail-pilot min_state_cos={min_cos:.10}");
+    assert!(min_cos >= 0.999);
+    drop(snapshots);
+    let stops = loaded.gguf().stop_token_ids().unwrap();
+    let request = ServeRequest {
+        temperature: Some(0.0),
+        ..ServeRequest::default()
+    };
+    let mut sampler = request_sampler(&request).unwrap();
+    let mut generated = Vec::new();
+    for step in 0..64 {
+        let next: Vec<_> = logits
+            .iter()
+            .map(|logits| sampler.sample(logits).unwrap().token)
+            .collect();
+        assert_eq!(
+            next[0], next[1],
+            "greedy continuation differs at step {step}"
+        );
+        assert!(next.iter().all(|&token| token == next[0]));
+        generated.push(next[0]);
+        if stops.contains(&next[0]) || step == 63 {
+            break;
+        }
+        for (s, logits) in states.iter_mut().zip(&mut logits) {
+            *logits = forward
+                .single_token(next[0], s.position() as u32, unsafe {
+                    s.metal_session_mut()
+                })
+                .unwrap();
+            s.advance_by(1).unwrap();
+        }
+    }
+    assert_eq!(states[0].position(), states[1].position());
+    eprintln!(
+        "tail-pilot greedy_tokens={} sha256={}",
+        generated.len(),
+        token_ids_sha256_i32le(&generated)
+    );
+}

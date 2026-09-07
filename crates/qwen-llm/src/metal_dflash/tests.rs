@@ -2896,6 +2896,7 @@ fn product_moe_plan(
         attn_matrix_online: true,
         attn_matrix_query_cap: configured_topology.then_some(1024),
         overlay_allowed: configured_topology,
+        single_chunk_vt: false,
     };
     build_prefill_scratch_plan_from_arch(
         arch,
@@ -2906,6 +2907,54 @@ fn product_moe_plan(
         modes,
     )
     .unwrap()
+}
+
+#[test]
+fn single_chunk_vt_plan_shares_only_layer_storage() {
+    let arch = crate::model::QWEN3_27B;
+    let base = product_moe_plan(&arch, 32, true);
+    for end in [8192, 8840, 32768] {
+        let mut modes = base.modes;
+        modes.attn_matrix_max_pos = end;
+        let full = build_prefill_scratch_plan_from_arch(&arch, 16, true, 32, false, modes).unwrap();
+        modes.single_chunk_vt = true;
+        let single =
+            build_prefill_scratch_plan_from_arch(&arch, 16, true, 32, false, modes).unwrap();
+        assert_eq!(
+            full.logical_bytes - single.logical_bytes,
+            15 * 4 * 256 * end * 2
+        );
+        assert_eq!(full.allocations.len(), single.allocations.len());
+        for (a, b) in full.allocations.iter().zip(&single.allocations) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.dtype, b.dtype);
+            if a.name == "attn_matrix_vt_pack" {
+                assert_eq!(a.logical_bytes, 16 * b.logical_bytes);
+            } else {
+                assert_eq!(a, b);
+            }
+        }
+        assert_eq!(full.deferred_allocations, single.deferred_allocations);
+        assert_eq!(full.matrix_query_rows, single.matrix_query_rows);
+        assert_eq!(full.matrix_max_pos, single.matrix_max_pos);
+        assert_eq!(modes.vt_layer(15), 0);
+        assert_eq!(full.modes.vt_layer(15), 15);
+        assert!(build_prefill_scratch_plan_from_arch(&arch, 16, true, 32, true, modes).is_err());
+        assert!(build_prefill_scratch_plan_from_arch(&arch, 16, true, 0, false, modes).is_err());
+        assert!(
+            build_prefill_scratch_plan_from_arch(
+                &product_moe_plan_arch(false),
+                16,
+                true,
+                32,
+                false,
+                modes
+            )
+            .is_err()
+        );
+        modes.enable_attn_matrix = false;
+        assert!(build_prefill_scratch_plan_from_arch(&arch, 16, true, 32, false, modes).is_err());
+    }
 }
 
 #[test]

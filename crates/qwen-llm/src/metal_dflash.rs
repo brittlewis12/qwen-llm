@@ -5980,6 +5980,21 @@ struct PrefillScratchPlanModes {
     attn_matrix_online: bool,
     attn_matrix_query_cap: Option<usize>,
     overlay_allowed: bool,
+    single_chunk_vt: bool,
+}
+
+impl PrefillScratchPlanModes {
+    fn vt_layers(self, layers: u64) -> u64 {
+        if self.single_chunk_vt {
+            1
+        } else {
+            layers.max(1)
+        }
+    }
+
+    fn vt_layer(self, layer: usize) -> usize {
+        if self.single_chunk_vt { 0 } else { layer }
+    }
 }
 
 struct PrefillScratchPlanBuilder {
@@ -6156,6 +6171,17 @@ fn build_prefill_scratch_plan_from_arch(
     include_spec_packs: bool,
     modes: PrefillScratchPlanModes,
 ) -> Result<PrefillScratchPlan, MetalError> {
+    if modes.single_chunk_vt
+        && (include_spec_packs
+            || !modes.enable_attn_matrix
+            || block_size == 0
+            || arch.kind != crate::model::ArchKind::Dense)
+    {
+        return Err(MetalError::BadShape {
+            kernel: "single_chunk_prefill_scratch",
+            detail: "single-chunk VT requires dense matrix prefill with nonzero width".into(),
+        });
+    }
     let n = u64::from(block_size);
     let h = u64::from(arch.hidden_size);
     let f = u64::from(arch.intermediate_size);
@@ -6264,7 +6290,7 @@ fn build_prefill_scratch_plan_from_arch(
     };
     let matrix_vt_elems = if modes.enable_attn_matrix {
         checked_u64_mul4(
-            n_attn_layers.max(1),
+            modes.vt_layers(n_attn_layers),
             n_kv,
             head_dim,
             matrix_max_pos,
@@ -6551,6 +6577,7 @@ fn resolve_prefill_scratch_plan_modes(
         attn_matrix_query_cap,
         overlay_allowed: prefill_attn_gdn_scratch_overlay_enabled()
             && !prefill_scratch_overlay_diagnostic_mode_present(),
+        single_chunk_vt: false,
     })
 }
 
@@ -6559,6 +6586,28 @@ pub fn plan_prefill_scratch_with_matrix_max_pos_configured(
     block_size: u32,
     matrix_max_pos: usize,
     config: PrefillScratchConfig,
+) -> Result<PrefillScratchPlan, MetalError> {
+    plan_prefill_scratch_inner(target_model, block_size, matrix_max_pos, config, false)
+}
+
+/// Single-block dense prefill with one transposed-V layer slot. The execution
+/// entrypoint rejects multi-block spans and captures before mutating state.
+/// Default/multi-block plans retain a separate VT slot for each layer.
+pub fn plan_single_chunk_prefill_scratch(
+    target_model: &crate::metal_forward::MetalModel,
+    block_size: u32,
+    matrix_max_pos: usize,
+    config: PrefillScratchConfig,
+) -> Result<PrefillScratchPlan, MetalError> {
+    plan_prefill_scratch_inner(target_model, block_size, matrix_max_pos, config, true)
+}
+
+fn plan_prefill_scratch_inner(
+    target_model: &crate::metal_forward::MetalModel,
+    block_size: u32,
+    matrix_max_pos: usize,
+    config: PrefillScratchConfig,
+    single_chunk_vt: bool,
 ) -> Result<PrefillScratchPlan, MetalError> {
     let n_attn_layers = u64::try_from(
         target_model
@@ -6576,13 +6625,14 @@ pub fn plan_prefill_scratch_with_matrix_max_pos_configured(
         .blocks
         .iter()
         .any(|block| matches!(block, MetalBlock::Gdn(_)));
-    let modes = resolve_prefill_scratch_plan_modes(
+    let mut modes = resolve_prefill_scratch_plan_modes(
         &target_model.arch,
         block_size,
         false,
         Some(matrix_max_pos),
         Some(config),
     )?;
+    modes.single_chunk_vt = single_chunk_vt;
     build_prefill_scratch_plan_from_arch(
         &target_model.arch,
         n_attn_layers,
@@ -6644,7 +6694,8 @@ pub struct MetalDFlashLayerMajorScratch {
     /// per-(query, tile) (m, l) sidecar for online matrix attention.
     pub attn_matrix_ml_pack: MetalTensor,
     /// `[n_attn_layers, n_kv_heads, head_dim, matrix_max_pos]` F16 — persistent
-    /// transposed V-cache view used by both matrix attention variants.
+    /// transposed V-cache view used by both matrix attention variants. Explicit
+    /// single-chunk plans share one slot across serially ordered layer consumers.
     pub attn_matrix_vt_pack: MetalTensor,
 
     // FFN scratch.
@@ -7064,7 +7115,7 @@ impl MetalDFlashLayerMajorScratch {
         };
         let attn_matrix_vt_elems = if enable_attn_matrix {
             checked_u64_mul(
-                n_attn_layers,
+                modes.vt_layers(n_attn_layers),
                 checked_u64_mul3(
                     arch.n_kv_heads as u64,
                     head_dim,
@@ -8585,6 +8636,12 @@ pub fn encode_packed_verify_layer_major_inner(
     debug_logits_dst: Option<&MetalTensor>,
     n_eff_override: Option<u32>,
 ) -> Result<Vec<i32>, DFlashError> {
+    if layer_scratch.scratch_plan.modes.single_chunk_vt {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: "single-chunk prefill scratch cannot be used for verification".into(),
+        }));
+    }
     let arch = &base.model.arch;
     // `n_block` is the scratch allocation size (verify_scratch.n,
     // layer_scratch.n; both must agree). `n` is the EFFECTIVE chain
@@ -10605,6 +10662,24 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
 ) -> Result<ProfiledPrefillResult, DFlashError> {
     let arch = &base.model.arch;
     let total_n = token_ids.len();
+    if layer_scratch.scratch_plan.modes.single_chunk_vt
+        && (total_n == 0
+            || total_n > layer_scratch.n as usize
+            || (start_position as u64)
+                .checked_add(total_n as u64)
+                .is_none_or(|end| end > layer_scratch.attn_matrix_max_pos)
+            || hidden_dst.is_some()
+            || !target_layer_ids.is_empty()
+            || attention_capture.is_some()
+            || !matches!(&tail_mode, PrefillTailMode::ReadLogits))
+    {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "single_chunk_prefill",
+            detail:
+                "single-chunk VT requires one nonempty covered block without capture or custom tail"
+                    .into(),
+        }));
+    }
     let h = arch.hidden_size as usize;
     let f = arch.intermediate_size as usize;
     let v = arch.vocab_size as usize;
@@ -12041,7 +12116,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;
                                     let v_t = layer_scratch.attn_matrix_vt_pack.view_subrange(
-                                        (ai * per_attn_vt) as u64,
+                                        (layer_scratch.scratch_plan.modes.vt_layer(ai)
+                                            * per_attn_vt)
+                                            as u64,
                                         vec![per_attn_vt as u64],
                                     );
                                     encode_scatter_offset_f32_to_f16_kv_vt(
@@ -12220,7 +12297,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     let matrix_online =
                                         layer_scratch.scratch_plan.modes.attn_matrix_online;
                                     let v_t = layer_scratch.attn_matrix_vt_pack.view_subrange(
-                                        (ai * per_attn_vt) as u64,
+                                        (layer_scratch.scratch_plan.modes.vt_layer(ai)
+                                            * per_attn_vt)
+                                            as u64,
                                         vec![per_attn_vt as u64],
                                     );
 
@@ -12514,7 +12593,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                         let per_attn_vt = n_kv * head_dim * vt_stride;
                                         let v_t = layer_scratch.attn_matrix_vt_pack.view_subrange(
-                                            (ai * per_attn_vt) as u64,
+                                            (layer_scratch.scratch_plan.modes.vt_layer(ai)
+                                                * per_attn_vt)
+                                                as u64,
                                             vec![per_attn_vt as u64],
                                         );
                                         if let Some(prefix_rows) = matrix_vt_prefix_rebuild_rows {

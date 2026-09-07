@@ -31,6 +31,10 @@ use std::time::Instant;
 
 const DFLASH_FIXED_SCRATCH_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 const SERIAL_TAIL_THRESHOLD: usize = 48;
+
+#[cfg(test)]
+#[path = "restored_tail_pilot.rs"]
+mod restored_tail_pilot;
 const DFLASH_PREFIX_REPLAY_ENV: &str = "QWEN_DFLASH_PREFIX_REPLAY";
 const DFLASH_PREFIX_REPLAY_MAX_ENTRIES: usize = 4;
 const DFLASH_PREFIX_REPLAY_MAX_TOKENS: usize = 4096;

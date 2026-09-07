@@ -3448,8 +3448,7 @@ mod tests {
         const DIRECTION_INDEX: usize = 17;
         const COEFFICIENT: f32 = 0.25;
 
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let tokenizer = Tokenizer::from_gguf(&gguf).expect("load released tokenizer");
         let marker = tokenizer.encode("<|im_start|>", false).unwrap();
@@ -3543,8 +3542,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_RUNTIME_GGUF to the pinned full release"]
     fn released_runner_generates_expected_text_and_replays_prompt_logits() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let tokenizer = Tokenizer::from_gguf(&gguf).expect("load released tokenizer");
         let prompt = "<|im_start|>user\nReply with exactly: HELLO<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
@@ -3644,8 +3642,7 @@ mod tests {
         const PROMPT_LENGTHS: [usize; 3] = [2_053, 2_054, 2_055];
         const MAX_PROMPT_TOKENS: usize = 2_055;
 
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let tokenizer = Tokenizer::from_gguf(&gguf).expect("load released tokenizer");
         let seed = tokenizer
@@ -3840,8 +3837,7 @@ mod tests {
         const TRACE_TOKEN_BYTES: &[u8] =
             include_bytes!("../tests/fixtures/qwen4exp_n4099_perf_roadmap_26f3c14.tokens.u32le");
 
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         assert_eq!(
             TRACE_TOKEN_BYTES.len(),
@@ -4490,8 +4486,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_RUNTIME_GGUF to the pinned full release"]
     fn released_packed_router_e8p32_strict_replays_exactly() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let tokenizer = Tokenizer::from_gguf(&gguf).expect("load released tokenizer");
         let prompt = "<|im_start|>user\nReply with exactly: HELLO<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
@@ -4665,8 +4660,7 @@ mod tests {
         ];
 
         let model_path = std::path::PathBuf::from(
-            std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
-                .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard"),
+            crate::test_fixtures::QWEN4EXP_Q3_K_XL.required(),
         );
         let output_path = std::path::PathBuf::from(
             std::env::var_os("QWEN4EXP_ROUTE_COUNT_CENSUS_OUT")
@@ -5136,8 +5130,7 @@ mod tests {
             .unwrap();
 
         let model_path = std::path::PathBuf::from(
-            std::env::var_os("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF")
-                .expect("QWEN4EXP_Q3_K_XL_RUNTIME_GGUF must point to the first Q3 shard"),
+            crate::test_fixtures::QWEN4EXP_Q3_K_XL.required(),
         );
         let output_path = std::path::PathBuf::from(
             std::env::var_os("QWEN4EXP_IQ3_GATE_UP_PROBE_OUT")

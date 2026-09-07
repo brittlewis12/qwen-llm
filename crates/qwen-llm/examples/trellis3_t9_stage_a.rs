@@ -217,7 +217,7 @@ fn rotate_cols_output(w: &mut [f32], n_out: usize, d: usize, signs: &[f32]) {
 fn main() {
     let data = std::env::var("T9_DATA").expect("T9_DATA (capture dir)");
     let model = std::env::var("T9_MODEL")
-        .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B.F32.gguf".into());
+        .unwrap_or_else(|_| qwen_llm::test_fixtures::QWEN35_0_8B_F32.path().into());
     let out_dir = std::env::var("T9_OUT").expect("T9_OUT");
     let seeds: Vec<u64> = std::env::var("T9_SEEDS")
         .unwrap_or_else(|_| "11,22,33".into())

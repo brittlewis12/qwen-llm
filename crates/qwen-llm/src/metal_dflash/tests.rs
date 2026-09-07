@@ -3369,7 +3369,7 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
 #[ignore]
 fn metal_35b_a3b_packed_moe_tail_profile() {
     run_packed_moe_tail_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         8,
         4,
@@ -3380,7 +3380,7 @@ fn metal_35b_a3b_packed_moe_tail_profile() {
 #[ignore]
 fn metal_122b_a10b_packed_moe_tail_profile() {
     run_packed_moe_tail_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         8,
         3,
@@ -3825,7 +3825,7 @@ fn run_packed_moe_tail_ab_profile(
 #[ignore]
 fn metal_35b_a3b_packed_moe_tail_ab_profile() {
     run_packed_moe_tail_ab_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         &[8, 16, 64, 128, 320],
         3,
@@ -3836,7 +3836,7 @@ fn metal_35b_a3b_packed_moe_tail_ab_profile() {
 #[ignore]
 fn metal_122b_a10b_packed_moe_tail_ab_profile() {
     run_packed_moe_tail_ab_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         &[8, 64, 128, 320],
         2,
@@ -4459,7 +4459,7 @@ fn run_live_packed_moe_tail_phase_profile(
 #[ignore]
 fn metal_35b_a3b_live_packed_moe_tail_phase_profile() {
     run_live_packed_moe_tail_phase_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         320,
         3,
@@ -4470,7 +4470,7 @@ fn metal_35b_a3b_live_packed_moe_tail_phase_profile() {
 #[ignore]
 fn metal_122b_a10b_live_packed_moe_tail_phase_profile() {
     run_live_packed_moe_tail_phase_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         320,
         2,
@@ -4858,7 +4858,7 @@ fn run_live_grouped_moe_tail_phase_profile(
 #[ignore]
 fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_320() {
     run_live_grouped_moe_tail_phase_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-320",
         320,
         2,
@@ -4869,7 +4869,7 @@ fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_320() {
 #[ignore]
 fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_320() {
     run_live_grouped_moe_tail_phase_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-320",
         320,
         2,
@@ -4880,7 +4880,7 @@ fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_320() {
 #[ignore]
 fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_512() {
     run_live_grouped_moe_tail_phase_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-512",
         512,
         2,
@@ -4891,7 +4891,7 @@ fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_512() {
 #[ignore]
 fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_512() {
     run_live_grouped_moe_tail_phase_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-512",
         512,
         2,
@@ -4902,7 +4902,7 @@ fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_512() {
 #[ignore]
 fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_1024() {
     run_live_grouped_moe_tail_phase_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-1024",
         1024,
         2,
@@ -4913,7 +4913,7 @@ fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_1024() {
 #[ignore]
 fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_1024() {
     run_live_grouped_moe_tail_phase_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-1024",
         1024,
         2,
@@ -5406,7 +5406,7 @@ fn run_moe_route_logits_e8p32_oracle(model_path: &str, label: &str, chunk_p: usi
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_128() {
     run_moe_route_bucket_fused_oracle(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-128",
         128,
     );
@@ -5416,7 +5416,7 @@ fn metal_35b_a3b_moe_route_bucket_fused_oracle_128() {
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_320() {
     run_moe_route_bucket_fused_oracle(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-320",
         320,
     );
@@ -5426,7 +5426,7 @@ fn metal_35b_a3b_moe_route_bucket_fused_oracle_320() {
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_512() {
     run_moe_route_bucket_fused_oracle(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         512,
     );
@@ -5436,7 +5436,7 @@ fn metal_35b_a3b_moe_route_bucket_fused_oracle_512() {
 #[ignore]
 fn metal_122b_a10b_moe_route_bucket_fused_oracle_512() {
     run_moe_route_bucket_fused_oracle(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         512,
     );
@@ -5446,7 +5446,7 @@ fn metal_122b_a10b_moe_route_bucket_fused_oracle_512() {
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_128() {
     run_moe_route_logits_e8p32_oracle(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-128",
         128,
     );
@@ -5456,7 +5456,7 @@ fn metal_35b_a3b_moe_route_logits_e8p32_oracle_128() {
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_320() {
     run_moe_route_logits_e8p32_oracle(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-320",
         320,
     );
@@ -5466,7 +5466,7 @@ fn metal_35b_a3b_moe_route_logits_e8p32_oracle_320() {
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_512() {
     run_moe_route_logits_e8p32_oracle(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-512",
         512,
     );
@@ -5476,7 +5476,7 @@ fn metal_35b_a3b_moe_route_logits_e8p32_oracle_512() {
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_1024() {
     run_moe_route_logits_e8p32_oracle(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-1024",
         1024,
     );
@@ -5486,7 +5486,7 @@ fn metal_35b_a3b_moe_route_logits_e8p32_oracle_1024() {
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_320() {
     run_moe_route_logits_e8p32_oracle(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-320",
         320,
     );
@@ -5496,7 +5496,7 @@ fn metal_122b_a10b_moe_route_logits_e8p32_oracle_320() {
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_512() {
     run_moe_route_logits_e8p32_oracle(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-512",
         512,
     );
@@ -5506,7 +5506,7 @@ fn metal_122b_a10b_moe_route_logits_e8p32_oracle_512() {
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_1024() {
     run_moe_route_logits_e8p32_oracle(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-1024",
         1024,
     );
@@ -5854,7 +5854,7 @@ fn run_gpu_compacted_grouped_down_profile(
 #[ignore]
 fn metal_122b_a10b_gpu_compacted_grouped_down_profile() {
     run_gpu_compacted_grouped_down_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         320,
         2,
@@ -5865,7 +5865,7 @@ fn metal_122b_a10b_gpu_compacted_grouped_down_profile() {
 #[ignore]
 fn metal_35b_a3b_gpu_compacted_grouped_down_profile() {
     run_gpu_compacted_grouped_down_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         320,
         2,
@@ -6366,7 +6366,7 @@ fn run_grouped_q5_swiglu_vs_matmat_oracle(
 #[ignore]
 fn metal_122b_a10b_grouped_q5_down_vs_matmat_oracle() {
     run_grouped_q5_down_vs_matmat_oracle(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         320,
         32,
@@ -6377,7 +6377,7 @@ fn metal_122b_a10b_grouped_q5_down_vs_matmat_oracle() {
 #[ignore]
 fn metal_122b_a10b_grouped_q5_swiglu_vs_matmat_oracle_layer46() {
     run_grouped_q5_swiglu_vs_matmat_oracle(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-layer46",
         46,
         64,
@@ -6668,7 +6668,7 @@ fn run_grouped_q4_swiglu_vs_packed_oracle(
 #[ignore]
 fn metal_122b_a10b_grouped_q4_swiglu_vs_packed_oracle() {
     run_grouped_q4_swiglu_vs_packed_oracle(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         320,
         32,
@@ -7511,7 +7511,7 @@ fn run_grouped_swiglu_down_backend_profile(
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_down_backend_profile() {
     run_grouped_swiglu_down_backend_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         320,
         2,
@@ -7522,7 +7522,7 @@ fn metal_122b_a10b_grouped_swiglu_down_backend_profile() {
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_down_backend_profile() {
     run_grouped_swiglu_down_backend_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         320,
         2,
@@ -7533,7 +7533,7 @@ fn metal_35b_a3b_grouped_swiglu_down_backend_profile() {
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_down_backend_profile_512() {
     run_grouped_swiglu_down_backend_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-512",
         512,
         2,
@@ -7544,7 +7544,7 @@ fn metal_35b_a3b_grouped_swiglu_down_backend_profile_512() {
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_down_backend_profile_512() {
     run_grouped_swiglu_down_backend_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-512",
         512,
         2,
@@ -7555,7 +7555,7 @@ fn metal_122b_a10b_grouped_swiglu_down_backend_profile_512() {
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_down_backend_profile_1024() {
     run_grouped_swiglu_down_backend_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-1024",
         1024,
         2,
@@ -7566,7 +7566,7 @@ fn metal_35b_a3b_grouped_swiglu_down_backend_profile_1024() {
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_down_backend_profile_1024() {
     run_grouped_swiglu_down_backend_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-1024",
         1024,
         2,
@@ -7828,7 +7828,7 @@ fn run_grouped_swiglu_fused_bank_profile(
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_320() {
     run_grouped_swiglu_fused_bank_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-320",
         320,
         3,
@@ -7839,7 +7839,7 @@ fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_320() {
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_320() {
     run_grouped_swiglu_fused_bank_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-320",
         320,
         3,
@@ -7850,7 +7850,7 @@ fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_320() {
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_512() {
     run_grouped_swiglu_fused_bank_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-512",
         512,
         3,
@@ -7861,7 +7861,7 @@ fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_512() {
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_512() {
     run_grouped_swiglu_fused_bank_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-512",
         512,
         3,
@@ -7872,7 +7872,7 @@ fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_512() {
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_1024() {
     run_grouped_swiglu_fused_bank_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-1024",
         1024,
         3,
@@ -7883,7 +7883,7 @@ fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_1024() {
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_1024() {
     run_grouped_swiglu_fused_bank_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-1024",
         1024,
         3,
@@ -8591,7 +8591,7 @@ fn run_grouped_moe_overlap_falsifier(model_path: &str, label: &str, chunk_p: usi
 #[ignore]
 fn metal_35b_a3b_grouped_overlap_falsifier_512() {
     run_grouped_moe_overlap_falsifier(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-512",
         512,
         3,
@@ -8602,7 +8602,7 @@ fn metal_35b_a3b_grouped_overlap_falsifier_512() {
 #[ignore]
 fn metal_122b_a10b_grouped_overlap_falsifier_512() {
     run_grouped_moe_overlap_falsifier(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "a10b-512",
         512,
         3,
@@ -8613,7 +8613,7 @@ fn metal_122b_a10b_grouped_overlap_falsifier_512() {
 #[ignore]
 fn metal_35b_a3b_grouped_zero_fill_coverage_oracle_512() {
     run_grouped_zero_fill_coverage_oracle(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-512",
         512,
     );
@@ -8623,7 +8623,7 @@ fn metal_35b_a3b_grouped_zero_fill_coverage_oracle_512() {
 #[ignore]
 fn metal_122b_a10b_grouped_zero_fill_coverage_oracle_512() {
     run_grouped_zero_fill_coverage_oracle(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "a10b-512",
         512,
     );
@@ -8880,7 +8880,7 @@ fn run_grouped_q4_n32_proof(model_path: &str, label: &str, chunk_p: usize, n_run
 #[ignore]
 fn metal_35b_a3b_grouped_q4_n32_proof_512() {
     run_grouped_q4_n32_proof(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         512,
         2,
@@ -8891,7 +8891,7 @@ fn metal_35b_a3b_grouped_q4_n32_proof_512() {
 #[ignore]
 fn metal_122b_a10b_grouped_q4_n32_proof_512() {
     run_grouped_q4_n32_proof(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         512,
         2,
@@ -8902,7 +8902,7 @@ fn metal_122b_a10b_grouped_q4_n32_proof_512() {
 #[ignore]
 fn metal_35b_a3b_grouped_q4_n32_proof_1024() {
     run_grouped_q4_n32_proof(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b-1024",
         1024,
         2,
@@ -8913,7 +8913,7 @@ fn metal_35b_a3b_grouped_q4_n32_proof_1024() {
 #[ignore]
 fn metal_122b_a10b_grouped_q4_n32_proof_1024() {
     run_grouped_q4_n32_proof(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b-1024",
         1024,
         2,
@@ -9223,7 +9223,7 @@ fn run_grouped_q4_hot_n32_proof(
 #[ignore]
 fn metal_35b_a3b_grouped_q4_hot_n32_proof_512() {
     run_grouped_q4_hot_n32_proof(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         512,
         32,
@@ -9235,7 +9235,7 @@ fn metal_35b_a3b_grouped_q4_hot_n32_proof_512() {
 #[ignore]
 fn metal_122b_a10b_grouped_q4_hot_n32_proof_512() {
     run_grouped_q4_hot_n32_proof(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         512,
         32,
@@ -9248,7 +9248,7 @@ fn metal_122b_a10b_grouped_q4_hot_n32_proof_512() {
 fn metal_35b_a3b_grouped_q4_hot_n32_threshold_scan_512() {
     for &threshold in &[48usize, 64, 96, 128] {
         run_grouped_q4_hot_n32_proof(
-            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            crate::test_fixtures::A3B_Q4_K_M.path(),
             &format!("a3b-th{threshold}"),
             512,
             threshold,
@@ -9262,7 +9262,7 @@ fn metal_35b_a3b_grouped_q4_hot_n32_threshold_scan_512() {
 fn metal_122b_a10b_grouped_q4_hot_n32_threshold_scan_512() {
     for &threshold in &[48usize, 64, 96, 128] {
         run_grouped_q4_hot_n32_proof(
-            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            crate::test_fixtures::A10B_Q4_K_XL.path(),
             &format!("122b-th{threshold}"),
             512,
             threshold,
@@ -9512,7 +9512,7 @@ fn run_gpu_owned_grouped_routed_backend_profile(
 #[ignore]
 fn metal_122b_a10b_gpu_owned_grouped_routed_backend_profile() {
     run_gpu_owned_grouped_routed_backend_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         320,
         2,
@@ -9523,7 +9523,7 @@ fn metal_122b_a10b_gpu_owned_grouped_routed_backend_profile() {
 #[ignore]
 fn metal_35b_a3b_gpu_owned_grouped_routed_backend_profile() {
     run_gpu_owned_grouped_routed_backend_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         320,
         2,
@@ -9800,7 +9800,7 @@ fn run_grouped_routed_down_accum_proof(
 #[ignore]
 fn metal_35b_a3b_grouped_routed_down_accum_proof_512() {
     run_grouped_routed_down_accum_proof(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         512,
         2,
@@ -9811,7 +9811,7 @@ fn metal_35b_a3b_grouped_routed_down_accum_proof_512() {
 #[ignore]
 fn metal_122b_a10b_grouped_routed_down_accum_proof_512() {
     run_grouped_routed_down_accum_proof(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         512,
         2,
@@ -10093,7 +10093,7 @@ fn run_fused_routed_tail_profile(model_path: &str, label: &str, chunk_p: usize, 
 #[ignore]
 fn metal_122b_a10b_fused_routed_tail_profile() {
     run_fused_routed_tail_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         320,
         2,
@@ -10104,7 +10104,7 @@ fn metal_122b_a10b_fused_routed_tail_profile() {
 #[ignore]
 fn metal_35b_a3b_fused_routed_tail_profile() {
     run_fused_routed_tail_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         320,
         2,
@@ -10356,7 +10356,7 @@ fn run_grouped_routed_down_experiment_profile(
 #[ignore]
 fn metal_122b_a10b_grouped_routed_down_experiment_profile() {
     run_grouped_routed_down_experiment_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         320,
         2,
@@ -10367,7 +10367,7 @@ fn metal_122b_a10b_grouped_routed_down_experiment_profile() {
 #[ignore]
 fn metal_35b_a3b_grouped_routed_down_experiment_profile() {
     run_grouped_routed_down_experiment_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         320,
         2,
@@ -10641,7 +10641,7 @@ fn run_hot_expert_routed_down_hybrid_profile(
 fn metal_122b_a10b_hot_expert_routed_down_hybrid_profile() {
     for threshold in [64usize, 96, 128] {
         run_hot_expert_routed_down_hybrid_profile(
-            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            crate::test_fixtures::A10B_Q4_K_XL.path(),
             "122b",
             320,
             threshold,
@@ -10654,7 +10654,7 @@ fn metal_122b_a10b_hot_expert_routed_down_hybrid_profile() {
 #[ignore]
 fn metal_35b_a3b_hot_expert_routed_down_hybrid_profile() {
     run_hot_expert_routed_down_hybrid_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         320,
         64,
@@ -11452,7 +11452,7 @@ fn run_packed_dense_prefill_phase_profile(model_path: &str, prompt: &str, chunk_
 fn metal_27b_packed_prefill_phase_profile() {
     let prompt = "The quick brown fox jumps over the lazy dog. ".repeat(32);
     run_packed_dense_prefill_phase_profile(
-        "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+        crate::test_fixtures::QWEN36_27B_Q4_K_M.path(),
         &prompt,
         321,
     );
@@ -11461,7 +11461,7 @@ fn metal_27b_packed_prefill_phase_profile() {
 #[test]
 #[ignore]
 fn metal_27b_packed_gdn_tail_profile() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[packed-gdn-tail] skipped — fixture missing");
         return;
@@ -11759,7 +11759,7 @@ fn metal_27b_packed_gdn_tail_profile() {
 /// 27B's 48). Loads in <1 s.
 #[test]
 fn dflash_verify_scratch_slots_and_offsets() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         eprintln!("[dflash-scratch] skipped — fixture missing");
         return;
@@ -11957,7 +11957,7 @@ fn dflash_verify_scratch_slots_and_offsets() {
 /// 0.8B-F32, N=4. Loads in ~500 ms; total runtime ≤ 2 s on M4 Max.
 #[test]
 fn dflash_packed_verify_argmax_matches_n_single_tokens() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         eprintln!("[dflash-packed-verify] skipped — fixture missing");
         return;
@@ -12129,7 +12129,7 @@ fn dflash_packed_verify_argmax_matches_n_single_tokens() {
 /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 2 s.
 #[test]
 fn dflash_packed_verify_layer_major_matches_token_major() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -12344,7 +12344,7 @@ fn dflash_packed_verify_layer_major_matches_token_major() {
 /// dflash_correctness.rs.
 #[test]
 fn dflash_packed_verify_n_eff_override_equiv() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         eprintln!("[n_eff-equiv] skipped — fixture missing");
         return;
@@ -12517,7 +12517,7 @@ fn dflash_packed_verify_n_eff_override_equiv() {
 /// codex flagged.
 #[test]
 fn dflash_packed_verify_dim_guard_wall() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -12633,7 +12633,7 @@ fn dflash_packed_verify_dim_guard_wall() {
 ///       start_position != K — should fail.
 #[test]
 fn dflash_packed_verify_kv_n_pos_guard() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -12701,7 +12701,7 @@ fn dflash_packed_verify_kv_n_pos_guard() {
 /// important than the cosine gate before writing restore.
 #[test]
 fn dflash_packed_verify_with_primed_session() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -12824,7 +12824,7 @@ fn dflash_packed_verify_with_primed_session() {
 /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 5 s on M4 Max.
 #[test]
 fn dflash_restore_after_partial_accept_replay_equivalence() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -12992,7 +12992,7 @@ fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
         eprintln!("[packed-gdn-restore] skipped — packed GDN disabled");
         return;
     }
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -13167,7 +13167,7 @@ fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
 /// only path).
 #[test]
 fn dflash_packed_verify_with_logits_cosine_match() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -13305,7 +13305,7 @@ fn dflash_packed_verify_with_logits_cosine_match() {
 // failure-message position. Iterator rewrite would lose all three.
 #[allow(clippy::needless_range_loop)]
 fn dflash_packed_verify_hidden_capture_layout() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -13446,7 +13446,7 @@ fn dflash_packed_verify_hidden_capture_layout() {
 /// stale kv_n_pos must fail.
 #[test]
 fn dflash_restore_after_partial_accept_guard_wall() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -13525,7 +13525,7 @@ fn dflash_restore_after_partial_accept_guard_wall() {
 /// returns properly-aligned views into the [N, V] buffer.
 #[test]
 fn dflash_debug_scratch_logits_slots() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         eprintln!("[dflash-debug-scratch] skipped — fixture missing");
         return;
@@ -13576,7 +13576,7 @@ fn dflash_debug_scratch_logits_slots() {
 /// Edge cases tested via subroutine: T<P, T==P, T==P+r, T==2P.
 #[test]
 fn prefill_tokens_matches_single_token_loop_0_8b() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         eprintln!("[prefill-tokens-vs-single-token] skipped — fixture missing");
         return;
@@ -14155,7 +14155,7 @@ fn prefill_bf16_bfloat_act_a3b_moe_drift_smoke() {
 #[test]
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
-    let path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let path = crate::test_fixtures::A3B_Q4_K_M.path();
     if !std::path::Path::new(path).exists() {
         eprintln!("[moe-prefill-vs-single] skipped — fixture missing");
         return;

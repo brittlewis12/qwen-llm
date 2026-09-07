@@ -87,6 +87,8 @@ mod qwen_queue2;
 pub mod runtime;
 pub mod sampling;
 pub mod tensor;
+#[doc(hidden)]
+pub mod test_fixtures;
 pub mod tokenizer;
 pub mod trellis_ldlq;
 pub mod trellis_offline;

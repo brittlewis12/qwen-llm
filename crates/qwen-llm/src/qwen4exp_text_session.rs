@@ -4185,8 +4185,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF to the pinned full release"]
     fn released_full_text_session_matches_separate_layer_commands() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let ctx = MetalContext::new().expect("initialize Metal");
         let weight_plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();
@@ -4383,8 +4382,7 @@ mod tests {
     #[ignore = "set QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF to the pinned full release"]
     fn released_packed_text_session_matches_scalar_and_continues() {
         const CAPACITY: usize = 12;
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let ctx = MetalContext::new().expect("initialize Metal");
         let weight_plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();
@@ -4492,8 +4490,7 @@ mod tests {
     fn released_packed_2048_crosses_into_scalar_selection_without_migration() {
         const PACKED_TOKENS: usize = 2_048;
         const CAPACITY: usize = 2_052;
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_TEXT_SESSION_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let ctx = MetalContext::new().expect("initialize Metal");
         let weight_plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();

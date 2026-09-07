@@ -3787,7 +3787,7 @@ mod tests {
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_prefill_endpoint_and_scalar_continuation_match_scalar_bitwise() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
@@ -3838,7 +3838,7 @@ mod tests {
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_prefill_n144_superchunk_state_matches_scalar_bitwise() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
@@ -3892,7 +3892,7 @@ mod tests {
         use std::time::Instant;
 
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
@@ -3972,7 +3972,7 @@ mod tests {
         use std::time::Instant;
 
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let tokenizer = LlamaCppTokenizer::open(&path).expect("open Muse tokenizer");
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
@@ -4312,7 +4312,7 @@ mod tests {
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn capture_enabled_prefill_and_decode_logits_match_ordinary_forward_bitwise() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
@@ -4464,7 +4464,7 @@ mod tests {
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn runs_pinned_q8_first_token_after_dropping_gguf_owner() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let tokenizer = LlamaCppTokenizer::open(&path).expect("open Muse tokenizer");
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");

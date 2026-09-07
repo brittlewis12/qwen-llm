@@ -1508,7 +1508,7 @@ mod tests {
     use crate::deepseek_v4_census::DeepSeekV4CensusV1;
     use std::path::Path;
 
-    const DS4_0731_CURRENT: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+    const DS4_0731_CURRENT: &str = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path();
     const DS4_0731_REAP_K160: &str = "/Users/tito/models/deepseek-v4-flash-0731-reap-k160/DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf";
     const DS4_0731_REAP_K216: &str = "/Users/tito/models/deepseek-v4-flash-0731-reap-k216/DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf";
 

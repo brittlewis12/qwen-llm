@@ -2278,7 +2278,7 @@ fn current_asset_packed_gpu_route_kill_packet() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path(),
             )
         });
     assert!(model_path.exists(), "missing current DS4 model");
@@ -2667,7 +2667,7 @@ fn current_asset_packed_grouped_expert_integration_packet() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path(),
             )
         });
     assert!(model_path.exists(), "missing current DS4 model");
@@ -3293,7 +3293,7 @@ fn current_asset_packed_attention_split_attribution_packet() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path(),
             )
         });
     assert!(model_path.exists(), "missing current DS4 model");
@@ -3922,7 +3922,7 @@ fn current_asset_packed_post_route_stage_attribution_packet() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path(),
             )
         });
     assert!(model_path.exists(), "missing current DS4 model");
@@ -4556,7 +4556,7 @@ fn current_asset_packed_all_iq3_sealed_promotion_gate() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path(),
             )
         });
     assert!(model_path.exists(), "missing current DS4 model");
@@ -5172,7 +5172,7 @@ fn splitk_hca_profiles_current_synthetic_terminal_tokens() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path(),
             )
         });
     assert!(model_path.exists(), "missing DS4 model");
@@ -6038,7 +6038,7 @@ fn current_weight_boundary_optimization_differentials() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path(),
             )
         });
     assert!(model_path.exists(), "missing DS4 model");
@@ -12286,7 +12286,7 @@ fn current_asset_multigroup_selector_whole_token_gate() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path(),
             )
         });
     assert!(model_path.exists(), "missing current DS4 model");

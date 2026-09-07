@@ -12,7 +12,7 @@ const CURRENT_FIXTURE_JSON: &str =
 const LEGACY_PROVISIONING_JSON: &str = include_str!(
     "fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_legacy_2026_07_31_provisioning_v1.json"
 );
-const DEFAULT_CURRENT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+const DEFAULT_CURRENT_MODEL: &str = qwen_llm::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path();
 const DEFAULT_LEGACY_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 
 fn legacy_fixture() -> PinnedDeepSeekV4AssetV1 {

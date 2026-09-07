@@ -1824,7 +1824,7 @@ mod tests {
     use fancy_regex::Regex;
     use proptest::prelude::*;
 
-    const DS4_0731_CURRENT: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+    const DS4_0731_CURRENT: &str = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path();
 
     #[test]
     fn raw_i32le_token_digest_matches_frozen_vectors() {
@@ -1880,13 +1880,13 @@ mod tests {
 
     fn fixtures() -> Vec<&'static str> {
         let candidates = [
-            "/Users/tito/models/Qwen3.5-0.8B.F32.gguf",
+            crate::test_fixtures::QWEN35_0_8B_F32.path(),
             "/Users/tito/models/Qwen3.5-0.8B-BF16.gguf",
             "/Users/tito/models/Qwen3.5-4B-BF16.gguf",
             "/Users/tito/models/Qwen3.5-27B-Q4_K_M.gguf",
-            "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            crate::test_fixtures::QWEN36_27B_Q4_K_M.path(),
             "/Users/tito/models/Qwen3.6-27B-MTP-Q4_K_M.gguf",
-            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            crate::test_fixtures::A3B_Q4_K_M.path(),
         ];
         candidates
             .iter()
@@ -1902,8 +1902,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_TOKENIZER_GGUF to the pinned Flash-Next release"]
     fn released_qwen4exp_tokenizer_preserves_specials_and_exact_bytes() {
-        let path = std::env::var_os("QWEN4EXP_TOKENIZER_GGUF")
-            .expect("QWEN4EXP_TOKENIZER_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released Flash-Next GGUF");
         assert_eq!(gguf.architecture().as_deref(), Some("qwen4exp"));
         let identity = qwen4exp_tokenizer_identity_sha256(&gguf).unwrap();

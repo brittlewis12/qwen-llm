@@ -3158,8 +3158,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF to the pinned full release"]
     fn released_two_layer_prefix_matches_separate_command_primitives() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let ctx = MetalContext::new().expect("initialize Metal");
         let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();
@@ -3335,8 +3334,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF to the pinned full release"]
     fn released_packed_two_layer_prefix_matches_scalar_transaction() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_LAYERS_ZERO_ONE_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let ctx = MetalContext::new().expect("initialize Metal");
         let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();

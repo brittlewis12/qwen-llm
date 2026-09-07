@@ -48,8 +48,8 @@ use qwen_llm::metal_forward::{
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
 
-const TARGET_GGUF: &str = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
-const DRAFTER_GGUF: &str = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+const TARGET_GGUF: &str = qwen_llm::test_fixtures::QWEN36_27B_Q4_K_M.path();
+const DRAFTER_GGUF: &str = qwen_llm::test_fixtures::DFLASH_DRAFT_36_Q8_0.path();
 
 fn fixtures_present() -> bool {
     std::path::Path::new(TARGET_GGUF).exists() && std::path::Path::new(DRAFTER_GGUF).exists()
@@ -3291,12 +3291,10 @@ fn prefill_tokens_matches_single_token_loop_27b_matrix_g6_prefix_gate() {
 
 #[test]
 fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
-    let model_path = std::env::var("QWEN_A3B_MOE_MODEL")
-        .unwrap_or_else(|_| "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf".into());
-    if !std::path::Path::new(&model_path).exists() {
+    let Some(model_path) = qwen_llm::test_fixtures::A3B_Q4_K_M.path_or_skip() else {
         eprintln!("[prefill-vs-single-a3b] skipped — target GGUF missing");
         return;
-    }
+    };
     let ctx = match MetalContext::new() {
         Ok(c) => c,
         Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -3968,7 +3966,7 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_sha
 
 #[test]
 fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let model_path = qwen_llm::test_fixtures::A3B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[prefill-hidden-a3b] skipped — target GGUF missing");
         return;

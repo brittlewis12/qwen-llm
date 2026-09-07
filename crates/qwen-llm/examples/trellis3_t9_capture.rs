@@ -64,7 +64,7 @@ fn split_documents(text: &str) -> Vec<String> {
 
 fn main() {
     let model_path = std::env::var("T9_MODEL")
-        .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B.F32.gguf".into());
+        .unwrap_or_else(|_| qwen_llm::test_fixtures::QWEN35_0_8B_F32.path().into());
     let corpus_path = std::env::var("T9_CORPUS").expect("T9_CORPUS required");
     let out_dir = std::env::var("T9_OUT").expect("T9_OUT required");
     let train_budget = env_or("T9_TRAIN_TOKENS", 32_768);

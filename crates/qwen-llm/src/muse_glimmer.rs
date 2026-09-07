@@ -993,7 +993,7 @@ mod tests {
     #[ignore = "requires the pinned local Unsloth Muse Glimmer Q8_0 GGUF"]
     fn binds_pinned_q8_target() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let gguf = GgufFile::open(path).expect("open Muse Q8 target");
         let model = MuseGlimmerModel::from_gguf(&gguf).expect("bind Muse Q8 target");

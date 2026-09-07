@@ -1778,18 +1778,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn packed_test_context() -> Option<MetalContext> {
-        match MetalContext::new() {
-            Ok(ctx) => Some(ctx),
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => {
-                let required = matches!(
-                    std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
-                    Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-                );
-                assert!(!required, "Metal is required but unavailable");
-                None
-            }
-            Err(error) => panic!("Metal initialization failed: {error}"),
-        }
+        crate::test_fixtures::metal_context_or_skip()
     }
 
     #[test]
@@ -3779,8 +3768,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_GDN_GGUF to the pinned full release"]
     fn released_layer_zero_matches_cpu_quantized_oracle() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_GDN_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_GDN_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let ctx = MetalContext::new().expect("initialize Metal");
         let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();

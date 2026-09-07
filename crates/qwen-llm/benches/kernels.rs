@@ -23,7 +23,7 @@ use qwen_llm::metal::{
 };
 use qwen_llm::tensor::{GgmlType, TensorDesc};
 
-const MODEL_27B: &str = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+const MODEL_27B: &str = qwen_llm::test_fixtures::QWEN36_27B_Q4_K_M.path();
 
 fn pick_q4k_shapes(g: &GgufFile) -> Vec<(&'static str, &TensorDesc)> {
     let names = [

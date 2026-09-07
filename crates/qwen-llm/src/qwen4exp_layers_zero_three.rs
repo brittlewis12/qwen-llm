@@ -3249,8 +3249,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_LAYERS_ZERO_THREE_GGUF to the pinned full release"]
     fn released_first_cycle_matches_separate_command_compositions() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_LAYERS_ZERO_THREE_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_LAYERS_ZERO_THREE_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let ctx = MetalContext::new().expect("initialize Metal");
         let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();

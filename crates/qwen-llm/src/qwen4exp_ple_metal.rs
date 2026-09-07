@@ -3008,8 +3008,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_PLE_GGUF to the pinned first release shard"]
     fn released_ple_matches_cpu_across_complete_dilated_history() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_PLE_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_PLE_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let config = Qwen4ExpConfig::from_gguf(&gguf).unwrap();
         let ple = config.ple.as_ref().unwrap();
@@ -3131,8 +3130,7 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_Q3_K_XL_PLE_GGUF to the pinned first release shard"]
     fn released_packed_ple_matches_serial_through_history_and_continuation() {
-        let path = std::env::var_os("QWEN4EXP_Q3_K_XL_PLE_GGUF")
-            .expect("QWEN4EXP_Q3_K_XL_PLE_GGUF must point to the first Q3 shard");
+        let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
         let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
         let config = Qwen4ExpConfig::from_gguf(&gguf).unwrap();
         let ple = config.ple.as_ref().unwrap();

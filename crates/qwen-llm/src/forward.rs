@@ -1421,7 +1421,7 @@ mod tests {
 
     #[test]
     fn forward_runs_one_token_0_8b() {
-        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -1451,7 +1451,7 @@ mod tests {
 
     #[test]
     fn forward_runs_one_token_35b_a3b_moe() {
-        let path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let path = crate::test_fixtures::A3B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -1489,7 +1489,7 @@ mod tests {
     /// RMSNorm, and mat_vec orientations are coherent.
     #[test]
     fn forward_bypass_blocks_smoke() {
-        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -1550,7 +1550,7 @@ mod tests {
     /// Produces /tmp/qwen-oracle/hello_t0.{f32,json}.
     #[test]
     fn oracle_match_hello_0_8b_f32() {
-        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
         let oracle_path = "/tmp/qwen-oracle/hello_t0.f32";
         if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
         {
@@ -1650,7 +1650,7 @@ mod tests {
     #[test]
     #[ignore]
     fn oracle_match_27b_q4_k_m() {
-        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         let oracle_path = "/tmp/qwen-oracle/hello_27b_q4km.f32";
         if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
         {
@@ -1736,7 +1736,7 @@ mod tests {
     #[test]
     #[ignore]
     fn oracle_match_longprompt_27b_q4_k_m() {
-        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         let oracle_path = "/tmp/qwen-oracle/longprompt_27b.f32";
         if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
         {
@@ -1830,7 +1830,7 @@ mod tests {
     /// Expected argmax: "." (token 13).
     #[test]
     fn oracle_match_longprompt_0_8b_f32() {
-        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
         let oracle_path = "/tmp/qwen-oracle/longprompt_t0.f32";
         if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
         {

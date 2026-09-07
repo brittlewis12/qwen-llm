@@ -1694,7 +1694,7 @@ mod tests {
 
     #[test]
     fn loads_0_8b_f32() {
-        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -1769,7 +1769,7 @@ mod tests {
 
     #[test]
     fn loads_27b_q4_k_m() {
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -1798,7 +1798,7 @@ mod tests {
 
     #[test]
     fn loads_35b_a3b_q4_k_m() {
-        let path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let path = crate::test_fixtures::A3B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -1840,8 +1840,8 @@ mod tests {
     /// missing locally.
     #[test]
     fn loads_dflash_drafter_3_6_27b() {
-        let target_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
-        let drafter_path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+        let target_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
+        let drafter_path = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.path();
         if !std::path::Path::new(target_path).exists()
             || !std::path::Path::new(drafter_path).exists()
         {

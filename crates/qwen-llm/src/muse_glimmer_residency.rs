@@ -1112,7 +1112,7 @@ mod tests {
     #[ignore = "requires the pinned local Unsloth Muse Glimmer Q8_0 GGUF and Metal"]
     fn plans_pinned_q8_target_without_realizing_weights() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let gguf = GgufFile::open(path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");

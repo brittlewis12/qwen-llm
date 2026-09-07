@@ -4251,7 +4251,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             eprintln!("[mat_mat_q4_k] skipped — fixture missing");
             return;
@@ -4683,7 +4683,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+        let path = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.path();
         if !std::path::Path::new(path).exists() {
             eprintln!("[mat_mat_q8_0] skipped — drafter GGUF missing");
             return;
@@ -4816,7 +4816,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             eprintln!("[prompt-matmat] skipped — fixture missing");
             return;
@@ -4952,7 +4952,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             eprintln!("[prompt-matmat-chained] skipped — fixture missing");
             return;
@@ -5141,7 +5141,7 @@ mod tests {
             Err(e) => panic!("init failed: {e}"),
         };
         let path = std::env::var("QWEN_Q8_AMORT_MODEL").unwrap_or_else(|_| {
-            "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf".into()
+            crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.path().into()
         });
         if !std::path::Path::new(&path).exists() {
             eprintln!("[q8-amort] skipped - GGUF missing: {path}");
@@ -5390,7 +5390,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             eprintln!("[v0.73a.0-gate] skipped — fixture missing");
             return;

@@ -1886,18 +1886,7 @@ mod tests {
     use objc2_metal::MTLCommandQueue;
 
     fn packed_test_context() -> Option<MetalContext> {
-        match MetalContext::new() {
-            Ok(ctx) => Some(ctx),
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => {
-                let required = matches!(
-                    std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
-                    Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-                );
-                assert!(!required, "Metal is required but unavailable");
-                None
-            }
-            Err(error) => panic!("Metal initialization failed: {error}"),
-        }
+        crate::test_fixtures::metal_context_or_skip()
     }
 
     #[test]

@@ -1077,8 +1077,7 @@ fn real_q8_block_major_r256_falsifier() {
         eprintln!("set MUSE_GLIMMER_RUN_R256_FALSIFIER=1 for A/B or =candidate for candidate-only");
         return;
     }
-    let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-        .unwrap_or_else(|_| "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into());
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
     let gguf = GgufFile::open(path).expect("open Muse Q8 target");
     let ctx = MetalContext::new().expect("open Metal context");
     let plan =
@@ -1181,8 +1180,7 @@ fn real_q8_sliding_block_50_metal_falsifier() {
         return;
     }
     let test_started = Instant::now();
-    let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-        .unwrap_or_else(|_| "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into());
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
     let gguf = GgufFile::open(path).expect("open Muse Q8 target");
     let ctx = MetalContext::new().expect("open Metal context");
     let plan =
@@ -2255,8 +2253,7 @@ fn basis_rows_match_generic_covectors_with_orientation_and_mean_reduction() {
 #[test]
 #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
 fn real_q8_block_51_replay_and_vjp_smoke() {
-    let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-        .unwrap_or_else(|_| "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into());
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
     let gguf = GgufFile::open(path).expect("open Muse Q8 target");
     let ctx = MetalContext::new().expect("open Metal context");
     let plan =
@@ -2380,8 +2377,7 @@ fn real_q8_block_51_replay_and_vjp_smoke() {
 #[test]
 #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
 fn real_q8_sliding_block_50_replay_and_vjp_smoke() {
-    let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-        .unwrap_or_else(|_| "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into());
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
     let gguf = GgufFile::open(path).expect("open Muse Q8 target");
     let ctx = MetalContext::new().expect("open Metal context");
     let plan =
@@ -2497,8 +2493,7 @@ fn real_q8_sliding_block_50_replay_and_vjp_smoke() {
 #[test]
 #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
 fn real_q8_two_block_multi_source_composition_smoke() {
-    let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-        .unwrap_or_else(|_| "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into());
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
     let gguf = GgufFile::open(path).expect("open Muse Q8 target");
     let ctx = MetalContext::new().expect("open Metal context");
     let plan =

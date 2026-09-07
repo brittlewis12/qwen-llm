@@ -3725,8 +3725,7 @@ fn released_attention_launch_geometry_and_large_width_reduction_match_cpu() {
 #[ignore = "set QWEN4EXP_Q3_K_XL_QSA_GGUF to the pinned full release"]
 fn released_layer_three_dense_packed_matches_scalar_rows_and_state() {
     const MAX_TOKENS: usize = 33;
-    let path = std::env::var_os("QWEN4EXP_Q3_K_XL_QSA_GGUF")
-        .expect("QWEN4EXP_Q3_K_XL_QSA_GGUF must point to the first Q3 shard");
+    let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
     let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
     let ctx = MetalContext::new().expect("initialize Metal");
     let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();
@@ -3844,8 +3843,7 @@ fn released_layer_three_dense_packed_matches_scalar_rows_and_state() {
 #[test]
 #[ignore = "set QWEN4EXP_Q3_K_XL_QSA_GGUF to the pinned full release"]
 fn released_layer_three_position_zero_matches_cpu_quantized_oracle() {
-    let path = std::env::var_os("QWEN4EXP_Q3_K_XL_QSA_GGUF")
-        .expect("QWEN4EXP_Q3_K_XL_QSA_GGUF must point to the first Q3 shard");
+    let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
     let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
     let ctx = MetalContext::new().expect("initialize Metal");
     let plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(&ctx, &gguf).unwrap();

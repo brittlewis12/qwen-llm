@@ -578,7 +578,7 @@ mod tests {
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn deployed_output_tail_matches_forward_from_captured_final_residual_bitwise() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
@@ -638,7 +638,7 @@ mod tests {
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn batched_full_readout_matches_scalar_oracle_exactly() {
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf".into()
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
         });
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");

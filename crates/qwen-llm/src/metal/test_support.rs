@@ -847,20 +847,7 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
 }
 
 pub(super) fn metal_test_context() -> Option<MetalContext> {
-    match MetalContext::new() {
-        Ok(ctx) => Some(ctx),
-        Err(MetalError::EmptyLibrary | MetalError::NoDevice) => {
-            let required = matches!(
-                std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-            );
-            if required {
-                panic!("Metal is required but unavailable");
-            }
-            None
-        }
-        Err(error) => panic!("Metal context: {error}"),
-    }
+    crate::test_fixtures::metal_context_or_skip()
 }
 
 pub(super) fn f32_desc(
@@ -950,7 +937,7 @@ pub(super) fn ffn_swiglu_q4_K_matches_unfused() {
         Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
         Err(e) => panic!("init failed: {e}"),
     };
-    let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(path).exists() {
         return;
     }

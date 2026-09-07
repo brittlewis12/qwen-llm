@@ -189,7 +189,7 @@ mod tests {
     fn arch_matches_gguf_0_8b() {
         // Sanity-check: numbers in QWEN3_0_8B match the live GGUF metadata.
         // Skipped if the file isn't present on this box.
-        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
         if !std::path::Path::new(path).exists() {
             return;
         }

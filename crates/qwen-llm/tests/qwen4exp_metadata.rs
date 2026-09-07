@@ -19,8 +19,7 @@ const PINNED_8BDC666_Q3_PLE_ROWS_SHA256: &str =
 #[test]
 #[ignore = "set QWEN4EXP_METADATA_GGUF to a standalone metadata shard"]
 fn parses_live_qwen4exp_metadata_when_available() {
-    let path = std::env::var_os("QWEN4EXP_METADATA_GGUF")
-        .expect("QWEN4EXP_METADATA_GGUF must point to a metadata GGUF");
+    let path = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL.required();
     let gguf = GgufFile::open(path).expect("open Qwen4Exp metadata GGUF");
     let actual = Qwen4ExpConfig::from_gguf(&gguf).expect("parse Qwen4Exp metadata");
     assert_eq!(actual, Qwen4ExpConfig::flash_next_reference());
@@ -83,8 +82,7 @@ fn parses_live_qwen4exp_metadata_when_available() {
 #[test]
 #[ignore = "set QWEN4EXP_Q3_K_XL_GGUF to the first released UD-Q3_K_XL shard"]
 fn plans_released_q3_k_xl_without_residing_the_ple_table() {
-    let path = std::env::var_os("QWEN4EXP_Q3_K_XL_GGUF")
-        .expect("QWEN4EXP_Q3_K_XL_GGUF must point to the first UD-Q3_K_XL shard");
+    let path = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL.required();
     let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
     let ctx = qwen_llm::metal::MetalContext::new().expect("initialize Metal");
     let allocated_before = ctx.current_allocated_size();
@@ -148,8 +146,7 @@ fn plans_released_q3_k_xl_without_residing_the_ple_table() {
 #[test]
 #[ignore = "set QWEN4EXP_Q3_K_XL_REALIZE_GGUF to opt into full weight realization"]
 fn realizes_released_q3_k_xl_as_read_only_metal_views() {
-    let path = std::env::var_os("QWEN4EXP_Q3_K_XL_REALIZE_GGUF")
-        .expect("QWEN4EXP_Q3_K_XL_REALIZE_GGUF must point to the first UD-Q3_K_XL shard");
+    let path = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL.required();
     let gguf = GgufFile::open(path).expect("open released UD-Q3_K_XL GGUF");
     let ctx = qwen_llm::metal::MetalContext::new().expect("initialize Metal");
     let baseline = ctx.current_allocated_size();

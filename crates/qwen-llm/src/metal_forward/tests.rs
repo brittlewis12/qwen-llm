@@ -5,20 +5,7 @@ use crate::loader::Model;
 use crate::sampling::{Sampler, SamplingConfig};
 
 fn metal_test_context() -> Option<MetalContext> {
-    match MetalContext::new() {
-        Ok(ctx) => Some(ctx),
-        Err(MetalError::EmptyLibrary | MetalError::NoDevice) => {
-            let required = matches!(
-                std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-            );
-            if required {
-                panic!("Metal is required but unavailable");
-            }
-            None
-        }
-        Err(error) => panic!("Metal context: {error}"),
-    }
+    crate::test_fixtures::metal_context_or_skip()
 }
 
 fn snapshot_validation_fixture() -> SessionSnapshot {
@@ -1592,7 +1579,7 @@ fn gguf_no_copy_generic_tied_q8_converted_embedding_is_bit_exact() {
 #[ignore = "requires local Qwen3.6 A3B Q4 fixture and explicit native embedding"]
 fn gguf_no_copy_generic_a3b_q4_is_bit_exact() {
     assert_generic_retained_model_exact(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         false,
         NativeQuantEmbeddingMode::Forced,
         true,
@@ -1613,7 +1600,7 @@ fn gguf_no_copy_generic_a3b_q4_is_bit_exact() {
 #[test]
 #[ignore = "requires local Qwen3.6 A3B Q4 fixture"]
 fn gguf_owned_arena_a3b_q4_is_bit_exact() {
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
     assert_eq!(
         native_quant_embedding_mode(),
         NativeQuantEmbeddingMode::Auto,
@@ -1736,7 +1723,7 @@ fn assert_gguf_parallel_a3b_q4_is_bit_exact(
     destination_length: ParallelDestinationLength,
     marker: &str,
 ) {
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
     assert_eq!(
         native_quant_embedding_mode(),
         NativeQuantEmbeddingMode::Auto,
@@ -2047,7 +2034,7 @@ fn assert_gguf_parallel_dense27b_q4_is_bit_exact(
     population: ParallelPopulationMethod,
     marker: &str,
 ) {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     assert_eq!(
         native_quant_embedding_mode(),
         NativeQuantEmbeddingMode::Auto,
@@ -2633,7 +2620,7 @@ fn gguf_no_copy_27b_prefill_and_continuation_are_bit_exact() {
         }
     }
 
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     let prompt_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt");
     assert!(
@@ -3277,7 +3264,7 @@ fn run_concurrent_gdn_moe_equivalence(
 /// the CPU forward produces after running just block 0.
 #[test]
 fn metal_gdn_block_matches_cpu() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         eprintln!("[metal-gdn] skipped — model missing");
         return;
@@ -3346,7 +3333,7 @@ fn metal_gdn_block_matches_cpu() {
 /// command buffer, all 24 blocks of Qwen3.5-0.8B-F32 chained.
 #[test]
 fn metal_single_token_matches_cpu_oracle() {
-    let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     let oracle_path = "/tmp/qwen-oracle/hello_t0.f32";
     if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists() {
         eprintln!("[metal-e2e] skipped — fixtures missing");
@@ -3416,7 +3403,7 @@ fn metal_single_token_matches_cpu_oracle() {
 
 #[test]
 fn metal_single_token_concurrent_gdn_matches_serial() {
-    let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[metal-concurrent-gdn] skipped — fixture missing");
         return;
@@ -3495,7 +3482,7 @@ fn metal_single_token_concurrent_gdn_matches_serial() {
 
 #[test]
 fn metal_single_token_concurrent_gdn_attn_matches_serial() {
-    let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[metal-concurrent-gdn-attn] skipped — fixture missing");
         return;
@@ -3560,7 +3547,7 @@ fn metal_single_token_concurrent_gdn_attn_matches_serial() {
 #[test]
 fn metal_single_token_concurrent_gdn_moe_matches_serial_a3b() {
     run_concurrent_gdn_moe_equivalence(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         4,
         0.995,
@@ -3570,7 +3557,7 @@ fn metal_single_token_concurrent_gdn_moe_matches_serial_a3b() {
 #[test]
 #[ignore = "requires the 22 GB A3B fixture and Metal GPU"]
 fn metal_sampled_attribution_matches_production_a3b() {
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
     let metadata = std::fs::metadata(model_path).expect("required A3B fixture is missing");
     assert_eq!(metadata.len(), 22_134_528_992, "A3B fixture size changed");
     let mut file = std::fs::File::open(model_path).expect("open A3B for authentication");
@@ -3684,7 +3671,7 @@ fn metal_sampled_structural_matches_copied_a3b() {
         plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
     };
 
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
     let metadata = std::fs::metadata(model_path).expect("required A3B fixture is missing");
     assert_eq!(metadata.len(), 22_134_528_992, "A3B fixture size changed");
     let mut file = std::fs::File::open(model_path).expect("open A3B for authentication");
@@ -3957,7 +3944,7 @@ fn metal_single_token_concurrent_gdn_moe_matches_serial_a10b_smoke() {
 
 #[test]
 fn metal_35b_a3b_moe_matches_cpu_smoke() {
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[metal-moe-a3b] skipped — fixture missing");
         return;
@@ -4023,7 +4010,7 @@ fn metal_35b_a3b_moe_matches_cpu_smoke() {
 #[test]
 fn metal_argmax_chain_matches_full_logits_dense() {
     run_argmax_chain_equivalence(
-        "/Users/tito/models/Qwen3.5-0.8B.F32.gguf",
+        crate::test_fixtures::QWEN35_0_8B_F32.path(),
         "dense-0p8b",
         0.9999,
     );
@@ -4032,7 +4019,7 @@ fn metal_argmax_chain_matches_full_logits_dense() {
 #[test]
 fn metal_argmax_chain_matches_full_logits_moe() {
     run_argmax_chain_equivalence(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "moe-a3b",
         0.995,
     );
@@ -4040,13 +4027,13 @@ fn metal_argmax_chain_matches_full_logits_moe() {
 
 #[test]
 fn metal_exact_greedy_chain_matches_full_logits_dense() {
-    run_exact_greedy_chain_equivalence("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf", "dense-27b");
+    run_exact_greedy_chain_equivalence(crate::test_fixtures::QWEN36_27B_Q4_K_M.path(), "dense-27b");
 }
 
 #[test]
 fn metal_exact_greedy_chain_matches_full_logits_moe() {
     run_exact_greedy_chain_equivalence(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "moe-a3b",
     );
 }
@@ -4065,7 +4052,7 @@ fn metal_exact_greedy_chain_matches_full_logits_moe() {
 /// indices, same shape K=5.
 #[test]
 fn metal_multi_hidden_matches_cpu() {
-    let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[metal-multi-hidden] skipped — fixture missing");
         return;
@@ -4164,7 +4151,7 @@ fn metal_multi_hidden_matches_cpu() {
 
 #[test]
 fn dense_ffn_capture_brackets_the_residual_update() {
-    let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[dense-ffn-capture] skipped - fixture missing");
         return;
@@ -4300,7 +4287,7 @@ fn dense_ffn_capture_brackets_the_residual_update() {
 
 #[test]
 fn dense_fixed_add_seam_is_bounded_and_ordered() {
-    let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[dense-fixed-add] skipped - fixture missing");
         return;
@@ -4536,7 +4523,7 @@ fn dense_fixed_add_seam_is_bounded_and_ordered() {
 
 #[test]
 fn dense_intervention_no_tail_matches_full_tail() {
-    let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[dense-intervention-no-tail] skipped - fixture missing");
         return;
@@ -4775,7 +4762,7 @@ fn dense_intervention_no_tail_matches_full_tail() {
 
 #[test]
 fn ordinary_moe_serial_post_block_fixed_add_seam() {
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[moe-fixed-add] skipped - fixture missing");
         return;
@@ -5023,7 +5010,7 @@ fn ordinary_moe_serial_post_block_fixed_add_seam() {
 #[test]
 #[ignore]
 fn metal_27b_gdn_block0_matches_cpu() {
-    let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -5110,7 +5097,7 @@ fn metal_27b_gdn_block0_matches_cpu() {
 #[test]
 #[ignore]
 fn metal_27b_q4_k_m_matches_oracle() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     let oracle_path = "/tmp/qwen-oracle/hello_27b_q4km.f32";
     if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists() {
         eprintln!("[metal-27b] skipped — fixtures missing");
@@ -5190,7 +5177,7 @@ fn metal_27b_q4_k_m_matches_oracle() {
 #[test]
 #[ignore]
 fn metal_27b_q5_fallback_bench() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         return;
     }
@@ -5323,7 +5310,7 @@ fn metal_27b_q5_fallback_bench() {
 #[test]
 #[ignore]
 fn metal_27b_byte_ledger() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         return;
     }
@@ -5509,7 +5496,7 @@ fn metal_27b_byte_ledger() {
 #[test]
 #[ignore]
 fn mtp_tensor_inventory() {
-    let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(path).exists() {
         return;
     }
@@ -6822,7 +6809,7 @@ fn moe_intra_profile_single_block(
 #[test]
 #[ignore]
 fn metal_27b_phase_profile() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         return;
     }
@@ -6878,7 +6865,7 @@ fn metal_27b_phase_profile() {
 #[test]
 #[ignore]
 fn metal_27b_attn_intra_profile() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         return;
     }
@@ -6947,7 +6934,7 @@ fn metal_27b_attn_intra_profile() {
 #[test]
 #[ignore]
 fn metal_27b_gdn_intra_profile() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         return;
     }
@@ -7002,7 +6989,7 @@ fn metal_27b_gdn_intra_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_gdn_intra_profile() {
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         return;
     }
@@ -7105,7 +7092,7 @@ fn run_moe_intra_profile(model_path: &str, label: &str, n_runs: usize) {
 #[ignore]
 fn metal_35b_a3b_moe_intra_profile() {
     run_moe_intra_profile(
-        "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        crate::test_fixtures::A3B_Q4_K_M.path(),
         "a3b",
         6,
     );
@@ -7115,7 +7102,7 @@ fn metal_35b_a3b_moe_intra_profile() {
 #[ignore]
 fn metal_122b_a10b_moe_intra_profile() {
     run_moe_intra_profile(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+        crate::test_fixtures::A10B_Q4_K_XL.path(),
         "122b",
         4,
     );
@@ -7133,7 +7120,7 @@ fn metal_122b_a10b_moe_intra_profile() {
 #[test]
 #[ignore]
 fn metal_27b_context_sweep() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         return;
     }
@@ -7205,7 +7192,7 @@ fn metal_27b_context_sweep() {
 #[test]
 #[ignore]
 fn metal_27b_perf_profile() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         return;
     }
@@ -7324,7 +7311,7 @@ fn metal_27b_perf_profile() {
 #[test]
 #[ignore]
 fn metal_27b_multi_token_perf() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     let oracle_path = "/tmp/qwen-oracle/longprompt_27b.f32";
     if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists() {
         eprintln!("[metal-27b-multi] skipped — fixtures missing");
@@ -7416,7 +7403,7 @@ fn metal_27b_multi_token_perf() {
 /// jumps over the lazy dog" (9 tokens), Qwen3.5-0.8B-F32.
 #[test]
 fn metal_multi_token_matches_cpu_oracle() {
-    let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     let oracle_path = "/tmp/qwen-oracle/longprompt_t0.f32";
     if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists() {
         eprintln!("[metal-e2e-multi] skipped — fixtures missing");
@@ -7506,7 +7493,7 @@ fn no_tail_prefill_matches_full_tail() {
     let override_path = std::env::var("QWEN_NO_TAIL_TEST_MODEL").ok();
     let model_path = override_path
         .as_deref()
-        .unwrap_or("/Users/tito/models/Qwen3.5-0.8B.F32.gguf");
+        .unwrap_or(crate::test_fixtures::QWEN35_0_8B_F32.path());
     if !std::path::Path::new(model_path).exists() {
         assert!(
             override_path.is_none(),
@@ -7700,7 +7687,7 @@ fn no_tail_prefill_matches_full_tail() {
 /// n_q=8, n_kv=2, head_dim=256, 4:1 GQA).
 #[test]
 fn metal_attn_block_matches_cpu() {
-    let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
     if !std::path::Path::new(path).exists() {
         eprintln!("[metal-attn] skipped — model missing");
         return;
@@ -8171,7 +8158,7 @@ fn call_gdn_step_directly(
 #[test]
 #[ignore]
 fn h2_prefix_cache_correctness_spike() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[h2-spike] skipped — fixture missing");
         return;
@@ -8343,7 +8330,7 @@ fn h2_prefix_cache_correctness_spike() {
 #[test]
 #[ignore]
 fn h2_packed_arena_snapshot_matches_cold() {
-    let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[h2-arena] skipped — fixture missing");
         return;

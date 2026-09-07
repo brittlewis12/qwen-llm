@@ -2862,7 +2862,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -3221,7 +3221,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -3265,7 +3265,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+        let path = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.path();
         if !std::path::Path::new(path).exists() {
             eprintln!("[q8_0-test] skipped — drafter GGUF missing");
             return;
@@ -3306,7 +3306,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -3357,7 +3357,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             eprintln!("[v0.73c.2-gate] skipped — fixture missing");
             return;
@@ -3529,7 +3529,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
         if !std::path::Path::new(path).exists() {
             eprintln!("[ffn-fused-mm-n16] skipped — fixture missing");
             return;

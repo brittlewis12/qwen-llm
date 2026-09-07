@@ -3348,7 +3348,7 @@ mod tests {
     #[ignore = "requires local 27B Q4_K fixture"]
     fn get_rows_q4_k_matches_selected_cpu_rows() {
         quantized_get_rows_fixture(
-            "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            crate::test_fixtures::QWEN36_27B_Q4_K_M.path(),
             GgmlType::Q4_K,
             true,
         );

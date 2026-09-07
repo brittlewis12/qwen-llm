@@ -6485,12 +6485,7 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_mat_vec_iq3_xxs_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_Q3_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[moe-iq3-oracle] skipped missing fixture {path}");
-            return;
-        }
+        let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {            eprintln!("[moe-iq3-oracle] skipped missing fixture {}", crate::test_fixtures::A3B_Q3_K_M.path());            return;        };
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -6560,12 +6555,7 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_swiglu_iq3_xxs_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_Q3_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[moe-iq3-direct-swiglu-oracle] skipped missing fixture {path}");
-            return;
-        }
+        let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {            eprintln!("[moe-iq3-direct-swiglu-oracle] skipped missing fixture {}", crate::test_fixtures::A3B_Q3_K_M.path());            return;        };
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -6698,12 +6688,7 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_grouped_swiglu_iq3_xxs_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_Q3_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[moe-iq3-swiglu-oracle] skipped missing fixture {path}");
-            return;
-        }
+        let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {            eprintln!("[moe-iq3-swiglu-oracle] skipped missing fixture {}", crate::test_fixtures::A3B_Q3_K_M.path());            return;        };
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -6830,12 +6815,7 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_mat_vec_iq3_s_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[moe-iq3s-oracle] skipped missing fixture {path}");
-            return;
-        }
+        let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {            eprintln!("[moe-iq3s-oracle] skipped missing fixture {}", crate::test_fixtures::A3B_IQ4_XS.path());            return;        };
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -6905,12 +6885,7 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_swiglu_iq3_s_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[moe-iq3s-direct-swiglu-oracle] skipped missing fixture {path}");
-            return;
-        }
+        let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {            eprintln!("[moe-iq3s-direct-swiglu-oracle] skipped missing fixture {}", crate::test_fixtures::A3B_IQ4_XS.path());            return;        };
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -7043,12 +7018,7 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_grouped_swiglu_iq3_s_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[moe-iq3s-swiglu-oracle] skipped missing fixture {path}");
-            return;
-        }
+        let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {            eprintln!("[moe-iq3s-swiglu-oracle] skipped missing fixture {}", crate::test_fixtures::A3B_IQ4_XS.path());            return;        };
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -7175,12 +7145,7 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_grouped_down_iq4_xs_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[moe-iq4xs-down-oracle] skipped missing fixture {path}");
-            return;
-        }
+        let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {            eprintln!("[moe-iq4xs-down-oracle] skipped missing fixture {}", crate::test_fixtures::A3B_IQ4_XS.path());            return;        };
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,

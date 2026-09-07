@@ -3477,6 +3477,10 @@ pub fn encode_attn_matrix_kqv_direct_v_f32(
 }
 
 #[cfg(test)]
+#[path = "attn_verifier_online_pilot.rs"]
+mod verifier_online_pilot;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::metal::test_support::*;

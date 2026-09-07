@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Dense Q8 Native Embedding Resource / Bitwise PASS
+
+- Test-only `6e36f048` qualifies the existing force path on Qwen3.8-27B-Q8_0.
+  Untied input Q8 storage is 1,350,860,800 bytes instead of 5,085,593,600 F32;
+  actual model allocation falls exactly 3,734,732,800 bytes. Output-head storage
+  stays separate and unchanged. No default allowlist, kernel or copy-policy change.
+- Thirteen scalar/packed gathered rows, full prompt logits, all 64 greedy-step
+  logit hashes and token IDs, and complete post-prefill/post-decode KV/GDN bytes
+  agree bitwise across separate processes. Bound MTP metadata is present but
+  MTP, drafter and sampled execution are not qualified.
+- Constructor-only 7582.436/2848.223 ms is descriptive, not endpoint authority.
+  Independent review requires actual process wall and generation guards; the
+  subsequent latency packet is recorded separately. Four policy tests pass.
+- Evidence: `docs/bench/2026-09-07-native-q8-embedding/RESULT.md`.
+
 ## 2026-09-07 - Q8 Fresh Serving Endpoint PASS, Opt-in KEEP / Automatic HOLD
 
 - `537215bc` tests fresh packed 19-48 on Q4/Q8; independently frozen Q8 A-B-B-A

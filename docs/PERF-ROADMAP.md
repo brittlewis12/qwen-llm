@@ -480,6 +480,21 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
+2026-09-06 single-chunk VT removes the restored-tail workspace blocker: actual
+query-32/key-8840 scratch is 51.7 MB instead of 323.3 MB, bitwise versus full-VT on
+Q4/Q8 including poisoned reuse. Only Qwen3.8/Q8 greedy no-drafter restored
+suffix 7-32 is enabled: balanced blue-2 wall saves 70.179%; compact-128 code/prose
+save 14.746%/13.978%, with all Q8 unchanged wall guards passing. Q4's reverse
+code pair misses 10%; its serving selection stays off. There is no distributional
+claim for sampled followups inheriting numerical checkpoints, no cold-load gain,
+and no global threshold change. Evidence:
+`docs/bench/2026-09-06-single-chunk-vt/RESULT.md`.
+
+The Q4 packet also observes a 153-row prose replay after a 128-token code answer:
+cache matching falls back to the prior prompt boundary instead of completed
+history. The cause is not yet established. Localize this boundary loss before
+attributing it to rendering or proposing cache/state-lifetime machinery.
+
 2026-09-06 restored suffix32 screen exposes a packed-workspace blocker:
 1262.563 ms serial versus 252.341 ms construction+packed execution, but
 323,256,320 bytes fails the 128 MiB gate before numerical/greedy validation.

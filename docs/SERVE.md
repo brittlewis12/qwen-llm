@@ -360,6 +360,13 @@ because client model-pickers probe it).
   Capture is best-effort and admitted against cache bytes plus Metal/process
   headroom; denial or failure is logged and generation continues. Both family
   caches enforce the configured byte budget.
+  Validated Qwen3.8/Q8 dense-27 requests without a drafter can prefill a restored
+  7-32-token suffix in one packed block when the current request is greedy and
+  the optional scratch price fits 128 MiB. Admission/allocation failure retains
+  serial prefill. Other profiles and fresh/exact hits retain their existing
+  policy. Packed-vs-serial state is numerical, not bitwise; sampled followups
+  can inherit these checkpoints, so this carries no distributional-equivalence
+  claim. Measured scope: `docs/bench/2026-09-06-single-chunk-vt/RESULT.md`.
   Muse currently performs a fresh exact packed prefill in superchunks of up to
   128 tokens with a 16-token packing quantum, followed by a scalar tail, into
   its reset resident session for every request. It reports `cached_tokens=0`,

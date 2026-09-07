@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-06 - Qwen3.8 Q8 Restored Packed Tails KEEP
+
+- `f0d1d67b` tests bounded packed restoration; final `f140c206` enables only
+  Qwen38 template + Q8_0 LM head + dense27 geometry, no drafter, greedy current
+  request, non-exact consumed suffix 7-32. Price is capped at 128 MiB; optional
+  memory/allocation denial retains prior serial fallback and pinned lookup.
+- Q8 release A-B-B-A blue2 TTFT/wall moves `1302.024/1406.235 ->
+  320.824/419.354 ms` (75.360%/70.179% saved). Compact128 code wall saves
+  14.746%, prose 13.978%; both orders clear 10%, named control spreads <2%.
+  Their TTFT savings are 80.306%/78.964%. All unchanged Q8 wall medians pass
+  the 3% guard; noisy exact-hit TTFT has no authority. No decode/cold-load claim.
+- All 80 paired responses across Q4/Q8 match text/usage/cache/status. Q4 code
+  saves 10.710% in aggregate but only 8.133% in reverse, missing the frozen gate;
+  Q4 serving stays off. Final 20 responses confirm Q8 widths 21/27/27 and Q4 none.
+  Sampled rows are not selected but may inherit numerical greedy checkpoints;
+  no distributional equivalence is claimed.
+- Final 374 CLI tests pass. Pure admission/allocation fault injection preserves
+  fallback selection/results; no real OOM is induced. `2e2279df` separately
+  repairs a test-only nonblocking accept race. Independent review supports
+  the narrowed profile. Evidence and all-row guards:
+  `docs/bench/2026-09-06-single-chunk-vt/RESULT.md`.
+
+## 2026-09-06 - Explicit Single-Chunk VT Storage KEEP
+
+- `2ae6f191` shares one transposed-V slot across ordered layer consumers in
+  explicit dense single-block prefill. Defaults/multi-chunk storage stay intact;
+  capture, custom-tail, multi-block and speculative misuse fail closed.
+- At suffix 32/key 8840, actual scratch falls 323,256,320 -> 51,691,520 bytes;
+  priced upper bound 52,342,440 fits the unchanged 128 MiB cap. Ordinary serial
+  serving previously used zero matrix scratch: endpoint selection is a bounded
+  memory-for-latency trade, not a memory reduction against that baseline.
+- Qwen3.6 Q4 and Qwen3.8 Q8 full-VT/single-VT/poisoned-reuse logits and KV/GDN
+  state agree bitwise. Invalid spans preserve state. Against serial prefill,
+  minimum state cosines are 0.999998759/0.999998920, with 64 equal greedy tokens
+  per target. Storage is bitwise; packed-vs-serial is numerical/greedy witnessed.
+- Static ordering audit and independent feedback precede the GPU oracles.
+  Evidence: `docs/bench/2026-09-06-single-chunk-vt/RESULT.md`; raw attempts
+  remain in `target/profiles/single-chunk-vt/`.
+
 ## 2026-09-06 - Restored Suffix Crossover Memory Screen FAIL
 
 - Test-only `5e58fee4` compares 32 actual forwards after a common 8,808-token

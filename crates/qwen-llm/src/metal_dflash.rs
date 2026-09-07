@@ -5912,6 +5912,10 @@ impl PrefillScratchPlan {
         self.matrix_max_pos
     }
 
+    pub fn is_single_chunk(&self) -> bool {
+        self.modes.single_chunk_vt
+    }
+
     pub fn matrix_query_rows(&self) -> u32 {
         self.matrix_query_rows
     }

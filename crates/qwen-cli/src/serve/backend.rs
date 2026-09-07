@@ -31,6 +31,7 @@ use std::time::Instant;
 
 const DFLASH_FIXED_SCRATCH_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 const SERIAL_TAIL_THRESHOLD: usize = 48;
+const RESTORED_TAIL_SCRATCH_LIMIT: u64 = 128 * 1024 * 1024;
 
 #[cfg(test)]
 #[path = "restored_tail_pilot.rs"]
@@ -322,6 +323,48 @@ fn needs_prefill_scratch(
                 .is_some_and(|remaining| (1..=SERIAL_TAIL_THRESHOLD).contains(&remaining)))
 }
 
+fn restored_packed_tail_arch(arch: &qwen_llm::model::Arch) -> bool {
+    arch.kind == qwen_llm::model::ArchKind::Dense
+        && arch.n_layer == 64
+        && arch.hidden_size == 5120
+        && arch.n_q_heads == 24
+        && arch.n_kv_heads == 4
+        && arch.attn_head_dim == 256
+}
+
+fn restored_packed_tail_width(
+    qualified_dense: bool,
+    has_drafter: bool,
+    greedy: bool,
+    prompt: usize,
+    restored: usize,
+    exact: bool,
+) -> Option<usize> {
+    let remaining = prompt.checked_sub(restored)?;
+    (qualified_dense
+        && !has_drafter
+        && greedy
+        && !exact
+        && restored > 0
+        && (7..=32).contains(&remaining))
+    .then_some(remaining)
+}
+
+fn allocate_single_chunk_request_state(
+    loaded: &LoadedModel,
+    capacity: usize,
+    plan: qwen_llm::metal_dflash::PrefillScratchPlan,
+) -> anyhow::Result<(usize, Option<MetalDFlashLayerMajorScratch>, Sequence)> {
+    let chunk = plan.block_size() as usize;
+    let scratch = MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(
+        loaded.context(),
+        loaded.metal_model(),
+        plan,
+    )?;
+    let sequence = loaded.create_sequence(SequenceConfig::new(capacity))?;
+    Ok((chunk, Some(scratch), sequence))
+}
+
 fn allocate_serve_request_state(
     loaded: &LoadedModel,
     prompt_tokens: usize,
@@ -424,12 +467,17 @@ fn prefill_remaining(
         // speculative requests keep the packed capture path even for a short
         // prompt rather than entering DFlash with missing context.
         let serial_capture_supported = loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
-        if use_serial_tail(
-            remaining,
-            SERIAL_TAIL_THRESHOLD,
-            dflash_capture.is_some(),
-            serial_capture_supported,
-        ) {
+        let single_chunk = scratch
+            .as_ref()
+            .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk());
+        if !single_chunk
+            && use_serial_tail(
+                remaining,
+                SERIAL_TAIL_THRESHOLD,
+                dflash_capture.is_some(),
+                serial_capture_supported,
+            )
+        {
             for (offset, &token) in prompt_ids[start..].iter().enumerate() {
                 let position = start + offset;
                 let position_u32 = u32::try_from(position)
@@ -673,12 +721,59 @@ impl GenerationBackend for EngineBackend {
                     ServeError::server_error(format!("price prefill memory: {error}"))
                 })?
         };
-        let admission = self
+        let mut packed_tail_plan = restored_packed_tail_width(
+            restored_packed_tail_arch(&self.loaded.arch()),
+            self.dflash_head.is_some(),
+            sampler.config().temperature == 0.0,
+            prompt_ids.len(),
+            cached_lookup
+                .as_ref()
+                .map_or(0, |lookup| lookup.restored_prefix_len()),
+            exact_cached,
+        )
+        .and_then(|width| {
+            let plan = qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
+                self.loaded.metal_model(),
+                width as u32,
+                prompt_ids.len(),
+                PrefillScratchConfig::default(),
+            )
+            .ok()?;
+            if plan.matrix_max_pos() < prompt_ids.len() as u64 {
+                return None;
+            }
+            let price = plan
+                .priced_upper_bound(|bytes| {
+                    Ok(self
+                        .loaded
+                        .context()
+                        .shared_buffer_size_and_align(bytes)?
+                        .size)
+                })
+                .ok()?;
+            (price <= RESTORED_TAIL_SCRATCH_LIMIT).then_some((plan, price))
+        });
+        let mut admission = self
             .loaded
-            .qwen_execution_memory_admission(1, capacity, prefill_scratch_upper_bytes, 0)
+            .qwen_execution_memory_admission(
+                1,
+                capacity,
+                packed_tail_plan
+                    .as_ref()
+                    .map_or(prefill_scratch_upper_bytes, |(_, price)| *price),
+                0,
+            )
             .map_err(|error| {
                 ServeError::server_error(format!("price request memory: {error:#}"))
             })?;
+        if !admission.admitted && packed_tail_plan.take().is_some() {
+            admission = self
+                .loaded
+                .qwen_execution_memory_admission(1, capacity, prefill_scratch_upper_bytes, 0)
+                .map_err(|error| {
+                    ServeError::server_error(format!("price serial fallback memory: {error:#}"))
+                })?;
+        }
         if !admission.admitted {
             return Err(ServeError {
                 status: 503,
@@ -697,11 +792,23 @@ impl GenerationBackend for EngineBackend {
         }
 
         let alloc_t0 = Instant::now();
-        let (mut chunk, mut scratch, mut sequence) =
-            allocate_serve_request_state(&self.loaded, prompt_ids.len(), capacity, needs_scratch)
-                .map_err(|error| {
-                ServeError::server_error(format!("allocate request state: {error:#}"))
-            })?;
+        let allocation = match packed_tail_plan {
+            Some((plan, _)) => allocate_single_chunk_request_state(&self.loaded, capacity, plan)
+                .or_else(|error| {
+                    tracing::warn!("serve: single-chunk tail allocation failed; retaining serial prefill: {error:#}");
+                    allocate_serve_request_state(&self.loaded, prompt_ids.len(), capacity, needs_scratch)
+                }),
+            None => allocate_serve_request_state(&self.loaded, prompt_ids.len(), capacity, needs_scratch),
+        };
+        let (mut chunk, mut scratch, mut sequence) = allocation.map_err(|error| {
+            ServeError::server_error(format!("allocate request state: {error:#}"))
+        })?;
+        if scratch
+            .as_ref()
+            .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk())
+        {
+            tracing::info!(target: "qwen_diag", "serve prefill: restored_packed_tail rows={chunk}");
+        }
         let mut alloc_ms = alloc_t0.elapsed().as_secs_f64() * 1e3;
         let forward = self.loaded.forward();
 

@@ -8,9 +8,7 @@ fn packed_width(
     restored: usize,
     exact: bool,
 ) -> Option<usize> {
-    let remaining = prompt.checked_sub(restored)?;
-    (dense && !has_drafter && !exact && restored > 0 && (7..=32).contains(&remaining))
-        .then_some(remaining)
+    restored_packed_tail_width(dense, has_drafter, true, prompt, restored, exact)
 }
 
 #[test]
@@ -28,6 +26,10 @@ fn bounded_restored_tail_plan_preserves_unqualified_lanes() {
             assert_eq!(packed_width(true, true, prefix + tail, prefix, false), None);
             assert_eq!(packed_width(true, false, prefix + tail, prefix, true), None);
             assert_eq!(packed_width(true, false, tail, 0, false), None);
+            assert_eq!(
+                restored_packed_tail_width(true, false, false, prefix + tail, prefix, false),
+                None
+            );
         }
     }
     assert_eq!(packed_width(true, false, 10, 11, false), None);
@@ -35,6 +37,13 @@ fn bounded_restored_tail_plan_preserves_unqualified_lanes() {
     // seven-row suffix is eligible, while incorrectly using matches is not.
     assert_eq!(packed_width(true, false, 13, 6, false), Some(7));
     assert_eq!(packed_width(true, false, 13, 7, false), None);
+    let mut arch = qwen_llm::model::QWEN3_27B;
+    assert!(restored_packed_tail_arch(&arch));
+    arch.mtp_n_hidden_layers = 0;
+    assert!(restored_packed_tail_arch(&arch));
+    arch.n_layer = 63;
+    assert!(!restored_packed_tail_arch(&arch));
+    assert!(!restored_packed_tail_arch(&qwen_llm::model::QWEN3_0_8B));
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {

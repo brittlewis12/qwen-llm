@@ -422,6 +422,151 @@ fn allocate_serve_request_state(
     }
 }
 
+struct ConsumedTailRequest {
+    chunk: usize,
+    scratch: Option<MetalDFlashLayerMajorScratch>,
+    sequence: Sequence,
+    restore: qwen_llm::runtime::PrefixCacheRestore,
+    allocation_ms: f64,
+}
+
+fn consumed_tail_scope(
+    enabled: bool,
+    arch: &qwen_llm::model::Arch,
+    template: super::items::QwenTemplate,
+    output: qwen_llm::tensor::GgmlType,
+    has_drafter: bool,
+    greedy: bool,
+    prompt: usize,
+) -> bool {
+    enabled
+        && template == super::items::QwenTemplate::Qwen36
+        && output == qwen_llm::tensor::GgmlType::Q6_K
+        && arch.kind == qwen_llm::model::ArchKind::Dense
+        && arch.n_layer == 64
+        && arch.hidden_size == 5120
+        && arch.n_q_heads == 24
+        && arch.n_kv_heads == 4
+        && arch.attn_head_dim == 256
+        && !has_drafter
+        && greedy
+        && (8192..=16384).contains(&prompt)
+}
+
+fn consumed_tail_width(prompt: usize, baseline: usize, consumed: usize) -> Option<usize> {
+    let remaining = prompt.checked_sub(consumed)?;
+    ((7..=32).contains(&remaining)
+        && prompt.checked_sub(baseline)? > SERIAL_TAIL_THRESHOLD
+        && consumed.checked_sub(baseline)? >= 64)
+        .then_some(remaining)
+}
+
+fn try_optional_request<P, A, T, E>(
+    plan: P,
+    admit: impl FnOnce(&P) -> Result<bool, E>,
+    allocate: impl FnOnce(P) -> Result<A, E>,
+    restore: impl FnOnce(A) -> Result<T, E>,
+) -> Result<Option<T>, E> {
+    if !admit(&plan)? {
+        return Ok(None);
+    }
+    restore(allocate(plan)?).map(Some)
+}
+
+impl EngineBackend {
+    fn try_consumed_tail_request(
+        &self,
+        prompt: &[i32],
+        baseline: usize,
+        capacity: usize,
+        greedy: bool,
+    ) -> Option<ConsumedTailRequest> {
+        if !consumed_tail_scope(
+            std::env::var("QWEN_SERVE_CONSUMED_TAIL").as_deref() == Ok("1"),
+            &self.loaded.arch(),
+            self.template,
+            self.loaded.metal_model().lm_head.dtype,
+            self.dflash_head.is_some(),
+            greedy,
+            prompt.len(),
+        ) {
+            return None;
+        }
+        let lookup = self.loaded.lookup_cached_consumed_extension(prompt)?;
+        let consumed = lookup.restored_prefix_len();
+        let width = consumed_tail_width(prompt.len(), baseline, consumed)?;
+        let plan = qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
+            self.loaded.metal_model(),
+            width as u32,
+            prompt.len(),
+            PrefillScratchConfig::default(),
+        )
+        .ok()?;
+        let price = plan
+            .priced_upper_bound(|bytes| {
+                Ok(self
+                    .loaded
+                    .context()
+                    .shared_buffer_size_and_align(bytes)?
+                    .size)
+            })
+            .ok()?;
+        if price > RESTORED_TAIL_SCRATCH_LIMIT {
+            return None;
+        }
+        let result = try_optional_request(
+            (lookup, plan),
+            |_| -> anyhow::Result<bool> {
+                let admission = self
+                    .loaded
+                    .qwen_execution_memory_admission(1, capacity, price, 0)?;
+                if !admission.admitted {
+                    tracing::info!(target: "qwen_diag", "serve consumed_tail: admission_denied reason={}", admission.reason.as_str());
+                }
+                Ok(admission.admitted)
+            },
+            |(lookup, plan)| -> anyhow::Result<_> {
+                let start = Instant::now();
+                let state = allocate_single_chunk_request_state(&self.loaded, capacity, plan)
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            "serve consumed_tail: allocation_failed; fallback: {error:#}"
+                        )
+                    })?;
+                Ok((lookup, state, start.elapsed().as_secs_f64() * 1e3))
+            },
+            |(lookup, (chunk, scratch, mut sequence), allocation_ms)| -> anyhow::Result<_> {
+                let restore = self
+                    .loaded
+                    .restore_prepared_consumed_extension(lookup, &mut sequence, prompt)
+                    .inspect_err(|error| {
+                        tracing::warn!("serve consumed_tail: restore_failed; fallback: {error:#}")
+                    })?;
+                Ok(ConsumedTailRequest {
+                    chunk,
+                    scratch,
+                    sequence,
+                    restore,
+                    allocation_ms,
+                })
+            },
+        );
+        match result {
+            Ok(Some(request)) => {
+                tracing::info!(target: "qwen_diag", "serve consumed_tail: selected restored={consumed} baseline_restored={baseline} rows={width} priced_bytes={price}");
+                Some(request)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    "serve consumed_tail: candidate_failed; re-admitting baseline: {error:#}"
+                );
+                None
+            }
+        }
+    }
+}
+
 fn restored_dflash_capture_complete(
     matched_tokens: usize,
     capture_start: usize,
@@ -728,78 +873,101 @@ impl GenerationBackend for EngineBackend {
                 .map_or(0, |lookup| lookup.restored_prefix_len()),
             exact_cached,
         );
-        // The retained lookup pins the restore boundary through allocation.
-        // Packed execution still admits its complete fallback topology.
-        let prefill_scratch_upper_bytes = if !needs_scratch {
-            0
-        } else {
-            let legacy_chunk = crate::baseline_prefill_chunk(prompt_ids.len());
-            let legacy_plan = plan_prefill_scratch_with_matrix_max_pos_configured(
-                self.loaded.metal_model(),
-                u32::try_from(legacy_chunk)
-                    .map_err(|_| ServeError::server_error("prefill chunk does not fit u32"))?,
-                prompt_ids.len().max(legacy_chunk),
-                PrefillScratchConfig::default(),
-            )
-            .map_err(|error| ServeError::server_error(format!("plan prefill memory: {error}")))?;
-            legacy_plan
-                .priced_upper_bound(|logical_bytes| {
-                    Ok(self
-                        .loaded
-                        .context()
-                        .shared_buffer_size_and_align(logical_bytes)?
-                        .size)
-                })
-                .map_err(|error| {
-                    ServeError::server_error(format!("price prefill memory: {error}"))
-                })?
-        };
-        let packed_tail_plan = restored_packed_tail_width(
-            restored_packed_tail_arch(
-                &self.loaded.arch(),
-                self.template,
-                self.loaded.metal_model().lm_head.dtype,
-            ),
-            self.dflash_head.is_some(),
-            sampler.config().temperature == 0.0,
-            prompt_ids.len(),
+        let candidate = self.try_consumed_tail_request(
+            &prompt_ids,
             cached_lookup
                 .as_ref()
                 .map_or(0, |lookup| lookup.restored_prefix_len()),
-            exact_cached,
-        )
-        .and_then(|width| {
-            let plan = qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
-                self.loaded.metal_model(),
-                width as u32,
-                prompt_ids.len(),
-                PrefillScratchConfig::default(),
+            capacity,
+            sampler.config().temperature == 0.0,
+        );
+        let (mut chunk, mut scratch, mut sequence, consumed_restore, mut alloc_ms) = if let Some(
+            candidate,
+        ) =
+            candidate
+        {
+            (
+                candidate.chunk,
+                candidate.scratch,
+                candidate.sequence,
+                Some(candidate.restore),
+                candidate.allocation_ms,
             )
-            .ok()?;
-            if plan.matrix_max_pos() < prompt_ids.len() as u64 {
-                return None;
-            }
-            let price = plan
-                .priced_upper_bound(|bytes| {
-                    Ok(self
-                        .loaded
-                        .context()
-                        .shared_buffer_size_and_align(bytes)?
-                        .size)
-                })
+        } else {
+            // The retained lookup pins the restore boundary through allocation.
+            // Packed execution still admits its complete fallback topology.
+            let prefill_scratch_upper_bytes = if !needs_scratch {
+                0
+            } else {
+                let legacy_chunk = crate::baseline_prefill_chunk(prompt_ids.len());
+                let legacy_plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+                    self.loaded.metal_model(),
+                    u32::try_from(legacy_chunk)
+                        .map_err(|_| ServeError::server_error("prefill chunk does not fit u32"))?,
+                    prompt_ids.len().max(legacy_chunk),
+                    PrefillScratchConfig::default(),
+                )
+                .map_err(|error| {
+                    ServeError::server_error(format!("plan prefill memory: {error}"))
+                })?;
+                legacy_plan
+                    .priced_upper_bound(|logical_bytes| {
+                        Ok(self
+                            .loaded
+                            .context()
+                            .shared_buffer_size_and_align(logical_bytes)?
+                            .size)
+                    })
+                    .map_err(|error| {
+                        ServeError::server_error(format!("price prefill memory: {error}"))
+                    })?
+            };
+            let packed_tail_plan = restored_packed_tail_width(
+                restored_packed_tail_arch(
+                    &self.loaded.arch(),
+                    self.template,
+                    self.loaded.metal_model().lm_head.dtype,
+                ),
+                self.dflash_head.is_some(),
+                sampler.config().temperature == 0.0,
+                prompt_ids.len(),
+                cached_lookup
+                    .as_ref()
+                    .map_or(0, |lookup| lookup.restored_prefix_len()),
+                exact_cached,
+            )
+            .and_then(|width| {
+                let plan = qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
+                    self.loaded.metal_model(),
+                    width as u32,
+                    prompt_ids.len(),
+                    PrefillScratchConfig::default(),
+                )
                 .ok()?;
-            (price <= RESTORED_TAIL_SCRATCH_LIMIT).then_some((plan, price))
-        });
-        let (packed_tail_plan, admission) =
-            admit_optional_tail(packed_tail_plan, prefill_scratch_upper_bytes, |price| {
-                self.loaded
-                    .qwen_execution_memory_admission(1, capacity, price, 0)
-            })
-            .map_err(|error| {
-                ServeError::server_error(format!("price request memory: {error:#}"))
-            })?;
-        if !admission.admitted {
-            return Err(ServeError {
+                if plan.matrix_max_pos() < prompt_ids.len() as u64 {
+                    return None;
+                }
+                let price = plan
+                    .priced_upper_bound(|bytes| {
+                        Ok(self
+                            .loaded
+                            .context()
+                            .shared_buffer_size_and_align(bytes)?
+                            .size)
+                    })
+                    .ok()?;
+                (price <= RESTORED_TAIL_SCRATCH_LIMIT).then_some((plan, price))
+            });
+            let (packed_tail_plan, admission) =
+                admit_optional_tail(packed_tail_plan, prefill_scratch_upper_bytes, |price| {
+                    self.loaded
+                        .qwen_execution_memory_admission(1, capacity, price, 0)
+                })
+                .map_err(|error| {
+                    ServeError::server_error(format!("price request memory: {error:#}"))
+                })?;
+            if !admission.admitted {
+                return Err(ServeError {
                 status: 503,
                 error_type: "server_busy",
                 code: Some("memory_admission_denied"),
@@ -813,46 +981,57 @@ impl GenerationBackend for EngineBackend {
                 ),
             }
             .into());
-        }
+            }
 
-        let alloc_t0 = Instant::now();
-        let allocation = allocate_optional_tail(
-            packed_tail_plan,
-            |plan| {
-                allocate_single_chunk_request_state(&self.loaded, capacity, plan)
+            let alloc_t0 = Instant::now();
+            let allocation = allocate_optional_tail(
+                packed_tail_plan,
+                |plan| {
+                    allocate_single_chunk_request_state(&self.loaded, capacity, plan)
                 .inspect_err(|error| {
                     tracing::warn!("serve: single-chunk tail allocation failed; retaining serial prefill: {error:#}");
                 })
-            },
-            || {
-                allocate_serve_request_state(
-                    &self.loaded,
-                    prompt_ids.len(),
-                    capacity,
-                    needs_scratch,
-                )
-            },
-        );
-        let (mut chunk, mut scratch, mut sequence) = allocation.map_err(|error| {
-            ServeError::server_error(format!("allocate request state: {error:#}"))
-        })?;
+                },
+                || {
+                    allocate_serve_request_state(
+                        &self.loaded,
+                        prompt_ids.len(),
+                        capacity,
+                        needs_scratch,
+                    )
+                },
+            );
+            let (chunk, scratch, sequence) = allocation.map_err(|error| {
+                ServeError::server_error(format!("allocate request state: {error:#}"))
+            })?;
+            (
+                chunk,
+                scratch,
+                sequence,
+                None,
+                alloc_t0.elapsed().as_secs_f64() * 1e3,
+            )
+        };
         if scratch
             .as_ref()
             .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk())
         {
             tracing::info!(target: "qwen_diag", "serve prefill: restored_packed_tail rows={chunk}");
         }
-        let mut alloc_ms = alloc_t0.elapsed().as_secs_f64() * 1e3;
         let forward = self.loaded.forward();
 
         // RAM prefix cache restore (dual-boundary entries from prior turns).
-        let restore = cached_lookup
-            .map(|lookup| {
-                self.loaded
-                    .restore_prepared_cached_prefix(lookup, &mut sequence, &prompt_ids)
-            })
-            .transpose()
-            .map_err(|error| ServeError::server_error(format!("prefix restore: {error:#}")))?;
+        let restore = if consumed_restore.is_some() {
+            consumed_restore
+        } else {
+            cached_lookup
+                .map(|lookup| {
+                    self.loaded
+                        .restore_prepared_cached_prefix(lookup, &mut sequence, &prompt_ids)
+                })
+                .transpose()
+                .map_err(|error| ServeError::server_error(format!("prefix restore: {error:#}")))?
+        };
         let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
         let matched_tokens = restore
             .as_ref()

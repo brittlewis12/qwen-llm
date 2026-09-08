@@ -163,10 +163,15 @@ Actual shared-graph decode attribution at6229 assigns56.175/115.877ms GPU to
 attention and44.173ms to FFN. The bottleneck is measured, not inferred from the
 `scalar_tail` label (only five remainder tokens at6229).
 
-1. Falsify existing Muse H128 online attention below7168, then require whole-token
-   numerical/greedy and paired wall evidence. Qwen v4 H256 is not a drop-in path.
-2. Qualify matrix fresh-prefill request timing and wider numerical behavior; address
-   packed attention as its share rises after GEMV removal. Preserve an exact path.
+1. Deliver bounded split H128 decode through an opt-in real runner with session-owned,
+   admitted scratch and unchanged scalar-prefill math. Whole16-forward ABBA passes:
+   6229 saves45.647% (8.663 ->15.938forwards/s),1024 saves20.599%. Qualify actual
+   generation/stop behavior; retain exact fallback and numerical-vs-bitwise labels.
+   Existing online overlap is KILL; split primitive remains HOLD on2048 control
+   noise despite independent whole-forward PASS. Qwen v4 H256 is not a drop-in path.
+2. Qualify/deliver the existing matrix fresh-prefill path and its composition with
+   split decode. Address packed attention after delivering these measured mechanisms,
+   not before. Preserve exact math; greedy agreement is not sampled equivalence.
 3. Retain the completed live-prefix opt-in (6269-token repeated-turn backend
    216.803 ->3.827s), but do not present avoided prefill as faster fresh inference.
 

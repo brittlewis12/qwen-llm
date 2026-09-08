@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Split Attention Whole Decode PASS
+
+- `1741d3dd` existing-online overlap KILL:12.45/13.76% slower GPU at2048/6229.
+  Changed parallelism in `ff0b87c2` partitions H128 positions, merges softmax using
+  540672B scratch. All14 numerical/poison/view/guard cases pass. Primitive overall
+  HOLD:2048 A spread17.223%;6229 saves94.559% with0.09576% spread. No rescue.
+- Explicit preregistered admission amendment allows independent whole-forward
+  `b0857a9d` packet. Exact-prefilled Current6229,16 sequential greedy forwards:
+  mean1847.024 ->1003.917ms,45.647% saved,8.663 ->15.938forwards/s.1024 guard
+  saves20.599%; primary/guard both-pair gates and A spreads0.270/0.862% pass.
+- All16 greedy IDs agree per cell; worst logits cosine0.999999997517,
+  RMS0.000156957, maxdelta0.00797224. New-KV tolerance passes and active prefix
+  remains bitwise unchanged. Separate warm ABBA follows all payload oracles.
+- One leased packet280.01s; independent review passes. Research/test-only, numerical
+  not bitwise/distribution exact;16 consumed forwards, not emitted-token throughput.
+  No cold, fresh-prefill, matrix-composition or production-default claim. Next is
+  bounded real-runner delivery, then existing matrix prefill qualification.
+  Evidence: `docs/bench/2026-09-08-muse-math/RESULT.md`.
+
 ## 2026-09-08 - Muse Matrix Transfer PASS / Decode Attention Attribution
 
 - Existing test-only matrix N128 passes: 3285.64 ->570.06ms, 38.96 ->224.54tok/s,

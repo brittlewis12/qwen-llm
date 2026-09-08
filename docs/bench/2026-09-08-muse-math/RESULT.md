@@ -130,3 +130,59 @@ Raw attempts, thermal/memory counters and mechanical score remain under
 `target/profiles/muse-live-prefix/{online,split,decode}-01*` and
 `attention-score.json`; build-online-01's missing-import failure was repaired
 before execution. No timed packet was rerun or rescored to change its disposition.
+
+## Bounded real-runner delivery PASS (opt-in)
+
+`d8295fa3` moves the unchanged shader to the product metallib and replaces test TLS
+selection with explicit session-owned scratch. `MuseGlimmerRuntimeOptions` defaults
+off; `load_with_options` rejects split requests outside Q8_0/unified Apple M4 Max
+and includes scratch in aggregate/session admission and allocation reconciliation.
+Only ordinary generated-token positions1024..7168 (upper exclusive) select split;
+prefill, capture and intervention graphs remain unchanged. Outside the range the
+original path remains selected. GPU failure poisons the session, never retries.
+The interval is bounded eligibility, not whole-model proof at every position.
+
+`QWEN_MUSE_SPLIT_DECODE=1 qwen run ...` enables this path; `0` or unset retains
+original math. No serving/lens environment opt-in. README documents scope and
+numerical-versus-bitwise/sampled equivalence. There is no matrix-prefill change.
+
+One leased admission/isolation regression passes in70.33s. Default and opt-in
+prefill at31/1031 native Current-prefix tokens (packed plus scalar tails) agree
+bitwise in all logits and active K/V. Eight generated forwards match the old pilot
+bitwise at1031, and the default fallback bitwise at31. Logical/priced/observed
+scratch deltas agree; invalid-token/frontier and poison/reset rejection pass.
+The CPU selector boundary test and11 CLI generation/sampler/terminal-boundary
+regressions pass. Independent implementation and result review passes.
+
+Actual production `qwen run` executes one sequential separate-process A/B delivery
+check at the same6229 native Current prompt, high reasoning, temp0, seed42,
+17 outputs/16 transitions. Both finish at token limit; emitted bytes and token
+fingerprint agree (`3d9ae02d476a7e3ed29c1f414ffeceb5dc6353c322f17d5a664fab12bf369578`).
+
+| Phase / allocation | Original | Split opt-in |
+| --- | ---: | ---: |
+| Prefill ms | 217876.383750 | 218786.604625 |
+| Generation ms | 1858.782083 | 1011.201583 |
+| Emitted tokens/s (17-token numerator) | 9.14577 | 16.81168 |
+| Transitions/s (16-forward numerator) | 8.60779 | 15.82276 |
+| Observed session bytes | 376635392 | 377176064 |
+| Aggregate required bytes | 30245060608 | 30245601280 |
+| Process wall seconds | 220.269900 | 220.350083 |
+
+This is a delivery smoke, **not another promotion-grade timing packet**. No cold
+filesystem conditioning or new cold/fresh-request speedup claim; total request
+time remains about220s because prefill remains28.5tokens/s. Generation includes
+first-use pipeline setup, sampling and stdout delivery; the warm ABBA above is
+still the whole-forward timing authority. Sampling policy is unchanged, but
+floating-point differences can change sampled tokens even at the same seed.
+
+Provenance caveat: execution records identify clean `d8295fa3`; the measured CLI
+was built from the reviewed candidate before its commit, so embedded metadata
+identifies `a9931487-dirty`. No source changed between that build, commit and run.
+Both identities are retained. A subsequent committed-source CLI build succeeds
+but does not retroactively certify the measured binary. No delivery rerun.
+Raw `delivery-01*`, `cli-delivery-{A,B}-01*`, build and CPU logs remain under the
+same profile directory. Primitive HOLD and old-online KILL remain unchanged.
+
+The next delivery target is matrix prefill qualification and composition with
+split decode; the fresh bottleneck is not closed by this decode result.

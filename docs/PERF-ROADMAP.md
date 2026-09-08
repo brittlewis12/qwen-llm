@@ -163,15 +163,17 @@ Actual shared-graph decode attribution at6229 assigns56.175/115.877ms GPU to
 attention and44.173ms to FFN. The bottleneck is measured, not inferred from the
 `scalar_tail` label (only five remainder tokens at6229).
 
-1. Deliver bounded split H128 decode through an opt-in real runner with session-owned,
-   admitted scratch and unchanged scalar-prefill math. Whole16-forward ABBA passes:
-   6229 saves45.647% (8.663 ->15.938forwards/s),1024 saves20.599%. Qualify actual
-   generation/stop behavior; retain exact fallback and numerical-vs-bitwise labels.
-   Existing online overlap is KILL; split primitive remains HOLD on2048 control
-   noise despite independent whole-forward PASS. Qwen v4 H256 is not a drop-in path.
-2. Qualify/deliver the existing matrix fresh-prefill path and its composition with
-   split decode. Address packed attention after delivering these measured mechanisms,
+1. Qualify/deliver the existing matrix fresh-prefill path and its composition with
+   split decode. ActualCLI fresh prefill still takes218s (~28.5tok/s) after decode
+   delivery. Address packed attention after delivering the existing matrix mechanism,
    not before. Preserve exact math; greedy agreement is not sampled equivalence.
+2. Retain bounded split H128 decode opt-in `QWEN_MUSE_SPLIT_DECODE=1`: actualCLI
+   17outputs/16transitions generation1858.782 ->1011.202ms, sameoutput/stopreason.
+   This diagnostic closes delivery, not newtimingpromotion. Warm16-forward ABBA
+   remains authority:6229 saves45.647%,1024 saves20.599%. Prefill unchanged, scratch
+   session-owned/admitted540672B; Q8/unifiedM4Max generatedpositions[1024,7168) only.
+   Existing online overlap is KILL; split primitive remains HOLD on2048 control
+   noise despite independent whole-forward PASS. Widen only with new qualification.
 3. Retain the completed live-prefix opt-in (6269-token repeated-turn backend
    216.803 ->3.827s), but do not present avoided prefill as faster fresh inference.
 

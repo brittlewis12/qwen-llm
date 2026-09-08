@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Bounded Split Decode CLI Opt-In Delivered
+
+- `d8295fa3` exposes `QWEN_MUSE_SPLIT_DECODE=1` on the Muse run path, defaultoff.
+  Explicit runtime options restrict Q8_0/unified M4 Max, generated positions
+  [1024,7168); scratch540672B is session-owned, aggregate/session-admitted and
+  reconciled. Prefill/capture/intervention math stays unchanged; fail-stop preserved.
+- One70.33s regression passes prefill logits/all-activeKV bitwise at31/1031,
+  eight-step explicit/pilot parity, short fallback, admission and poison checks.
+  CPU selector plus11 CLI generation/sampling/terminal regressions pass; reviewGO.
+- Real run6229/high/temp0/seed42 A/B delivery:17 emitted/16 transitions, samebytes
+  andtokenfingerprint/tokenlimit. Generation1858.782 ->1011.202ms, transitionrate
+  8.608 ->15.823/s. Sessionallocation delta exactly540672B. Prefill217.876/218.787s
+  stays28.5tok/s; processwall~220s unchanged. Diagnostic, not newtimingpromotion.
+- MeasuredCLI embeddedidentity `a9931487-dirty` predates cleanexecution `d8295fa3`;
+  unchanged reviewedsource betweenbuild/commit/run is disclosed. Later committed
+  CLIbuild passes, not a retroactive provenance repair; no rerun. OldonlineKILL and
+  primitiveHOLD remain. Next: matrix fresh-prefill delivery and split composition.
+  Evidence: `docs/bench/2026-09-08-muse-math/RESULT.md`.
+
 ## 2026-09-08 - Muse Split Attention Whole Decode PASS
 
 - `1741d3dd` existing-online overlap KILL:12.45/13.76% slower GPU at2048/6229.

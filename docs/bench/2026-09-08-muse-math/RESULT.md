@@ -186,3 +186,43 @@ same profile directory. Primitive HOLD and old-online KILL remain unchanged.
 
 The next delivery target is matrix prefill qualification and composition with
 split decode; the fresh bottleneck is not closed by this decode result.
+
+## Matrix prefill delivered; packed attention is the next bottleneck
+
+`ce59bc4e` exposes the existing Q8 matrix path via default-off
+`QWEN_MUSE_MATRIX_PREFILL=1`, restricted to unified M4 Max/Q8_0 and session
+capacity<=7168. No new matrix buffers; scalar kernels remain unchanged but consume
+numerically changed KV. CLI reports `packed_matrix+scalar_tail` honestly.
+
+One composition regression passes in351.96s. Native Current prefixes16/31/128/1024/
+6229 cover the N16 specialization, scalar tails and ordinary superchunks. All five
+pass inherited endpoint cosine>0.99999/RMS<0.002/abs<0.1, all16 continuation logits
+cosine>0.99999/RMS<0.006/abs<0.3 and all17 greedy emitted IDs versus exact reference.
+Full6229 endpoint cosine0.999999988569, RMS0.000250469, maxdelta0.028245926.
+Exact/matrix fresh diagnostics214685.718041/76366.274458ms; no paired timing claim.
+The first N16 exact4311.959750ms includes first-use effects and is not a speedup.
+
+Actual ordinary matrix packed chunk at6144+80 takes1367.552167ms. The shared-graph
+stage profile takes1384.175750ms GPU, with261 stages and no output head, matching
+the real chunk preceding five scalar tails. Profiled residual and all active KV
+are bitwise identical to plain replay. Scaled stage costs: full attention460.043ms,
+sliding attention495.194ms, FFN325.428ms, front projections75.357ms, attention output
+24.124ms, attention preparation2.745ms, embedding0.140ms. Attention is69.01% of
+this late chunk; that is not a measured whole-prefill fraction. Production remains
+one serial encoder; these timestamps are attribution, not throughput authority.
+
+One actual CLI composed-candidate run (same6229/high/temp0/seed42/17outputs,
+16transitions) reports prefill76223.9ms /81.72tok/s, generation1019.9ms and total
+77602.1ms (external process77.777731s). Stdout and token fingerprint match the retained
+exact fixture; finish is token_limit. Session377176064B and aggregate30245601280B
+match split-only: matrix adds no buffer. Embedded build identity is clean
+`ce59bc4e`, built after commit. This is bounded opt-in delivery with diagnostic
+timing, not a synthetic historical AB pair, default promotion or cold-cache claim.
+
+Source review approved this smaller delivery qualification rather than spending
+another25-minute ABBA packet merely reconfirming the existing matrix mechanism.
+Next: batched H128 online attention using query-row parallelism, with causal/window
+oracles followed by actual fresh-prefill composition and controlled timing if it
+survives. Old singleton-online KILL and split-primitive HOLD remain unchanged.
+Raw `prefill-01*`, `cli-prefill-M-01*` and committed-source builds remain under
+`target/profiles/muse-live-prefix/`.

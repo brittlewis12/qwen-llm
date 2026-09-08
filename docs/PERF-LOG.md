@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Matrix Prefill CLI Delivery / Attention Attribution
+
+- `ce59bc4e` exposes default-off `QWEN_MUSE_MATRIX_PREFILL=1`, Q8/unifiedM4Max,
+  capacity<=7168, no new buffers. Composes with split decode; honest packed_matrix
+  telemetry. Scalar kernels unchanged, resulting KV/logits tolerance-qualified.
+- Five nativeprefixes16/31/128/1024/6229 pass inherited endpoint and16-continuation
+  numerical gates and all17greedyIDs. One351.96s regression; fullfreshdiagnostic
+  exact214.686 ->matrix76.366s. No ABBA/default promotion; first-use N16 not scored.
+- Actual late80-row chunk at6144: profileGPU1384.176ms, fullattention460.043,
+  slidingattention495.194 (~69% combined), FFN325.428, front75.357ms. Sharedgraph
+  profile preserves residual/allactiveKV bitwise; production stayssingleencoder.
+- RealCLI bothoptins6229/17outputs: prefill76.224s/81.72tok/s, generation1.020s,
+  process77.778s, sameemittedbytes/fingerprint/stopreason as retainedexactfixture.
+  Session377176064B unchangedvs split-only. Cleanembedded/executionsourcece59bc4e.
+  Deliverydiagnostic, not historicalpairedtiming or coldclaim. Next: batched online
+  packedattention, not more caching or another matrix-only remeasurement.
+  Evidence: `docs/bench/2026-09-08-muse-math/RESULT.md`.
+
 ## 2026-09-08 - Muse Bounded Split Decode CLI Opt-In Delivered
 
 - `d8295fa3` exposes `QWEN_MUSE_SPLIT_DECODE=1` on the Muse run path, defaultoff.

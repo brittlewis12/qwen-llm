@@ -163,10 +163,13 @@ Actual shared-graph decode attribution at6229 assigns56.175/115.877ms GPU to
 attention and44.173ms to FFN. The bottleneck is measured, not inferred from the
 `scalar_tail` label (only five remainder tokens at6229).
 
-1. Qualify/deliver the existing matrix fresh-prefill path and its composition with
-   split decode. ActualCLI fresh prefill still takes218s (~28.5tok/s) after decode
-   delivery. Address packed attention after delivering the existing matrix mechanism,
-   not before. Preserve exact math; greedy agreement is not sampled equivalence.
+1. Attack packed attention with batched H128 online query-row parallelism. Matrix
+   prefill is now delivered defaultoff (`QWEN_MUSE_MATRIX_PREFILL=1`): realCLI6229
+   prefill76.224s/81.72tok/s, same17greedy outputs when composed with splitdecode.
+   Fiveprefix numerical composition passes. Actual late6144+80 chunk attributes
+   955.236/1384.176ms GPU to full+sliding attention (~69%). Falsify masking/window
+   and numerical behavior cheaply, then spend controlled whole-prefill timing on
+   the improved composed path. Preserve exact math and sampled-equivalence caveats.
 2. Retain bounded split H128 decode opt-in `QWEN_MUSE_SPLIT_DECODE=1`: actualCLI
    17outputs/16transitions generation1858.782 ->1011.202ms, sameoutput/stopreason.
    This diagnostic closes delivery, not newtimingpromotion. Warm16-forward ABBA

@@ -484,6 +484,23 @@ const MUSE_GLIMMER_QUERY_HEAD_COUNT: usize = 32;
 const MUSE_GLIMMER_KV_HEAD_COUNT: usize = 2;
 const MUSE_GLIMMER_ATTENTION_HEAD_DIM: usize = 128;
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_PACKED_ONLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_packed_online<R>(enabled: bool, run: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_PACKED_ONLINE.set(self.0);
+        }
+    }
+    let _restore = Restore(FORCE_PACKED_ONLINE.replace(enabled));
+    run()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn encode_muse_glimmer_attn_prefill_f16kv_f32(
     ctx: &MetalContext,
@@ -562,6 +579,60 @@ pub fn encode_muse_glimmer_attn_prefill_f16kv_f32(
         head_dim: u32,
         sliding_window: u32,
         scale: f32,
+    }
+    #[cfg(test)]
+    if FORCE_PACKED_ONLINE.get() {
+        if (query_head_count, kv_head_count, head_dim) != (32, 2, 128) || row_count > 128 {
+            return bad_shape(
+                KERNEL,
+                "packed online requires G16/H128 and at most128 rows".into(),
+            );
+        }
+        for (tensor, alignment) in [(query, 16), (key_cache, 8), (value_cache, 8), (output, 16)] {
+            if !tensor.offset.is_multiple_of(alignment) {
+                return bad_shape(KERNEL, "unaligned packed online view".into());
+            }
+        }
+        let pipeline = ctx.pipeline("kernel_muse_prefill_online_h128")?;
+        if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32 {
+            return bad_shape(KERNEL, "packed online requires32-lane SIMDgroups".into());
+        }
+        enc.note_read(query);
+        enc.note_read(key_cache);
+        enc.note_read(value_cache);
+        enc.note_write(output);
+        enc.set_pipeline(&pipeline);
+        enc.set_bytes(
+            0,
+            &Args {
+                row_count: checked_u32(KERNEL, row_count, "row count")?,
+                base_position: checked_u32(KERNEL, base_position, "base position")?,
+                end_position: checked_u32(KERNEL, end_position, "end position")?,
+                kv_stride: 256,
+                query_head_count: 32,
+                kv_head_count: 2,
+                head_dim: 128,
+                sliding_window: checked_u32(KERNEL, sliding_window.unwrap_or(0), "sliding window")?,
+                scale: 128.0_f32.sqrt().recip(),
+            },
+        );
+        enc.set_tensor(1, query);
+        enc.set_tensor(2, key_cache);
+        enc.set_tensor(3, value_cache);
+        enc.set_tensor(4, output);
+        enc.dispatch(
+            MTLSize {
+                width: 32,
+                height: row_count,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+        return Ok(());
     }
     let pipeline = ctx.pipeline("kernel_muse_glimmer_attn_prefill_f16kv_f32")?;
     let materialized_pipeline = ctx.pipeline("kernel_attn_decode_f16kv")?;
@@ -1619,6 +1690,8 @@ mod tests {
             }
         }
     }
+
+    include!("muse_packed_online_pilot.rs");
 
     #[test]
     fn muse_glimmer_packed_attention_matches_scalar_rows_bitwise() {

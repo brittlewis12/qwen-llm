@@ -1455,6 +1455,34 @@ impl LoadedModel {
         }
     }
 
+    /// Advance one dense sequence through an intermediate prompt token without
+    /// final norm, LM head, or logits readback. Finish the prompt with
+    /// `decode_token` when logits are needed. Position and failure discipline
+    /// match the owned packed prompt-only path.
+    pub fn prefill_token_prompt_only(
+        &self,
+        sequence: &mut Sequence,
+        token_id: i32,
+    ) -> Result<(), RuntimeError> {
+        ensure_same_model_owner(&self.owner, &sequence.owner)?;
+        sequence.state.ensure_usable()?;
+        sequence.ensure_can_append(1)?;
+        let position = sequence_position_u32(sequence)?;
+        match self
+            .forward()
+            .single_token_no_tail(token_id, position, &mut sequence.state)
+        {
+            Ok(()) => {
+                sequence.position += 1;
+                Ok(())
+            }
+            Err(error) => {
+                sequence.state.poison("serial prompt-only prefill failed");
+                Err(error.into())
+            }
+        }
+    }
+
     /// Advance one owned sequence by a single token and return the next
     /// logits. The sequence's tracked position is the kernel position; a
     /// failed forward poisons the state so it cannot be snapshotted or
@@ -1579,7 +1607,9 @@ impl LoadedModel {
                 Ok(logits)
             }
             Err(error) => {
-                sequence.state.poison("packed prefill with hidden capture failed");
+                sequence
+                    .state
+                    .poison("packed prefill with hidden capture failed");
                 Err(error.into())
             }
         }

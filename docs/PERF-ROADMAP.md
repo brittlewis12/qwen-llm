@@ -193,6 +193,14 @@ permanent reuse taint before adding production anchors; the CPU prototype does
 not exercise these low-level GPU aliases. This is not a bug in current full-copy
 snapshots and does not itself implement taint tracking.
 
+The next ownership prerequisites have concrete coverage: packed hidden capture
+rejects session/scratch aliases before encoding, and ordinary serial serving now
+uses owned prompt-only/decode APIs. Real F32 and Q4 tests preserve logits and all
+persistent bytes, including fresh/exact-hit backend emission and completed pending
+checkpoints. Packed/capture/spec paths remain raw fallbacks. No new latency or
+anchor eligibility is claimed; wire a real restore-issued anchor only after raw
+session escape cannot rearm reuse and shared storage is accounted across eviction.
+
 ## Attention Checkpoint - 2026-09-07
 
 The adjacent exact tiled-VT copy experiment improves16-bank GPU time85.26/81.62%

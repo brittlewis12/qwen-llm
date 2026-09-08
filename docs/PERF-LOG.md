@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Ordinary Serial Serving Owns Append Frontiers
+
+- Add `LoadedModel::prefill_token_prompt_only` with model-owner, capacity and
+  usable-state checks, exactly-once advance on success and poison on forward error.
+  Ordinary noncapture serving prefill/decode now uses owned APIs; capture branches
+  retain raw calls and move their manual advance inside the branch. Dense no-tail
+  selectors, packed/spec policy and final-token work elision are unchanged.
+- Actual 0.8B F32 owned/raw no-tail plus final-full-token test passes bitwise logits
+  and all KV/GDN/conv bytes, with owner/capacity/poison rejection checks (0.54s).
+  Existing 0.8B Q4_K_M serve-prefill regression passes prefixes0/8, tails1/2/16/48,
+  and pending-boundary scratch checks at request lengths9/56/57 (1.18s).
+- New real-Q4 backend regression renders a short request and compares fresh and
+  exact-prompt-hit generation against raw serial: all emitted bytes agree, four
+  output tokens require exactly three transitions, and completed checkpoint restore
+  reproduces KV/GDN/conv bitwise with the last token still pending (0.38s).
+  This covers the generation backend, not HTTP transport or timing qualification.
+- Final serving CPU suite passes107 tests/9 ignored; runtime-filter CPU checks
+  pass22/9 ignored, and non-test release CLI compilation passes. Independent review
+  passes. Initial CLI test setup incorrectly held the production lease in its parent, so the child
+  fails before Metal initialization. Retained and repaired to normal child-owned
+  leasing; library unit tests still use the external guardian. No bypass or timing
+  rescue. Raw records: `target/profiles/runtime-snapshot-ownership/`.
+- No latency, incremental snapshot, or anchor-eligibility claim. Restore anchors,
+  permanent raw-session escape handling, segmented durable export and conservative
+  cache lifetime/accounting remain the next integration boundary.
+
 ## 2026-09-07 - Packed Capture Destination Alias Guard
 
 - Packed hidden capture now rejects destinations sharing any mutable session or

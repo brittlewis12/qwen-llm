@@ -158,3 +158,70 @@ fn runtime_packed_capture_rejects_session_and_scratch_aliases() {
         "owned failed prefill must remain fail-stop"
     );
 }
+
+#[test]
+#[ignore = "serial Metal, real 0.8B owned serial prompt append equivalence"]
+fn runtime_owned_prompt_token_matches_raw_append_and_fails_closed() {
+    let runtime = Runtime::metal().unwrap();
+    let model = runtime
+        .load_model(crate::test_fixtures::QWEN35_0_8B_F32.path())
+        .unwrap();
+    let mut raw = model.create_sequence(SequenceConfig::new(4)).unwrap();
+    for token in [1, 2] {
+        model.decode_token(&mut raw, token).unwrap();
+    }
+    let root = checkpoint(&model, &raw, &[1, 2]);
+    let mut owned = model.create_sequence(SequenceConfig::new(4)).unwrap();
+    model
+        .restore_prepared_checkpoint(&root, &mut owned, &[1, 2, 3, 4])
+        .unwrap();
+    model
+        .forward()
+        .single_token_no_tail(3, 2, unsafe { raw.metal_session_mut() })
+        .unwrap();
+    raw.advance_by(1).unwrap();
+    model.prefill_token_prompt_only(&mut owned, 3).unwrap();
+    assert_eq!(owned.position(), 3);
+    assert_same_payload(
+        &checkpoint(&model, &raw, &[1, 2, 3]),
+        &checkpoint(&model, &owned, &[1, 2, 3]),
+    );
+    let raw_logits = model
+        .forward()
+        .single_token(4, 3, unsafe { raw.metal_session_mut() })
+        .unwrap();
+    raw.advance_by(1).unwrap();
+    let owned_logits = model.decode_token(&mut owned, 4).unwrap();
+    assert_eq!(
+        raw_logits.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        owned_logits.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+    );
+    assert_eq!(owned.position(), 4);
+    let full = checkpoint(&model, &owned, &[1, 2, 3, 4]);
+    assert_same_payload(&checkpoint(&model, &raw, &[1, 2, 3, 4]), &full);
+    assert!(matches!(
+        model.prefill_token_prompt_only(&mut owned, 5),
+        Err(RuntimeError::SequenceCapacityExceeded { .. })
+    ));
+    assert_same_payload(&full, &checkpoint(&model, &owned, &[1, 2, 3, 4]));
+
+    let mut foreign = model.create_sequence(SequenceConfig::new(4)).unwrap();
+    foreign.owner = Arc::new(ModelOwnerToken::new());
+    assert!(matches!(
+        model.prefill_token_prompt_only(&mut foreign, 1),
+        Err(RuntimeError::SequenceModelMismatch)
+    ));
+    assert_eq!(foreign.position(), 0);
+    assert!(foreign.state.ensure_usable().is_ok());
+
+    let mut invalid = model.create_sequence(SequenceConfig::new(4)).unwrap();
+    assert!(model.prefill_token_prompt_only(&mut invalid, -1).is_err());
+    assert_eq!(invalid.position(), 0);
+    assert!(invalid.state.ensure_usable().is_err());
+    assert!(model.decode_token(&mut invalid, 1).is_err());
+    assert!(
+        model
+            .prepare_checkpoint_boundary(&invalid, vec![], None, None, None, 0)
+            .is_err()
+    );
+}

@@ -591,27 +591,25 @@ fn prefill_remaining(
                                 "serial tail capture prefill: {error:#}"
                             ))
                         })?;
+                        sequence.advance_by(1).map_err(|error| {
+                            ServeError::server_error(format!("advance: {error:#}"))
+                        })?;
                         *captured += 1;
                         logits
                     }
-                    _ if skip_tail => forward
-                        .single_token_no_tail(token, position_u32, unsafe {
-                            sequence.metal_session_mut()
-                        })
+                    _ if skip_tail => loaded
+                        .prefill_token_prompt_only(sequence, token)
                         .map(|()| None)
                         .map_err(|error| {
                             ServeError::server_error(format!("serial no-tail prefill: {error:#}"))
                         })?,
-                    _ => forward
-                        .single_token(token, position_u32, unsafe { sequence.metal_session_mut() })
+                    _ => loaded
+                        .decode_token(sequence, token)
                         .map(Some)
                         .map_err(|error| {
                             ServeError::server_error(format!("serial tail prefill: {error:#}"))
                         })?,
                 };
-                sequence
-                    .advance_by(1)
-                    .map_err(|error| ServeError::server_error(format!("advance: {error:#}")))?;
                 prompt_logits = logits;
             }
             break;
@@ -1420,7 +1418,7 @@ impl GenerationBackend for EngineBackend {
                                 (offset * *n_features) as u64,
                                 vec![*n_features as u64],
                             );
-                            forward
+                            let next = forward
                                 .single_token_with_multi_hidden(
                                     token,
                                     u32::try_from(position).context("position does not fit u32")?,
@@ -1432,17 +1430,15 @@ impl GenerationBackend for EngineBackend {
                                         .target_layer_ids,
                                     &view,
                                 )
-                                .context("decode token")?
+                                .context("decode token")?;
+                            sequence.advance_by(1)?;
+                            next
                         }
-                        _ => forward
-                            .single_token(
-                                token,
-                                u32::try_from(position).context("position does not fit u32")?,
-                                unsafe { sequence.metal_session_mut() },
-                            )
+                        _ => self
+                            .loaded
+                            .decode_token(&mut sequence, token)
                             .context("decode token")?,
                     };
-                    sequence.advance_by(1)?;
                     Ok(next)
                 },
             )
@@ -2178,6 +2174,138 @@ mod tests {
             ..ServeRequest::default()
         };
         assert!(request_sampler(&request).is_err());
+    }
+
+    #[test]
+    #[ignore = "serial Metal, real 0.8B fresh/exact-hit serial backend parity"]
+    fn owned_serial_backend_preserves_emission_and_completed_checkpoint() {
+        #[derive(Default)]
+        struct Sink(Vec<u8>);
+        impl GenerationSink for Sink {
+            fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
+                self.0.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn tick(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
+        let loaded = runtime
+            .load_model("/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf")
+            .unwrap();
+        let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
+        let template = crate::prompt_template::serve_qwen_template(family, loaded.gguf()).unwrap();
+        let no_thinking = crate::supports_qwen_no_thinking_prompt(family, loaded.gguf());
+        let mut backend = EngineBackend::new(
+            loaded,
+            "owned-serial-test".into(),
+            4,
+            Some(128),
+            128,
+            None,
+            template,
+            no_thinking,
+        )
+        .unwrap();
+        let request = crate::open_responses::items::parse_request(&serde_json::json!({
+            "model":"owned-serial-test", "input":"Continue: one, two, three,",
+            "temperature":0.0, "max_output_tokens":4,
+        }))
+        .unwrap();
+        let prompt = backend.render_prompt(&request).unwrap();
+        let prompt_ids = backend.tokenizer.encode(&prompt, false).unwrap();
+        assert!(prompt_ids.len() <= SERIAL_TAIL_THRESHOLD);
+        let mut reference = backend
+            .loaded
+            .create_sequence(SequenceConfig::new(128))
+            .unwrap();
+        let mut logits = Vec::new();
+        for (position, &token) in prompt_ids.iter().enumerate() {
+            logits = backend
+                .loaded
+                .forward()
+                .single_token(token, position as u32, unsafe {
+                    reference.metal_session_mut()
+                })
+                .unwrap();
+            reference.advance_by(1).unwrap();
+        }
+        let mut expected = Sink::default();
+        let generation = crate::generate_serial(
+            logits,
+            4,
+            &backend.loaded.gguf().stop_token_ids().unwrap(),
+            &mut request_sampler(&request).unwrap(),
+            |token| {
+                expected
+                    .0
+                    .extend(backend.tokenizer.try_decode_piece_bytes_exact(token)?);
+                Ok(())
+            },
+            |token| {
+                let position = reference.position();
+                let logits =
+                    backend
+                        .loaded
+                        .forward()
+                        .single_token(token, position as u32, unsafe {
+                            reference.metal_session_mut()
+                        })?;
+                reference.advance_by(1)?;
+                Ok(logits)
+            },
+        )
+        .unwrap();
+        assert_eq!(generation.tokens.len(), 4);
+        assert_eq!(generation.transitions, 3);
+        let mut completed = prompt_ids.clone();
+        completed.extend_from_slice(&generation.tokens);
+        assert_eq!(reference.position(), completed.len() - 1);
+        let identity = backend.loaded.snapshot_identity(&reference).unwrap();
+        let expected_state = reference
+            .metal_session()
+            .snapshot(
+                identity.clone(),
+                completed[..completed.len() - 1].to_vec(),
+                None,
+            )
+            .unwrap();
+        for cached in [false, true] {
+            let mut actual = Sink::default();
+            let outcome = backend
+                .generate(&request, &prompt, &mut actual)
+                .unwrap_or_else(|_| panic!("serial backend failed cached={cached}"));
+            assert_eq!(actual.0, expected.0);
+            assert_eq!(outcome.usage.output_tokens, 4);
+            assert_eq!(
+                outcome.usage.cached_tokens,
+                if cached { prompt_ids.len() } else { 0 }
+            );
+            let lookup = backend.loaded.lookup_cached_prefix(&completed).unwrap();
+            let mut restored = backend
+                .loaded
+                .create_sequence(SequenceConfig::new(128))
+                .unwrap();
+            let report = backend
+                .loaded
+                .restore_prepared_cached_prefix(lookup, &mut restored, &completed)
+                .unwrap();
+            assert!(report.exact);
+            assert_eq!(restored.position(), completed.len() - 1);
+            let actual_state = restored
+                .metal_session()
+                .snapshot(
+                    identity.clone(),
+                    completed[..completed.len() - 1].to_vec(),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(actual_state.kv_k_arena, expected_state.kv_k_arena);
+            assert_eq!(actual_state.kv_v_arena, expected_state.kv_v_arena);
+            assert_eq!(actual_state.gdn_conv_arena, expected_state.gdn_conv_arena);
+            assert_eq!(actual_state.gdn_state_arena, expected_state.gdn_state_arena);
+        }
     }
 
     #[test]

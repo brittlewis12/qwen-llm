@@ -43,11 +43,17 @@ use super::{
     write_atomic_replace,
 };
 
+mod access;
 mod compare;
+pub(crate) use access::{BoundFullAccess, FullAccess, FullExecutionMode};
 mod import;
 mod readout;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::generic_bound_trace_json;
+#[cfg(test)]
+pub(crate) use tests::write_cpu_gguf;
 mod token_bank;
 mod trace;
 mod trace_batch;
@@ -80,7 +86,7 @@ pub(crate) struct ReadFullArgs {
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 
-    /// Directory produced by `import-full`, `import-muse-full`, or `assemble-muse-full`.
+    /// Data-only linear transport or a legacy imported/assembled full lens directory.
     #[arg(
         long,
         conflicts_with = "logit_lens",
@@ -134,7 +140,7 @@ pub(crate) struct ReadFullArgs {
     #[arg(long)]
     pub(crate) identity_cache: PathBuf,
 
-    /// Acknowledge a published BF16-to-GGUF transfer; not needed for model-bound Muse assets.
+    /// Acknowledge unverified source/deployment equivalence; exact bindings still must match.
     #[arg(long)]
     pub(crate) allow_unvalidated_transfer: bool,
 

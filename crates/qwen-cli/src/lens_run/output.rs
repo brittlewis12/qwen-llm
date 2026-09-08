@@ -235,6 +235,8 @@ impl RunExecution {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct RunOutput {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) linear_transports: Vec<serde_json::Value>,
     pub(super) schema: &'static str,
     pub(super) schema_version: u32,
     pub(super) runtime_kind: &'static str,
@@ -304,6 +306,7 @@ impl BundleOutputBudget {
 }
 
 pub(crate) struct RunResult {
+    pub(crate) linear_transports: Vec<serde_json::Value>,
     pub(crate) prompt_token_ids: Vec<i32>,
     pub(crate) generated_token_ids: Vec<i32>,
     pub(crate) decoded_text: String,
@@ -407,6 +410,7 @@ pub(super) fn build_run_output(
 ) -> RunOutput {
     let requested_live_readouts = bound_plan.resolved.readouts.clone();
     RunOutput {
+        linear_transports: result.linear_transports,
         schema: RUN_SCHEMA,
         schema_version: RUN_SCHEMA_VERSION,
         runtime_kind,

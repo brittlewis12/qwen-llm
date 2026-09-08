@@ -20,7 +20,7 @@ pub(super) struct FullReadoutDocument {
     pub(super) ranking_scope: &'static str,
     pub(super) source_site: &'static str,
     pub(super) input: FullReadoutInput,
-    pub(super) artifact: FullReadoutArtifact,
+    pub(super) artifact: serde_json::Value,
     pub(super) deployed_model: FullReadoutModel,
     pub(super) transfer: FullReadoutTransfer,
     pub(super) reader: FullReadoutReader,
@@ -57,7 +57,8 @@ pub(super) struct FullReadoutArtifact {
 #[derive(Debug, Serialize)]
 pub(super) struct FullReadoutModel {
     pub(super) path: PathBuf,
-    pub(super) content_blake3: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) content_blake3: Option<String>,
     pub(super) model_locator_id: String,
     pub(super) tokenizer_metadata_id: String,
     pub(super) architecture_contract: &'static str,
@@ -116,20 +117,20 @@ pub(super) struct FullTokenScore {
 }
 
 pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
-    validate_token_build_identity(
-        env!("QWEN_BUILD_SOURCE_STATE"),
-        env!("QWEN_BUILD_STAMP_ERROR"),
-    )?;
     validate_read_full_args(&args)?;
     let full_lens = args
         .full_lens
         .as_deref()
         .context("--full-lens is required")?;
     validate_artifact_directory(full_lens, "full lens")?;
-    let manifest_path = full_lens.join(FULL_MANIFEST_NAME);
-    let manifest: FullLensManifest = read_json_file(&manifest_path)?;
-    validate_manifest(&manifest)?;
-    let manifest_canonical_json_blake3 = digest_json(&manifest)?;
+    let manifest = FullAccess::open(full_lens, false)?;
+    if !manifest.is_data() {
+        validate_token_build_identity(
+            env!("QWEN_BUILD_SOURCE_STATE"),
+            env!("QWEN_BUILD_STAMP_ERROR"),
+        )?;
+    }
+    manifest.acknowledge_transfer(args.allow_unvalidated_transfer)?;
     let layers = if args.layers.is_empty() {
         manifest.transport.source_layers.clone()
     } else {
@@ -146,7 +147,8 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
     ensure!(
-        ModelFamily::detect(&gguf) == Some(ModelFamily::Qwen35),
+        ModelFamily::detect(&gguf) == Some(ModelFamily::Qwen35)
+            || (manifest.is_data() && ModelFamily::detect(&gguf) == Some(ModelFamily::Qwen35Moe)),
         "full-lens readout requires an ordinary dense Qwen model"
     );
     let model_context_tokens = gguf.declared_context_length()?;
@@ -198,6 +200,13 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     );
 
     crate::shutdown::checkpoint()?;
+    let mut manifest = manifest.bind_opened(
+        &gguf,
+        FullExecutionMode::Scalar,
+        Some(args.identity_cache.as_path()),
+        args.allow_unvalidated_transfer,
+    )?;
+    let cpu_content_blake3 = manifest.bound_content_blake3().map(str::to_owned);
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf_with_intent(
@@ -207,7 +216,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             ModelLoadIntent::SinglePassAnalysis,
         )
         .with_context(|| format!("load model {}", args.model.display()))?;
-    validate_deployed_model(&manifest, &loaded)?;
+    manifest.validate_loaded(&loaded)?;
     let arch = loaded.arch();
     ensure!(
         token_ids
@@ -216,16 +225,15 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         "full-lens input contains a token outside the deployed vocabulary"
     );
     let identity = loaded.workspace_lens_identity();
-    let content = checkpoint_content_identity(
-        loaded.gguf(),
-        &CheckpointIdentityCache::new(&args.identity_cache),
-    )
-    .with_context(|| {
-        format!(
-            "resolve strong model identity using {}",
-            args.identity_cache.display()
-        )
-    })?;
+    let content_blake3 = if manifest.is_data() {
+        cpu_content_blake3
+    } else {
+        Some(hex(&checkpoint_content_identity(
+            loaded.gguf(),
+            &CheckpointIdentityCache::new(&args.identity_cache),
+        )?
+        .content_id))
+    };
     crate::lens_run::ensure_qwen_sequence_admitted(&loaded, prefix.len())?;
     super::super::full_output::retained_metadata_budget(
         layers.len(),
@@ -238,7 +246,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         .create_sequence(SequenceConfig::new(prefix.len()))
         .context("create full-lens prompt sequence")?;
     let mut workspace_lens = loaded
-        .workspace_lens_session(&mut sequence)
+        .passive_workspace_lens_session(&mut sequence)
         .context("open full-lens workspace-lens session")?;
     let capture = workspace_lens
         .forward_prompt_last_post_block_residuals(prefix, &layers)
@@ -250,20 +258,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             && capture.capture.hidden_size == arch.hidden_size as usize,
         "full-lens prompt capture metadata is inconsistent"
     );
-    let payload_path = full_lens.join(&manifest.payload.path);
-    let (mut payload_file, payload_length) = open_regular_file(&payload_path)?;
-    ensure!(
-        payload_length as u64 == manifest.payload.byte_length,
-        "full lens payload length does not match its manifest"
-    );
     let hidden_size = arch.hidden_size as usize;
-    let matrix_len = usize::try_from(transport_matrix_bytes(&manifest)?)
-        .context("full-lens matrix byte count")?;
-    let mut matrix = Vec::new();
-    matrix
-        .try_reserve_exact(matrix_len)
-        .context("allocate full-lens transport matrix")?;
-    matrix.resize(matrix_len, 0);
     let mut full_readout_workspace = match workspace_lens.full_readout_workspace(1) {
         Ok(workspace) => Some(workspace),
         Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
@@ -289,18 +284,13 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     indexed_results
         .try_reserve_exact(layers.len())
         .context("allocate full-lens layer results")?;
-    let mut payload_hasher = Blake3Hasher::new();
     let mut bundle = super::super::full_output::Bundle::optional(
         args.full_output.as_deref(),
         &layers,
         arch.vocab_size as usize,
     )?;
-    for &layer in &manifest.transport.source_layers {
-        payload_file
-            .read_exact(&mut matrix)
-            .with_context(|| format!("read full-lens source layer {layer}"))?;
-        payload_hasher.update(&matrix);
-        ensure_finite_f16(&matrix, layer as usize, 0)?;
+    for layer in manifest.transport.source_layers.clone() {
+        let matrix = manifest.read_matrix(layer)?;
         let Some(&capture_slot) = selected_slots.get(&layer) else {
             continue;
         };
@@ -367,18 +357,6 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             },
         ));
     }
-    let mut extra = [0u8; 1];
-    ensure!(
-        payload_file
-            .read(&mut extra)
-            .with_context(|| format!("check full lens payload end {}", payload_path.display()))?
-            == 0,
-        "full lens payload contains trailing bytes"
-    );
-    ensure!(
-        payload_hasher.finalize().to_hex().as_str() == manifest.payload.blake3,
-        "full lens payload BLAKE3 mismatch"
-    );
     indexed_results.sort_unstable_by_key(|(slot, _)| *slot);
     ensure!(
         indexed_results.len() == layers.len()
@@ -396,7 +374,11 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     let document = FullReadoutDocument {
         schema: "llm.lens.readout",
         schema_version: 1,
-        readout: "qwen_published_full_vocabulary",
+        readout: if manifest.is_data() {
+            "qwen_linear_transport_full_vocabulary"
+        } else {
+            "qwen_published_full_vocabulary"
+        },
         scoring: "deployed_output_rmsnorm_and_lm_head",
         score_semantics: "full_vocabulary_next_token_logits_no_softmax_v1",
         ranking_scope: "full_vocabulary",
@@ -409,27 +391,17 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             captured_token_id: capture.token_id,
             predicts_position: selected_position + 1,
         },
-        artifact: FullReadoutArtifact {
-            manifest: manifest_path,
-            manifest_canonical_json_blake3,
-            payload_blake3: manifest.payload.blake3,
-            method: manifest.transport.method,
-            target_layer: manifest.transport.target_layer,
-            orientation: manifest.transport.orientation,
-            source_repository: manifest.source.repository,
-            source_revision: manifest.source.revision,
-            fitted_checkpoint: manifest.model.fitted_checkpoint,
-            fitted_checkpoint_revision: manifest.model.fitted_checkpoint_revision,
-            fit_n_prompts: manifest.fit.n_prompts,
-            fit_max_sequence_length: manifest.fit.max_sequence_length,
-            fit_skip_first: manifest.fit.skip_first,
-        },
+        artifact: manifest.readout_artifact(full_lens)?,
         deployed_model: FullReadoutModel {
             path: args.model,
-            content_blake3: hex(&content.content_id),
+            content_blake3,
             model_locator_id: format!("{:016x}", identity.model_locator_id),
             tokenizer_metadata_id: format!("{:016x}", identity.tokenizer_metadata_id),
-            architecture_contract: "exact_qwen3_hybrid_dense_27b_v1",
+            architecture_contract: if manifest.is_data() {
+                "actual_qwen_native_geometry_v1"
+            } else {
+                "exact_qwen3_hybrid_dense_27b_v1"
+            },
             n_layers: arch.n_layer,
             hidden_size: arch.hidden_size,
             vocab_size: arch.vocab_size,
@@ -437,7 +409,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             lm_head_dtype: format!("{:?}", loaded.metal_model().lm_head.dtype),
         },
         transfer: FullReadoutTransfer {
-            validation_status: manifest.transfer.validation_status,
+            validation_status: manifest.validation_status(),
             override_policy: "explicit_allow_unvalidated_transfer",
         },
         reader: FullReadoutReader {
@@ -465,8 +437,15 @@ pub(super) fn validate_deployed_model(
     manifest: &FullLensManifest,
     loaded: &qwen_llm::runtime::LoadedModel,
 ) -> Result<()> {
+    validate_deployed_geometry(manifest, loaded.gguf(), loaded.arch())
+}
+
+pub(super) fn validate_deployed_geometry(
+    manifest: &FullLensManifest,
+    gguf: &GgufFile,
+    arch: qwen_llm::model::Arch,
+) -> Result<()> {
     let profile = profile_for_manifest(manifest)?;
-    let arch = loaded.arch();
     let mut expected = qwen_llm::model::QWEN3_27B;
     ensure!(
         arch.mtp_n_hidden_layers <= expected.mtp_n_hidden_layers,
@@ -481,7 +460,7 @@ pub(super) fn validate_deployed_model(
         "deployed model does not match the published full transport geometry"
     );
     ensure!(
-        model_metadata_matches_profile(loaded.gguf(), profile),
+        model_metadata_matches_profile(gguf, profile),
         "deployed model metadata does not match published asset {}",
         profile.source_filename
     );
@@ -490,7 +469,11 @@ pub(super) fn validate_deployed_model(
 
 pub(super) fn validate_read_full_args(args: &ReadFullArgs) -> Result<()> {
     ensure!(
-        args.allow_unvalidated_transfer,
+        args.allow_unvalidated_transfer
+            || args
+                .full_lens
+                .as_ref()
+                .is_some_and(|p| FullAccess::is_data_directory(p).unwrap_or(false)),
         "published full-lens transfer is unvalidated; pass --allow-unvalidated-transfer to acknowledge this"
     );
     ensure!(

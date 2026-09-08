@@ -208,6 +208,34 @@ pub fn checkpoint_content_identity(
     resolve_content_sources(&sources, cache, || {})
 }
 
+/// Hash retained file bytes under the native ordered-content scheme. Neither
+/// downloader declarations nor cached roots can authorize this verification.
+pub fn verified_checkpoint_content_identity(
+    gguf: &GgufFile,
+) -> Result<CheckpointContentReport, CheckpointIdentityError> {
+    use std::os::unix::fs::FileExt;
+    let sources = source_views(gguf);
+    validate_sources(&sources, false)?;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let (content_id, bytes_hashed) = hash_ordered_content_with(&sources, |source, hash| {
+        let length = source.bytes.len() as u64;
+        let mut offset = 0;
+        while offset < length {
+            let n = (length - offset).min(buffer.len() as u64) as usize;
+            source.file.read_exact_at(&mut buffer[..n], offset)?;
+            hash.update(&buffer[..n]);
+            offset += n as u64;
+        }
+        Ok(())
+    })?;
+    validate_sources(&sources, true)?;
+    Ok(CheckpointContentReport {
+        content_id,
+        bytes_hashed,
+        outcome: IdentityCacheOutcome::ComputedUncached,
+    })
+}
+
 /// Resolve a strong cached or downloader-declared content root without ever
 /// hashing mapped model bytes. A cold source without complete fresh sidecars
 /// fails closed instead of falling back to an exhaustive scan.
@@ -538,6 +566,16 @@ fn metadata_key(sources: &[SourceView<'_>]) -> [u8; 32] {
 fn hash_ordered_content(
     sources: &[SourceView<'_>],
 ) -> Result<([u8; 32], u64), CheckpointIdentityError> {
+    hash_ordered_content_with(sources, |source, hash| {
+        update_content_bytes(hash, source.bytes);
+        Ok(())
+    })
+}
+
+fn hash_ordered_content_with(
+    sources: &[SourceView<'_>],
+    mut read: impl FnMut(&SourceView<'_>, &mut blake3::Hasher) -> Result<(), CheckpointIdentityError>,
+) -> Result<([u8; 32], u64), CheckpointIdentityError> {
     let mut content = blake3::Hasher::new();
     content.update(CONTENT_DOMAIN);
     hash_u64(&mut content, sources.len() as u64);
@@ -547,7 +585,7 @@ fn hash_ordered_content(
         shard.update(SHARD_DOMAIN);
         hash_u64(&mut shard, index as u64);
         hash_u64(&mut shard, source.bytes.len() as u64);
-        update_content_bytes(&mut shard, source.bytes);
+        read(source, &mut shard)?;
         let shard_id = shard.finalize();
         hash_u64(&mut content, index as u64);
         hash_u64(&mut content, source.bytes.len() as u64);

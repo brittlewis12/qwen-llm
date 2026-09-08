@@ -118,6 +118,8 @@ struct TraceBatchAttribution {
 
 #[derive(Debug, Deserialize)]
 struct Producer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_dirty: Option<String>,
     #[serde(default)]
     build_commit: Option<String>,
     #[serde(default)]
@@ -126,6 +128,16 @@ struct Producer {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DeployedModel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) content_blake3: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) content_authenticated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) n_layers: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) locator_scheme: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -152,6 +164,10 @@ pub(crate) struct TokenizerSummary {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct LensSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) producer_contract: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) runtime_binding: Option<serde_json::Value>,
     pub(crate) kind: String,
     pub(crate) method: String,
     #[serde(default)]
@@ -401,6 +417,7 @@ struct SummaryView {
 
 #[derive(Debug, Serialize)]
 struct TraceBatchView {
+    batch_schema: String,
     request_id: String,
     request_index: usize,
     request_count: usize,
@@ -410,6 +427,10 @@ struct TraceBatchView {
 
 #[derive(Debug, Serialize)]
 struct ArtifactView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) producer_contract: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) runtime_binding: Option<serde_json::Value>,
     kind: String,
     source_repository: Option<String>,
     source_revision: Option<String>,
@@ -419,6 +440,18 @@ struct ArtifactView {
 
 #[derive(Debug, Serialize)]
 struct ModelView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) content_blake3: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) content_authenticated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) n_layers: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) locator_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hidden_size: Option<usize>,
     name: Option<String>,
     base_model_name: Option<String>,
     architecture: Option<String>,
@@ -454,6 +487,8 @@ struct VectorView {
 
 #[derive(Debug, Serialize)]
 struct ProducerView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_dirty: Option<String>,
     build_commit: Option<String>,
     build_source_state: Option<String>,
 }
@@ -1088,11 +1123,17 @@ fn sort_occurrences(map: BTreeMap<u32, (usize, usize, usize)>) -> Vec<Occurrence
     rows
 }
 
+pub(crate) fn summary_json(document: &TraceDocument) -> Result<serde_json::Value> {
+    Ok(serde_json::to_value(summary_view(document))?)
+}
+
 fn summary_view(document: &TraceDocument) -> SummaryView {
     SummaryView {
         schema_version: document.schema_version,
         method: document.lens.method.clone(),
         artifact: ArtifactView {
+            producer_contract: document.lens.producer_contract.clone(),
+            runtime_binding: document.lens.runtime_binding.clone(),
             kind: document.lens.kind.clone(),
             source_repository: document.lens.source_repository.clone(),
             source_revision: document.lens.source_revision.clone(),
@@ -1100,6 +1141,12 @@ fn summary_view(document: &TraceDocument) -> SummaryView {
             payload_blake3: document.lens.payload_blake3.clone(),
         },
         model: document.deployed_model.as_ref().map(|model| ModelView {
+            content_blake3: model.content_blake3.clone(),
+            content_authenticated: model.content_authenticated,
+            n_layers: model.n_layers,
+            hidden_size: model.hidden_size,
+            path: model.path.clone(),
+            locator_scheme: model.locator_scheme.clone(),
             name: model.name.clone(),
             base_model_name: model.base_model_name.clone(),
             architecture: model.architecture.clone(),
@@ -1141,6 +1188,7 @@ fn summary_view(document: &TraceDocument) -> SummaryView {
         }),
         timings_ms: document.timing.clone(),
         producer: document.producer.as_ref().map(|producer| ProducerView {
+            build_dirty: producer.build_dirty.clone(),
             build_commit: producer.build_commit.clone(),
             build_source_state: producer.build_source_state.clone(),
         }),
@@ -1153,6 +1201,7 @@ fn summary_view(document: &TraceDocument) -> SummaryView {
         input_source: document.input_source.clone(),
         add_special_tokens: document.add_special_tokens,
         batch: document.batch.as_ref().map(|batch| TraceBatchView {
+            batch_schema: batch.batch_schema.clone(),
             request_id: batch.request_id.clone(),
             request_index: batch.request_index,
             request_count: batch.request_count,
@@ -2217,6 +2266,45 @@ fn print_token(view: &TokenView) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn generic_trace_json_inspection_retains_contract_binding_and_authenticated_context() {
+        let original = crate::full_lens::generic_bound_trace_json();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let document =
+            parse_trace_bytes(&bytes, std::path::Path::new("generic-cohort-trace.json")).unwrap();
+        let view = summary_json(&document).unwrap();
+        assert_eq!(
+            view["artifact"]["producer_contract"],
+            original["lens"]["producer_contract"]
+        );
+        assert_eq!(
+            view["artifact"]["runtime_binding"],
+            original["lens"]["runtime_binding"]
+        );
+        assert_eq!(view["method"], "unknown-cpu-fixture-method");
+        for key in [
+            "path",
+            "locator_scheme",
+            "locator_id",
+            "content_authenticated",
+            "content_blake3",
+            "architecture",
+            "n_layers",
+            "hidden_size",
+            "vocab_size",
+        ] {
+            assert_eq!(view["model"][key], original["deployed_model"][key], "{key}");
+        }
+        assert_eq!(view["batch"], original["batch"]);
+        assert_eq!(view["producer"], original["producer"]);
+        assert_eq!(view["tokenizer"], original["tokenizer"]);
+        assert_eq!(view["model"]["vocab_size"], 32);
+        assert_eq!(
+            view["artifact"]["runtime_binding"]["binding_phase"],
+            "cpu_before_metal"
+        );
+    }
+
     fn fixture(version: u32, rendering: bool) -> TraceDocument {
         let rendering = rendering.then(|| Rendering {
             renderer: "qwen3.6_messages_v1".into(),
@@ -2285,10 +2373,16 @@ mod tests {
             schema: "qwen.lens.trace".into(),
             schema_version: version,
             producer: (version == 3).then(|| Producer {
+                build_dirty: None,
                 build_commit: Some("test".into()),
                 build_source_state: Some("clean".into()),
             }),
             deployed_model: (version == 3).then(|| DeployedModel {
+                content_blake3: None,
+                content_authenticated: None,
+                n_layers: None,
+                path: None,
+                locator_scheme: None,
                 name: Some("test".into()),
                 base_model_name: None,
                 architecture: Some("qwen35moe".into()),
@@ -2302,6 +2396,8 @@ mod tests {
                 pretokenizer: Some("qwen35".into()),
             }),
             lens: LensSummary {
+                producer_contract: None,
+                runtime_binding: None,
                 kind: "test".into(),
                 method: "j".into(),
                 target_layer: Some(6),

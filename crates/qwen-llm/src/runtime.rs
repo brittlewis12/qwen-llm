@@ -2764,7 +2764,6 @@ fn snapshot_identity_parts(
     shards: &[SnapshotShardIdentityInput],
 ) -> (u64, u64) {
     let mut model_hash = HASH_OFFSET;
-    let mut tokenizer_hash = HASH_OFFSET;
 
     hash_str(&mut model_hash, "qwen-llm-model-v1");
     hash_str(&mut model_hash, &format!("{arch:?}"));
@@ -2792,16 +2791,32 @@ fn snapshot_identity_parts(
         }
     }
 
-    hash_str(&mut tokenizer_hash, "qwen-llm-tokenizer-v1");
     for (key, value) in gguf.model.metadata() {
-        if key.starts_with("tokenizer.") {
-            hash_str(&mut tokenizer_hash, key);
-            hash_value(&mut tokenizer_hash, value);
-        } else {
+        if !key.starts_with("tokenizer.") {
             hash_str(&mut model_hash, key);
             hash_value(&mut model_hash, value);
         }
     }
 
-    (model_hash, tokenizer_hash)
+    (model_hash, tokenizer_metadata_identity(gguf))
+}
+
+/// The native lightweight tokenizer metadata identity, available before Metal.
+pub fn tokenizer_metadata_identity(gguf: &GgufFile) -> u64 {
+    let mut hash = HASH_OFFSET;
+    hash_str(&mut hash, "qwen-llm-tokenizer-v1");
+    for (key, value) in gguf.model.metadata() {
+        if key.starts_with("tokenizer.") {
+            hash_str(&mut hash, key);
+            hash_value(&mut hash, value);
+        }
+    }
+    hash
+}
+
+/// CPU identity of this retained GGUF using the same binder as model loading.
+pub fn opened_gguf_lightweight_identity_parts(gguf: &GgufFile) -> Result<(u64, u64), RuntimeError> {
+    let bound = Model::from_gguf(gguf)?;
+    let shards = snapshot_shard_identity_inputs(gguf)?;
+    Ok(snapshot_identity_parts(gguf, bound.arch, &shards))
 }

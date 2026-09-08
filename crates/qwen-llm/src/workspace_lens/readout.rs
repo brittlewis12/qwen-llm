@@ -698,16 +698,7 @@ pub(super) fn validate_full_readout_tail(
             expected: expected_lm_head_shape,
         });
     }
-    if !matches!(
-        model.lm_head.dtype,
-        GgmlType::F32
-            | GgmlType::F16
-            | GgmlType::BF16
-            | GgmlType::Q4_K
-            | GgmlType::Q6_K
-            | GgmlType::Q8_0
-            | GgmlType::IQ4_NL
-    ) {
+    if !selected_readout_head_dtype_supported(model.lm_head.dtype) {
         return Err(WorkspaceLensError::UnsupportedTokenReadoutLmHeadDtype {
             dtype: model.lm_head.dtype,
         });
@@ -1117,16 +1108,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
                 expected: expected_lm_head_shape,
             });
         }
-        if !matches!(
-            lm_head.dtype,
-            GgmlType::F32
-                | GgmlType::F16
-                | GgmlType::BF16
-                | GgmlType::Q4_K
-                | GgmlType::Q6_K
-                | GgmlType::Q8_0
-                | GgmlType::IQ4_NL
-        ) {
+        if !selected_readout_head_dtype_supported(lm_head.dtype) {
             return Err(WorkspaceLensError::UnsupportedTokenReadoutLmHeadDtype {
                 dtype: lm_head.dtype,
             });
@@ -1982,7 +1964,61 @@ mod scalar_logits_tests {
     }
 }
 
-impl WorkspaceLensPassiveSession<'_, '_> {
+impl<'model> WorkspaceLensPassiveSession<'model, '_> {
+    pub fn full_readout_workspace(
+        &self,
+        rows: usize,
+    ) -> Result<WorkspaceLensFullReadoutWorkspace<'model>, WorkspaceLensError> {
+        self.inner.full_readout_workspace(rows)
+    }
+
+    pub fn apply_f16_transport_logits_with_vector(
+        &self,
+        matrix: &[u8],
+        residual: &[f32],
+    ) -> Result<WorkspaceLensFullVocabularyLogitsWithVector, WorkspaceLensError> {
+        self.inner
+            .apply_f16_transport_logits_with_vector(matrix, residual)
+    }
+
+    pub fn selected_token_readouts(
+        &self,
+        tokens: &[u32],
+    ) -> Result<WorkspaceLensTokenReadouts, WorkspaceLensError> {
+        self.inner.selected_token_readouts(tokens)
+    }
+
+    pub fn selected_token_raw_lm_head_rows(
+        &self,
+        tokens: &[u32],
+    ) -> Result<WorkspaceLensTokenReadouts, WorkspaceLensError> {
+        self.inner.selected_token_raw_lm_head_rows(tokens)
+    }
+
+    pub fn f16_transport_readout_query_capacity(
+        &self,
+        additional_live_bytes: usize,
+    ) -> Result<usize, WorkspaceLensError> {
+        self.inner
+            .f16_transport_readout_query_capacity(additional_live_bytes)
+    }
+
+    pub fn prepare_f16_transport_readouts(
+        &self,
+        matrix: &[u8],
+    ) -> Result<WorkspaceLensPreparedF16Transport<'model>, WorkspaceLensError> {
+        self.inner.prepare_f16_transport_readouts(matrix)
+    }
+
+    pub fn project_prepared_f16_transport_readouts(
+        &self,
+        transport: &WorkspaceLensPreparedF16Transport<'_>,
+        readouts: &WorkspaceLensTokenReadouts,
+    ) -> Result<Vec<f32>, WorkspaceLensError> {
+        self.inner
+            .project_prepared_f16_transport_readouts(transport, readouts)
+    }
+
     pub fn deployed_logits_from_post_block_residual(
         &self,
         source_residual: &[f32],

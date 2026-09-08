@@ -9,6 +9,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 ## Working Capability
 
+- Data-only full transports are accepted directly by read/trace and selected-bank
+  run paths: new fits need no hardcoded profile or pickle loader. See the
+  [data contract](LENS-DATA-CONTRACT.md) for export, verification and mode limits.
 - Native plain logit-lens readouts and opt-in lossless full-vocabulary exports
   are available through `read-full`; see [observer controls](LENS-OBSERVER-CONTROLS.md)
   for semantics, examples, and bounded scalar/packed qualification.
@@ -101,8 +104,8 @@ UI, generic plugin systems, and production hardening are out of scope.
 - A coefficient-1 coordinate swap on Qwen3.6 R reverses the local `basketball`
   versus `Jordan` selected-token ranking at exactly the requested L20/position-3
   site. The unchanged output is recorded without a behavioral claim.
-- The active `qwen-lens` unit suite passes 214 tests with four model-bound
-  qualification tests intentionally ignored by default.
+- The data-contract CPU check passes 326 `qwen-lens` tests and 19 targeted runtime
+  tests; nine opt-in CLI tests and one Metal-initializing test are not executed.
 - Real T128 Qwen3.8 Q8 J and R row fits pass across a hybrid L58-to-L62
   traversal. The R proof takes `7.84s` forward plus `1.67s` VJP at B1.
 - The exact 4.52 GB eyes-ml Muse source imports to 51 pinned F16 matrices. On the
@@ -150,9 +153,11 @@ UI, generic plugin systems, and production hardening are out of scope.
   Qwen3.6 Q4 has bounded local J/R qualification, not broad equivalence.
 - `coordinate_swap` is the paper-equivalent two-coordinate exchange;
   `source_to_target` remains a separate directed displacement for compatibility.
-- A complete Qwen3.8 n25/T128/skip-4/target-62 J/R pair now exists with recorded
-  local pair validation. Its native import/profile admission remains unwired;
-  the existing Qwen3.8 J profile is the different n1000/target-63 asset. See
+- The complete Qwen3.8 n25/T128/skip-4/target-62 J/R pair is converted to the
+  data-only contract and passes native CPU payload verification without new
+  profile entries. Live numerical smoke awaits Metal availability; transfer
+  equivalence is not established. The legacy Qwen3.8 J profile remains the
+  different n1000/target-63 asset. See
   [construal corpus research](LENS-CONSTRUAL-CORPUS.md) for artifact provenance
   and comparison limits. Qwen3.6 has its released target-62 matched pair plus
   template asset; Muse has a first-25-Pile/T128/skip-4/target-50 matched pair.
@@ -182,10 +187,12 @@ UI, generic plugin systems, and production hardening are out of scope.
 ## Active Gate
 
 The released Qwen3.6 pair, matched Muse pair, and canonical coordinate swap are
-available. The newly completed Qwen3.8 pair needs audited native import, not
-another full fit. Artifact-first inspection and within-checkpoint comparison
-remain the immediate path; native fitting optimization is a separate project,
-not a prerequisite imposed by the former application deadline.
+available. The newly completed Qwen3.8 pair needs bounded live verification of
+the generic consumption path, not another full fit or profile registration.
+Prompt construction is paused until that path is checked. Artifact-first
+inspection and within-checkpoint comparison remain the research path; native
+fitting optimization is a separate project, not a prerequisite imposed by the
+former application deadline.
 
 ## Deferred
 

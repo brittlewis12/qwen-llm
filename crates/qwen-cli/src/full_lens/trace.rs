@@ -138,7 +138,7 @@ pub(crate) struct TraceFullArgs {
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 
-    /// Directory produced by `qwen-lens import-full` or `import-muse-full`.
+    /// Data-only linear transport or a legacy imported full lens directory.
     #[arg(long)]
     pub(crate) full_lens: PathBuf,
 
@@ -206,11 +206,11 @@ pub(crate) struct TraceFullArgs {
     )]
     pub(crate) vectors: Vec<TraceFullVectorCell>,
 
-    /// Muse only: private cache for a declared GGUF content identity.
+    /// Private native identity cache for legacy assets; data exact bindings always hash retained bytes.
     #[arg(long)]
     pub(crate) identity_cache: Option<PathBuf>,
 
-    /// Muse only: acknowledge published BF16-to-GGUF transfer.
+    /// Acknowledge unverified source/deployment equivalence for unbound transports.
     #[arg(long)]
     pub(crate) allow_unvalidated_transfer: bool,
 
@@ -320,6 +320,8 @@ pub(super) struct TraceFullProducer {
 
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct TraceFullModel {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) content_blake3: Option<String>,
     pub(super) path: PathBuf,
     pub(super) locator_scheme: &'static str,
     pub(super) locator_id: String,
@@ -351,12 +353,19 @@ pub(super) type TraceFullRendering = LensInputRendering;
 
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct TraceFullLens {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) producer_contract: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) runtime_binding: Option<serde_json::Value>,
     pub(super) kind: &'static str,
     pub(super) method: String,
     pub(super) target_layer: u32,
     pub(super) source_site: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub(super) source_repository: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub(super) source_revision: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub(super) source_filename: String,
     pub(super) payload_blake3: String,
     pub(super) scoring: &'static str,
@@ -496,6 +505,7 @@ pub(super) fn trace_full_runtime_summaries(
     let identity = loaded.workspace_lens_identity();
     (
         TraceFullModel {
+            content_blake3: None,
             path: model_path.to_path_buf(),
             locator_scheme: WORKSPACE_LENS_IDENTITY_SCHEME,
             locator_id: format!("{:016x}", identity.model_locator_id),
@@ -526,6 +536,8 @@ pub(super) fn trace_full_runtime_summaries(
 
 pub(super) fn trace_full_lens_summary(manifest: &FullLensManifest) -> TraceFullLens {
     TraceFullLens {
+        producer_contract: None,
+        runtime_binding: None,
         kind: "published_full_transport",
         method: manifest.transport.method.clone(),
         target_layer: manifest.transport.target_layer,
@@ -546,9 +558,10 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .map(resolve_output_file_path)
         .transpose()?;
     let stdout_format = effective_trace_stdout_format(args.format, output.is_some());
-    let manifest_path = args.full_lens.join(FULL_MANIFEST_NAME);
-    let manifest: FullLensManifest = read_json_file(&manifest_path)?;
-    validate_trace_full_manifest(&manifest)?;
+    let manifest = FullAccess::open(&args.full_lens, true)?;
+    if manifest.is_data() {
+        manifest.acknowledge_transfer(args.allow_unvalidated_transfer)?;
+    }
     let layers = if args.layers.is_empty() {
         manifest.transport.source_layers.clone()
     } else {
@@ -567,7 +580,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let family = ModelFamily::detect(&gguf).context("detect trace-full Qwen family")?;
     ensure!(
         family == ModelFamily::Qwen35,
-        "trace-full requires an ordinary dense Qwen model"
+        "packed trace-full requires the native dense Qwen capture capability; use scalar read-full for ordinary MoE"
     );
     let model_context_tokens = gguf.declared_context_length()?;
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load tokenizer from GGUF")?;
@@ -621,6 +634,12 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     crate::shutdown::checkpoint()?;
+    let mut manifest = manifest.bind_opened(
+        &gguf,
+        FullExecutionMode::Packed,
+        args.identity_cache.as_deref(),
+        args.allow_unvalidated_transfer,
+    )?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf_with_intent(
@@ -630,23 +649,11 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             ModelLoadIntent::SinglePassAnalysis,
         )
         .with_context(|| format!("load model {}", args.model.display()))?;
-    validate_deployed_model(&manifest, &loaded)?;
+    manifest.validate_loaded(&loaded)?;
     let arch = loaded.arch();
-    let (deployed_model, tokenizer_summary) = trace_full_runtime_summaries(&args.model, &loaded);
-    let payload_path = args.full_lens.join(&manifest.payload.path);
-    let (mut payload_file, payload_length) = open_regular_file(&payload_path)?;
-    ensure!(
-        payload_length as u64 == manifest.payload.byte_length,
-        "full lens payload length does not match its manifest"
-    );
-    let matrix_bytes = transport_matrix_bytes(&manifest)?;
-    let matrix_len = usize::try_from(matrix_bytes).context("full-lens matrix byte count")?;
-    let mut matrix = Vec::new();
-    matrix
-        .try_reserve_exact(matrix_len)
-        .context("allocate reusable full-lens transport matrix")?;
-    matrix.resize(matrix_len, 0);
-
+    let (mut deployed_model, tokenizer_summary) =
+        trace_full_runtime_summaries(&args.model, &loaded);
+    manifest.authenticate_trace_model(&mut deployed_model);
     let trace_started = Instant::now();
     let position_tiles =
         trace_position_tiles(token_ids.len(), MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS)?;
@@ -741,22 +748,8 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .try_reserve_exact(args.vectors.len())
         .context("allocate selected transported-vector results")?;
     for &layer in &layers {
-        let layer_slot = manifest
-            .transport
-            .source_layers
-            .iter()
-            .position(|&candidate| candidate == layer)
-            .with_context(|| format!("full lens has no payload slot for layer {layer}"))?;
-        let matrix_offset = (layer_slot as u64)
-            .checked_mul(matrix_bytes)
-            .context("full-lens matrix offset overflow")?;
         let read_started = Instant::now();
-        payload_file
-            .seek(SeekFrom::Start(matrix_offset))
-            .with_context(|| format!("seek full-lens source layer {layer}"))?;
-        payload_file
-            .read_exact(&mut matrix)
-            .with_context(|| format!("read full-lens source layer {layer}"))?;
+        let matrix = manifest.read_matrix(layer)?;
         matrix_read_wall_ms += read_started.elapsed().as_secs_f64() * 1e3;
 
         let vector_positions = vector_positions_by_layer
@@ -855,7 +848,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         },
         deployed_model,
         tokenizer: tokenizer_summary,
-        lens: trace_full_lens_summary(&manifest),
+        lens: manifest.trace_summary(),
         score_semantics: TraceFullScoreSemantics {
             kind: "logit",
             normalization: "deployed_output_rmsnorm",
@@ -1044,10 +1037,8 @@ pub(super) fn validate_trace_full_args(args: &TraceFullArgs) -> Result<()> {
             args.output_dir.is_some()
                 && args.output.is_none()
                 && args.format.is_none()
-                && args.vectors.is_empty()
-                && args.identity_cache.is_none()
-                && !args.allow_unvalidated_transfer,
-            "--requests-jsonl requires --output-dir and does not accept single-trace or Muse-only options"
+                && args.vectors.is_empty(),
+            "--requests-jsonl requires --output-dir and does not accept single-trace output options"
         );
         return Ok(());
     }

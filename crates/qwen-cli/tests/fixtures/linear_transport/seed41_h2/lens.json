@@ -1,0 +1,51 @@
+{
+  "schema": "llm.lens.linear_transport",
+  "schema_version": 1,
+  "status": "complete",
+  "transport": {
+    "operator": "post_block_linear",
+    "method": "experimental/seed41",
+    "source_layers": [
+      2,
+      0
+    ],
+    "target_layer": 1,
+    "orientation": "target_source",
+    "bias": "none",
+    "output": "deployed_native",
+    "identity_layers": []
+  },
+  "model": {
+    "architecture": "qwen35",
+    "n_layers": 3,
+    "hidden_size": 2,
+    "vocab_size": 58,
+    "source_checkpoint": {
+      "id": "independent/fixture",
+      "revision": "41"
+    }
+  },
+  "payload": {
+    "path": "transport.f16le",
+    "dtype": "f16_le",
+    "shape": [
+      2,
+      2,
+      2
+    ],
+    "byte_length": 16,
+    "sha256": "92651b1f683510d78a027d3f06af16e59f8bbaa67d72fdcfa110b44288d555c3",
+    "matrix_sha256": [
+      "92eb7a153053a7908e4944d1f19174a279a3db9e7ac4472ad702be3bff4fb53c",
+      "4fdc58c95626fa33218516013405f6be0d78a6d0091f7b5a7b9b2c352e205341"
+    ]
+  },
+  "provenance": {
+    "seed": 41,
+    "fixture_generator": "python-stdlib"
+  },
+  "qualification": {
+    "validated": true,
+    "note": "deliberate producer claim, not authority"
+  }
+}

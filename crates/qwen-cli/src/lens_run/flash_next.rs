@@ -122,6 +122,7 @@ pub(super) fn run_qwen4exp(
     }
 
     let result = RunResult {
+        linear_transports: Vec::new(),
         prompt_token_ids: prompt_token_ids.to_vec(),
         decoded_text: tokenizer.decode(&generated_token_ids),
         generated_token_ids,

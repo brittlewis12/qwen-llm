@@ -121,6 +121,22 @@ fn validate_dequant(desc: &TensorDesc, bytes: &[u8]) -> Result<DequantPlan, Code
     })
 }
 
+/// Validate layout and codec availability without allocating or decoding weights.
+pub fn validate_dequantization(desc: &TensorDesc, bytes: &[u8]) -> Result<(), CodecError> {
+    validate_dequant(desc, bytes)?;
+    if desc.dtype != GgmlType::F32 {
+        // The same static, read-only GGML trait table used by dequant_validated_into.
+        let traits = unsafe { llama_cpp_sys_2::ggml_get_type_traits(desc.dtype as i32 as u32) };
+        if traits.is_null() {
+            return Err(CodecError::NoTraits(desc.dtype as i32));
+        }
+        if unsafe { (*traits).to_float }.is_none() {
+            return Err(CodecError::NoToFloat(desc.dtype as i32));
+        }
+    }
+    Ok(())
+}
+
 fn dequant_validated_into(
     desc: &TensorDesc,
     bytes: &[u8],

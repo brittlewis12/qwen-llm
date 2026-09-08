@@ -34,7 +34,11 @@ pub(crate) enum LensDefinition {
         id: String,
         artifact: PathBuf,
     },
-    #[serde(rename = "published_full_transport", alias = "published_full_j")]
+    #[serde(
+        rename = "published_full_transport",
+        alias = "published_full_j",
+        alias = "linear_transport"
+    )]
     PublishedFullTransport {
         id: String,
         artifact: PathBuf,
@@ -701,21 +705,11 @@ pub(super) fn validate_plan(plan: &LensPlan) -> Result<()> {
     )?;
     unique_ids(plan.readouts.iter().map(|item| item.id.as_str()), "readout")?;
     for lens in &plan.lenses {
-        if let LensDefinition::PublishedFullTransport {
-            id,
-            token_ids,
-            allow_unvalidated_transfer,
-            ..
-        } = lens
-        {
+        if let LensDefinition::PublishedFullTransport { id, token_ids, .. } = lens {
             let unique = token_ids.iter().copied().collect::<HashSet<_>>();
             ensure!(
                 !token_ids.is_empty() && unique.len() == token_ids.len(),
                 "published full transport lens {id} requires unique token IDs"
-            );
-            ensure!(
-                *allow_unvalidated_transfer,
-                "published full transport lens {id} requires allow_unvalidated_transfer=true for BF16-to-GGUF use"
             );
         }
     }
@@ -961,10 +955,174 @@ pub(super) fn ensure_projected_full_direction_bank_budget(
     Ok(())
 }
 
+pub(super) fn open_full_transports(
+    plan: &LensPlan,
+    plan_dir: &Path,
+) -> Result<HashMap<String, crate::full_lens::FullAccess>> {
+    let mut opened = HashMap::new();
+    for lens in &plan.lenses {
+        if let LensDefinition::PublishedFullTransport {
+            id,
+            artifact,
+            allow_unvalidated_transfer,
+            ..
+        } = lens
+        {
+            let access =
+                crate::full_lens::FullAccess::open(&resolve_plan_path(plan_dir, artifact), false)?;
+            access.acknowledge_transfer(*allow_unvalidated_transfer)?;
+            opened.insert(id.clone(), access);
+        }
+    }
+    Ok(opened)
+}
+
+pub(super) struct BoundPlanArtifacts {
+    full: HashMap<String, crate::full_lens::BoundFullAccess>,
+    ready: HashMap<String, PreparedLens>,
+}
+
+fn prepare_cpu_lens(
+    definition: &LensDefinition,
+    plan_dir: &Path,
+    arch: qwen_llm::model::Arch,
+) -> Result<PreparedLens> {
+    let lens = match definition {
+        LensDefinition::NativeSelected { artifact, .. } => LoadedLens::Native(load_native_lens(
+            &resolve_plan_path(plan_dir, artifact),
+            arch.n_layer,
+            arch.hidden_size as usize,
+            arch.vocab_size,
+        )?),
+        LensDefinition::WorkspaceTemplate {
+            id,
+            weights,
+            labels,
+        } => {
+            let lens = TemplateLens::open(&resolve_plan_path(plan_dir, weights))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let vocabulary =
+                TemplateVocabulary::load(&resolve_plan_path(plan_dir, labels), lens.n_rows())
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            ensure!(
+                lens.hidden_size() == arch.hidden_size as usize,
+                "template lens {id} hidden size does not match the CPU-bound deployment"
+            );
+            LoadedLens::Template { lens, vocabulary }
+        }
+        LensDefinition::PublishedFullTransport { .. } => {
+            bail!("full transports require retained bound access")
+        }
+    };
+    Ok(PreparedLens {
+        id: definition.id().to_owned(),
+        lens,
+        raw_lm_head: None,
+    })
+}
+
+pub(super) fn bind_full_transports(
+    mut opened: HashMap<String, crate::full_lens::FullAccess>,
+    plan: &LensPlan,
+    plan_dir: &Path,
+    gguf: &GgufFile,
+    cache: Option<&Path>,
+) -> Result<BoundPlanArtifacts> {
+    let arch = qwen_llm::loader::Model::from_gguf(gguf)?.arch;
+    let mut bound = HashMap::new();
+    let mut ready = HashMap::new();
+    for lens in &plan.lenses {
+        if let LensDefinition::PublishedFullTransport {
+            id,
+            token_ids,
+            allow_unvalidated_transfer,
+            ..
+        } = lens
+        {
+            ensure!(
+                token_ids
+                    .iter()
+                    .all(|&token| token < arch.vocab_size && token <= i32::MAX as u32),
+                "full transport token selection is outside the CPU-bound deployment vocabulary"
+            );
+            let artifact = opened
+                .remove(id)
+                .context("missing verified full transport")?;
+            bound.insert(
+                id.clone(),
+                artifact.bind_opened(
+                    gguf,
+                    crate::full_lens::FullExecutionMode::Projection,
+                    cache,
+                    *allow_unvalidated_transfer,
+                )?,
+            );
+        }
+    }
+    for definition in &plan.lenses {
+        if !matches!(definition, LensDefinition::PublishedFullTransport { .. }) {
+            let prepared = prepare_cpu_lens(definition, plan_dir, arch)?;
+            ready.insert(prepared.id.clone(), prepared);
+        }
+    }
+    ensure!(opened.is_empty(), "unbound full transports remain");
+    let has_layer = |id: &str, layer| -> bool {
+        bound
+            .get(id)
+            .is_some_and(|artifact| artifact.contains_layer(layer))
+            || ready
+                .get(id)
+                .is_some_and(|lens| lens_has_layer(lens, layer))
+    };
+    for readout in &plan.readouts {
+        for layer in readout
+            .scope
+            .layers
+            .expand(arch.n_layer, "readout.layers")?
+        {
+            ensure!(
+                has_layer(&readout.lens, layer),
+                "readout {} lens {} has no row for layer {layer}",
+                readout.id,
+                readout.lens
+            );
+        }
+    }
+    let directions = plan
+        .directions
+        .iter()
+        .map(|direction| (direction.id(), direction))
+        .collect::<HashMap<_, _>>();
+    for operation in &plan.operations {
+        let layers = operation
+            .scope
+            .layers
+            .expand(arch.n_layer, "operation.layers")?;
+        for id in operation.action.direction_ids() {
+            let direction = directions
+                .get(id)
+                .context("unknown direction in CPU plan preflight")?
+                .lens_row()
+                .context("ordinary runtime requires lens-row directions")?;
+            for &layer in &layers {
+                ensure!(
+                    has_layer(&direction.lens, layer),
+                    "direction {id} has no source layer {layer}"
+                );
+                if let Some(prepared) = ready.get(&direction.lens) {
+                    direction_row(prepared, direction, layer)?;
+                }
+            }
+        }
+    }
+    Ok(BoundPlanArtifacts { full: bound, ready })
+}
+
 pub(super) fn prepare_execution_plan(
     plan: &LensPlan,
     plan_dir: &Path,
     loaded: &qwen_llm::runtime::LoadedModel,
+    full_transports: &mut BoundPlanArtifacts,
 ) -> Result<ExecutionPlan> {
     let arch = loaded.arch();
     let direction_defs = plan
@@ -1024,21 +1182,16 @@ pub(super) fn prepare_execution_plan(
     let mut lenses = HashMap::new();
     for definition in &plan.lenses {
         let prepared = match definition {
-            LensDefinition::NativeSelected { id, artifact } => PreparedLens {
-                id: id.clone(),
-                lens: LoadedLens::Native(load_native_lens(
-                    &resolve_plan_path(plan_dir, artifact),
-                    arch.n_layer,
-                    arch.hidden_size as usize,
-                    arch.vocab_size,
-                )?),
-                raw_lm_head: None,
-            },
+            LensDefinition::NativeSelected { id, .. }
+            | LensDefinition::WorkspaceTemplate { id, .. } => full_transports
+                .ready
+                .remove(id)
+                .context("lens artifact was not bound before model load")?,
             LensDefinition::PublishedFullTransport {
                 id,
                 artifact,
                 token_ids,
-                allow_unvalidated_transfer: _,
+                allow_unvalidated_transfer,
             } => {
                 let layers = required_lens_layers
                     .get(id.as_str())
@@ -1048,20 +1201,30 @@ pub(super) fn prepare_execution_plan(
                     .collect::<Vec<_>>();
                 let projected = crate::full_lens::project_full_token_directions(
                     &resolve_plan_path(plan_dir, artifact),
+                    full_transports
+                        .full
+                        .get_mut(id)
+                        .context("full transport was not verified before model load")?,
                     token_ids,
                     &layers,
                     loaded,
                     crate::full_lens::FullTokenTargetCovector::DeployedLogitNumerator,
+                    *allow_unvalidated_transfer,
                 )?;
                 let raw_lm_head = raw_lens_layers
                     .get(id.as_str())
                     .map(|raw_layers| {
                         crate::full_lens::project_full_token_directions(
                             &resolve_plan_path(plan_dir, artifact),
+                            full_transports
+                                .full
+                                .get_mut(id)
+                                .context("full transport was not verified before model load")?,
                             token_ids,
                             &raw_layers.iter().copied().collect::<Vec<_>>(),
                             loaded,
                             crate::full_lens::FullTokenTargetCovector::RawLmHead,
+                            *allow_unvalidated_transfer,
                         )
                         .map(native_lens_from_projected_full)
                     })
@@ -1070,30 +1233,6 @@ pub(super) fn prepare_execution_plan(
                     id: id.clone(),
                     lens: LoadedLens::Native(native_lens_from_projected_full(projected)),
                     raw_lm_head,
-                }
-            }
-            LensDefinition::WorkspaceTemplate {
-                id,
-                weights,
-                labels,
-            } => {
-                let weights_path = resolve_plan_path(plan_dir, weights);
-                let lens = TemplateLens::open(&weights_path)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                let vocabulary =
-                    TemplateVocabulary::load(&resolve_plan_path(plan_dir, labels), lens.n_rows())
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                ensure!(
-                    lens.hidden_size() == arch.hidden_size as usize,
-                    "template lens {} hidden size {} != model {}",
-                    id,
-                    lens.hidden_size(),
-                    arch.hidden_size
-                );
-                PreparedLens {
-                    id: id.clone(),
-                    lens: LoadedLens::Template { lens, vocabulary },
-                    raw_lm_head: None,
                 }
             }
         };

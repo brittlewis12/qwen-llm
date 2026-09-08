@@ -3,6 +3,7 @@
 use super::*;
 
 pub(crate) struct ProjectedFullTokenDirections {
+    pub(crate) producer_metadata: Option<serde_json::Value>,
     pub(crate) method: String,
     pub(crate) target_layer: u32,
     pub(crate) source_layers: Vec<u32>,
@@ -47,15 +48,16 @@ pub(crate) fn projected_full_token_direction_retained_bytes(
 
 pub(crate) fn project_full_token_directions(
     artifact: &Path,
+    manifest: &mut BoundFullAccess,
     token_ids: &[u32],
     source_layers: &[u32],
     loaded: &qwen_llm::runtime::LoadedModel,
     target_covector: FullTokenTargetCovector,
+    allow_unvalidated_transfer: bool,
 ) -> Result<ProjectedFullTokenDirections> {
     validate_artifact_directory(artifact, "published full transport lens")?;
-    let manifest: FullLensManifest = read_json_file(&artifact.join(FULL_MANIFEST_NAME))?;
-    validate_manifest(&manifest)?;
-    validate_deployed_model(&manifest, loaded)?;
+    manifest.validate_loaded(loaded)?;
+    manifest.acknowledge_transfer(allow_unvalidated_transfer)?;
     let arch = loaded.arch();
     ensure!(
         !token_ids.is_empty(),
@@ -71,11 +73,12 @@ pub(crate) fn project_full_token_directions(
     drop(unique_tokens);
     ensure!(
         !source_layers.is_empty()
-            && source_layers.windows(2).all(|pair| pair[0] < pair[1])
+            && source_layers.iter().copied().collect::<BTreeSet<_>>().len() == source_layers.len()
+            && (manifest.is_data() || source_layers.windows(2).all(|pair| pair[0] < pair[1]))
             && source_layers
                 .iter()
                 .all(|layer| manifest.transport.source_layers.contains(layer)),
-        "published full transport source layers must be nonempty, sorted, unique artifact layers"
+        "full transport source layers must be nonempty, unique artifact layers in caller order"
     );
 
     let hidden_size = arch.hidden_size as usize;
@@ -97,7 +100,7 @@ pub(crate) fn project_full_token_directions(
         .create_sequence(SequenceConfig::new(1))
         .context("create published full transport projection sequence")?;
     let workspace_lens = loaded
-        .workspace_lens_session(&mut sequence)
+        .passive_workspace_lens_session(&mut sequence)
         .context("open published full transport projection session")?;
     let caller_reserve_bytes = TOKEN_ARTIFACT_MAX_BYTES
         .checked_add(JSON_FILE_MAX_BYTES)
@@ -123,34 +126,8 @@ pub(crate) fn project_full_token_directions(
         None
     };
 
-    let payload_path = artifact.join(&manifest.payload.path);
-    let (mut payload, payload_length) = open_regular_file(&payload_path)?;
-    ensure!(
-        payload_length as u64 == manifest.payload.byte_length,
-        "published full transport payload length does not match its manifest"
-    );
-    let matrix_bytes = transport_matrix_bytes(&manifest)?;
-    let matrix_length =
-        usize::try_from(matrix_bytes).context("full transport matrix byte count")?;
-    let mut matrix = vec![0_u8; matrix_length];
     for (layer_index, &layer) in source_layers.iter().enumerate() {
-        let layer_slot = manifest
-            .transport
-            .source_layers
-            .iter()
-            .position(|&candidate| candidate == layer)
-            .context("published full transport layer disappeared after validation")?;
-        let offset = u64::try_from(layer_slot)
-            .context("published full transport layer slot does not fit u64")?
-            .checked_mul(matrix_bytes)
-            .context("published full transport matrix offset overflow")?;
-        payload
-            .seek(SeekFrom::Start(offset))
-            .with_context(|| format!("seek published full transport source layer {layer}"))?;
-        payload
-            .read_exact(&mut matrix)
-            .with_context(|| format!("read published full transport source layer {layer}"))?;
-        ensure_finite_f16(&matrix, layer as usize, 0)?;
+        let matrix = manifest.read_matrix(layer)?;
         let prepared_transport = workspace_lens
             .prepare_f16_transport_readouts(&matrix)
             .with_context(|| format!("prepare published full transport source layer {layer}"))?;
@@ -203,16 +180,25 @@ pub(crate) fn project_full_token_directions(
     );
 
     Ok(ProjectedFullTokenDirections {
-        method: format!(
-            "published_{}_{}",
-            manifest.transport.method,
-            match target_covector {
-                FullTokenTargetCovector::DeployedLogitNumerator => {
-                    "selected_token_numerator"
+        producer_metadata: if manifest.is_data() {
+            Some(manifest.readout_artifact(artifact)?)
+        } else {
+            None
+        },
+        method: if manifest.is_data() {
+            manifest.transport.method.clone()
+        } else {
+            format!(
+                "published_{}_{}",
+                manifest.transport.method,
+                match target_covector {
+                    FullTokenTargetCovector::DeployedLogitNumerator => {
+                        "selected_token_numerator"
+                    }
+                    FullTokenTargetCovector::RawLmHead => "raw_lm_head_token_direction",
                 }
-                FullTokenTargetCovector::RawLmHead => "raw_lm_head_token_direction",
-            }
-        ),
+            )
+        },
         target_layer: manifest.transport.target_layer,
         source_layers: source_layers.to_vec(),
         token_ids: token_ids.iter().map(|&token| token as i32).collect(),

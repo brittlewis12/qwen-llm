@@ -74,14 +74,17 @@ pub(crate) fn run(
     output_path: Option<&Path>,
 ) -> Result<()> {
     validate_plan(&plan, args)?;
-    let cache = args
-        .identity_cache
-        .as_ref()
-        .context("Muse Glimmer qwen-lens run requires --identity-cache")?;
     let bound = MuseGlimmerModel::from_gguf(&gguf).context("bind running Muse Glimmer model")?;
     let config = bound.config.clone();
     let profile = bound.artifact_profile;
     drop(bound);
+    let mut generic_access = preflight_generic_muse_banks(
+        &plan,
+        plan_dir,
+        &gguf,
+        &config,
+        args.identity_cache.as_deref(),
+    )?;
     let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
         .context("load Muse llama.cpp tokenizer")?;
     artifact::validate_tokenizer(&tokenizer, &config)?;
@@ -113,27 +116,41 @@ pub(crate) fn run(
     let plan = &bound_plan.resolved;
     super::lens_run::validate_reachable_scopes(plan, prompt_ids.len(), args.max_new_tokens)?;
 
-    let content = checkpoint_content_identity_without_weight_hashing(
-        &gguf,
-        &CheckpointIdentityCache::new(cache),
-    )
-    .with_context(|| {
-        format!(
-            "resolve running Muse GGUF identity without hashing weights using {}",
-            cache.display()
+    let needs_legacy_identity = generic_access.len() != plan.lenses.len();
+    let content = if needs_legacy_identity {
+        let cache = args
+            .identity_cache
+            .as_ref()
+            .context("legacy Muse Lens run requires --identity-cache")?;
+        let content = checkpoint_content_identity_without_weight_hashing(
+            &gguf,
+            &CheckpointIdentityCache::new(cache),
         )
-    })?;
-    ensure!(
-        content.bytes_hashed == 0,
-        "Muse lens execution must not hash model weights"
-    );
-    let content_id = super::hex(&content.content_id);
+        .with_context(|| {
+            format!(
+                "resolve running Muse GGUF identity without hashing weights using {}",
+                cache.display()
+            )
+        })?;
+        ensure!(
+            content.bytes_hashed == 0,
+            "legacy Muse lens identity resolution must not hash model weights"
+        );
+        Some(content)
+    } else {
+        None
+    };
+    let content_id = content
+        .as_ref()
+        .map(|c| super::hex(&c.content_id))
+        .unwrap_or_default();
     crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse Lens run")?;
     let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, forward_count)
         .context("load Muse Lens runner model")?;
     let mut lenses = HashMap::new();
     let mut published_lenses = Vec::new();
+    let mut linear_transports = Vec::new();
     for lens in &plan.lenses {
         let (id, loaded_lens) = match lens {
             LensDefinition::NativeSelected { id, artifact: path } => (
@@ -147,9 +164,35 @@ pub(crate) fn run(
                 allow_unvalidated_transfer,
             } => {
                 let source_layers = required_lens_layers(&plan, id, config.layer_count)?;
+                let path = resolve(plan_dir, path);
+                let directory = if path.is_dir() {
+                    path.as_path()
+                } else {
+                    path.parent().unwrap_or(Path::new("."))
+                };
+                if let Some(mut access) = generic_access.remove(id) {
+                    let loaded_lens = load_generic_muse_artifact(
+                        &mut access,
+                        token_ids,
+                        &source_layers,
+                        &config,
+                        &context,
+                        &loaded,
+                    )?;
+                    let mut binding = access.summary(directory)?;
+                    binding["lens_id"] = id.clone().into();
+                    binding["selected_token_ids"] = serde_json::to_value(token_ids)?;
+                    binding["selected_source_layers"] = serde_json::to_value(&source_layers)?;
+                    linear_transports.push(binding);
+                    ensure!(
+                        lenses.insert(id.clone(), loaded_lens).is_none(),
+                        "duplicate Muse lens id"
+                    );
+                    continue;
+                }
                 let (loaded_lens, binding) = load_published_muse_artifact(
                     id,
-                    &resolve(plan_dir, path),
+                    &path,
                     token_ids,
                     &source_layers,
                     *allow_unvalidated_transfer,
@@ -171,8 +214,11 @@ pub(crate) fn run(
     }
     let execution_binding = (!published_lenses.is_empty()).then(|| RunExecutionBinding {
         deployed_model_content_blake3: content_id.clone(),
-        content_identity_outcome: format!("{:?}", content.outcome),
-        weight_bytes_hashed: content.bytes_hashed,
+        content_identity_outcome: format!(
+            "{:?}",
+            content.as_ref().expect("legacy identity").outcome
+        ),
+        weight_bytes_hashed: content.as_ref().expect("legacy identity").bytes_hashed,
         published_lenses,
     });
     let execution = prepare_execution_plan(plan.clone(), lenses, &config, &context)?;
@@ -230,6 +276,7 @@ pub(crate) fn run(
         bound_plan,
         &prepared_input,
         RunResult {
+            linear_transports,
             prompt_token_ids: prompt_ids.to_vec(),
             generated_token_ids: generated.clone(),
             decoded_text: tokenizer.decode(&generated),
@@ -245,6 +292,148 @@ pub(crate) fn run(
         execution_binding,
         output_path,
     )
+}
+
+fn preflight_generic_muse_banks(
+    plan: &LensPlan,
+    plan_dir: &Path,
+    gguf: &GgufFile,
+    config: &MuseGlimmerConfig,
+    cache: Option<&Path>,
+) -> Result<HashMap<String, super::muse_full_lens::generic::GenericAccess>> {
+    let mut accesses = HashMap::new();
+    for lens in &plan.lenses {
+        if let LensDefinition::PublishedFullTransport {
+            id,
+            artifact: path,
+            allow_unvalidated_transfer,
+            token_ids,
+        } = lens
+        {
+            let path = resolve(plan_dir, path);
+            let directory = if path.is_dir() {
+                path.as_path()
+            } else {
+                path.parent().unwrap_or(Path::new("."))
+            };
+            if super::full_lens::FullAccess::is_data_directory(directory)? {
+                let access = super::muse_full_lens::generic::GenericAccess::open(
+                    directory,
+                    gguf,
+                    cache,
+                    *allow_unvalidated_transfer,
+                )?;
+                let source_layers = required_lens_layers(plan, id, config.layer_count)?;
+                validate_generic_muse_selection(&access, token_ids, &source_layers, config)?;
+                validate_generic_muse_direction_tokens(plan, id, token_ids)?;
+                ensure!(
+                    accesses.insert(id.clone(), access).is_none(),
+                    "duplicate Muse lens id"
+                );
+            }
+        }
+    }
+    Ok(accesses)
+}
+
+fn validate_generic_muse_selection(
+    access: &super::muse_full_lens::generic::GenericAccess,
+    token_ids: &[u32],
+    source_layers: &[u32],
+    config: &MuseGlimmerConfig,
+) -> Result<usize> {
+    let mut unique = BTreeSet::new();
+    ensure!(
+        !token_ids.is_empty()
+            && token_ids.len() <= 32
+            && token_ids
+                .iter()
+                .all(|&t| t < config.vocab_size && unique.insert(t)),
+        "generic Muse token IDs must be 1..=32 unique model-vocabulary IDs"
+    );
+    ensure!(
+        !source_layers.is_empty()
+            && source_layers.windows(2).all(|p| p[0] < p[1])
+            && source_layers.iter().all(|l| access
+                .data
+                .manifest()
+                .transport
+                .source_layers
+                .contains(l)),
+        "generic Muse source layers must be sorted unique artifact layers"
+    );
+    source_layers
+        .len()
+        .checked_mul(token_ids.len())
+        .and_then(|n| n.checked_mul(config.hidden_size as usize))
+        .context("generic Muse projection size overflow")
+}
+
+fn validate_generic_muse_direction_tokens(
+    plan: &LensPlan,
+    lens_id: &str,
+    token_ids: &[u32],
+) -> Result<()> {
+    for direction in &plan.directions {
+        if let DirectionDefinition::LensRow(d) = direction {
+            if d.lens != lens_id {
+                continue;
+            }
+            let DirectionRow::TokenId { token_id } = &d.row else {
+                bail!("generic Muse direction {} requires row.kind=token_id", d.id);
+            };
+            let token =
+                u32::try_from(*token_id).context("Muse direction token ID must be nonnegative")?;
+            ensure!(
+                token_ids.contains(&token),
+                "Muse direction {} selects token {token} absent from its generic token bank",
+                d.id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn load_generic_muse_artifact(
+    access: &mut super::muse_full_lens::generic::GenericAccess,
+    token_ids: &[u32],
+    source_layers: &[u32],
+    config: &MuseGlimmerConfig,
+    context: &MetalContext,
+    loaded: &MuseGlimmerLoadedModel,
+) -> Result<LoadedMuseLens> {
+    let count = validate_generic_muse_selection(access, token_ids, source_layers, config)?;
+    let covectors = loaded.selected_token_lens_covectors(context, token_ids)?;
+    ensure!(
+        covectors.token_ids() == token_ids
+            && covectors.hidden_size() == config.hidden_size as usize,
+        "Muse selected-token covector metadata is inconsistent"
+    );
+    let mut values = Vec::new();
+    values.try_reserve_exact(count)?;
+    for &layer in source_layers {
+        let matrix = access.data.read_matrix(layer)?;
+        let projected =
+            loaded.project_f16_transport_lens_covectors(context, &matrix, &covectors)?;
+        ensure!(
+            projected.len() == token_ids.len() * config.hidden_size as usize,
+            "generic Muse projection returned invalid shape"
+        );
+        values.extend(projected);
+    }
+    ensure!(
+        values.len() == count && values.iter().all(|v| v.is_finite()),
+        "generic Muse projection returned invalid values"
+    );
+    Ok(LoadedMuseLens {
+        method: access.data.manifest().transport.method.clone(),
+        candidate_universe: "plan_selected_linear_transport_token_rows",
+        target_layer: access.data.manifest().transport.target_layer,
+        source_layers: source_layers.to_vec(),
+        token_ids: token_ids.to_vec(),
+        hidden_size: config.hidden_size as usize,
+        values,
+    })
 }
 
 fn load_muse_artifact(
@@ -940,6 +1129,40 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn generic_selections_are_cpu_preflighted_without_metal() {
+        let fixture = crate::linear_transport::tests::fixture("unregistered-fit", 2, 123);
+        let access = super::super::muse_full_lens::generic::GenericAccess {
+            data: crate::linear_transport::VerifiedTransport::open(&fixture.0).unwrap(),
+            runtime_binding: serde_json::Value::Null,
+        };
+        let mut config = MuseGlimmerConfig::unsloth_release_reference();
+        config.hidden_size = 2;
+        config.layer_count = 3;
+        config.vocab_size = 32;
+        assert_eq!(
+            validate_generic_muse_selection(&access, &[7, 8], &[0, 2], &config).unwrap(),
+            8
+        );
+        for tokens in [vec![], vec![7, 7], vec![32], (0..33).collect()] {
+            assert!(validate_generic_muse_selection(&access, &tokens, &[0, 2], &config).is_err());
+        }
+        for layers in [vec![], vec![1], vec![0, 0], vec![2, 0], vec![0, 3]] {
+            assert!(validate_generic_muse_selection(&access, &[7], &layers, &config).is_err());
+        }
+        let mut plan: LensPlan = serde_json::from_value(json!({
+            "version":1,"lenses":[{"kind":"linear_transport","id":"g","artifact":"a","token_ids":[7],"allow_unvalidated_transfer":true}],
+            "directions":[{"id":"d","lens":"g","row":{"kind":"token_id","token_id":8},"normalization":"unit_l2"}],
+            "operations":[], "readouts":[]
+        })).unwrap();
+        assert!(validate_generic_muse_direction_tokens(&plan, "g", &[7]).is_err());
+        assert!(validate_generic_muse_direction_tokens(&plan, "g", &[7, 8]).is_ok());
+        if let DirectionDefinition::LensRow(direction) = &mut plan.directions[0] {
+            direction.row = DirectionRow::TokenId { token_id: -1 };
+        }
+        assert!(validate_generic_muse_direction_tokens(&plan, "g", &[7]).is_err());
+    }
+
+    #[test]
     fn scoring_is_f64_dot_and_stable_token_tie_break() {
         let lens = LoadedMuseLens {
             method: "J".into(),
@@ -1065,6 +1288,14 @@ mod tests {
         .unwrap();
         validate_plan(&published, &args).unwrap();
         assert_eq!(required_lens_layers(&published, "p", 52).unwrap(), [25, 50]);
+        let mut generic_plan = serde_json::to_value(&published).unwrap();
+        generic_plan["lenses"][0]["kind"] = "linear_transport".into();
+        let generic_plan: LensPlan = serde_json::from_value(generic_plan).unwrap();
+        validate_plan(&generic_plan, &args).unwrap();
+        assert_eq!(
+            required_lens_layers(&generic_plan, "p", 52).unwrap(),
+            [25, 50]
+        );
 
         let unsupported_covector: LensPlan = serde_json::from_value(json!({
             "version": 1,

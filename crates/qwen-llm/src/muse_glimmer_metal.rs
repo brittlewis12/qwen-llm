@@ -460,6 +460,10 @@ pub fn encode_muse_glimmer_logit_softcap_f32(
 pub const MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS: usize = 7_168;
 
 #[cfg(test)]
+#[path = "muse_split_attention_pilot.rs"]
+pub(crate) mod split_attention_pilot;
+
+#[cfg(test)]
 thread_local! {
     static FORCE_ONLINE_ATTENTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -669,6 +673,21 @@ pub fn encode_muse_glimmer_attn_decode_f16kv_f32(
             "muse_glimmer_attn_decode",
             "visible position count must be nonzero".into(),
         );
+    }
+    #[cfg(test)]
+    if split_attention_pilot::try_encode(
+        ctx,
+        enc,
+        query,
+        key_cache,
+        value_cache,
+        output,
+        query_head_count,
+        kv_head_count,
+        head_dim,
+        visible_positions,
+    )? {
+        return Ok(());
     }
     #[cfg(test)]
     if FORCE_ONLINE_ATTENTION.get() {
@@ -1424,9 +1443,46 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, existing online attention overlap screen"]
     fn muse_online_attention_overlap_wall_screen() {
+        attention_overlap_screen(false);
+    }
+
+    #[test]
+    #[ignore = "serial Metal, H128 split-position attention screen"]
+    fn muse_split_attention_overlap_wall_screen() {
+        attention_overlap_screen(true);
+    }
+
+    fn attention_overlap_screen(split: bool) {
         let ctx = MetalContext::new().unwrap();
-        for positions in [1, 257, 2048, 6229, 7168] {
-            let (query_values, key_values, value_values) = attention_fixture(positions + 1);
+        let before = ctx.current_allocated_size();
+        let scratch = split.then(|| split_attention_pilot::allocate(&ctx));
+        let scratch_bytes = ctx.current_allocated_size() - before;
+        assert!(scratch_bytes <= 1024 * 1024);
+        let positions = if split {
+            vec![
+                1, 2, 31, 32, 127, 128, 129, 257, 2048, 6229, 7168, 7169, 32769, 257,
+            ]
+        } else {
+            vec![1, 257, 2048, 6229, 7168]
+        };
+        for positions in positions {
+            if let Some(partial) = &scratch {
+                unsafe {
+                    std::ptr::write_bytes(
+                        (partial.buffer.contents().as_ptr() as *mut u8)
+                            .add(partial.offset as usize),
+                        0xff,
+                        partial.n_bytes() as usize,
+                    );
+                }
+            }
+            let (mut query_values, mut key_values, mut value_values) =
+                attention_fixture(positions + 1);
+            if split {
+                query_values.iter_mut().for_each(|x| *x *= 10.0);
+                key_values.iter_mut().for_each(|x| *x *= 8.0);
+                value_values.iter_mut().for_each(|x| *x *= 5.0);
+            }
             let mut padded_query = vec![42.125; 4];
             padded_query.extend_from_slice(&query_values);
             let query_storage = tensor_from_f32(&ctx, &padded_query);
@@ -1439,11 +1495,43 @@ mod tests {
             let b_storage = tensor_from_f32(&ctx, &vec![42.125; 4104]);
             let a = a_storage.view_subrange(4, vec![4096]);
             let b = b_storage.view_subrange(4, vec![4096]);
+            if split && positions == 1 {
+                for concurrent in [true, false] {
+                    let command = ctx.queue.commandBuffer().unwrap();
+                    let encoder = if concurrent {
+                        KernelEncoder::begin_concurrent(&command)
+                    } else {
+                        KernelEncoder::begin(&command)
+                    };
+                    let error =
+                        split_attention_pilot::with_scratch(scratch.as_ref().unwrap(), || {
+                            encode_muse_glimmer_attn_decode_f16kv_f32(
+                                &ctx,
+                                &encoder,
+                                &query,
+                                &key,
+                                &value,
+                                &b,
+                                32,
+                                2,
+                                128,
+                                if concurrent { 1 } else { u32::MAX as usize },
+                            )
+                        })
+                        .unwrap_err();
+                    assert!(error.to_string().contains(if concurrent {
+                        "serial encoder"
+                    } else {
+                        "bounded nonempty"
+                    }));
+                    encoder.end();
+                }
+            }
             let run = |online: bool, repetitions: usize| {
                 let started = std::time::Instant::now();
                 let command = ctx.queue.commandBuffer().unwrap();
                 let encoder = KernelEncoder::begin(&command);
-                with_online_attention(online, || {
+                let encode = || {
                     for _ in 0..repetitions {
                         encode_muse_glimmer_attn_decode_f16kv_f32(
                             &ctx,
@@ -1459,7 +1547,12 @@ mod tests {
                         )
                         .unwrap();
                     }
-                });
+                };
+                if split && online {
+                    split_attention_pilot::with_scratch(scratch.as_ref().unwrap(), encode);
+                } else {
+                    with_online_attention(online, encode);
+                }
                 encoder.end();
                 command.commit();
                 command.waitUntilCompleted();
@@ -1504,9 +1597,10 @@ mod tests {
                 );
             }
             eprintln!(
-                "MUSE_ONLINE_JSON {}",
+                "MUSE_ATTENTION_JSON {}",
                 serde_json::json!({"kind":"oracle", "positions":positions,
-                "cosine":cosine,"max_abs":max_abs,"nonzero_views_and_output_guards":true})
+                "cosine":cosine,"max_abs":max_abs,"nonzero_views_and_output_guards":true,
+                "candidate":if split {"split"} else {"online"}, "scratch_driver_bytes":scratch_bytes})
             );
             if matches!(positions, 2048 | 6229) {
                 for (index, online) in [false, true, true, false, false, true, true, false]
@@ -1515,9 +1609,10 @@ mod tests {
                 {
                     let (wall_ms, gpu_ms) = run(online, 8);
                     eprintln!(
-                        "MUSE_ONLINE_JSON {}",
+                        "MUSE_ATTENTION_JSON {}",
                         serde_json::json!({"kind":if index<4 {"warmup"} else {"sample"},
-                        "positions":positions, "arm":if online {"B"} else {"A"}, "wall_ms":wall_ms,"gpu_ms":gpu_ms})
+                        "positions":positions, "arm":if online {"B"} else {"A"}, "wall_ms":wall_ms,"gpu_ms":gpu_ms,
+                        "candidate":if split {"split"} else {"online"}})
                     );
                 }
             }

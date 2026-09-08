@@ -160,9 +160,10 @@ map, not a claim that warm serving is the largest opportunity in every lane.
 
 | Priority | Lane / work to remove | Current authority | Next decision |
 | --- | --- | --- | --- |
-| 1 | Transient prompt publication, serial serving | A4GiB serve cache cannot retain both32K prompt and completed snapshots; prompt capture blocks first token. CPU witness also proves retry and larger-cache counterexamples. | Highest-priority policy falsifier: establish consumers/evictions and cancellation/failure guards before conditional elision. No blanket skip. |
+| 1 | Lossless incremental CPU snapshot publication | Existing-root publication + full restore saves 39.026/52.268% at 8840/32752 plus16; both frozen cells pass. 32K shares 2.146GB KV, all recurrent state recopied, logical accounting unchanged. Test-only ownership/byte proofs pass. | Real Sequence restore -> owned append -> publication anchor; prevent escaped raw buffer aliases from rearming reuse, keep canonical durable export explicit. Prove cache lifetime/accounting and complete request before promotion. |
 | 2 | Live continuation / retained state ownership | Owned runtime tracks model provenance, capacity and consumed position; backend still allocates request-local sequences. | Measure exact-history eligibility; preserve poison, capacity, cancellation, cache clear/eviction and branching/regeneration behavior. Position alone is not token-history identity. |
 | 3 | GPU-owned snapshot publication + restore | Model-free32K cycle244.042 ->85.585ms,64.930% saved;8840 control fails, overall two-cell HOLD. All-byte/immutability proofs pass. | No GPU cache rollout or threshold retrofit. Any follow-up must price both directions, driver-sized storage, durable materialization and complete request cost. |
+| Policy hold | Transient prompt-capture elision | A4GiB serve cache cannot retain both32K prompt/completed snapshots, but CPU witnesses prove abort-retry and larger-cache counterexamples. | Lossless prefix sharing takes precedence. No blanket skip or inferred traffic rate; cache keys/checkpoints/retry semantics stay unchanged. |
 | Hold | Tiled VT / N16 attention | Strong copy-bank/full-verifier results respectively, but no endpoint promotion authority. N8 persistent-online endpoint remains closed. | Do not rescue noisy tiled controls or manufacture N16 DFlash2 reachability. |
 
 Cold-load remains an independent co-primary track: native Q8 embedding removes
@@ -176,7 +177,18 @@ Do not spend effort on fictitious zeroing: `zeros_f32`/`zeros_f16` already alloc
 uninitialized buffers, as do CPU snapshot arenas before capture. Keep weight
 quantization separate from KV dtype; the snapshot experiments use F16 KV even
 when the target model's weights are Q8. Evidence and scope:
-`docs/bench/2026-09-07-snapshot-lifecycle/RESULT.md`.
+`docs/bench/2026-09-07-snapshot-lifecycle/RESULT.md` and
+`docs/bench/2026-09-07-snapshot-segments/RESULT.md`. Incremental publication does
+not remove any restore bytes, reduce first-root cost or qualify fresh-prompt/decode
+latency. Its unique payload ledger excludes allocator/metadata overhead; anchors
+outliving cache eviction require explicit admission/lifetime accounting.
+
+Source audit: even safe `Sequence::metal_session(&self)` exposes retainable writable
+KV buffers. A caller can retain an alias before restore, then write through a safe
+blit afterward. Invalidating only `metal_session_mut`, or clearing at accessor
+time then rearming on restore, is insufficient. Resolve raw-escape lifetime or
+permanent reuse taint before adding production anchors; the CPU prototype does
+not exercise these low-level GPU aliases.
 
 ## Attention Checkpoint - 2026-09-07
 

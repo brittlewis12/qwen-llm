@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Incremental CPU Snapshot Lifecycle PASS
+
+- Test-only `3cfc7fe0` shares only immutable KV actually restored into the producer;
+  all changed GDN/conv bytes are recopied. Both arms retain the root and charge
+  subsequent publication, fresh destination allocation and FULL restore. No GPU
+  commands, model execution, first-root or endpoint claim.
+- 8840+16 total 64.116875 ->39.094896 ms saves 39.026%; 32752+16
+  228.329625 ->108.985896 ms saves 52.268%. Both means/pairs clear the frozen 20%
+  gate; control spreads 1.860/1.659% pass 5%. One packet, no timing rescue.
+- 32K publication copies 2,304,376,832 ->157,941,760 B. Two-entry unique CPU payload
+  saves 2,146,435,072 B while conservative logical accounting remains unchanged.
+  All 2,304,376,832 restore bytes remain; driver allocations match. Not peak RSS,
+  physical residency or production admission; initial root costs are setup in both.
+- Three CPU ownership/fork/invalidation/export tests and one real-geometry lifecycle
+  oracle pass, plus non-test release check. Build failure retained and repaired
+  before execution. External production lease; global compression/swap/pageout
+  growth 0, decompressions 2. Independent review agrees bounded phase PASS.
+- This lossless mechanism outranks conditional prompt-capture elision for the
+  restored-request track: preserve checkpoints/retries rather than changing policy.
+  Actual Sequence anchors, unsafe-mutation invalidation, durable export and cache
+  lifetime/accounting remain unimplemented. No production/default change.
+  Evidence: `docs/bench/2026-09-07-snapshot-segments/RESULT.md`.
+- Follow-up source audit catches a stronger eligibility blocker: safe immutable
+  `metal_session()` exposes retainable KV buffers writable through safe blit APIs.
+  An alias acquired before restore can write after it; accessor-time invalidation
+  alone cannot safely rearm reuse. Independent review confirms; no runtime exploit
+  execution or prototype failure claimed. Account for escaped aliases, not just
+  calls to the unsafe mutable bridge.
+
 ## 2026-09-07 - Snapshot Lifecycle 32K PASS / Two-Cell HOLD
 
 - Test-only `741c4ef4` charges snapshot allocation/publication, fresh destination

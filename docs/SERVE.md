@@ -381,10 +381,16 @@ because client model-pickers probe it).
   enablement remains held after an unpaired first-request outlier under substantial
   global compression. No first-request guarantee or sampled-distribution claim.
   Evidence: `docs/bench/2026-09-07-fresh-serving-http/RESULT.md`.
-  Muse currently performs a fresh exact packed prefill in superchunks of up to
-  128 tokens with a 16-token packing quantum, followed by a scalar tail, into
-  its reset resident session for every request. It reports `cached_tokens=0`,
-  `matched_tokens=0`, and `restore_ms=0`.
+  Muse defaults to fresh exact packed prefill in superchunks of up to128 tokens
+  with a16-token packing quantum, followed by a scalar remainder. Set
+  `QWEN_MUSE_PREFIX_REUSE=1` to reuse the exact consumed-token prefix of the last
+  successful request in its resident session, without snapshot copies. It always
+  recomputes at least the final prompt row, reports only actually reused tokens
+  as cached/matched, and keeps `restore_ms=0`. Capacity rejection preserves the
+  prior history; a cancelled request clears reuse history. GPU poison remains
+  fail-stop. This is one serial resident history, not durable or cross-process
+  caching; it does not accelerate fresh prompts or per-token decode. Evidence:
+  `docs/bench/2026-09-08-muse-live-prefix/RESULT.md`.
   Durable publication keeps the existing completed-else-prompt shadowing
   policy. **Durable publication remains parked**: current serve is RAM-only,
   so cross-restart warmth still re-prefills. `--durable-dual-publish` is

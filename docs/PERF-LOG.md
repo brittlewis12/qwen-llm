@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Matrix Transfer PASS / Decode Attention Attribution
+
+- Existing test-only matrix N128 passes: 3285.64 ->570.06ms, 38.96 ->224.54tok/s,
+  with endpoint/16-greedy continuation numerical gates unchanged. Production packed
+  Q8 is batched GEMV; the6229-token prompt has only five scalar remainder tokens.
+- `91e72d8e` longer transfer passes:1024 native-prefix rows33.216 ->5.949s;
+  full native Current6229 rows214.891 ->76.096s. Endpoint cosine at6229 is
+  0.999999988569, RMS0.000250469, maxdelta0.028246; all16 greedy IDs agree.
+  These are sequential single-pair diagnostics, not timing/default promotion.
+- Actual scalar decode6229: profile GPU115.877ms, attention56.175ms (~48.5%),
+  FFN44.173ms, front projections7.435ms. At1024 attention19.127/78.824ms GPU.
+  Shared-graph timestamp replay preserves logits and written KV bitwise; normal
+  production remains one encoder. No synthetic-chain or physical-bandwidth claim.
+- Attention now leads the decode queue. Qwen v4 hardcodes H256, not MuseH128;
+  existing Muse online attention below7168 is the next bounded falsifier. Matrix
+  fresh prefill remains co-primary, not displaced by the separate cache result.
+  Evidence: `docs/bench/2026-09-08-muse-math/RESULT.md`.
+
+## 2026-09-08 - Muse Copy-Free Repeated-Turn Reuse PASS
+
+- Opt-in `1cdab794` retains actual consumed IDs and rewinds full-position K/V to
+  an exact common prefix, capped atprompt-1. No snapshot copy/newKV allocation;
+  cancellation clears history, admission rejection preserves it, poison stays fatal.
+- Full6269-token followup backend ABBA216.803237 ->3.827429s saves98.235%
+  (56.645x), including16 output tokens. Both paired50% gates pass; control spread
+  0.003197%. Reuses6230 tokens, computes39; all emissions/consumed IDs agree.
+  Native Current fixture plus authored reply/Mara followup, not the user's recording.
+- Model/session allocations unchanged29,599,907,840 /480,280,576B; CPU history
+  storage is additional. All-activeKV/rewind oracles and cancellation guards pass;
+  `93151c9c` short sampled retries match reset attemp1/seed42 andtemp0.7/seed99.
+- Global compression/pageout/swapout growth0; backend-wide decompressions12636,
+  swapins3827 are disclosed, not phase-local attribution. One measured packet.
+  Keep `QWEN_MUSE_PREFIX_REUSE=1` opt-in, defaultoff. No fresh/decode/CLI-cold claim.
+  Evidence: `docs/bench/2026-09-08-muse-live-prefix/RESULT.md`.
+
 ## 2026-09-07 - Ordinary Serial Serving Owns Append Frontiers
 
 - Add `LoadedModel::prefill_token_prompt_only` with model-owner, capacity and

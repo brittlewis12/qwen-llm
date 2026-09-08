@@ -153,7 +153,28 @@ Decision rules:
   for decision-changing results. A focused regression and ordinary endpoint
   check are preferable to replaying unrelated historical gates.
 
-## Updated Leverage Map - 2026-09-07
+## Muse Fresh / Decode Priority - 2026-09-08
+
+The active Muse priority is **fresh prefill and scalar decode**, not further cache
+work. Current production packed Q8 projections are exact batched GEMV. The existing
+test-only matrix path passes longer numerical/16-greedy tests: full native6229
+prompt214.891 ->76.096s in a diagnostic A/B, with no production promotion yet.
+Actual shared-graph decode attribution at6229 assigns56.175/115.877ms GPU to
+attention and44.173ms to FFN. The bottleneck is measured, not inferred from the
+`scalar_tail` label (only five remainder tokens at6229).
+
+1. Falsify existing Muse H128 online attention below7168, then require whole-token
+   numerical/greedy and paired wall evidence. Qwen v4 H256 is not a drop-in path.
+2. Qualify matrix fresh-prefill request timing and wider numerical behavior; address
+   packed attention as its share rises after GEMV removal. Preserve an exact path.
+3. Retain the completed live-prefix opt-in (6269-token repeated-turn backend
+   216.803 ->3.827s), but do not present avoided prefill as faster fresh inference.
+
+Evidence: `docs/bench/2026-09-08-muse-math/RESULT.md` and
+`docs/bench/2026-09-08-muse-live-prefix/RESULT.md`. Native ATEM, sampling and reasoning
+contracts stay unchanged; temperature1/top-k64/top-p0.95 is sampled, not greedy.
+
+## Qwen Restored-Request Leverage Map - 2026-09-07
 
 The ranking changes materially for restored requests. This is a next-experiment
 map, not a claim that warm serving is the largest opportunity in every lane.

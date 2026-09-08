@@ -102,6 +102,16 @@ Primary sentinels:
 
 Decision rules:
 
+- Eligibility follows architecture, admitted capacity and kernel invariants, not
+  the last benchmark's endpoint. A tested length is evidence, not an automatic cliff.
+- Separate correctness from performance experiments. Use independent primitive
+  oracles and local identical-state replays for unchanged math mechanisms; do not
+  repeat a complete known-loser model path merely to show that it remains slow.
+- Reuse an optimized traversal for horizon checks, live-state oracles and current
+  phase attribution. Spend full-request timing on decisions it can actually change.
+- Noisy controls limit performance claims; they do not veto independent correctness
+  evidence. Keep prior attempts/verdicts, but do not turn their experiment gates
+  into universal requirements for subsequent work.
 - Prefer removing prompt tokens, target evaluations, arithmetic, or bytes over
   improving the same work unit. Prefer a new work unit over another local retune.
 - Same-work kernel changes must name the measured phase and whole-phase ceiling.

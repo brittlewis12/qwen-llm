@@ -150,11 +150,12 @@ UI, generic plugin systems, and production hardening are out of scope.
   Qwen3.6 Q4 has bounded local J/R qualification, not broad equivalence.
 - `coordinate_swap` is the paper-equivalent two-coordinate exchange;
   `source_to_target` remains a separate directed displacement for compatibility.
-- No complete method-matched R asset currently exists for Qwen3.8. Qwen3.6 has
-  the released T128/skip-4/target-62 matched J/R pair plus its separate real
-  template asset. Muse has a complete first-25-Pile/T128/skip-4/target-50
-  matched J/R pair with the same pinned model/dependency stack and corpus
-  protocol on one fitter lineage.
+- A complete Qwen3.8 n25/T128/skip-4/target-62 J/R pair now exists with recorded
+  local pair validation. Its native import/profile admission remains unwired;
+  the existing Qwen3.8 J profile is the different n1000/target-63 asset. See
+  [construal corpus research](LENS-CONSTRUAL-CORPUS.md) for artifact provenance
+  and comparison limits. Qwen3.6 has its released target-62 matched pair plus
+  template asset; Muse has a first-25-Pile/T128/skip-4/target-50 matched pair.
 - Muse full-J/R assembly and application code does not make a T16 fit a
   method-comparable scientific asset.
 - Strict Lens messages match the normal run lane's system/user/assistant subset;
@@ -180,11 +181,11 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 ## Active Gate
 
-The shortest honest full-R and intervention-parity paths are complete through
-the released Qwen3.6 pair, the matched Muse pair, and canonical coordinate swap.
-No additional native full-fitting lane remains credible for this deadline. The
-current output lane prioritizes artifact-first offline inspection and comparison
-over speculative fitting or a resident service.
+The released Qwen3.6 pair, matched Muse pair, and canonical coordinate swap are
+available. The newly completed Qwen3.8 pair needs audited native import, not
+another full fit. Artifact-first inspection and within-checkpoint comparison
+remain the immediate path; native fitting optimization is a separate project,
+not a prerequisite imposed by the former application deadline.
 
 ## Deferred
 

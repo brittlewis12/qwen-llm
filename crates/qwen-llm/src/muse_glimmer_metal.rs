@@ -516,6 +516,39 @@ pub fn encode_muse_glimmer_attn_prefill_f16kv_f32(
     head_dim: usize,
     sliding_window: Option<usize>,
 ) -> Result<(), MetalError> {
+    encode_muse_glimmer_attn_prefill_with_online(
+        ctx,
+        enc,
+        query,
+        key_cache,
+        value_cache,
+        output,
+        row_count,
+        base_position,
+        query_head_count,
+        kv_head_count,
+        head_dim,
+        sliding_window,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_muse_glimmer_attn_prefill_with_online(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key_cache: &MetalTensor,
+    value_cache: &MetalTensor,
+    output: &MetalTensor,
+    row_count: usize,
+    base_position: usize,
+    query_head_count: usize,
+    kv_head_count: usize,
+    head_dim: usize,
+    sliding_window: Option<usize>,
+    online: bool,
+) -> Result<(), MetalError> {
     const KERNEL: &str = "muse_glimmer_attn_prefill";
     if row_count == 0
         || query_head_count == 0
@@ -581,7 +614,8 @@ pub fn encode_muse_glimmer_attn_prefill_f16kv_f32(
         scale: f32,
     }
     #[cfg(test)]
-    if FORCE_PACKED_ONLINE.get() {
+    let online = online || FORCE_PACKED_ONLINE.get();
+    if online {
         if (query_head_count, kv_head_count, head_dim) != (32, 2, 128) || row_count > 128 {
             return bad_shape(
                 KERNEL,

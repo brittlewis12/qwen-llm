@@ -194,8 +194,8 @@ pub(crate) fn run_muse_glimmer_single_turn(
         (0, _, _) => "scalar_tail",
         (_, 0, false) => "packed_exact",
         (_, _, false) => "packed_exact+scalar_tail",
-        (_, 0, true) => "packed_matrix",
-        (_, _, true) => "packed_matrix+scalar_tail",
+        (_, 0, true) => "packed_matrix_online",
+        (_, _, true) => "packed_matrix_online+scalar_tail",
     };
 
     eprintln!(

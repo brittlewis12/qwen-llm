@@ -37,8 +37,7 @@ use crate::muse_glimmer_lens_fit::{
 };
 use crate::muse_glimmer_metal::{
     MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS, encode_muse_glimmer_attn_decode_f16kv_f32,
-    encode_muse_glimmer_attn_prefill_f16kv_f32, encode_muse_glimmer_logit_softcap_f32,
-    encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
+    encode_muse_glimmer_logit_softcap_f32, encode_muse_glimmer_rope_adjacent_pair_in_place_f32,
     encode_muse_glimmer_rope_adjacent_pair_rows_in_place_f32,
 };
 use crate::muse_glimmer_residency::{
@@ -918,6 +917,7 @@ pub struct MuseGlimmerTextForward<'ctx, 'model> {
     ctx: &'ctx MetalContext,
     weights: MuseGlimmerMetalModelWeights<'model>,
     packed_q8_mat_mat: bool,
+    packed_online_attention: bool,
 }
 
 pub struct MuseGlimmerPreparedF16Transport {
@@ -1110,6 +1110,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             ctx,
             weights,
             packed_q8_mat_mat: false,
+            packed_online_attention: false,
         })
     }
 
@@ -1120,6 +1121,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     ) -> Result<Self, MuseGlimmerTextSessionError> {
         let mut forward = Self::new(ctx, resident)?;
         forward.packed_q8_mat_mat = packed_q8_mat_mat;
+        Ok(forward)
+    }
+
+    pub(crate) fn new_with_optimized_prefill(
+        ctx: &'ctx MetalContext,
+        resident: &'model MuseGlimmerMetalWeights,
+        enabled: bool,
+    ) -> Result<Self, MuseGlimmerTextSessionError> {
+        let mut forward = Self::new_with_packed_q8_mat_mat(ctx, resident, enabled)?;
+        forward.packed_online_attention = enabled;
         Ok(forward)
     }
 
@@ -2211,7 +2222,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             if maximum_visible <= MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS {
                 let (key_cache, value_cache) =
                     session.cache_prefix_views(layer_index, end_position)?;
-                encode_muse_glimmer_attn_prefill_f16kv_f32(
+                crate::muse_glimmer_metal::encode_muse_glimmer_attn_prefill_with_online(
                     self.ctx,
                     encoder,
                     &packed.query,
@@ -2224,6 +2235,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                     geometry.kv_head_count,
                     geometry.head_dim,
                     layer.sliding_attention.then_some(geometry.sliding_window),
+                    self.packed_online_attention,
                 )?;
             } else {
                 for row in 0..rows {

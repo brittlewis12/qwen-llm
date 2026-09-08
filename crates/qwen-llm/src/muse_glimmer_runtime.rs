@@ -52,7 +52,7 @@ pub struct MuseGlimmerRuntimeOptions {
     /// Tolerance-qualified H128 attention for ordinary generated tokens at
     /// positions 1024..7168 on the Q8 M4 Max lane. Prefill/lens math is unchanged.
     pub split_decode: bool,
-    /// Numerically qualified Q8 matrix prefill; scalar kernels are unchanged.
+    /// Numerically qualified Q8 matrix plus online prefill attention; scalar kernels are unchanged.
     /// Initially restricted to Q8/M4 Max sessions with capacity <=7168.
     pub matrix_prefill: bool,
 }
@@ -236,7 +236,7 @@ impl MuseGlimmerLoadedModel {
             ..
         } = self;
         let forward =
-            MuseGlimmerTextForward::new_with_packed_q8_mat_mat(ctx, weights, *matrix_prefill)?;
+            MuseGlimmerTextForward::new_with_optimized_prefill(ctx, weights, *matrix_prefill)?;
         Ok(MuseGlimmerTextRunner { forward, session })
     }
 }
@@ -615,6 +615,117 @@ mod tests {
     use super::*;
     use crate::gguf::GgufFile;
     use crate::muse_glimmer::MuseGlimmerConfig;
+
+    #[test]
+    #[ignore = "serial Metal, delivered optimized Muse prefill option short-shape composition"]
+    fn optimized_prefill_runner_short_composition() {
+        use crate::tokenizer::{LlamaCppTokenizer, Tokenize};
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+        let gguf = GgufFile::open(path).unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let options = MuseGlimmerRuntimeOptions {
+            split_decode: true,
+            matrix_prefill: true,
+        };
+        let before = ctx.current_allocated_size();
+        assert!(MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, 7169, options).is_err());
+        assert_eq!(ctx.current_allocated_size(), before);
+        let mut model =
+            MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, 144, options).unwrap();
+        let mut reference = MuseGlimmerTextSession::new(&ctx, model.config(), 144).unwrap();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
+        ))
+        .unwrap();
+        let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
+            "begin",
+            Some(
+                fixture["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+        );
+        let rendered = request
+            .render(model.config().chat_template_profile, None)
+            .unwrap();
+        let tokens: Vec<u32> = tokenizer
+            .encode(&rendered, false)
+            .unwrap()
+            .into_iter()
+            .map(|id| u32::try_from(id).unwrap())
+            .collect();
+        let argmax = |logits: &[f32]| -> u32 {
+            logits
+                .iter()
+                .enumerate()
+                .max_by(|(ai, a), (bi, b)| a.total_cmp(b).then_with(|| bi.cmp(ai)))
+                .unwrap()
+                .0 as u32
+        };
+        for count in [16, 31, 128] {
+            reference.reset().unwrap();
+            let expected = {
+                let forward = MuseGlimmerTextForward::new(&ctx, &model.weights).unwrap();
+                let mut expected = vec![forward.prefill(&tokens[..count], &mut reference).unwrap()];
+                for step in 0..16 {
+                    expected.push(
+                        forward
+                            .forward_token(argmax(&expected[step]), &mut reference)
+                            .unwrap(),
+                    );
+                }
+                expected
+            };
+            let mut runner = model.create_runner(&ctx).unwrap();
+            runner.reset().unwrap();
+            let mut checkpoints = 0;
+            let mut actual = runner
+                .prefill_with_command_checkpoint(&tokens[..count], || {
+                    checkpoints += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(checkpoints > 0);
+            for (step, reference) in expected.iter().enumerate() {
+                let mut dot = 0.0_f64;
+                let mut aa = 0.0_f64;
+                let mut bb = 0.0_f64;
+                let mut difference = 0.0_f64;
+                let mut max_abs = 0.0_f64;
+                assert_eq!(actual.len(), reference.len());
+                for (&a, &b) in reference.iter().zip(&actual) {
+                    let (a, b) = (a as f64, b as f64);
+                    assert!(a.is_finite() && b.is_finite());
+                    dot += a * b;
+                    aa += a * a;
+                    bb += b * b;
+                    difference += (a - b).powi(2);
+                    max_abs = max_abs.max((a - b).abs());
+                }
+                let cosine = dot / (aa * bb).sqrt();
+                let relative_rms = (difference / aa).sqrt();
+                let (rms_gate, abs_gate) = if step == 0 {
+                    (0.002, 0.1)
+                } else {
+                    (0.006, 0.3)
+                };
+                assert!(
+                    cosine > 0.999_99 && relative_rms < rms_gate && max_abs < abs_gate,
+                    "short count={count} step={step} cos={cosine} RMS={relative_rms} abs={max_abs}"
+                );
+                assert_eq!(argmax(&actual), argmax(reference));
+                if step < 16 {
+                    actual = runner.forward_token(argmax(&actual)).unwrap();
+                }
+            }
+            assert_eq!(runner.next_position(), count + 16);
+            eprintln!(
+                "MUSE_OPTIMIZED_RUNNER tokens={count} logits_and_17_greedy_pass=true checkpoints={checkpoints}"
+            );
+        }
+    }
 
     #[test]
     fn request_shaped_session_plan_matches_capacity() {

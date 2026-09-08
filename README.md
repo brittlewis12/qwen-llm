@@ -78,8 +78,9 @@ omit the variable or set it to `0` for the original math. This CLI opt-in does n
 enable split decode in serving or lens workflows.
 
 `QWEN_MUSE_MATRIX_PREFILL=1` opts Muse Q8_0 on the same device into matrix-based
-packed prefill for session capacities up to 7168 tokens. It adds no session
-buffers and composes with the split-decode opt-in. Logs report `packed_matrix`
+packed prefill with row-parallel online attention, for session capacities up to
+7168 tokens. It adds no session buffers and composes with the split-decode opt-in.
+Logs report `packed_matrix_online`
 instead of `packed_exact`. Scalar-tail kernels are unchanged, but consume the
 numerically changed matrix-prefilled KV; this is not bitwise or sampled-output
 equivalence. Both options remain off by default.

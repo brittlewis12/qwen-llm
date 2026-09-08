@@ -4526,6 +4526,175 @@ mod tests {
         reference_argmax: u32,
     }
 
+    #[test]
+    #[ignore = "serial Metal, whole-model Muse split-attention decode qualification"]
+    fn split_attention_actual_decode_packet() {
+        use crate::muse_glimmer_metal::split_attention_pilot;
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+        let admitted = plan.admit(ctx.memory_signals()).unwrap();
+        let weights = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .unwrap()
+            .into_weights();
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
+        ))
+        .unwrap();
+        let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
+            "begin",
+            Some(
+                fixture["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            ),
+        );
+        let prompt = request
+            .render(weights.config().chat_template_profile, None)
+            .unwrap();
+        let ids = tokenizer.encode(&prompt, false).unwrap();
+        assert_eq!(ids.len(), 6229);
+        let tokens: Vec<u32> = ids.iter().map(|&id| u32::try_from(id).unwrap()).collect();
+        let mut session =
+            MuseGlimmerTextSession::new(&ctx, weights.config(), tokens.len() + 16).unwrap();
+        let before = ctx.current_allocated_size();
+        let partial = split_attention_pilot::allocate(&ctx);
+        let scratch_bytes = ctx.current_allocated_size() - before;
+        assert!(scratch_bytes <= 1024 * 1024);
+        let prefix_hash = |session: &MuseGlimmerTextSession, prefix: usize| {
+            let mut hash = blake3::Hasher::new();
+            for layer in 0..session.geometry.layer_count {
+                let start = session.geometry.cache_write_offset(layer, 0).unwrap() * 2;
+                for tensor in [&session.key_cache, &session.value_cache] {
+                    unsafe {
+                        hash.update(std::slice::from_raw_parts(
+                            (tensor.buffer.contents().as_ptr() as *const u8)
+                                .add(tensor.offset as usize + start),
+                            prefix * session.geometry.kv_width * 2,
+                        ));
+                    }
+                }
+            }
+            hash.finalize()
+        };
+        let tail_values = |session: &MuseGlimmerTextSession, prefix: usize| {
+            let mut values = Vec::new();
+            for layer in 0..session.geometry.layer_count {
+                let start = session.geometry.cache_write_offset(layer, prefix).unwrap() * 2;
+                for tensor in [&session.key_cache, &session.value_cache] {
+                    let data = unsafe {
+                        std::slice::from_raw_parts(
+                            (tensor.buffer.contents().as_ptr() as *const u8)
+                                .add(tensor.offset as usize + start)
+                                as *const u16,
+                            16 * session.geometry.kv_width,
+                        )
+                    };
+                    values.extend(data.iter().map(|&bits| half::f16::from_bits(bits).to_f32()));
+                }
+            }
+            values
+        };
+        for prefix in [1024, tokens.len()] {
+            session.reset().unwrap();
+            let seed = forward.prefill(&tokens[..prefix], &mut session).unwrap();
+            let original_prefix = prefix_hash(&session, prefix);
+            let run = |session: &mut MuseGlimmerTextSession, split: bool| {
+                let started = std::time::Instant::now();
+                session.rewind_prefix(prefix).unwrap();
+                let mut body = || {
+                    let mut ids = Vec::with_capacity(16);
+                    let mut outputs: Vec<Vec<f32>> = Vec::with_capacity(16);
+                    for step in 0..16 {
+                        let current = if step == 0 { &seed } else { &outputs[step - 1] };
+                        let token = greedy_argmax(current);
+                        ids.push(token);
+                        outputs.push(forward.forward_token(token, session).unwrap());
+                    }
+                    (ids, outputs)
+                };
+                let (ids, outputs) = if split {
+                    split_attention_pilot::with_scratch(&partial, body)
+                } else {
+                    body()
+                };
+                (started.elapsed().as_secs_f64() * 1e3, ids, outputs)
+            };
+            let oracle_a = run(&mut session, false);
+            let kv_a = tail_values(&session, prefix);
+            assert_eq!(prefix_hash(&session, prefix), original_prefix);
+            let oracle_b = run(&mut session, true);
+            let kv_b = tail_values(&session, prefix);
+            assert_eq!(prefix_hash(&session, prefix), original_prefix);
+            assert_eq!(oracle_a.1, oracle_b.1);
+            let kv = compare_logits(&kv_b, &kv_a);
+            assert!(
+                kv.cosine > 0.999_99 && kv.relative_rms < 0.002,
+                "KV tail {kv:?}"
+            );
+            let check = |candidate: &[Vec<f32>]| {
+                let mut minimum_cosine = 1.0_f64;
+                let mut maximum_relative_rms = 0.0_f64;
+                let mut maximum_absolute = 0.0_f32;
+                for (a, b) in oracle_a.2.iter().zip(candidate) {
+                    let comparison = compare_logits(b, a);
+                    assert!(
+                        comparison.cosine > 0.999_99
+                            && comparison.relative_rms < 0.002
+                            && comparison.max_abs < 0.1,
+                        "whole decode numerical gate {comparison:?}"
+                    );
+                    minimum_cosine = minimum_cosine.min(comparison.cosine);
+                    maximum_relative_rms = maximum_relative_rms.max(comparison.relative_rms);
+                    maximum_absolute = maximum_absolute.max(comparison.max_abs);
+                }
+                (minimum_cosine, maximum_relative_rms, maximum_absolute)
+            };
+            let oracle_numeric = check(&oracle_b.2);
+            eprintln!(
+                "MUSE_DECODE_JSON {}",
+                serde_json::json!({"kind":"oracle", "prefix":prefix,
+                "A_ms":oracle_a.0,"B_ms":oracle_b.0,"logits":oracle_numeric,
+                "kv_cosine":kv.cosine,"kv_relative_rms":kv.relative_rms,"kv_max_abs":kv.max_abs,
+                "prefix_bitwise_unchanged":true,"scratch_driver_bytes":scratch_bytes})
+            );
+            // All payload oracles precede a separate warm ABBA and measured ABBA.
+            for split in [false, true, true, false] {
+                let result = run(&mut session, split);
+                eprintln!(
+                    "MUSE_DECODE_JSON {}",
+                    serde_json::json!({"kind":"warmup", "prefix":prefix,
+                    "arm":if split {"B"} else {"A"},"wall_ms":result.0})
+                );
+            }
+            let mut packet = Vec::new();
+            for split in [false, true, true, false] {
+                let result = run(&mut session, split);
+                eprintln!(
+                    "MUSE_DECODE_JSON {}",
+                    serde_json::json!({"kind":"sample", "prefix":prefix,
+                    "arm":if split {"B"} else {"A"},"wall_ms":result.0,"forwards":16})
+                );
+                packet.push(result);
+            }
+            for (index, result) in packet.iter().enumerate() {
+                assert_eq!(result.1, oracle_a.1);
+                let numerical = check(&result.2);
+                eprintln!(
+                    "MUSE_DECODE_JSON {}",
+                    serde_json::json!({"kind":"numerical", "prefix":prefix,
+                    "index":index,"logits":numerical,"greedy_ids":result.1})
+                );
+            }
+            assert_eq!(session.next_position(), prefix + 16);
+            assert_eq!(prefix_hash(&session, prefix), original_prefix);
+        }
+    }
+
     fn compare_logits(candidate: &[f32], reference: &[f32]) -> LogitComparison {
         assert_eq!(candidate.len(), reference.len());
         let mut dot = 0.0_f64;

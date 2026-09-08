@@ -139,6 +139,8 @@ fn attention_model_context_crosschecks() {
         (131056, 16, None, true),
         (131056, 16, Some(2048), true),
     ] {
+        let key = key.view_subrange(0, vec![((base + rows) * 256) as u64]);
+        let value = value.view_subrange(0, vec![((base + rows) * 256) as u64]);
         let values = query_values(rows, uniform);
         let mut padded = vec![-77.0; 4];
         padded.extend(&values);

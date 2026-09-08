@@ -376,6 +376,17 @@ fn live_long_attention_chunk(
     tokens: &[u32],
     base: usize,
 ) {
+    live_long_attention_chunk_with_tiling(bounded, candidate, session, tokens, base, false);
+}
+
+fn live_long_attention_chunk_with_tiling(
+    bounded: &MuseGlimmerTextForward<'_, '_>,
+    candidate: &MuseGlimmerTextForward<'_, '_>,
+    session: &mut MuseGlimmerTextSession,
+    tokens: &[u32],
+    base: usize,
+    tiled: bool,
+) {
     let prefix_hash = long_context_prefix_hash(session, base);
     let written_kv = |session: &MuseGlimmerTextSession| {
         let mut values = Vec::new();
@@ -425,7 +436,7 @@ fn live_long_attention_chunk(
             }
         }
     }
-    let b = run(candidate, session);
+    let b = crate::muse_glimmer_metal::with_tiled_prefill(tiled, || run(candidate, session));
     let residual_b = read_f32(
         &session
             .packed
@@ -453,7 +464,165 @@ fn live_long_attention_chunk(
     );
     eprintln!(
         "MUSE_LONG_JSON {}",
-        serde_json::json!({"kind":"live_chunk","base":base,"rows":128,"A_ms":a.0,"B_ms":b.0,"logits_cosine":logits.cosine,"logits_rms":logits.relative_rms,"logits_max_abs":logits.max_abs,"residual_cosine":residual.cosine,"residual_rms":residual.relative_rms,"residual_max_abs":residual.max_abs,"kv_cosine":kv.cosine,"kv_rms":kv.relative_rms,"kv_max_abs":kv.max_abs,"prefix_immutable":true,"matrix_limit":candidate.packed_prefill_max_end,"online_limit":candidate.packed_online_max_end})
+        serde_json::json!({"kind":"live_chunk","base":base,"rows":128,"tiled":tiled,"A_ms":a.0,"B_ms":b.0,"logits_cosine":logits.cosine,"logits_rms":logits.relative_rms,"logits_max_abs":logits.max_abs,"residual_cosine":residual.cosine,"residual_rms":residual.relative_rms,"residual_max_abs":residual.max_abs,"kv_cosine":kv.cosine,"kv_rms":kv.relative_rms,"kv_max_abs":kv.max_abs,"prefix_immutable":true,"matrix_limit":candidate.packed_prefill_max_end,"online_limit":candidate.packed_online_max_end})
+    );
+    if tiled {
+        for (kind, candidate, reference, width, cosine, rms) in [
+            (
+                "residual",
+                &residual_b,
+                &residual_a,
+                session.geometry.hidden_size,
+                0.999_99,
+                0.002,
+            ),
+            ("KV", &kv_b, &kv_a, session.geometry.kv_width, 0.9999, 0.01),
+        ] {
+            let mut worst_rms = 0.0_f64;
+            let mut minimum_cosine = 1.0_f64;
+            for (index, (candidate, reference)) in candidate
+                .chunks_exact(width)
+                .zip(reference.chunks_exact(width))
+                .enumerate()
+            {
+                let row = compare_logits(candidate, reference);
+                assert!(
+                    row.cosine > cosine && row.relative_rms < rms,
+                    "tiled {kind} row={index} {row:?}"
+                );
+                worst_rms = worst_rms.max(row.relative_rms);
+                minimum_cosine = minimum_cosine.min(row.cosine);
+            }
+            eprintln!(
+                "MUSE_TILED_JSON {}",
+                serde_json::json!({"kind":"per_row_numerics","base":base,"tensor":kind,"minimum_cosine":minimum_cosine,"worst_relative_rms":worst_rms})
+            );
+        }
+        let b_hash = long_context_prefix_hash(session, base + 128);
+        run(bounded, session);
+        crate::muse_glimmer_metal::with_tiled_prefill(true, || run(candidate, session));
+        let mut endpoints = Vec::new();
+        for (pair, order) in [[false, true], [true, false]].into_iter().enumerate() {
+            for tiled in order {
+                let before = crate::muse_glimmer_metal::tiled_prefill_dispatch_count();
+                let (wall_ms, logits) =
+                    crate::muse_glimmer_metal::with_tiled_prefill(tiled, || {
+                        run(if tiled { candidate } else { bounded }, session)
+                    });
+                assert_eq!(
+                    crate::muse_glimmer_metal::tiled_prefill_dispatch_count() - before,
+                    if tiled {
+                        session.geometry.layer_count as u64
+                    } else {
+                        0
+                    }
+                );
+                endpoints.push((tiled, logits));
+                eprintln!(
+                    "MUSE_TILED_JSON {}",
+                    serde_json::json!({"kind":"live_chunk_timing","base":base,"rows":128,"pair":pair,"tiled":tiled,"wall_ms":wall_ms})
+                );
+            }
+        }
+        for (tiled, logits) in endpoints {
+            assert_logits_bitwise_equal(
+                "timed chunk matches untimed endpoint",
+                &logits,
+                if tiled { &b.1 } else { &a.1 },
+            );
+        }
+        let restored =
+            crate::muse_glimmer_metal::with_tiled_prefill(true, || run(candidate, session));
+        assert_logits_bitwise_equal("tiled chunk restored after timing", &b.1, &restored.1);
+        assert_eq!(long_context_prefix_hash(session, base + 128), b_hash);
+        assert_eq!(long_context_prefix_hash(session, base), prefix_hash);
+    }
+}
+
+#[test]
+#[ignore = "serial Metal, one tiled traversal with current-online live chunk comparisons"]
+fn tiled_prefill_live_chunk_transfer() {
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let gguf = GgufFile::open(path).unwrap();
+    let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
+    let tokens = long_context_tokens(path, &config);
+    let ctx = MetalContext::new().unwrap();
+    let transaction = ctx.begin_allocation_transaction();
+    let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+    let geometry = MuseGlimmerTextGeometry::from_config(&config, 32784).unwrap();
+    let session_plan =
+        MuseGlimmerTextSessionMemoryPlan::for_geometry_with_split_decode(&ctx, &geometry, true)
+            .unwrap();
+    let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+        plan.memory_plan()
+            .priced_upper_bytes()
+            .checked_add(session_plan.priced_upper_bytes())
+            .unwrap(),
+        64 * 1024 * 1024,
+        MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES,
+        ctx.memory_signals(),
+        true,
+    );
+    assert!(admission.admitted, "tiled transfer admission {admission:?}");
+    let weights =
+        MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
+            .unwrap()
+            .into_weights();
+    let forward = MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    let mut session =
+        MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), 32784, true).unwrap();
+    drop(transaction);
+    let mut previous = 0;
+    let mut logits = Vec::new();
+    for end in [8192, 32768] {
+        let started = std::time::Instant::now();
+        logits = crate::muse_glimmer_metal::with_tiled_prefill(true, || {
+            forward.prefill(&tokens[previous..end], &mut session)
+        })
+        .unwrap();
+        eprintln!(
+            "MUSE_TILED_JSON {}",
+            serde_json::json!({"kind":"candidate_traversal_diagnostic","start":previous,"end":end,"wall_ms":started.elapsed().as_secs_f64()*1000.0})
+        );
+        let original_hash = long_context_prefix_hash(&session, end);
+        live_long_attention_chunk_with_tiling(
+            &forward,
+            &forward,
+            &mut session,
+            &tokens,
+            end - 128,
+            true,
+        );
+        assert_eq!(long_context_prefix_hash(&session, end), original_hash);
+        assert_eq!(session.next_position(), end);
+        assert_logits_bitwise_equal(
+            "tiled traversal endpoint restored",
+            &logits,
+            &read_f32(&session.logits),
+        );
+        previous = end;
+    }
+    let prefix = long_context_prefix_hash(&session, 32768);
+    let expected = [
+        913, 49098, 26, 352, 4557, 24, 54633, 26137, 26, 589, 48570, 948, 19044, 70912, 398, 6837,
+        24,
+    ];
+    for (step, &token) in expected.iter().enumerate() {
+        assert_eq!(
+            greedy_argmax(&logits),
+            token,
+            "tiled historical greedy step={step}"
+        );
+        if step < 16 {
+            logits = forward
+                .forward_generated_token(token, &mut session)
+                .unwrap();
+        }
+    }
+    assert_eq!(long_context_prefix_hash(&session, 32768), prefix);
+    eprintln!(
+        "MUSE_TILED_JSON {}",
+        serde_json::json!({"kind":"historical_greedy_check","tokens":expected,"prefix_immutable":true,"session_driver_bytes":session.observed_allocation_delta()})
     );
 }
 

@@ -492,6 +492,11 @@ thread_local! {
 }
 
 #[cfg(test)]
+pub(crate) fn tiled_prefill_dispatch_count() -> u64 {
+    TILED_PREFILL_DISPATCHES.get()
+}
+
+#[cfg(test)]
 pub(crate) fn with_tiled_prefill<R>(enabled: bool, run: impl FnOnce() -> R) -> R {
     struct Restore(bool);
     impl Drop for Restore {

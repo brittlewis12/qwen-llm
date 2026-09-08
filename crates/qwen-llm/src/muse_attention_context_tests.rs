@@ -55,6 +55,10 @@ fn context_numerical_check(actual: &[f32], expected: &[f32]) -> f32 {
 #[test]
 #[ignore = "serial Metal, model-context attention correctness with independent F64 queries"]
 fn attention_model_context_crosschecks() {
+    attention_model_context_oracle(true);
+}
+
+fn attention_model_context_oracle(check_split: bool) {
     use objc2_metal::MTLBuffer;
     const CONTEXT: usize = 131072;
     let ctx = MetalContext::new().unwrap();
@@ -142,9 +146,9 @@ fn attention_model_context_crosschecks() {
         let key = key.view_subrange(0, vec![((base + rows) * 256) as u64]);
         let value = value.view_subrange(0, vec![((base + rows) * 256) as u64]);
         let values = query_values(rows, uniform);
-        let mut padded = vec![-77.0; 4];
+        let mut padded = vec![-77.0; 8];
         padded.extend(&values);
-        let query = tensor_from_f32(&ctx, &padded).view_subrange(4, vec![values.len() as u64]);
+        let query = tensor_from_f32(&ctx, &padded).view_subrange(8, vec![values.len() as u64]);
         let storage = tensor_from_f32(&ctx, &vec![-77.0; values.len() + 8]);
         let output = storage.view_subrange(4, vec![values.len() as u64]);
         poison(&output);
@@ -209,6 +213,9 @@ fn attention_model_context_crosschecks() {
             "MUSE_CONTEXT_JSON {}",
             serde_json::json!({"kind":"prefill_oracle","base":base,"rows":rows,"window":window,"uniform":uniform,"gpu_max_abs":gpu_delta,"f64_max_abs":f64_delta,"guards":true})
         );
+    }
+    if !check_split {
+        return;
     }
     let partial_storage = tensor_from_f32(
         &ctx,

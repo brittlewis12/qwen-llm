@@ -118,7 +118,7 @@ fn tiled_prefill_current_online_screen() {
         let actual = read_f32(&outputs[1]);
         let gpu_delta = context_numerical_check(&actual, &read_f32(&outputs[0]));
         let mut f64_delta = 0.0_f64;
-        for row in [0, rows - 1] {
+        for row in [0, (rows - 1).min(1), rows - 1] {
             let end = base + row + 1;
             let start = window.map(|w| end.saturating_sub(w)).unwrap_or(0);
             for head in [0, 31] {
@@ -163,6 +163,21 @@ fn tiled_prefill_current_online_screen() {
                 }
             }
             context_numerical_check(&read_f32(&outputs[1]), &read_f32(&outputs[0]));
+            for storage in &storages {
+                let data = read_f32(storage);
+                assert!(
+                    data[..8]
+                        .iter()
+                        .chain(&data[data.len() - 8..])
+                        .all(|&v| v == -77.0)
+                );
+            }
         }
     }
+}
+
+#[test]
+#[ignore = "serial Metal, tiled prefill independent model-context oracle"]
+fn tiled_prefill_model_context_crosschecks() {
+    with_tiled_prefill(true, || attention_model_context_oracle(false));
 }

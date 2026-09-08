@@ -1,5 +1,61 @@
 # Muse long-context qualification
 
+## Model-context invariants and refreshed profile PASS
+
+`900e5106` replaces benchmark-derived upper limits with admitted model context
+(131072 for released Muse). Packed math still checks exact prefix views, shape,
+capacity and device capabilities. Generated split attention requires1024 visible
+positions and owned scratch; both PSOs require32-lane SIMDgroups. The lower bound
+is performance policy, not a correctness limit. Q8/M4Max opt-ins remain defaultoff.
+Historical7168/32768 comparisons explicitly freeze their old reference limits.
+
+`527c5056` model-free attention oracle PASS1.11s: fully initialized actual F16 K/V,
+nonzero guarded views, poisoned output/partials, nonuniform/peaked/uniform queries,
+full/sliding2048, chunk crossings at32K/64K and exact131072 endpoint. Selected
+first/last rows compare to valid singleton GPU attention and independent CPU F64
+softmax using actual F16-rounded storage. Worst prefill F64 error4.7301324e-5;
+split GPU delta0.00016534328 and independent F64 error1.1051233e-6. All cosine
+>=0.999999/maxabs<=5e-4 GPU and <=5e-4 independent gates pass. Uniform131K split
+exact. First attempt rejected an oversized cache view before dispatch; repaired
+exact-prefix binding, not a changed numerical gate. The older zero-query131K test
+now explicitly initializes uninitialized tensor allocations and passes0.10s.
+
+Same source's one optimized CurrentMarcus traversal0->8192->32768 plus512
+teacher-forced transcript transitions PASS300.95s. Local original/generated
+single-token comparisons at8192/32768/32783/32784/33279 all agree top1, cosine
+>0.99999999995, relative RMS<1.06e-5, maxabs<=0.000904561. Retained prefix immutable;
+capacity33281 fills and next forward rejects without advance. This is NOT512
+independently generated IDs, whole-model131K equivalence, or sampled exactness.
+No full slow-prefix reference was needed to check these invariants.
+
+The same live states provide ordinary versus timestamped packed/generated replays;
+logits/written KV agree bitwise, packed restoration preserves all active KV.
+Decode observer now calls the actual generated API and enables split in the graph.
+
+| Phase / position | GPU ms | FFN ms | Full attention ms | Sliding attention ms | Front / attention-output ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| N128 packed /8064 | 778.573 | 443.753 | 112.318 | 87.098 | 96.302 /33.324 |
+| N128 packed /32640 | 1113.485 | 427.869 | 476.070 | 79.649 | 92.146 /32.321 |
+| Generated /8192 | 63.241 | 44.329 | 1.667 | 2.336 | 7.349 /3.580 |
+| Generated /32768 | 68.039 | 44.200 | 6.032 | 2.428 | 7.423 /3.664 |
+| Generated /33280 | 67.424 | 43.733 | 6.606 | 2.310 | 7.257 /3.552 |
+
+These are warm GPU attribution, not controlled whole-request timings. Ordinary
+packed walls779.677/1115.329ms; ordinary decode67.591/73.993/**360.418ms** versus
+profiled walls64.261/69.334/69.235ms. The last ordinary-wall outlier is retained;
+CPU hashing preceded it, but no causal attribution is established. Diagnostic
+prefix56.623s plus189.215s extension and512-loop41.018s include differing observer
+work and must not replace prior timing authority.
+
+Long-prefill attention49.91% (full42.76%) now outranks FFN38.43% there; at8K FFN
+is57.0%. Decode FFN64.96% outranks remaining attention12.43%. A hypothetical2x full
+attention kernel would save21.4% of this late32K chunk, NOT the full prompt. FFN
+logical Q8 payload22,029,336,576B /44.2ms is498.4GB/s equivalent payload rate, not
+measured DRAM bandwidth or proof of a roofline. Independent cx reviewers rank
+tiled forward attention first and structural FFN work/byte avoidance second.
+
+Raw retained: `target/profiles/muse-live-prefix/{context-oracle-01*,context-oracle-02*,context-zero-01*,current-profile-01*}`.
+
 ## Capacity reservation decoupled PASS
 
 `a23c3b11` removes the optimized-prefill capacity restriction without widening its

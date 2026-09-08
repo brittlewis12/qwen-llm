@@ -165,38 +165,42 @@ Decision rules:
 
 ## Muse Fresh / Decode Priority - 2026-09-08
 
-The active Muse priority is **fresh prefill and scalar decode**, not further cache
-work. Original default math remains exact batched Q8 GEMV. Bounded opt-ins now
-deliver matrix/online prefill and split-position decode: actual6229 CLI prefill
-178.183tok/s and generation15.587 transitions/s. Both phases have separate
-whole-phase qualification; these are numerical, not bitwise or sampled-exact paths.
-Earlier original-decode and matrix-only-prefill attribution identified the work
-removed. Refresh attribution before ranking the remaining kernels; the scalar_tail
-label still represents only five remainder tokens at6229.
+The active Muse priority is **fresh prefill and decode**, not further cache work.
+Default original math remains; Q8/M4Max matrix/online and split opt-ins are numerical,
+not bitwise or sampled-exact paths. Benchmark-derived upper cliffs are removed:
+model context131072, actual capacity and kernel invariants govern admission. The
+1024-visible-position split minimum remains performance policy. Independent131K
+attention checks and a512-transition32K live horizon pass, without another full
+slow-prefix reference. This is not full-model131K numerical equivalence.
 
-1. Extend the output horizon around32K. Splitdecode now delivers14.722forwards/s
-   in controlled32K ABBA (73.134%saved),14.681transitions/s in thenativeCLI.
-   Selectionends32784: a32729-token prompt gets55fasttransitions beforefallback.
-   Qualify a concrete longer continuation before pursuing much larger prompts.
-2. Retain completed capacity decoupling:6884+391 teacher-forced transitions pass,
-   including the split-decode boundary and bitwise straddling-prefill fallback.
-   ActualCLI6229/17 with32768reservation retains179.21prefilltok/s and sameoutput;
-   fullcapacityadmission unchanged. Subsequentfreshqualification separatelywidens
-   arithmeticto32768; straddling/beyond chunks retainoriginalmath. Whole6229 online
-   prefill ABBA54.750%saved/180.769tok/s remains the existing timing authority.
-3. Refresh actual fullyoptimized prefill/decode attribution before choosing FFN work.
-   The previous69%attention share predates online attention; it does not establish
-   today's remaining bottleneck. A new profile may move this ahead of range expansion.
-4. Extend prefill beyond32K only with an actual workload and completefreshstate
-   qualification. Currentoptin Q8/M4Max matrix+online ends32768; splitdecode ends
-   32784. Capacityreservation isseparate; straddling/beyond chunks retainoriginal.
-   Priorwarmdecode6229 saves45.647%,1024 saves20.599%; scratch remainsadmitted540672B.
-   Existing online overlap is KILL; split primitive remains HOLD on2048 control
-   noise despite independent whole-forward PASS. Widen only with new qualification.
-5. Retain the completed live-prefix opt-in (6269-token repeated-turn backend
-   216.803 ->3.827s), but do not present avoided prefill as faster fresh inference.
+1. Tiled forward prefill attention: refreshed late32K N128 GPU1113.485ms is49.91%
+   attention (42.76%full),38.43%FFN. Reuse KV across GQA siblings/token rows and use
+   matrix QK while initially retaining F32 queries/probabilities. Screen against
+   current online, not the old per-row loser. Only material primitive wins earn
+   live-state integration work. A2x full-attention win projects21.4%late-chunk
+   savings, not whole-prompt savings. PriorH256 one-pass failures constrain shape,
+   not a universal ban on this differentH128/G16 ownership mechanism.
+2. Structural FFN work/byte reduction:8K packed FFN57.0%,32K decode64.96% (44.200ms).
+   Current packedN128 already usesQ8 MMA; repeated local tile/fusion changes need
+   a new mechanism. Decode logical FFN payload22.029GB/44.2ms is498GB/s equivalent
+   payload rate, NOT measured DRAM or proof of saturation. Sparse skipping requires
+   distribution/error evidence and charged selection/gather costs, not free masks.
+3. Preserve complete-flow checks proportional to changes: current profiles use the
+   generated path and bitwise ordinary/profiled comparisons. Reuse optimized live
+   traversals and independent local oracles; do not impose benchmark endpoints as
+   production cliffs or pay an hour proving an obvious fallback is slow. Retain
+   ordinary33280 decode-wall360.418ms outlier; GPU67.424ms is attribution only.
+4. Retain delivered timing authority:32K controlled decode14.722forwards/s,
+   73.134%saved; fresh32K231.586s/141.494tok/s is a single diagnostic, notABBA.
+   Remaining32K decode attention12.43% makes further attention polishing secondary.
+   Historical online-overlapKILL and split-primitiveHOLD remain; independent
+   whole-forward PASS stands separately. Scratch remainsadmitted540672B.
+5. Retain live-prefix opt-in (6269-token repeated-turn backend216.803 ->3.827s),
+   but do not present avoided prefill as faster fresh inference. Native ATEM,
+   reasoning effort and sampling policy remain unchanged.
 
-Evidence: `docs/bench/2026-09-08-muse-math/RESULT.md` and
+Evidence: `docs/bench/2026-09-08-muse-long-context/RESULT.md`,
+`docs/bench/2026-09-08-muse-math/RESULT.md` and
 `docs/bench/2026-09-08-muse-live-prefix/RESULT.md`. Native ATEM, sampling and reasoning
 contracts stay unchanged; temperature1/top-k64/top-p0.95 is sampled, not greedy.
 

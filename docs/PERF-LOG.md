@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Model-Context Invariants PASS / Current Attribution
+
+- `900e5106` removes benchmark-derived32768/32784 upper cliffs from opt-in
+  prefill/generated decode. Model context131072, capacity, shape and PSO capability
+  checks govern admission; split requires at least1024 visible positions. Q8/M4Max
+  eligibility, default-off policy and admitted540672B scratch remain unchanged.
+- `527c5056` independent F64/F16-storage and singleton-GPU attention checks PASS
+  through131072 in1.11s: worst prefill F64 error0.0000473013; split GPU delta
+  0.000165343 and F64 error0.00000110512. Offset guards/poison/uniform/peaked cases
+  pass. First attempt rejected an oversized prefix view before dispatch; retained,
+  fixture repaired. Explicitly initialized historical131K zero oracle PASS0.10s.
+- One optimized traversal plus512 teacher-forced transitions PASS300.95s. Five
+  local original/generated comparisons through33279 agree top1, maxdelta<=0.000905;
+  prefix immutable, capacity exhaustion rejects without advance. Not512 independent
+  greedy generations or complete131K model equivalence; no repeated slow prefix.
+- Actual generated-path profiling (bitwise ordinary/profiled outputs/KV) reranks:
+  late32K N128 GPU1113.485ms is49.91% attention /38.43% FFN; decode68.039ms is
+  64.96% FFN /12.43% attention. At8K packed FFN57.0%. Prior69%attention map is stale.
+  Profile33280 ordinary-wall360.418ms outlier retained, profile GPU67.424ms; stage
+  attribution is not request timing authority. Next: reuse tiled prefill Q/K/V,
+  then structural FFN work/byte reduction, not further decode-attention polishing.
+- Evidence and limitations: `docs/bench/2026-09-08-muse-long-context/RESULT.md`.
+
 ## 2026-09-08 - Muse Long Decode Whole-Forward PASS / Opt-In Delivered
 
 - `a49678ec` controlled16-forward ABBA32K4045.209 ->1086.801ms saves73.134%,

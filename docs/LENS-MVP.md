@@ -12,6 +12,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Native plain logit-lens readouts and opt-in lossless full-vocabulary exports
   are available through `read-full`; see [observer controls](LENS-OBSERVER-CONTROLS.md)
   for semantics, examples, and bounded scalar/packed qualification.
+- The [depth and sequence-order exploration](LENS-DEPTH-AND-ORDER.md) records
+  full-depth archive coverage, uncensored observer comparisons, and the limits
+  of order-sensitive readout patterns after censoring and common-trend controls.
 - Imported Qwen3.6 matched full J/R and Qwen3.8 full J transports support packed
   layer x position top-k, selected transported vectors, and selected-token live
   directions.

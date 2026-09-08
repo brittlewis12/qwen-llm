@@ -2,6 +2,68 @@
 
 use super::*;
 
+pub(super) fn admit_scalar_observer_allocations(
+    context: &crate::metal::MetalContext,
+    gpu_buffers: &[usize],
+    host_bytes: usize,
+) -> Result<(), WorkspaceLensError> {
+    let gpu_bytes = gpu_buffers.iter().try_fold(0u64, |total, &bytes| {
+        let bytes = u64::try_from(bytes).map_err(|_| WorkspaceLensError::SizeOverflow)?;
+        total
+            .checked_add(context.shared_buffer_size_and_align(bytes)?.size)
+            .ok_or(WorkspaceLensError::SizeOverflow)
+    })?;
+    let host_bytes = u64::try_from(host_bytes).map_err(|_| WorkspaceLensError::SizeOverflow)?;
+    // Current signals already include resident model/sequence buffers. This is
+    // an incremental admission check, not a second reservation of their bytes.
+    let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+        gpu_bytes,
+        host_bytes,
+        0,
+        context.memory_signals(),
+        true,
+    );
+    if !admission.admitted {
+        return Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
+            reason: admission.reason,
+            requested_bytes: gpu_bytes
+                .checked_add(host_bytes)
+                .ok_or(WorkspaceLensError::SizeOverflow)?,
+            working_set_headroom_bytes: admission.working_set_headroom_bytes,
+            process_remaining_bytes: admission.signals.process_limit_remaining_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn encode_scalar_lens_head(
+    context: &crate::metal::MetalContext,
+    encoder: &KernelEncoder,
+    model: &crate::metal_forward::MetalModel,
+    residual: &MetalTensor,
+    normalized: &MetalTensor,
+    logits: &MetalTensor,
+) -> Result<(), WorkspaceLensError> {
+    encode_rms_norm_mul_f32(
+        context,
+        encoder,
+        residual,
+        &model.output_norm,
+        normalized,
+        RMS_EPS,
+    )?;
+    encode_mat_vec_dispatch(
+        context,
+        encoder,
+        &model.lm_head,
+        normalized,
+        logits,
+        model.arch.hidden_size as usize,
+        model.arch.vocab_size as usize,
+    )?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reduce_workspace_vjp_readouts(
     trajectories: &[f32],
@@ -197,6 +259,15 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
                 max: MAX_FULL_READOUT_TOP_K,
             });
         }
+        self.apply_row_f16_transport_logits_with_vector(transport_bytes, source_residual)?
+            .into_topk(top_k)
+    }
+
+    pub fn apply_row_f16_transport_logits_with_vector(
+        &mut self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+    ) -> Result<WorkspaceLensFullVocabularyLogitsWithVector, WorkspaceLensError> {
         let arch = self.model.arch();
         let hidden_size = arch.hidden_size as usize;
         let vocab_size = arch.vocab_size as usize;
@@ -214,7 +285,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             });
         }
         validate_full_readout_transport_size(transport_bytes, hidden_size)?;
-        validate_full_readout_tail(self.model.metal_model(), hidden_size, vocab_size)?;
+        validate_scalar_readout_tail(self.model.metal_model(), hidden_size, vocab_size)?;
         let hidden_bytes = checked_product(hidden_size, std::mem::size_of::<f32>())?;
         let logits_bytes = checked_product(vocab_size, std::mem::size_of::<f32>())?;
         let peak_bytes = transport_bytes
@@ -253,23 +324,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
                 hidden_size,
                 hidden_size,
             )?;
-            encode_rms_norm_mul_f32(
-                context,
-                &encoder,
-                &transported,
-                &model.output_norm,
-                &normalized,
-                RMS_EPS,
-            )?;
-            encode_mat_vec_dispatch(
-                context,
-                &encoder,
-                &model.lm_head,
-                &normalized,
-                &logits,
-                hidden_size,
-                vocab_size,
-            )?;
+            encode_scalar_lens_head(context, &encoder, model, &transported, &normalized, &logits)?;
             Ok(())
         })();
         encoder.end();
@@ -306,12 +361,9 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
                 index,
             });
         }
-        let scores = exact_vocabulary_top_k(&full_logits, top_k)?;
-        Ok(WorkspaceLensFullVocabularyReadoutWithVector {
-            readout: WorkspaceLensFullVocabularyReadout {
-                rms_denominator_f64_recomputed,
-                scores,
-            },
+        Ok(WorkspaceLensFullVocabularyLogitsWithVector {
+            logits: full_logits,
+            rms_denominator_f64_recomputed,
             transported_values,
         })
     }
@@ -658,6 +710,33 @@ pub(super) fn validate_full_readout_tail(
     ) {
         return Err(WorkspaceLensError::UnsupportedTokenReadoutLmHeadDtype {
             dtype: model.lm_head.dtype,
+        });
+    }
+    if model.output_norm.dtype != GgmlType::F32
+        || model.output_norm.shape.as_slice() != [hidden_size as u64]
+    {
+        return Err(WorkspaceLensError::InvalidTokenReadoutOutputNorm {
+            dtype: model.output_norm.dtype,
+            shape: model.output_norm.shape.clone(),
+            expected: hidden_size,
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn validate_scalar_readout_tail(
+    model: &crate::metal_forward::MetalModel,
+    hidden_size: usize,
+    vocab_size: usize,
+) -> Result<(), WorkspaceLensError> {
+    // Dtype support belongs to scalar matvec dispatch, not selected-row decoding.
+    let expected_lm_head_shape = [hidden_size, vocab_size];
+    if linear_shape(WorkspaceLensLinear::LmHead, &model.lm_head).ok()
+        != Some(expected_lm_head_shape)
+    {
+        return Err(WorkspaceLensError::InvalidTokenReadoutLmHeadShape {
+            got: model.lm_head.shape.clone(),
+            expected: expected_lm_head_shape,
         });
     }
     if model.output_norm.dtype != GgmlType::F32
@@ -1625,6 +1704,15 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
                 max: MAX_FULL_READOUT_TOP_K,
             });
         }
+        self.apply_f16_transport_logits_with_vector(transport_bytes, source_residual)?
+            .into_topk(top_k)
+    }
+
+    pub fn apply_f16_transport_logits_with_vector(
+        &self,
+        transport_bytes: &[u8],
+        source_residual: &[f32],
+    ) -> Result<WorkspaceLensFullVocabularyLogitsWithVector, WorkspaceLensError> {
         let arch = self.arch();
         let hidden_size = arch.hidden_size as usize;
         let vocab_size = arch.vocab_size as usize;
@@ -1642,38 +1730,8 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
             });
         }
         let model = self.model.metal_model();
-        let expected_lm_head_shape = [hidden_size, vocab_size];
-        if linear_shape(WorkspaceLensLinear::LmHead, &model.lm_head).ok()
-            != Some(expected_lm_head_shape)
-        {
-            return Err(WorkspaceLensError::InvalidTokenReadoutLmHeadShape {
-                got: model.lm_head.shape.clone(),
-                expected: expected_lm_head_shape,
-            });
-        }
-        if !matches!(
-            model.lm_head.dtype,
-            GgmlType::F32
-                | GgmlType::F16
-                | GgmlType::BF16
-                | GgmlType::Q4_K
-                | GgmlType::Q6_K
-                | GgmlType::Q8_0
-                | GgmlType::IQ4_NL
-        ) {
-            return Err(WorkspaceLensError::UnsupportedTokenReadoutLmHeadDtype {
-                dtype: model.lm_head.dtype,
-            });
-        }
-        if model.output_norm.dtype != GgmlType::F32
-            || model.output_norm.shape.as_slice() != [hidden_size as u64]
-        {
-            return Err(WorkspaceLensError::InvalidTokenReadoutOutputNorm {
-                dtype: model.output_norm.dtype,
-                shape: model.output_norm.shape.clone(),
-                expected: hidden_size,
-            });
-        }
+        validate_full_readout_transport_size(transport_bytes, hidden_size)?;
+        validate_scalar_readout_tail(model, hidden_size, vocab_size)?;
         let hidden_bytes = checked_product(hidden_size, std::mem::size_of::<f32>())?;
         let logits_bytes = checked_product(vocab_size, std::mem::size_of::<f32>())?;
         let peak_bytes = transport_bytes
@@ -1715,23 +1773,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
                 hidden_size,
                 hidden_size,
             )?;
-            encode_rms_norm_mul_f32(
-                context,
-                &encoder,
-                &transported,
-                &model.output_norm,
-                &normalized,
-                RMS_EPS,
-            )?;
-            encode_mat_vec_dispatch(
-                context,
-                &encoder,
-                &model.lm_head,
-                &normalized,
-                &logits,
-                hidden_size,
-                vocab_size,
-            )?;
+            encode_scalar_lens_head(context, &encoder, model, &transported, &normalized, &logits)?;
             Ok(())
         })();
         encoder.end();
@@ -1768,12 +1810,9 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
                 index,
             });
         }
-        let scores = exact_vocabulary_top_k(&full_logits, top_k)?;
-        Ok(WorkspaceLensFullVocabularyReadoutWithVector {
-            readout: WorkspaceLensFullVocabularyReadout {
-                rms_denominator_f64_recomputed,
-                scores,
-            },
+        Ok(WorkspaceLensFullVocabularyLogitsWithVector {
+            logits: full_logits,
+            rms_denominator_f64_recomputed,
             transported_values,
         })
     }
@@ -1890,6 +1929,155 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
             hidden_size,
             values,
             diagnostics,
+        })
+    }
+}
+
+impl WorkspaceLensFullVocabularyLogitsWithVector {
+    fn into_topk(
+        self,
+        top_k: usize,
+    ) -> Result<WorkspaceLensFullVocabularyReadoutWithVector, WorkspaceLensError> {
+        let scores = exact_vocabulary_top_k(&self.logits, top_k)?;
+        Ok(WorkspaceLensFullVocabularyReadoutWithVector {
+            readout: WorkspaceLensFullVocabularyReadout {
+                scores,
+                rms_denominator_f64_recomputed: self.rms_denominator_f64_recomputed,
+            },
+            transported_values: self.transported_values,
+        })
+    }
+}
+
+#[cfg(test)]
+mod scalar_logits_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_topk_preserves_logit_bits_and_vector() {
+        let full = WorkspaceLensFullVocabularyLogitsWithVector {
+            logits: vec![-0.0, 3.25, -7.0, 1.5],
+            transported_values: vec![0.125, -2.0],
+            rms_denominator_f64_recomputed: 1.417,
+        };
+        let top = full.clone().into_topk(4).unwrap();
+        for score in top.readout.scores {
+            assert_eq!(
+                score.logit.to_bits(),
+                full.logits[score.token_id as usize].to_bits()
+            );
+        }
+        assert_eq!(top.transported_values, full.transported_values);
+        assert_eq!(
+            top.readout.rms_denominator_f64_recomputed,
+            full.rms_denominator_f64_recomputed
+        );
+    }
+
+    #[test]
+    fn scalar_topk_rejects_nonfinite_logits() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(exact_vocabulary_top_k(&[0.0, value], 1).is_err());
+        }
+    }
+}
+
+impl WorkspaceLensPassiveSession<'_, '_> {
+    pub fn deployed_logits_from_post_block_residual(
+        &self,
+        source_residual: &[f32],
+    ) -> Result<WorkspaceLensFullVocabularyLogitsWithVector, WorkspaceLensError> {
+        let arch = self.inner.arch();
+        let hidden_size = arch.hidden_size as usize;
+        let vocab_size = arch.vocab_size as usize;
+        if source_residual.len() != hidden_size {
+            return Err(WorkspaceLensError::ActivationSize {
+                name: "full readout source residual",
+                got: source_residual.len(),
+                expected: hidden_size,
+            });
+        }
+        if let Some(index) = source_residual.iter().position(|value| !value.is_finite()) {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
+                name: "full readout source residual",
+                index,
+            });
+        }
+        let model = self.inner.model.metal_model();
+        validate_scalar_readout_tail(model, hidden_size, vocab_size)?;
+        let hidden_bytes = checked_product(hidden_size, std::mem::size_of::<f32>())?;
+        let logits_bytes = checked_product(vocab_size, std::mem::size_of::<f32>())?;
+        let peak_bytes = hidden_bytes
+            .checked_mul(3)
+            .and_then(|bytes| bytes.checked_add(logits_bytes.checked_mul(2)?))
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        enforce_workspace_lens_byte_budget("full-vocabulary identity readout", peak_bytes)?;
+
+        let context = self.inner.model.context();
+        let allocation = context.begin_allocation_transaction();
+        admit_scalar_observer_allocations(
+            context,
+            &[hidden_bytes, hidden_bytes, logits_bytes],
+            hidden_bytes
+                .checked_add(logits_bytes)
+                .ok_or(WorkspaceLensError::SizeOverflow)?,
+        )?;
+        let transported = MetalTensor::from_bytes(
+            context,
+            bytemuck::cast_slice(source_residual),
+            vec![hidden_size as u64],
+            GgmlType::F32,
+        )?;
+        let normalized = MetalTensor::zeros_f32(context, vec![hidden_size as u64])?;
+        let logits = MetalTensor::zeros_f32(context, vec![vocab_size as u64])?;
+        drop(allocation);
+        let command = context
+            .queue
+            .commandBuffer()
+            .ok_or(WorkspaceLensError::MissingCommandBuffer)?;
+        let encoder = KernelEncoder::begin(&command);
+        let encode_result = (|| -> Result<(), WorkspaceLensError> {
+            encode_scalar_lens_head(context, &encoder, model, &transported, &normalized, &logits)?;
+            Ok(())
+        })();
+        encoder.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        validate_completed_command(&command)?;
+
+        let transported_values = read_f32_fallible(
+            &transported,
+            hidden_size,
+            "full readout transported residual",
+        )?;
+        if let Some(index) = transported_values
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
+                name: "full readout transported residual",
+                index,
+            });
+        }
+        let rms_denominator_f64_recomputed = (transported_values
+            .iter()
+            .map(|value| f64::from(*value) * f64::from(*value))
+            .sum::<f64>()
+            / hidden_size as f64
+            + f64::from(RMS_EPS))
+        .sqrt() as f32;
+        let full_logits = read_f32_fallible(&logits, vocab_size, "full readout logits")?;
+        if let Some(index) = full_logits.iter().position(|value| !value.is_finite()) {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
+                name: "full readout logits",
+                index,
+            });
+        }
+        Ok(WorkspaceLensFullVocabularyLogitsWithVector {
+            logits: full_logits,
+            rms_denominator_f64_recomputed,
+            transported_values,
         })
     }
 }

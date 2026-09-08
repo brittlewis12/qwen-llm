@@ -86,10 +86,25 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         self.sequence.ensure_can_append(token_ids.len())?;
         let hidden_size = arch.hidden_size as usize;
         let capture_len = checked_product(capture_layers.len(), hidden_size)?;
+        enforce_workspace_lens_byte_budget(
+            "passive prompt capture",
+            checked_product(capture_len, 8)?,
+        )?;
+        let context = self.model.context();
+        let allocation = context.begin_allocation_transaction();
+        let capture_bytes = checked_product(capture_len, std::mem::size_of::<f32>())?;
+        let host_bytes = capture_bytes
+            .checked_add(checked_product(
+                capture_layers.len(),
+                std::mem::size_of::<u32>(),
+            )?)
+            .ok_or(WorkspaceLensError::SizeOverflow)?;
+        admit_scalar_observer_allocations(context, &[capture_bytes], host_bytes)?;
         let capture = MetalTensor::zeros_f32(
             self.model.context(),
             vec![u64::try_from(capture_len).map_err(|_| WorkspaceLensError::SizeOverflow)?],
         )?;
+        drop(allocation);
         let forward = self.model.forward();
         for (position, &token_id) in token_ids.iter().enumerate() {
             let position_u32 = u32::try_from(position)
@@ -97,15 +112,21 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
             let state = unsafe { self.sequence.metal_session_mut() };
             state.ensure_usable()?;
             let result = if position + 1 == token_ids.len() {
-                forward.single_token_with_multi_hidden_no_tail(
+                forward.single_token_with_post_block_interventions_no_tail(
                     token_id,
                     position_u32,
                     state,
                     capture_layers,
                     &capture,
+                    &[],
                 )
             } else {
-                forward.single_token_no_tail(token_id, position_u32, state)
+                forward.single_token_with_post_block_interventions_no_capture_no_tail(
+                    token_id,
+                    position_u32,
+                    state,
+                    &[],
+                )
             };
             if let Err(error) = result {
                 state.poison("full-vocabulary prompt capture forward failed");
@@ -607,5 +628,29 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
             _ => return Err(WorkspaceLensError::InvalidLinearRole { layer: index, role }),
         };
         Ok(tensor)
+    }
+}
+
+impl WorkspaceLensPassiveSession<'_, '_> {
+    pub fn forward_prompt_last_post_block_residuals(
+        &mut self,
+        token_ids: &[i32],
+        capture_layers: &[u32],
+    ) -> Result<WorkspaceLensPromptLastCapture, WorkspaceLensError> {
+        let capture = self
+            .inner
+            .forward_prompt_last_post_block_residuals(token_ids, capture_layers)?;
+        if let Some(index) = capture
+            .capture
+            .values
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
+                name: "passive post-block residuals",
+                index,
+            });
+        }
+        Ok(capture)
     }
 }

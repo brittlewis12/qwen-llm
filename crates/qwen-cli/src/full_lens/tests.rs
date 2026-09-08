@@ -40,7 +40,9 @@ fn canonical_payload() -> FullPayload {
 fn test_read_full_args() -> ReadFullArgs {
     ReadFullArgs {
         model: "model.gguf".into(),
-        full_lens: "full-lens".into(),
+        full_lens: Some("full-lens".into()),
+        logit_lens: false,
+        full_output: None,
         prompt: Some("hello".into()),
         token_ids: Vec::new(),
         no_special_tokens: false,

@@ -450,7 +450,12 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         env!("QWEN_BUILD_STAMP_ERROR"),
     )?;
     validate_read_args(&args)?;
-    let full_lens = canonical_real_directory(&args.full_lens, "Muse full-transport artifact")?;
+    let full_lens = canonical_real_directory(
+        args.full_lens
+            .as_deref()
+            .context("--full-lens is required")?,
+        "Muse full-transport artifact",
+    )?;
     let manifest_path = full_lens.join(artifact::MANIFEST_NAME);
     let probe: SchemaProbe = super::read_json_file(&manifest_path)?;
     let read_artifact = match probe.schema.as_str() {
@@ -515,6 +520,13 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         bound.config.context_length,
     );
     let layers = select_layers(&args.layers, read_artifact.source_layers())?;
+    super::full_output::retained_metadata_budget(
+        layers.len(),
+        bound.config.hidden_size as usize,
+        token_ids.len(),
+        args.top_k,
+        args.include_vector,
+    )?;
     let mut capture_layers = layers.clone();
     capture_layers.sort_unstable();
     let capture_slots = capture_layers
@@ -571,6 +583,11 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         "Muse full-readout capture metadata is inconsistent"
     );
 
+    let mut bundle = super::full_output::Bundle::optional(
+        args.full_output.as_deref(),
+        &layers,
+        model_config.vocab_size as usize,
+    )?;
     let mut results = Vec::new();
     results
         .try_reserve_exact(layers.len())
@@ -608,6 +625,9 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             .deployed_logits_from_post_block_residual(&transported)
             .with_context(|| format!("apply Muse deployed output tail at source layer {layer}"))?;
         let output_tail_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        if let Some(bundle) = &mut bundle {
+            bundle.row(results.len(), &logits)?;
+        }
         let ranked = top_k_logits(&logits, args.top_k)?;
         let mut top_k = Vec::with_capacity(ranked.len());
         for (rank, (token_id, logit)) in ranked.into_iter().enumerate() {
@@ -768,6 +788,9 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             super::serialize_json_pretty_bounded(&document, "Muse published full readout")?
         }
     };
+    if let Some(bundle) = bundle {
+        bundle.publish(&serde_json::from_slice::<serde_json::Value>(&bytes)?)?;
+    }
     if let Some(output) = args.output {
         let output = super::resolve_output_path(&output)?;
         super::publish_immutable(&output, &bytes)?;

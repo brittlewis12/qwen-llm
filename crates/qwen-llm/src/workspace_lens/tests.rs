@@ -2100,3 +2100,37 @@ fn dense_ffn_vjp_preserves_the_identity_residual() {
         assert_eq!(actual, grad_output, "identity branch changed in {rule:?}");
     }
 }
+#[test]
+#[ignore = "requires Metal and QWEN_WORKSPACE_LENS_MODEL; supports native dense or MoE"]
+fn passive_scalar_last_layer_matches_deployed_inference() {
+    use crate::runtime::{LoadedModelConfig, ModelLoadIntent, Runtime, SequenceConfig};
+
+    let runtime = Runtime::metal().unwrap();
+    let loaded = runtime
+        .load_model_with_intent(
+            std::env::var("QWEN_WORKSPACE_LENS_MODEL").unwrap(),
+            LoadedModelConfig::default(),
+            ModelLoadIntent::SinglePassAnalysis,
+        )
+        .unwrap();
+    let mut observed = loaded.create_sequence(SequenceConfig::new(2)).unwrap();
+    let mut ordinary = loaded.create_sequence(SequenceConfig::new(2)).unwrap();
+    let mut passive = loaded
+        .passive_workspace_lens_session(&mut observed)
+        .unwrap();
+    let capture = passive
+        .forward_prompt_last_post_block_residuals(&[1, 2], &[loaded.arch().n_layer - 1])
+        .unwrap();
+    let readout = passive
+        .deployed_logits_from_post_block_residual(&capture.capture.values)
+        .unwrap();
+    assert_eq!(readout.transported_values, capture.capture.values);
+    let forward = loaded.forward();
+    let state = unsafe { ordinary.metal_session_mut() };
+    forward.single_token(1, 0, state).unwrap();
+    let expected = forward.single_token(2, 1, state).unwrap();
+    assert_eq!(readout.logits.len(), loaded.arch().vocab_size as usize);
+    for (actual, expected) in readout.logits.iter().zip(expected) {
+        assert!((actual - expected).abs() <= 1e-4 * expected.abs().max(1.0));
+    }
+}

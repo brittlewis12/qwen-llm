@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Online Prefill Whole-Phase PASS / CLI 178 Tok/s
+
+- `e9f94539` packed query-row online attention passes10 poisoned-output, offset,
+  causal/window and analyticCPU cases. Three primitive cells save88.055/90.349/
+  90.925%GPU with stable controls; no new scratch. Reviewer caught/fixed an
+  inherited-output oracle before execution. No prior HOLD/KILL is reopened.
+- `c7b90b75` wholefreshprefill ABBA against delivered matrix-only passes:
+  6229 mean76.151 ->34.458s,54.750% saved (bothpairs55.273/54.229),180.769tok/s.
+  1024 saves14.460%,204.299tok/s; A spreads0.293/1.794% pass5%. One860.62s packet.
+- All17greedy/logit gates pass against original math. FullactiveKV candidate6229
+  cosine0.999998997795/RMS0.001415855 passes aggregate gates; maxabs0.828125 is
+  reported, not elementwise-bounded. Prefixes staybitwiseimmutable; retainedtimed
+  endpoints reproduce respectiveoraclesbitwise. SeparatewarmABBA followsoracles.
+- `72bf971d` delivers samekernel through MATRIX_PREFILL optin, nowreported
+  packed_matrix_online; originaldefault unchanged. Actualruntime short16/31/128
+  qualificationPASS13.42s. RealCLI6229/17outputs prefill34.958s/178.183tok/s,
+  generation1.026s, process36.540s, samebytes/fingerprint/stop, noallocationdelta.
+  Cleanembeddedsource. Laterunusedimportcleanup/check passes; no timingrerun.
+- Independent reviewpasses. Wholewarmresidentprefill authority, not cold/HTTP or
+  sampledexactness; CLI isdeliverydiagnostic. Next: separate actualprefill eligibility
+  fromcapacityreservation, qualifybeyond7168, refreshdeliveredgraphattribution.
+  Evidence: `docs/bench/2026-09-08-muse-math/RESULT.md`.
+
 ## 2026-09-08 - Muse Matrix Prefill CLI Delivery / Attention Attribution
 
 - `ce59bc4e` exposes default-off `QWEN_MUSE_MATRIX_PREFILL=1`, Q8/unifiedM4Max,

@@ -1,4 +1,4 @@
-# Muse fresh math: numerical transfer PASS, attention dominates decode
+# Muse fresh prefill and decode: bounded opt-in delivery
 
 Production Muse packed Q8 projections use exact batched GEMV, not matrix
 multiplication. `packed_exact+scalar_tail` at 6229 tokens means 6224 packed rows
@@ -226,3 +226,96 @@ oracles followed by actual fresh-prefill composition and controlled timing if it
 survives. Old singleton-online KILL and split-primitive HOLD remain unchanged.
 Raw `prefill-01*`, `cli-prefill-M-01*` and committed-source builds remain under
 `target/profiles/muse-live-prefix/`.
+
+## Batched online attention primitive PASS
+
+`e9f94539` uses one SIMDgroup per H128 query with the packed row axis supplying
+parallelism. No score array or new scratch. This is not the rejected singleton
+online selector: a packed chunk supplies many more independent query groups.
+Ten cases cover1/16/80/128 rows, nonzero bases/views, full/sliding attention,
+2048-window crossing, and the7168 materialized boundary. The zero-query crossing
+case also matches an independent CPU average of F16-rounded values. Review caught
+an oracle that could inherit A's output; candidate payloads are now NaN-poisoned
+before every untimed B oracle, preserving surrounding guards. All outputs finite,
+worst cosine0.99999999998449/maxdelta1.4901161e-7 pass >=0.999999/<=5e-4.
+
+| Base / rows / window | GPU ABBA ms | Mean saved | A spread |
+| --- | --- | ---: | ---: |
+| 896 /128 /full | 6.893682 /0.823333 /0.813453 /6.808734 | 88.055% | 1.240% |
+| 6144 /80 /full | 34.318266 /3.324156 /3.284594 /34.156724 | 90.349% | 0.472% |
+| 6144 /80 /2048 | 12.101260 /1.101953 /1.100818 /12.171276 | 90.925% | 0.577% |
+
+Each cell has separate warm ABBA after its oracle, then eight-dispatch measured
+ABBA. All mean/both-pair50% gates and5% A controls pass. One2.16s leased screen;
+this legitimately admits the following whole-prefill packet, not prior HOLD repair.
+
+## Whole fresh prefill PASS
+
+`c7b90b75` compares delivered matrix-only prefill (A) with matrix plus packed
+online attention (B). One resident model, one shared candidate session with split
+scratch present in both arms, and a separate original-math reference session.
+Native Current1024 prefix and full6229 prompt; all prior fixture identities apply.
+
+Before timing, exact reference produces an endpoint plus16 continuation logits.
+Both candidate oracles start with NaN-poisoned KV. All active K/V, including older
+sliding-layer storage, are compared in place against exact: cosine>0.9999 and
+relative RMS<0.01; max absolute delta is reported, not gated. Prefix hashes remain
+bitwise unchanged through16 continuations. The online hook covers only prefill;
+A/B continuations use the same shipped split decode, exact reference original math.
+All17 greedy IDs and inherited endpoint/continuation logit gates pass. At6229 B
+endpoint cosine0.999999991167, RMS0.000140731, maxdelta0.023641586. Its full active
+KV cosine0.999998997795/RMS0.001415855 pass, maxdelta0.828125 is not an elementwise
+bound. Matrix-only KV maximum is1.26171875; neither proves universal error ordering.
+
+After all per-cell payload oracles: separate warm ABBA, then measured ABBA. Each
+arm resets to zero and recomputes the entire prompt through completed full-logit
+readback. No profiling, KV readbacks, hashes or numerical comparisons between
+measured arms. Retained timed endpoints match their corresponding oracles bitwise
+after the packet. Rendering/tokenization, first-token selection, load and output
+delivery are outside this whole-prefill work unit.
+
+| Prompt | Whole-prefill ABBA ms | A mean -> B mean ms | Saved | A spread | Prefill tokens/s A -> B |
+| --- | --- | --- | ---: | ---: | --- |
+| 1024 | 5912.132083 /5037.974834 /4986.529167 /5806.983917 | 5859.558000 ->5012.252001 | 14.460% | 1.794% | 174.757 ->204.299 |
+| 6229 | 76039.950625 /34010.113791 /34906.517834 /76262.897333 | 76151.423979 ->34458.315813 | 54.750% | 0.293% | 81.798 ->180.769 |
+
+Frozen primary >=35% mean/both-pair savings passes (pairs55.273/54.229%). Short
+guard <=3% regression passes (pairs14.786/14.129% saved); both A spreads<=5% pass.
+One860.62s packet. No new buffers, KV copies or whole-model wiring. Reference logits
+add CPU storage. The preflight records no thermal/performance warning; it is not
+proof of a globally quiet host. This is warm-resident fresh-prefill authority,
+not process-cold/HTTP or sampled-distribution qualification. No packet rerun.
+
+## Online prefill real-runner delivery PASS
+
+`72bf971d` moves the same kernel to the product metallib and explicitly selects
+it through the existing `QWEN_MUSE_MATRIX_PREFILL=1` option. It now means matrix
+plus online packed attention, reported as `packed_matrix_online`. Matrix-only
+remains an internal reference. Default original math, Q8/M4 Max/capacity<=7168
+bounds, scalar tails, split-decode selection and admission are unchanged.
+
+Actual load-options/create-runner/checkpoint-prefill regression at16/31/128 passes
+all17 greedy/logit comparisons and rejects capacity7169 before allocation (13.42s).
+One full CLI run with both opt-ins,6229/high/temp0/seed42/17outputs16transitions:
+prefill34958.459958ms (**178.183tok/s**), generation1026.474917ms (15.587 transitions/s;
+CLI's16.562 emitted-tokens/s has17 in its numerator), external process36.539600s.
+Stdout, token fingerprint and token_limit finish match the retained exact fixture.
+Session377176064B/aggregate30245601280B remain unchanged. Embedded source72bf971d
+is clean and matches acquisition; later30f87aee removes only an unused test import,
+with final library test typecheck passing and no GPU rerun.
+
+This CLI check closes delivery, not another controlled/cold-conditioned timing
+claim. The earlier exact CLI took about220s, matrix-only77.8s and delivered online
+36.5s on this fixture; those separate acquisitions are not a synthetic ABBA.
+Independent implementation/result review passes. Raw `packed-online-01*`,
+`whole-prefill-01*`, their mechanical scores, `online-delivery-01*`, `cli-prefill-O-01*`
+and all builds remain under the same profile directory. Old singleton-online KILL
+and split-decode primitive HOLD remain unchanged.
+
+Next user-facing constraint: capacity is still coupled to prefill eligibility.
+A6884-token prompt plus392 outputs requests7275 positions and currently rejects
+this opt-in, even though the prompt itself fits. Decouple reservation from actual
+absolute prefill end only with boundary qualification; do not silently widen math.
+Beyond7168 full packed attention still falls back to per-row dispatches. Wider
+online context and a new delivered-graph profile are next; the old69% attention
+share must not be used as the remaining post-optimization profile.

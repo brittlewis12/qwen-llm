@@ -156,28 +156,34 @@ Decision rules:
 ## Muse Fresh / Decode Priority - 2026-09-08
 
 The active Muse priority is **fresh prefill and scalar decode**, not further cache
-work. Current production packed Q8 projections are exact batched GEMV. The existing
-test-only matrix path passes longer numerical/16-greedy tests: full native6229
-prompt214.891 ->76.096s in a diagnostic A/B, with no production promotion yet.
-Actual shared-graph decode attribution at6229 assigns56.175/115.877ms GPU to
-attention and44.173ms to FFN. The bottleneck is measured, not inferred from the
-`scalar_tail` label (only five remainder tokens at6229).
+work. Original default math remains exact batched Q8 GEMV. Bounded opt-ins now
+deliver matrix/online prefill and split-position decode: actual6229 CLI prefill
+178.183tok/s and generation15.587 transitions/s. Both phases have separate
+whole-phase qualification; these are numerical, not bitwise or sampled-exact paths.
+Earlier original-decode and matrix-only-prefill attribution identified the work
+removed. Refresh attribution before ranking the remaining kernels; the scalar_tail
+label still represents only five remainder tokens at6229.
 
-1. Attack packed attention with batched H128 online query-row parallelism. Matrix
-   prefill is now delivered defaultoff (`QWEN_MUSE_MATRIX_PREFILL=1`): realCLI6229
-   prefill76.224s/81.72tok/s, same17greedy outputs when composed with splitdecode.
-   Fiveprefix numerical composition passes. Actual late6144+80 chunk attributes
-   955.236/1384.176ms GPU to full+sliding attention (~69%). Falsify masking/window
-   and numerical behavior cheaply, then spend controlled whole-prefill timing on
-   the improved composed path. Preserve exact math and sampled-equivalence caveats.
-2. Retain bounded split H128 decode opt-in `QWEN_MUSE_SPLIT_DECODE=1`: actualCLI
+1. Decouple capacity reservation from actual absolute prefill eligibility. Online
+   matrix prefill is delivered: whole6229 ABBA76.151 ->34.458s (54.750%saved,
+   180.769tok/s),1024 saves14.460%. ActualCLI178.183tok/s, same17outputs/fingerprint.
+   CurrentQ8/M4Max optin still rejects capacity>7168:6884prompt+392outputs=7275
+   loses eligibleprefill. Qualify this exact request through the decode boundary;
+   retainfullcapacityadmission and boundeachprefillcall's actualend, nottail length.
+2. Qualify packed online attention beyond7168. Full layers still fall back to
+   per-row dispatches and the host rejects longer full-visible packed ranges.
+   This is a separate context expansion, not just removing a capacity check.
+3. Refresh one actual delivered packed-graph profile before choosing FFN work.
+   The previous69%attention share predates online attention; it does not establish
+   today's remaining bottleneck. A new profile may move this ahead of range expansion.
+4. Retain bounded split H128 decode opt-in `QWEN_MUSE_SPLIT_DECODE=1`: actualCLI
    17outputs/16transitions generation1858.782 ->1011.202ms, sameoutput/stopreason.
    This diagnostic closes delivery, not newtimingpromotion. Warm16-forward ABBA
    remains authority:6229 saves45.647%,1024 saves20.599%. Prefill unchanged, scratch
    session-owned/admitted540672B; Q8/unifiedM4Max generatedpositions[1024,7168) only.
    Existing online overlap is KILL; split primitive remains HOLD on2048 control
    noise despite independent whole-forward PASS. Widen only with new qualification.
-3. Retain the completed live-prefix opt-in (6269-token repeated-turn backend
+5. Retain the completed live-prefix opt-in (6269-token repeated-turn backend
    216.803 ->3.827s), but do not present avoided prefill as faster fresh inference.
 
 Evidence: `docs/bench/2026-09-08-muse-math/RESULT.md` and

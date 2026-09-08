@@ -3036,6 +3036,9 @@ mod native_embedding_pilot;
 
 #[cfg(test)]
 mod snapshot_transfer_pilot;
+
+#[cfg(test)]
+mod snapshot_segments_pilot;
 mod residency;
 mod session;
 mod support;

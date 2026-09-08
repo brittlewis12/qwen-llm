@@ -8,10 +8,10 @@ use objc2_metal::MTLCommandBufferStatus;
 use serde_json::{Value, json};
 use std::time::Instant;
 
-struct Section {
-    name: &'static str,
-    layer_bytes: usize,
-    layers: Vec<MetalTensor>,
+pub(super) struct Section {
+    pub(super) name: &'static str,
+    pub(super) layer_bytes: usize,
+    pub(super) layers: Vec<MetalTensor>,
 }
 
 enum Snapshot {
@@ -19,7 +19,10 @@ enum Snapshot {
     Gpu(Vec<MetalTensor>),
 }
 
-fn allocate(ctx: &MetalContext, shapes: &[(&'static str, usize, usize)]) -> Vec<Section> {
+pub(super) fn allocate(
+    ctx: &MetalContext,
+    shapes: &[(&'static str, usize, usize)],
+) -> Vec<Section> {
     shapes
         .iter()
         .map(|&(name, count, layer_bytes)| {
@@ -35,7 +38,7 @@ fn allocate(ctx: &MetalContext, shapes: &[(&'static str, usize, usize)]) -> Vec<
         .collect()
 }
 
-fn payload(t: &MetalTensor) -> &[u8] {
+pub(super) fn payload(t: &MetalTensor) -> &[u8] {
     assert_eq!(t.buffer.storageMode(), objc2_metal::MTLStorageMode::Shared);
     assert!(t.offset + t.n_bytes() <= t.buffer.length() as u64);
     unsafe {
@@ -46,7 +49,7 @@ fn payload(t: &MetalTensor) -> &[u8] {
     }
 }
 
-fn set_first(t: &MetalTensor, byte: u8) {
+pub(super) fn set_first(t: &MetalTensor, byte: u8) {
     assert!(!payload(t).is_empty());
     // Only used in the synchronous immutability oracle, never during GPU work.
     unsafe {

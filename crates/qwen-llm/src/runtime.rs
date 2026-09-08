@@ -55,6 +55,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+#[path = "runtime_snapshot_tests.rs"]
+mod snapshot_tests;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("metal runtime: {0}")]

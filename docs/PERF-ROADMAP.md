@@ -182,8 +182,13 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    not a universal ban on this differentH128/G16 ownership mechanism.
    FirstF32 tiled primitive saves~34% againstcurrentonline; live8K aggregate checks
    pass but new uncalibrated per-row RMSscreenfails0.002921>0.002. No promotion;
-   diagnose actual same-input attention versus downstream amplification before
-   further timing or32K extension. Preserve failure rather than rescore its gate.
+   same-input52-layer diagnosis now bounds observed deltas near5.2e-5; N2 shadows
+   match consumedN128 outputs, and allfive selected deployed-logit probes PASS.
+   Preserve original failure, but do not treat the uncalibrated cutoff as a quality
+   boundary. Next: frozen-kernel32K live chunk/logit/KV/shortcontinuation transfer,
+   rowwise residuals diagnostic, no full slow-prefix reference. Persisted8064 state
+   reduces diagnostic turnaround51.37->5.47s; extend it once and retain32K replay
+   state. FasterPV is a separate subsequent candidate, not a confounded rescue.
 2. Structural FFN work/byte reduction:8K packed FFN57.0%,32K decode64.96% (44.200ms).
    Current packedN128 already usesQ8 MMA; repeated local tile/fusion changes need
    a new mechanism. Decode logical FFN payload22.029GB/44.2ms is498GB/s equivalent

@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Tiled Same-Input Diagnosis / Selected Readouts PASS
+
+- `7106f3d2` test-only packed observer saves8064-prefix429391872B once; replay
+  identity checks model metadata/tokens/geometry/math and prefix hash. Five capture
+  buffers fit conservative16MiB GPU allowance;128MiB CPU allowance, no prefix copy.
+  Plain/captured endpoints and activeKV bitwise; N2 shadow outputs match the N128
+  consumed row84/85 outputs bitwise. Poisoned captures complete, prefix immutable.
+- Across52layers on both A/B trajectories,104 identical-input comparisons have
+  worst relativeRMS3.976e-6/maxdelta5.198e-5. IndependentF64 on each pair's largest
+  disagreement head: worst online4.697e-5, tiled3.928e-5. These selected heads are
+  not a bound on every head's F64 error. No evidence here of a tiled indexing defect.
+- All128 final rows retained:84/113/119 exceed the prior uncalibrated0.002 residual
+  screen, maximum0.002920887. Largest observed row84 increases occur after FFNs23/33;
+  this locates amplification, not its cause. F16 causality remains unproven.
+- `5732a49e` deployed-tail probes of rows84/85/113/119/127 pass existing logit
+  cosine>0.99999/RMS<0.002/maxabs<0.1, alltop1 equal. Worst RMS0.001142717,
+  maxabs0.07365751. Intermediate-row probes are hypothetical stopping points, not
+  continuation/sampling equivalence. The original per-row packet remains FAIL.
+- Initial diagnostic51.37s including priming; persisted-state readout diagnostic
+  5.47s. These are experiment turnaround, NOT inference speedup measurements.
+  Build01 failed on JSON macro expression; attempted stale executable selected
+  zero tests (noGPU), retained as invalid attempt01. Fixed expression/build and
+  driver now requires exactly one listed test. Valid attempts02/03 retained in
+  `target/profiles/muse-live-prefix`; reusable inputs in `target/profiles/muse-tiled-diagnostic`.
+- Independent review recommends freezing this kernel for separately scoped32K
+  live chunk/logit/KV/continuation transfer before changing PV. No rollout or
+  whole-prefill speedup claim; primitive savings and old failure remain separate.
+
 ## 2026-09-08 - Muse Tiled Live Transfer FAIL / Numerical Diagnosis Required
 
 - `8522c9f4` repeated primitive PASS0.43s; tiled-only independent context oracle

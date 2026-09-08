@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Prefill Eligibility No Longer Depends On Reservation
+
+- `a23c3b11` permits larger admitted capacities while bounding both optimized
+  projections/attention by each chunk's absolute end<=7168. Straddling/beyond
+  chunks retain original math; no long-prompt arithmetic expansion yet.
+- `2b94a341` adapted CurrentMarcus6884 prefix +391 teacher-forced transitions to
+  capacity7275 passes all inherited logit gates and all391 top1 comparisons.
+  Prefix immutable; incremental7160/7168+16 fallbacks match original logits/KV
+  bitwise. One370.15s numerical regression, not391 generated-token equivalence.
+- ActualCLI6229/17 with32768reservation retains samebytes/fingerprint/stop and
+  179.21prefilltok/s. Fullsession1,789,444,096B is admitted/accounted; no32K-prompt
+  performance claim. Initialfixturefailure precedesGPU, retained and repaired by
+  joiningadjacentroles before nativeATEM rendering; CPUidentity checked first.
+  Evidence: `docs/bench/2026-09-08-muse-long-context/RESULT.md`.
+
 ## 2026-09-08 - Muse Online Prefill Whole-Phase PASS / CLI 178 Tok/s
 
 - `e9f94539` packed query-row online attention passes10 poisoned-output, offset,

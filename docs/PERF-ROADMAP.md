@@ -164,15 +164,17 @@ Earlier original-decode and matrix-only-prefill attribution identified the work
 removed. Refresh attribution before ranking the remaining kernels; the scalar_tail
 label still represents only five remainder tokens at6229.
 
-1. Decouple capacity reservation from actual absolute prefill eligibility. Online
-   matrix prefill is delivered: whole6229 ABBA76.151 ->34.458s (54.750%saved,
-   180.769tok/s),1024 saves14.460%. ActualCLI178.183tok/s, same17outputs/fingerprint.
-   CurrentQ8/M4Max optin still rejects capacity>7168:6884prompt+392outputs=7275
-   loses eligibleprefill. Qualify this exact request through the decode boundary;
-   retainfullcapacityadmission and boundeachprefillcall's actualend, nottail length.
-2. Qualify packed online attention beyond7168. Full layers still fall back to
+1. Qualify packed online attention beyond7168. Full layers still fall back to
    per-row dispatches and the host rejects longer full-visible packed ranges.
-   This is a separate context expansion, not just removing a capacity check.
+   Use an authentic8K live chunk before complete fresh8K qualification, then32K.
+   Keep matrix-range expansion explicit; chunk evidence alone cannot establish
+   accumulated full-prefill numerical behavior or end-to-end throughput.
+2. Retain completed capacity decoupling:6884+391 teacher-forced transitions pass,
+   including the split-decode boundary and bitwise straddling-prefill fallback.
+   ActualCLI6229/17 with32768reservation retains179.21prefilltok/s and sameoutput;
+   fullcapacityadmission unchanged. Optimized chunk absoluteend still<=7168.
+   This fixes reservation eligibility, not32K-prompt arithmetic. Whole6229 online
+   prefill ABBA54.750%saved/180.769tok/s remains the existing timing authority.
 3. Refresh one actual delivered packed-graph profile before choosing FFN work.
    The previous69%attention share predates online attention; it does not establish
    today's remaining bottleneck. A new profile may move this ahead of range expansion.

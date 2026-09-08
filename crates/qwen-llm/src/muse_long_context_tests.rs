@@ -3,8 +3,25 @@ fn long_context_tokens(path: &str, config: &MuseGlimmerConfig) -> Vec<u32> {
         "../../../docs/bench/tokenizer-messages/current-marcus-long.json"
     ))
     .unwrap();
+    let mut messages: Vec<crate::muse_glimmer_prompt::MuseGlimmerMessage> = Vec::new();
+    for message in request.messages {
+        assert!(
+            message.reasoning_content.is_none()
+                && message.recipient.is_none()
+                && message.end_turn.is_none()
+                && message.tool_calls.is_empty()
+        );
+        if let Some(last) = messages.last_mut()
+            && last.role == message.role
+        {
+            last.content.push_str("\n\n");
+            last.content.push_str(&message.content);
+        } else {
+            messages.push(message);
+        }
+    }
     let rendered = crate::muse_glimmer_prompt::render_muse_glimmer_atem_prompt_annotated(
-        &request.messages,
+        &messages,
         &crate::muse_glimmer_prompt::MuseGlimmerPromptOptions {
             profile: config.chat_template_profile,
             add_generation_prompt: false,
@@ -18,11 +35,19 @@ fn long_context_tokens(path: &str, config: &MuseGlimmerConfig) -> Vec<u32> {
     assert!(ids.len() >= 32784);
     eprintln!(
         "MUSE_LONG_JSON {}",
-        serde_json::json!({"kind":"fixture", "name":"native Current Marcus transcript prefixes; embedded thinking retained as content", "total_tokens":ids.len(), "token_sha256":crate::tokenizer::token_ids_sha256_i32le(&ids)})
+        serde_json::json!({"kind":"fixture", "name":"native Current Marcus transcript prefixes; adjacent roles joined with two newlines; embedded thinking retained as content", "total_tokens":ids.len(), "token_sha256":crate::tokenizer::token_ids_sha256_i32le(&ids)})
     );
     ids.into_iter()
         .map(|id| u32::try_from(id).unwrap())
         .collect()
+}
+
+#[test]
+#[ignore = "CPU-only authenticated Muse long fixture identity"]
+fn muse_long_fixture_identity() {
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let gguf = GgufFile::open(path).unwrap();
+    long_context_tokens(path, &MuseGlimmerConfig::from_gguf(&gguf).unwrap());
 }
 
 fn long_context_prefix_hash(session: &MuseGlimmerTextSession, end: usize) -> blake3::Hash {

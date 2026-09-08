@@ -433,6 +433,41 @@ fn tiled_prefill_numerical_diagnostic() {
             serde_json::json!({"kind":"layer_residual","layer":slot/6,"stage":if slot/3%2==0 {"post_attention"}else{"post_ffn"},"row":([84,85,127][slot%3]),"relative_rms":comparison.relative_rms,"max_abs":comparison.max_abs,"reference_norm":a.iter().map(|&x|(x as f64).powi(2)).sum::<f64>().sqrt()})
         );
     }
+    for row in [84, 85, 113, 119, 127] {
+        let mut readouts = Vec::new();
+        for residual in &finals {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    residual[row * 6656..(row + 1) * 6656].as_ptr(),
+                    (session.residual.buffer.contents().as_ptr() as *mut u8)
+                        .add(session.residual.offset as usize) as *mut f32,
+                    6656,
+                );
+            }
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            forward
+                .encode_deployed_output_tail(&encoder, &session)
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+            readouts.push(session.read_logits());
+        }
+        let comparison = compare_logits(&readouts[1], &readouts[0]);
+        eprintln!(
+            "MUSE_DIAGNOSTIC_JSON {}",
+            serde_json::json!({"kind":"selected_row_deployed_readout","row":row,"cosine":comparison.cosine,"relative_rms":comparison.relative_rms,"max_abs":comparison.max_abs,"top1_equal":comparison.reference_argmax==comparison.candidate_argmax})
+        );
+        assert!(
+            comparison.cosine > 0.999_99
+                && comparison.relative_rms < 0.002
+                && comparison.max_abs < 0.1,
+            "selected row readout {row}: {comparison:?}"
+        );
+    }
     for (row, (a, b)) in finals[0]
         .chunks_exact(6656)
         .zip(finals[1].chunks_exact(6656))

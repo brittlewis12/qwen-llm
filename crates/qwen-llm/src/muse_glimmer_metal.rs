@@ -578,14 +578,6 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_online(
     let maximum_visible = sliding_window
         .map(|window| end_position.min(window))
         .unwrap_or(end_position);
-    if maximum_visible > MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS {
-        return bad_shape(
-            KERNEL,
-            format!(
-                "materialized packed attention supports at most {MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS} visible positions, got {maximum_visible}"
-            ),
-        );
-    }
     validate_readable_f32(query, query_elements, "query", KERNEL)?;
     validate_readable_f16(key_cache, cache_elements, "key cache", KERNEL)?;
     validate_readable_f16(value_cache, cache_elements, "value cache", KERNEL)?;
@@ -667,6 +659,14 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_online(
             },
         );
         return Ok(());
+    }
+    if maximum_visible > MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS {
+        return bad_shape(
+            KERNEL,
+            format!(
+                "materialized packed attention supports at most {MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS} visible positions, got {maximum_visible}"
+            ),
+        );
     }
     let pipeline = ctx.pipeline("kernel_muse_glimmer_attn_prefill_f16kv_f32")?;
     let materialized_pipeline = ctx.pipeline("kernel_attn_decode_f16kv")?;

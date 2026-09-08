@@ -1,19 +1,42 @@
 #[test]
 #[ignore = "serial Metal, Muse packed online causal/window and paired kernel screen"]
 fn packed_online_attention_screen() {
+    packed_online_screen(false);
+}
+
+#[test]
+#[ignore = "serial Metal, Muse 8K/32K packed online attention screen"]
+fn packed_online_long_attention_screen() {
+    packed_online_screen(true);
+}
+
+fn packed_online_screen(long: bool) {
     let ctx = MetalContext::new().unwrap();
-    for (base, rows, window, analytic, timed) in [
-        (0, 1, None, false, false),
-        (0, 16, None, false, false),
-        (31, 16, None, false, false),
-        (896, 128, None, false, true),
-        (1920, 128, Some(2048), false, false),
-        (2046, 16, Some(2048), true, false),
-        (6144, 80, None, false, true),
-        (6144, 80, Some(2048), false, true),
-        (7040, 128, None, false, false),
-        (7167, 1, None, false, false),
-    ] {
+    let cases: &[(usize, usize, Option<usize>, bool, bool)] = if long {
+        &[
+            (7160, 16, None, false, false),
+            (8064, 128, None, false, true),
+            (8064, 128, Some(2048), false, false),
+            (32640, 128, None, false, true),
+            (32640, 128, Some(2048), false, true),
+            (32767, 1, None, false, false),
+            (32760, 16, Some(2048), true, false),
+        ]
+    } else {
+        &[
+            (0, 1, None, false, false),
+            (0, 16, None, false, false),
+            (31, 16, None, false, false),
+            (896, 128, None, false, true),
+            (1920, 128, Some(2048), false, false),
+            (2046, 16, Some(2048), true, false),
+            (6144, 80, None, false, true),
+            (6144, 80, Some(2048), false, true),
+            (7040, 128, None, false, false),
+            (7167, 1, None, false, false),
+        ]
+    };
+    for &(base, rows, window, analytic, timed) in cases {
         let end = base + rows;
         let q: Vec<f32> = (0..rows * 4096)
             .map(|i| {
@@ -56,11 +79,46 @@ fn packed_online_attention_screen() {
             let encoder = KernelEncoder::begin(&command);
             with_packed_online(online, || {
                 for _ in 0..chains {
-                    encode_muse_glimmer_attn_prefill_f16kv_f32(
-                        &ctx, &encoder, &q_tensor, &key, &value, &output, rows, base, 32, 2, 128,
-                        window,
-                    )
-                    .unwrap();
+                    if !online
+                        && window.map(|window| end.min(window)).unwrap_or(end)
+                            > MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS
+                    {
+                        for row in 0..rows {
+                            let visible_end = base + row + 1;
+                            let start = window
+                                .map(|window| visible_end.saturating_sub(window))
+                                .unwrap_or(0);
+                            let q_row = q_tensor.view_subrange((row * 4096) as u64, vec![4096]);
+                            let out_row = output.view_subrange((row * 4096) as u64, vec![4096]);
+                            let k_row = key.view_subrange(
+                                (start * 256) as u64,
+                                vec![((visible_end - start) * 256) as u64],
+                            );
+                            let v_row = value.view_subrange(
+                                (start * 256) as u64,
+                                vec![((visible_end - start) * 256) as u64],
+                            );
+                            encode_muse_glimmer_attn_decode_f16kv_f32(
+                                &ctx,
+                                &encoder,
+                                &q_row,
+                                &k_row,
+                                &v_row,
+                                &out_row,
+                                32,
+                                2,
+                                128,
+                                visible_end - start,
+                            )
+                            .unwrap();
+                        }
+                    } else {
+                        encode_muse_glimmer_attn_prefill_f16kv_f32(
+                            &ctx, &encoder, &q_tensor, &key, &value, &output, rows, base, 32, 2,
+                            128, window,
+                        )
+                        .unwrap();
+                    }
                 }
             });
             encoder.end();

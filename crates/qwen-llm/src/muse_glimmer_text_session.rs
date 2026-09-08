@@ -924,6 +924,7 @@ pub struct MuseGlimmerTextForward<'ctx, 'model> {
     packed_q8_mat_mat: bool,
     packed_online_attention: bool,
     packed_prefill_max_end: usize,
+    packed_online_max_end: usize,
 }
 
 pub struct MuseGlimmerPreparedF16Transport {
@@ -1118,6 +1119,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             packed_q8_mat_mat: false,
             packed_online_attention: false,
             packed_prefill_max_end: MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END,
+            packed_online_max_end: MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END,
         })
     }
 
@@ -2105,6 +2107,8 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         let packed = session.packed.views(geometry, rows)?;
         let optimized_range =
             optimized_prefill_range(start_position, rows, self.packed_prefill_max_end);
+        let online_attention = self.packed_online_attention
+            && optimized_prefill_range(start_position, rows, self.packed_online_max_end);
         let encoder = stages.stage("embedding", None);
         encode_get_rows_f32(
             self.ctx,
@@ -2232,7 +2236,9 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             } else {
                 end_position
             };
-            if maximum_visible <= MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS {
+            if online_attention
+                || maximum_visible <= MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS
+            {
                 let (key_cache, value_cache) =
                     session.cache_prefix_views(layer_index, end_position)?;
                 crate::muse_glimmer_metal::encode_muse_glimmer_attn_prefill_with_online(
@@ -2248,7 +2254,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                     geometry.kv_head_count,
                     geometry.head_dim,
                     layer.sliding_attention.then_some(geometry.sliding_window),
-                    self.packed_online_attention && optimized_range,
+                    online_attention,
                 )?;
             } else {
                 for row in 0..rows {

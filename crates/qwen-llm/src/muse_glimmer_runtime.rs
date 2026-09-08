@@ -52,6 +52,9 @@ pub struct MuseGlimmerRuntimeOptions {
     /// Tolerance-qualified H128 attention for ordinary generated tokens at
     /// positions 1024..7168 on the Q8 M4 Max lane. Prefill/lens math is unchanged.
     pub split_decode: bool,
+    /// Numerically qualified Q8 matrix prefill; scalar kernels are unchanged.
+    /// Initially restricted to Q8/M4 Max sessions with capacity <=7168.
+    pub matrix_prefill: bool,
 }
 
 pub struct MuseGlimmerLoadedModel {
@@ -61,6 +64,7 @@ pub struct MuseGlimmerLoadedModel {
     admission: MuseGlimmerRuntimeAdmission,
     observed_weight_bytes: u64,
     device_registry_id: u64,
+    matrix_prefill: bool,
 }
 
 impl MuseGlimmerLoadedModel {
@@ -79,12 +83,17 @@ impl MuseGlimmerLoadedModel {
         options: MuseGlimmerRuntimeOptions,
     ) -> Result<Self, MuseGlimmerRuntimeError> {
         let weight_plan = MuseGlimmerMetalWeightPlan::for_release(ctx, gguf)?;
-        if options.split_decode
+        if (options.split_decode || options.matrix_prefill)
             && (weight_plan.artifact_profile() != MuseGlimmerArtifactProfile::UnslothQ8_0
                 || ctx.device.name().to_string() != "Apple M4 Max"
                 || !ctx.device.hasUnifiedMemory())
         {
-            return invalid("split decode is qualified only for Muse Q8_0 on unified Apple M4 Max");
+            return invalid(
+                "optimized math is qualified only for Muse Q8_0 on unified Apple M4 Max",
+            );
+        }
+        if options.matrix_prefill && capacity > 7168 {
+            return invalid("matrix prefill currently requires session capacity <=7168");
         }
         let geometry = MuseGlimmerTextGeometry::from_config(weight_plan.config(), capacity)?;
         let session_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry_with_split_decode(
@@ -146,6 +155,7 @@ impl MuseGlimmerLoadedModel {
             },
             observed_weight_bytes,
             device_registry_id: ctx.device.registryID(),
+            matrix_prefill: options.matrix_prefill,
         })
     }
 
@@ -220,9 +230,13 @@ impl MuseGlimmerLoadedModel {
             ));
         }
         let Self {
-            weights, session, ..
+            weights,
+            session,
+            matrix_prefill,
+            ..
         } = self;
-        let forward = MuseGlimmerTextForward::new(ctx, weights)?;
+        let forward =
+            MuseGlimmerTextForward::new_with_packed_q8_mat_mat(ctx, weights, *matrix_prefill)?;
         Ok(MuseGlimmerTextRunner { forward, session })
     }
 }

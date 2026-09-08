@@ -176,10 +176,26 @@ pub(crate) fn run_muse_glimmer_single_turn(
             !prefill_packed_tokens.is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS),
         )
         + prefill_scalar_tail_commands;
-    let prefill_mode = match (prefill_packed_tokens, prefill_scalar_tail_commands) {
-        (0, _) => "scalar_tail",
-        (_, 0) => "packed_exact",
-        _ => "packed_exact+scalar_tail",
+    let read_math_opt_in = |name: &str| -> Result<bool> {
+        match std::env::var(name) {
+            Err(std::env::VarError::NotPresent) => Ok(false),
+            Ok(value) if value == "0" => Ok(false),
+            Ok(value) if value == "1" => Ok(true),
+            _ => bail!("{name} must be 0 or 1"),
+        }
+    };
+    let split_decode = read_math_opt_in("QWEN_MUSE_SPLIT_DECODE")?;
+    let matrix_prefill = read_math_opt_in("QWEN_MUSE_MATRIX_PREFILL")?;
+    let prefill_mode = match (
+        prefill_packed_tokens,
+        prefill_scalar_tail_commands,
+        matrix_prefill,
+    ) {
+        (0, _, _) => "scalar_tail",
+        (_, 0, false) => "packed_exact",
+        (_, _, false) => "packed_exact+scalar_tail",
+        (_, 0, true) => "packed_matrix",
+        (_, _, true) => "packed_matrix+scalar_tail",
     };
 
     eprintln!(
@@ -196,22 +212,19 @@ pub(crate) fn run_muse_glimmer_single_turn(
     );
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for Muse Glimmer")?;
-    let split_decode = match std::env::var("QWEN_MUSE_SPLIT_DECODE") {
-        Err(std::env::VarError::NotPresent) => false,
-        Ok(value) if value == "0" => false,
-        Ok(value) if value == "1" => true,
-        _ => bail!("QWEN_MUSE_SPLIT_DECODE must be 0 or 1"),
-    };
     let mut loaded = MuseGlimmerLoadedModel::load_with_options(
         &ctx,
         gguf,
         capacity,
-        qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions { split_decode },
+        qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions {
+            split_decode,
+            matrix_prefill,
+        },
     )
     .context("load admitted Muse Glimmer weights and text session")?;
     eprintln!(
-        "muse_glimmer: split_decode={} eligible_generated_positions=1024..7168 prefill_unchanged=true",
-        split_decode
+        "muse_glimmer: split_decode={} eligible_generated_positions=1024..7168 matrix_prefill={}",
+        split_decode, matrix_prefill
     );
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();

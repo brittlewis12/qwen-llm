@@ -6,7 +6,6 @@
 //! a 16-token quantum while retaining the scalar path for decode, tails,
 //! captures, and interventions.
 
-#[cfg(test)]
 use crate::metal::encode_mat_mat_q8_0_f32;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalMemoryAdmission, MetalMemoryAdmissionReason,
@@ -918,7 +917,6 @@ impl MuseGlimmerTextSession {
 pub struct MuseGlimmerTextForward<'ctx, 'model> {
     ctx: &'ctx MetalContext,
     weights: MuseGlimmerMetalModelWeights<'model>,
-    #[cfg(test)]
     packed_q8_mat_mat: bool,
 }
 
@@ -1111,13 +1109,11 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         Ok(Self {
             ctx,
             weights,
-            #[cfg(test)]
             packed_q8_mat_mat: false,
         })
     }
 
-    #[cfg(test)]
-    fn new_with_packed_q8_mat_mat(
+    pub(crate) fn new_with_packed_q8_mat_mat(
         ctx: &'ctx MetalContext,
         resident: &'model MuseGlimmerMetalWeights,
         packed_q8_mat_mat: bool,
@@ -2055,7 +2051,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         let encode_result = (|| {
             let encoder = KernelEncoder::begin(&command);
             self.encode_packed_chunk_graph(
-                &encoder,
+                &mut TokenGraphEncoder::Plain(&encoder),
                 start_position,
                 tokens.len(),
                 session,
@@ -2081,7 +2077,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
 
     fn encode_packed_chunk_graph(
         &self,
-        encoder: &KernelEncoder,
+        stages: &mut TokenGraphEncoder<'_>,
         start_position: usize,
         rows: usize,
         session: &MuseGlimmerTextSession,
@@ -2089,7 +2085,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     ) -> Result<(), MuseGlimmerTextSessionError> {
         let geometry = &session.geometry;
         let packed = session.packed.views(geometry, rows)?;
-
+        let encoder = stages.stage("embedding", None);
         encode_get_rows_f32(
             self.ctx,
             encoder,
@@ -2111,6 +2107,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         )?;
 
         for (layer_index, layer) in self.weights.layers.iter().enumerate() {
+            let encoder = stages.stage("front_projections", Some(layer_index));
             encode_rms_norm_mul_rows_f32(
                 self.ctx,
                 encoder,
@@ -2157,6 +2154,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.query_width,
                 rows,
             )?;
+            let encoder = stages.stage("attention_prepare", Some(layer_index));
             encode_rms_norm_batched_f32(
                 self.ctx,
                 encoder,
@@ -2203,6 +2201,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 cache_write,
                 rows * geometry.kv_width,
             )?;
+            let encoder = stages.stage("attention", Some(layer_index));
             let end_position = start_position + rows;
             let maximum_visible = if layer.sliding_attention {
                 end_position.min(geometry.sliding_window)
@@ -2248,6 +2247,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                     )?;
                 }
             }
+            let encoder = stages.stage("attention_output", Some(layer_index));
             encode_sigmoid_mul_f32(
                 self.ctx,
                 encoder,
@@ -2275,6 +2275,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.post_norm_epsilon,
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &packed.residual, &packed.branch_normed)?;
+            let encoder = stages.stage("ffn", Some(layer_index));
             encode_rms_norm_mul_rows_f32(
                 self.ctx,
                 encoder,
@@ -2333,6 +2334,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         }
 
         if produce_logits {
+            let encoder = stages.stage("output_tail", None);
             encode_copy_offset_f32(
                 self.ctx,
                 encoder,
@@ -2358,7 +2360,6 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         rows: usize,
     ) -> Result<(), MuseGlimmerTextSessionError> {
         if weight.dtype == GgmlType::Q8_0 {
-            #[cfg(test)]
             if self.packed_q8_mat_mat {
                 encode_mat_mat_q8_0_f32(
                     self.ctx, encoder, weight, input, output, n_in, n_out, rows,
@@ -4608,6 +4609,214 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn profile_actual_matrix_chunk(
+        forward: &MuseGlimmerTextForward<'_, '_>,
+        session: &mut MuseGlimmerTextSession,
+        tokens: &[u32],
+        position: usize,
+    ) {
+        let rows = tokens.len();
+        session.rewind_prefix(position).unwrap();
+        let started = std::time::Instant::now();
+        forward
+            .execute_packed_chunk(tokens, session, false)
+            .unwrap();
+        let plain_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let residual = read_f32(
+            &session
+                .packed
+                .views(&session.geometry, rows)
+                .unwrap()
+                .residual,
+        );
+        let kv_hash = |session: &MuseGlimmerTextSession| {
+            let mut hash = blake3::Hasher::new();
+            for layer in 0..session.geometry.layer_count {
+                let (key, value) = session.cache_prefix_views(layer, position + rows).unwrap();
+                for tensor in [key, value] {
+                    unsafe {
+                        hash.update(std::slice::from_raw_parts(
+                            (tensor.buffer.contents().as_ptr() as *const u8)
+                                .add(tensor.offset as usize),
+                            (position + rows) * session.geometry.kv_width * 2,
+                        ));
+                    }
+                }
+            }
+            hash.finalize()
+        };
+        let expected_kv = kv_hash(session);
+        session.rewind_prefix(position).unwrap();
+        session.packed.write_tokens(tokens).unwrap();
+        let samples = forward
+            .ctx
+            .timestamp_sample_buffer((1 + 5 * session.geometry.layer_count) * 2)
+            .unwrap();
+        let mut spans = Vec::new();
+        let started = std::time::Instant::now();
+        let command = forward.ctx.queue.commandBuffer().unwrap();
+        {
+            let mut stages = TokenGraphEncoder::Profiled {
+                command: &command,
+                samples: &samples,
+                current: None,
+                spans: &mut spans,
+            };
+            forward
+                .encode_packed_chunk_graph(&mut stages, position, rows, session, false)
+                .unwrap();
+        }
+        command.commit();
+        command.waitUntilCompleted();
+        let profile_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+        session.next_position = position + rows;
+        assert_logits_bitwise_equal(
+            "profiled packed residual",
+            &read_f32(
+                &session
+                    .packed
+                    .views(&session.geometry, rows)
+                    .unwrap()
+                    .residual,
+            ),
+            &residual,
+        );
+        assert_eq!(kv_hash(session), expected_kv);
+        let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+        let timestamps = forward
+            .ctx
+            .resolve_timestamp_samples(&samples, spans.len() * 2)
+            .unwrap();
+        let span_ticks = timestamps.last().unwrap() - timestamps[0];
+        assert!(span_ticks > 0 && gpu_ms > 0.0);
+        let scale = gpu_ms / span_ticks as f64;
+        let mut groups = std::collections::BTreeMap::<String, f64>::new();
+        for (index, (stage, layer)) in spans.iter().enumerate() {
+            assert!(timestamps[2 * index + 1] >= timestamps[2 * index]);
+            let name = if *stage == "attention" {
+                if forward.weights.layers[layer.unwrap()].sliding_attention {
+                    "attention_sliding"
+                } else {
+                    "attention_full"
+                }
+            } else {
+                stage
+            };
+            *groups.entry(name.to_string()).or_default() +=
+                (timestamps[2 * index + 1] - timestamps[2 * index]) as f64 * scale;
+        }
+        eprintln!(
+            "MUSE_PREFILL_JSON {}",
+            serde_json::json!({"kind":"matrix_chunk_attribution", "position":position,"rows":rows,"produce_logits":false,"plain_wall_ms":plain_wall_ms,"profile_wall_ms":profile_wall_ms,"profile_gpu_ms":gpu_ms,"scaled_stage_ms":groups,"stages":spans.len(),"raw_timestamps":timestamps,"residual_and_all_active_kv_bitwise":true})
+        );
+    }
+
+    #[test]
+    #[ignore = "serial Metal, Muse matrix-prefill/split-decode composition and actual packed attribution"]
+    fn matrix_prefill_split_decode_composition() {
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+        let weights = MuseGlimmerMetalWeights::realize(
+            &ctx,
+            &gguf,
+            plan.admit(ctx.memory_signals()).unwrap(),
+        )
+        .unwrap()
+        .into_weights();
+        let exact_forward = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
+        let matrix_forward =
+            MuseGlimmerTextForward::new_with_packed_q8_mat_mat(&ctx, &weights, true).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
+        ))
+        .unwrap();
+        let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
+            "begin",
+            Some(
+                fixture["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+        );
+        let prompt = request
+            .render(weights.config().chat_template_profile, None)
+            .unwrap();
+        let ids = tokenizer.encode(&prompt, false).unwrap();
+        assert_eq!(ids.len(), 6229);
+        eprintln!(
+            "MUSE_PREFILL_JSON {}",
+            serde_json::json!({"kind":"fixture","tokens":ids.len(),"token_sha256":crate::tokenizer::token_ids_sha256_i32le(&ids)})
+        );
+        let tokens: Vec<u32> = ids
+            .into_iter()
+            .map(|id| u32::try_from(id).unwrap())
+            .collect();
+        let mut exact = MuseGlimmerTextSession::new(&ctx, weights.config(), 6245).unwrap();
+        let mut matrix =
+            MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), 6245, true)
+                .unwrap();
+        for count in [16, 31, 128, 1024, 6229] {
+            exact.reset().unwrap();
+            matrix.reset().unwrap();
+            let started = std::time::Instant::now();
+            let mut a = exact_forward.prefill(&tokens[..count], &mut exact).unwrap();
+            let exact_ms = started.elapsed().as_secs_f64() * 1e3;
+            let started = std::time::Instant::now();
+            let mut b = matrix_forward
+                .prefill(&tokens[..count], &mut matrix)
+                .unwrap();
+            let matrix_ms = started.elapsed().as_secs_f64() * 1e3;
+            let endpoint = compare_logits(&b, &a);
+            assert!(
+                endpoint.cosine > 0.999_99
+                    && endpoint.relative_rms < 0.002
+                    && endpoint.max_abs < 0.1,
+                "composition endpoint {endpoint:?}"
+            );
+            assert_eq!(greedy_argmax(&a), greedy_argmax(&b));
+            let mut emitted = vec![greedy_argmax(&a)];
+            eprintln!(
+                "MUSE_PREFILL_JSON {}",
+                serde_json::json!({"kind":"composition_prefill","tokens":count,"exact_ms":exact_ms,"matrix_ms":matrix_ms,"cosine":endpoint.cosine,"relative_rms":endpoint.relative_rms,"max_abs":endpoint.max_abs})
+            );
+            for step in 0..16 {
+                let token = greedy_argmax(&a);
+                a = exact_forward.forward_token(token, &mut exact).unwrap();
+                b = matrix_forward
+                    .forward_generated_token(token, &mut matrix)
+                    .unwrap();
+                let comparison = compare_logits(&b, &a);
+                assert!(
+                    comparison.cosine > 0.999_99
+                        && comparison.relative_rms < 0.006
+                        && comparison.max_abs < 0.3,
+                    "composition continuation {comparison:?}"
+                );
+                assert_eq!(
+                    greedy_argmax(&a),
+                    greedy_argmax(&b),
+                    "continuation step {step}"
+                );
+                emitted.push(greedy_argmax(&a));
+                eprintln!(
+                    "MUSE_PREFILL_JSON {}",
+                    serde_json::json!({"kind":"composition_continuation","tokens":count,"step":step,"cosine":comparison.cosine,"relative_rms":comparison.relative_rms,"max_abs":comparison.max_abs})
+                );
+            }
+            eprintln!(
+                "MUSE_PREFILL_JSON {}",
+                serde_json::json!({"kind":"composition_emitted","tokens":count,"ids":emitted,"frontier":matrix.next_position(),"observed_session_bytes":matrix.observed_allocation_delta()})
+            );
+        }
+        profile_actual_matrix_chunk(&matrix_forward, &mut matrix, &tokens[6144..6224], 6144);
     }
 
     #[derive(Clone, Copy, Debug)]

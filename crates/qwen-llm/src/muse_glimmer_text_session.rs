@@ -924,6 +924,8 @@ pub struct MuseGlimmerTextForward<'ctx, 'model> {
     packed_online_attention: bool,
     packed_prefill_max_end: usize,
     packed_online_max_end: usize,
+    #[cfg(test)]
+    packed_numerical_capture: Option<tests::PackedNumericalCapture>,
 }
 
 pub struct MuseGlimmerPreparedF16Transport {
@@ -1120,6 +1122,8 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             packed_online_attention: false,
             packed_prefill_max_end: context_length,
             packed_online_max_end: context_length,
+            #[cfg(test)]
+            packed_numerical_capture: None,
         })
     }
 
@@ -2278,6 +2282,20 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                     )?;
                 }
             }
+            #[cfg(test)]
+            if let Some(capture) = &self.packed_numerical_capture {
+                capture.attention(
+                    self.ctx,
+                    encoder,
+                    layer_index,
+                    start_position,
+                    rows,
+                    session,
+                    &packed.query,
+                    &packed.attention_output,
+                    layer.sliding_attention,
+                )?;
+            }
             let encoder = stages.stage("attention_output", Some(layer_index));
             encode_sigmoid_mul_f32(
                 self.ctx,
@@ -2307,6 +2325,10 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.post_norm_epsilon,
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &packed.residual, &packed.branch_normed)?;
+            #[cfg(test)]
+            if let Some(capture) = &self.packed_numerical_capture {
+                capture.residual(self.ctx, encoder, layer_index, 0, &packed.residual)?;
+            }
             let encoder = stages.stage("ffn", Some(layer_index));
             encode_rms_norm_mul_rows_f32(
                 self.ctx,
@@ -2366,6 +2388,10 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 self.weights.config.post_norm_epsilon,
             )?;
             encode_add_inplace_f32(self.ctx, encoder, &packed.residual, &packed.branch_normed)?;
+            #[cfg(test)]
+            if let Some(capture) = &self.packed_numerical_capture {
+                capture.residual(self.ctx, encoder, layer_index, 1, &packed.residual)?;
+            }
         }
 
         if produce_logits {
@@ -5070,6 +5096,7 @@ mod tests {
     }
 
     include!("muse_long_context_tests.rs");
+    include!("muse_tiled_numerical_diagnostic.rs");
 
     #[test]
     fn split_decode_selection_uses_visible_work() {

@@ -188,7 +188,6 @@ pub(crate) fn run_muse_glimmer_single_turn(
     let matrix_prefill = read_math_opt_in("QWEN_MUSE_MATRIX_PREFILL")?;
     let optimized_packed_tokens = if matrix_prefill {
         prefill_packed_tokens
-            .min(qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END)
     } else {
         0
     };
@@ -200,12 +199,6 @@ pub(crate) fn run_muse_glimmer_single_turn(
         (0, _, _) => "scalar_tail",
         (_, 0, false) => "packed_exact",
         (_, _, false) => "packed_exact+scalar_tail",
-        (_, 0, true) if prefill_packed_tokens > optimized_packed_tokens => {
-            "packed_matrix_online+packed_exact"
-        }
-        (_, _, true) if prefill_packed_tokens > optimized_packed_tokens => {
-            "packed_matrix_online+packed_exact+scalar_tail"
-        }
         (_, 0, true) => "packed_matrix_online",
         (_, _, true) => "packed_matrix_online+scalar_tail",
     };
@@ -235,11 +228,8 @@ pub(crate) fn run_muse_glimmer_single_turn(
     )
     .context("load admitted Muse Glimmer weights and text session")?;
     eprintln!(
-        "muse_glimmer: split_decode={} eligible_generated_positions=1024..{} matrix_prefill={} optimized_packed_tokens={}",
-        split_decode,
-        qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_SPLIT_DECODE_MAX_END,
-        matrix_prefill,
-        optimized_packed_tokens
+        "muse_glimmer: split_decode={} split_min_visible_positions=1024 model_context={} matrix_prefill={} optimized_packed_tokens={}",
+        split_decode, config.context_length, matrix_prefill, optimized_packed_tokens
     );
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();

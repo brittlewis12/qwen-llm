@@ -53,8 +53,6 @@ pub const MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
 pub const MUSE_GLIMMER_PACKED_PREFILL_QUANTUM: usize = 16;
 pub const MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS: usize = 128;
-pub const MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END: usize = 32768;
-pub const MUSE_GLIMMER_SPLIT_DECODE_MAX_END: usize = 32784;
 const MUSE_GLIMMER_FULL_READOUT_PASS_K: usize = 16;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K: usize = MUSE_GLIMMER_FULL_READOUT_PASS_K * 2;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_ROWS: usize = 128;
@@ -645,8 +643,8 @@ pub struct MuseGlimmerTextSession {
     split_decode_partials: Option<MetalTensor>,
 }
 
-fn split_decode_position_eligible(position: usize) -> bool {
-    (1024..MUSE_GLIMMER_SPLIT_DECODE_MAX_END).contains(&position)
+fn split_decode_visible_positions_eligible(visible_positions: usize) -> bool {
+    visible_positions >= 1024
 }
 
 fn optimized_prefill_range(base: usize, rows: usize, maximum_end: usize) -> bool {
@@ -1114,13 +1112,14 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     ) -> Result<Self, MuseGlimmerTextSessionError> {
         resident.validate_context(ctx)?;
         let weights = MuseGlimmerMetalModelWeights::bind(resident)?;
+        let context_length = weights.config.context_length as usize;
         Ok(Self {
             ctx,
             weights,
             packed_q8_mat_mat: false,
             packed_online_attention: false,
-            packed_prefill_max_end: MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END,
-            packed_online_max_end: MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END,
+            packed_prefill_max_end: context_length,
+            packed_online_max_end: context_length,
         })
     }
 
@@ -2468,7 +2467,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 produce_logits,
                 capture,
                 interventions,
-                generated && split_decode_position_eligible(position),
+                generated,
             )?;
             encoder.end();
             Ok::<(), MuseGlimmerTextSessionError>(())
@@ -2643,11 +2642,9 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             let encoder = stages.stage("attention", Some(layer_index));
             let (key_cache, value_cache, visible_positions) =
                 session.cache_views(layer_index, position, layer.sliding_attention)?;
-            if let Some(partial) = session
-                .split_decode_partials
-                .as_ref()
-                .filter(|_| split_decode)
-            {
+            if let Some(partial) = session.split_decode_partials.as_ref().filter(|_| {
+                split_decode && split_decode_visible_positions_eligible(visible_positions)
+            }) {
                 crate::muse_glimmer_metal::split_attention::encode(
                     self.ctx,
                     encoder,
@@ -4498,7 +4495,7 @@ mod tests {
             bytes
         };
         let started = std::time::Instant::now();
-        let plain = forward.forward_token(token, session).unwrap();
+        let plain = forward.forward_generated_token(token, session).unwrap();
         let plain_wall_ms = started.elapsed().as_secs_f64() * 1e3;
         let expected_kv = current_kv(session);
         session.rewind_prefix(position).unwrap();
@@ -4527,7 +4524,7 @@ mod tests {
                     true,
                     None,
                     &[],
-                    false,
+                    true,
                 )
                 .unwrap();
         }
@@ -4549,9 +4546,18 @@ mod tests {
         assert!(span_ticks > 0 && gpu_ms > 0.0);
         let scale = gpu_ms / span_ticks as f64;
         let mut groups = std::collections::BTreeMap::<&str, f64>::new();
-        for (index, (stage, _layer)) in spans.iter().enumerate() {
+        for (index, (stage, layer)) in spans.iter().enumerate() {
             assert!(timestamps[2 * index + 1] >= timestamps[2 * index]);
-            *groups.entry(stage).or_default() +=
+            let group = if *stage == "attention" {
+                if forward.weights.layers[layer.unwrap()].sliding_attention {
+                    "attention_sliding"
+                } else {
+                    "attention_full"
+                }
+            } else {
+                stage
+            };
+            *groups.entry(group).or_default() +=
                 (timestamps[2 * index + 1] - timestamps[2 * index]) as f64 * scale;
         }
         eprintln!(
@@ -4559,7 +4565,7 @@ mod tests {
             serde_json::json!({"kind":"decode_attribution", "position":position,
             "plain_wall_ms":plain_wall_ms, "profile_wall_ms":profile_wall_ms, "profile_gpu_ms":gpu_ms,
             "scaled_stage_ms":groups, "stages":spans.len(), "raw_timestamps":timestamps,
-            "logits_and_written_kv_bitwise":true, "sampling":"encoder-stage, attribution not throughput"})
+            "logits_and_written_kv_bitwise":true, "generated_path":true, "sampling":"encoder-stage, attribution not throughput"})
         );
         session.rewind_prefix(position).unwrap();
     }
@@ -5066,7 +5072,7 @@ mod tests {
     include!("muse_long_context_tests.rs");
 
     #[test]
-    fn split_decode_selection_is_bounded() {
+    fn split_decode_selection_uses_visible_work() {
         for (position, expected) in [
             (0, false),
             (1023, false),
@@ -5074,10 +5080,11 @@ mod tests {
             (7167, true),
             (7168, true),
             (32783, true),
-            (32784, false),
-            (usize::MAX, false),
+            (32784, true),
+            (65536, true),
+            (131072, true),
         ] {
-            assert_eq!(split_decode_position_eligible(position), expected);
+            assert_eq!(split_decode_visible_positions_eligible(position), expected);
         }
     }
 
@@ -5216,7 +5223,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "serial Metal, delivered split decode through32K and upper fallback"]
+    #[ignore = "serial Metal, delivered split decode through the former32K cutoff"]
     fn split_attention_long_decode_delivery() {
         split_attention_decode_packet(true, true);
     }
@@ -5426,23 +5433,25 @@ mod tests {
                 );
                 if prefix == tokens.len() {
                     let next = session.next_position();
-                    assert_eq!(next, MUSE_GLIMMER_SPLIT_DECODE_MAX_END);
+                    assert_eq!(next, 32784);
                     let token = *oracle_b.1.last().unwrap();
-                    let original = forward.forward_token(token, &mut session).unwrap();
+                    let original = split_attention_pilot::with_scratch(&partial, || {
+                        forward.forward_token(token, &mut session).unwrap()
+                    });
                     let original_kv = prefix_hash(&session, next + 1);
                     session.rewind_prefix(next).unwrap();
                     let fallback = forward
                         .forward_generated_token(token, &mut session)
                         .unwrap();
                     assert_logits_bitwise_equal(
-                        "first position beyond split range",
+                        "former split cutoff stays on qualified kernel",
                         &original,
                         &fallback,
                     );
                     assert_eq!(prefix_hash(&session, next + 1), original_kv);
                     eprintln!(
                         "MUSE_DECODE_JSON {}",
-                        serde_json::json!({"kind":"delivered_fallback","position":next,"logits_and_all_active_kv_bitwise":true})
+                        serde_json::json!({"kind":"delivered_former_cutoff","position":next,"logits_and_all_active_kv_bitwise_pilot":true})
                     );
                 }
                 previous_prefix = prefix;

@@ -50,10 +50,10 @@ pub struct MuseGlimmerRuntimeAdmission {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MuseGlimmerRuntimeOptions {
     /// Tolerance-qualified H128 attention for ordinary generated tokens at
-    /// positions 1024..32784 on the Q8 M4 Max lane. Prefill/lens math is unchanged.
+    /// visible KV ranges >=1024 on the Q8 M4 Max lane, through admitted model context.
     pub split_decode: bool,
     /// Numerically qualified Q8 matrix plus online prefill attention; scalar kernels are unchanged.
-    /// Restricted to Q8/M4 Max packed chunks with absolute end <=32768.
+    /// Restricted to Q8/M4 Max and the admitted model context, not a benchmark length.
     pub matrix_prefill: bool,
 }
 

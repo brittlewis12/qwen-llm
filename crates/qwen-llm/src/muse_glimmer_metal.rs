@@ -1726,6 +1726,7 @@ mod tests {
     }
 
     include!("muse_packed_online_pilot.rs");
+    include!("muse_attention_context_tests.rs");
 
     #[test]
     fn muse_glimmer_packed_attention_matches_scalar_rows_bitwise() {
@@ -1910,6 +1911,23 @@ mod tests {
         let value = MetalTensor::zeros_f16(&ctx, vec![cache_elements as u64]).unwrap();
         let sentinels = [0, POSITIONS / 2, POSITIONS - 1];
         unsafe {
+            query
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .write_bytes(0, 4096 * 4);
+            key.buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .write_bytes(0, cache_elements * 2);
+            value
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .write_bytes(0, cache_elements * 2);
             let values = value.buffer.contents().as_ptr().cast::<u16>();
             for kv_head in 0..MUSE_GLIMMER_KV_HEAD_COUNT {
                 for dimension in 0..MUSE_GLIMMER_ATTENTION_HEAD_DIM {

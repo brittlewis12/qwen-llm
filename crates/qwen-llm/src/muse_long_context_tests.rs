@@ -159,6 +159,117 @@ fn optimized_prefill_eligibility_uses_absolute_end() {
 }
 
 #[test]
+fn optimized_math_uses_admitted_model_context() {
+    let config = MuseGlimmerConfig::unsloth_release_reference();
+    let end = config.context_length as usize;
+    let geometry = MuseGlimmerTextGeometry::from_config(&config, end).unwrap();
+    for base in [32760, 32768, 65528, end - 16] {
+        assert!(optimized_prefill_range(base, 16, end));
+    }
+    assert!(!optimized_prefill_range(end - 8, 16, end));
+    assert!(!optimized_prefill_range(usize::MAX, 16, end));
+    assert!(geometry.cache_write_offset(0, end - 1).is_ok());
+    assert!(geometry.cache_write_offset(0, end).is_err());
+    assert!(MuseGlimmerTextGeometry::from_config(&config, end + 1).is_err());
+}
+
+fn check_local_generated_math(
+    forward: &MuseGlimmerTextForward<'_, '_>,
+    session: &mut MuseGlimmerTextSession,
+    token: u32,
+) -> Vec<f32> {
+    let position = session.next_position();
+    let prefix = long_context_prefix_hash(session, position);
+    let reference = forward.forward_token(token, session).unwrap();
+    session.rewind_prefix(position).unwrap();
+    let actual = forward.forward_generated_token(token, session).unwrap();
+    let comparison = compare_logits(&actual, &reference);
+    assert!(
+        comparison.cosine > 0.999_99 && comparison.relative_rms < 0.002 && comparison.max_abs < 0.1,
+        "local generated math {comparison:?}"
+    );
+    assert_eq!(long_context_prefix_hash(session, position), prefix);
+    eprintln!(
+        "MUSE_CONTEXT_JSON {}",
+        serde_json::json!({"kind":"local_decode","position":position,"cosine":comparison.cosine,"relative_rms":comparison.relative_rms,"max_abs":comparison.max_abs,"top1_equal":comparison.reference_argmax == comparison.candidate_argmax,"prefix_immutable":true})
+    );
+    actual
+}
+
+#[test]
+#[ignore = "serial Metal, one optimized traversal for horizon checks and current phase attribution"]
+fn optimized_horizon_and_current_profile() {
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let gguf = GgufFile::open(path).unwrap();
+    let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
+    let tokens = long_context_tokens(path, &config);
+    let ctx = MetalContext::new().unwrap();
+    let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+    let weights =
+        MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
+            .unwrap()
+            .into_weights();
+    let forward = MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    assert_eq!(
+        forward.packed_prefill_max_end,
+        config.context_length as usize
+    );
+    assert_eq!(
+        forward.packed_online_max_end,
+        config.context_length as usize
+    );
+    let mut session =
+        MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), 33281, true).unwrap();
+    let mut previous = 0;
+    for end in [8192, 32768] {
+        let started = std::time::Instant::now();
+        forward
+            .prefill(&tokens[previous..end], &mut session)
+            .unwrap();
+        eprintln!(
+            "MUSE_CONTEXT_JSON {}",
+            serde_json::json!({"kind":"optimized_prefix","start":previous,"end":end,"wall_ms":started.elapsed().as_secs_f64()*1e3})
+        );
+        let prefix = long_context_prefix_hash(&session, end);
+        profile_actual_matrix_chunk(&forward, &mut session, &tokens[end - 128..end], end - 128);
+        assert_eq!(long_context_prefix_hash(&session, end), prefix);
+        check_local_generated_math(&forward, &mut session, tokens[end]);
+        session.rewind_prefix(end).unwrap();
+        profile_actual_decode(&forward, &mut session, tokens[end]);
+        assert_eq!(session.next_position(), end);
+        previous = end;
+    }
+    let prefix = long_context_prefix_hash(&session, 32768);
+    let started = std::time::Instant::now();
+    for position in 32768..33280 {
+        let output = if [32783, 32784, 33279].contains(&position) {
+            check_local_generated_math(&forward, &mut session, tokens[position])
+        } else {
+            forward
+                .forward_generated_token(tokens[position], &mut session)
+                .unwrap()
+        };
+        assert!(output.iter().all(|value| value.is_finite()));
+    }
+    eprintln!(
+        "MUSE_CONTEXT_JSON {}",
+        serde_json::json!({"kind":"teacher_forced_horizon","start":32768,"transitions":512,"wall_ms_including_local_checks":started.elapsed().as_secs_f64()*1e3,"prefix_immutable":long_context_prefix_hash(&session,32768)==prefix})
+    );
+    assert_eq!(long_context_prefix_hash(&session, 32768), prefix);
+    profile_actual_decode(&forward, &mut session, tokens[33280]);
+    forward
+        .forward_generated_token(tokens[33280], &mut session)
+        .unwrap();
+    assert_eq!(session.next_position(), 33281);
+    assert!(
+        forward
+            .forward_generated_token(tokens[33280], &mut session)
+            .is_err()
+    );
+    assert_eq!(session.next_position(), 33281);
+}
+
+#[test]
 #[ignore = "serial Metal, Muse capacity reservation and 7168 prefill/decode boundary"]
 fn optimized_prefill_large_reservation_boundary() {
     let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
@@ -372,7 +483,11 @@ fn long_prefill_32k_delivery_boundaries() {
             .unwrap()
             .into_weights();
     let exact = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
-    let forward = MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    let mut forward =
+        MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    // Preserve this historical bounded-policy regression independently of rollout.
+    forward.packed_prefill_max_end = 32768;
+    forward.packed_online_max_end = 32768;
     assert_eq!(forward.packed_prefill_max_end, 32768);
     assert_eq!(forward.packed_online_max_end, 32768);
     let mut session =

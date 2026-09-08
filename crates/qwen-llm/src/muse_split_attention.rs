@@ -126,6 +126,14 @@ pub(crate) fn encode(
     };
     let main = ctx.pipeline("kernel_muse_split_attention_h128")?;
     let reduce = ctx.pipeline("kernel_muse_split_attention_reduce_h128")?;
+    if [&main, &reduce].iter().any(|pipeline| {
+        pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32
+    }) {
+        return bad_shape(
+            KERNEL,
+            "split attention requires32-lane SIMDgroups in both stages".into(),
+        );
+    }
     for source in [query, key, value] {
         enc.note_read(source);
     }

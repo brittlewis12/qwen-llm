@@ -70,18 +70,19 @@ Raw model input remains explicit:
 
 Muse Q8_0 on unified Apple M4 Max has an opt-in decode path:
 `QWEN_MUSE_SPLIT_DECODE=1 ./target/release/qwen run ...`. It uses partitioned
-attention for generated-token positions 1024 through 32783, retaining the existing
-path outside that range. The session admits an additional 528 KiB scratch buffer.
+attention when a layer sees at least 1024 KV positions, throughout the admitted
+model context. Shorter visible ranges keep the existing path. The session admits
+an additional 528 KiB scratch buffer.
 Prefill, sampling policy, reasoning, and stop handling are unchanged. This is
 tolerance-qualified arithmetic, not bitwise or seed-for-seed sampled equivalence;
 omit the variable or set it to `0` for the original math. This CLI opt-in does not
 enable split decode in serving or lens workflows.
 
 `QWEN_MUSE_MATRIX_PREFILL=1` opts Muse Q8_0 on the same device into matrix-based
-packed prefill with row-parallel online attention for chunks ending at or before
-absolute position 32768. Larger session reservations are allowed; chunks crossing
-or beyond the qualified boundary use the original kernels. It adds no session
-buffers and composes with the split-decode opt-in.
+packed prefill with row-parallel online attention throughout the admitted model
+context (131072 tokens for the released profile). There are no benchmark-length
+cutoffs; context/capacity, geometry and buffer validation remain enforced. It adds
+no session buffers and composes with the split-decode opt-in.
 Logs report `packed_matrix_online`
 instead of `packed_exact`. Scalar-tail kernels are unchanged, but consume the
 numerically changed matrix-prefilled KV; this is not bitwise or sampled-output

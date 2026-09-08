@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Long Decode Whole-Forward PASS / Opt-In Delivered
+
+- `a49678ec` controlled16-forward ABBA32K4045.209 ->1086.801ms saves73.134%,
+  3.955 ->14.722forwards/s.8K saves50.645%,15.720forwards/s. Frozenprimary35%,
+  guard3%regression and5%A-spread gates allPASS; spreads0.00206/0.07550%.
+- All17independentgreedy IDs/all16logits and newKV gatesPASS; prefixesimmutable,
+  8Kretainedprefix survives extensionto32K. At32K maxlogitdelta0.003263474,
+  newKVRMS0.000128053/maxdelta0.00390625. Sameadmitted540672Bscratchbotharms;
+  oraclesbeforeseparatewarmABBA, postpacketvalidation. One273.99s packet.
+- `00cf511b` delivers split atgeneratedpositions[1024,32784), defaultoff. Actual
+  generatedAPI matchespilotbitwiseall16logits/allactiveKV; firstexcluded32784
+  matchesoriginalfallbackbitwise (249.49s). CPUselectionchecks/review/buildsPASS.
+- Same32729nativeCLI17outputs now1.090s generation/14.681transitions/s instead
+  of4.055s; samebytes/fingerprint/stop, unchangedmemory/prefillalgorithm, cleanbuild.
+  Prefill233.353s/140.255tok/s; process235.073s vs235.527s before isNOTanendtoend
+  speedupqualification. Controlleddecode authorityseparate; no sampledexactness.
+- Next: extendoutputhorizon (only55fasttransitionsafter32729prompt), thenrefresh
+  fullyoptimizedgraphattribution. Prefillrangeends32768, decodedrangeends32784;
+  widercontexts keeporiginalfallback. HistoricalHOLD/KILL decisionsunchanged.
+  Evidence: `docs/bench/2026-09-08-muse-long-context/RESULT.md`.
+
 ## 2026-09-08 - Muse Complete Fresh 32K Prefill Qualified And Delivered
 
 - Extended attention primitive gatesPASS through32K, up to97.745%GPU saved versus

@@ -164,25 +164,23 @@ Earlier original-decode and matrix-only-prefill attribution identified the work
 removed. Refresh attribution before ranking the remaining kernels; the scalar_tail
 label still represents only five remainder tokens at6229.
 
-1. Qualify split decode through32K. Prefill is now delivered through32768 absolute
-   packedend: completefresh8K/32K numerical and independent17greedy gates pass;
-   realnative32729 CLI141.778prefilltok/s. Its decode remains only3.946transitions/s
-   because split selection still stops at7168. Existing32K primitive numerics plus
-   this actual cost justify a whole16-forward packet, not another microbenchmark.
+1. Extend the output horizon around32K. Splitdecode now delivers14.722forwards/s
+   in controlled32K ABBA (73.134%saved),14.681transitions/s in thenativeCLI.
+   Selectionends32784: a32729-token prompt gets55fasttransitions beforefallback.
+   Qualify a concrete longer continuation before pursuing much larger prompts.
 2. Retain completed capacity decoupling:6884+391 teacher-forced transitions pass,
    including the split-decode boundary and bitwise straddling-prefill fallback.
    ActualCLI6229/17 with32768reservation retains179.21prefilltok/s and sameoutput;
    fullcapacityadmission unchanged. Subsequentfreshqualification separatelywidens
    arithmeticto32768; straddling/beyond chunks retainoriginalmath. Whole6229 online
    prefill ABBA54.750%saved/180.769tok/s remains the existing timing authority.
-3. Refresh one actual delivered packed-graph profile before choosing FFN work.
+3. Refresh actual fullyoptimized prefill/decode attribution before choosing FFN work.
    The previous69%attention share predates online attention; it does not establish
    today's remaining bottleneck. A new profile may move this ahead of range expansion.
-4. Retain bounded split H128 decode opt-in `QWEN_MUSE_SPLIT_DECODE=1`: actualCLI
-   17outputs/16transitions generation1858.782 ->1011.202ms, sameoutput/stopreason.
-   This diagnostic closes delivery, not newtimingpromotion. Warm16-forward ABBA
-   remains authority:6229 saves45.647%,1024 saves20.599%. Prefill unchanged, scratch
-   session-owned/admitted540672B; Q8/unifiedM4Max generatedpositions[1024,7168) only.
+4. Extend prefill beyond32K only with an actual workload and completefreshstate
+   qualification. Currentoptin Q8/M4Max matrix+online ends32768; splitdecode ends
+   32784. Capacityreservation isseparate; straddling/beyond chunks retainoriginal.
+   Priorwarmdecode6229 saves45.647%,1024 saves20.599%; scratch remainsadmitted540672B.
    Existing online overlap is KILL; split primitive remains HOLD on2048 control
    noise despite independent whole-forward PASS. Widen only with new qualification.
 5. Retain the completed live-prefix opt-in (6269-token repeated-turn backend

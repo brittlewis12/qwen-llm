@@ -129,3 +129,55 @@ CLI request or a cold-conditioned speedup. Numeric/greedy qualification does not
 establish arbitrary sampled-output equivalence. Raw `long-attention-01*`, score,
 `long-chunk-01*`, `fresh-{8k,32k}-01*`, `delivery32k-01*`, exporter and
 `cli-long32k-01*` remain under `target/profiles/muse-live-prefix/`.
+
+## Whole long-context split decode PASS
+
+`a49678ec` reuses the whole-forward instrument for8192 and32768 prefixes of the
+same adapted transcript. Admission includes the session-owned540672B partial
+buffer, held in both arms. Optimized prefill primes8K; after its packet, rewind
+excludes the generated suffix and extends the actual fixture through32K, checking
+the retained8K prefix hash. No split-force hook is active during prefill/extension.
+
+A uses original scalar decode (the shipped selection at those positions when
+acquired); B forces only split attention. Each arm starts at the same frontier
+and saved logits, then performs16 completed forwards plus17 greedy selections.
+All16 returned logit vectors are retained, adding CPU oracle storage. B's new KV
+rows are NaN-poisoned before its untimed oracle. All17 independently selected IDs
+agree; all16 logits pass cosine>0.99999/RMS<0.002/abs<0.1, new KV passes
+cosine>0.99999/RMS<0.002, and existing prefixes remain bitwise immutable.
+
+| Prefix | Whole16-forward ABBA ms | Mean A -> B ms | Saved | A spread | Forwards/s A -> B |
+| --- | --- | --- | ---: | ---: | --- |
+| 8192 | 2063.071708 /1018.487917 /1017.192000 /2061.514750 | 2062.293229 ->1017.839959 | 50.645% | 0.07550% | 7.758 ->15.720 |
+| 32768 | 4045.251125 /1086.632708 /1086.969959 /4045.167708 | 4045.209417 ->1086.801334 | 73.134% | 0.00206% | 3.955 ->14.722 |
+
+Frozen32K primary >=35% mean/both-pair wall savings passes (73.138/73.129% pairs).
+8K <=3% regression guard passes (50.632/50.658% saved); both A spreads pass5%.
+Separate warm ABBA follows payload oracles; measured outputs are checked afterward,
+with no hashes/numerical scans/profile encoders interposed between measured arms.
+At32K worst logit cosine0.999999999623/RMS0.000031470/abs0.003263474; new KV cosine
+0.999999991801/RMS0.000128053/reported maxdelta0.00390625. One273.99s packet.
+This is controlled warm decode from optimized-prefill state, not a cold, prefill
+or arbitrary sampled-output claim. Historical singleton-online KILL and earlier
+split primitive HOLD remain unchanged; this is independent long-context evidence.
+
+`00cf511b` widens the existing split opt-in to generated positions[1024,32784),
+exactly covering the tested32K+16 forwards. No additional buffers or prefill changes.
+CPU selector boundaries pass. A249.49s delivery regression uses the actual generated
+API, passes original-reference numerics, then matches forced-pilot replay bitwise
+in all16 logits and all active KV at8K/32K. First excluded position32784 matches
+original fallback bitwise, including all active KV. No timing packet is rerun.
+
+The same complete native32729-token CLI request is repeated because decode selection
+changed:17 emitted tokens/16 transitions, identical stdout, token fingerprint and
+token_limit finish. Generation1089.868ms is14.681 transitions/s (CLI15.598 emitted
+tokens/s), versus4054.619ms before rollout. Prefill233353.236ms/140.255tok/s uses
+the unchanged prefill graph. Process235.072657s versus235.527020s before: prefill
+variation offsets most of the short16-transition benefit, so this establishes no
+controlled end-to-end request-latency win. Clean embedded source00cf511b; memory
+unchanged. Source/result review passes.
+
+Raw `long-decode-01*`, `long-decode-score.json`, `long-decode-delivery-01*` and
+`cli-long32k-split-01*` are retained beside the prior CLI attempt. The next real
+product limit is output horizon: a32729-token prompt has55 eligible transitions
+before the32784 fallback. Longer continuation/range qualification remains separate.

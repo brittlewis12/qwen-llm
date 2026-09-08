@@ -59,6 +59,47 @@ const MUSE_GLIMMER_FULL_READOUT_PASS_K: usize = 16;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K: usize = MUSE_GLIMMER_FULL_READOUT_PASS_K * 2;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_ROWS: usize = 128;
 
+enum TokenGraphEncoder<'a> {
+    Plain(&'a KernelEncoder),
+    #[cfg(test)]
+    Profiled {
+        command: &'a Retained<objc2::runtime::ProtocolObject<dyn MTLCommandBuffer>>,
+        samples: &'a crate::metal::MetalTimestampSampleBuffer,
+        current: Option<KernelEncoder>,
+        spans: &'a mut Vec<(&'static str, Option<usize>)>,
+    },
+}
+
+impl TokenGraphEncoder<'_> {
+    fn stage(&mut self, _name: &'static str, _layer: Option<usize>) -> &KernelEncoder {
+        match self {
+            Self::Plain(encoder) => encoder,
+            #[cfg(test)]
+            Self::Profiled {
+                command,
+                samples,
+                current,
+                spans,
+            } => {
+                if let Some(previous) = current.take() {
+                    previous.end();
+                }
+                let index = spans.len() * 2;
+                assert!(index + 1 < samples.sample_count());
+                *current = Some(KernelEncoder::begin_sampled(
+                    command,
+                    samples,
+                    index,
+                    index + 1,
+                    false,
+                ));
+                spans.push((_name, _layer));
+                current.as_ref().unwrap()
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MuseGlimmerFullReadoutHeadMode {
     Q8Batch,
@@ -316,7 +357,7 @@ impl MuseGlimmerTextSessionMemoryPlan {
         for (name, logical) in session_allocation_specs(geometry)? {
             let priced = ctx.price_shared_buffer_upper(logical).map_err(|error| {
                 MuseGlimmerTextSessionError::Invalid(format!("session allocation {name:?} {error}"))
-                })?;
+            })?;
             let (priced_bytes, alignment) = (priced.priced_upper_bytes, priced.alignment);
             logical_bytes = logical_bytes.checked_add(logical).ok_or_else(|| {
                 MuseGlimmerTextSessionError::Invalid("session logical byte total overflow".into())
@@ -2312,7 +2353,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         let encode_result = (|| {
             let encoder = KernelEncoder::begin(&command);
             self.encode_token_graph_inner(
-                &encoder,
+                &mut TokenGraphEncoder::Plain(&encoder),
                 position,
                 position_u32,
                 session,
@@ -2358,7 +2399,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
 
     fn encode_token_graph_inner(
         &self,
-        encoder: &KernelEncoder,
+        stages: &mut TokenGraphEncoder<'_>,
         position: usize,
         position_u32: u32,
         session: &MuseGlimmerTextSession,
@@ -2367,6 +2408,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         interventions: &[PostBlockIntervention<'_>],
     ) -> Result<(), MuseGlimmerTextSessionError> {
         let geometry = &session.geometry;
+        let encoder = stages.stage("embedding", None);
         encode_get_rows_f32(
             self.ctx,
             encoder,
@@ -2386,6 +2428,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         )?;
 
         for (layer_index, layer) in self.weights.layers.iter().enumerate() {
+            let encoder = stages.stage("front_projections", Some(layer_index));
             if let Some(MuseGlimmerProductionCaptureSink::Lens(capture)) = capture
                 && let Ok(block_slot) = capture.target_blocks.binary_search(&(layer_index as u32))
             {
@@ -2442,6 +2485,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.hidden_size,
                 geometry.query_width,
             )?;
+            let encoder = stages.stage("attention_prepare", Some(layer_index));
             encode_rms_norm_batched_f32(
                 self.ctx,
                 encoder,
@@ -2486,6 +2530,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 cache_write,
                 geometry.kv_width,
             )?;
+            let encoder = stages.stage("attention", Some(layer_index));
             let (key_cache, value_cache, visible_positions) =
                 session.cache_views(layer_index, position, layer.sliding_attention)?;
             encode_muse_glimmer_attn_decode_f16kv_f32(
@@ -2500,6 +2545,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.head_dim,
                 visible_positions,
             )?;
+            let encoder = stages.stage("attention_output", Some(layer_index));
             encode_sigmoid_mul_f32(
                 self.ctx,
                 encoder,
@@ -2541,6 +2587,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                     geometry.hidden_size,
                 )?;
             }
+            let encoder = stages.stage("ffn", Some(layer_index));
             encode_rms_norm_mul_f32(
                 self.ctx,
                 encoder,
@@ -2633,6 +2680,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         }
 
         if produce_logits {
+            let encoder = stages.stage("output_tail", None);
             self.encode_deployed_output_tail(encoder, session)?;
         }
         Ok(())
@@ -4283,6 +4331,190 @@ mod tests {
         walls.sort_by(f64::total_cmp);
         gpu.sort_by(f64::total_cmp);
         (walls[1], gpu[1])
+    }
+
+    fn profile_actual_decode(
+        forward: &MuseGlimmerTextForward<'_, '_>,
+        session: &mut MuseGlimmerTextSession,
+        token: u32,
+    ) {
+        let position = session.next_position();
+        let current_kv = |session: &MuseGlimmerTextSession| {
+            let mut bytes = Vec::new();
+            for layer in 0..session.geometry.layer_count {
+                let offset = session
+                    .geometry
+                    .cache_write_offset(layer, position)
+                    .unwrap()
+                    * 2;
+                for tensor in [&session.key_cache, &session.value_cache] {
+                    unsafe {
+                        bytes.extend_from_slice(std::slice::from_raw_parts(
+                            (tensor.buffer.contents().as_ptr() as *const u8)
+                                .add(tensor.offset as usize + offset),
+                            session.geometry.kv_width * 2,
+                        ));
+                    }
+                }
+            }
+            bytes
+        };
+        let started = std::time::Instant::now();
+        let plain = forward.forward_token(token, session).unwrap();
+        let plain_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let expected_kv = current_kv(session);
+        session.rewind_prefix(position).unwrap();
+        let samples = forward
+            .ctx
+            .timestamp_sample_buffer((2 + 5 * session.geometry.layer_count) * 2)
+            .unwrap();
+        let mut spans = Vec::new();
+        forward.validate_token_and_session(token, session).unwrap();
+        session.write_token(token as i32);
+        let started = std::time::Instant::now();
+        let command = forward.ctx.queue.commandBuffer().unwrap();
+        {
+            let mut encoder = TokenGraphEncoder::Profiled {
+                command: &command,
+                samples: &samples,
+                current: None,
+                spans: &mut spans,
+            };
+            forward
+                .encode_token_graph_inner(
+                    &mut encoder,
+                    position,
+                    position as u32,
+                    session,
+                    true,
+                    None,
+                    &[],
+                )
+                .unwrap();
+        }
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+        assert!(command.error().is_none());
+        session.next_position += 1;
+        let profiled = session.read_logits();
+        let profile_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+        assert_logits_bitwise_equal("profiled decode", &profiled, &plain);
+        assert_eq!(current_kv(session), expected_kv);
+        let timestamps = forward
+            .ctx
+            .resolve_timestamp_samples(&samples, spans.len() * 2)
+            .unwrap();
+        let span_ticks = timestamps.last().unwrap() - timestamps[0];
+        assert!(span_ticks > 0 && gpu_ms > 0.0);
+        let scale = gpu_ms / span_ticks as f64;
+        let mut groups = std::collections::BTreeMap::<&str, f64>::new();
+        for (index, (stage, _layer)) in spans.iter().enumerate() {
+            assert!(timestamps[2 * index + 1] >= timestamps[2 * index]);
+            *groups.entry(stage).or_default() +=
+                (timestamps[2 * index + 1] - timestamps[2 * index]) as f64 * scale;
+        }
+        eprintln!(
+            "MUSE_MATH_JSON {}",
+            serde_json::json!({"kind":"decode_attribution", "position":position,
+            "plain_wall_ms":plain_wall_ms, "profile_wall_ms":profile_wall_ms, "profile_gpu_ms":gpu_ms,
+            "scaled_stage_ms":groups, "stages":spans.len(), "raw_timestamps":timestamps,
+            "logits_and_written_kv_bitwise":true, "sampling":"encoder-stage, attribution not throughput"})
+        );
+        session.rewind_prefix(position).unwrap();
+    }
+
+    #[test]
+    #[ignore = "serial Metal, Muse longer native-prompt matrix numerical transfer and decode attribution"]
+    fn packed_q8_matrix_current_prompt_transfer() {
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+        let admitted = plan.admit(ctx.memory_signals()).unwrap();
+        let weights = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .unwrap()
+            .into_weights();
+        let exact_forward =
+            MuseGlimmerTextForward::new_with_packed_q8_mat_mat(&ctx, &weights, false).unwrap();
+        let matrix_forward =
+            MuseGlimmerTextForward::new_with_packed_q8_mat_mat(&ctx, &weights, true).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
+        ))
+        .unwrap();
+        let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
+            "begin",
+            Some(
+                fixture["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            ),
+        );
+        let prompt = request
+            .render(weights.config().chat_template_profile, None)
+            .unwrap();
+        let ids = tokenizer.encode(&prompt, false).unwrap();
+        assert!((4096..=7168).contains(&ids.len()));
+        eprintln!(
+            "MUSE_MATH_JSON {}",
+            serde_json::json!({"kind":"fixture", "tokens":ids.len(),
+            "token_sha256":crate::tokenizer::token_ids_sha256_i32le(&ids)})
+        );
+        let tokens: Vec<u32> = ids.iter().map(|&id| u32::try_from(id).unwrap()).collect();
+        let mut exact =
+            MuseGlimmerTextSession::new(&ctx, weights.config(), tokens.len() + 16).unwrap();
+        let mut matrix =
+            MuseGlimmerTextSession::new(&ctx, weights.config(), tokens.len() + 16).unwrap();
+        for count in [1024, tokens.len()] {
+            exact.reset().unwrap();
+            matrix.reset().unwrap();
+            let started = std::time::Instant::now();
+            let mut a = exact_forward.prefill(&tokens[..count], &mut exact).unwrap();
+            let exact_ms = started.elapsed().as_secs_f64() * 1e3;
+            let started = std::time::Instant::now();
+            let mut b = matrix_forward
+                .prefill(&tokens[..count], &mut matrix)
+                .unwrap();
+            let matrix_ms = started.elapsed().as_secs_f64() * 1e3;
+            let comparison = compare_logits(&b, &a);
+            eprintln!(
+                "MUSE_MATH_JSON {}",
+                serde_json::json!({"kind":"prefill_diagnostic", "tokens":count,
+                "complete_native_prompt":count==tokens.len(), "exact_ms":exact_ms, "matrix_ms":matrix_ms,
+                "cosine":comparison.cosine, "relative_rms":comparison.relative_rms, "max_abs":comparison.max_abs,
+                "exact_argmax":comparison.reference_argmax, "matrix_argmax":comparison.candidate_argmax})
+            );
+            profile_actual_decode(&exact_forward, &mut exact, greedy_argmax(&a));
+            assert!(
+                comparison.cosine > 0.999_99
+                    && comparison.relative_rms < 0.002
+                    && comparison.max_abs < 0.1,
+                "inherited endpoint numerical gate: {comparison:?}"
+            );
+            assert_eq!(comparison.reference_argmax, comparison.candidate_argmax);
+            for step in 0..16 {
+                let token = greedy_argmax(&a);
+                assert_eq!(greedy_argmax(&b), token, "greedy continuation step {step}");
+                a = exact_forward.forward_token(token, &mut exact).unwrap();
+                b = matrix_forward.forward_token(token, &mut matrix).unwrap();
+                let comparison = compare_logits(&b, &a);
+                eprintln!(
+                    "MUSE_MATH_JSON {}",
+                    serde_json::json!({"kind":"continuation", "tokens":count, "step":step,
+                    "cosine":comparison.cosine, "relative_rms":comparison.relative_rms, "max_abs":comparison.max_abs})
+                );
+                assert!(
+                    comparison.cosine > 0.999_99
+                        && comparison.relative_rms < 0.006
+                        && comparison.max_abs < 0.3,
+                    "inherited continuation numerical gate: {comparison:?}"
+                );
+            }
+        }
     }
 
     #[derive(Clone, Copy, Debug)]

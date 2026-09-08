@@ -180,11 +180,21 @@ fn long_attention_live_8k_chunk() {
     candidate.packed_online_max_end = 32768;
     let mut session = MuseGlimmerTextSession::new(&ctx, weights.config(), 8192).unwrap();
     bounded.prefill(&tokens[..8064], &mut session).unwrap();
-    let prefix_hash = long_context_prefix_hash(&session, 8064);
+    live_long_attention_chunk(&bounded, &candidate, &mut session, &tokens, 8064);
+}
+
+fn live_long_attention_chunk(
+    bounded: &MuseGlimmerTextForward<'_, '_>,
+    candidate: &MuseGlimmerTextForward<'_, '_>,
+    session: &mut MuseGlimmerTextSession,
+    tokens: &[u32],
+    base: usize,
+) {
+    let prefix_hash = long_context_prefix_hash(session, base);
     let written_kv = |session: &MuseGlimmerTextSession| {
         let mut values = Vec::new();
         for layer in 0..session.geometry.layer_count {
-            let offset = session.geometry.cache_write_offset(layer, 8064).unwrap() * 2;
+            let offset = session.geometry.cache_write_offset(layer, base).unwrap() * 2;
             for tensor in [&session.key_cache, &session.value_cache] {
                 unsafe {
                     let slice = std::slice::from_raw_parts(
@@ -204,12 +214,12 @@ fn long_attention_live_8k_chunk() {
         values
     };
     let run = |forward: &MuseGlimmerTextForward<'_, '_>, session: &mut MuseGlimmerTextSession| {
-        session.rewind_prefix(8064).unwrap();
+        session.rewind_prefix(base).unwrap();
         let started = std::time::Instant::now();
-        let logits = forward.prefill(&tokens[8064..8192], session).unwrap();
+        let logits = forward.prefill(&tokens[base..base + 128], session).unwrap();
         (started.elapsed().as_secs_f64() * 1e3, logits)
     };
-    let a = run(&bounded, &mut session);
+    let a = run(bounded, session);
     let residual_a = read_f32(
         &session
             .packed
@@ -217,10 +227,10 @@ fn long_attention_live_8k_chunk() {
             .unwrap()
             .residual,
     );
-    let kv_a = written_kv(&session);
-    assert_eq!(long_context_prefix_hash(&session, 8064), prefix_hash);
+    let kv_a = written_kv(session);
+    assert_eq!(long_context_prefix_hash(session, base), prefix_hash);
     for layer in 0..session.geometry.layer_count {
-        let offset = session.geometry.cache_write_offset(layer, 8064).unwrap() * 2;
+        let offset = session.geometry.cache_write_offset(layer, base).unwrap() * 2;
         for tensor in [&session.key_cache, &session.value_cache] {
             unsafe {
                 (tensor.buffer.contents().as_ptr() as *mut u8)
@@ -229,7 +239,7 @@ fn long_attention_live_8k_chunk() {
             }
         }
     }
-    let b = run(&candidate, &mut session);
+    let b = run(candidate, session);
     let residual_b = read_f32(
         &session
             .packed
@@ -237,8 +247,8 @@ fn long_attention_live_8k_chunk() {
             .unwrap()
             .residual,
     );
-    let kv_b = written_kv(&session);
-    assert_eq!(long_context_prefix_hash(&session, 8064), prefix_hash);
+    let kv_b = written_kv(session);
+    assert_eq!(long_context_prefix_hash(session, base), prefix_hash);
     let logits = compare_logits(&b.1, &a.1);
     let residual = compare_logits(&residual_b, &residual_a);
     let kv = compare_logits(&kv_b, &kv_a);
@@ -257,6 +267,198 @@ fn long_attention_live_8k_chunk() {
     );
     eprintln!(
         "MUSE_LONG_JSON {}",
-        serde_json::json!({"kind":"live_chunk","base":8064,"rows":128,"A_ms":a.0,"B_ms":b.0,"logits_cosine":logits.cosine,"logits_rms":logits.relative_rms,"logits_max_abs":logits.max_abs,"residual_cosine":residual.cosine,"residual_rms":residual.relative_rms,"residual_max_abs":residual.max_abs,"kv_cosine":kv.cosine,"kv_rms":kv.relative_rms,"kv_max_abs":kv.max_abs,"prefix_immutable":true,"matrix_limit":candidate.packed_prefill_max_end,"online_limit":candidate.packed_online_max_end})
+        serde_json::json!({"kind":"live_chunk","base":base,"rows":128,"A_ms":a.0,"B_ms":b.0,"logits_cosine":logits.cosine,"logits_rms":logits.relative_rms,"logits_max_abs":logits.max_abs,"residual_cosine":residual.cosine,"residual_rms":residual.relative_rms,"residual_max_abs":residual.max_abs,"kv_cosine":kv.cosine,"kv_rms":kv.relative_rms,"kv_max_abs":kv.max_abs,"prefix_immutable":true,"matrix_limit":candidate.packed_prefill_max_end,"online_limit":candidate.packed_online_max_end})
+    );
+}
+
+#[test]
+#[ignore = "serial Metal, complete fresh 8K Muse joint range qualification"]
+fn long_prefill_fresh_8k() {
+    long_prefill_fresh_qualification(8192);
+}
+
+#[test]
+#[ignore = "serial Metal, expensive complete fresh 32K Muse joint range qualification"]
+fn long_prefill_fresh_32k() {
+    long_prefill_fresh_qualification(32768);
+}
+
+fn long_prefill_fresh_qualification(count: usize) {
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let gguf = GgufFile::open(path).unwrap();
+    let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
+    let tokens = long_context_tokens(path, &config);
+    let ctx = MetalContext::new().unwrap();
+    let transaction = ctx.begin_allocation_transaction();
+    let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+    let geometry = MuseGlimmerTextGeometry::from_config(&config, count + 16).unwrap();
+    let session_plan =
+        MuseGlimmerTextSessionMemoryPlan::for_geometry_with_split_decode(&ctx, &geometry, true)
+            .unwrap();
+    let metal_bytes = plan
+        .memory_plan()
+        .priced_upper_bytes()
+        .checked_add(session_plan.priced_upper_bytes().checked_mul(2).unwrap())
+        .unwrap();
+    let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+        metal_bytes,
+        64 * 1024 * 1024,
+        MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES,
+        ctx.memory_signals(),
+        true,
+    );
+    assert!(
+        admission.admitted,
+        "two-session qualification admission {admission:?}"
+    );
+    let weights =
+        MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
+            .unwrap()
+            .into_weights();
+    let bounded = MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    let mut extended =
+        MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    extended.packed_prefill_max_end = count;
+    extended.packed_online_max_end = count;
+    let mut a =
+        MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), count + 16, true)
+            .unwrap();
+    let mut b =
+        MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), count + 16, true)
+            .unwrap();
+    drop(transaction);
+    let run_fresh = |forward: &MuseGlimmerTextForward<'_, '_>,
+                     session: &mut MuseGlimmerTextSession,
+                     arm: &str| {
+        session.reset().unwrap();
+        for tensor in [&session.key_cache, &session.value_cache] {
+            unsafe {
+                (tensor.buffer.contents().as_ptr() as *mut u8)
+                    .add(tensor.offset as usize)
+                    .write_bytes(0xff, session.geometry.cache_elements().unwrap() * 2);
+            }
+        }
+        let started = std::time::Instant::now();
+        let mut chunks = 0;
+        let logits = forward.prefill_with_command_checkpoint(&tokens[..count], session, || {
+            chunks += 1;
+            if chunks % 64 == 0 { eprintln!("MUSE_LONG_JSON {}", serde_json::json!({"kind":"progress","arm":arm,"tokens":count,"chunks":chunks,"elapsed_s":started.elapsed().as_secs_f64()})); }
+            Ok(())
+        }).unwrap();
+        let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        assert!(logits.iter().all(|value| value.is_finite()));
+        eprintln!(
+            "MUSE_LONG_JSON {}",
+            serde_json::json!({"kind":"fresh_diagnostic","arm":arm,"tokens":count,"wall_ms":wall_ms,"prefill_tps":count as f64 * 1000.0 / wall_ms})
+        );
+        (wall_ms, logits)
+    };
+    let (b_ms, mut b_logits) = run_fresh(&extended, &mut b, "B");
+    let b_hash = long_context_prefix_hash(&b, count);
+    let mut attention_only =
+        MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    attention_only.packed_online_max_end = count;
+    let probe_started = std::time::Instant::now();
+    live_long_attention_chunk(&bounded, &attention_only, &mut b, &tokens, count - 128);
+    let probe_ms = probe_started.elapsed().as_secs_f64() * 1e3;
+    b.rewind_prefix(count - 128).unwrap();
+    let restore_started = std::time::Instant::now();
+    let restored = extended
+        .prefill(&tokens[count - 128..count], &mut b)
+        .unwrap();
+    let restore_ms = restore_started.elapsed().as_secs_f64() * 1e3;
+    assert_logits_bitwise_equal(
+        "restore original fresh extended endpoint after probe",
+        &b_logits,
+        &restored,
+    );
+    assert_eq!(long_context_prefix_hash(&b, count), b_hash);
+    assert_eq!(b.next_position(), count);
+    eprintln!(
+        "MUSE_LONG_JSON {}",
+        serde_json::json!({"kind":"probe_restoration","tokens":count,"probe_ms":probe_ms,"restore_ms":restore_ms,"fresh_endpoint_and_all_active_kv_bitwise":true})
+    );
+    let (a_ms, mut a_logits) = run_fresh(&bounded, &mut a, "A");
+    let a_hash = long_context_prefix_hash(&a, count);
+    let endpoint = compare_logits(&b_logits, &a_logits);
+    assert!(
+        endpoint.cosine > 0.999_99 && endpoint.relative_rms < 0.002 && endpoint.max_abs < 0.1,
+        "fresh endpoint {endpoint:?}"
+    );
+    let mut dot = 0.0_f64;
+    let mut aa = 0.0_f64;
+    let mut bb = 0.0_f64;
+    let mut difference = 0.0_f64;
+    let mut max_abs = 0.0_f64;
+    for layer in 0..a.geometry.layer_count {
+        let (ak, av) = a.cache_prefix_views(layer, count).unwrap();
+        let (bk, bv) = b.cache_prefix_views(layer, count).unwrap();
+        for (a, b) in [(ak, bk), (av, bv)] {
+            unsafe {
+                let a = std::slice::from_raw_parts(
+                    (a.buffer.contents().as_ptr() as *const u8).add(a.offset as usize)
+                        as *const u16,
+                    count * 256,
+                );
+                let b = std::slice::from_raw_parts(
+                    (b.buffer.contents().as_ptr() as *const u8).add(b.offset as usize)
+                        as *const u16,
+                    count * 256,
+                );
+                for (&a, &b) in a.iter().zip(b) {
+                    let (a, b) = (
+                        half::f16::from_bits(a).to_f64(),
+                        half::f16::from_bits(b).to_f64(),
+                    );
+                    assert!(a.is_finite() && b.is_finite());
+                    dot += a * b;
+                    aa += a * a;
+                    bb += b * b;
+                    difference += (a - b).powi(2);
+                    max_abs = max_abs.max((a - b).abs());
+                }
+            }
+        }
+    }
+    let kv_cosine = dot / (aa * bb).sqrt();
+    let kv_rms = (difference / aa).sqrt();
+    assert!(
+        kv_cosine > 0.9999 && kv_rms < 0.01,
+        "fresh active KV cosine={kv_cosine} RMS={kv_rms}"
+    );
+    let mut emitted = Vec::new();
+    for step in 0..17 {
+        let comparison = compare_logits(&b_logits, &a_logits);
+        let (rms_gate, abs_gate) = if step == 0 {
+            (0.002, 0.1)
+        } else {
+            (0.006, 0.3)
+        };
+        assert!(
+            comparison.cosine > 0.999_99
+                && comparison.relative_rms < rms_gate
+                && comparison.max_abs < abs_gate,
+            "fresh continuation step={step} {comparison:?}"
+        );
+        let a_token = greedy_argmax(&a_logits);
+        let b_token = greedy_argmax(&b_logits);
+        assert_eq!(a_token, b_token, "independent greedy step={step}");
+        emitted.push(a_token);
+        eprintln!(
+            "MUSE_LONG_JSON {}",
+            serde_json::json!({"kind":"continuation","tokens":count,"step":step,"cosine":comparison.cosine,"relative_rms":comparison.relative_rms,"max_abs":comparison.max_abs})
+        );
+        if step < 16 {
+            a_logits = bounded.forward_generated_token(a_token, &mut a).unwrap();
+            b_logits = extended.forward_generated_token(b_token, &mut b).unwrap();
+        }
+    }
+    assert_eq!(long_context_prefix_hash(&a, count), a_hash);
+    assert_eq!(long_context_prefix_hash(&b, count), b_hash);
+    assert_eq!(a.next_position(), count + 16);
+    assert_eq!(b.next_position(), count + 16);
+    eprintln!(
+        "MUSE_LONG_JSON {}",
+        serde_json::json!({"kind":"fresh_qualification","tokens":count,"A_ms":a_ms,"B_ms":b_ms,"baseline":"delivered bounded hybrid, not all-original arithmetic","kv_cosine":kv_cosine,"kv_rms":kv_rms,"kv_max_abs":max_abs,"prefixes_immutable":true,"independent_greedy_ids":emitted,"session_driver_bytes_each":b.observed_allocation_delta(),"aggregate_required_bytes":admission.required_bytes,"cpu_oracle_allowance_bytes":64 * 1024 * 1024})
     );
 }

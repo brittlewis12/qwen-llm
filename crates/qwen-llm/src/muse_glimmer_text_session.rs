@@ -5203,9 +5203,18 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, whole-model Muse split-attention decode qualification"]
     fn split_attention_actual_decode_packet() {
+        split_attention_decode_packet(false);
+    }
+
+    #[test]
+    #[ignore = "serial Metal, Muse split decode whole-forward 8K/32K ABBA qualification"]
+    fn split_attention_long_decode_packet() {
+        split_attention_decode_packet(true);
+    }
+
+    fn split_attention_decode_packet(long: bool) {
         use crate::muse_glimmer_metal::split_attention_pilot;
         let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
         let gguf = GgufFile::open(path).unwrap();
         let ctx = MetalContext::new().unwrap();
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
@@ -5213,31 +5222,52 @@ mod tests {
         let weights = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
             .unwrap()
             .into_weights();
-        let forward = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
-        ))
-        .unwrap();
-        let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
-            "begin",
-            Some(
-                fixture["messages"][0]["content"]
-                    .as_str()
-                    .unwrap()
-                    .to_string(),
-            ),
-        );
-        let prompt = request
-            .render(weights.config().chat_template_profile, None)
+        let forward =
+            MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, long).unwrap();
+        let tokens: Vec<u32> = if long {
+            let mut tokens = long_context_tokens(path, weights.config());
+            tokens.truncate(32768);
+            tokens
+        } else {
+            let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
+            ))
             .unwrap();
-        let ids = tokenizer.encode(&prompt, false).unwrap();
-        assert_eq!(ids.len(), 6229);
-        let tokens: Vec<u32> = ids.iter().map(|&id| u32::try_from(id).unwrap()).collect();
-        let mut session =
-            MuseGlimmerTextSession::new(&ctx, weights.config(), tokens.len() + 16).unwrap();
+            let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
+                "begin",
+                Some(
+                    fixture["messages"][0]["content"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                ),
+            );
+            let prompt = request
+                .render(weights.config().chat_template_profile, None)
+                .unwrap();
+            let ids = tokenizer.encode(&prompt, false).unwrap();
+            assert_eq!(ids.len(), 6229);
+            ids.iter().map(|&id| u32::try_from(id).unwrap()).collect()
+        };
+        let mut session = MuseGlimmerTextSession::new_with_split_decode(
+            &ctx,
+            weights.config(),
+            tokens.len() + 16,
+            long,
+        )
+        .unwrap();
         let before = ctx.current_allocated_size();
-        let partial = split_attention_pilot::allocate(&ctx);
-        let scratch_bytes = ctx.current_allocated_size() - before;
+        let partial = if long {
+            session.split_decode_partials.as_ref().unwrap().clone()
+        } else {
+            split_attention_pilot::allocate(&ctx)
+        };
+        let scratch_bytes = if long {
+            partial.buffer.length() as u64
+        } else {
+            ctx.current_allocated_size() - before
+        };
         assert!(scratch_bytes <= 1024 * 1024);
         let prefix_hash = |session: &MuseGlimmerTextSession, prefix: usize| {
             let mut hash = blake3::Hasher::new();
@@ -5273,9 +5303,21 @@ mod tests {
             }
             values
         };
-        for prefix in [1024, tokens.len()] {
-            session.reset().unwrap();
-            let seed = forward.prefill(&tokens[..prefix], &mut session).unwrap();
+        let mut previous_prefix = 0;
+        for prefix in if long {
+            [8192, tokens.len()]
+        } else {
+            [1024, tokens.len()]
+        } {
+            let start = if long { previous_prefix } else { 0 };
+            session.rewind_prefix(start).unwrap();
+            let retained = (start > 0).then(|| prefix_hash(&session, start));
+            let seed = forward
+                .prefill(&tokens[start..prefix], &mut session)
+                .unwrap();
+            if let Some(retained) = retained {
+                assert_eq!(prefix_hash(&session, start), retained);
+            }
             let original_prefix = prefix_hash(&session, prefix);
             let run = |session: &mut MuseGlimmerTextSession, split: bool| {
                 let started = std::time::Instant::now();
@@ -5289,6 +5331,9 @@ mod tests {
                         ids.push(token);
                         outputs.push(forward.forward_token(token, session).unwrap());
                     }
+                    if long {
+                        ids.push(greedy_argmax(outputs.last().unwrap()));
+                    }
                     (ids, outputs)
                 };
                 let (ids, outputs) = if split {
@@ -5301,6 +5346,18 @@ mod tests {
             let oracle_a = run(&mut session, false);
             let kv_a = tail_values(&session, prefix);
             assert_eq!(prefix_hash(&session, prefix), original_prefix);
+            if long {
+                for layer in 0..session.geometry.layer_count {
+                    let start = session.geometry.cache_write_offset(layer, prefix).unwrap() * 2;
+                    for tensor in [&session.key_cache, &session.value_cache] {
+                        unsafe {
+                            (tensor.buffer.contents().as_ptr() as *mut u8)
+                                .add(tensor.offset as usize + start)
+                                .write_bytes(0xff, 16 * session.geometry.kv_width * 2);
+                        }
+                    }
+                }
+            }
             let oracle_b = run(&mut session, true);
             let kv_b = tail_values(&session, prefix);
             assert_eq!(prefix_hash(&session, prefix), original_prefix);
@@ -5311,6 +5368,7 @@ mod tests {
                 "KV tail {kv:?}"
             );
             let check = |candidate: &[Vec<f32>]| {
+                assert_eq!(candidate.len(), oracle_a.2.len());
                 let mut minimum_cosine = 1.0_f64;
                 let mut maximum_relative_rms = 0.0_f64;
                 let mut maximum_absolute = 0.0_f32;
@@ -5366,6 +5424,7 @@ mod tests {
             }
             assert_eq!(session.next_position(), prefix + 16);
             assert_eq!(prefix_hash(&session, prefix), original_prefix);
+            previous_prefix = prefix;
         }
     }
 

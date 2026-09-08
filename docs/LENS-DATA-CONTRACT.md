@@ -155,7 +155,10 @@ explicitly not authenticated weight-content roots.
 Private verification logs and frozen executable live under
 `target/lens-data-contract/verification/` in the implementation worktree. Binary
 SHA256: `12e69ef2c6e6856da2399fc7d47663578f4f18cb46531b6a46549ccbf15df9d1`.
-The next bounded check is J/R scalar and packed readout, passive projected-bank
-execution, and layer62 identity parity against the native plain logit lens when
-Metal is available; do not turn scalar/packed rounding differences into a new
-fit-qualification claim.
+Follow-up: [comparative archive exploration](LENS-COMPARATIVE-PHYSIOLOGY.md)
+now exercises the new 3.8 pair through live scalar/packed readout, cohorts,
+inspection and passive projected-bank execution. All twelve fitted/plain
+layer62 full-vocabulary comparisons in that panel are byte-identical. The earlier
+lease-blocked attempt remains historical evidence, not the current capability
+limit. This does not qualify generic Muse execution, interventions, or scientific
+transfer, and scalar/packed rounding differences remain distinct from fit quality.

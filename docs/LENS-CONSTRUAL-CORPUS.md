@@ -234,8 +234,9 @@ No second R fit is needed. Saved validation does not prove HF-to-GGUF transfer.
 Implementation update: the [data-only contract](LENS-DATA-CONTRACT.md) now removes
 per-fit admission. Both archives have been converted without executing pickle and
 pass native CPU integrity verification in adjacent `j/data-v1` and `r/data-v1`
-directories. No published profile was added. Live numerical checks remain pending
-Metal availability; this does not change the scientific comparison limits here.
+directories. No published profile was added. The subsequent
+[comparative archive exploration](LENS-COMPARATIVE-PHYSIOLOGY.md) exercises live
+readout and passive bank execution while preserving these comparison limits.
 
 Local Q8 and Q4 GGUF headers are compatible with the ordinary Qwen family;
 header inspection does not authenticate derivation from the fitted revision.
@@ -250,7 +251,7 @@ Nor does chronological version order identify a causal training intervention.
 The 3.6 n25 pair has weaker recorded recipe provenance, so nominally similar
 Pile/T128 settings do not establish exact cross-model method matching.
 
-Research priority after the generic-consumption fix and its bounded live checks:
-reassess the corpus construct, then compare both models on the small
-lineage/repair casebook. The closed
-world task-binding corpus remains a useful control, not the default flagship.
+The generic-consumption fix and archive follow-up are now available. Reassess
+corpus construction in light of those observations rather than require a new
+casebook before exploring further. The closed-world task-binding corpus remains
+a useful control, not the default flagship.

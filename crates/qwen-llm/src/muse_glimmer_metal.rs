@@ -458,6 +458,23 @@ pub fn encode_muse_glimmer_logit_softcap_f32(
 }
 
 pub const MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS: usize = 7_168;
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_ONLINE_ATTENTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_online_attention<R>(enabled: bool, run: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_ONLINE_ATTENTION.set(self.0);
+        }
+    }
+    let _restore = Restore(FORCE_ONLINE_ATTENTION.replace(enabled));
+    run()
+}
 const MUSE_GLIMMER_QUERY_HEAD_COUNT: usize = 32;
 const MUSE_GLIMMER_KV_HEAD_COUNT: usize = 2;
 const MUSE_GLIMMER_ATTENTION_HEAD_DIM: usize = 128;
@@ -651,6 +668,21 @@ pub fn encode_muse_glimmer_attn_decode_f16kv_f32(
         return bad_shape(
             "muse_glimmer_attn_decode",
             "visible position count must be nonzero".into(),
+        );
+    }
+    #[cfg(test)]
+    if FORCE_ONLINE_ATTENTION.get() {
+        return encode_muse_glimmer_attn_decode_online_f16kv_f32(
+            ctx,
+            enc,
+            query,
+            key_cache,
+            value_cache,
+            output,
+            query_head_count,
+            kv_head_count,
+            head_dim,
+            visible_positions,
         );
     }
     if visible_positions <= MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS {
@@ -1387,6 +1419,109 @@ mod tests {
         let cosine = dot / (materialized_norm * online_norm);
         assert!(max_abs <= 5e-4, "max_abs={max_abs}");
         assert!(cosine >= 0.999_999, "cosine={cosine}");
+    }
+
+    #[test]
+    #[ignore = "serial Metal, existing online attention overlap screen"]
+    fn muse_online_attention_overlap_wall_screen() {
+        let ctx = MetalContext::new().unwrap();
+        for positions in [1, 257, 2048, 6229, 7168] {
+            let (query_values, key_values, value_values) = attention_fixture(positions + 1);
+            let mut padded_query = vec![42.125; 4];
+            padded_query.extend_from_slice(&query_values);
+            let query_storage = tensor_from_f32(&ctx, &padded_query);
+            let query = query_storage.view_subrange(4, vec![4096]);
+            let key_storage = tensor_from_f16(&ctx, &key_values);
+            let value_storage = tensor_from_f16(&ctx, &value_values);
+            let key = key_storage.view_subrange(256, vec![(positions * 256) as u64]);
+            let value = value_storage.view_subrange(256, vec![(positions * 256) as u64]);
+            let a_storage = tensor_from_f32(&ctx, &vec![42.125; 4104]);
+            let b_storage = tensor_from_f32(&ctx, &vec![42.125; 4104]);
+            let a = a_storage.view_subrange(4, vec![4096]);
+            let b = b_storage.view_subrange(4, vec![4096]);
+            let run = |online: bool, repetitions: usize| {
+                let started = std::time::Instant::now();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                with_online_attention(online, || {
+                    for _ in 0..repetitions {
+                        encode_muse_glimmer_attn_decode_f16kv_f32(
+                            &ctx,
+                            &encoder,
+                            &query,
+                            &key,
+                            &value,
+                            if online { &b } else { &a },
+                            32,
+                            2,
+                            128,
+                            positions,
+                        )
+                        .unwrap();
+                    }
+                });
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert_eq!(
+                    command.status(),
+                    objc2_metal::MTLCommandBufferStatus::Completed
+                );
+                assert!(command.error().is_none());
+                (
+                    started.elapsed().as_secs_f64() * 1e3 / repetitions as f64,
+                    (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / repetitions as f64,
+                )
+            };
+            run(false, 1);
+            run(true, 1);
+            let av = read_f32(&a);
+            let bv = read_f32(&b);
+            let max_abs = av
+                .iter()
+                .zip(&bv)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            let dot: f64 = av
+                .iter()
+                .zip(&bv)
+                .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                .sum();
+            let aa: f64 = av.iter().map(|&a| f64::from(a).powi(2)).sum();
+            let bb: f64 = bv.iter().map(|&b| f64::from(b).powi(2)).sum();
+            let cosine = dot / (aa * bb).sqrt();
+            assert!(
+                max_abs <= 5e-4 && cosine >= 0.999_999,
+                "positions={positions} max_abs={max_abs} cosine={cosine}"
+            );
+            for storage in [&a_storage, &b_storage] {
+                let values = read_f32(storage);
+                assert!(
+                    values[..4]
+                        .iter()
+                        .chain(&values[4100..])
+                        .all(|&x| x == 42.125)
+                );
+            }
+            eprintln!(
+                "MUSE_ONLINE_JSON {}",
+                serde_json::json!({"kind":"oracle", "positions":positions,
+                "cosine":cosine,"max_abs":max_abs,"nonzero_views_and_output_guards":true})
+            );
+            if matches!(positions, 2048 | 6229) {
+                for (index, online) in [false, true, true, false, false, true, true, false]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let (wall_ms, gpu_ms) = run(online, 8);
+                    eprintln!(
+                        "MUSE_ONLINE_JSON {}",
+                        serde_json::json!({"kind":if index<4 {"warmup"} else {"sample"},
+                        "positions":positions, "arm":if online {"B"} else {"A"}, "wall_ms":wall_ms,"gpu_ms":gpu_ms})
+                    );
+                }
+            }
+        }
     }
 
     #[test]

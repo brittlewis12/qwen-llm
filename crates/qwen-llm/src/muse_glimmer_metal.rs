@@ -487,6 +487,20 @@ const MUSE_GLIMMER_ATTENTION_HEAD_DIM: usize = 128;
 #[cfg(test)]
 thread_local! {
     static FORCE_PACKED_ONLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_TILED_PREFILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TILED_PREFILL_DISPATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_tiled_prefill<R>(enabled: bool, run: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_TILED_PREFILL.set(self.0);
+        }
+    }
+    let _restore = Restore(FORCE_TILED_PREFILL.replace(enabled));
+    run()
 }
 
 #[cfg(test)]
@@ -619,9 +633,36 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_online(
                 return bad_shape(KERNEL, "unaligned packed online view".into());
             }
         }
-        let pipeline = ctx.pipeline("kernel_muse_prefill_online_h128")?;
-        if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32 {
+        #[cfg(test)]
+        let tiled = FORCE_TILED_PREFILL.get();
+        #[cfg(not(test))]
+        let tiled = false;
+        if tiled && !query.offset.is_multiple_of(32) {
+            return bad_shape(
+                KERNEL,
+                "tiled F32 matrix query requires32-byte alignment".into(),
+            );
+        }
+        let threads = if tiled { 128 } else { 32 };
+        #[cfg(test)]
+        if tiled {
+            TILED_PREFILL_DISPATCHES.set(TILED_PREFILL_DISPATCHES.get() + 1);
+        }
+        let pipeline = ctx.pipeline(if tiled {
+            "kernel_muse_prefill_tiled_f32_h128"
+        } else {
+            "kernel_muse_prefill_online_h128"
+        })?;
+        if pipeline.threadExecutionWidth() != 32
+            || pipeline.maxTotalThreadsPerThreadgroup() < threads
+        {
             return bad_shape(KERNEL, "packed online requires32-lane SIMDgroups".into());
+        }
+        if pipeline.staticThreadgroupMemoryLength() > ctx.device.maxThreadgroupMemoryLength() {
+            return bad_shape(
+                KERNEL,
+                "packed attention exceeds threadgroup memory capacity".into(),
+            );
         }
         enc.note_read(query);
         enc.note_read(key_cache);
@@ -648,12 +689,16 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_online(
         enc.set_tensor(4, output);
         enc.dispatch(
             MTLSize {
-                width: 32,
-                height: row_count,
+                width: if tiled { 2 } else { 32 },
+                height: if tiled {
+                    row_count.div_ceil(2)
+                } else {
+                    row_count
+                },
                 depth: 1,
             },
             MTLSize {
-                width: 32,
+                width: threads,
                 height: 1,
                 depth: 1,
             },
@@ -1727,6 +1772,7 @@ mod tests {
 
     include!("muse_packed_online_pilot.rs");
     include!("muse_attention_context_tests.rs");
+    include!("muse_tiled_prefill_tests.rs");
 
     #[test]
     fn muse_glimmer_packed_attention_matches_scalar_rows_bitwise() {

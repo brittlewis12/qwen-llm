@@ -70,7 +70,7 @@ Raw model input remains explicit:
 
 Muse Q8_0 on unified Apple M4 Max has an opt-in decode path:
 `QWEN_MUSE_SPLIT_DECODE=1 ./target/release/qwen run ...`. It uses partitioned
-attention for generated-token positions 1024 through 7167, retaining the existing
+attention for generated-token positions 1024 through 32783, retaining the existing
 path outside that range. The session admits an additional 528 KiB scratch buffer.
 Prefill, sampling policy, reasoning, and stop handling are unchanged. This is
 tolerance-qualified arithmetic, not bitwise or seed-for-seed sampled equivalence;

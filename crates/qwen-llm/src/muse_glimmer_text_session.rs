@@ -54,6 +54,7 @@ pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
 pub const MUSE_GLIMMER_PACKED_PREFILL_QUANTUM: usize = 16;
 pub const MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS: usize = 128;
 pub const MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END: usize = 32768;
+pub const MUSE_GLIMMER_SPLIT_DECODE_MAX_END: usize = 32784;
 const MUSE_GLIMMER_FULL_READOUT_PASS_K: usize = 16;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K: usize = MUSE_GLIMMER_FULL_READOUT_PASS_K * 2;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_ROWS: usize = 128;
@@ -645,7 +646,7 @@ pub struct MuseGlimmerTextSession {
 }
 
 fn split_decode_position_eligible(position: usize) -> bool {
-    (1024..7168).contains(&position)
+    (1024..MUSE_GLIMMER_SPLIT_DECODE_MAX_END).contains(&position)
 }
 
 fn optimized_prefill_range(base: usize, rows: usize, maximum_end: usize) -> bool {
@@ -5071,7 +5072,9 @@ mod tests {
             (1023, false),
             (1024, true),
             (7167, true),
-            (7168, false),
+            (7168, true),
+            (32783, true),
+            (32784, false),
             (usize::MAX, false),
         ] {
             assert_eq!(split_decode_position_eligible(position), expected);
@@ -5203,16 +5206,22 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, whole-model Muse split-attention decode qualification"]
     fn split_attention_actual_decode_packet() {
-        split_attention_decode_packet(false);
+        split_attention_decode_packet(false, false);
     }
 
     #[test]
     #[ignore = "serial Metal, Muse split decode whole-forward 8K/32K ABBA qualification"]
     fn split_attention_long_decode_packet() {
-        split_attention_decode_packet(true);
+        split_attention_decode_packet(true, false);
     }
 
-    fn split_attention_decode_packet(long: bool) {
+    #[test]
+    #[ignore = "serial Metal, delivered split decode through32K and upper fallback"]
+    fn split_attention_long_decode_delivery() {
+        split_attention_decode_packet(true, true);
+    }
+
+    fn split_attention_decode_packet(long: bool, delivery: bool) {
         use crate::muse_glimmer_metal::split_attention_pilot;
         let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
         let gguf = GgufFile::open(path).unwrap();
@@ -5253,7 +5262,7 @@ mod tests {
         let mut session = MuseGlimmerTextSession::new_with_split_decode(
             &ctx,
             weights.config(),
-            tokens.len() + 16,
+            tokens.len() + if delivery { 17 } else { 16 },
             long,
         )
         .unwrap();
@@ -5329,14 +5338,18 @@ mod tests {
                         let current = if step == 0 { &seed } else { &outputs[step - 1] };
                         let token = greedy_argmax(current);
                         ids.push(token);
-                        outputs.push(forward.forward_token(token, session).unwrap());
+                        outputs.push(if delivery && split {
+                            forward.forward_generated_token(token, session).unwrap()
+                        } else {
+                            forward.forward_token(token, session).unwrap()
+                        });
                     }
                     if long {
                         ids.push(greedy_argmax(outputs.last().unwrap()));
                     }
                     (ids, outputs)
                 };
-                let (ids, outputs) = if split {
+                let (ids, outputs) = if split && !delivery {
                     split_attention_pilot::with_scratch(&partial, body)
                 } else {
                     body()
@@ -5394,6 +5407,47 @@ mod tests {
                 "kv_cosine":kv.cosine,"kv_relative_rms":kv.relative_rms,"kv_max_abs":kv.max_abs,
                 "prefix_bitwise_unchanged":true,"scratch_driver_bytes":scratch_bytes})
             );
+            if delivery {
+                let delivered_kv = prefix_hash(&session, prefix + 16);
+                let pilot =
+                    split_attention_pilot::with_scratch(&partial, || run(&mut session, false));
+                assert_eq!(oracle_b.1, pilot.1);
+                for (actual, expected) in oracle_b.2.iter().zip(&pilot.2) {
+                    assert_logits_bitwise_equal(
+                        "delivered split matches qualified pilot",
+                        actual,
+                        expected,
+                    );
+                }
+                assert_eq!(prefix_hash(&session, prefix + 16), delivered_kv);
+                eprintln!(
+                    "MUSE_DECODE_JSON {}",
+                    serde_json::json!({"kind":"delivered_split","prefix":prefix,"all16_logits_and_active_kv_bitwise_pilot":true})
+                );
+                if prefix == tokens.len() {
+                    let next = session.next_position();
+                    assert_eq!(next, MUSE_GLIMMER_SPLIT_DECODE_MAX_END);
+                    let token = *oracle_b.1.last().unwrap();
+                    let original = forward.forward_token(token, &mut session).unwrap();
+                    let original_kv = prefix_hash(&session, next + 1);
+                    session.rewind_prefix(next).unwrap();
+                    let fallback = forward
+                        .forward_generated_token(token, &mut session)
+                        .unwrap();
+                    assert_logits_bitwise_equal(
+                        "first position beyond split range",
+                        &original,
+                        &fallback,
+                    );
+                    assert_eq!(prefix_hash(&session, next + 1), original_kv);
+                    eprintln!(
+                        "MUSE_DECODE_JSON {}",
+                        serde_json::json!({"kind":"delivered_fallback","position":next,"logits_and_all_active_kv_bitwise":true})
+                    );
+                }
+                previous_prefix = prefix;
+                continue;
+            }
             // All payload oracles precede a separate warm ABBA and measured ABBA.
             for split in [false, true, true, false] {
                 let result = run(&mut session, split);

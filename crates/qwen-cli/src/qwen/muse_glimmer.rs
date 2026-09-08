@@ -235,8 +235,11 @@ pub(crate) fn run_muse_glimmer_single_turn(
     )
     .context("load admitted Muse Glimmer weights and text session")?;
     eprintln!(
-        "muse_glimmer: split_decode={} eligible_generated_positions=1024..7168 matrix_prefill={} optimized_packed_tokens={}",
-        split_decode, matrix_prefill, optimized_packed_tokens
+        "muse_glimmer: split_decode={} eligible_generated_positions=1024..{} matrix_prefill={} optimized_packed_tokens={}",
+        split_decode,
+        qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_SPLIT_DECODE_MAX_END,
+        matrix_prefill,
+        optimized_packed_tokens
     );
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();

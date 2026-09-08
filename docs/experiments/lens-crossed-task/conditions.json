@@ -1,0 +1,276 @@
+{
+  "version": 2,
+  "status": "24 pre-data conditions; CPU audit is recorded separately",
+  "scaffold": "Use only this fictional record and its stated rules; no outside facts are needed. Describe records, not actions on real equipment, food, plants, or systems. Give 90 to 120 words total under exactly these three headings, in order: Observation, Account, Check. Start each heading on its own line, followed by a colon and newline. Do not echo the selected code, the job names, or these instructions. State uncertainty when appropriate.\n",
+  "codebooks": {
+    "plus": {
+      "first": "A",
+      "second": "B"
+    },
+    "minus": {
+      "first": "B",
+      "second": "A"
+    }
+  },
+  "subjects": {
+    "radiatornoise": "Fictional tabletop radiator-noise log. Cause H1 is a loose marker: by the bench rules it clicks once at every upward and downward temperature transition, regardless of circulation. Cause H2 is a bubble marker: it clicks only when circulation starts, regardless of temperature. The two causes are mutually exclusive. Recorded trials: with circulation held on, an upward transition and a downward transition each produced one click. Starting circulation at constant temperature produced no click. Stipulated cause for the stipulation-based job: H1.\n",
+    "roastinguniformity": "Fictional tabletop roasting-uniformity simulation. Cause H1 is a position bias: by the simulation rules the left zone darkens more than the right, regardless of piece tags. Cause H2 is a tag bias: tag P darkens more than tag Q, regardless of zone. The two causes are mutually exclusive. Recorded trials: P on the left darkened more than Q on the right; after exchanging tags between zones, Q on the left darkened more than P on the right. Stipulated cause for the stipulation-based job: H1.\n",
+    "plantwatering": "Fictional tabletop plant-watering log. Cause H1 is a timing bias: by the log rules a late water entry produces a wilt marker and an early entry does not, regardless of pot code. Cause H2 is a pot bias: pot K produces a wilt marker and pot L does not, regardless of entry time. The two causes are mutually exclusive. Recorded trials: pot K with an early entry had no wilt marker; pot L with a late entry had a wilt marker; pot K with a late entry had a wilt marker. Stipulated cause for the stipulation-based job: H1.\n",
+    "softwarecache": "Fictional software-cache trace. Cause H1 is a stale-entry rule: by the trace rules a warm entry returns the old value and a cold entry returns the current value, regardless of client. Cause H2 is a client rule: client X returns the old value and client Y returns the current value, regardless of entry state. The two causes are mutually exclusive. Recorded trials: X with a cold entry returned the current value; Y with a warm entry returned the old value; X with a warm entry returned the old value. Stipulated cause for the stipulation-based job: H1.\n"
+  },
+  "rendering": {
+    "prefix": "<|im_start|>user\n",
+    "order": [
+      "prefix",
+      "definitions",
+      "scaffold",
+      "vignette",
+      "precue checkpoint",
+      "codebook",
+      "preselection checkpoint",
+      "selection",
+      "suffix"
+    ],
+    "codebook": "Codebook:\nFirst definition: {first}\nSecond definition: {second}\n",
+    "selection": "Selected code: {label}\n",
+    "suffix": "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "mode": "explicit ordinary-Qwen no-thinking template; replay literal token IDs without added specials"
+  },
+  "conditions": [
+    {
+      "id": "radiatornoise-plus-A",
+      "subject": "radiatornoise",
+      "codebook": "plus",
+      "label": "A",
+      "job": "explanation",
+      "order": "forward",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "radiatornoise-plus-B",
+      "subject": "radiatornoise",
+      "codebook": "plus",
+      "label": "B",
+      "job": "diagnosis",
+      "order": "forward",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "radiatornoise-minus-A",
+      "subject": "radiatornoise",
+      "codebook": "minus",
+      "label": "A",
+      "job": "diagnosis",
+      "order": "forward",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "radiatornoise-minus-B",
+      "subject": "radiatornoise",
+      "codebook": "minus",
+      "label": "B",
+      "job": "explanation",
+      "order": "forward",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "roastinguniformity-plus-A",
+      "subject": "roastinguniformity",
+      "codebook": "plus",
+      "label": "A",
+      "job": "explanation",
+      "order": "forward",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "roastinguniformity-plus-B",
+      "subject": "roastinguniformity",
+      "codebook": "plus",
+      "label": "B",
+      "job": "diagnosis",
+      "order": "forward",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "roastinguniformity-minus-A",
+      "subject": "roastinguniformity",
+      "codebook": "minus",
+      "label": "A",
+      "job": "diagnosis",
+      "order": "forward",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "roastinguniformity-minus-B",
+      "subject": "roastinguniformity",
+      "codebook": "minus",
+      "label": "B",
+      "job": "explanation",
+      "order": "forward",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "plantwatering-plus-A",
+      "subject": "plantwatering",
+      "codebook": "plus",
+      "label": "A",
+      "job": "explanation",
+      "order": "forward",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "plantwatering-plus-B",
+      "subject": "plantwatering",
+      "codebook": "plus",
+      "label": "B",
+      "job": "diagnosis",
+      "order": "forward",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "plantwatering-minus-A",
+      "subject": "plantwatering",
+      "codebook": "minus",
+      "label": "A",
+      "job": "diagnosis",
+      "order": "forward",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "plantwatering-minus-B",
+      "subject": "plantwatering",
+      "codebook": "minus",
+      "label": "B",
+      "job": "explanation",
+      "order": "forward",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "softwarecache-plus-A",
+      "subject": "softwarecache",
+      "codebook": "plus",
+      "label": "A",
+      "job": "explanation",
+      "order": "forward",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "softwarecache-plus-B",
+      "subject": "softwarecache",
+      "codebook": "plus",
+      "label": "B",
+      "job": "diagnosis",
+      "order": "forward",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "softwarecache-minus-A",
+      "subject": "softwarecache",
+      "codebook": "minus",
+      "label": "A",
+      "job": "diagnosis",
+      "order": "forward",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "softwarecache-minus-B",
+      "subject": "softwarecache",
+      "codebook": "minus",
+      "label": "B",
+      "job": "explanation",
+      "order": "forward",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "radiatornoise-plus-A-reverse",
+      "subject": "radiatornoise",
+      "codebook": "plus",
+      "label": "A",
+      "job": "diagnosis",
+      "order": "reverse",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "radiatornoise-plus-B-reverse",
+      "subject": "radiatornoise",
+      "codebook": "plus",
+      "label": "B",
+      "job": "explanation",
+      "order": "reverse",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "radiatornoise-minus-A-reverse",
+      "subject": "radiatornoise",
+      "codebook": "minus",
+      "label": "A",
+      "job": "explanation",
+      "order": "reverse",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "radiatornoise-minus-B-reverse",
+      "subject": "radiatornoise",
+      "codebook": "minus",
+      "label": "B",
+      "job": "diagnosis",
+      "order": "reverse",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "softwarecache-plus-A-reverse",
+      "subject": "softwarecache",
+      "codebook": "plus",
+      "label": "A",
+      "job": "diagnosis",
+      "order": "reverse",
+      "selected_ordinal": "first"
+    },
+    {
+      "id": "softwarecache-plus-B-reverse",
+      "subject": "softwarecache",
+      "codebook": "plus",
+      "label": "B",
+      "job": "explanation",
+      "order": "reverse",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "softwarecache-minus-A-reverse",
+      "subject": "softwarecache",
+      "codebook": "minus",
+      "label": "A",
+      "job": "explanation",
+      "order": "reverse",
+      "selected_ordinal": "second"
+    },
+    {
+      "id": "softwarecache-minus-B-reverse",
+      "subject": "softwarecache",
+      "codebook": "minus",
+      "label": "B",
+      "job": "diagnosis",
+      "order": "reverse",
+      "selected_ordinal": "first"
+    }
+  ],
+  "definition_blocks": {
+    "explanation": "Take the stipulated cause as given, not as an inference. Trace its consequences to account for the observations, and state one further consequence that would check this account. Do not choose between causes.",
+    "diagnosis": "Treat both candidate causes as live alternatives. Use the observations to discriminate between them, and state one further observation that would check this discrimination. Do not assume the stipulated cause is true."
+  },
+  "definition_intro": "Two jobs are defined below.\n",
+  "orders": {
+    "forward": [
+      "explanation",
+      "diagnosis"
+    ],
+    "reverse": [
+      "diagnosis",
+      "explanation"
+    ]
+  },
+  "order_control_subjects": [
+    "radiatornoise",
+    "softwarecache"
+  ]
+}

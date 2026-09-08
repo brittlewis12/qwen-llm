@@ -27,16 +27,8 @@ use crate::model_request::Turn;
 /// Absent effort is ordinary chat (no thinking), matching the CLI default.
 /// Unknown values fail closed rather than inventing a tier.
 pub(crate) fn reasoning_tier(request: &ServeRequest) -> Result<DeepSeekV4Reasoning, ServeError> {
-    match request.reasoning_effort.as_deref() {
-        None | Some("none") => Ok(DeepSeekV4Reasoning::None),
-        Some("low") => Ok(DeepSeekV4Reasoning::Low),
-        Some("high") => Ok(DeepSeekV4Reasoning::High),
-        Some("max") => Ok(DeepSeekV4Reasoning::Max),
-        Some(other) => Err(ServeError::invalid_request(
-            Some("reasoning.effort"),
-            format!("DeepSeek V4 supports reasoning.effort none|low|high|max; got {other:?}"),
-        )),
-    }
+    DeepSeekV4Reasoning::parse(request.reasoning_effort.as_deref())
+        .map_err(|error| ServeError::invalid_request(Some("reasoning.effort"), error.message))
 }
 
 pub(crate) fn encode_options(
@@ -63,6 +55,12 @@ pub(crate) fn render_deepseek_v4_serve_prompt(
         return Err(ServeError::invalid_request(
             Some("x_qwen.no_thinking"),
             "DeepSeek V4 uses reasoning.effort; x_qwen.no_thinking is unsupported",
+        ));
+    }
+    if request.thinking_requested {
+        return Err(ServeError::invalid_request(
+            Some("x_qwen.thinking"),
+            "DeepSeek V4 selects thinking through reasoning.effort; x_qwen.thinking is unsupported",
         ));
     }
     if request.strip_history_thinking {

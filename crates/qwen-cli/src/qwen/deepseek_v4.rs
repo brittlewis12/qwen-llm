@@ -193,27 +193,13 @@ impl DeepSeekV4MultigroupSelectorPlan {
     }
 }
 
-/// CLI values for `--reasoning`, mapping to the DeepSeek V4 release
-/// three-tier effort contract (vLLM `77434861`): `none` is chat mode; `low`
-/// opens `<think>` with no effort bytes (the release thinking default);
-/// `high` additionally prepends the "Absolute maximum" instruction (labeled
-/// max in the earlier two-tier encoders); and
-/// `max` prepends the stronger "Beyond maximum" instruction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
-pub(crate) enum ReasoningLevelArg {
-    None,
-    Low,
-    High,
-    Max,
-}
-
+/// Legacy `--reasoning` binds through the same table as every other lane
+/// (`DeepSeekV4Reasoning::LEVELS`, vLLM `77434861`): `none` is chat mode;
+/// `low` opens `<think>` with no effort bytes (the release thinking
+/// default); `high` prepends the "Absolute maximum" instruction; `max` the
+/// stronger "Beyond maximum" instruction.
 pub(crate) fn deepseek_v4_encode_options(args: &Args) -> Result<DeepSeekV4EncodeOptions> {
-    let reasoning = match args.reasoning {
-        None | Some(ReasoningLevelArg::None) => DeepSeekV4Reasoning::None,
-        Some(ReasoningLevelArg::Low) => DeepSeekV4Reasoning::Low,
-        Some(ReasoningLevelArg::High) => DeepSeekV4Reasoning::High,
-        Some(ReasoningLevelArg::Max) => DeepSeekV4Reasoning::Max,
-    };
+    let reasoning = DeepSeekV4Reasoning::parse(args.reasoning.as_deref())?;
     ensure!(
         !(args.preserve_reasoning && matches!(reasoning, DeepSeekV4Reasoning::None)),
         "--preserve-reasoning requires --reasoning low, high, or max"
@@ -381,7 +367,7 @@ pub(crate) fn validate_deepseek_v4_generation_mode(
         unsupported.push("--max-context-tokens");
     }
     if args.messages_preserve_thinking
-        && matches!(args.reasoning, None | Some(ReasoningLevelArg::None))
+        && !DeepSeekV4Reasoning::parse(args.reasoning.as_deref()).is_ok_and(|tier| tier.is_thinking())
     {
         // Preserved history reasoning is a release thinking-mode contract;
         // accepting the flag in chat mode would silently no-op.

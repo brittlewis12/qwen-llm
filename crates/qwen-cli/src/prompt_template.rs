@@ -1,4 +1,9 @@
 use anyhow::{Context, Result, bail, ensure};
+use crate::messages::{
+    Qwen38GenerationMode, QwenGenerationMode, ReasoningControlError,
+};
+use crate::open_responses::items::QwenTemplate;
+use qwen_llm::model_family::ModelFamily;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::muse_glimmer::{
     ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, MuseGlimmerChatTemplateProfile,
@@ -321,4 +326,186 @@ mod tests {
             digest_hex(digest),
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ordinary-Qwen user-prompt protocol: the family-owned binding of a `user`
+// (+ `system`) request and its reasoning controls to released template
+// bytes. Transport-neutral (no clap, no HTTP): `qwen run --user`, batch
+// `user` rows, and any future lane hand it plain strings and bools.
+// ---------------------------------------------------------------------------
+
+/// The rendering protocol for ordinary-Qwen `user`(+`system`) requests,
+/// resolved once per model from the GGUF header, so there is exactly one
+/// implementation of the released template bytes across lanes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct QwenUserPromptProtocol {
+    qwen38: bool,
+    template: QwenTemplate,
+}
+
+/// Transport-neutral reasoning controls for one request.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct QwenReasoningControls<'a> {
+    /// `reasoning_effort` spelling as supplied; `None` when omitted.
+    pub(crate) effort: Option<&'a str>,
+    /// The released non-thinking transition was requested.
+    pub(crate) no_thinking: bool,
+}
+
+impl QwenUserPromptProtocol {
+    #[cfg(test)]
+    pub(crate) fn for_test(qwen38: bool, template: QwenTemplate) -> Self {
+        Self { qwen38, template }
+    }
+
+    /// `None` for families that do not render ordinary-Qwen chat.
+    pub(crate) fn resolve(family: ModelFamily, gguf: &GgufFile) -> Result<Option<Self>> {
+        if !matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            qwen38: crate::messages::supports_qwen38_release_prompt_protocol(family, gguf),
+            template: serve_qwen_template(family, gguf)?,
+        }))
+    }
+
+    /// Whether the template bytes are pinned to a released model (or the
+    /// Qwen3.8 protocol applies). Unpinned ChatML renders the legacy generic
+    /// contract, which `run` allows and batch rows do not.
+    pub(crate) fn pinned(&self) -> bool {
+        self.qwen38 || self.template.verified()
+    }
+
+    pub(crate) fn is_qwen38(&self) -> bool {
+        self.qwen38
+    }
+
+    pub(crate) fn template(&self) -> QwenTemplate {
+        self.template
+    }
+
+    /// Stable protocol label for records.
+    pub(crate) fn label(&self) -> &'static str {
+        if self.qwen38 {
+            "qwen38"
+        } else {
+            self.template.label()
+        }
+    }
+
+    /// What this model accepts as reasoning controls: the effort levels (in
+    /// release order, empty when the model has no effort control), the
+    /// fallback when omitted, and whether no-thinking exists. Derived from
+    /// the same tables `bind` parses with, so the advertisement cannot drift
+    /// from the parser.
+    pub(crate) fn reasoning_capability(&self) -> ReasoningCapability {
+        if self.qwen38 {
+            ReasoningCapability {
+                levels: Qwen38GenerationMode::level_names(),
+                fallback: Some("xhigh"),
+                no_thinking: Support::Supported,
+                thinking: Support::Supported,
+            }
+        } else {
+            let pinned = self.template.verified();
+            let unsupported = || Support::Unsupported {
+                code: "template_not_pinned",
+                message: "requires a model whose chat template is pinned (released Qwen3.5/3.6/3.8 templates); this model's template is unrecognized".into(),
+            };
+            ReasoningCapability {
+                levels: Vec::new(),
+                fallback: None,
+                no_thinking: if pinned { Support::Supported } else { unsupported() },
+                thinking: if pinned { Support::Supported } else { unsupported() },
+            }
+        }
+    }
+
+    /// Bind the controls to this model's generation mode. Qwen3.8 identities
+    /// bind effort levels (including `none`); every other ordinary Qwen has
+    /// no effort control and binds only the no-thinking transition.
+    pub(crate) fn bind(
+        &self,
+        controls: QwenReasoningControls<'_>,
+    ) -> Result<QwenBoundGeneration, ReasoningControlError> {
+        if self.qwen38 {
+            return Ok(QwenBoundGeneration::Qwen38(Qwen38GenerationMode::parse(
+                controls.effort,
+                controls.no_thinking,
+            )?));
+        }
+        if let Some(effort) = controls.effort {
+            return Err(ReasoningControlError {
+                code: "reasoning_effort_unsupported",
+                message: format!(
+                    "reasoning effort {effort:?} applies to Qwen3.8 (low/medium/xhigh), DeepSeek V4 (none/low/high/max), and Muse Glimmer; this model has no reasoning-effort control"
+                ),
+            });
+        }
+        if controls.no_thinking && !self.template.verified() {
+            return Err(ReasoningControlError {
+                code: "no_thinking_unsupported",
+                message: "no-thinking requires a model whose chat template is pinned (released Qwen3.5, Qwen3.6, or Qwen3.8 templates); this model's template is unrecognized, so omit it to use the default generation behavior".into(),
+            });
+        }
+        Ok(QwenBoundGeneration::Template(if controls.no_thinking {
+            QwenGenerationMode::NoThinking
+        } else {
+            QwenGenerationMode::Auto
+        }))
+    }
+
+    /// Render one user turn with optional system text under bound controls.
+    pub(crate) fn render(
+        &self,
+        user: &str,
+        system: Option<&str>,
+        controls: QwenReasoningControls<'_>,
+    ) -> Result<String> {
+        match self.bind(controls)? {
+            QwenBoundGeneration::Qwen38(mode) => {
+                Ok(crate::messages::render_qwen38_single_turn_prompt(user, system, mode))
+            }
+            QwenBoundGeneration::Template(mode) => {
+                Ok(crate::messages::render_qwen_single_turn_prompt_for_template(
+                    user,
+                    system,
+                    self.template,
+                    mode,
+                ))
+            }
+        }
+    }
+}
+
+/// The bound generation decision for an ordinary-Qwen request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QwenBoundGeneration {
+    Qwen38(Qwen38GenerationMode),
+    Template(QwenGenerationMode),
+}
+
+/// Whether a control exists for this model. `Unsupported` carries a stable
+/// code and the message a lane would refuse with.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum Support {
+    Supported,
+    Unsupported {
+        code: &'static str,
+        message: String,
+    },
+}
+
+/// Projection of a family's reasoning contract: what `reasoning_effort`
+/// accepts, what applies when omitted, and whether the explicit thinking
+/// controls exist. Built from the same tables the binders parse with.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ReasoningCapability {
+    pub(crate) levels: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fallback: Option<&'static str>,
+    pub(crate) no_thinking: Support,
+    pub(crate) thinking: Support,
 }

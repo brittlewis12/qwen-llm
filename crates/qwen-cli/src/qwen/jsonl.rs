@@ -16,7 +16,7 @@ pub(crate) struct JsonlRequest {
     pub(crate) user: Option<String>,
     pub(crate) system: Option<String>,
     pub(crate) no_thinking: Option<bool>,
-    pub(crate) reasoning_effort: Option<cli::RunReasoningEffort>,
+    pub(crate) reasoning_effort: Option<String>,
     pub(crate) tokens: Option<usize>,
     pub(crate) cache_prefix_tokens: Option<usize>,
     pub(crate) sampling: Option<JsonlSampling>,
@@ -43,7 +43,7 @@ impl JsonlInputLabel {
 /// model that declares one) must not abort a batch of raw rows; they are
 /// reported on the templated rows that would have needed it.
 pub(crate) enum JsonlRowProtocol {
-    Resolved(crate::QwenUserPromptProtocol),
+    Resolved(prompt_template::QwenUserPromptProtocol),
     NotOrdinaryQwen,
     Unresolved(String),
 }
@@ -101,8 +101,10 @@ pub(crate) fn resolve_jsonl_request_input(
         .render(
             user,
             request.system.as_deref(),
-            request.no_thinking.unwrap_or(false),
-            request.reasoning_effort,
+            prompt_template::QwenReasoningControls {
+                effort: request.reasoning_effort.as_deref(),
+                no_thinking: request.no_thinking.unwrap_or(false),
+            },
         )
         .with_context(|| format!("render request line {line}"))?;
     Ok((
@@ -689,10 +691,10 @@ fn run_one_prepared_jsonl_request(
 /// prepared before the model loads.
 pub(crate) fn jsonl_user_prompt_protocol_for_gguf(
     gguf: &GgufFile,
-) -> Result<Option<crate::QwenUserPromptProtocol>> {
+) -> Result<Option<prompt_template::QwenUserPromptProtocol>> {
     match ModelFamily::detect(gguf) {
         Some(family @ (ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)) => {
-            crate::QwenUserPromptProtocol::resolve(family, gguf)
+            prompt_template::QwenUserPromptProtocol::resolve(family, gguf)
         }
         _ => Ok(None),
     }

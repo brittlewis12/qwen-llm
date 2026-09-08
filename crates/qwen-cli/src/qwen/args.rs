@@ -73,9 +73,10 @@ pub(crate) struct Args {
     #[arg(long, hide_short_help = true, requires = "messages")]
     pub(crate) messages_no_generation_prompt: bool,
 
-    /// DeepSeek V4 release reasoning mode for --messages encoding.
-    #[arg(long, hide_short_help = true, requires = "messages", value_enum)]
-    pub(crate) reasoning: Option<ReasoningLevelArg>,
+    /// DeepSeek V4 release reasoning mode for --messages encoding
+    /// (none/low/high/max; none is ordinary chat).
+    #[arg(long, hide_short_help = true, requires = "messages", value_name = "LEVEL")]
+    pub(crate) reasoning: Option<String>,
 
     /// Retain reasoning across turns (DeepSeek V4 thinking modes only).
     #[arg(long, hide_short_help = true, requires = "messages")]

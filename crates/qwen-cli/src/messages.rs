@@ -50,6 +50,72 @@ pub(crate) enum DeepSeekV4Reasoning {
     Max,
 }
 
+/// A reasoning control that cannot bind for this model. `code` is stable for
+/// machine consumers; `message` is what the user sees. Transports map it to
+/// their own error shape (anyhow on the CLI, `ServeError` with a param).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReasoningControlError {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+}
+
+impl std::fmt::Display for ReasoningControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ReasoningControlError {}
+
+impl ReasoningControlError {
+    pub(crate) fn invalid_level(family: &str, levels: &[&str], got: &str) -> Self {
+        Self {
+            code: "reasoning_effort_invalid",
+            message: format!(
+                "{family} accepts reasoning effort {}; got {got:?}",
+                levels.join("|")
+            ),
+        }
+    }
+}
+
+// Shared across binaries; qwen-bench renders DeepSeek without binding controls.
+#[allow(dead_code)]
+impl DeepSeekV4Reasoning {
+    /// Accepted `reasoning_effort` spellings and the tier each binds to —
+    /// the one authority for every lane (legacy `--reasoning`, `run
+    /// --reasoning-effort`, serve `reasoning.effort`). `none` is ordinary
+    /// chat; the fallback when nothing is specified is also chat.
+    pub(crate) const LEVELS: &'static [(&'static str, Self)] = &[
+        ("none", Self::None),
+        ("low", Self::Low),
+        ("high", Self::High),
+        ("max", Self::Max),
+    ];
+    pub(crate) const FALLBACK: Self = Self::None;
+
+    pub(crate) fn level_names() -> Vec<&'static str> {
+        Self::LEVELS.iter().map(|(name, _)| *name).collect()
+    }
+
+    pub(crate) fn parse(effort: Option<&str>) -> Result<Self, ReasoningControlError> {
+        let Some(effort) = effort else {
+            return Ok(Self::FALLBACK);
+        };
+        Self::LEVELS
+            .iter()
+            .find(|(name, _)| *name == effort)
+            .map(|(_, tier)| *tier)
+            .ok_or_else(|| {
+                ReasoningControlError::invalid_level("DeepSeek V4", &Self::level_names(), effort)
+            })
+    }
+
+    pub(crate) fn is_thinking(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DeepSeekV4EncodeOptions {
     pub(crate) reasoning: DeepSeekV4Reasoning,
@@ -262,6 +328,49 @@ pub(crate) enum Qwen38GenerationMode {
 impl Default for Qwen38GenerationMode {
     fn default() -> Self {
         Self::Thinking(Qwen38ReasoningEffort::Xhigh)
+    }
+}
+
+impl Qwen38GenerationMode {
+    /// Accepted `reasoning_effort` spellings and the generation mode each
+    /// binds to. `none` is the released non-thinking transition (the same
+    /// mode `--no-thinking` selects); the fallback is upstream's xhigh.
+    pub(crate) const LEVELS: &'static [(&'static str, Self)] = &[
+        ("none", Self::NoThinking),
+        ("low", Self::Thinking(Qwen38ReasoningEffort::Low)),
+        ("medium", Self::Thinking(Qwen38ReasoningEffort::Medium)),
+        ("xhigh", Self::Thinking(Qwen38ReasoningEffort::Xhigh)),
+    ];
+
+    pub(crate) fn level_names() -> Vec<&'static str> {
+        Self::LEVELS.iter().map(|(name, _)| *name).collect()
+    }
+
+    /// Bind the request's controls. `no_thinking` and an effort level are
+    /// two spellings of one decision, so both together is a conflict.
+    pub(crate) fn parse(
+        effort: Option<&str>,
+        no_thinking: bool,
+    ) -> Result<Self, ReasoningControlError> {
+        if no_thinking && effort.is_some() {
+            return Err(ReasoningControlError {
+                code: "reasoning_conflict",
+                message: "reasoning effort cannot be combined with no-thinking".into(),
+            });
+        }
+        if no_thinking {
+            return Ok(Self::NoThinking);
+        }
+        let Some(effort) = effort else {
+            return Ok(Self::default());
+        };
+        Self::LEVELS
+            .iter()
+            .find(|(name, _)| *name == effort)
+            .map(|(_, mode)| *mode)
+            .ok_or_else(|| {
+                ReasoningControlError::invalid_level("Qwen3.8", &Self::level_names(), effort)
+            })
     }
 }
 

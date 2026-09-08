@@ -13,8 +13,12 @@ pub(crate) fn prepare_muse_glimmer_prompt(
                 !run.no_thinking,
                 "Muse Glimmer does not declare a no-thinking ATEM profile; use --reasoning-effort low for the lightest supported reasoning mode"
             );
+            // Omission is preserved: the messages document may carry its own
+            // strength, and the library merges request, document, then the
+            // `high` fallback.
             let reasoning_strength = run
                 .reasoning_effort
+                .as_deref()
                 .map(resolve_muse_glimmer_reasoning_strength)
                 .transpose()?;
             match run.acquire_input()? {
@@ -65,19 +69,34 @@ pub(crate) fn prepare_muse_glimmer_prompt(
 }
 
 pub(crate) fn resolve_muse_glimmer_reasoning_strength(
-    requested: cli::RunReasoningEffort,
+    requested: &str,
 ) -> Result<MuseGlimmerReasoningStrength> {
-    Ok(match requested {
-        cli::RunReasoningEffort::Low => MuseGlimmerReasoningStrength::Low,
-        cli::RunReasoningEffort::Medium => MuseGlimmerReasoningStrength::Medium,
-        cli::RunReasoningEffort::High => MuseGlimmerReasoningStrength::High,
-        cli::RunReasoningEffort::Xhigh => MuseGlimmerReasoningStrength::Xhigh,
-        cli::RunReasoningEffort::Max => {
-            bail!(
-                "--reasoning-effort max is a DeepSeek V4 tier; Muse Glimmer accepts low, medium, high, xhigh"
+    MuseGlimmerReasoningStrength::parse(requested).ok_or_else(|| {
+        anyhow!(
+            "{}",
+            crate::messages::ReasoningControlError::invalid_level(
+                "Muse Glimmer",
+                &MuseGlimmerReasoningStrength::level_names(),
+                requested
             )
-        }
+        )
     })
+}
+
+/// What Muse accepts as reasoning controls, from the library's own table.
+pub(crate) fn muse_glimmer_reasoning_capability() -> prompt_template::ReasoningCapability {
+    prompt_template::ReasoningCapability {
+        levels: MuseGlimmerReasoningStrength::level_names(),
+        fallback: Some(MuseGlimmerReasoningStrength::High.as_str()),
+        no_thinking: prompt_template::Support::Unsupported {
+            code: "no_thinking_unsupported",
+            message: "Muse Glimmer declares no non-thinking ATEM profile; use reasoning effort low for the lightest supported mode".into(),
+        },
+        thinking: prompt_template::Support::Unsupported {
+            code: "thinking_unsupported",
+            message: "Muse Glimmer always reasons; there is no explicit thinking toggle".into(),
+        },
+    }
 }
 
 pub(crate) fn validate_muse_glimmer_generation_mode(

@@ -139,6 +139,10 @@ pub(crate) struct ServeRequest {
     /// Rendering family, resolved from the loaded model at startup rather
     /// than per request.
     pub(crate) template: QwenTemplate,
+    /// Qwen3.8 generation mode bound once by `normalize_request`; `None`
+    /// for templates without an effort control. Renderers read this rather
+    /// than re-parsing `reasoning_effort`.
+    pub(crate) qwen38_mode: Option<crate::messages::Qwen38GenerationMode>,
     pub(crate) strip_history_thinking: bool,
     pub(crate) echo_stats: bool,
 }
@@ -166,6 +170,7 @@ impl Default for ServeRequest {
             no_thinking: false,
             thinking_requested: false,
             template: QwenTemplate::default(),
+            qwen38_mode: None,
             strip_history_thinking: false,
             echo_stats: false,
         }

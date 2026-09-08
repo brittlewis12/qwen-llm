@@ -110,30 +110,25 @@ fn muse_glimmer_messages_use_the_shared_structured_atem_contract() {
 }
 
 #[test]
-fn muse_glimmer_reasoning_strength_preserves_all_released_levels() {
+fn muse_reasoning_levels_bind_through_the_library_table() {
     for (requested, expected) in [
-        (
-            cli::RunReasoningEffort::Low,
-            MuseGlimmerReasoningStrength::Low,
-        ),
-        (
-            cli::RunReasoningEffort::Medium,
-            MuseGlimmerReasoningStrength::Medium,
-        ),
-        (
-            cli::RunReasoningEffort::High,
-            MuseGlimmerReasoningStrength::High,
-        ),
-        (
-            cli::RunReasoningEffort::Xhigh,
-            MuseGlimmerReasoningStrength::Xhigh,
-        ),
+        ("low", MuseGlimmerReasoningStrength::Low),
+        ("medium", MuseGlimmerReasoningStrength::Medium),
+        ("high", MuseGlimmerReasoningStrength::High),
+        ("xhigh", MuseGlimmerReasoningStrength::Xhigh),
     ] {
         assert_eq!(
             resolve_muse_glimmer_reasoning_strength(requested).unwrap(),
             expected
         );
     }
+    let err = resolve_muse_glimmer_reasoning_strength("max").unwrap_err();
+    assert!(err.to_string().contains("low|medium|high|xhigh"), "{err}");
+    // Advertised levels come from the same table the parser uses.
+    assert_eq!(
+        muse_glimmer_reasoning_capability().levels,
+        MuseGlimmerReasoningStrength::level_names()
+    );
 }
 
 #[test]
@@ -1115,59 +1110,62 @@ fn qwen4exp_serial_mode_rejects_inert_advanced_options() {
 }
 
 #[test]
-fn qwen38_reasoning_effort_resolver_is_typed_and_fail_closed() {
+fn reasoning_controls_bind_through_each_family_table() {
+    use crate::messages::Qwen38ReasoningEffort;
+    use crate::open_responses::items::QwenTemplate;
+    use crate::prompt_template::{QwenBoundGeneration, QwenReasoningControls, QwenUserPromptProtocol};
+
+    // Qwen3.8: every advertised level binds; `none` is the no-thinking mode;
+    // omission is upstream xhigh; a foreign level fails with the level list.
     assert_eq!(
-        resolve_qwen38_generation_mode(true, false, None).unwrap(),
-        Some(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh))
+        Qwen38GenerationMode::parse(None, false).unwrap(),
+        Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh)
     );
-    for (input, expected) in [
-        (cli::RunReasoningEffort::Low, Qwen38ReasoningEffort::Low),
-        (
-            cli::RunReasoningEffort::Medium,
-            Qwen38ReasoningEffort::Medium,
-        ),
-        (cli::RunReasoningEffort::Xhigh, Qwen38ReasoningEffort::Xhigh),
-    ] {
-        assert_eq!(
-            resolve_qwen38_generation_mode(true, false, Some(input)).unwrap(),
-            Some(Qwen38GenerationMode::Thinking(expected))
-        );
+    for (name, expected) in Qwen38GenerationMode::LEVELS {
+        assert_eq!(Qwen38GenerationMode::parse(Some(name), false).unwrap(), *expected);
     }
-    assert!(
-        resolve_qwen38_generation_mode(true, false, Some(cli::RunReasoningEffort::High))
-            .unwrap_err()
-            .to_string()
-            .contains("not Qwen3.8 levels")
+    assert_eq!(
+        Qwen38GenerationMode::parse(Some("none"), false).unwrap(),
+        Qwen38GenerationMode::NoThinking
     );
     assert_eq!(
-        resolve_qwen38_generation_mode(true, true, None).unwrap(),
-        Some(Qwen38GenerationMode::NoThinking)
+        Qwen38GenerationMode::parse(None, true).unwrap(),
+        Qwen38GenerationMode::NoThinking
     );
-    // Non-Qwen3.8 families resolve their own effort vocabulary; the Qwen3.8
-    // resolver simply stands aside.
+    let err = Qwen38GenerationMode::parse(Some("high"), false).unwrap_err();
+    assert_eq!(err.code, "reasoning_effort_invalid");
+    assert!(err.message.contains("none|low|medium|xhigh"), "{err}");
     assert_eq!(
-        resolve_qwen38_generation_mode(false, false, Some(cli::RunReasoningEffort::Low)).unwrap(),
-        None
+        Qwen38GenerationMode::parse(Some("low"), true).unwrap_err().code,
+        "reasoning_conflict"
+    );
+
+    // DeepSeek: none/low/high/max; omission is chat; `xhigh` is foreign.
+    assert_eq!(DeepSeekV4Reasoning::parse(None).unwrap(), DeepSeekV4Reasoning::None);
+    assert_eq!(DeepSeekV4Reasoning::parse(Some("max")).unwrap(), DeepSeekV4Reasoning::Max);
+    assert!(DeepSeekV4Reasoning::parse(Some("xhigh")).unwrap_err().message.contains("none|low|high|max"));
+
+    // Ordinary non-3.8 Qwen has no effort control and binds only the
+    // no-thinking transition, which needs a pinned template.
+    let pinned = QwenUserPromptProtocol::for_test(false, QwenTemplate::Qwen36);
+    assert_eq!(
+        pinned.bind(QwenReasoningControls { effort: None, no_thinking: true }).unwrap(),
+        QwenBoundGeneration::Template(QwenGenerationMode::NoThinking)
     );
     assert_eq!(
-        resolve_deepseek_v4_run_options(Some(cli::RunReasoningEffort::Max))
-            .unwrap()
-            .reasoning,
-        DeepSeekV4Reasoning::Max
+        pinned.bind(QwenReasoningControls { effort: Some("low"), no_thinking: false }).unwrap_err().code,
+        "reasoning_effort_unsupported"
     );
-    assert!(resolve_deepseek_v4_run_options(Some(cli::RunReasoningEffort::Xhigh)).is_err());
-    assert!(
-        !resolve_deepseek_v4_run_options(None)
-            .unwrap()
-            .preserve_reasoning
-    );
+    let generic = QwenUserPromptProtocol::for_test(false, QwenTemplate::Generic);
     assert_eq!(
-        resolve_qwen38_generation_mode(false, false, None).unwrap(),
-        None
+        generic.bind(QwenReasoningControls { effort: None, no_thinking: true }).unwrap_err().code,
+        "no_thinking_unsupported"
     );
-    assert!(
-        resolve_qwen38_generation_mode(true, true, Some(cli::RunReasoningEffort::Low)).is_err()
-    );
+    // The advertised capability is derived from the same tables.
+    let q38 = QwenUserPromptProtocol::for_test(true, QwenTemplate::Qwen38);
+    assert_eq!(q38.reasoning_capability().levels, Qwen38GenerationMode::level_names());
+    assert!(pinned.reasoning_capability().levels.is_empty());
+    assert!(matches!(generic.reasoning_capability().no_thinking, crate::prompt_template::Support::Unsupported { .. }));
 }
 
 #[test]
@@ -5180,38 +5178,13 @@ mod jsonl_templated_rows {
     }
 
     #[test]
-    fn user_rows_need_an_ordinary_qwen_pinned_template() {
-        let err = resolve_jsonl_request_input(
-            &row(r#"{"user":"hi"}"#),
-            2,
-            &JsonlRowProtocol::NotOrdinaryQwen,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("require an ordinary Qwen model"),
-            "{err}"
-        );
-        let generic = JsonlRowProtocol::Resolved(QwenUserPromptProtocol::for_test(
-            false,
-            QwenTemplate::Generic,
-        ));
-        let err = resolve_jsonl_request_input(&row(r#"{"user":"hi"}"#), 2, &generic).unwrap_err();
-        assert!(err.to_string().contains("template is pinned"), "{err}");
-        // A failed resolution is reported on the templated row that needed
-        // it; raw rows in the same batch are unaffected.
-        let unresolved = JsonlRowProtocol::Unresolved("digest not pinned".into());
-        let err =
-            resolve_jsonl_request_input(&row(r#"{"user":"hi"}"#), 2, &unresolved).unwrap_err();
-        assert!(err.to_string().contains("digest not pinned"), "{err}");
-        assert!(resolve_jsonl_request_input(&row(r#"{"prompt":"hi"}"#), 2, &unresolved).is_ok());
-    }
-
-    #[test]
-    fn unknown_reasoning_effort_values_fail_at_parse() {
-        assert!(
-            serde_json::from_str::<JsonlRequest>(r#"{"user":"hi","reasoning_effort":"turbo"}"#)
-                .is_err()
-        );
+    fn unknown_reasoning_effort_values_fail_at_binding_with_the_family_levels() {
+        // The row parses (effort is a spelling bound per family), and the
+        // binding names the model's accepted levels.
+        let row = row(r#"{"user":"hi","reasoning_effort":"turbo"}"#);
+        let q38 = JsonlRowProtocol::Resolved(QwenUserPromptProtocol::for_test(true, QwenTemplate::Qwen38));
+        let err = resolve_jsonl_request_input(&row, 1, &q38).unwrap_err();
+        assert!(format!("{err:#}").contains("none|low|medium|xhigh"), "{err:#}");
         assert!(serde_json::from_str::<JsonlRequest>(r#"{"user":"hi","unknown":1}"#).is_err());
     }
 

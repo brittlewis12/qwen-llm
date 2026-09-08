@@ -43,14 +43,16 @@ pub(crate) fn reasoning_strength(
     request: &ServeRequest,
 ) -> Result<MuseGlimmerReasoningStrength, ServeError> {
     match request.reasoning_effort.as_deref() {
-        None | Some("high") => Ok(MuseGlimmerReasoningStrength::High),
-        Some("low") => Ok(MuseGlimmerReasoningStrength::Low),
-        Some("medium") => Ok(MuseGlimmerReasoningStrength::Medium),
-        Some("xhigh") => Ok(MuseGlimmerReasoningStrength::Xhigh),
-        Some(other) => Err(ServeError::invalid_request(
-            Some("reasoning.effort"),
-            format!("Muse Glimmer supports reasoning.effort low|medium|high|xhigh; got {other:?}"),
-        )),
+        None => Ok(MuseGlimmerReasoningStrength::High),
+        Some(effort) => MuseGlimmerReasoningStrength::parse(effort).ok_or_else(|| {
+            ServeError::invalid_request(
+                Some("reasoning.effort"),
+                format!(
+                    "Muse Glimmer supports reasoning.effort {}; got {effort:?}",
+                    MuseGlimmerReasoningStrength::level_names().join("|")
+                ),
+            )
+        }),
     }
 }
 
@@ -62,6 +64,12 @@ pub(crate) fn render_muse_glimmer_serve_prompt(
         return Err(ServeError::invalid_request(
             Some("x_qwen.no_thinking"),
             "Muse Glimmer has no no-thinking ATEM profile; use reasoning.effort low",
+        ));
+    }
+    if request.thinking_requested {
+        return Err(ServeError::invalid_request(
+            Some("x_qwen.thinking"),
+            "Muse Glimmer always reasons; x_qwen.thinking is unsupported",
         ));
     }
     if request.strip_history_thinking {

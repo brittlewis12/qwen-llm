@@ -22,6 +22,28 @@ pub enum MuseGlimmerReasoningStrength {
 }
 
 impl MuseGlimmerReasoningStrength {
+    /// Accepted spellings, in release order. The fallback when no source
+    /// (request or document) specifies a strength is `High`; callers merge
+    /// sources before applying it (`MuseGlimmerRequest::resolved_reasoning_strength`).
+    pub const LEVELS: &'static [(&'static str, Self)] = &[
+        ("low", Self::Low),
+        ("medium", Self::Medium),
+        ("high", Self::High),
+        ("xhigh", Self::Xhigh),
+    ];
+
+    pub fn level_names() -> Vec<&'static str> {
+        Self::LEVELS.iter().map(|(name, _)| *name).collect()
+    }
+
+    /// `None` when the spelling is not a Muse strength.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::LEVELS
+            .iter()
+            .find(|(level, _)| *level == name)
+            .map(|(_, strength)| *strength)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",

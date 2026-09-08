@@ -855,21 +855,17 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
     output.finish()
 }
 
-/// Qwen3.8 generation mode from the request, or `None` for generic Qwen.
-/// Absent effort defaults to upstream xhigh, matching `qwen run`.
+/// The Qwen3.8 generation mode bound by `normalize_request`, or `None` for
+/// templates without an effort control. Requests that skipped
+/// normalization (tests) bind here through the same table.
 fn qwen38_generation_mode(request: &ServeRequest) -> Option<Qwen38GenerationMode> {
     if request.template != QwenTemplate::Qwen38 {
         return None;
     }
-    if request.no_thinking {
-        return Some(Qwen38GenerationMode::NoThinking);
-    }
-    Some(match request.reasoning_effort.as_deref() {
-        Some("none") => Qwen38GenerationMode::NoThinking,
-        Some("low") => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low),
-        Some("medium") => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
-        _ => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh),
-    })
+    Some(request.qwen38_mode.unwrap_or_else(|| {
+        Qwen38GenerationMode::parse(request.reasoning_effort.as_deref(), request.no_thinking)
+            .unwrap_or_default()
+    }))
 }
 
 pub(crate) fn qwen_serve_generation_mode_name(request: &ServeRequest) -> &'static str {

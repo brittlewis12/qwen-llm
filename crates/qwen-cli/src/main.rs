@@ -51,13 +51,13 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use messages::{
     DeepSeekV4EncodeOptions, DeepSeekV4InlineThinking, DeepSeekV4Reasoning, Qwen38GenerationMode,
-    Qwen38ReasoningEffort, QwenGenerationMode, load_deepseek_v4_0731_messages_prompt,
-    load_messages_prompt_with_policy, messages_thinking_mode, parse_strict_messages_input,
-    render_deepseek_v4_0731_messages_prompt, render_deepseek_v4_0731_single_turn_prompt,
-    render_qwen_chat_for_template, render_qwen_single_turn_prompt_for_template,
+    QwenGenerationMode, load_deepseek_v4_0731_messages_prompt, load_messages_prompt_with_policy,
+    messages_thinking_mode, parse_strict_messages_input, render_deepseek_v4_0731_messages_prompt,
+    render_deepseek_v4_0731_single_turn_prompt, render_qwen_chat_for_template,
     render_qwen38_single_turn_prompt,
 };
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
+use prompt_template::{QwenBoundGeneration, QwenReasoningControls, QwenUserPromptProtocol};
 use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, IdentityCacheOutcome, checkpoint_content_identity,
 };
@@ -592,51 +592,63 @@ fn prepare_modern_run_prompt(
             failure.as_str(),
         );
     }
-    if run.no_thinking
-        && matches!(
-            family,
-            ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp
-        )
-    {
-        ensure!(
-            supports_qwen_no_thinking_prompt(family, gguf),
-            "--no-thinking requires a model whose chat template is pinned (released Qwen3.5, Qwen3.6, Qwen3.8, or Qwen3.8-Flash-Next templates); this model's template is unrecognized, so omit --no-thinking to use its default generation behavior"
-        );
-    }
-    let qwen38 = supports_qwen38_prompt_protocol(family, gguf);
-    // Pinned Qwen3.5/3.6 templates render their released bytes; unpinned
-    // ChatML keeps the legacy generic contract.
-    let qwen_template = prompt_template::serve_qwen_template(family, gguf)?;
-
-    let no_thinking = run.no_thinking;
-    let reasoning_effort = run.reasoning_effort;
-    let qwen38_generation_mode =
-        resolve_qwen38_generation_mode(qwen38, no_thinking, reasoning_effort)?;
-    let deepseek_v4_options = match family {
-        ModelFamily::DeepSeek4 => resolve_deepseek_v4_run_options(run.reasoning_effort)?,
-        _ => {
-            ensure!(
-                run.reasoning_effort.is_none() || qwen38,
-                "--reasoning-effort applies to Qwen3.8 (low/medium/xhigh), DeepSeek V4 (low/high/max), and Muse Glimmer; this model has no reasoning-effort control"
-            );
-            DeepSeekV4EncodeOptions::default()
-        }
+    // Own the control strings so binding does not borrow `run` past the
+    // point where its input is consumed.
+    let effort = run.reasoning_effort.clone();
+    let controls = QwenReasoningControls {
+        effort: effort.as_deref(),
+        no_thinking: run.no_thinking,
     };
+    // Each family binds the reasoning controls against its own levels; the
+    // bound value is what renders, so nothing downstream re-parses strings.
+    let qwen_protocol = QwenUserPromptProtocol::resolve(family, gguf)?;
+    let qwen_bound = match qwen_protocol.as_ref() {
+        Some(protocol) => Some(protocol.bind(controls)?),
+        None => None,
+    };
+    let qwen4exp_mode = match family {
+        ModelFamily::Qwen4Exp if supports_qwen38_prompt_protocol(family, gguf) => Some(
+            Qwen38GenerationMode::parse(controls.effort, controls.no_thinking)?,
+        ),
+        _ => None,
+    };
+    let deepseek_v4_options = match family {
+        ModelFamily::DeepSeek4 => {
+            // `--no-thinking` on DeepSeek is an idempotent request for its
+            // default chat mode; a thinking tier alongside it is a conflict.
+            let reasoning = DeepSeekV4Reasoning::parse(controls.effort)?;
+            ensure!(
+                !(controls.no_thinking && reasoning.is_thinking()),
+                "--no-thinking cannot be combined with a DeepSeek V4 thinking tier"
+            );
+            DeepSeekV4EncodeOptions {
+                reasoning,
+                preserve_reasoning: reasoning.is_thinking(),
+            }
+        }
+        _ => DeepSeekV4EncodeOptions::default(),
+    };
+    let qwen_template = qwen_protocol
+        .as_ref()
+        .map_or(crate::open_responses::items::QwenTemplate::Generic, |protocol| {
+            protocol.template()
+        });
     let input = run.acquire_input()?;
     let (text, source) = match input {
         cli::AcquiredRunInput::RawPrompt(prompt) => (prompt, PromptSource::Inline),
         cli::AcquiredRunInput::User { system, user } => {
             let prompt = match family {
-                ModelFamily::Qwen4Exp if qwen38 => render_qwen38_single_turn_prompt(
-                    &user,
-                    system.as_deref(),
-                    qwen38_generation_mode.expect("validated Qwen3.8 mode"),
-                ),
-                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
-                    QwenUserPromptProtocol::resolve(family, gguf)?
-                        .expect("ordinary Qwen resolves a user prompt protocol")
-                        .render(&user, system.as_deref(), no_thinking, reasoning_effort)?
+                ModelFamily::Qwen4Exp if qwen4exp_mode.is_some() => {
+                    render_qwen38_single_turn_prompt(
+                        &user,
+                        system.as_deref(),
+                        qwen4exp_mode.expect("bound Flash-Next mode"),
+                    )
                 }
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => qwen_protocol
+                    .as_ref()
+                    .expect("ordinary Qwen resolves a user prompt protocol")
+                    .render(&user, system.as_deref(), controls)?,
                 ModelFamily::Qwen4Exp => {
                     let failure = qwen4exp_prompt_capability_failure(family, gguf)
                         .expect("unsupported Flash-Next prompt has a capability failure");
@@ -664,8 +676,14 @@ fn prepare_modern_run_prompt(
                 || messages
                     .iter()
                     .any(|message| message.role == "tool" || !message.tool_calls.is_empty());
+            let qwen38_history_mode = match (qwen_bound, qwen4exp_mode) {
+                (Some(QwenBoundGeneration::Qwen38(mode)), _) | (_, Some(mode)) => Some(mode),
+                _ => None,
+            };
             let prompt = match family {
-                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp if qwen38 => {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp
+                    if qwen38_history_mode.is_some() =>
+                {
                     render_qwen_chat_for_template(
                         &messages,
                         &chat.tools,
@@ -673,7 +691,7 @@ fn prepare_modern_run_prompt(
                         true,
                         true,
                         QwenGenerationMode::Auto,
-                        Some(qwen38_generation_mode.expect("validated Qwen3.8 mode")),
+                        qwen38_history_mode,
                     )?
                     .text
                 }
@@ -682,6 +700,9 @@ fn prepare_modern_run_prompt(
                         qwen_template.verified() || !has_tool_surface,
                         "tools and tool history require a model whose chat template is pinned (released Qwen3.5/3.6/3.8 templates); this model's template is unrecognized"
                     );
+                    let Some(QwenBoundGeneration::Template(mode)) = qwen_bound else {
+                        unreachable!("non-3.8 ordinary Qwen binds a template mode");
+                    };
                     // Pinned templates follow the serve owner position and
                     // preserve replayed reasoning; the legacy generic contract
                     // strips it.
@@ -691,11 +712,7 @@ fn prepare_modern_run_prompt(
                         qwen_template,
                         qwen_template.verified(),
                         true,
-                        if no_thinking {
-                            QwenGenerationMode::NoThinking
-                        } else {
-                            QwenGenerationMode::Auto
-                        },
+                        mode,
                         None,
                     )?
                     .text
@@ -730,140 +747,6 @@ fn prepare_modern_run_prompt(
             ModelFamily::Qwen4Exp => "qwen38",
             _ => qwen_template.label(),
         }),
-    })
-}
-
-/// The rendering protocol for ordinary-Qwen `user`(+`system`) requests,
-/// resolved once per model from the GGUF header. `qwen run --user` and
-/// templated `--requests-jsonl` rows render through the same instance so
-/// there is exactly one implementation of the released template bytes.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct QwenUserPromptProtocol {
-    qwen38: bool,
-    template: crate::open_responses::items::QwenTemplate,
-}
-
-impl QwenUserPromptProtocol {
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        qwen38: bool,
-        template: crate::open_responses::items::QwenTemplate,
-    ) -> Self {
-        Self { qwen38, template }
-    }
-
-    /// `None` for families that do not render ordinary-Qwen chat.
-    pub(crate) fn resolve(family: ModelFamily, gguf: &GgufFile) -> Result<Option<Self>> {
-        if !matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
-            return Ok(None);
-        }
-        Ok(Some(Self {
-            qwen38: supports_qwen38_prompt_protocol(family, gguf),
-            template: prompt_template::serve_qwen_template(family, gguf)?,
-        }))
-    }
-
-    /// Whether the template bytes are pinned to a released model (or the
-    /// Qwen3.8 protocol applies). Unpinned ChatML renders the legacy generic
-    /// contract, which `run` allows and batch rows do not.
-    pub(crate) fn pinned(&self) -> bool {
-        self.qwen38 || self.template.verified()
-    }
-
-    /// Stable protocol label for records.
-    pub(crate) fn label(&self) -> &'static str {
-        if self.qwen38 {
-            "qwen38"
-        } else {
-            self.template.label()
-        }
-    }
-
-    /// Render one user turn with optional system text and the released
-    /// generation controls. Validates the controls against this model.
-    pub(crate) fn render(
-        &self,
-        user: &str,
-        system: Option<&str>,
-        no_thinking: bool,
-        reasoning_effort: Option<cli::RunReasoningEffort>,
-    ) -> Result<String> {
-        ensure!(
-            !no_thinking || self.pinned(),
-            "no-thinking requires a model whose chat template is pinned (released Qwen3.5, Qwen3.6, or Qwen3.8 templates); this model's template is unrecognized, so omit it to use the default generation behavior"
-        );
-        let qwen38_mode =
-            resolve_qwen38_generation_mode(self.qwen38, no_thinking, reasoning_effort)?;
-        ensure!(
-            reasoning_effort.is_none() || self.qwen38,
-            "reasoning-effort applies to Qwen3.8 (low/medium/xhigh); this model has no reasoning-effort control"
-        );
-        Ok(if self.qwen38 {
-            render_qwen38_single_turn_prompt(
-                user,
-                system,
-                qwen38_mode.expect("validated Qwen3.8 mode"),
-            )
-        } else {
-            render_qwen_single_turn_prompt_for_template(
-                user,
-                system,
-                self.template,
-                if no_thinking {
-                    QwenGenerationMode::NoThinking
-                } else {
-                    QwenGenerationMode::Auto
-                },
-            )
-        })
-    }
-}
-
-fn resolve_qwen38_generation_mode(
-    qwen38: bool,
-    no_thinking: bool,
-    reasoning_effort: Option<cli::RunReasoningEffort>,
-) -> Result<Option<Qwen38GenerationMode>> {
-    ensure!(
-        !(no_thinking && reasoning_effort.is_some()),
-        "--reasoning-effort cannot be combined with --no-thinking"
-    );
-    if !qwen38 {
-        return Ok(None);
-    }
-    if no_thinking {
-        return Ok(Some(Qwen38GenerationMode::NoThinking));
-    }
-    let effort = match reasoning_effort.unwrap_or(cli::RunReasoningEffort::Xhigh) {
-        cli::RunReasoningEffort::Low => Qwen38ReasoningEffort::Low,
-        cli::RunReasoningEffort::Medium => Qwen38ReasoningEffort::Medium,
-        cli::RunReasoningEffort::High | cli::RunReasoningEffort::Max => {
-            bail!(
-                "--reasoning-effort high/max are not Qwen3.8 levels (Qwen3.8 accepts low, medium, xhigh)"
-            )
-        }
-        cli::RunReasoningEffort::Xhigh => Qwen38ReasoningEffort::Xhigh,
-    };
-    Ok(Some(Qwen38GenerationMode::Thinking(effort)))
-}
-
-/// DeepSeek V4 thinking tier for `qwen run`: absent means ordinary chat;
-/// thinking tiers preserve replayed reasoning, as serve does.
-fn resolve_deepseek_v4_run_options(
-    reasoning_effort: Option<cli::RunReasoningEffort>,
-) -> Result<DeepSeekV4EncodeOptions> {
-    let reasoning = match reasoning_effort {
-        None => DeepSeekV4Reasoning::None,
-        Some(cli::RunReasoningEffort::Low) => DeepSeekV4Reasoning::Low,
-        Some(cli::RunReasoningEffort::High) => DeepSeekV4Reasoning::High,
-        Some(cli::RunReasoningEffort::Max) => DeepSeekV4Reasoning::Max,
-        Some(other) => {
-            bail!("--reasoning-effort {other:?} is not a DeepSeek V4 tier (accepts low, high, max)")
-        }
-    };
-    Ok(DeepSeekV4EncodeOptions {
-        reasoning,
-        preserve_reasoning: !matches!(reasoning, DeepSeekV4Reasoning::None),
     })
 }
 
@@ -1060,6 +943,57 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "message": "--prompt-lookup requires a recognised Qwen target architecture",
         }),
     };
+    // Reasoning contract, family-owned: each entry is derived from the same
+    // table that binds the lane's controls, so this cannot drift from what
+    // `run`, batch rows, and serve accept. Additive under v1; consumers must
+    // tolerate unknown fields.
+    let reasoning = match family {
+        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => {
+            match QwenUserPromptProtocol::resolve(family.expect("ordinary Qwen"), &gguf) {
+                Ok(Some(protocol)) => serde_json::to_value(protocol.reasoning_capability())?,
+                Ok(None) => unreachable!("ordinary Qwen resolves a protocol"),
+                Err(error) => serde_json::json!({
+                    "status": "unsupported",
+                    "code": "template_unresolved",
+                    "message": error.to_string(),
+                }),
+            }
+        }
+        Some(ModelFamily::Qwen4Exp) => {
+            if supports_qwen38_prompt_protocol(ModelFamily::Qwen4Exp, &gguf) {
+                serde_json::to_value(prompt_template::ReasoningCapability {
+                    levels: Qwen38GenerationMode::level_names(),
+                    fallback: Some("xhigh"),
+                    no_thinking: prompt_template::Support::Supported,
+                    thinking: prompt_template::Support::Supported,
+                })?
+            } else {
+                let failure = qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, &gguf)
+                    .expect("unsupported Flash-Next prompt has a capability failure");
+                serde_json::json!({
+                    "status": "unsupported",
+                    "code": "prompt_protocol_unsupported",
+                    "message": format!("Qwen3.8-Flash-Next chat rendering does not support the declared {}", failure.as_str()),
+                })
+            }
+        }
+        Some(ModelFamily::DeepSeek4) => serde_json::to_value(prompt_template::ReasoningCapability {
+            levels: DeepSeekV4Reasoning::level_names(),
+            fallback: Some("none"),
+            // `no_thinking` is an idempotent request for chat mode.
+            no_thinking: prompt_template::Support::Supported,
+            thinking: prompt_template::Support::Unsupported {
+                code: "thinking_unsupported",
+                message: "DeepSeek V4 selects thinking through reasoning effort; there is no explicit thinking toggle".into(),
+            },
+        })?,
+        Some(ModelFamily::MuseGlimmer) => serde_json::to_value(muse_glimmer_reasoning_capability())?,
+        None => serde_json::json!({
+            "status": "unsupported",
+            "code": "unknown_family",
+            "message": "reasoning controls require a recognised architecture",
+        }),
+    };
     let projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),
@@ -1070,6 +1004,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "serve": project(Lane::Serve),
         },
         "prompt_lookup": { "run": prompt_lookup },
+        "capabilities": { "reasoning": reasoning },
     });
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())

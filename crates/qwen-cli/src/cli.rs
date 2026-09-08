@@ -1,6 +1,6 @@
 use super::Args;
 use anyhow::{Context, Result, ensure};
-use clap::{ArgGroup, Args as ClapArgs, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args as ClapArgs, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -113,18 +113,10 @@ pub(crate) struct RunInvocation {
     pub(crate) model: PathBuf,
     pub(crate) input: RunInput,
     pub(crate) no_thinking: bool,
-    pub(crate) reasoning_effort: Option<RunReasoningEffort>,
+    /// Effort spelling as supplied; each family binds it against its own
+    /// levels after the model is detected (`qwen info --json` lists them).
+    pub(crate) reasoning_effort: Option<String>,
     generation: GenerationOverrides,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum RunReasoningEffort {
-    Low,
-    Medium,
-    High,
-    Xhigh,
-    Max,
 }
 
 #[derive(Debug)]
@@ -203,15 +195,16 @@ pub(crate) struct RunArgs {
     #[arg(long, conflicts_with = "raw_prompt")]
     no_thinking: bool,
 
-    /// Reasoning depth. Muse accepts low/medium/high/xhigh and defaults to high;
-    /// Qwen3.8 accepts low/medium/xhigh and defaults to xhigh. DeepSeek V4
-    /// accepts low/high/max thinking tiers and defaults to ordinary chat.
+    /// Reasoning depth, bound against the detected model's own levels (see
+    /// `qwen info --json` capabilities.reasoning). Qwen3.8: none/low/medium/xhigh,
+    /// default xhigh; DeepSeek V4: none/low/high/max, default none (ordinary
+    /// chat); Muse: low/medium/high/xhigh, default high.
     #[arg(
         long,
-        value_name = "EFFORT",
+        value_name = "LEVEL",
         conflicts_with_all = ["raw_prompt", "no_thinking"]
     )]
-    reasoning_effort: Option<RunReasoningEffort>,
+    reasoning_effort: Option<String>,
 
     #[command(flatten)]
     generation: GenerationOverrides,
@@ -477,54 +470,23 @@ mod tests {
     }
 
     #[test]
-    fn run_accepts_cross_family_reasoning_levels() {
-        for (value, expected) in [
-            ("low", RunReasoningEffort::Low),
-            ("medium", RunReasoningEffort::Medium),
-            ("high", RunReasoningEffort::High),
-            ("xhigh", RunReasoningEffort::Xhigh),
-        ] {
+    fn run_passes_reasoning_levels_through_for_family_binding() {
+        for value in ["low", "medium", "high", "xhigh", "max", "none"] {
             let (_, invocation) = parse(&[
                 "qwen",
                 "run",
                 "-m",
                 "model.gguf",
                 "--user",
-                "Hello",
+                "hi",
                 "--reasoning-effort",
                 value,
             ]);
             let Invocation::Run(run) = invocation else {
-                panic!("expected run invocation");
+                panic!("expected run");
             };
-            assert_eq!(run.reasoning_effort, Some(expected));
+            assert_eq!(run.reasoning_effort.as_deref(), Some(value));
         }
-
-        for value in ["none", "unknown"] {
-            assert!(
-                Args::try_parse_from([
-                    "qwen",
-                    "run",
-                    "-m",
-                    "model.gguf",
-                    "--user",
-                    "Hello",
-                    "--reasoning-effort",
-                    value,
-                ])
-                .is_err(),
-                "unexpectedly accepted {value}"
-            );
-        }
-
-        let mut command = Args::command();
-        let run = command.find_subcommand_mut("run").expect("run subcommand");
-        let mut help = Vec::new();
-        run.write_long_help(&mut help).unwrap();
-        let help = String::from_utf8(help).unwrap();
-        assert!(help.contains("--reasoning-effort <EFFORT>"));
-        assert!(help.contains("possible values: low, medium, high, xhigh, max"));
-        assert!(help.contains("Muse accepts low/medium/high/xhigh"));
     }
 
     #[test]

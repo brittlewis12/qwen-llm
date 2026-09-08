@@ -40,23 +40,14 @@ pub(crate) fn bind_qwen_request(
         ));
     }
     if template == QwenTemplate::Qwen38 {
-        match (request.no_thinking, request.reasoning_effort.as_deref()) {
-            (true, Some(_)) => {
-                return Err(ServeError::invalid_request(
-                    Some("reasoning.effort"),
-                    "reasoning.effort cannot be combined with x_qwen.no_thinking",
-                ));
-            }
-            (_, None | Some("none" | "low" | "medium" | "xhigh")) => {}
-            (_, Some(other)) => {
-                return Err(ServeError::invalid_request(
-                    Some("reasoning.effort"),
-                    format!(
-                        "Qwen3.8 supports reasoning.effort none|low|medium|xhigh; got {other:?}"
-                    ),
-                ));
-            }
-        }
+        // Bind once through the family table; renderers consume the bound
+        // mode instead of re-parsing the string.
+        let mode = crate::messages::Qwen38GenerationMode::parse(
+            request.reasoning_effort.as_deref(),
+            request.no_thinking,
+        )
+        .map_err(|error| ServeError::invalid_request(Some("reasoning.effort"), error.message))?;
+        request.qwen38_mode = Some(mode);
     }
     Ok(request)
 }

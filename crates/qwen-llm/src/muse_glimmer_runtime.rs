@@ -619,7 +619,7 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, delivered optimized Muse prefill option short-shape composition"]
     fn optimized_prefill_runner_short_composition() {
-        use crate::tokenizer::{LlamaCppTokenizer, Tokenize};
+        use crate::tokenizer::LlamaCppTokenizer;
         let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
         let gguf = GgufFile::open(path).unwrap();
         let ctx = MetalContext::new().unwrap();

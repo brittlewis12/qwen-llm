@@ -53,7 +53,7 @@ pub struct MuseGlimmerRuntimeOptions {
     /// positions 1024..7168 on the Q8 M4 Max lane. Prefill/lens math is unchanged.
     pub split_decode: bool,
     /// Numerically qualified Q8 matrix plus online prefill attention; scalar kernels are unchanged.
-    /// Initially restricted to Q8/M4 Max packed chunks with absolute end <=7168.
+    /// Restricted to Q8/M4 Max packed chunks with absolute end <=32768.
     pub matrix_prefill: bool,
 }
 

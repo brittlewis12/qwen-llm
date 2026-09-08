@@ -79,7 +79,7 @@ enable split decode in serving or lens workflows.
 
 `QWEN_MUSE_MATRIX_PREFILL=1` opts Muse Q8_0 on the same device into matrix-based
 packed prefill with row-parallel online attention for chunks ending at or before
-absolute position 7168. Larger session reservations are allowed; chunks crossing
+absolute position 32768. Larger session reservations are allowed; chunks crossing
 or beyond the qualified boundary use the original kernels. It adds no session
 buffers and composes with the split-decode opt-in.
 Logs report `packed_matrix_online`

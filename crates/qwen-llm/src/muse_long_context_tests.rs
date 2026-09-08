@@ -1,4 +1,4 @@
-fn long_context_tokens(path: &str, config: &MuseGlimmerConfig) -> Vec<u32> {
+fn long_context_messages() -> Vec<crate::muse_glimmer_prompt::MuseGlimmerMessage> {
     let request = crate::muse_glimmer_request::MuseGlimmerRequest::from_json(include_str!(
         "../../../docs/bench/tokenizer-messages/current-marcus-long.json"
     ))
@@ -20,6 +20,11 @@ fn long_context_tokens(path: &str, config: &MuseGlimmerConfig) -> Vec<u32> {
             messages.push(message);
         }
     }
+    messages
+}
+
+fn long_context_tokens(path: &str, config: &MuseGlimmerConfig) -> Vec<u32> {
+    let messages = long_context_messages();
     let rendered = crate::muse_glimmer_prompt::render_muse_glimmer_atem_prompt_annotated(
         &messages,
         &crate::muse_glimmer_prompt::MuseGlimmerPromptOptions {
@@ -50,6 +55,67 @@ fn muse_long_fixture_identity() {
     long_context_tokens(path, &MuseGlimmerConfig::from_gguf(&gguf).unwrap());
 }
 
+#[test]
+#[ignore = "CPU-only export of an authenticated native long CLI request"]
+fn export_muse_long_cli_fixture() {
+    use crate::muse_glimmer_prompt::MuseGlimmerMessageRole;
+    use std::io::Write;
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let gguf = GgufFile::open(path).unwrap();
+    let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
+    let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+    let messages = long_context_messages();
+    for end in (1..=messages.len()).rev() {
+        if messages[end - 1].role != MuseGlimmerMessageRole::User {
+            continue;
+        }
+        let rendered = crate::muse_glimmer_prompt::render_muse_glimmer_atem_prompt_annotated(
+            &messages[..end],
+            &crate::muse_glimmer_prompt::MuseGlimmerPromptOptions {
+                profile: config.chat_template_profile,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .text;
+        let ids = tokenizer.encode(&rendered, false).unwrap();
+        if ids.len() > 32768 {
+            continue;
+        }
+        assert!(ids.len() >= 24576);
+        let wire: Vec<serde_json::Value> = messages[..end]
+            .iter()
+            .map(|message| {
+                let role = match message.role {
+                    MuseGlimmerMessageRole::System => "system",
+                    MuseGlimmerMessageRole::User => "user",
+                    MuseGlimmerMessageRole::Assistant => "assistant",
+                    _ => panic!("unexpected tool fixture"),
+                };
+                serde_json::json!({"role":role,"content":message.content})
+            })
+            .collect();
+        let document = serde_json::json!({"messages":wire});
+        let metadata = serde_json::json!({"tokens":ids.len(),"token_sha256":crate::tokenizer::token_ids_sha256_i32le(&ids),"messages":end,"description":"largest complete normalized Current Marcus request ending in a user turn below32K"});
+        for (name, value) in [
+            ("long-cli-fixture.json", document),
+            ("long-cli-fixture-meta.json", metadata.clone()),
+        ] {
+            let path = std::path::Path::new("target/profiles/muse-live-prefix").join(name);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .unwrap();
+            serde_json::to_writer(&mut file, &value).unwrap();
+            writeln!(file).unwrap();
+        }
+        eprintln!("MUSE_LONG_JSON {}", metadata);
+        return;
+    }
+    panic!("no eligible long CLI fixture");
+}
+
 fn long_context_prefix_hash(session: &MuseGlimmerTextSession, end: usize) -> blake3::Hash {
     let mut hash = blake3::Hasher::new();
     for layer in 0..session.geometry.layer_count {
@@ -64,6 +130,17 @@ fn long_context_prefix_hash(session: &MuseGlimmerTextSession, end: usize) -> bla
         }
     }
     hash.finalize()
+}
+
+fn bounded_7k_forward<'ctx, 'model>(
+    ctx: &'ctx MetalContext,
+    weights: &'model MuseGlimmerMetalWeights,
+) -> MuseGlimmerTextForward<'ctx, 'model> {
+    let mut forward =
+        MuseGlimmerTextForward::new_with_optimized_prefill(ctx, weights, true).unwrap();
+    forward.packed_prefill_max_end = 7168;
+    forward.packed_online_max_end = 7168;
+    forward
 }
 
 #[test]
@@ -95,8 +172,7 @@ fn optimized_prefill_large_reservation_boundary() {
             .unwrap()
             .into_weights();
     let exact = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
-    let optimized =
-        MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    let optimized = bounded_7k_forward(&ctx, &weights);
     let mut reference = MuseGlimmerTextSession::new(&ctx, weights.config(), 7275).unwrap();
     let mut candidate =
         MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), 7275, true).unwrap();
@@ -174,9 +250,8 @@ fn long_attention_live_8k_chunk() {
         MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
             .unwrap()
             .into_weights();
-    let bounded = MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
-    let mut candidate =
-        MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    let bounded = bounded_7k_forward(&ctx, &weights);
+    let mut candidate = bounded_7k_forward(&ctx, &weights);
     candidate.packed_online_max_end = 32768;
     let mut session = MuseGlimmerTextSession::new(&ctx, weights.config(), 8192).unwrap();
     bounded.prefill(&tokens[..8064], &mut session).unwrap();
@@ -283,6 +358,64 @@ fn long_prefill_fresh_32k() {
     long_prefill_fresh_qualification(32768);
 }
 
+#[test]
+#[ignore = "serial Metal, delivered 32K prefill constructor and incremental fallback boundaries"]
+fn long_prefill_32k_delivery_boundaries() {
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let gguf = GgufFile::open(path).unwrap();
+    let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
+    let tokens = long_context_tokens(path, &config);
+    let ctx = MetalContext::new().unwrap();
+    let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+    let weights =
+        MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
+            .unwrap()
+            .into_weights();
+    let exact = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
+    let forward = MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    assert_eq!(forward.packed_prefill_max_end, 32768);
+    assert_eq!(forward.packed_online_max_end, 32768);
+    let mut session =
+        MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), 32784, true).unwrap();
+    let mut logits = forward.prefill(&tokens[..32768], &mut session).unwrap();
+    let prefix = long_context_prefix_hash(&session, 32768);
+    let expected = [
+        913, 49098, 26, 352, 4557, 24, 54633, 26137, 26, 589, 48570, 948, 19044, 70912, 398, 6837,
+        24,
+    ];
+    for (step, &token) in expected.iter().enumerate() {
+        assert_eq!(
+            greedy_argmax(&logits),
+            token,
+            "delivered greedy step={step}"
+        );
+        if step < 16 {
+            logits = forward
+                .forward_generated_token(token, &mut session)
+                .unwrap();
+        }
+    }
+    assert_eq!(long_context_prefix_hash(&session, 32768), prefix);
+    for base in [32760, 32768] {
+        session.rewind_prefix(base).unwrap();
+        let reference = exact
+            .prefill(&tokens[base..base + 16], &mut session)
+            .unwrap();
+        let reference_kv = long_context_prefix_hash(&session, base + 16);
+        session.rewind_prefix(base).unwrap();
+        let actual = forward
+            .prefill(&tokens[base..base + 16], &mut session)
+            .unwrap();
+        assert_logits_bitwise_equal("delivered32K straddle/beyond fallback", &reference, &actual);
+        assert_eq!(long_context_prefix_hash(&session, base + 16), reference_kv);
+        assert_eq!(session.next_position(), base + 16);
+    }
+    eprintln!(
+        "MUSE_LONG_JSON {}",
+        serde_json::json!({"kind":"delivery32k","independent_greedy_ids":expected,"constructor_limits":32768,"straddle_and_beyond_fallback_bitwise":true,"generation_prefix_immutable":true,"session_driver_bytes":session.observed_allocation_delta()})
+    );
+}
+
 fn long_prefill_fresh_qualification(count: usize) {
     let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
     let gguf = GgufFile::open(path).unwrap();
@@ -315,7 +448,7 @@ fn long_prefill_fresh_qualification(count: usize) {
         MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
             .unwrap()
             .into_weights();
-    let bounded = MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    let bounded = bounded_7k_forward(&ctx, &weights);
     let mut extended =
         MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
     extended.packed_prefill_max_end = count;
@@ -355,8 +488,7 @@ fn long_prefill_fresh_qualification(count: usize) {
     };
     let (b_ms, mut b_logits) = run_fresh(&extended, &mut b, "B");
     let b_hash = long_context_prefix_hash(&b, count);
-    let mut attention_only =
-        MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    let mut attention_only = bounded_7k_forward(&ctx, &weights);
     attention_only.packed_online_max_end = count;
     let probe_started = std::time::Instant::now();
     live_long_attention_chunk(&bounded, &attention_only, &mut b, &tokens, count - 128);

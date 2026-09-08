@@ -12,6 +12,10 @@ UI, generic plugin systems, and production hardening are out of scope.
 - Data-only full transports are accepted directly by read/trace and selected-bank
   run paths: new fits need no hardcoded profile or pickle loader. See the
   [data contract](LENS-DATA-CONTRACT.md) for export, verification and mode limits.
+- [Comparative archive physiology](LENS-COMPARATIVE-PHYSIOLOGY.md) exercises the
+  new 3.8 pair alongside 3.6: full-depth R traces, J/R/plain full scores, native
+  reasoning-mode contrasts and four complete continuations. Boundary localization
+  and source-scope drift are observational leads, not identified mechanisms.
 - Native plain logit-lens readouts and opt-in lossless full-vocabulary exports
   are available through `read-full`; see [observer controls](LENS-OBSERVER-CONTROLS.md)
   for semantics, examples, and bounded scalar/packed qualification.
@@ -155,8 +159,9 @@ UI, generic plugin systems, and production hardening are out of scope.
   `source_to_target` remains a separate directed displacement for compatibility.
 - The complete Qwen3.8 n25/T128/skip-4/target-62 J/R pair is converted to the
   data-only contract and passes native CPU payload verification without new
-  profile entries. Live numerical smoke awaits Metal availability; transfer
-  equivalence is not established. The legacy Qwen3.8 J profile remains the
+  profile entries. Live scalar/packed readouts and passive bank execution now
+  work; the archive panel verifies target62 identity parity without establishing
+  transfer equivalence. The legacy Qwen3.8 J profile remains the
   different n1000/target-63 asset. See
   [construal corpus research](LENS-CONSTRUAL-CORPUS.md) for artifact provenance
   and comparison limits. Qwen3.6 has its released target-62 matched pair plus
@@ -187,12 +192,11 @@ UI, generic plugin systems, and production hardening are out of scope.
 ## Active Gate
 
 The released Qwen3.6 pair, matched Muse pair, and canonical coordinate swap are
-available. The newly completed Qwen3.8 pair needs bounded live verification of
-the generic consumption path, not another full fit or profile registration.
-Prompt construction is paused until that path is checked. Artifact-first
-inspection and within-checkpoint comparison remain the research path; native
-fitting optimization is a separate project, not a prerequisite imposed by the
-former application deadline.
+available, and the new Qwen3.8 pair is live through generic consumption. Follow
+the archive observations about boundary sensitivity and selective repair; new
+prompt construction is not a prerequisite. Artifact-first inspection and
+within-checkpoint comparison remain useful means, not research ends. Native
+fitting optimization remains a separate project.
 
 ## Deferred
 

@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Runtime Snapshot Alias Boundary Reproduced
+
+- `6621673a` runs the actual LoadedModel/Sequence/prepared-checkpoint APIs on
+  Qwen3.5-0.8B F32. KV tensor handles escape through the safe immutable accessor
+  both before and after restore, then a checked four-byte blit mutates the prefix.
+- Full recapture observes exactly the changed K bytes; V/GDN/conv and the original
+  checkpoint remain unchanged. Naive restored-prefix reuse would discard the write.
+  One ignored release test passes in 0.98s under the production lease guardian.
+  This reproduces the capability boundary, not corruption in the current full-copy
+  snapshot path, and does not implement or qualify a reuse-taint mechanism.
+- Source review also identifies packed hidden capture accepting destinations that
+  alias session/scratch buffers. Narrow pre-encode rejection and owned serial
+  append integration precede segmented snapshot rollout; no latency claim.
+- Import-only build failure retained, repaired before execution. Raw build and
+  execution records: `target/profiles/runtime-snapshot-ownership/`.
+
 ## 2026-09-07 - Incremental CPU Snapshot Lifecycle PASS
 
 - Test-only `3cfc7fe0` shares only immutable KV actually restored into the producer;

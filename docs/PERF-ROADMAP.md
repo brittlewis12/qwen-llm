@@ -185,10 +185,13 @@ outliving cache eviction require explicit admission/lifetime accounting.
 
 Source audit: even safe `Sequence::metal_session(&self)` exposes retainable writable
 KV buffers. A caller can retain an alias before restore, then write through a safe
-blit afterward. Invalidating only `metal_session_mut`, or clearing at accessor
+blit afterward. Actual 0.8B F32 runtime witness `6621673a` passes both escape orders:
+current full recapture sees the four-byte mutation, original checkpoint unchanged.
+Invalidating only `metal_session_mut`, or clearing at accessor
 time then rearming on restore, is insufficient. Resolve raw-escape lifetime or
 permanent reuse taint before adding production anchors; the CPU prototype does
-not exercise these low-level GPU aliases.
+not exercise these low-level GPU aliases. This is not a bug in current full-copy
+snapshots and does not itself implement taint tracking.
 
 ## Attention Checkpoint - 2026-09-07
 

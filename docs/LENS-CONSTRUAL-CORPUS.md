@@ -201,7 +201,7 @@ The resulting target is **preserving and revising a usable possibility space**,
 including the source/status of its contents, rather than maximizing either
 stability or movement of an interpretation.
 
-## Qwen3.8 Matched Pair: Verified Availability, Pending Import
+## Qwen3.8 Matched Pair: Availability And Conversion
 
 The new artifacts are locally present at:
 
@@ -225,10 +225,17 @@ hashes and fitter/dependency identities. J/R differ in the intended backward
 rules, not the nominal forward or corpus. This is stronger matching than names.
 
 The inspected native importer still contains the old Qwen3.8 n1000/target63 J
-profile, not this pair. Next implementation is audited native import preserving
+profile, not this pair. At the time of this research pass, the next implementation
+was audited native import preserving
 archive orientation, checkpoint/recipe/source identities and payload integrity;
 do not rename reports into manifests, disable validation or build another kernel.
 No second R fit is needed. Saved validation does not prove HF-to-GGUF transfer.
+
+Implementation update: the [data-only contract](LENS-DATA-CONTRACT.md) now removes
+per-fit admission. Both archives have been converted without executing pickle and
+pass native CPU integrity verification in adjacent `j/data-v1` and `r/data-v1`
+directories. No published profile was added. Live numerical checks remain pending
+Metal availability; this does not change the scientific comparison limits here.
 
 Local Q8 and Q4 GGUF headers are compatible with the ordinary Qwen family;
 header inspection does not authenticate derivation from the fitted revision.
@@ -243,6 +250,7 @@ Nor does chronological version order identify a causal training intervention.
 The 3.6 n25 pair has weaker recorded recipe provenance, so nominally similar
 Pile/T128 settings do not establish exact cross-model method matching.
 
-Priority: correct the corpus construct in parallel with this bounded import
-work, then compare both models on the small lineage/repair casebook. The closed
+Research priority after the generic-consumption fix and its bounded live checks:
+reassess the corpus construct, then compare both models on the small
+lineage/repair casebook. The closed
 world task-binding corpus remains a useful control, not the default flagship.

@@ -1,4 +1,95 @@
 use super::*;
+
+#[test]
+fn all_plan_artifacts_are_cpu_bound_before_any_projection_can_start() {
+    let first = crate::linear_transport::tests::fixture("first-valid", 2, 1);
+    let second = crate::linear_transport::tests::fixture("second-wrong-geometry", 3, 2);
+    let model = first.0.join("model.gguf");
+    crate::full_lens::write_cpu_gguf(&model, "qwen35", 2, "first", false);
+    let gguf = GgufFile::open(&model).unwrap();
+    let plan: LensPlan = serde_json::from_value(serde_json::json!({"version":1,
+        "lenses":[{"kind":"linear_transport","id":"first","artifact":first.0,"token_ids":[1],"allow_unvalidated_transfer":true},
+            {"kind":"linear_transport","id":"second","artifact":second.0,"token_ids":[1],"allow_unvalidated_transfer":true}],
+        "directions":[],"operations":[],"readouts":[
+            {"id":"a","lens":"first","scope":{"layers":{"kind":"values","values":[0]},"prefill":{"kind":"all"}},"top_k":1},
+            {"id":"b","lens":"second","scope":{"layers":{"kind":"values","values":[0]},"prefill":{"kind":"all"}},"top_k":1}]})).unwrap();
+    validate_plan(&plan).unwrap();
+    let opened = open_full_transports(&plan, Path::new(".")).unwrap();
+    let mut projection_started = false;
+    let result: Result<()> = (|| {
+        let _bound = bind_full_transports(opened, &plan, Path::new("."), &gguf, None)?;
+        projection_started = true;
+        Ok(())
+    })();
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("geometry mismatch")
+    );
+    assert!(!projection_started);
+    let mut mixed = plan.clone();
+    for legacy in [
+        LensDefinition::NativeSelected {
+            id: "second".into(),
+            artifact: second.0.join("missing-native"),
+        },
+        LensDefinition::WorkspaceTemplate {
+            id: "second".into(),
+            weights: second.0.join("missing-weights"),
+            labels: second.0.join("missing-labels"),
+        },
+    ] {
+        mixed.lenses[1] = legacy;
+        let opened = open_full_transports(&mixed, Path::new(".")).unwrap();
+        let mut projection_started = false;
+        let result: Result<()> = (|| {
+            let _bound = bind_full_transports(opened, &mixed, Path::new("."), &gguf, None)?;
+            projection_started = true;
+            Ok(())
+        })();
+        assert!(result.is_err());
+        assert!(!projection_started);
+    }
+}
+
+#[test]
+fn generic_plan_preflight_is_data_driven_and_retains_verified_handles() {
+    use crate::linear_transport::tests::{fixture, modify};
+    for (method, hidden, seed) in [("new-qwen-recipe", 2, 3), ("future-fit", 5, 7)] {
+        let f = fixture(method, hidden, seed);
+        let mut plan: LensPlan = serde_json::from_value(serde_json::json!({
+            "version":1,
+            "lenses":[{"kind":"linear_transport", "id":"arbitrary", "artifact":f.0, "token_ids":[7,1], "allow_unvalidated_transfer":true}],
+            "directions":[], "operations":[],
+            "readouts":[{"id":"scores", "lens":"arbitrary", "scope":{"layers":{"kind":"values","values":[0,2]},"prefill":{"kind":"all"}},"top_k":2}]
+        })).unwrap();
+        validate_plan(&plan).unwrap();
+        validate_ordinary_plan(&plan).unwrap();
+        assert_eq!(
+            open_full_transports(&plan, Path::new(".")).unwrap().len(),
+            1
+        );
+        if let LensDefinition::PublishedFullTransport {
+            allow_unvalidated_transfer,
+            ..
+        } = &mut plan.lenses[0]
+        {
+            *allow_unvalidated_transfer = false;
+        }
+        assert!(open_full_transports(&plan, Path::new(".")).is_err());
+        modify(
+            &f,
+            |v| v["model"]["exact_binding"] = serde_json::json!({"gguf_content_blake3":"a".repeat(64),"tokenizer_metadata_id":"b".repeat(16)}),
+        );
+        assert_eq!(
+            open_full_transports(&plan, Path::new(".")).unwrap().len(),
+            1
+        );
+        std::fs::write(f.0.join("transport.f16le"), vec![0u8; hidden * hidden * 4]).unwrap();
+        assert!(open_full_transports(&plan, Path::new(".")).is_err());
+    }
+}
 use clap::Parser;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -284,6 +375,8 @@ fn sweep_cli_preserves_order_duplicates_signed_zero_and_negative_values() {
         "hello",
         "--output",
         "sweep",
+        "--identity-cache",
+        "private-cache",
     ])
     .unwrap()
     .args;
@@ -299,6 +392,10 @@ fn sweep_cli_preserves_order_duplicates_signed_zero_and_negative_values() {
             .collect::<Vec<_>>()
     );
     assert_eq!(parsed.arm_run_args().seed, 0);
+    assert_eq!(
+        parsed.arm_run_args().identity_cache,
+        Some(PathBuf::from("private-cache"))
+    );
     assert_eq!(
         parsed.arm_run_args().prefill_execution,
         PrefillExecution::Auto
@@ -785,6 +882,7 @@ fn sweep_cohort_model_bound_children_are_inspectable() {
     .unwrap();
     let output = root.join("cohort");
     run_coefficient_sweep(CoefficientSweepArgs {
+        identity_cache: None,
         model: model.into(),
         plan: plan.into(),
         operation,
@@ -1107,6 +1205,7 @@ fn run_artifact_serializes_envelope_exact_plan_and_score_semantics() {
     let plan = minimal_plan();
     let plan_digest = canonical_plan_blake3(&plan).unwrap();
     let artifact = RunOutput {
+        linear_transports: Vec::new(),
         schema: RUN_SCHEMA,
         schema_version: RUN_SCHEMA_VERSION,
         runtime_kind: "ordinary_qwen",
@@ -1291,6 +1390,7 @@ fn summary_contains_required_counts_text_and_artifact_path() {
     let plan = minimal_plan();
     let plan_digest = canonical_plan_blake3(&plan).unwrap();
     let artifact = RunOutput {
+        linear_transports: Vec::new(),
         schema: RUN_SCHEMA,
         schema_version: RUN_SCHEMA_VERSION,
         runtime_kind: "muse_glimmer",
@@ -1896,7 +1996,9 @@ fn published_full_transport_plan_requires_explicit_transfer_and_unique_tokens() 
     let expanded = plan(json!((0..64).collect::<Vec<_>>()), true);
     validate_plan(&expanded).unwrap();
 
-    assert!(validate_plan(&plan(json!([42, 43]), false)).is_err());
+    // Transfer authority is checked against the opened artifact, not syntax:
+    // an exact-bound data artifact needs no unvalidated-transfer override.
+    assert!(validate_plan(&plan(json!([42, 43]), false)).is_ok());
     assert!(validate_plan(&plan(json!([42, 42]), true)).is_err());
     assert!(validate_plan(&plan(json!([]), true)).is_err());
     assert!(validate_plan(&plan(json!([43]), true)).is_err());

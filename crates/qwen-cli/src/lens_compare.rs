@@ -696,6 +696,10 @@ fn ensure_sweep_readout_semantics(arms: &[LoadedSweepArm]) -> Result<()> {
 
 fn ensure_sweep_run_context(reference: &RunDocument, candidate: &RunDocument) -> Result<()> {
     ensure!(
+        reference.linear_transports == candidate.linear_transports,
+        "sweep linear transport contracts or runtime bindings differ"
+    );
+    ensure!(
         reference.schema_version == candidate.schema_version
             && reference.input_source == candidate.input_source
             && reference.add_special_tokens == candidate.add_special_tokens
@@ -989,6 +993,10 @@ fn print_sweep_inspection(result: &SweepInspection) {
 
 #[derive(Debug, Serialize)]
 struct TraceComparison {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    left_context: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    right_context: Option<serde_json::Value>,
     alignment: &'static str,
     schema_version: u32,
     left_lens: LensIdentity,
@@ -1147,6 +1155,22 @@ fn compare_traces(
     let left_score = trace_score_identity(left);
     let right_score = trace_score_identity(right);
     ensure!(left_score == right_score, "trace score semantics differ");
+    let authenticated = |document: &TraceDocument| {
+        document
+            .deployed_model
+            .as_ref()
+            .map(|model| {
+                (
+                    model.content_authenticated.unwrap_or(false),
+                    model.content_blake3.clone(),
+                )
+            })
+            .unwrap_or((false, None))
+    };
+    ensure!(
+        authenticated(left) == authenticated(right),
+        "trace deployed authenticated content identities differ"
+    );
     if left.schema_version == 3 {
         ensure!(
             left.input_source == right.input_source
@@ -1168,8 +1192,8 @@ fn compare_traces(
             left.deployed_model
                 .as_ref()
                 .and_then(|model| model.locator_id.as_ref())
-                .is_some(),
-            "v3 comparison requires a deployed model locator ID"
+                .is_some_and(|id| !id.trim().is_empty()),
+            "v3 comparison requires a nonblank deployed model locator ID"
         );
         ensure!(
             left.tokenizer
@@ -1185,8 +1209,8 @@ fn compare_traces(
             left.tokenizer
                 .as_ref()
                 .and_then(|tokenizer| tokenizer.metadata_id.as_ref())
-                .is_some(),
-            "v3 comparison requires a tokenizer metadata ID"
+                .is_some_and(|id| !id.trim().is_empty()),
+            "v3 comparison requires a nonblank tokenizer metadata ID"
         );
     }
 
@@ -1215,6 +1239,8 @@ fn compare_traces(
     let aggregate_differences = compare_aggregates(left, right);
     let vectors = compare_vectors(left, right, limit);
     Ok(TraceComparison {
+        left_context: retained_trace_context(left)?,
+        right_context: retained_trace_context(right)?,
         alignment: "exact layer/position and exact token ID; no inferred alignment",
         schema_version: left.schema_version,
         left_lens: lens_identity(left),
@@ -1241,6 +1267,20 @@ fn trace_coordinates(document: &TraceDocument) -> Vec<CellCoordinate> {
             source_position: cell.source_position,
         })
         .collect()
+}
+
+fn retained_trace_context(document: &TraceDocument) -> Result<Option<serde_json::Value>> {
+    if document.lens.producer_contract.is_some()
+        || document.lens.runtime_binding.is_some()
+        || document
+            .deployed_model
+            .as_ref()
+            .is_some_and(|m| m.content_blake3.is_some())
+    {
+        Ok(Some(crate::lens_inspect::summary_json(document)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn trace_score_identity(document: &TraceDocument) -> TraceScoreIdentity {
@@ -1541,6 +1581,8 @@ struct RunSampler {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RunDocument {
+    #[serde(default)]
+    linear_transports: Vec<serde_json::Value>,
     schema: String,
     schema_version: u32,
     runtime_kind: String,
@@ -2043,7 +2085,8 @@ impl RunExecutionBinding {
                     && lens_ids.insert(&lens.lens_id)
                     && is_lower_hex_digest(&lens.manifest_canonical_json_blake3)
                     && !lens.profile.is_empty()
-                    && matches!(lens.method.as_str(), "J" | "R")
+                    && !lens.method.trim().is_empty()
+                    && lens.method.len() <= 1024
                     && !lens.fitted_checkpoint.is_empty()
                     && !lens.fitted_checkpoint_revision.is_empty()
                     && !lens.source_repository.is_empty()
@@ -2170,6 +2213,8 @@ impl RunScore {
 
 #[derive(Debug, Serialize)]
 struct RunComparison {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    linear_transports: Vec<serde_json::Value>,
     alignment: &'static str,
     runtime_kind: String,
     model_path: PathBuf,
@@ -2274,6 +2319,10 @@ fn compare_runs(left: &RunDocument, right: &RunDocument, limit: usize) -> Result
         left.model_path == right.model_path,
         "run model paths differ"
     );
+    ensure!(
+        left.linear_transports == right.linear_transports,
+        "run linear transport contracts or deployment bindings differ"
+    );
     let bindings_match = match (&left.execution_binding, &right.execution_binding) {
         (None, None) => true,
         (Some(left), Some(right)) => left.stable_identity_eq(right),
@@ -2309,6 +2358,7 @@ fn compare_runs(left: &RunDocument, right: &RunDocument, limit: usize) -> Result
         }
     }
     Ok(RunComparison {
+        linear_transports: left.linear_transports.clone(),
         alignment: "exact readout key and exact candidate identity; no inferred alignment",
         runtime_kind: left.runtime_kind.clone(),
         model_path: left.model_path.clone(),
@@ -2689,6 +2739,7 @@ mod tests {
             .unwrap()
             .clone();
         RunDocument {
+            linear_transports: Vec::new(),
             schema: "qwen.lens.run".into(),
             schema_version: 3,
             runtime_kind: "ordinary_qwen".into(),
@@ -3413,6 +3464,7 @@ mod tests {
             .unwrap()
             .clone();
         let mut document = RunDocument {
+            linear_transports: Vec::new(),
             schema: "qwen.lens.run".into(),
             schema_version: 4,
             runtime_kind: "ordinary_qwen".into(),
@@ -3798,6 +3850,7 @@ mod tests {
     fn run_document(generated: Vec<i32>, scores: Vec<RunScore>) -> RunDocument {
         let max_new_tokens = generated.len().max(1);
         RunDocument {
+            linear_transports: Vec::new(),
             schema: "qwen.lens.run".into(),
             schema_version: 1,
             runtime_kind: "ordinary_qwen".into(),
@@ -3850,6 +3903,98 @@ mod tests {
             label: None,
             score,
         }
+    }
+
+    #[test]
+    fn unknown_method_run_comparison_has_no_fit_registry_and_binds_data_metadata() {
+        let mut left = run_document(vec![4], vec![run_score(4, 1.0)]);
+        let mut right = run_document(vec![4], vec![run_score(4, 1.0)]);
+        left.live_readouts[0].method = "unknown-future-recipe".into();
+        right.live_readouts[0].method = left.live_readouts[0].method.clone();
+        let metadata = json!({"lens_id":"lens", "artifact":{"method":"unknown-future-recipe", "producer_contract":{"qualification":{"validated":true}}, "runtime_binding":{"status":"source_deployment_equivalence_unverified"}}});
+        left.linear_transports.push(metadata.clone());
+        right.linear_transports.push(metadata);
+        compare_runs(&left, &right, 10).unwrap();
+        right.linear_transports[0]["artifact"]["runtime_binding"]["status"] =
+            "different-binding".into();
+        assert!(compare_runs(&left, &right, 10).is_err());
+        let mut binding = run_execution_binding();
+        binding.published_lenses[0].method = "independent-method".into();
+        binding.validate().unwrap();
+    }
+
+    #[test]
+    fn generic_trace_comparison_keeps_full_binding_context_and_checks_content_identity() {
+        let value = crate::full_lens::generic_bound_trace_json();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let left = crate::lens_inspect::parse_trace_bytes(&bytes, Path::new("left.json")).unwrap();
+        let mut right =
+            crate::lens_inspect::parse_trace_bytes(&bytes, Path::new("right.json")).unwrap();
+        let comparison = serde_json::to_value(compare_traces(&left, &right, 10).unwrap()).unwrap();
+        for side in ["left_context", "right_context"] {
+            assert_eq!(
+                comparison[side]["artifact"]["producer_contract"],
+                value["lens"]["producer_contract"]
+            );
+            assert_eq!(
+                comparison[side]["artifact"]["runtime_binding"],
+                value["lens"]["runtime_binding"]
+            );
+            assert_eq!(
+                comparison[side]["model"]["content_blake3"],
+                value["deployed_model"]["content_blake3"]
+            );
+            assert_eq!(comparison[side]["batch"], value["batch"]);
+            assert_eq!(comparison[side]["producer"], value["producer"]);
+        }
+        right.deployed_model.as_mut().unwrap().content_blake3 = Some("0".repeat(64));
+        assert!(compare_traces(&left, &right, 10).is_err());
+    }
+
+    #[test]
+    fn required_trace_alignment_rejects_blank_equal_locators() {
+        let value = crate::full_lens::generic_bound_trace_json();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        for locator in [None, Some(""), Some(" "), Some("\t\n")] {
+            let mut left =
+                crate::lens_inspect::parse_trace_bytes(&bytes, Path::new("left.json")).unwrap();
+            let mut right =
+                crate::lens_inspect::parse_trace_bytes(&bytes, Path::new("right.json")).unwrap();
+            left.deployed_model.as_mut().unwrap().locator_id = locator.map(str::to_owned);
+            right.deployed_model.as_mut().unwrap().locator_id = locator.map(str::to_owned);
+            assert!(
+                compare_traces(&left, &right, 10).is_err(),
+                "accepted locator {locator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_comparison_serialization_preserves_complete_linear_transport_metadata() {
+        let trace = crate::full_lens::generic_bound_trace_json();
+        let retained = json!({"lens_id":"lens","artifact":trace["lens"]});
+        let mut left = run_document(vec![4], vec![run_score(4, 1.0)]);
+        let mut right = run_document(vec![4], vec![run_score(4, 1.0)]);
+        for document in [&mut left, &mut right] {
+            document.live_readouts[0].method =
+                retained["artifact"]["method"].as_str().unwrap().into();
+            document.live_readouts[0].target_layer = Some(1);
+            document.linear_transports.push(retained.clone());
+        }
+        let output = serde_json::to_value(compare_runs(&left, &right, 10).unwrap()).unwrap();
+        assert_eq!(output["linear_transports"], json!([retained]));
+        assert_eq!(
+            output["linear_transports"][0]["artifact"]["producer_contract"],
+            trace["lens"]["producer_contract"]
+        );
+        assert_eq!(
+            output["linear_transports"][0]["artifact"]["runtime_binding"],
+            trace["lens"]["runtime_binding"]
+        );
+        left.linear_transports.clear();
+        right.linear_transports.clear();
+        let legacy = serde_json::to_value(compare_runs(&left, &right, 10).unwrap()).unwrap();
+        assert!(legacy.get("linear_transports").is_none());
     }
 
     fn run_execution_binding() -> RunExecutionBinding {

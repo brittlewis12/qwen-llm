@@ -7,6 +7,8 @@ use super::muse_full_lens_artifact as artifact;
 use super::muse_lens_artifact;
 use super::muse_lens_rows_artifact as rows;
 use super::muse_published_full_lens_artifact as published;
+#[path = "muse_linear_transport.rs"]
+pub(crate) mod generic;
 use anyhow::{Context, Result, ensure};
 use blake3::Hasher;
 use clap::Args;
@@ -208,6 +210,7 @@ struct TokenScore {
 }
 
 enum ReadArtifact {
+    Generic(generic::GenericAccess),
     Local {
         manifest: artifact::Manifest,
         canonical_json_blake3: String,
@@ -221,6 +224,7 @@ enum ReadArtifact {
 impl ReadArtifact {
     fn source_layers(&self) -> &[u32] {
         match self {
+            Self::Generic(a) => &a.data.manifest().transport.source_layers,
             Self::Local { manifest, .. } => &manifest.config.source_layers,
             Self::Published { manifest, .. } => &manifest.transport.source_layers,
         }
@@ -228,6 +232,7 @@ impl ReadArtifact {
 
     fn payload_path(&self) -> &str {
         match self {
+            Self::Generic(a) => &a.data.manifest().payload.path,
             Self::Local { manifest, .. } => &manifest.payload.path,
             Self::Published { manifest, .. } => &manifest.payload.path,
         }
@@ -235,6 +240,7 @@ impl ReadArtifact {
 
     fn payload_byte_length(&self) -> u64 {
         match self {
+            Self::Generic(a) => a.data.manifest().payload.byte_length,
             Self::Local { manifest, .. } => manifest.payload.byte_length,
             Self::Published { manifest, .. } => manifest.payload.byte_length,
         }
@@ -242,6 +248,7 @@ impl ReadArtifact {
 
     fn matrices(&self) -> &[artifact::MatrixDescriptor] {
         match self {
+            Self::Generic(_) => &[],
             Self::Local { manifest, .. } => &manifest.payload.matrices,
             Self::Published { manifest, .. } => &manifest.payload.matrices,
         }
@@ -274,7 +281,7 @@ struct MuseTraceDocument {
     producer: MuseTraceProducer,
     deployed_model: MuseTraceModel,
     tokenizer: MuseTraceTokenizer,
-    lens: MuseTraceLens,
+    lens: serde_json::Value,
     score_semantics: MuseTraceScoreSemantics,
     execution_mode: &'static str,
     input_source: &'static str,
@@ -444,6 +451,16 @@ pub(crate) fn is_artifact(directory: &Path) -> Result<bool> {
     ))
 }
 
+pub(crate) fn is_artifact_for_model(directory: &Path, model: &Path) -> Result<bool> {
+    if super::full_lens::FullAccess::is_data_directory(directory)? {
+        let gguf = GgufFile::open(model)?;
+        return Ok(muse_lens_artifact::is_muse_architecture(
+            gguf.architecture().as_deref(),
+        ));
+    }
+    is_artifact(directory)
+}
+
 pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     super::validate_token_build_identity(
         env!("QWEN_BUILD_SOURCE_STATE"),
@@ -458,7 +475,17 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     )?;
     let manifest_path = full_lens.join(artifact::MANIFEST_NAME);
     let probe: SchemaProbe = super::read_json_file(&manifest_path)?;
-    let read_artifact = match probe.schema.as_str() {
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open Muse model {}", args.model.display()))?;
+    let mut read_artifact = match probe.schema.as_str() {
+        "llm.lens.linear_transport" => ReadArtifact::Generic(generic::GenericAccess::open(
+            args.full_lens
+                .as_deref()
+                .context("--full-lens is required")?,
+            &gguf,
+            Some(&args.identity_cache),
+            args.allow_unvalidated_transfer,
+        )?),
         artifact::SCHEMA => {
             let manifest: artifact::Manifest = super::read_json_file(&manifest_path)?;
             artifact::validate_manifest(&manifest)?;
@@ -484,11 +511,10 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         schema => anyhow::bail!("unsupported Muse full-transport schema {schema:?}"),
     };
 
-    let gguf = GgufFile::open(&args.model)
-        .with_context(|| format!("open Muse model {}", args.model.display()))?;
     let bound =
         MuseGlimmerModel::from_gguf(&gguf).context("bind Muse model for full-transport readout")?;
     match &read_artifact {
+        ReadArtifact::Generic(_) => {}
         ReadArtifact::Local { manifest, .. } => ensure!(
             manifest.config.architecture == ARCHITECTURE_NAME
                 && manifest.config.artifact_profile
@@ -536,20 +562,29 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         .map(|(slot, layer)| (layer, slot))
         .collect::<BTreeMap<_, _>>();
 
-    let content = checkpoint_content_identity_without_weight_hashing(
-        &gguf,
-        &CheckpointIdentityCache::new(&args.identity_cache),
-    )
-    .with_context(|| {
-        format!(
-            "resolve Muse model identity without hashing weights using {}",
-            args.identity_cache.display()
+    let content = if matches!(read_artifact, ReadArtifact::Generic(_)) {
+        None
+    } else {
+        Some(
+            checkpoint_content_identity_without_weight_hashing(
+                &gguf,
+                &CheckpointIdentityCache::new(&args.identity_cache),
+            )
+            .with_context(|| {
+                format!(
+                    "resolve Muse model identity without hashing weights using {}",
+                    args.identity_cache.display()
+                )
+            })?,
         )
-    })?;
-    let content_id = super::hex(&content.content_id);
+    };
+    let content_id = content
+        .as_ref()
+        .map(|c| super::hex(&c.content_id))
+        .unwrap_or_default();
     ensure!(
-        content.bytes_hashed == 0,
-        "Muse full readout refuses model identities that hash weight bytes"
+        content.as_ref().is_none_or(|c| c.bytes_hashed == 0),
+        "legacy Muse full readout refuses model identities that hash weight bytes"
     );
     if let ReadArtifact::Local { manifest, .. } = &read_artifact {
         ensure!(
@@ -593,18 +628,25 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         .try_reserve_exact(layers.len())
         .context("allocate Muse full-readout layer results")?;
     for &layer in &layers {
-        let descriptor = read_artifact
-            .matrices()
-            .iter()
-            .find(|matrix| matrix.source_layer == layer)
-            .context("Muse full transport omitted a selected source matrix")?;
         let started = Instant::now();
-        let matrix = read_matrix(
-            &full_lens,
-            read_artifact.payload_path(),
-            read_artifact.payload_byte_length(),
-            descriptor,
-        )?;
+        let (matrix, matrix_blake3) = if let ReadArtifact::Generic(a) = &mut read_artifact {
+            let matrix = a.data.read_matrix(layer)?;
+            let digest = blake3::hash(&matrix).to_hex().to_string();
+            (matrix, digest)
+        } else {
+            let descriptor = read_artifact
+                .matrices()
+                .iter()
+                .find(|matrix| matrix.source_layer == layer)
+                .context("Muse full transport omitted a selected source matrix")?;
+            let matrix = read_matrix(
+                &full_lens,
+                read_artifact.payload_path(),
+                read_artifact.payload_byte_length(),
+                descriptor,
+            )?;
+            (matrix, descriptor.blake3.clone())
+        };
         let matrix_read_wall_ms = started.elapsed().as_secs_f64() * 1e3;
         let capture_slot = *capture_slots
             .get(&layer)
@@ -647,7 +689,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             source_position: selected_position,
             source_token_id: capture.token_id,
             predicts_position: selected_position + 1,
-            verified_matrix_blake3: descriptor.blake3.clone(),
+            verified_matrix_blake3: matrix_blake3,
             rms_denominator_f64_recomputed,
             matrix_read_wall_ms,
             transport_wall_ms,
@@ -673,9 +715,30 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         captured_token_id: capture.token_id,
         predicts_position: selected_position + 1,
     };
-    let content_identity_outcome = format!("{:?}", content.outcome);
+    let content_identity_outcome = content
+        .as_ref()
+        .map(|c| format!("{:?}", c.outcome))
+        .unwrap_or_default();
     let runtime_profile = muse_lens_artifact::profile_name(bound.artifact_profile).to_owned();
     let bytes = match read_artifact {
+        ReadArtifact::Generic(a) => {
+            let document = serde_json::json!({
+                "schema":"muse_glimmer.lens.full_readout", "schema_version":2,
+                "readout":"full_vocabulary", "ranking_scope":"full_vocabulary",
+                "score_semantics":"deployed_output_rmsnorm_native_head_scale_softcap_no_softmax_v1",
+                "source_site":"post_block_residual", "input":input,
+                "artifact":a.summary(&full_lens)?,
+                "deployed_model":{"path":args.model, "architecture":ARCHITECTURE_NAME,
+                    "n_layers":model_config.layer_count, "hidden_size":model_config.hidden_size,
+                    "vocab_size":model_config.vocab_size,
+                    "content_blake3":a.runtime_binding["gguf_content_blake3"],
+                    "output_tail":"rmsnorm_native_output_projection_logit_scale_final_softcap"},
+                "reader":ReadoutReader { build_commit:env!("QWEN_BUILD_COMMIT"),
+                    build_dirty:env!("QWEN_BUILD_DIRTY"), build_source_state:env!("QWEN_BUILD_SOURCE_STATE") },
+                "results":results
+            });
+            super::serialize_json_pretty_bounded(&document, "Muse generic full readout")?
+        }
         ReadArtifact::Local {
             manifest,
             canonical_json_blake3,
@@ -711,7 +774,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
                     path: args.model.clone(),
                     content_blake3: content_id,
                     content_identity_outcome,
-                    weight_bytes_hashed: content.bytes_hashed,
+                    weight_bytes_hashed: content.as_ref().expect("legacy identity").bytes_hashed,
                     architecture: ARCHITECTURE_NAME,
                     artifact_profile: runtime_profile,
                     n_layers: model_config.layer_count,
@@ -765,7 +828,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
                     path: args.model.clone(),
                     content_blake3: content_id,
                     content_identity_outcome,
-                    weight_bytes_hashed: content.bytes_hashed,
+                    weight_bytes_hashed: content.as_ref().expect("legacy identity").bytes_hashed,
                     architecture: ARCHITECTURE_NAME,
                     artifact_profile: runtime_profile,
                     n_layers: model_config.layer_count,
@@ -800,6 +863,10 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
 }
 
 pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
+    ensure!(
+        args.requests_jsonl.is_none(),
+        "Muse trace-full does not support cohort execution; use single inputs"
+    );
     super::validate_token_build_identity(
         env!("QWEN_BUILD_SOURCE_STATE"),
         env!("QWEN_BUILD_STAMP_ERROR"),
@@ -819,22 +886,48 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let full_lens =
         canonical_real_directory(&args.full_lens, "Muse published full-transport artifact")?;
     let manifest_path = full_lens.join(published::MANIFEST_NAME);
-    let manifest: published::Manifest = super::read_json_file(&manifest_path)?;
-    published::validate_manifest(&manifest)?;
-    ensure!(
-        args.allow_unvalidated_transfer,
-        "published Muse trace requires --allow-unvalidated-transfer for BF16-to-GGUF use"
-    );
-    let layers = select_layers(&args.layers, &manifest.transport.source_layers)?;
-
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open Muse model {}", args.model.display()))?;
+    let is_generic = super::full_lens::FullAccess::is_data_directory(&full_lens)?;
+    let mut generic = if is_generic {
+        Some(generic::GenericAccess::open(
+            &args.full_lens,
+            &gguf,
+            args.identity_cache.as_deref(),
+            args.allow_unvalidated_transfer,
+        )?)
+    } else {
+        None
+    };
+    let manifest: Option<published::Manifest> = if is_generic {
+        None
+    } else {
+        let m: published::Manifest = super::read_json_file(&manifest_path)?;
+        published::validate_manifest(&m)?;
+        ensure!(
+            args.allow_unvalidated_transfer,
+            "published Muse trace requires --allow-unvalidated-transfer for BF16-to-GGUF use"
+        );
+        Some(m)
+    };
+    let sources = if let Some(a) = &generic {
+        &a.data.manifest().transport.source_layers
+    } else {
+        &manifest
+            .as_ref()
+            .expect("legacy manifest")
+            .transport
+            .source_layers
+    };
+    let layers = select_layers(&args.layers, sources)?;
     let bound = MuseGlimmerModel::from_gguf(&gguf).context("bind Muse model for full trace")?;
-    ensure!(
-        manifest.model.architecture == ARCHITECTURE_NAME
-            && manifest.model.geometry == muse_lens_artifact::geometry(&bound.config),
-        "Muse published trace artifact does not match deployed release geometry"
-    );
+    if let Some(manifest) = &manifest {
+        ensure!(
+            manifest.model.architecture == ARCHITECTURE_NAME
+                && manifest.model.geometry == muse_lens_artifact::geometry(&bound.config),
+            "Muse published trace artifact does not match deployed release geometry"
+        );
+    }
     let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &args.model)
         .context("load Muse tokenizer for full trace")?;
     muse_lens_artifact::validate_tokenizer(&tokenizer, &bound.config)?;
@@ -876,24 +969,29 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     let host_result_reserve_bytes =
         trace_host_result_reserve_bytes(1, MAX_MUSE_TRACE_DOCUMENT_BYTES)?;
 
-    let identity_cache = args
-        .identity_cache
-        .as_ref()
-        .context("Muse trace-full requires --identity-cache")?;
-    let content = checkpoint_content_identity_without_weight_hashing(
-        &gguf,
-        &CheckpointIdentityCache::new(identity_cache),
-    )
-    .with_context(|| {
-        format!(
-            "resolve Muse model identity without hashing weights using {}",
-            identity_cache.display()
+    let content = if is_generic {
+        None
+    } else {
+        let identity_cache = args
+            .identity_cache
+            .as_ref()
+            .context("Muse trace-full requires --identity-cache")?;
+        let content = checkpoint_content_identity_without_weight_hashing(
+            &gguf,
+            &CheckpointIdentityCache::new(identity_cache),
         )
-    })?;
-    ensure!(
-        content.bytes_hashed == 0,
-        "Muse trace-full refuses model identities that hash weight bytes"
-    );
+        .with_context(|| {
+            format!(
+                "resolve Muse model identity without hashing weights using {}",
+                identity_cache.display()
+            )
+        })?;
+        ensure!(
+            content.bytes_hashed == 0,
+            "legacy Muse trace-full refuses model identities that hash weight bytes"
+        );
+        Some(content)
+    };
 
     let mut capture_layers = layers.clone();
     capture_layers.sort_unstable();
@@ -1042,19 +1140,25 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         )
     };
     for &layer in &layers {
-        let descriptor = manifest
-            .payload
-            .matrices
-            .iter()
-            .find(|matrix| matrix.source_layer == layer)
-            .context("Muse published trace omitted a selected source matrix")?;
         let started = Instant::now();
-        let matrix = read_matrix(
-            &full_lens,
-            &manifest.payload.path,
-            manifest.payload.byte_length,
-            descriptor,
-        )?;
+        let matrix = if let Some(a) = &mut generic {
+            a.data.read_matrix(layer)?
+        } else {
+            let manifest = manifest.as_ref().expect("legacy manifest");
+            let descriptor = manifest
+                .payload
+                .matrices
+                .iter()
+                .find(|matrix| matrix.source_layer == layer)
+                .context("Muse published trace omitted a selected source matrix")?;
+            let matrix = read_matrix(
+                &full_lens,
+                &manifest.payload.path,
+                manifest.payload.byte_length,
+                descriptor,
+            )?;
+            matrix
+        };
         matrix_read_wall_ms += started.elapsed().as_secs_f64() * 1e3;
         let started = Instant::now();
         let prepared = runner
@@ -1274,6 +1378,20 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         .model
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
+    let (locator_scheme, locator_id, content_authenticated) = if let Some(a) = &generic {
+        a.trace_locator()?
+    } else {
+        (
+            "ordered_gguf_declared_content_blake3_v1",
+            super::hex(
+                &content
+                    .as_ref()
+                    .context("missing legacy model identity")?
+                    .content_id,
+            ),
+            true,
+        )
+    };
     let document = MuseTraceDocument {
         schema: "qwen.lens.trace",
         schema_version: 3,
@@ -1284,9 +1402,9 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         },
         deployed_model: MuseTraceModel {
             path: args.model.clone(),
-            locator_scheme: "ordered_gguf_declared_content_blake3_v1",
-            locator_id: super::hex(&content.content_id),
-            content_authenticated: true,
+            locator_scheme,
+            locator_id,
+            content_authenticated,
             architecture: Some(ARCHITECTURE_NAME.into()),
             name: model_name,
             base_model_name: None,
@@ -1295,26 +1413,35 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             vocab_size: model_config.vocab_size,
         },
         tokenizer: MuseTraceTokenizer {
-            metadata_id: super::hex(&model_config.tokenizer_identity_sha256),
+            metadata_id: generic
+                .as_ref()
+                .and_then(|a| a.runtime_binding["tokenizer_metadata_id"].as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| super::hex(&model_config.tokenizer_identity_sha256)),
             model: Some(model_config.tokenizer_model.clone()),
             pretokenizer: Some(model_config.tokenizer_pre.clone()),
         },
-        lens: MuseTraceLens {
-            kind: "published_full_transport",
-            method: manifest.transport.method.clone(),
-            target_layer: manifest.transport.target_layer,
-            source_site: manifest.transport.coordinate.clone(),
-            source_repository: manifest.source.repository.clone(),
-            source_revision: manifest.source.revision.clone(),
-            source_filename: manifest.source.filename.clone(),
-            payload_blake3: manifest.payload.blake3.clone(),
-            fitted_checkpoint: manifest.model.fitted_checkpoint.clone(),
-            fitted_checkpoint_revision: manifest.model.fitted_checkpoint_revision.clone(),
-            orientation: manifest.transport.orientation.clone(),
-            transfer_validation_status: manifest.transfer.validation_status.clone(),
-            transfer_override_policy: "explicit_allow_unvalidated_transfer",
-            image_token_status: manifest.transfer.image_token_status.clone(),
-            scoring: "transport_then_deployed_output_tail",
+        lens: if let Some(a) = &generic {
+            a.summary(&full_lens)?
+        } else {
+            let manifest = manifest.as_ref().expect("legacy manifest");
+            serde_json::to_value(MuseTraceLens {
+                kind: "published_full_transport",
+                method: manifest.transport.method.clone(),
+                target_layer: manifest.transport.target_layer,
+                source_site: manifest.transport.coordinate.clone(),
+                source_repository: manifest.source.repository.clone(),
+                source_revision: manifest.source.revision.clone(),
+                source_filename: manifest.source.filename.clone(),
+                payload_blake3: manifest.payload.blake3.clone(),
+                fitted_checkpoint: manifest.model.fitted_checkpoint.clone(),
+                fitted_checkpoint_revision: manifest.model.fitted_checkpoint_revision.clone(),
+                orientation: manifest.transport.orientation.clone(),
+                transfer_validation_status: manifest.transfer.validation_status.clone(),
+                transfer_override_policy: "explicit_allow_unvalidated_transfer",
+                image_token_status: manifest.transfer.image_token_status.clone(),
+                scoring: "transport_then_deployed_output_tail",
+            })?
         },
         score_semantics: MuseTraceScoreSemantics {
             kind: "logit",
@@ -1392,10 +1519,6 @@ fn validate_trace_args(args: &TraceFullArgs) -> Result<()> {
     ensure!(
         args.max_tokens.is_none_or(|max_tokens| max_tokens > 0),
         "Muse --max-tokens must be positive"
-    );
-    ensure!(
-        args.identity_cache.is_some(),
-        "Muse trace-full requires --identity-cache"
     );
     Ok(())
 }
@@ -1499,8 +1622,8 @@ fn sorted_muse_occurrences(
 fn print_muse_trace_summary(document: &MuseTraceDocument, output: Option<&Path>) {
     println!(
         "{} {} | {} tokens x {} layers = {} cells | top-k {}",
-        document.lens.method,
-        document.lens.kind,
+        document.lens["method"].as_str().unwrap_or(""),
+        document.lens["kind"].as_str().unwrap_or(""),
         document.input_token_ids.len(),
         document.selected_layers.len(),
         document.cells.len(),
@@ -1662,7 +1785,7 @@ fn select_layers(requested: &[u32], available: &[u32]) -> Result<Vec<u32>> {
         !layers.is_empty()
             && layers
                 .iter()
-                .all(|layer| unique.insert(*layer) && available.binary_search(layer).is_ok()),
+                .all(|layer| unique.insert(*layer) && available.contains(layer)),
         "--layers must be unique source layers present in the Muse full transport"
     );
     Ok(layers)
@@ -2465,5 +2588,12 @@ mod tests {
         );
         assert_eq!(occurrences.per_layer[0].source_layer, 50);
         assert_eq!(occurrences.per_layer[1].source_layer, 25);
+    }
+    #[test]
+    fn generic_source_order_is_not_a_sorted_registry_requirement() {
+        assert_eq!(select_layers(&[], &[2, 0]).unwrap(), [2, 0]);
+        assert_eq!(select_layers(&[0, 2], &[2, 0]).unwrap(), [0, 2]);
+        assert!(select_layers(&[1], &[2, 0]).is_err());
+        assert!(select_layers(&[0, 0], &[2, 0]).is_err());
     }
 }

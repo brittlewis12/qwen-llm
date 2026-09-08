@@ -341,19 +341,25 @@ impl LlamaCppTokenizer {
 
     /// Open a GGUF file just for its tokenizer. Cheap (vocab-only load).
     ///
-    /// We re-open the file via llama.cpp's loader rather than reusing the
-    /// already-open [`GgufFile`] mmap, because llama.cpp's own loader is
-    /// the canonical thing that interprets `tokenizer.ggml.*` keys and
-    /// builds the BPE state. Cross-checking against the same file keeps
-    /// the seam tight.
+    /// llama.cpp interprets `tokenizer.ggml.*` and builds its own BPE state.
+    /// This pathname-only API does not authenticate against an opened model;
+    /// consumers with a retained [`GgufFile`] must use [`Self::from_gguf`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, TokError> {
+        Self::open_paths(&[path.as_ref()], false)
+    }
+
+    fn open_paths(paths: &[&Path], explicit_splits: bool) -> Result<Self, TokError> {
         ensure_backend();
-        let path_str = path
-            .as_ref()
-            .to_str()
-            .ok_or_else(|| TokError::BadPath(path.as_ref().to_path_buf()))?;
-        let cpath = CString::new(path_str)
-            .map_err(|_| TokError::PathContainsNul(path.as_ref().to_path_buf()))?;
+        let cpaths = paths
+            .iter()
+            .map(|path| {
+                let text = path
+                    .to_str()
+                    .ok_or_else(|| TokError::BadPath(path.to_path_buf()))?;
+                CString::new(text).map_err(|_| TokError::PathContainsNul(path.to_path_buf()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut pointers = cpaths.iter().map(|path| path.as_ptr()).collect::<Vec<_>>();
 
         // Vocab-only load: skip GPU, skip compute. We don't want llama.cpp
         // to allocate any tensor buffers, just to parse the tokenizer.
@@ -361,7 +367,15 @@ impl LlamaCppTokenizer {
         let mut params = unsafe { llama_cpp_sys_2::llama_model_default_params() };
         params.vocab_only = true;
         let model = NonNull::new(unsafe {
-            llama_cpp_sys_2::llama_model_load_from_file(cpath.as_ptr(), params)
+            if explicit_splits {
+                llama_cpp_sys_2::llama_model_load_from_splits(
+                    pointers.as_mut_ptr(),
+                    pointers.len(),
+                    params,
+                )
+            } else {
+                llama_cpp_sys_2::llama_model_load_from_file(pointers[0], params)
+            }
         })
         .ok_or(TokError::LoadFailed)?;
         let vocab = NonNull::new(unsafe {
@@ -388,11 +402,17 @@ impl LlamaCppTokenizer {
         })
     }
 
-    /// Convenience: open the same path that backs an already-loaded
-    /// [`GgufFile`]. This keeps engine + tokenizer pinned to the same
-    /// on-disk file by construction.
-    pub fn from_gguf(_g: &GgufFile, path: impl AsRef<Path>) -> Result<Self, TokError> {
-        Self::open(path)
+    /// Load vocabulary from descriptors authenticated against retained shards.
+    /// Independent file descriptions avoid sharing seek cursors with the GGUF
+    /// parser. Descriptor pinning prevents pathname substitution during loading;
+    /// stamp checks reject replacement or mutation before returning a tokenizer.
+    pub fn from_gguf(g: &GgufFile, _path: impl AsRef<Path>) -> Result<Self, TokError> {
+        with_retained_tokenizer_paths(g, |paths| {
+            Self::open_paths(
+                &paths.iter().map(|path| path.as_path()).collect::<Vec<_>>(),
+                true,
+            )
+        })
     }
 
     pub fn n_vocab(&self) -> u32 {
@@ -585,6 +605,190 @@ impl LlamaCppTokenizer {
             }
             out
         })
+    }
+}
+
+fn with_retained_tokenizer_paths<T>(
+    g: &GgufFile,
+    load: impl FnOnce(&[std::path::PathBuf]) -> Result<T, TokError>,
+) -> Result<T, TokError> {
+    use std::os::fd::AsRawFd;
+
+    g.revalidate_retained_shard_stamps()?;
+    let files = g
+        .shards
+        .iter()
+        .map(|shard| {
+            let file = std::fs::File::open(&shard.path).map_err(crate::gguf::GgufError::from)?;
+            let stamp = crate::checkpoint_identity::source_stamp(&file)
+                .map_err(crate::gguf::GgufError::from)?;
+            if stamp != shard.source_stamp {
+                return Err(TokError::Gguf(crate::gguf::GgufError::Decode(
+                    "tokenizer source differs from retained GGUF shard".into(),
+                )));
+            }
+            Ok(file)
+        })
+        .collect::<Result<Vec<_>, TokError>>()?;
+    let paths = files
+        .iter()
+        .map(|file| std::path::PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd())))
+        .collect::<Vec<_>>();
+    let result = load(&paths)?;
+    g.revalidate_retained_shard_stamps()?;
+    Ok(result)
+}
+
+#[cfg(test)]
+mod retained_tokenizer_tests {
+    use super::*;
+    use std::fs::{self, File, OpenOptions};
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "retained-tokenizer-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn string(bytes: &mut Vec<u8>, text: &str) {
+        bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(text.as_bytes());
+    }
+
+    fn vocab_gguf(swap: bool) -> Vec<u8> {
+        vocab_gguf_split(swap, None)
+    }
+
+    fn vocab_gguf_split(swap: bool, split: Option<u16>) -> Vec<u8> {
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(if split.is_some() { 11u64 } else { 8u64 }).to_le_bytes());
+        for (key, value) in [
+            ("general.architecture", "llama"),
+            ("tokenizer.ggml.model", "gpt2"),
+            ("tokenizer.ggml.pre", "gpt-2"),
+        ] {
+            string(&mut bytes, key);
+            bytes.extend_from_slice(&8u32.to_le_bytes());
+            string(&mut bytes, value);
+        }
+        string(&mut bytes, "tokenizer.ggml.tokens");
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&257u64.to_le_bytes());
+        for mut b in 0..=255u8 {
+            if swap {
+                b = match b {
+                    b'a' => b'b',
+                    b'b' => b'a',
+                    b => b,
+                };
+            }
+            string(&mut bytes, &byte_to_unicode(b).to_string());
+        }
+        string(&mut bytes, "<|endoftext|>");
+        string(&mut bytes, "tokenizer.ggml.merges");
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        string(&mut bytes, "tokenizer.ggml.token_type");
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(&257u64.to_le_bytes());
+        for i in 0..257 {
+            bytes.extend_from_slice(&(if i == 256 { 3i32 } else { 1i32 }).to_le_bytes());
+        }
+        for key in ["tokenizer.ggml.bos_token_id", "tokenizer.ggml.eos_token_id"] {
+            string(&mut bytes, key);
+            bytes.extend_from_slice(&4u32.to_le_bytes());
+            bytes.extend_from_slice(&256u32.to_le_bytes());
+        }
+        if let Some(index) = split {
+            for (key, value) in [("split.no", index), ("split.count", 2u16)] {
+                string(&mut bytes, key);
+                bytes.extend_from_slice(&2u32.to_le_bytes());
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            string(&mut bytes, "split.tensors.count");
+            bytes.extend_from_slice(&5u32.to_le_bytes());
+            bytes.extend_from_slice(&0i32.to_le_bytes());
+        }
+        bytes.resize(bytes.len().next_multiple_of(32), 0);
+        bytes
+    }
+
+    #[test]
+    fn retained_vocab_load_ignores_replaced_path_with_same_size_and_special_ids() {
+        let temp = Temp::new();
+        let path = temp.0.join("model.gguf");
+        let retained = temp.0.join("retained.gguf");
+        fs::write(&path, vocab_gguf(false)).unwrap();
+        let file = File::open(&path).unwrap();
+        fs::rename(&path, &retained).unwrap();
+        fs::write(&path, vocab_gguf(true)).unwrap();
+        let gguf = GgufFile::from_opened_file(file, &path).unwrap();
+        assert!(LlamaCppTokenizer::from_gguf(&gguf, &path).is_err());
+        let gguf = GgufFile::open(&retained).unwrap();
+        let pinned = LlamaCppTokenizer::from_gguf(&gguf, &path).unwrap();
+        let replacement = LlamaCppTokenizer::open(&path).unwrap();
+        assert_eq!(pinned.n_vocab(), replacement.n_vocab());
+        assert_eq!(pinned.bos(), replacement.bos());
+        assert_eq!(pinned.eos(), replacement.eos());
+        assert_eq!(pinned.encode("a", false).unwrap(), [97]);
+        assert_eq!(replacement.encode("a", false).unwrap(), [98]);
+    }
+
+    #[test]
+    fn retained_vocab_load_rejects_mutation_before_or_during_loading() {
+        let temp = Temp::new();
+        let path = temp.0.join("model.gguf");
+        fs::write(&path, vocab_gguf(false)).unwrap();
+        let gguf = GgufFile::open(&path).unwrap();
+        let result = with_retained_tokenizer_paths(&gguf, |_| {
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(&[0])
+                .unwrap();
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(
+            with_retained_tokenizer_paths::<()>(&gguf, |_| panic!("must reject before load"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_vocab_load_pins_all_split_descriptors() {
+        let temp = Temp::new();
+        let first = temp.0.join("model-00001-of-00002.gguf");
+        let second = temp.0.join("model-00002-of-00002.gguf");
+        fs::write(&first, vocab_gguf_split(false, Some(0))).unwrap();
+        fs::write(&second, vocab_gguf_split(false, Some(1))).unwrap();
+        let gguf = GgufFile::open(&first).unwrap();
+        assert_eq!(gguf.shard_count(), 2);
+        let tokenizer = LlamaCppTokenizer::from_gguf(&gguf, &first).unwrap();
+        assert_eq!(tokenizer.encode("ab", false).unwrap(), [97, 98]);
     }
 }
 

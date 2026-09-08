@@ -294,9 +294,10 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         "trace-full batching requires at least two requests"
     );
 
-    let manifest_path = args.full_lens.join(FULL_MANIFEST_NAME);
-    let manifest: FullLensManifest = read_json_file(&manifest_path)?;
-    validate_trace_full_manifest(&manifest)?;
+    let manifest = FullAccess::open(&args.full_lens, true)?;
+    if manifest.is_data() {
+        manifest.acknowledge_transfer(args.allow_unvalidated_transfer)?;
+    }
     let layers = if args.layers.is_empty() {
         manifest.transport.source_layers.clone()
     } else {
@@ -316,7 +317,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
     let family = ModelFamily::detect(&gguf).context("detect trace-full Qwen family")?;
     ensure!(
         family == ModelFamily::Qwen35,
-        "trace-full requires an ordinary dense Qwen model"
+        "packed trace-full cohorts require native dense Qwen capture; scalar read-full supports ordinary MoE"
     );
     let model_context_tokens = gguf.declared_context_length()?;
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load tokenizer from GGUF")?;
@@ -384,6 +385,12 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
     }
 
     crate::shutdown::checkpoint()?;
+    let mut manifest = manifest.bind_opened(
+        &gguf,
+        FullExecutionMode::Packed,
+        args.identity_cache.as_deref(),
+        args.allow_unvalidated_transfer,
+    )?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let model_load_started = Instant::now();
     let loaded = runtime
@@ -395,10 +402,12 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         )
         .with_context(|| format!("load model {}", args.model.display()))?;
     let model_load_wall_ms = model_load_started.elapsed().as_secs_f64() * 1e3;
-    validate_deployed_model(&manifest, &loaded)?;
+    manifest.validate_loaded(&loaded)?;
     let arch = loaded.arch();
-    let (deployed_model, tokenizer_summary) = trace_full_runtime_summaries(&args.model, &loaded);
-    let lens_summary = trace_full_lens_summary(&manifest);
+    let (mut deployed_model, tokenizer_summary) =
+        trace_full_runtime_summaries(&args.model, &loaded);
+    manifest.authenticate_trace_model(&mut deployed_model);
+    let lens_summary = manifest.trace_summary();
 
     let execution_started = Instant::now();
     let max_prompt_rows = prepared_inputs
@@ -525,20 +534,6 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         .create_sequence(SequenceConfig::new(1))
         .context("create trace-full readout owner")?;
 
-    let payload_path = args.full_lens.join(&manifest.payload.path);
-    let (mut payload_file, payload_length) = open_regular_file(&payload_path)?;
-    ensure!(
-        payload_length as u64 == manifest.payload.byte_length,
-        "full lens payload length does not match its manifest"
-    );
-    let matrix_bytes = transport_matrix_bytes(&manifest)?;
-    let matrix_len = usize::try_from(matrix_bytes).context("full-lens matrix byte count")?;
-    let mut matrix = Vec::new();
-    matrix
-        .try_reserve_exact(matrix_len)
-        .context("allocate reusable full-lens transport matrix")?;
-    matrix.resize(matrix_len, 0);
-
     let tiled = max_prompt_rows > MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS;
     let workspace_rows = max_prompt_rows.min(MAX_WORKSPACE_LENS_PACKED_READOUT_POSITIONS);
     let execution_mode = if tiled {
@@ -559,22 +554,8 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
     let mut readout_gpu_ms = 0.0f64;
     let mut readout_wall_ms = 0.0f64;
     for &layer in &layers {
-        let layer_slot = manifest
-            .transport
-            .source_layers
-            .iter()
-            .position(|&candidate| candidate == layer)
-            .with_context(|| format!("full lens has no payload slot for layer {layer}"))?;
-        let matrix_offset = (layer_slot as u64)
-            .checked_mul(matrix_bytes)
-            .context("full-lens matrix offset overflow")?;
         let read_started = Instant::now();
-        payload_file
-            .seek(SeekFrom::Start(matrix_offset))
-            .with_context(|| format!("seek full-lens source layer {layer}"))?;
-        payload_file
-            .read_exact(&mut matrix)
-            .with_context(|| format!("read full-lens source layer {layer}"))?;
+        let matrix = manifest.read_matrix(layer)?;
         matrix_read_wall_ms += read_started.elapsed().as_secs_f64() * 1e3;
         prompt_workspace
             .bind_f16_transport(&matrix)

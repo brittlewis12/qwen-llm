@@ -47,6 +47,9 @@ pub(crate) const MAX_SWEEP_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
         ])
 ))]
 pub(crate) struct CoefficientSweepArgs {
+    /// Existing private identity cache; data exact bindings always hash retained bytes.
+    #[arg(long)]
+    pub(super) identity_cache: Option<PathBuf>,
     /// Ordinary dense or MoE Qwen GGUF model, loaded once for every arm.
     #[arg(short = 'm', long)]
     pub(super) model: PathBuf,
@@ -169,7 +172,7 @@ impl CoefficientSweepArgs {
         LensRunArgs {
             model: self.model.clone(),
             plan: self.plan.clone(),
-            identity_cache: None,
+            identity_cache: self.identity_cache.clone(),
             prompt: self.prompt.clone(),
             token_ids: self.token_ids.clone(),
             user: self.user.clone(),
@@ -491,6 +494,7 @@ pub(super) fn run_cohort(args: LensRunArgs) -> Result<()> {
     validate_plan(&source_plan)?;
     validate_ordinary_plan(&source_plan)?;
     let plan_dir = plan_path.parent().unwrap_or_else(|| Path::new("."));
+    let full_transports = open_full_transports(&source_plan, plan_dir)?;
 
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
@@ -597,6 +601,13 @@ pub(super) fn run_cohort(args: LensRunArgs) -> Result<()> {
         bounds,
     };
     crate::shutdown::checkpoint()?;
+    let mut full_transports = bind_full_transports(
+        full_transports,
+        &source_plan,
+        plan_dir,
+        &gguf,
+        args.identity_cache.as_deref(),
+    )?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf_with_intent(
@@ -627,7 +638,12 @@ pub(super) fn run_cohort(args: LensRunArgs) -> Result<()> {
         first_request.prepared_input.token_ids.len(),
     )
     .with_context(|| format!("bind run cohort request {:?}", first_request.id))?;
-    let execution = prepare_execution_plan(&first_bound_plan.resolved, plan_dir, &loaded)?;
+    let execution = prepare_execution_plan(
+        &first_bound_plan.resolved,
+        plan_dir,
+        &loaded,
+        &mut full_transports,
+    )?;
     drop(first_bound_plan);
     let stop_tokens = loaded
         .gguf()
@@ -845,6 +861,23 @@ pub(super) fn execute_ordinary_arm(
         )?;
     }
     Ok(RunResult {
+        linear_transports: execution
+            .plan
+            .lenses
+            .iter()
+            .filter_map(|definition| {
+                let id = definition.id();
+                let prepared = execution.lenses.get(id)?;
+                if let LoadedLens::Native(native) = &prepared.lens {
+                    native
+                        .producer_metadata
+                        .as_ref()
+                        .map(|metadata| serde_json::json!({"lens_id": id, "artifact":metadata}))
+                } else {
+                    None
+                }
+            })
+            .collect(),
         prompt_token_ids: prompt_token_ids.to_vec(),
         decoded_text: tokenizer.decode(&generated_token_ids),
         generated_token_ids,
@@ -885,6 +918,7 @@ pub(super) fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result
         validate_ordinary_plan(&effective)?;
     }
     let plan_dir = plan_path.parent().unwrap_or_else(|| Path::new("."));
+    let full_transports = open_full_transports(&source_plan, plan_dir)?;
 
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
@@ -909,6 +943,13 @@ pub(super) fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result
     )?;
 
     crate::shutdown::checkpoint()?;
+    let mut full_transports = bind_full_transports(
+        full_transports,
+        &source_plan,
+        plan_dir,
+        &gguf,
+        args.identity_cache.as_deref(),
+    )?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf(gguf, args.model.clone())
@@ -927,7 +968,12 @@ pub(super) fn run_single_coefficient_sweep(args: CoefficientSweepArgs) -> Result
         &prepared_input.rendering,
         prompt_token_ids.len(),
     )?;
-    let execution = prepare_execution_plan(&source_bound_plan.resolved, plan_dir, &loaded)?;
+    let execution = prepare_execution_plan(
+        &source_bound_plan.resolved,
+        plan_dir,
+        &loaded,
+        &mut full_transports,
+    )?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
     let schedule = CompiledEventSchedule::compile(&execution.plan, execution.n_layer)?;
     let mut prefill = prepare_ordinary_prefill(
@@ -1150,6 +1196,7 @@ pub(super) fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result
     }
     let source_plan_blake3 = canonical_plan_blake3(&source_plan)?;
     let plan_dir = plan_path.parent().unwrap_or_else(|| Path::new("."));
+    let full_transports = open_full_transports(&source_plan, plan_dir)?;
 
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
@@ -1259,6 +1306,13 @@ pub(super) fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result
         ensure_sweep_cohort_manifest_capacity(&manifest_basis, &preflight_requests)?;
 
     crate::shutdown::checkpoint()?;
+    let mut full_transports = bind_full_transports(
+        full_transports,
+        &source_plan,
+        plan_dir,
+        &gguf,
+        args.identity_cache.as_deref(),
+    )?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf(gguf, args.model.clone())
@@ -1285,7 +1339,12 @@ pub(super) fn run_coefficient_sweep_cohort(args: CoefficientSweepArgs) -> Result
         first_request.prepared_input.token_ids.len(),
     )
     .with_context(|| format!("bind sweep cohort request {:?}", first_request.id))?;
-    let execution = prepare_execution_plan(&first_bound_plan.resolved, plan_dir, &loaded)?;
+    let execution = prepare_execution_plan(
+        &first_bound_plan.resolved,
+        plan_dir,
+        &loaded,
+        &mut full_transports,
+    )?;
     drop(first_bound_plan);
     let stop_tokens = loaded
         .gguf()

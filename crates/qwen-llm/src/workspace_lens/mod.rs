@@ -40,6 +40,46 @@ mod error;
 mod fit;
 mod gdn;
 mod readout;
+/// Native LM-head dtypes supported by packed readout and selected-row projection.
+pub fn selected_readout_head_dtype_supported(dtype: GgmlType) -> bool {
+    matches!(
+        dtype,
+        GgmlType::F32
+            | GgmlType::F16
+            | GgmlType::BF16
+            | GgmlType::Q4_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_0
+            | GgmlType::IQ4_NL
+    )
+}
+
+/// Check the CPU-bound output tail before allocating any Metal resources.
+pub fn validate_opened_output_head(
+    gguf: &crate::gguf::GgufFile,
+    selected_or_packed: bool,
+) -> Result<(), WorkspaceLensError> {
+    let bound = crate::loader::Model::from_gguf(gguf).map_err(RuntimeError::from)?;
+    let norm = crate::codec::dequant_to_f32(bound.output_norm, gguf.slice(bound.output_norm))
+        .map_err(MfError::from)?;
+    if let Some(index) = norm.iter().position(|v| !v.is_finite()) {
+        return Err(WorkspaceLensError::NonFiniteTokenReadoutData {
+            name: "deployed output normalization",
+            index,
+        });
+    }
+    crate::codec::validate_dequantization(bound.lm_head, gguf.slice(bound.lm_head))
+        .map_err(MfError::from)?;
+    let dtype = if crate::metal_forward::weight_dtype_kept_native(bound.lm_head.dtype) {
+        bound.lm_head.dtype
+    } else {
+        GgmlType::F32
+    };
+    if selected_or_packed && !selected_readout_head_dtype_supported(dtype) {
+        return Err(WorkspaceLensError::UnsupportedTokenReadoutLmHeadDtype { dtype });
+    }
+    Ok(())
+}
 mod session;
 mod support;
 #[cfg(test)]
@@ -818,16 +858,20 @@ pub struct WorkspaceLensPassiveSession<'model, 'sequence> {
 }
 
 impl LoadedModel {
+    pub fn validate_passive_workspace_lens_output(&self) -> Result<(), WorkspaceLensError> {
+        readout::validate_scalar_readout_tail(
+            self.metal_model(),
+            self.arch().hidden_size as usize,
+            self.arch().vocab_size as usize,
+        )
+    }
+
     pub fn passive_workspace_lens_session<'model, 'sequence>(
         &'model self,
         sequence: &'sequence mut Sequence,
     ) -> Result<WorkspaceLensPassiveSession<'model, 'sequence>, WorkspaceLensError> {
         self.ensure_owns(sequence)?;
-        readout::validate_scalar_readout_tail(
-            self.metal_model(),
-            self.arch().hidden_size as usize,
-            self.arch().vocab_size as usize,
-        )?;
+        self.validate_passive_workspace_lens_output()?;
         Ok(WorkspaceLensPassiveSession {
             inner: WorkspaceLensSession {
                 model: self,

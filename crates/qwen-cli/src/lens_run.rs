@@ -87,7 +87,7 @@ pub(crate) struct LensRunArgs {
     #[arg(long)]
     pub(crate) plan: PathBuf,
 
-    /// Private model-content identity cache (required for Muse Glimmer).
+    /// Private native identity cache for legacy assets; data exact bindings always hash retained bytes.
     #[arg(long)]
     pub(crate) identity_cache: Option<PathBuf>,
 
@@ -387,6 +387,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next"
     );
     validate_ordinary_plan(&plan)?;
+    let full_transports = open_full_transports(&plan, plan_dir)?;
 
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load model tokenizer")?;
     let prepared_input = prepare_qwen_model_input(args.input_spec(), family, &gguf, &tokenizer)?;
@@ -404,6 +405,13 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     )?;
 
     crate::shutdown::checkpoint()?;
+    let mut full_transports = bind_full_transports(
+        full_transports,
+        &plan,
+        plan_dir,
+        &gguf,
+        args.identity_cache.as_deref(),
+    )?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let loaded = runtime
         .load_opened_gguf_with_intent(
@@ -422,7 +430,12 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     );
 
     let bound_plan = bind_plan_positions(&plan, &prepared_input.rendering, prompt_token_ids.len())?;
-    let execution = prepare_execution_plan(&bound_plan.resolved, plan_dir, &loaded)?;
+    let execution = prepare_execution_plan(
+        &bound_plan.resolved,
+        plan_dir,
+        &loaded,
+        &mut full_transports,
+    )?;
     validate_reachable_scopes(&execution.plan, prompt_token_ids.len(), args.max_new_tokens)?;
     let schedule = CompiledEventSchedule::compile(&execution.plan, execution.n_layer)?;
     let mut prefill = prepare_ordinary_prefill(

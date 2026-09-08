@@ -3,6 +3,7 @@
 use super::*;
 
 pub(super) struct NativeLens {
+    pub(super) producer_metadata: Option<serde_json::Value>,
     pub(super) method: String,
     pub(super) target_layer: u32,
     pub(super) source_layers: Vec<u32>,
@@ -109,6 +110,7 @@ pub(super) fn load_native_lens(
         values.push(value);
     }
     Ok(NativeLens {
+        producer_metadata: None,
         method: method.into(),
         target_layer: manifest.config.target_layer,
         source_layers,
@@ -122,6 +124,7 @@ pub(super) fn native_lens_from_projected_full(
     projected: crate::full_lens::ProjectedFullTokenDirections,
 ) -> NativeLens {
     NativeLens {
+        producer_metadata: projected.producer_metadata,
         method: projected.method,
         target_layer: projected.target_layer,
         source_layers: projected.source_layers,

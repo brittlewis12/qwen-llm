@@ -21,6 +21,7 @@ mod lens_compare;
 mod lens_input;
 mod lens_inspect;
 mod lens_run;
+pub mod linear_transport;
 #[allow(dead_code)]
 mod messages;
 mod model_request;
@@ -126,6 +127,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Verify a data-only full transport without loading a model.
+    VerifyFull(linear_transport::VerifyFullArgs),
     /// Compare two compatible trace or run artifacts by exact identities.
     Compare(lens_compare::CompareArgs),
     /// Inspect a bounded qwen.lens.trace artifact without loading a model.
@@ -154,9 +157,9 @@ enum Command {
     /// Compare the published J-lens with native deployed-checkpoint J directions.
     #[command(alias = "validate-transfer")]
     CompareTransfer(CompareTransferArgs),
-    /// Read full-vocabulary logits through an imported published J/R transport.
+    /// Read native full-vocabulary logits through a verified full transport.
     ReadFull(ReadFullArgs),
-    /// Trace packed full-vocabulary published J/R top-k across layers and positions.
+    /// Trace verified full-transport top-k across layers and positions.
     #[command(name = "trace-full")]
     TraceFull(TraceFullArgs),
 }
@@ -601,6 +604,7 @@ fn run() -> Result<()> {
         Command::ImportFull(args) => import_full(args),
         Command::CompareTransfer(args) => compare_transfer(args),
         Command::ReadFull(args) => read_full(args),
+        Command::VerifyFull(args) => linear_transport::verify_full(args),
         Command::TraceFull(args) => trace_full(args),
     }
 }
@@ -627,10 +631,11 @@ fn read_full(args: ReadFullArgs) -> Result<()> {
     if args.logit_lens {
         return plain_logit_lens::read(args);
     }
-    if muse_full_lens::is_artifact(
+    if muse_full_lens::is_artifact_for_model(
         args.full_lens
             .as_deref()
             .context("--full-lens is required")?,
+        &args.model,
     )? {
         muse_full_lens::read_full(args)
     } else {
@@ -639,7 +644,7 @@ fn read_full(args: ReadFullArgs) -> Result<()> {
 }
 
 fn trace_full(args: TraceFullArgs) -> Result<()> {
-    let muse = muse_full_lens::is_artifact(&args.full_lens)?;
+    let muse = muse_full_lens::is_artifact_for_model(&args.full_lens, &args.model)?;
     if args.requests_jsonl.is_some() {
         ensure!(
             !muse,

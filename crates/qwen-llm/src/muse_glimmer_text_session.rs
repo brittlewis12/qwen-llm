@@ -314,12 +314,8 @@ impl MuseGlimmerTextSessionMemoryPlan {
         let mut logical_bytes = 0_u64;
         let mut priced_upper_bytes = 0_u64;
         for (name, logical) in session_allocation_specs(geometry)? {
-            let priced = ctx
-                .price_shared_buffer_upper(logical)
-                .map_err(|error| {
-                    MuseGlimmerTextSessionError::Invalid(format!(
-                        "session allocation {name:?} {error}"
-                    ))
+            let priced = ctx.price_shared_buffer_upper(logical).map_err(|error| {
+                MuseGlimmerTextSessionError::Invalid(format!("session allocation {name:?} {error}"))
                 })?;
             let (priced_bytes, alignment) = (priced.priced_upper_bytes, priced.alignment);
             logical_bytes = logical_bytes.checked_add(logical).ok_or_else(|| {
@@ -688,8 +684,21 @@ impl MuseGlimmerTextSession {
     }
 
     pub fn reset(&mut self) -> Result<(), MuseGlimmerTextSessionError> {
+        self.rewind_prefix(0)
+    }
+
+    /// Discard a suffix of the current causal KV history without copying it.
+    /// All layers retain absolute-position KV, including sliding-attention layers.
+    /// Scratch/logits are not restored; callers must forward again before readout.
+    pub fn rewind_prefix(&mut self, position: usize) -> Result<(), MuseGlimmerTextSessionError> {
         self.ensure_usable()?;
-        self.next_position = 0;
+        if position > self.next_position {
+            return invalid(format!(
+                "cannot rewind from {} to future position {position}",
+                self.next_position
+            ));
+        }
+        self.next_position = position;
         Ok(())
     }
 
@@ -935,9 +944,7 @@ impl MuseGlimmerFullReadoutWorkspacePlan {
         let prepared_transport_reserve_bytes = ctx
             .price_shared_buffer_upper(transport_logical)
             .map_err(|error| {
-                MuseGlimmerTextSessionError::Invalid(format!(
-                    "prepared-transport reserve {error}"
-                ))
+                MuseGlimmerTextSessionError::Invalid(format!("prepared-transport reserve {error}"))
             })?
             .priced_upper_bytes;
         Ok(Self {
@@ -3742,9 +3749,8 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_prefill_endpoint_and_scalar_continuation_match_scalar_bitwise() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
@@ -3791,11 +3797,89 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "serial Metal, Muse live-prefix rewind and branch exactness"]
+    fn live_prefix_rewind_matches_fresh_logits_and_all_active_kv() {
+        let gguf = GgufFile::open(crate::test_fixtures::MUSE_GLIMMER_Q8_0.path()).unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+        let admitted = plan.admit(ctx.memory_signals()).unwrap();
+        let weights = MuseGlimmerMetalWeights::realize(&ctx, &gguf, admitted)
+            .unwrap()
+            .into_weights();
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
+        let mut live = MuseGlimmerTextSession::new(&ctx, weights.config(), 160).unwrap();
+        let mut fresh = MuseGlimmerTextSession::new(&ctx, weights.config(), 160).unwrap();
+        let root: Vec<u32> = (0..145).map(|i| 1000 + i).collect();
+        forward.prefill(&root, &mut live).unwrap();
+        let mut history = root.clone();
+        let mut branch = root[..33].to_vec();
+        branch[16] += 1;
+        let mut unrelated = root[..129].to_vec();
+        unrelated[0] += 1;
+        let mut extension = unrelated.clone();
+        extension.extend_from_slice(&root[129..]);
+        for prompt in [
+            root.clone(),
+            root[..128].to_vec(),
+            root[..17].to_vec(),
+            branch,
+            root[..1].to_vec(),
+            unrelated,
+            extension,
+        ] {
+            let reused = history
+                .iter()
+                .zip(&prompt)
+                .take_while(|(a, b)| a == b)
+                .count()
+                .min(prompt.len() - 1);
+            live.rewind_prefix(reused).unwrap();
+            let actual = forward.prefill(&prompt[reused..], &mut live).unwrap();
+            fresh.reset().unwrap();
+            let expected = forward.prefill(&prompt, &mut fresh).unwrap();
+            assert_logits_bitwise_equal("rewound prompt", &actual, &expected);
+            assert_eq!(live.next_position(), prompt.len());
+            for layer in 0..live.geometry.layer_count {
+                let offset = live.geometry.cache_write_offset(layer, 0).unwrap() * 2;
+                let bytes = prompt.len() * live.geometry.kv_width * 2;
+                for (a, b) in [
+                    (&live.key_cache, &fresh.key_cache),
+                    (&live.value_cache, &fresh.value_cache),
+                ] {
+                    unsafe {
+                        let a = std::slice::from_raw_parts(
+                            (a.buffer.contents().as_ptr() as *const u8).add(offset),
+                            bytes,
+                        );
+                        let b = std::slice::from_raw_parts(
+                            (b.buffer.contents().as_ptr() as *const u8).add(offset),
+                            bytes,
+                        );
+                        assert_eq!(a, b, "active KV differs at layer {layer}");
+                    }
+                }
+            }
+            let token = greedy_argmax(&expected);
+            let actual = forward.forward_token(token, &mut live).unwrap();
+            let expected = forward.forward_token(token, &mut fresh).unwrap();
+            assert_logits_bitwise_equal("rewound continuation", &actual, &expected);
+            history = prompt;
+            history.push(token);
+        }
+        let position = live.next_position();
+        assert!(live.rewind_prefix(position + 1).is_err());
+        assert_eq!(live.next_position(), position);
+        live.poison_reason = Some("injected command failure".into());
+        assert!(live.rewind_prefix(0).is_err());
+        assert!(live.reset().is_err());
+        assert_eq!(live.next_position(), position);
+    }
+
+    #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_prefill_n144_superchunk_state_matches_scalar_bitwise() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
@@ -3847,9 +3931,8 @@ mod tests {
     fn packed_q8_prefill_n128_wall_screen() {
         use std::time::Instant;
 
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
@@ -3927,9 +4010,8 @@ mod tests {
     fn packed_q8_mat_mat_n128_numerical_and_wall_screen() {
         use std::time::Instant;
 
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let tokenizer = LlamaCppTokenizer::open(&path).expect("open Muse tokenizer");
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
@@ -4267,9 +4349,8 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn capture_enabled_prefill_and_decode_logits_match_ordinary_forward_bitwise() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf)
@@ -4419,9 +4500,8 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn runs_pinned_q8_first_token_after_dropping_gguf_owner() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let tokenizer = LlamaCppTokenizer::open(&path).expect("open Muse tokenizer");
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");

@@ -552,6 +552,12 @@ impl MuseGlimmerTextRunner<'_, '_> {
     pub fn reset(&mut self) -> Result<(), MuseGlimmerRuntimeError> {
         Ok(self.session.reset()?)
     }
+
+    /// Retain an already-consumed causal prefix. The caller must establish token
+    /// identity and forward a nonempty suffix to obtain current logits.
+    pub fn rewind_prefix(&mut self, position: usize) -> Result<(), MuseGlimmerRuntimeError> {
+        Ok(self.session.rewind_prefix(position)?)
+    }
 }
 
 fn invalid<T>(detail: impl Into<String>) -> Result<T, MuseGlimmerRuntimeError> {
@@ -577,9 +583,8 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn deployed_output_tail_matches_forward_from_captured_final_residual_bitwise() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let mut model = MuseGlimmerLoadedModel::load(&ctx, &gguf, 1).expect("load Muse Q8 target");
@@ -637,9 +642,8 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn batched_full_readout_matches_scalar_oracle_exactly() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let mut model = MuseGlimmerLoadedModel::load(&ctx, &gguf, 2).expect("load Muse Q8 target");

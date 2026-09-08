@@ -184,3 +184,34 @@ fn muse_live_prefix_reuse_backend_packet() {
         );
     }
 }
+
+#[test]
+#[ignore = "serial Metal, Muse sampled exact-hit reuse versus reset"]
+fn muse_live_prefix_sampled_retries_match_reset() {
+    let path = std::path::Path::new(qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0.path());
+    let gguf = GgufFile::open(path).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let mut backend =
+        MuseGlimmerBackend::new(ctx, gguf, path, "muse-prefix-pilot".into(), 16, 512).unwrap();
+    let (mut request, prompt) = request(
+        &backend,
+        "You are a concise storyteller. Describe a winter street.",
+        false,
+    );
+    for (temperature, seed) in [(1.0, 42), (0.7, 99)] {
+        request.temperature = Some(temperature);
+        request.seed = Some(seed);
+        backend.prefix_reuse = false;
+        let (reference, expected, _) = run(&mut backend, &request, &prompt);
+        let history = backend.consumed_tokens.clone();
+        backend.prefix_reuse = true;
+        let (candidate, actual, _) = run(&mut backend, &request, &prompt);
+        assert_eq!(actual, expected);
+        assert_eq!(backend.consumed_tokens, history);
+        assert_eq!(candidate.usage.output_tokens, reference.usage.output_tokens);
+        assert_eq!(
+            candidate.usage.cached_tokens,
+            reference.usage.input_tokens - 1
+        );
+    }
+}

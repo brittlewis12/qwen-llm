@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-07 - Packed Capture Destination Alias Guard
+
+- Packed hidden capture now rejects destinations sharing any mutable session or
+  packed-scratch buffer before encoding, including offset subviews. This closes a
+  real destination-alias gap exposed by the incremental-snapshot ownership audit;
+  it does not implement prefix reuse or raw-escape taint.
+- Actual 0.8B F32 regression passes session-x, recurrent-subview, KV and scratch-
+  subview rejection with unchanged persistent bytes. A valid separate capture
+  destination preserves full logits and KV/GDN/conv bitwise versus plain prefill.
+  Owned rejection preserves position and the existing poison-on-failure contract.
+- Independent review passes; one release regression passes in 0.55s under the
+  production lease. No performance claim or selector/default change. Raw evidence:
+  `target/profiles/runtime-snapshot-ownership/{build-capture-01,capture-01}.log`.
+
 ## 2026-09-07 - Runtime Snapshot Alias Boundary Reproduced
 
 - `6621673a` runs the actual LoadedModel/Sequence/prepared-checkpoint APIs on

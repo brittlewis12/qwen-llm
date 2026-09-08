@@ -10899,6 +10899,16 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
     }
     match hidden_dst {
         Some(dst) => {
+            if target_session.aliases_mutable_buffer(dst)
+                || layer_scratch.aliases_mutable_buffer(dst)
+            {
+                return Err(DFlashError::Metal(MetalError::BadShape {
+                    kernel: "prefill_tokens_with_multi_hidden.hidden_dst",
+                    detail:
+                        "capture destination aliases mutable session or prefill scratch storage"
+                            .into(),
+                }));
+            }
             let want_hidden_elems = total_n * k_target * h;
             if (dst.n_elements() as usize) != want_hidden_elems {
                 return Err(DFlashError::Metal(MetalError::BadShape {

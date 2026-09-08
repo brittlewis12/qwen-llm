@@ -74,3 +74,87 @@ fn runtime_snapshot_observes_alias_retained_across_restore() {
         );
     }
 }
+
+fn assert_same_payload(a: &PreparedCheckpoint, b: &PreparedCheckpoint) {
+    assert_eq!(a.snapshot.kv_k_arena, b.snapshot.kv_k_arena);
+    assert_eq!(a.snapshot.kv_v_arena, b.snapshot.kv_v_arena);
+    assert_eq!(a.snapshot.gdn_state_arena, b.snapshot.gdn_state_arena);
+    assert_eq!(a.snapshot.gdn_conv_arena, b.snapshot.gdn_conv_arena);
+    assert_eq!(a.snapshot.kv_n_pos, b.snapshot.kv_n_pos);
+}
+
+#[test]
+#[ignore = "serial Metal, real 0.8B packed capture destination guards"]
+fn runtime_packed_capture_rejects_session_and_scratch_aliases() {
+    let runtime = Runtime::metal().unwrap();
+    let model = runtime
+        .load_model(crate::test_fixtures::QWEN35_0_8B_F32.path())
+        .unwrap();
+    let mut sequence = model.create_sequence(SequenceConfig::new(8)).unwrap();
+    model.decode_token(&mut sequence, 1).unwrap();
+    let root = checkpoint(&model, &sequence, &[1]);
+    let h = u64::from(model.arch().hidden_size);
+    let plan = model.plan_packed_prefill_scratch(2, 8).unwrap();
+    let mut scratch = model.allocate_packed_prefill_scratch(plan).unwrap();
+    let aliases = [
+        sequence.metal_session().x.clone(),
+        sequence.metal_session().gdn_state[0].view_subrange(1, vec![h]),
+        sequence.metal_session().kv_k[0].view_subrange(0, vec![h]),
+        scratch.x_pack.view_subrange(h, vec![h]),
+    ];
+    for destination in &aliases {
+        let error = prefill_tokens_with_multi_hidden(
+            &model.forward(),
+            &[2],
+            1,
+            &mut sequence.state,
+            &mut scratch.inner,
+            &[0],
+            Some(destination),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("aliases mutable session or prefill scratch")
+        );
+        assert_eq!(sequence.position(), 1);
+        assert_same_payload(&root, &checkpoint(&model, &sequence, &[1]));
+    }
+
+    let mut plain = model.create_sequence(SequenceConfig::new(8)).unwrap();
+    model
+        .restore_prepared_checkpoint(&root, &mut plain, &[1, 2])
+        .unwrap();
+    let plain_logits = model.prefill(&mut plain, &mut scratch, &[2]).unwrap();
+    let destination = MetalTensor::zeros_f32(model.context(), vec![h]).unwrap();
+    let captured_logits = model
+        .prefill_with_hidden_capture(&mut sequence, &mut scratch, &[2], &[0], &destination)
+        .unwrap();
+    assert_eq!(
+        plain_logits.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        captured_logits
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_same_payload(
+        &checkpoint(&model, &plain, &[1, 2]),
+        &checkpoint(&model, &sequence, &[1, 2]),
+    );
+
+    let escaped = sequence.metal_session().x.clone();
+    let error = model
+        .prefill_with_hidden_capture(&mut sequence, &mut scratch, &[3], &[0], &escaped)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("aliases mutable session or prefill scratch")
+    );
+    assert_eq!(sequence.position(), 2);
+    assert!(
+        sequence.state.ensure_usable().is_err(),
+        "owned failed prefill must remain fail-stop"
+    );
+}

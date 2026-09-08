@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse F32 Shared-KV Prefill Screen PASS / Research Only
+
+- `d354eeba` test-only32-query/32-KV tiledH128 forward attention retains F32 Q,
+  probabilities and accumulation, widening F16 K/V into reused shared panels.
+  Four SIMDgroups,20,992B static threadgroup storage; no global sidecar/scratch.
+  Lane-owned softmax state follows independent cx review to reduce live registers.
+- Short current-online AB/BA32K N128 screen: full GPU36.563/36.386ms versus tiled
+  24.127/24.310ms (~33.6%saved); sliding2048 1.791/1.794 versus1.168/1.165ms
+  (~34.9%saved). Separate warm pair; not whole-model or full host-call timing.
+- Eight numerical cases PASS: odd rows, causal tails, window1/32/2048, peaked and
+  uniform, offset guards/poison, dispatch witness, independent F64 probes. Worst
+  GPU delta2.297759e-5/F64 error1.720613e-5. Entire test0.46s, no slow reference.
+  Next: live optimized-model chunk transfer, not rollout. Remaining review nits:
+  independently probe odd-case middle row and recheck guards after timed repeats.
+- Raw: `target/profiles/muse-live-prefix/tiled-prefill-01*`. Release lib buildPASS;
+  repository-wide fmt check finds pre-existing unrelated differences, untouched.
+
 ## 2026-09-08 - Muse Model-Context Invariants PASS / Current Attribution
 
 - `900e5106` removes benchmark-derived32768/32784 upper cliffs from opt-in

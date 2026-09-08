@@ -164,16 +164,16 @@ Earlier original-decode and matrix-only-prefill attribution identified the work
 removed. Refresh attribution before ranking the remaining kernels; the scalar_tail
 label still represents only five remainder tokens at6229.
 
-1. Qualify packed online attention beyond7168. Full layers still fall back to
-   per-row dispatches and the host rejects longer full-visible packed ranges.
-   Use an authentic8K live chunk before complete fresh8K qualification, then32K.
-   Keep matrix-range expansion explicit; chunk evidence alone cannot establish
-   accumulated full-prefill numerical behavior or end-to-end throughput.
+1. Qualify split decode through32K. Prefill is now delivered through32768 absolute
+   packedend: completefresh8K/32K numerical and independent17greedy gates pass;
+   realnative32729 CLI141.778prefilltok/s. Its decode remains only3.946transitions/s
+   because split selection still stops at7168. Existing32K primitive numerics plus
+   this actual cost justify a whole16-forward packet, not another microbenchmark.
 2. Retain completed capacity decoupling:6884+391 teacher-forced transitions pass,
    including the split-decode boundary and bitwise straddling-prefill fallback.
    ActualCLI6229/17 with32768reservation retains179.21prefilltok/s and sameoutput;
-   fullcapacityadmission unchanged. Optimized chunk absoluteend still<=7168.
-   This fixes reservation eligibility, not32K-prompt arithmetic. Whole6229 online
+   fullcapacityadmission unchanged. Subsequentfreshqualification separatelywidens
+   arithmeticto32768; straddling/beyond chunks retainoriginalmath. Whole6229 online
    prefill ABBA54.750%saved/180.769tok/s remains the existing timing authority.
 3. Refresh one actual delivered packed-graph profile before choosing FFN work.
    The previous69%attention share predates online attention; it does not establish

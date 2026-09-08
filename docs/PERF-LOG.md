@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Complete Fresh 32K Prefill Qualified And Delivered
+
+- Extended attention primitive gatesPASS through32K, up to97.745%GPU saved versus
+  real per-row fallback; authentic8K chunk residual/KV/logit and prefix checksPASS.
+- `0cd3c30e` completefresh8K PASS before32K: B46.938s/174.529tok/s vsboundedA91.309s.
+  Full32K B231.586s/141.494tok/s vsA3136.436s/10.448tok/s. Complete reference ran;
+  singleB-first/A-later diagnostic, NOTABBA or all-original32K numerical authority.
+- Bothcells17independentgreedy IDs and inheritedendpoint/continuationgatesPASS;
+  activeKV/prefiximmutability and liveprobe fullstate restorationbitwisePASS.
+  32K KVRMS0.002107048/cos0.999997781869; maxdelta3.6953125 reportednotbounded.
+  Aggregateadmission includes2sessions+64MiBCPUoracles; one32Ktest3414.30s.
+- `b50ffc19` deliversoptin matrix/online chunksending<=32768; defaults, fullcapacity
+  admission, splitdecodebound and straddlingfallback unchanged. Productconstructor
+  and fallback checksPASS; historicalreferences explicitly keep7168limits.
+- RealnativeCLI32729tokens/17outputs: prefill230.847s/141.778tok/s, process235.527s;
+  generation4.055s, cleanbuild. Distinctnativeuser-endingfixture, not32768prefix.
+  Deliverydiagnostic, no cold/sampledexactnessclaim. ReviewPASS. Longdecode now
+  remains on oldfallback: investigate measured3.946transitions/s next.
+  Evidence: `docs/bench/2026-09-08-muse-long-context/RESULT.md`.
+
 ## 2026-09-08 - Muse Prefill Eligibility No Longer Depends On Reservation
 
 - `a23c3b11` permits larger admitted capacities while bounding both optimized

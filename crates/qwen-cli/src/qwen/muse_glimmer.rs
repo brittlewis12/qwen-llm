@@ -74,7 +74,7 @@ pub(crate) fn resolve_muse_glimmer_reasoning_strength(
     MuseGlimmerReasoningStrength::parse(requested).ok_or_else(|| {
         anyhow!(
             "{}",
-            crate::messages::ReasoningControlError::invalid_level(
+            crate::messages::CapabilityError::invalid_level(
                 "Muse Glimmer",
                 &MuseGlimmerReasoningStrength::level_names(),
                 requested

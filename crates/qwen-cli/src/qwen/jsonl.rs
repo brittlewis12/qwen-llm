@@ -89,13 +89,19 @@ pub(crate) fn resolve_jsonl_request_input(
             bail!("request line {line}: templated user rows require an ordinary Qwen model")
         }
         JsonlRowProtocol::Unresolved(reason) => {
-            bail!("request line {line}: templated user rows need the model's chat template: {reason}")
+            bail!(
+                "request line {line}: templated user rows need the model's chat template: {reason}"
+            )
         }
     };
-    ensure!(
-        protocol.pinned(),
-        "request line {line}: templated user rows require a model whose chat template is pinned (released Qwen3.5/3.6/3.8); this model's template is unrecognized, so submit a raw prompt instead"
-    );
+    // The family's input contract decides (the same rule as `run --user`):
+    // plain chat renders on any ordinary Qwen; reasoning controls bind
+    // against the template inside `render` and refuse when unpinned.
+    protocol
+        .input_capability()
+        .user
+        .require()
+        .with_context(|| format!("request line {line}"))?;
     let user = request.user.as_deref().expect("templated row has user");
     let prompt = protocol
         .render(

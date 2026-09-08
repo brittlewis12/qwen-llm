@@ -8,8 +8,9 @@
 //! - Unknown item *types* are rejected. Unknown *fields* are ignored:
 //!   top-level request fields log once per name; `id`/`status` on replayed
 //!   input items are accepted and ignored silently.
-//! - `store:true`, `previous_response_id`, `truncation:"auto"`, `tools`,
-//!   and `tool_choice` fail closed with spec error envelopes.
+//! - `store:true`, `previous_response_id`, and `truncation:"auto"` fail
+//!   closed with spec error envelopes; `tools`/`tool_choice` parse here and
+//!   are admitted per family at bind time (`bind_qwen_request`).
 
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -38,6 +39,18 @@ impl ServeError {
             code: None,
             param: param.map(str::to_owned),
             message: message.into(),
+        }
+    }
+
+    /// A request control the loaded model's contract does not provide; the
+    /// capability's stable code rides in the envelope.
+    pub(crate) fn unsupported(param: &str, error: crate::messages::CapabilityError) -> Self {
+        Self {
+            status: 400,
+            error_type: "invalid_request",
+            code: Some(error.code),
+            param: Some(param.to_owned()),
+            message: error.message,
         }
     }
 
@@ -919,14 +932,13 @@ fn required_str_for(
 }
 
 fn validate_tool_name(name: &str, param: &str, context: &str) -> Result<(), ServeError> {
-    if name.len() > 64
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
+    if !crate::model_request::tool_name_is_valid(name) {
         return Err(ServeError::invalid_request(
             Some(param),
-            format!("{context} must match [A-Za-z0-9_-]{{1,64}}"),
+            format!(
+                "{context} must match {}",
+                crate::model_request::TOOL_NAME_GRAMMAR
+            ),
         ));
     }
     Ok(())
@@ -1591,13 +1603,16 @@ mod tests {
     #[test]
     fn tool_names_and_call_ids_are_bounded() {
         let long_name = "a".repeat(65);
-        for name in ["bad name", "bad.name", long_name.as_str()] {
+        for name in ["bad name", "", long_name.as_str()] {
             let error = parse(json!({
                 "model":"m", "input":"q", "tools":[{"name":name}]
             }))
             .unwrap_err();
             assert_eq!(error.param.as_deref(), Some("tools"));
         }
+        // Dotted names are released-protocol shapes (Qwen3.6 oracle `fs.list`,
+        // Muse ATEM namespaces), the same grammar `qwen run --messages` admits.
+        assert!(parse(json!({"model":"m", "input":"q", "tools":[{"name":"fs.list"}]})).is_ok());
         let call_id = "c".repeat(65);
         let error = parse(json!({"model":"m", "input":[
             {"role":"user", "content":"q"},

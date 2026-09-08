@@ -271,14 +271,17 @@ startup. Muse requires an explicit startup default:
 - `truncation` — only `"disabled"` (default). The engine already fails
   closed on context overflow (S0 F3); serve maps that to the spec error
   instead of a process exit.
-- `tools` — uniquely named function tools are supported on Qwen families (S2)
-  and Muse Glimmer's ATEM protocol;
-  known definition fields have strict types, and `strict:true` is rejected
-  because schema enforcement is unsupported. DeepSeek V4 fails closed on any
-  tool definition; hosted tool types fail closed. Definitions render into the
-  selected family tool block, byte-pinned to its renderer contract.
-  Function names must match `[A-Za-z0-9_-]{1,64}`; replay `call_id` values are
-  limited to 64 bytes.
+- `tools` — uniquely named function tools are supported on pinned Qwen
+  templates (Qwen3.5/3.6/3.8), DeepSeek V4 (DSML), and Muse Glimmer's ATEM
+  protocol; known definition fields have strict types, and `strict:true` is
+  rejected because schema enforcement is unsupported. Hosted tool types fail
+  closed. Definitions render into the selected family tool block, byte-pinned
+  to its renderer contract. An unpinned Qwen template refuses tools and
+  replayed tool turns with code `tools_require_pinned_template` — the same
+  family rule as `qwen run --messages`, advertised by `qwen info --json`
+  under `capabilities.input.tools`.
+  Function names must match `[A-Za-z0-9_.-]{1,64}` (the grammar `qwen run
+  --messages` admits); replay `call_id` values are limited to 64 bytes.
 - `tool_choice` — `"auto"` (default) or an `allowed_tools` object.
   `allowed_tools` accepts only mode `"auto"`, requires a non-empty unique list
   of declared function names, and defines the exact executable set. Narrowing
@@ -422,8 +425,12 @@ because client model-pickers probe it).
   Qwen3.5 and Qwen3.8 pass every non-string through `tojson` (`true`/`null`).
   Every rule is pinned by the per-template jinja2 oracle fixtures. The released `last_query_index` rule applies:
   assistant turns after the final user query keep their think block (empty
-  if no reasoning) even under strip. The unpinned generic contract keeps
-  the compact flat form frozen in `serve_tool_render_fixtures_v1.json`.
+  if no reasoning) even under strip. Unpinned ChatML refuses tools
+  (`tools_require_pinned_template`); the compact flat form
+  `serve_tool_render_fixtures_v1.json` once froze for it was serve-invented
+  and is superseded (2026-09-07). Function names on every lane match
+  `[A-Za-z0-9_.-]{1,64}` — dotted names are released-protocol shapes
+  (Qwen3.6 oracle `fs.list`, Muse ATEM namespaces).
 - Preserve/strip rendering policy: preserve is the default for the validated
   Qwen3.6 identity (owner position, Amendment 1 of S0; economics measured in S0
   G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 uses

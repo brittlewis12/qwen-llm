@@ -27,12 +27,14 @@ use super::items::{QwenTemplate, ServeRequest};
 use super::tool_parse::{ArgumentStyle, ParsedCall, python_json, render_calls_for};
 
 impl QwenTemplate {
-    /// Argument stringification of the released template.
+    /// Argument stringification of the released template. Tools bind only on
+    /// pinned templates (`prompt_template::qwen_tools_support`), so the
+    /// generic arm is unreachable through a bound request; it takes the
+    /// majority released rule to keep the renderer total.
     pub(crate) fn argument_style(self) -> ArgumentStyle {
         match self {
-            Self::Generic => ArgumentStyle::Compact,
             Self::Qwen36 => ArgumentStyle::PythonStr,
-            Self::Qwen35 | Self::Qwen38 => ArgumentStyle::ToJson,
+            Self::Generic | Self::Qwen35 | Self::Qwen38 => ArgumentStyle::ToJson,
         }
     }
 }
@@ -384,13 +386,12 @@ const TOOLS_FORMAT_INSTRUCTION: &str = concat!(
     "knowledge and do not tell the user about function calls\n</IMPORTANT>",
 );
 
-/// Tools block, byte-pinned to the template oracle
-/// (`qwen36_tools_system_block_with_system`): the tools system message
-/// absorbs the caller's system text after `</IMPORTANT>`.
+/// Tools block, byte-pinned to the per-template jinja2 oracles (Qwen3.6
+/// `two_rounds_*`, Qwen3.8 `two_rounds_tojson_scalars`): the tools system
+/// message absorbs the caller's system text after `</IMPORTANT>`.
 fn render_tools_system_block(
     tools: &[ToolDefinition],
     effort_instruction: Option<&str>,
-    released: bool,
     system: Option<&str>,
     system_source: Option<&str>,
     message_index: usize,
@@ -429,24 +430,13 @@ fn render_tools_system_block(
         if let Some(strict) = tool.strict {
             function.insert("strict".into(), serde_json::json!(strict));
         }
-        if released {
-            // Pinned templates: the OpenAI-shaped object every released client
-            // passes to `tool | tojson`, with Python's separators (what both
-            // Transformers and llama.cpp emit).
-            let mut entry = serde_json::Map::new();
-            entry.insert("type".into(), serde_json::json!("function"));
-            entry.insert("function".into(), serde_json::Value::Object(function));
-            tools_content.push_str(&python_json(&serde_json::Value::Object(entry)));
-        } else {
-            // Legacy unpinned contract frozen in serve_tool_render_fixtures_v1.
-            let mut entry = serde_json::Map::new();
-            entry.insert("type".into(), serde_json::json!("function"));
-            entry.extend(function);
-            tools_content.push_str(
-                &serde_json::to_string(&serde_json::Value::Object(entry))
-                    .expect("serialize tool definition"),
-            );
-        }
+        // The OpenAI-shaped object every released client passes to
+        // `tool | tojson`, with Python's separators (what both Transformers
+        // and llama.cpp emit).
+        let mut entry = serde_json::Map::new();
+        entry.insert("type".into(), serde_json::json!("function"));
+        entry.insert("function".into(), serde_json::Value::Object(function));
+        tools_content.push_str(&python_json(&serde_json::Value::Object(entry)));
     }
     tools_content.push_str("\n</tools>");
     tools_content.push_str(TOOLS_FORMAT_INSTRUCTION);
@@ -464,7 +454,7 @@ fn render_tools_system_block(
             None,
         );
         output.push(
-            if released { jinja_trim(system) } else { system },
+            jinja_trim(system),
             QwenServePromptSpanKind::MessageContent,
             context,
             system_source.map(str::to_owned),
@@ -686,7 +676,6 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
         render_tools_system_block(
             &request.model_request.tools,
             effort_instruction,
-            verified,
             request.model_request.system.as_deref(),
             request
                 .model_request
@@ -1069,40 +1058,11 @@ mod tests {
     }
 
     #[test]
-    fn tools_system_block_matches_frozen_fixture_bytes() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/serve_tool_render_fixtures_v1.json"
-        ))
-        .expect("parse tool fixtures");
-        let case = fixture["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|case| case["name"] == "qwen36_tools_system_block_with_system")
-            .expect("tools block case")
-            .clone();
-        let request = parse_request(&json!({
-            "model": "m",
-            "instructions": case["system"],
-            "tools": case["tools"],
-            "input": "List files in /tmp.",
-        }))
-        .expect("tools request must parse");
-        let rendered = render_qwen_serve_prompt(&request);
-        let expected_block = case["prompt"].as_str().unwrap();
-        assert!(
-            rendered.starts_with(expected_block),
-            "tools system block diverged from frozen fixture:\n got: {:?}\nwant: {:?}",
-            &rendered[..expected_block.len().min(rendered.len())],
-            expected_block
-        );
-    }
-
-    #[test]
     fn tool_continuation_prompt_matches_oracle_shape() {
-        // Full loop: tools block, user, assistant(reasoning + call),
-        // coalesced tool_response user block, generation prompt.
-        let request = parse_request(&json!({
+        // Full loop on the pinned Qwen3.6 template: tools block, user,
+        // assistant(reasoning + call), coalesced tool_response user block,
+        // generation prompt. Bytes follow the oracle's `two_rounds_*` cases.
+        let mut request = parse_request(&json!({
             "model": "m",
             "tools": [{"type": "function", "name": "fs_list",
                         "parameters": {"type": "object"}}],
@@ -1116,6 +1076,7 @@ mod tests {
             ],
         }))
         .expect("tool loop must parse");
+        request.template = QwenTemplate::Qwen36;
         let rendered = render_qwen_serve_prompt(&request);
         let tail_start = rendered
             .find("<|im_start|>user\nList files")
@@ -1124,12 +1085,12 @@ mod tests {
             &rendered[tail_start..],
             concat!(
                 "<|im_start|>user\nList files in /tmp.<|im_end|>\n",
-                "<|im_start|>assistant\n<think>\nUse fs.list.\n</think>",
+                "<|im_start|>assistant\n<think>\nUse fs.list.\n</think>\n\n",
                 "<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n</parameter>\n",
                 "</function>\n</tool_call><|im_end|>\n",
                 "<|im_start|>user\n<tool_response>\n{\"entries\":[\"a.txt\"]}\n</tool_response>",
                 "<|im_end|>\n",
-                "<|im_start|>assistant\n",
+                "<|im_start|>assistant\n<think>\n",
             ),
         );
         let annotated = render_qwen_serve_prompt_annotated(&request);
@@ -1167,7 +1128,7 @@ mod tests {
 
     #[test]
     fn parallel_same_name_results_retain_call_order_and_unicode_byte_spans() {
-        let request = parse_request(&json!({
+        let mut request = parse_request(&json!({
             "model": "m",
             "tools": [{"type": "function", "name": "fetch"}],
             "input": [
@@ -1181,6 +1142,7 @@ mod tests {
             ]
         }))
         .unwrap();
+        request.template = QwenTemplate::Qwen36;
         let annotated = render_qwen_serve_prompt_annotated(&request);
         assert_complete_annotations(&annotated);
         let results = annotated

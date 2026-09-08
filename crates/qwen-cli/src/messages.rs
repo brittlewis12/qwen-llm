@@ -50,24 +50,26 @@ pub(crate) enum DeepSeekV4Reasoning {
     Max,
 }
 
-/// A reasoning control that cannot bind for this model. `code` is stable for
-/// machine consumers; `message` is what the user sees. Transports map it to
-/// their own error shape (anyhow on the CLI, `ServeError` with a param).
+/// A request asked for something this model's contract does not provide: a
+/// reasoning control that cannot bind, an input form its template cannot
+/// render. `code` is stable for machine consumers; `message` is what the
+/// user sees. Transports map it to their own error shape (anyhow on the CLI,
+/// `ServeError` with a param).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ReasoningControlError {
+pub(crate) struct CapabilityError {
     pub(crate) code: &'static str,
     pub(crate) message: String,
 }
 
-impl std::fmt::Display for ReasoningControlError {
+impl std::fmt::Display for CapabilityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for ReasoningControlError {}
+impl std::error::Error for CapabilityError {}
 
-impl ReasoningControlError {
+impl CapabilityError {
     pub(crate) fn invalid_level(family: &str, levels: &[&str], got: &str) -> Self {
         Self {
             code: "reasoning_effort_invalid",
@@ -98,7 +100,7 @@ impl DeepSeekV4Reasoning {
         Self::LEVELS.iter().map(|(name, _)| *name).collect()
     }
 
-    pub(crate) fn parse(effort: Option<&str>) -> Result<Self, ReasoningControlError> {
+    pub(crate) fn parse(effort: Option<&str>) -> Result<Self, CapabilityError> {
         let Some(effort) = effort else {
             return Ok(Self::FALLBACK);
         };
@@ -107,7 +109,7 @@ impl DeepSeekV4Reasoning {
             .find(|(name, _)| *name == effort)
             .map(|(_, tier)| *tier)
             .ok_or_else(|| {
-                ReasoningControlError::invalid_level("DeepSeek V4", &Self::level_names(), effort)
+                CapabilityError::invalid_level("DeepSeek V4", &Self::level_names(), effort)
             })
     }
 
@@ -348,12 +350,9 @@ impl Qwen38GenerationMode {
 
     /// Bind the request's controls. `no_thinking` and an effort level are
     /// two spellings of one decision, so both together is a conflict.
-    pub(crate) fn parse(
-        effort: Option<&str>,
-        no_thinking: bool,
-    ) -> Result<Self, ReasoningControlError> {
+    pub(crate) fn parse(effort: Option<&str>, no_thinking: bool) -> Result<Self, CapabilityError> {
         if no_thinking && effort.is_some() {
-            return Err(ReasoningControlError {
+            return Err(CapabilityError {
                 code: "reasoning_conflict",
                 message: "reasoning effort cannot be combined with no-thinking".into(),
             });
@@ -368,9 +367,7 @@ impl Qwen38GenerationMode {
             .iter()
             .find(|(name, _)| *name == effort)
             .map(|(_, mode)| *mode)
-            .ok_or_else(|| {
-                ReasoningControlError::invalid_level("Qwen3.8", &Self::level_names(), effort)
-            })
+            .ok_or_else(|| CapabilityError::invalid_level("Qwen3.8", &Self::level_names(), effort))
     }
 }
 
@@ -816,12 +813,9 @@ fn parse_strict_tool_definition(
         .and_then(|name| name.as_str())
         .with_context(|| format!("tool {index} in {source} is missing a string name"))?;
     ensure!(
-        !name.is_empty()
-            && name.len() <= 64
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')),
-        "tool {index} in {source} has an invalid name {name:?}"
+        crate::model_request::tool_name_is_valid(name),
+        "tool {index} in {source} has an invalid name {name:?}; names must match {}",
+        crate::model_request::TOOL_NAME_GRAMMAR
     );
     let description = match function.get("description") {
         None | Some(serde_json::Value::Null) => None,

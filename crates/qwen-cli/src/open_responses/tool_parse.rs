@@ -107,10 +107,10 @@ fn parse_call_blocks(mut rest: &str) -> Option<Vec<ParsedCall>> {
     }
 }
 
-/// Parameter values round-trip through the structured render as compact
-/// JSON for mappings/sequences/numbers/booleans and raw text otherwise
-/// (fixture `qwen36_mapping_parameter_renders_compact_json`). JSON string
-/// literals stay raw text so quoted prose is never silently unwrapped.
+/// Parameter values decode as JSON for mappings/sequences/numbers/booleans
+/// and raw text otherwise; the template's argument style re-renders them
+/// (`ArgumentStyle`). JSON string literals stay raw text so quoted prose is
+/// never silently unwrapped.
 fn decode_parameter_value(raw: &str) -> Value {
     match serde_json::from_str::<Value>(raw) {
         Ok(parsed @ (Value::Object(_) | Value::Array(_) | Value::Number(_) | Value::Bool(_))) => {
@@ -120,9 +120,6 @@ fn decode_parameter_value(raw: &str) -> Value {
     }
 }
 
-/// Structured re-render of parsed calls (normalized template glue; the
-/// verbatim path renders retained raw bytes instead). Fixture:
-/// `qwen36_assistant_*` cases.
 /// Python's `repr(float)` for a JSON number: shortest round-trip digits,
 /// fixed notation for exponents in `-4..16`, otherwise `d.ddde±XX` with a
 /// two-digit signed exponent, and always at least one fractional digit.
@@ -227,8 +224,6 @@ pub(crate) fn python_json(value: &Value) -> String {
 /// How a released template stringifies non-string call arguments.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArgumentStyle {
-    /// Legacy unpinned contract: compact JSON for non-strings.
-    Compact,
     /// Qwen3.6: `tojson` for mappings/sequences, Jinja `string` (Python
     /// `str()`: `True`/`False`/`None`) for other scalars.
     PythonStr,
@@ -239,7 +234,6 @@ pub(crate) enum ArgumentStyle {
 fn parameter_value(value: &Value, style: ArgumentStyle) -> String {
     match (style, value) {
         (_, Value::String(text)) => text.clone(),
-        (ArgumentStyle::Compact, other) => serde_json::to_string(other).expect("serialize value"),
         (ArgumentStyle::ToJson, other) => python_json(other),
         (ArgumentStyle::PythonStr, Value::Object(_) | Value::Array(_)) => python_json(value),
         (ArgumentStyle::PythonStr, Value::Bool(true)) => "True".into(),
@@ -249,8 +243,13 @@ fn parameter_value(value: &Value, style: ArgumentStyle) -> String {
     }
 }
 
-pub(crate) fn render_calls(visible: &str, calls: &[ParsedCall]) -> String {
-    render_calls_for(visible, calls, ArgumentStyle::Compact)
+/// Structured re-render of parsed calls under the `tojson` argument rule
+/// (Qwen3.5/3.8), where a parsed JSON scalar re-renders as the bytes it was
+/// decoded from. Fixture: `qwen36_assistant_*` cases (string arguments,
+/// style-independent).
+#[cfg(test)]
+fn render_calls(visible: &str, calls: &[ParsedCall]) -> String {
+    render_calls_for(visible, calls, ArgumentStyle::ToJson)
 }
 
 /// Render assistant tool calls in the XML-parameter form with the argument
@@ -400,7 +399,6 @@ mod tests {
             "qwen36_assistant_single_call_with_content",
             "qwen36_assistant_call_no_content",
             "qwen36_assistant_parallel_calls_sequential_items",
-            "qwen36_mapping_parameter_renders_compact_json",
         ] {
             let case = case(name);
             let turn = &case["turn"];

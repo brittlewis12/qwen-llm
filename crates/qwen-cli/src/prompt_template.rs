@@ -1,10 +1,8 @@
-use anyhow::{Context, Result, bail, ensure};
-use crate::messages::{
-    Qwen38GenerationMode, QwenGenerationMode, ReasoningControlError,
-};
+use crate::messages::{CapabilityError, Qwen38GenerationMode, QwenGenerationMode};
 use crate::open_responses::items::QwenTemplate;
-use qwen_llm::model_family::ModelFamily;
+use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::gguf::GgufFile;
+use qwen_llm::model_family::ModelFamily;
 use qwen_llm::muse_glimmer::{
     ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, MuseGlimmerChatTemplateProfile,
     MuseGlimmerConfig,
@@ -370,13 +368,6 @@ impl QwenUserPromptProtocol {
         }))
     }
 
-    /// Whether the template bytes are pinned to a released model (or the
-    /// Qwen3.8 protocol applies). Unpinned ChatML renders the legacy generic
-    /// contract, which `run` allows and batch rows do not.
-    pub(crate) fn pinned(&self) -> bool {
-        self.qwen38 || self.template.verified()
-    }
-
     pub(crate) fn is_qwen38(&self) -> bool {
         self.qwen38
     }
@@ -409,16 +400,40 @@ impl QwenUserPromptProtocol {
             }
         } else {
             let pinned = self.template.verified();
-            let unsupported = || Support::Unsupported {
+            let unsupported = || {
+                Support::Unsupported {
                 code: "template_not_pinned",
                 message: "requires a model whose chat template is pinned (released Qwen3.5/3.6/3.8 templates); this model's template is unrecognized".into(),
+            }
             };
             ReasoningCapability {
                 levels: Vec::new(),
                 fallback: None,
-                no_thinking: if pinned { Support::Supported } else { unsupported() },
-                thinking: if pinned { Support::Supported } else { unsupported() },
+                no_thinking: if pinned {
+                    Support::Supported
+                } else {
+                    unsupported()
+                },
+                thinking: if pinned {
+                    Support::Supported
+                } else {
+                    unsupported()
+                },
             }
+        }
+    }
+
+    /// What request forms this model renders. Plain chat on an unpinned
+    /// template is the long-frozen bare ChatML contract that `run --user`
+    /// and serve string input have always rendered; the tool block has no
+    /// such contract (the old compact form was serve-invented), so tools
+    /// need a pinned template.
+    pub(crate) fn input_capability(&self) -> InputCapability {
+        InputCapability {
+            raw: Support::Supported,
+            user: Support::Supported,
+            messages: Support::Supported,
+            tools: qwen_tools_support(self.template),
         }
     }
 
@@ -428,7 +443,7 @@ impl QwenUserPromptProtocol {
     pub(crate) fn bind(
         &self,
         controls: QwenReasoningControls<'_>,
-    ) -> Result<QwenBoundGeneration, ReasoningControlError> {
+    ) -> Result<QwenBoundGeneration, CapabilityError> {
         if self.qwen38 {
             return Ok(QwenBoundGeneration::Qwen38(Qwen38GenerationMode::parse(
                 controls.effort,
@@ -436,7 +451,7 @@ impl QwenUserPromptProtocol {
             )?));
         }
         if let Some(effort) = controls.effort {
-            return Err(ReasoningControlError {
+            return Err(CapabilityError {
                 code: "reasoning_effort_unsupported",
                 message: format!(
                     "reasoning effort {effort:?} applies to Qwen3.8 (low/medium/xhigh), DeepSeek V4 (none/low/high/max), and Muse Glimmer; this model has no reasoning-effort control"
@@ -444,7 +459,7 @@ impl QwenUserPromptProtocol {
             });
         }
         if controls.no_thinking && !self.template.verified() {
-            return Err(ReasoningControlError {
+            return Err(CapabilityError {
                 code: "no_thinking_unsupported",
                 message: "no-thinking requires a model whose chat template is pinned (released Qwen3.5, Qwen3.6, or Qwen3.8 templates); this model's template is unrecognized, so omit it to use the default generation behavior".into(),
             });
@@ -464,17 +479,17 @@ impl QwenUserPromptProtocol {
         controls: QwenReasoningControls<'_>,
     ) -> Result<String> {
         match self.bind(controls)? {
-            QwenBoundGeneration::Qwen38(mode) => {
-                Ok(crate::messages::render_qwen38_single_turn_prompt(user, system, mode))
-            }
-            QwenBoundGeneration::Template(mode) => {
-                Ok(crate::messages::render_qwen_single_turn_prompt_for_template(
+            QwenBoundGeneration::Qwen38(mode) => Ok(
+                crate::messages::render_qwen38_single_turn_prompt(user, system, mode),
+            ),
+            QwenBoundGeneration::Template(mode) => Ok(
+                crate::messages::render_qwen_single_turn_prompt_for_template(
                     user,
                     system,
                     self.template,
                     mode,
-                ))
-            }
+                ),
+            ),
         }
     }
 }
@@ -492,10 +507,87 @@ pub(crate) enum QwenBoundGeneration {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum Support {
     Supported,
-    Unsupported {
-        code: &'static str,
-        message: String,
-    },
+    Unsupported { code: &'static str, message: String },
+}
+
+impl Support {
+    /// The refusal a lane raises when a request uses an unsupported control:
+    /// the same code and message the capability advertises.
+    pub(crate) fn require(&self) -> Result<(), CapabilityError> {
+        match self {
+            Self::Supported => Ok(()),
+            Self::Unsupported { code, message } => Err(CapabilityError {
+                code,
+                message: message.clone(),
+            }),
+        }
+    }
+}
+
+/// Tool definitions and tool-call history render only on a pinned template:
+/// the released tool block is oracle-verified per template, and an
+/// unrecognized template has no released bytes to reproduce. One rule for
+/// `run --messages` and serve, so the two cannot drift.
+pub(crate) fn qwen_tools_support(template: QwenTemplate) -> Support {
+    if template.verified() {
+        Support::Supported
+    } else {
+        Support::Unsupported {
+            code: "tools_require_pinned_template",
+            message: "tools and tool history require a model whose chat template is pinned (released Qwen3.5/3.6/3.8 templates); this model's template is unrecognized".into(),
+        }
+    }
+}
+
+/// Projection of a family's input contract: which request forms its
+/// template renders. A family-level fact from the header alone; a lane that
+/// has not implemented a form reports that gap itself.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct InputCapability {
+    /// Untemplated text (`--raw-prompt`, batch `prompt`/`prompt_file`).
+    pub(crate) raw: Support,
+    /// One user turn with optional system text (`--user`, batch `user`).
+    pub(crate) user: Support,
+    /// A chat document (`--messages`, serve items).
+    pub(crate) messages: Support,
+    /// Function-tool definitions and tool-call history inside a document.
+    pub(crate) tools: Support,
+}
+
+impl InputCapability {
+    /// A claim, not a default: a family may declare this only when every
+    /// form has an oracle-backed renderer (DeepSeek V4: dual-source chat
+    /// fixtures incl. tools; Muse Glimmer: released ATEM prompt tests).
+    pub(crate) fn all_supported() -> Self {
+        Self {
+            raw: Support::Supported,
+            user: Support::Supported,
+            messages: Support::Supported,
+            tools: Support::Supported,
+        }
+    }
+
+    /// Raw text always renders; every templated form shares one refusal.
+    pub(crate) fn raw_only(code: &'static str, message: String) -> Self {
+        let unsupported = Support::Unsupported { code, message };
+        Self {
+            raw: Support::Supported,
+            user: unsupported.clone(),
+            messages: unsupported.clone(),
+            tools: unsupported,
+        }
+    }
+
+    /// Nothing renders (no recognised architecture).
+    pub(crate) fn none(code: &'static str, message: String) -> Self {
+        let unsupported = Support::Unsupported { code, message };
+        Self {
+            raw: unsupported.clone(),
+            user: unsupported.clone(),
+            messages: unsupported.clone(),
+            tools: unsupported,
+        }
+    }
 }
 
 /// Projection of a family's reasoning contract: what `reasoning_effort`

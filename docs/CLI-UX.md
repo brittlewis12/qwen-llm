@@ -112,7 +112,9 @@ Contract:
   corresponding field; the request seed remains explicit and deterministic.
 - Non-Muse modern messages accept the strict ordinary-chat subset (optional
   leading system or developer, alternating user/assistant turns, a final user
-  turn) and, on pinned Qwen templates, OpenAI-shaped tool conversations: a
+  turn) and, on pinned Qwen templates (`capabilities.input.tools` in `qwen
+  info --json`; the same rule serve applies), OpenAI-shaped tool
+  conversations: a
   wrapper `tools` list, assistant `tool_calls` (each followed by exactly one
   `tool` result), assistant `reasoning_content`, and a final user turn or a
   completed tool-result round awaiting the assistant. Inline `<think>` in
@@ -275,9 +277,13 @@ remains available and was already discoverable in the baseline study.
 form — `user` with optional `system`, `no_thinking`, and `reasoning_effort` —
 rendered by the same pinned-template path as `qwen run --user`. Exactly one of
 `prompt`, `prompt_file`, or `user` is required; rendering controls on raw rows
-are rejected; templated rows require an ordinary Qwen model whose template is
-pinned (unpinned ChatML must submit raw prompts); DeepSeek V4 batch rejects
-them. Output rows echo `input: {kind, template}`. This resolves the ambiguity
+are rejected; templated rows require an ordinary Qwen model; DeepSeek V4 batch
+rejects them. Output rows echo `input: {kind, template}`. (Until 2026-09-07
+templated rows also required a pinned template; they now follow the same
+family rule as `run --user` — plain chat renders the legacy bare ChatML
+contract on an unpinned template, visible as `template: "generic"`, while
+`no_thinking`/`reasoning_effort` still refuse there. `qwen info --json`
+advertises the rule under `capabilities.input`.) This resolves the ambiguity
 the earlier review feared by making the input form structural, and it removed
 the chat-template re-implementation from `scripts/bench/text_capability_eval.py`
 (packet schema v2). Conversation-history rows remain deferred until a named

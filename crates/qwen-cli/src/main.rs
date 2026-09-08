@@ -628,11 +628,10 @@ fn prepare_modern_run_prompt(
         }
         _ => DeepSeekV4EncodeOptions::default(),
     };
-    let qwen_template = qwen_protocol
-        .as_ref()
-        .map_or(crate::open_responses::items::QwenTemplate::Generic, |protocol| {
-            protocol.template()
-        });
+    let qwen_template = qwen_protocol.as_ref().map_or(
+        crate::open_responses::items::QwenTemplate::Generic,
+        |protocol| protocol.template(),
+    );
     let input = run.acquire_input()?;
     let (text, source) = match input {
         cli::AcquiredRunInput::RawPrompt(prompt) => (prompt, PromptSource::Inline),
@@ -696,10 +695,14 @@ fn prepare_modern_run_prompt(
                     .text
                 }
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
-                    ensure!(
-                        qwen_template.verified() || !has_tool_surface,
-                        "tools and tool history require a model whose chat template is pinned (released Qwen3.5/3.6/3.8 templates); this model's template is unrecognized"
-                    );
+                    if has_tool_surface {
+                        qwen_protocol
+                            .as_ref()
+                            .expect("ordinary Qwen resolves a user prompt protocol")
+                            .input_capability()
+                            .tools
+                            .require()?;
+                    }
                     let Some(QwenBoundGeneration::Template(mode)) = qwen_bound else {
                         unreachable!("non-3.8 ordinary Qwen binds a template mode");
                     };
@@ -748,6 +751,43 @@ fn prepare_modern_run_prompt(
             _ => qwen_template.label(),
         }),
     })
+}
+
+/// Which request forms a loaded header renders, per family. Ordinary Qwen
+/// derives it from its protocol (tools need a pinned template); Flash-Next
+/// renders templated forms only with the released protocol; DeepSeek V4 and
+/// Muse Glimmer own complete renderers.
+pub(crate) fn input_capability_for(
+    family: Option<ModelFamily>,
+    gguf: &GgufFile,
+) -> prompt_template::InputCapability {
+    use prompt_template::InputCapability;
+    match family {
+        Some(family @ (ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)) => {
+            match QwenUserPromptProtocol::resolve(family, gguf) {
+                Ok(Some(protocol)) => protocol.input_capability(),
+                Ok(None) => unreachable!("ordinary Qwen resolves a protocol"),
+                Err(error) => InputCapability::raw_only("template_unresolved", error.to_string()),
+            }
+        }
+        Some(ModelFamily::Qwen4Exp) => {
+            match qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, gguf) {
+                None => InputCapability::all_supported(),
+                Some(failure) => InputCapability::raw_only(
+                    "prompt_protocol_unsupported",
+                    format!(
+                        "Qwen3.8-Flash-Next chat rendering does not support the declared {}; use --raw-prompt for untemplated input",
+                        failure.as_str()
+                    ),
+                ),
+            }
+        }
+        Some(ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer) => InputCapability::all_supported(),
+        None => InputCapability::none(
+            "unknown_family",
+            "templated input requires a recognised architecture".into(),
+        ),
+    }
 }
 
 /// `--no-thinking` is a template transition, so any model whose chat
@@ -922,14 +962,17 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
                     "code": "model_unreadable",
                     "message": error.to_string(),
                 }),
-                Ok(model) => match qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model) {
-                    Ok(()) => serde_json::json!({ "status": "permitted" }),
-                    Err(message) => serde_json::json!({
-                        "status": "unsupported",
-                        "code": "layout_not_qualified",
-                        "message": message,
-                    }),
-                },
+                Ok(model) => {
+                    match qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
+                    {
+                        Ok(()) => serde_json::json!({ "status": "permitted" }),
+                        Err(message) => serde_json::json!({
+                            "status": "unsupported",
+                            "code": "layout_not_qualified",
+                            "message": message,
+                        }),
+                    }
+                }
             }
         }
         Some(_) => serde_json::json!({
@@ -1004,7 +1047,10 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "serve": project(Lane::Serve),
         },
         "prompt_lookup": { "run": prompt_lookup },
-        "capabilities": { "reasoning": reasoning },
+        "capabilities": {
+            "reasoning": reasoning,
+            "input": input_capability_for(family, &gguf),
+        },
     });
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())

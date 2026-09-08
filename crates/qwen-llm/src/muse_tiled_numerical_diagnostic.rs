@@ -430,7 +430,7 @@ fn tiled_prefill_numerical_diagnostic() {
         let comparison = compare_logits(b, a);
         eprintln!(
             "MUSE_DIAGNOSTIC_JSON {}",
-            serde_json::json!({"kind":"layer_residual","layer":slot/6,"stage":if slot/3%2==0 {"post_attention"}else{"post_ffn"},"row":[84,85,127][slot%3],"relative_rms":comparison.relative_rms,"max_abs":comparison.max_abs,"reference_norm":a.iter().map(|&x|(x as f64).powi(2)).sum::<f64>().sqrt()})
+            serde_json::json!({"kind":"layer_residual","layer":slot/6,"stage":if slot/3%2==0 {"post_attention"}else{"post_ffn"},"row":([84,85,127][slot%3]),"relative_rms":comparison.relative_rms,"max_abs":comparison.max_abs,"reference_norm":a.iter().map(|&x|(x as f64).powi(2)).sum::<f64>().sqrt()})
         );
     }
     for (row, (a, b)) in finals[0]

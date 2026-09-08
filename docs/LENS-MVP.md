@@ -15,6 +15,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 - The [depth and sequence-order exploration](LENS-DEPTH-AND-ORDER.md) records
   full-depth archive coverage, uncensored observer comparisons, and the limits
   of order-sensitive readout patterns after censoring and common-trend controls.
+- The [crossed-task follow-up](LENS-CROSSED-TASK.md) separates label and
+  definition-order effects in a synthetic explanation/diagnosis panel; strong
+  within-order transfer reverses across order, with a smaller order-even component.
 - Imported Qwen3.6 matched full J/R and Qwen3.8 full J transports support packed
   layer x position top-k, selected transported vectors, and selected-token live
   directions.

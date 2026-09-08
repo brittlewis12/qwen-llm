@@ -76,13 +76,21 @@ const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Args)]
 pub(crate) struct ReadFullArgs {
-    /// Dense Qwen3.6, Qwen3.8, or Muse Glimmer GGUF used for capture and output.
+    /// Ordinary Qwen dense/MoE or Muse Glimmer GGUF used for capture and output.
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 
     /// Directory produced by `import-full`, `import-muse-full`, or `assemble-muse-full`.
-    #[arg(long)]
-    pub(crate) full_lens: PathBuf,
+    #[arg(
+        long,
+        conflicts_with = "logit_lens",
+        required_unless_present = "logit_lens"
+    )]
+    pub(crate) full_lens: Option<PathBuf>,
+
+    /// Read native post-block residuals through the deployed output tail, without a fit.
+    #[arg(long, conflicts_with = "full_lens")]
+    pub(crate) logit_lens: bool,
 
     /// Text prompt. Exactly one of --prompt or --token-ids is required.
     #[arg(
@@ -110,11 +118,11 @@ pub(crate) struct ReadFullArgs {
     #[arg(long)]
     pub(crate) position: Option<usize>,
 
-    /// Source layers in output order; defaults to every artifact source layer.
+    /// Layers in output order; defaults to all model blocks for plain lens, otherwise artifact sources.
     #[arg(long, value_delimiter = ',')]
     pub(crate) layers: Vec<u32>,
 
-    /// Full-vocabulary results per layer (Qwen maximum 25; Muse maximum 32).
+    /// Results per layer (plain maximum 1024; fitted Qwen 25, fitted Muse 32).
     #[arg(long, default_value_t = 10)]
     pub(crate) top_k: usize,
 
@@ -133,6 +141,10 @@ pub(crate) struct ReadFullArgs {
     /// Include each selected pre-output-norm transported hidden vector.
     #[arg(long)]
     pub(crate) include_vector: bool,
+
+    /// Immutable full-vocabulary F32 LE bundle (metadata.json and logits.f32le).
+    #[arg(long, conflicts_with = "output")]
+    pub(crate) full_output: Option<PathBuf>,
 
     /// Optional immutable deterministic JSON result.
     #[arg(long)]
@@ -449,7 +461,7 @@ fn validate_artifact_directory(directory: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_output_file(output: &Path) -> Result<PathBuf> {
+pub(super) fn resolve_output_file(output: &Path) -> Result<PathBuf> {
     let leaf = output
         .file_name()
         .filter(|leaf| !leaf.is_empty() && *leaf != "." && *leaf != "..")

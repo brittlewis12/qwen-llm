@@ -9,6 +9,9 @@ UI, generic plugin systems, and production hardening are out of scope.
 
 ## Working Capability
 
+- Native plain logit-lens readouts and opt-in lossless full-vocabulary exports
+  are available through `read-full`; see [observer controls](LENS-OBSERVER-CONTROLS.md)
+  for semantics, examples, and bounded scalar/packed qualification.
 - Imported Qwen3.6 matched full J/R and Qwen3.8 full J transports support packed
   layer x position top-k, selected transported vectors, and selected-token live
   directions.

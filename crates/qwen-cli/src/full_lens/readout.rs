@@ -121,8 +121,12 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         env!("QWEN_BUILD_STAMP_ERROR"),
     )?;
     validate_read_full_args(&args)?;
-    validate_artifact_directory(&args.full_lens, "full lens")?;
-    let manifest_path = args.full_lens.join(FULL_MANIFEST_NAME);
+    let full_lens = args
+        .full_lens
+        .as_deref()
+        .context("--full-lens is required")?;
+    validate_artifact_directory(full_lens, "full lens")?;
+    let manifest_path = full_lens.join(FULL_MANIFEST_NAME);
     let manifest: FullLensManifest = read_json_file(&manifest_path)?;
     validate_manifest(&manifest)?;
     let manifest_canonical_json_blake3 = digest_json(&manifest)?;
@@ -223,6 +227,13 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         )
     })?;
     crate::lens_run::ensure_qwen_sequence_admitted(&loaded, prefix.len())?;
+    super::super::full_output::retained_metadata_budget(
+        layers.len(),
+        arch.hidden_size as usize,
+        token_ids.len(),
+        args.top_k,
+        args.include_vector,
+    )?;
     let mut sequence = loaded
         .create_sequence(SequenceConfig::new(prefix.len()))
         .context("create full-lens prompt sequence")?;
@@ -239,7 +250,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             && capture.capture.hidden_size == arch.hidden_size as usize,
         "full-lens prompt capture metadata is inconsistent"
     );
-    let payload_path = args.full_lens.join(&manifest.payload.path);
+    let payload_path = full_lens.join(&manifest.payload.path);
     let (mut payload_file, payload_length) = open_regular_file(&payload_path)?;
     ensure!(
         payload_length as u64 == manifest.payload.byte_length,
@@ -279,6 +290,11 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         .try_reserve_exact(layers.len())
         .context("allocate full-lens layer results")?;
     let mut payload_hasher = Blake3Hasher::new();
+    let mut bundle = super::super::full_output::Bundle::optional(
+        args.full_output.as_deref(),
+        &layers,
+        arch.vocab_size as usize,
+    )?;
     for &layer in &manifest.transport.source_layers {
         payload_file
             .read_exact(&mut matrix)
@@ -304,26 +320,30 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             layer, selected_position, args.top_k
         );
         let readout = if let Some(workspace) = &mut full_readout_workspace {
-            workspace.apply_row_f16_transport_topk_with_vector(&matrix, residual, args.top_k)
+            workspace.apply_row_f16_transport_logits_with_vector(&matrix, residual)
         } else {
-            workspace_lens.apply_f16_transport_topk_with_vector(&matrix, residual, args.top_k)
+            workspace_lens.apply_f16_transport_logits_with_vector(&matrix, residual)
         }
         .with_context(|| format!("apply full-lens source layer {layer}"))?;
+        if let Some(bundle) = &mut bundle {
+            bundle.row(capture_slot, &readout.logits)?;
+        }
+        let ranked = super::super::full_output::ranked(&readout.logits, args.top_k)?;
         let mut top_k = Vec::new();
         top_k
-            .try_reserve_exact(readout.readout.scores.len())
+            .try_reserve_exact(ranked.len())
             .context("allocate decoded full-lens top-k")?;
-        for (rank, score) in readout.readout.scores.into_iter().enumerate() {
-            let token_id = i32::try_from(score.token_id).context("decode full-lens token ID")?;
+        for (rank, (score_token_id, logit)) in ranked.into_iter().enumerate() {
+            let token_id = i32::try_from(score_token_id).context("decode full-lens token ID")?;
             let piece = tokenizer
                 .try_decode_piece_bytes_exact(token_id)
-                .with_context(|| format!("decode full-lens token {}", score.token_id))?;
+                .with_context(|| format!("decode full-lens token {score_token_id}"))?;
             top_k.push(FullTokenScore {
                 rank,
-                token_id: score.token_id,
+                token_id: score_token_id,
                 token_display_lossy: String::from_utf8_lossy(piece).into_owned(),
                 token_piece_hex: hex(piece),
-                logit: score.logit,
+                logit,
             });
         }
         indexed_results.push((
@@ -333,7 +353,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
                 source_position: selected_position,
                 source_token_id: capture.token_id,
                 predicts_position: selected_position + 1,
-                rms_denominator_f64_recomputed: readout.readout.rms_denominator_f64_recomputed,
+                rms_denominator_f64_recomputed: readout.rms_denominator_f64_recomputed,
                 transported_vector: args.include_vector.then_some(FullTransportedVector {
                     operation: "row_major_f16_transport_times_source_residual",
                     stage: "before_output_rmsnorm",
@@ -430,6 +450,9 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
         results,
     };
     let bytes = serialize_json_pretty_bounded(&document, "full lens readout")?;
+    if let Some(bundle) = bundle {
+        bundle.publish(&serde_json::from_slice(&bytes)?)?;
+    }
     if let Some(output) = args.output {
         let output = resolve_output_file(&output)?;
         publish_immutable(&output, &bytes)?;

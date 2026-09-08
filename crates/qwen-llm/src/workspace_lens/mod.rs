@@ -631,6 +631,15 @@ pub struct WorkspaceLensFullVocabularyReadoutWithVector {
     pub transported_values: Vec<f32>,
 }
 
+/// Unmasked deployed scalar logits in vocabulary order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceLensFullVocabularyLogitsWithVector {
+    pub logits: Vec<f32>,
+    pub transported_values: Vec<f32>,
+    /// Host diagnostic only; deployed RMSNorm uses its own F32 reduction.
+    pub rms_denominator_f64_recomputed: f32,
+}
+
 /// Model-bound GPU storage for repeated full-vocabulary readout rows.
 ///
 /// The capacity is expressed in rows so callers can later tile positions or
@@ -803,7 +812,30 @@ pub struct WorkspaceLensSession<'model, 'sequence> {
     sequence: &'sequence mut Sequence,
 }
 
+/// Read-only observer of native post-block residuals and the deployed head.
+pub struct WorkspaceLensPassiveSession<'model, 'sequence> {
+    inner: WorkspaceLensSession<'model, 'sequence>,
+}
+
 impl LoadedModel {
+    pub fn passive_workspace_lens_session<'model, 'sequence>(
+        &'model self,
+        sequence: &'sequence mut Sequence,
+    ) -> Result<WorkspaceLensPassiveSession<'model, 'sequence>, WorkspaceLensError> {
+        self.ensure_owns(sequence)?;
+        readout::validate_scalar_readout_tail(
+            self.metal_model(),
+            self.arch().hidden_size as usize,
+            self.arch().vocab_size as usize,
+        )?;
+        Ok(WorkspaceLensPassiveSession {
+            inner: WorkspaceLensSession {
+                model: self,
+                sequence,
+            },
+        })
+    }
+
     pub fn workspace_lens_identity(&self) -> WorkspaceLensModelIdentity {
         let (model_locator_id, tokenizer_metadata_id) = self.lightweight_identity_parts();
         WorkspaceLensModelIdentity {

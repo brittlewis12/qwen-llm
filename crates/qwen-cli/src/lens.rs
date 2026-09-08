@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod full_lens;
+mod full_output;
 mod lens_compare;
 mod lens_input;
 mod lens_inspect;
@@ -33,6 +34,7 @@ mod muse_lens_run;
 mod muse_published_full_lens;
 mod muse_published_full_lens_artifact;
 mod open_responses;
+mod plain_logit_lens;
 #[allow(dead_code)]
 mod prompt_template;
 mod published_pt;
@@ -614,7 +616,22 @@ fn fit_rows(args: FitRowsArgs) -> Result<()> {
 }
 
 fn read_full(args: ReadFullArgs) -> Result<()> {
-    if muse_full_lens::is_artifact(&args.full_lens)? {
+    ensure!(
+        args.logit_lens ^ args.full_lens.is_some(),
+        "specify exactly one of --logit-lens or --full-lens"
+    );
+    ensure!(
+        args.output.is_none() || args.full_output.is_none(),
+        "--output conflicts with --full-output"
+    );
+    if args.logit_lens {
+        return plain_logit_lens::read(args);
+    }
+    if muse_full_lens::is_artifact(
+        args.full_lens
+            .as_deref()
+            .context("--full-lens is required")?,
+    )? {
         muse_full_lens::read_full(args)
     } else {
         read_qwen_full(args)
@@ -2647,13 +2664,11 @@ fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 }
 
 fn serialize_json_pretty_bounded(value: &impl Serialize, name: &str) -> Result<Vec<u8>> {
-    let bytes = serde_json::to_vec_pretty(value).with_context(|| format!("serialize {name}"))?;
-    ensure!(
-        bytes.len() <= JSON_FILE_MAX_BYTES,
-        "serialized {name} is {} bytes; artifact JSON limit is {}",
-        bytes.len(),
-        JSON_FILE_MAX_BYTES
-    );
+    let mut bytes = Vec::new();
+    let mut writer = ByteLimitedWriter::new(&mut bytes, JSON_FILE_MAX_BYTES);
+    serde_json::to_writer_pretty(&mut writer, value).with_context(|| {
+        format!("serialize {name} within {JSON_FILE_MAX_BYTES} byte JSON limit")
+    })?;
     Ok(bytes)
 }
 

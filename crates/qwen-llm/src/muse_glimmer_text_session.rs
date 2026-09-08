@@ -351,10 +351,25 @@ impl MuseGlimmerTextSessionMemoryPlan {
         ctx: &MetalContext,
         geometry: &MuseGlimmerTextGeometry,
     ) -> Result<Self, MuseGlimmerTextSessionError> {
+        Self::for_geometry_with_split_decode(ctx, geometry, false)
+    }
+
+    pub(crate) fn for_geometry_with_split_decode(
+        ctx: &MetalContext,
+        geometry: &MuseGlimmerTextGeometry,
+        split_decode: bool,
+    ) -> Result<Self, MuseGlimmerTextSessionError> {
         let mut allocations = Vec::new();
         let mut logical_bytes = 0_u64;
         let mut priced_upper_bytes = 0_u64;
-        for (name, logical) in session_allocation_specs(geometry)? {
+        let mut specs = session_allocation_specs(geometry)?;
+        if split_decode {
+            specs.push((
+                "split_decode_partials".into(),
+                crate::muse_glimmer_metal::split_attention::PARTIAL_ELEMENTS * 4,
+            ));
+        }
+        for (name, logical) in specs {
             let priced = ctx.price_shared_buffer_upper(logical).map_err(|error| {
                 MuseGlimmerTextSessionError::Invalid(format!("session allocation {name:?} {error}"))
             })?;
@@ -627,6 +642,11 @@ pub struct MuseGlimmerTextSession {
     logits: MetalTensor,
     key_cache: MetalTensor,
     value_cache: MetalTensor,
+    split_decode_partials: Option<MetalTensor>,
+}
+
+fn split_decode_position_eligible(position: usize) -> bool {
+    (1024..7168).contains(&position)
 }
 
 impl MuseGlimmerTextSession {
@@ -635,8 +655,21 @@ impl MuseGlimmerTextSession {
         config: &MuseGlimmerConfig,
         capacity: usize,
     ) -> Result<Self, MuseGlimmerTextSessionError> {
+        Self::new_with_split_decode(ctx, config, capacity, false)
+    }
+
+    pub(crate) fn new_with_split_decode(
+        ctx: &MetalContext,
+        config: &MuseGlimmerConfig,
+        capacity: usize,
+        split_decode: bool,
+    ) -> Result<Self, MuseGlimmerTextSessionError> {
         let geometry = MuseGlimmerTextGeometry::from_config(config, capacity)?;
-        let memory_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry(ctx, &geometry)?;
+        let memory_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry_with_split_decode(
+            ctx,
+            &geometry,
+            split_decode,
+        )?;
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let admission = memory_plan.admission(ctx.memory_signals());
         if !admission.admitted {
@@ -689,6 +722,14 @@ impl MuseGlimmerTextSession {
             logits: MetalTensor::zeros_f32(ctx, vec![config.vocab_size as u64])?,
             key_cache: MetalTensor::zeros_f16(ctx, vec![cache_elements])?,
             value_cache: MetalTensor::zeros_f16(ctx, vec![cache_elements])?,
+            split_decode_partials: split_decode
+                .then(|| {
+                    MetalTensor::zeros_f32(
+                        ctx,
+                        vec![crate::muse_glimmer_metal::split_attention::PARTIAL_ELEMENTS],
+                    )
+                })
+                .transpose()?,
         };
         let allocated_after = ctx.current_allocated_size();
         let observed_allocation_delta = session
@@ -1092,6 +1133,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         session: &mut MuseGlimmerTextSession,
     ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
         self.forward_token_with_post_block_interventions(token, &[], session)
+    }
+
+    pub(crate) fn forward_generated_token(
+        &self,
+        token: u32,
+        session: &mut MuseGlimmerTextSession,
+    ) -> Result<Vec<f32>, MuseGlimmerTextSessionError> {
+        self.validate_token_and_session(token, session)?;
+        self.execute_token_with_sink_inner(token, session, true, None, &[], true)?
+            .ok_or_else(|| MuseGlimmerTextSessionError::Invalid("logits were not produced".into()))
     }
 
     pub fn forward_token_with_post_block_interventions(
@@ -2335,6 +2386,25 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         capture: Option<MuseGlimmerProductionCaptureSink<'_>>,
         interventions: &[PostBlockIntervention<'_>],
     ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
+        self.execute_token_with_sink_inner(
+            token,
+            session,
+            produce_logits,
+            capture,
+            interventions,
+            false,
+        )
+    }
+
+    fn execute_token_with_sink_inner(
+        &self,
+        token: u32,
+        session: &mut MuseGlimmerTextSession,
+        produce_logits: bool,
+        capture: Option<MuseGlimmerProductionCaptureSink<'_>>,
+        interventions: &[PostBlockIntervention<'_>],
+        generated: bool,
+    ) -> Result<Option<Vec<f32>>, MuseGlimmerTextSessionError> {
         validate_post_block_interventions(
             session,
             interventions,
@@ -2360,6 +2430,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 produce_logits,
                 capture,
                 interventions,
+                generated && split_decode_position_eligible(position),
             )?;
             encoder.end();
             Ok::<(), MuseGlimmerTextSessionError>(())
@@ -2406,6 +2477,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         produce_logits: bool,
         capture: Option<MuseGlimmerProductionCaptureSink<'_>>,
         interventions: &[PostBlockIntervention<'_>],
+        split_decode: bool,
     ) -> Result<(), MuseGlimmerTextSessionError> {
         let geometry = &session.geometry;
         let encoder = stages.stage("embedding", None);
@@ -2533,18 +2605,38 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             let encoder = stages.stage("attention", Some(layer_index));
             let (key_cache, value_cache, visible_positions) =
                 session.cache_views(layer_index, position, layer.sliding_attention)?;
-            encode_muse_glimmer_attn_decode_f16kv_f32(
-                self.ctx,
-                encoder,
-                &session.query,
-                &key_cache,
-                &value_cache,
-                &session.attention_output,
-                geometry.query_head_count,
-                geometry.kv_head_count,
-                geometry.head_dim,
-                visible_positions,
-            )?;
+            if let Some(partial) = session
+                .split_decode_partials
+                .as_ref()
+                .filter(|_| split_decode)
+            {
+                crate::muse_glimmer_metal::split_attention::encode(
+                    self.ctx,
+                    encoder,
+                    &session.query,
+                    &key_cache,
+                    &value_cache,
+                    &session.attention_output,
+                    partial,
+                    geometry.query_head_count,
+                    geometry.kv_head_count,
+                    geometry.head_dim,
+                    visible_positions,
+                )?;
+            } else {
+                encode_muse_glimmer_attn_decode_f16kv_f32(
+                    self.ctx,
+                    encoder,
+                    &session.query,
+                    &key_cache,
+                    &value_cache,
+                    &session.attention_output,
+                    geometry.query_head_count,
+                    geometry.kv_head_count,
+                    geometry.head_dim,
+                    visible_positions,
+                )?;
+            }
             let encoder = stages.stage("attention_output", Some(layer_index));
             encode_sigmoid_mul_f32(
                 self.ctx,
@@ -4389,6 +4481,7 @@ mod tests {
                     true,
                     None,
                     &[],
+                    false,
                 )
                 .unwrap();
         }
@@ -4524,6 +4617,142 @@ mod tests {
         max_abs: f32,
         candidate_argmax: u32,
         reference_argmax: u32,
+    }
+
+    #[test]
+    fn split_decode_selection_is_bounded() {
+        for (position, expected) in [
+            (0, false),
+            (1023, false),
+            (1024, true),
+            (7167, true),
+            (7168, false),
+            (usize::MAX, false),
+        ] {
+            assert_eq!(split_decode_position_eligible(position), expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "serial Metal, Muse split decode admission and prefill isolation"]
+    fn split_decode_preserves_prefill_and_matches_pilot() {
+        use crate::muse_glimmer_metal::split_attention_pilot;
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+        let gguf = GgufFile::open(path).unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+        let weights = MuseGlimmerMetalWeights::realize(
+            &ctx,
+            &gguf,
+            plan.admit(ctx.memory_signals()).unwrap(),
+        )
+        .unwrap()
+        .into_weights();
+        let forward = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
+        let mut exact = MuseGlimmerTextSession::new(&ctx, weights.config(), 1040).unwrap();
+        let mut split =
+            MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), 1040, true)
+                .unwrap();
+        assert!(exact.split_decode_partials.is_none());
+        let partial = split.split_decode_partials.as_ref().unwrap().clone();
+        assert_eq!(
+            split.memory_plan.logical_bytes() - exact.memory_plan.logical_bytes(),
+            540672
+        );
+        let extra = split
+            .memory_plan
+            .allocations()
+            .iter()
+            .find(|allocation| allocation.name == "split_decode_partials")
+            .unwrap();
+        assert_eq!(
+            split.memory_plan.priced_upper_bytes() - exact.memory_plan.priced_upper_bytes(),
+            extra.priced_bytes
+        );
+        assert_eq!(
+            split.observed_allocation_delta() - exact.observed_allocation_delta(),
+            partial.buffer.length() as u64
+        );
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
+        ))
+        .unwrap();
+        let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
+            "begin",
+            Some(
+                fixture["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+        );
+        let rendered = request
+            .render(weights.config().chat_template_profile, None)
+            .unwrap();
+        let tokens: Vec<u32> = tokenizer
+            .encode(&rendered, false)
+            .unwrap()
+            .into_iter()
+            .map(|id| u32::try_from(id).unwrap())
+            .collect();
+        for prefix in [31, 1031] {
+            exact.reset().unwrap();
+            split.reset().unwrap();
+            let a = forward.prefill(&tokens[..prefix], &mut exact).unwrap();
+            let mut b = forward.prefill(&tokens[..prefix], &mut split).unwrap();
+            assert_logits_bitwise_equal("opt-in does not change packed or scalar prefill", &a, &b);
+            for layer in 0..exact.geometry.layer_count {
+                let offset = exact.geometry.cache_write_offset(layer, 0).unwrap() * 2;
+                for (a, b) in [
+                    (&exact.key_cache, &split.key_cache),
+                    (&exact.value_cache, &split.value_cache),
+                ] {
+                    unsafe {
+                        let bytes = prefix * exact.geometry.kv_width * 2;
+                        assert_eq!(
+                            std::slice::from_raw_parts(
+                                (a.buffer.contents().as_ptr() as *const u8).add(offset),
+                                bytes
+                            ),
+                            std::slice::from_raw_parts(
+                                (b.buffer.contents().as_ptr() as *const u8).add(offset),
+                                bytes
+                            )
+                        );
+                    }
+                }
+            }
+            for _ in 0..8 {
+                let token = greedy_argmax(&b);
+                let reference = if prefix >= 1024 {
+                    split_attention_pilot::with_scratch(&partial, || {
+                        forward.forward_token(token, &mut exact).unwrap()
+                    })
+                } else {
+                    forward.forward_token(token, &mut exact).unwrap()
+                };
+                b = forward.forward_generated_token(token, &mut split).unwrap();
+                assert_logits_bitwise_equal(
+                    "explicit split matches pilot or exact fallback",
+                    &b,
+                    &reference,
+                );
+            }
+        }
+        let position = split.next_position();
+        assert!(
+            forward
+                .forward_generated_token(weights.config().vocab_size, &mut split)
+                .is_err()
+        );
+        assert_eq!(split.next_position(), position);
+        split.poison_reason = Some("test fail-stop".into());
+        assert!(forward.forward_generated_token(1, &mut split).is_err());
+        assert!(split.reset().is_err());
+        eprintln!(
+            "MUSE_SPLIT_DELIVERY admission_delta=540672 prefill_logits_and_all_active_kv_bitwise=true explicit_matches_pilot=true short_fallback_bitwise=true poison_rejected=true"
+        );
     }
 
     #[test]

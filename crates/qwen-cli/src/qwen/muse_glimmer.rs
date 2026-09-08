@@ -196,8 +196,23 @@ pub(crate) fn run_muse_glimmer_single_turn(
     );
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for Muse Glimmer")?;
-    let mut loaded = MuseGlimmerLoadedModel::load(&ctx, gguf, capacity)
-        .context("load admitted Muse Glimmer weights and text session")?;
+    let split_decode = match std::env::var("QWEN_MUSE_SPLIT_DECODE") {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "0" => false,
+        Ok(value) if value == "1" => true,
+        _ => bail!("QWEN_MUSE_SPLIT_DECODE must be 0 or 1"),
+    };
+    let mut loaded = MuseGlimmerLoadedModel::load_with_options(
+        &ctx,
+        gguf,
+        capacity,
+        qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions { split_decode },
+    )
+    .context("load admitted Muse Glimmer weights and text session")?;
+    eprintln!(
+        "muse_glimmer: split_decode={} eligible_generated_positions=1024..7168 prefill_unchanged=true",
+        split_decode
+    );
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();
     eprintln!(

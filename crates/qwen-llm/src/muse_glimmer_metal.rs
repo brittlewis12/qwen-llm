@@ -459,9 +459,10 @@ pub fn encode_muse_glimmer_logit_softcap_f32(
 
 pub const MUSE_GLIMMER_MATERIALIZED_ATTENTION_MAX_POSITIONS: usize = 7_168;
 
+#[path = "muse_split_attention.rs"]
+pub(crate) mod split_attention;
 #[cfg(test)]
-#[path = "muse_split_attention_pilot.rs"]
-pub(crate) mod split_attention_pilot;
+pub(crate) use split_attention as split_attention_pilot;
 
 #[cfg(test)]
 thread_local! {

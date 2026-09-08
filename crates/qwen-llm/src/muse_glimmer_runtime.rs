@@ -47,6 +47,13 @@ pub struct MuseGlimmerRuntimeAdmission {
     pub session: MetalMemoryAdmission,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MuseGlimmerRuntimeOptions {
+    /// Tolerance-qualified H128 attention for ordinary generated tokens at
+    /// positions 1024..7168 on the Q8 M4 Max lane. Prefill/lens math is unchanged.
+    pub split_decode: bool,
+}
+
 pub struct MuseGlimmerLoadedModel {
     weights: MuseGlimmerMetalWeights,
     session: MuseGlimmerTextSession,
@@ -62,9 +69,29 @@ impl MuseGlimmerLoadedModel {
         gguf: &GgufFile,
         capacity: usize,
     ) -> Result<Self, MuseGlimmerRuntimeError> {
+        Self::load_with_options(ctx, gguf, capacity, MuseGlimmerRuntimeOptions::default())
+    }
+
+    pub fn load_with_options(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        capacity: usize,
+        options: MuseGlimmerRuntimeOptions,
+    ) -> Result<Self, MuseGlimmerRuntimeError> {
         let weight_plan = MuseGlimmerMetalWeightPlan::for_release(ctx, gguf)?;
+        if options.split_decode
+            && (weight_plan.artifact_profile() != MuseGlimmerArtifactProfile::UnslothQ8_0
+                || ctx.device.name().to_string() != "Apple M4 Max"
+                || !ctx.device.hasUnifiedMemory())
+        {
+            return invalid("split decode is qualified only for Muse Q8_0 on unified Apple M4 Max");
+        }
         let geometry = MuseGlimmerTextGeometry::from_config(weight_plan.config(), capacity)?;
-        let session_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry(ctx, &geometry)?;
+        let session_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry_with_split_decode(
+            ctx,
+            &geometry,
+            options.split_decode,
+        )?;
         let aggregate_bytes = weight_plan
             .memory_plan()
             .priced_upper_bytes()
@@ -97,7 +124,12 @@ impl MuseGlimmerLoadedModel {
         let weight_admission = realized.admission();
         let observed_weight_bytes = realized.observed_allocation_delta();
         let weights = realized.into_weights();
-        let session = MuseGlimmerTextSession::new(ctx, weights.config(), capacity)?;
+        let session = MuseGlimmerTextSession::new_with_split_decode(
+            ctx,
+            weights.config(),
+            capacity,
+            options.split_decode,
+        )?;
         if session.memory_plan() != &session_plan {
             return invalid("realized session memory plan differs from aggregate admission");
         }
@@ -214,7 +246,7 @@ impl MuseGlimmerTextRunner<'_, '_> {
     }
 
     pub fn forward_token(&mut self, token: u32) -> Result<Vec<f32>, MuseGlimmerRuntimeError> {
-        Ok(self.forward.forward_token(token, self.session)?)
+        Ok(self.forward.forward_generated_token(token, self.session)?)
     }
 
     /// Apply the resident deployed output norm, projection, scale, and softcap

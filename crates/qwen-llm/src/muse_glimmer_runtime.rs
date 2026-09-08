@@ -53,7 +53,7 @@ pub struct MuseGlimmerRuntimeOptions {
     /// positions 1024..7168 on the Q8 M4 Max lane. Prefill/lens math is unchanged.
     pub split_decode: bool,
     /// Numerically qualified Q8 matrix plus online prefill attention; scalar kernels are unchanged.
-    /// Initially restricted to Q8/M4 Max sessions with capacity <=7168.
+    /// Initially restricted to Q8/M4 Max packed chunks with absolute end <=7168.
     pub matrix_prefill: bool,
 }
 
@@ -91,9 +91,6 @@ impl MuseGlimmerLoadedModel {
             return invalid(
                 "optimized math is qualified only for Muse Q8_0 on unified Apple M4 Max",
             );
-        }
-        if options.matrix_prefill && capacity > 7168 {
-            return invalid("matrix prefill currently requires session capacity <=7168");
         }
         let geometry = MuseGlimmerTextGeometry::from_config(weight_plan.config(), capacity)?;
         let session_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry_with_split_decode(
@@ -628,7 +625,7 @@ mod tests {
             matrix_prefill: true,
         };
         let before = ctx.current_allocated_size();
-        assert!(MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, 7169, options).is_err());
+        assert!(MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, 131073, options).is_err());
         assert_eq!(ctx.current_allocated_size(), before);
         let mut model =
             MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, 144, options).unwrap();

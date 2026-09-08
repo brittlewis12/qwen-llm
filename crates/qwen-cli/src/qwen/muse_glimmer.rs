@@ -186,6 +186,12 @@ pub(crate) fn run_muse_glimmer_single_turn(
     };
     let split_decode = read_math_opt_in("QWEN_MUSE_SPLIT_DECODE")?;
     let matrix_prefill = read_math_opt_in("QWEN_MUSE_MATRIX_PREFILL")?;
+    let optimized_packed_tokens = if matrix_prefill {
+        prefill_packed_tokens
+            .min(qwen_llm::muse_glimmer_text_session::MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END)
+    } else {
+        0
+    };
     let prefill_mode = match (
         prefill_packed_tokens,
         prefill_scalar_tail_commands,
@@ -194,6 +200,12 @@ pub(crate) fn run_muse_glimmer_single_turn(
         (0, _, _) => "scalar_tail",
         (_, 0, false) => "packed_exact",
         (_, _, false) => "packed_exact+scalar_tail",
+        (_, 0, true) if prefill_packed_tokens > optimized_packed_tokens => {
+            "packed_matrix_online+packed_exact"
+        }
+        (_, _, true) if prefill_packed_tokens > optimized_packed_tokens => {
+            "packed_matrix_online+packed_exact+scalar_tail"
+        }
         (_, 0, true) => "packed_matrix_online",
         (_, _, true) => "packed_matrix_online+scalar_tail",
     };
@@ -223,8 +235,8 @@ pub(crate) fn run_muse_glimmer_single_turn(
     )
     .context("load admitted Muse Glimmer weights and text session")?;
     eprintln!(
-        "muse_glimmer: split_decode={} eligible_generated_positions=1024..7168 matrix_prefill={}",
-        split_decode, matrix_prefill
+        "muse_glimmer: split_decode={} eligible_generated_positions=1024..7168 matrix_prefill={} optimized_packed_tokens={}",
+        split_decode, matrix_prefill, optimized_packed_tokens
     );
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();

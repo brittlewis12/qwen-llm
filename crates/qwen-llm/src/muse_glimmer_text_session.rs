@@ -53,6 +53,7 @@ pub const MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MUSE_GLIMMER_MAX_LIVE_CAPTURE_LAYERS: usize = 64;
 pub const MUSE_GLIMMER_PACKED_PREFILL_QUANTUM: usize = 16;
 pub const MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS: usize = 128;
+pub const MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END: usize = 7168;
 const MUSE_GLIMMER_FULL_READOUT_PASS_K: usize = 16;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_TOP_K: usize = MUSE_GLIMMER_FULL_READOUT_PASS_K * 2;
 pub const MUSE_GLIMMER_FULL_READOUT_MAX_ROWS: usize = 128;
@@ -647,6 +648,10 @@ fn split_decode_position_eligible(position: usize) -> bool {
     (1024..7168).contains(&position)
 }
 
+fn optimized_prefill_range(base: usize, rows: usize, maximum_end: usize) -> bool {
+    rows > 0 && base.checked_add(rows).is_some_and(|end| end <= maximum_end)
+}
+
 impl MuseGlimmerTextSession {
     pub fn new(
         ctx: &MetalContext,
@@ -918,6 +923,7 @@ pub struct MuseGlimmerTextForward<'ctx, 'model> {
     weights: MuseGlimmerMetalModelWeights<'model>,
     packed_q8_mat_mat: bool,
     packed_online_attention: bool,
+    packed_prefill_max_end: usize,
 }
 
 pub struct MuseGlimmerPreparedF16Transport {
@@ -1111,6 +1117,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             weights,
             packed_q8_mat_mat: false,
             packed_online_attention: false,
+            packed_prefill_max_end: MUSE_GLIMMER_OPTIMIZED_PREFILL_MAX_END,
         })
     }
 
@@ -2096,6 +2103,8 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     ) -> Result<(), MuseGlimmerTextSessionError> {
         let geometry = &session.geometry;
         let packed = session.packed.views(geometry, rows)?;
+        let optimized_range =
+            optimized_prefill_range(start_position, rows, self.packed_prefill_max_end);
         let encoder = stages.stage("embedding", None);
         encode_get_rows_f32(
             self.ctx,
@@ -2137,6 +2146,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.hidden_size,
                 geometry.query_width,
                 rows,
+                optimized_range,
             )?;
             self.encode_packed_projection(
                 encoder,
@@ -2146,6 +2156,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.hidden_size,
                 geometry.kv_width,
                 rows,
+                optimized_range,
             )?;
             self.encode_packed_projection(
                 encoder,
@@ -2155,6 +2166,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.hidden_size,
                 geometry.kv_width,
                 rows,
+                optimized_range,
             )?;
             self.encode_packed_projection(
                 encoder,
@@ -2164,6 +2176,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.hidden_size,
                 geometry.query_width,
                 rows,
+                optimized_range,
             )?;
             let encoder = stages.stage("attention_prepare", Some(layer_index));
             encode_rms_norm_batched_f32(
@@ -2235,7 +2248,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                     geometry.kv_head_count,
                     geometry.head_dim,
                     layer.sliding_attention.then_some(geometry.sliding_window),
-                    self.packed_online_attention,
+                    self.packed_online_attention && optimized_range,
                 )?;
             } else {
                 for row in 0..rows {
@@ -2275,6 +2288,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.query_width,
                 geometry.hidden_size,
                 rows,
+                optimized_range,
             )?;
             encode_rms_norm_mul_rows_f32(
                 self.ctx,
@@ -2306,6 +2320,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.hidden_size,
                 geometry.feed_forward_size,
                 rows,
+                optimized_range,
             )?;
             self.encode_packed_projection(
                 encoder,
@@ -2315,6 +2330,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.hidden_size,
                 geometry.feed_forward_size,
                 rows,
+                optimized_range,
             )?;
             encode_silu_mul_f32(
                 self.ctx,
@@ -2331,6 +2347,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.feed_forward_size,
                 geometry.hidden_size,
                 rows,
+                optimized_range,
             )?;
             encode_rms_norm_mul_rows_f32(
                 self.ctx,
@@ -2370,9 +2387,10 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         n_in: usize,
         n_out: usize,
         rows: usize,
+        optimized_range: bool,
     ) -> Result<(), MuseGlimmerTextSessionError> {
         if weight.dtype == GgmlType::Q8_0 {
-            if self.packed_q8_mat_mat {
+            if self.packed_q8_mat_mat && optimized_range {
                 encode_mat_mat_q8_0_f32(
                     self.ctx, encoder, weight, input, output, n_in, n_out, rows,
                 )?;
@@ -4261,6 +4279,7 @@ mod tests {
                     matrix.geometry.hidden_size,
                     matrix.geometry.query_width,
                     tokens.len(),
+                    true,
                 )?;
                 matrix_forward.encode_packed_projection(
                     encoder,
@@ -4270,6 +4289,7 @@ mod tests {
                     matrix.geometry.hidden_size,
                     matrix.geometry.kv_width,
                     tokens.len(),
+                    true,
                 )?;
                 matrix_forward.encode_packed_projection(
                     encoder,
@@ -4279,6 +4299,7 @@ mod tests {
                     matrix.geometry.hidden_size,
                     matrix.geometry.kv_width,
                     tokens.len(),
+                    true,
                 )?;
                 matrix_forward.encode_packed_projection(
                     encoder,
@@ -4288,6 +4309,7 @@ mod tests {
                     matrix.geometry.hidden_size,
                     matrix.geometry.query_width,
                     tokens.len(),
+                    true,
                 )?;
                 matrix_forward.encode_packed_projection(
                     encoder,
@@ -4297,6 +4319,7 @@ mod tests {
                     matrix.geometry.query_width,
                     matrix.geometry.hidden_size,
                     tokens.len(),
+                    true,
                 )?;
                 matrix_forward.encode_packed_projection(
                     encoder,
@@ -4306,6 +4329,7 @@ mod tests {
                     matrix.geometry.hidden_size,
                     matrix.geometry.feed_forward_size,
                     tokens.len(),
+                    true,
                 )?;
                 matrix_forward.encode_packed_projection(
                     encoder,
@@ -4315,6 +4339,7 @@ mod tests {
                     matrix.geometry.hidden_size,
                     matrix.geometry.feed_forward_size,
                     tokens.len(),
+                    true,
                 )?;
                 matrix_forward.encode_packed_projection(
                     encoder,
@@ -4324,6 +4349,7 @@ mod tests {
                     matrix.geometry.feed_forward_size,
                     matrix.geometry.hidden_size,
                     tokens.len(),
+                    true,
                 )?;
             }
             Ok(())
@@ -5029,6 +5055,8 @@ mod tests {
         candidate_argmax: u32,
         reference_argmax: u32,
     }
+
+    include!("muse_long_context_tests.rs");
 
     #[test]
     fn split_decode_selection_is_bounded() {

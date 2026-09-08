@@ -4819,6 +4819,196 @@ mod tests {
         profile_actual_matrix_chunk(&matrix_forward, &mut matrix, &tokens[6144..6224], 6144);
     }
 
+    #[test]
+    #[ignore = "serial Metal, whole fresh-prefill online attention numerical and ABBA packet"]
+    fn packed_online_whole_prefill_packet() {
+        use crate::muse_glimmer_metal::with_packed_online;
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+        let weights = MuseGlimmerMetalWeights::realize(
+            &ctx,
+            &gguf,
+            plan.admit(ctx.memory_signals()).unwrap(),
+        )
+        .unwrap()
+        .into_weights();
+        let exact = MuseGlimmerTextForward::new(&ctx, &weights).unwrap();
+        let matrix =
+            MuseGlimmerTextForward::new_with_packed_q8_mat_mat(&ctx, &weights, true).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
+        ))
+        .unwrap();
+        let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
+            "begin",
+            Some(
+                fixture["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+        );
+        let rendered = request
+            .render(weights.config().chat_template_profile, None)
+            .unwrap();
+        let ids = tokenizer.encode(&rendered, false).unwrap();
+        assert_eq!(ids.len(), 6229);
+        let tokens: Vec<u32> = ids
+            .into_iter()
+            .map(|id| u32::try_from(id).unwrap())
+            .collect();
+        let mut reference = MuseGlimmerTextSession::new(&ctx, weights.config(), 6245).unwrap();
+        let mut session =
+            MuseGlimmerTextSession::new_with_split_decode(&ctx, weights.config(), 6245, true)
+                .unwrap();
+        let hash_prefix = |session: &MuseGlimmerTextSession, count: usize| {
+            let mut hash = blake3::Hasher::new();
+            for layer in 0..session.geometry.layer_count {
+                let (key, value) = session.cache_prefix_views(layer, count).unwrap();
+                for tensor in [key, value] {
+                    unsafe {
+                        hash.update(std::slice::from_raw_parts(
+                            (tensor.buffer.contents().as_ptr() as *const u8)
+                                .add(tensor.offset as usize),
+                            count * 256 * 2,
+                        ));
+                    }
+                }
+            }
+            hash.finalize()
+        };
+        for count in [1024, 6229] {
+            reference.reset().unwrap();
+            let mut reference_logits =
+                vec![exact.prefill(&tokens[..count], &mut reference).unwrap()];
+            let reference_hash = hash_prefix(&reference, count);
+            for step in 0..16 {
+                let token = greedy_argmax(&reference_logits[step]);
+                reference_logits.push(exact.forward_token(token, &mut reference).unwrap());
+            }
+            assert_eq!(hash_prefix(&reference, count), reference_hash);
+            let run_prefill = |session: &mut MuseGlimmerTextSession, online: bool| {
+                let started = std::time::Instant::now();
+                session.reset().unwrap();
+                let logits = with_packed_online(online, || {
+                    matrix.prefill(&tokens[..count], session).unwrap()
+                });
+                (started.elapsed().as_secs_f64() * 1e3, logits)
+            };
+            let mut oracle_endpoints = Vec::new();
+            for online in [false, true] {
+                for tensor in [&session.key_cache, &session.value_cache] {
+                    unsafe {
+                        (tensor.buffer.contents().as_ptr() as *mut u8)
+                            .add(tensor.offset as usize)
+                            .write_bytes(0xff, session.geometry.cache_elements().unwrap() * 2);
+                    }
+                }
+                let (wall_ms, endpoint) = run_prefill(&mut session, online);
+                oracle_endpoints.push(endpoint.clone());
+                let mut dot = 0.0_f64;
+                let mut aa = 0.0_f64;
+                let mut bb = 0.0_f64;
+                let mut difference = 0.0_f64;
+                let mut maximum = 0.0_f64;
+                for layer in 0..session.geometry.layer_count {
+                    let (ak, av) = reference.cache_prefix_views(layer, count).unwrap();
+                    let (bk, bv) = session.cache_prefix_views(layer, count).unwrap();
+                    for (a, b) in [(ak, bk), (av, bv)] {
+                        unsafe {
+                            let a = std::slice::from_raw_parts(
+                                (a.buffer.contents().as_ptr() as *const u8).add(a.offset as usize)
+                                    as *const u16,
+                                count * 256,
+                            );
+                            let b = std::slice::from_raw_parts(
+                                (b.buffer.contents().as_ptr() as *const u8).add(b.offset as usize)
+                                    as *const u16,
+                                count * 256,
+                            );
+                            for (&a, &b) in a.iter().zip(b) {
+                                let a = half::f16::from_bits(a).to_f64();
+                                let b = half::f16::from_bits(b).to_f64();
+                                assert!(a.is_finite() && b.is_finite());
+                                dot += a * b;
+                                aa += a * a;
+                                bb += b * b;
+                                difference += (a - b).powi(2);
+                                maximum = maximum.max((a - b).abs());
+                            }
+                        }
+                    }
+                }
+                let kv_cosine = dot / (aa * bb).sqrt();
+                let kv_relative_rms = (difference / aa).sqrt();
+                assert!(
+                    kv_cosine > 0.9999 && kv_relative_rms < 0.01,
+                    "full active KV cosine={kv_cosine} RMS={kv_relative_rms}"
+                );
+                let prefix_hash = hash_prefix(&session, count);
+                let mut logits = endpoint;
+                let mut emitted = Vec::new();
+                for step in 0..17 {
+                    let comparison = compare_logits(&logits, &reference_logits[step]);
+                    let (rms, abs) = if step == 0 {
+                        (0.002, 0.1)
+                    } else {
+                        (0.006, 0.3)
+                    };
+                    assert!(
+                        comparison.cosine > 0.999_99
+                            && comparison.relative_rms < rms
+                            && comparison.max_abs < abs,
+                        "whole prefill step={step} {comparison:?}"
+                    );
+                    let token = greedy_argmax(&logits);
+                    assert_eq!(token, greedy_argmax(&reference_logits[step]));
+                    emitted.push(token);
+                    eprintln!(
+                        "MUSE_WHOLE_PREFILL_JSON {}",
+                        serde_json::json!({"kind":"numerical","tokens":count,"arm":if online {"B"} else {"A"},"step":step,"cosine":comparison.cosine,"relative_rms":comparison.relative_rms,"max_abs":comparison.max_abs})
+                    );
+                    if step < 16 {
+                        logits = matrix.forward_generated_token(token, &mut session).unwrap();
+                    }
+                }
+                assert_eq!(hash_prefix(&session, count), prefix_hash);
+                assert_eq!(session.next_position(), count + 16);
+                eprintln!(
+                    "MUSE_WHOLE_PREFILL_JSON {}",
+                    serde_json::json!({"kind":"oracle","tokens":count,"arm":if online {"B"} else {"A"},"wall_ms":wall_ms,"kv_cosine":kv_cosine,"kv_relative_rms":kv_relative_rms,"kv_max_abs":maximum,"prefix_immutable":true,"emitted":emitted})
+                );
+            }
+            for online in [false, true, true, false] {
+                let result = run_prefill(&mut session, online);
+                eprintln!(
+                    "MUSE_WHOLE_PREFILL_JSON {}",
+                    serde_json::json!({"kind":"warmup","tokens":count,"arm":if online {"B"} else {"A"},"wall_ms":result.0})
+                );
+            }
+            let mut packet = Vec::new();
+            for online in [false, true, true, false] {
+                let result = run_prefill(&mut session, online);
+                eprintln!(
+                    "MUSE_WHOLE_PREFILL_JSON {}",
+                    serde_json::json!({"kind":"sample","tokens":count,"arm":if online {"B"} else {"A"},"wall_ms":result.0})
+                );
+                packet.push((online, result.1));
+            }
+            for (online, logits) in packet {
+                assert_logits_bitwise_equal(
+                    "timed prefill endpoint matches corresponding oracle",
+                    &logits,
+                    &oracle_endpoints[usize::from(online)],
+                );
+            }
+            assert_eq!(session.next_position(), count);
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct LogitComparison {
         cosine: f64,

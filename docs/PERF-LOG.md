@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Tiled Live Transfer FAIL / Numerical Diagnosis Required
+
+- `8522c9f4` repeated primitive PASS0.43s; tiled-only independent context oracle
+  PASS0.72s through131072, worst F64 error1.005e-5. No unchanged split rerun.
+- Live8K candidate traversal51.731s, then shared-prefix128-row online/tiled replay:
+  aggregate logits RMS0.000131619/maxdelta0.008968, residual RMS0.000735875,
+  writtenKV RMS0.000533679 all pass established aggregate checks; prefix immutable.
+  Untimed A750.849/B685.663ms are not qualified timing.
+- Newly added per-row residual screen FAIL at first failing row84: RMS0.002920887
+  exceeds0.002, cosine0.999995753. Hidden-coordinate argmax agreement is NOT a token
+  quality check. Test stops54.65s before timing/32K/historical17greedy checks.
+- Independent reviewer acknowledges transplanting the aggregate RMS gate onto each
+  row lacked calibration. Preserve FAIL, do not relax/rescore or promote. Next is
+  separately named same-input attention and per-layer amplification diagnosis,
+  retaining all rows and reusable live prefix rather than repeated priming passes.
+  Raw: `target/profiles/muse-live-prefix/{tiled-prefill-02*,tiled-context-01*,tiled-live-01*}`.
+
 ## 2026-09-08 - Muse F32 Shared-KV Prefill Screen PASS / Research Only
 
 - `d354eeba` test-only32-query/32-KV tiledH128 forward attention retains F32 Q,

@@ -180,6 +180,10 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    live-state integration work. A2x full-attention win projects21.4%late-chunk
    savings, not whole-prompt savings. PriorH256 one-pass failures constrain shape,
    not a universal ban on this differentH128/G16 ownership mechanism.
+   FirstF32 tiled primitive saves~34% againstcurrentonline; live8K aggregate checks
+   pass but new uncalibrated per-row RMSscreenfails0.002921>0.002. No promotion;
+   diagnose actual same-input attention versus downstream amplification before
+   further timing or32K extension. Preserve failure rather than rescore its gate.
 2. Structural FFN work/byte reduction:8K packed FFN57.0%,32K decode64.96% (44.200ms).
    Current packedN128 already usesQ8 MMA; repeated local tile/fusion changes need
    a new mechanism. Decode logical FFN payload22.029GB/44.2ms is498GB/s equivalent

@@ -489,6 +489,20 @@ thread_local! {
     static FORCE_PACKED_ONLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_TILED_PREFILL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static TILED_PREFILL_DISPATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static FORCE_MATRIX_PV: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MATRIX_PV_DISPATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_matrix_pv<R>(enabled: bool, run: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_MATRIX_PV.set(self.0);
+        }
+    }
+    let _restore = Restore(FORCE_MATRIX_PV.replace(enabled));
+    run()
 }
 
 #[cfg(test)]
@@ -691,7 +705,17 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_tiling(
         if tiled {
             TILED_PREFILL_DISPATCHES.set(TILED_PREFILL_DISPATCHES.get() + 1);
         }
-        let pipeline = ctx.pipeline(if tiled {
+        #[cfg(test)]
+        let matrix_pv = tiled && FORCE_MATRIX_PV.get();
+        #[cfg(not(test))]
+        let matrix_pv = false;
+        #[cfg(test)]
+        if matrix_pv {
+            MATRIX_PV_DISPATCHES.set(MATRIX_PV_DISPATCHES.get() + 1);
+        }
+        let pipeline = ctx.pipeline(if matrix_pv {
+            "kernel_muse_prefill_matrix_pv_f32_h128"
+        } else if tiled {
             "kernel_muse_prefill_tiled_f32_h128"
         } else {
             "kernel_muse_prefill_online_h128"

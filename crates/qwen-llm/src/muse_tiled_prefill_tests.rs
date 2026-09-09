@@ -1,6 +1,16 @@
 #[test]
 #[ignore = "serial Metal, F32 tiled prefill correctness and short current-online screen"]
 fn tiled_prefill_current_online_screen() {
+    tiled_prefill_primitive_screen(false);
+}
+
+#[test]
+#[ignore = "serial Metal, F32 matrix-PV versus delivered scalar-PV tile"]
+fn matrix_pv_prefill_screen() {
+    tiled_prefill_primitive_screen(true);
+}
+
+fn tiled_prefill_primitive_screen(matrix_pv: bool) {
     use objc2_metal::MTLBuffer;
     let ctx = MetalContext::new().unwrap();
     let mut k = vec![0_u16; 256 + 32768 * 256];
@@ -82,25 +92,35 @@ fn tiled_prefill_current_online_screen() {
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
             let before = TILED_PREFILL_DISPATCHES.get();
-            with_tiled_prefill(tiled, || {
-                encode_muse_glimmer_attn_prefill_with_online(
-                    &ctx,
-                    &encoder,
-                    &query,
-                    &key,
-                    &value,
-                    &outputs[usize::from(tiled)],
-                    rows,
-                    base,
-                    32,
-                    2,
-                    128,
-                    window,
-                    true,
-                )
+            let pv_before = MATRIX_PV_DISPATCHES.get();
+            with_tiled_prefill(tiled || matrix_pv, || {
+                with_matrix_pv(matrix_pv && tiled, || {
+                    encode_muse_glimmer_attn_prefill_with_online(
+                        &ctx,
+                        &encoder,
+                        &query,
+                        &key,
+                        &value,
+                        &outputs[usize::from(tiled)],
+                        rows,
+                        base,
+                        32,
+                        2,
+                        128,
+                        window,
+                        true,
+                    )
+                })
             })
             .unwrap();
-            assert_eq!(TILED_PREFILL_DISPATCHES.get() - before, u64::from(tiled));
+            assert_eq!(
+                TILED_PREFILL_DISPATCHES.get() - before,
+                u64::from(tiled || matrix_pv)
+            );
+            assert_eq!(
+                MATRIX_PV_DISPATCHES.get() - pv_before,
+                u64::from(tiled && matrix_pv)
+            );
             encoder.end();
             let start = std::time::Instant::now();
             command.commit();
@@ -111,10 +131,9 @@ fn tiled_prefill_current_online_screen() {
                 objc2_metal::MTLCommandBufferStatus::Completed
             );
             assert!(command.error().is_none());
-            (
-                wall,
-                (command.GPUEndTime() - command.GPUStartTime()) * 1000.0,
-            )
+            let gpu = (command.GPUEndTime() - command.GPUStartTime()) * 1000.0;
+            assert!(gpu.is_finite() && gpu > 0.0);
+            (wall, gpu)
         };
         for output in &outputs {
             unsafe {
@@ -158,7 +177,7 @@ fn tiled_prefill_current_online_screen() {
         }
         eprintln!(
             "MUSE_TILED_JSON {}",
-            serde_json::json!({"kind":"correctness", "base":base,"rows":rows,"window":window,"uniform":uniform,"gpu_max_abs":gpu_delta,"f64_max_abs":f64_delta,"guards":true,"dispatch_witness":true})
+            serde_json::json!({"kind":"correctness", "matrix_pv_screen":matrix_pv,"base":base,"rows":rows,"window":window,"uniform":uniform,"gpu_max_abs":gpu_delta,"f64_max_abs":f64_delta,"guards":true,"dispatch_witness":true})
         );
         if rows >= 16 && !uniform {
             run(false);
@@ -168,7 +187,7 @@ fn tiled_prefill_current_online_screen() {
                     let (wall_ms, gpu_ms) = run(tiled);
                     eprintln!(
                         "MUSE_TILED_JSON {}",
-                        serde_json::json!({"kind":"timing_screen","base":base,"rows":rows,"window":window,"pair":pair,"tiled":tiled,"wall_ms":wall_ms,"gpu_ms":gpu_ms})
+                        serde_json::json!({"kind":"timing_screen","matrix_pv_screen":matrix_pv,"base":base,"rows":rows,"window":window,"pair":pair,"tiled":tiled,"wall_ms":wall_ms,"gpu_ms":gpu_ms})
                     );
                 }
             }
@@ -190,6 +209,14 @@ fn tiled_prefill_current_online_screen() {
 #[ignore = "serial Metal, tiled prefill independent model-context oracle"]
 fn tiled_prefill_model_context_crosschecks() {
     with_tiled_prefill(true, || attention_model_context_oracle(false));
+}
+
+#[test]
+#[ignore = "serial Metal, matrix-PV independent model-context prefill oracle"]
+fn matrix_pv_model_context_crosschecks() {
+    with_tiled_prefill(true, || {
+        with_matrix_pv(true, || attention_model_context_oracle(false))
+    });
 }
 
 #[test]

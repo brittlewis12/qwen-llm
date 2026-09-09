@@ -1,5 +1,53 @@
 # Muse long-context qualification
 
+## Frozen tiled attention transfer and opt-in delivery PASS
+
+`7d3fab2e` compares current online to frozen F32 QK-MMA/scalar-PV tiled attention
+on the same authentic32640 prefix,128 new tokens and8 fixed-token continuations.
+The prefix restores tiled8064 state, extends with current online/matrix once
+(185.994s), and persists before qualification. It is a hybrid common prefix, not
+an independently all-online or full-fresh32K equivalence test.
+
+Separate warmAB then measured ABBA real prefill calls:
+1113.363333/913.322959/913.748125/1113.492000ms. Means1113.427667 ->913.535542ms;
+17.952861% saved, bothpairs17.967214/17.938510%, A-spread0.011556%. Frozen>=10%
+mean/bothpair and<=5%control gatesPASS. Timing includes encoding/completion/endpoint
+readback, excludes rewind/oracles/prefix serialization. Entire packet206.33s.
+
+All9 logit/top1 comparisons pass: endpoint cosine0.999999995431/RMS0.000124178/
+maxdelta0.006622315; worst continuation maxdelta0.010962725. All128 residuals
+aggregate RMS0.000569645 and136 newly written KV rows RMS0.000409228 pass unchanged
+aggregate gates. Worst rowwise RMS0.001471785/0.003958897 are diagnostic, not gates.
+Prefix immutable; timed endpoints and restoredB active KV bitwise. The original
+8K per-row RMS packet remains FAIL; separate identical-input/F64 and selected
+deployed-logit diagnostics justify this independently scoped transfer, not rescoring.
+
+`0811cccd` delivers the unchanged shader under `QWEN_MUSE_MATRIX_PREFILL=1` for
+fullN128 chunks. N16 loses the shape screen from short through6K work; all smaller
+remainders conservatively retain online attention. No benchmark-length ceiling,
+session buffer, new flag, cross-device eligibility or default change. Shader moves
+from research into the product library; TLS overrides preserve explicit references.
+Short145=N128+N16+scalar1 plus8fixed continuations PASS4.41s; saved32K N128pilot/
+N16online bitwise delivery PASS15.11s without re-priming or new ABBA.
+
+Actual native6229/high/temp0/seed42/17outputs retains stdout and token fingerprint
+`3d9ae02d476a7e3ed29c1f414ffeceb5dc6353c322f17d5a664fab12bf369578`, token_limit and
+clean embedded0811cccd. Planned6144tiled/80online/5scalar tokens. Prefill32.175968s,
+193.591692tok/s; generation16forwards1.019420s (~15.70forwards/s), process33.791749s.
+The CLI's16.676157decode tok/s counts17 emitted tokens. This is delivery evidence,
+not a controlled whole-prefill improvement or sampled-output equivalence claim.
+
+Current-stage replay `6a2262b8` passes bitwise residual/activeKV observer checks:
+GPU954.503ms, FFN428.710(44.91%), fullattention314.821/sliding49.448(combined38.16%),
+front92.273/attention-output32.415, unassignedinterstage32.256ms(3.38%). Ordinary
+wall1110.958 versus profiled957.738ms retained; attribution does not supersede the
+controlled913.536ms model-call authority. Next: cheap equal-work larger-batch FFN
+screen, then F32 MMA PV, with distinct hypotheses and persisted-state transfer.
+
+Raw: `target/profiles/muse-live-prefix/{tiled32-01*,tiled-prefill-03*,tiled-short-delivery-01*,tiled32-delivery-01*,cli-prefill-T-01*,tiled32-profile-01*}`.
+Replay prefix: `target/profiles/muse-tiled-diagnostic/prefix32.{json,bin}`; hash
+`2da45d5f9dbba777c32aa3ac871b9cfe8a35d9ddffdc699e1bc3036eabf3cca1`.
+
 ## Model-context invariants and refreshed profile PASS
 
 `900e5106` replaces benchmark-derived upper limits with admitted model context

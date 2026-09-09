@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Tiled Prefill Opt-In Delivered / Native CLI PASS
+
+- `0811cccd` moves the byte-identical frozen shader into the product library and
+  selects tiled attention for fullN128 chunks under existing Q8/M4Max matrix opt-in.
+  N16 loses the short-work screen; other remainders conservatively stay online.
+  No context ceiling, new option, session allocation or default change. Historical
+  online constructors/explicit overrides remain independent references.
+- Short145-token N128+N16+scalar1 and8fixed continuations PASS4.41s: all9top1equal,
+  maxlogitdelta0.0122604, activeKVRMS0.000506014; explicit composed pilot bitwise.
+  Saved32K delivery PASS15.11s, N128pilot and N16online logits/allactiveKV bitwise,
+  prefix immutable. No long re-priming or repeated ABBA. CPU selector/buildsPASS.
+- Actual same native6229/high/temp0/seed42/17outputs: same stdout, fingerprint,
+  token_limit, clean embedded0811cccd. Planned6144tiled+80online+5scalar tokens;
+  prefill32.176s/193.592tok/s,16generationforwards1.019s/~15.70forwards/s,
+  process33.792s. Delivery diagnostic, not a new controlled whole-prefill speedup;
+  CLI16.676decode tok/s uses17 emitted tokens. Defaults remain off.
+- `6a2262b8` refreshed delivered32K N128 GPU954.503ms: FFN428.710ms(44.91%),
+  fullattention314.821/sliding49.448ms(combined38.16%), front92.273/attnout32.415.
+  Unassignedinterstage32.256ms(3.38%) retained; ordinary1110.958ms versus profiled
+  wall957.738ms also retained. Bitwise residual/KV observer checksPASS20.94s;
+  attribution does not replace controlled913.536ms model-call timing authority.
+- Fresh cx audit finds128 is a historical host batch cap, not an MMA kernel limit.
+  Next cheap falsifier: same512 FFN activation rows as4x128/2x256/1x512 using
+  unchanged kernels, bitwise outputs, charged GPU/host work. No guaranteed byte
+  reduction: Q8 tile is already64x32 and query groups are grid-x. Then separately
+  pursue F32 MMA PV against the delivered tile. Decode FFN remains independent.
+- Raw: `target/profiles/muse-live-prefix/{tiled-prefill-03*,tiled-short-delivery-01*,tiled32-delivery-01*,cli-prefill-T-01*,tiled32-profile-01*}`.
+
 ## 2026-09-08 - Muse Frozen Tiled 32K Model-Chunk Transfer PASS
 
 - `7d3fab2e` current-online versus frozen F32 tiled N128 at32640: controlled

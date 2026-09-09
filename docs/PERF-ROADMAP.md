@@ -173,7 +173,17 @@ model context131072, actual capacity and kernel invariants govern admission. The
 attention checks and a512-transition32K live horizon pass, without another full
 slow-prefix reference. This is not full-model131K numerical equivalence.
 
-1. Tiled forward prefill attention: refreshed late32K N128 GPU1113.485ms is49.91%
+1. Tiled forward prefill attention delivery is complete under the existing opt-in.
+   Current native6229 CLI193.592prefilltok/s is a delivery diagnostic. Refreshed
+   delivered32K GPU954.503ms: FFN44.91%, attention38.16%,3.38%unassignedinterstage;
+   ordinary-wall1110.958ms retained, not substituted for controlled913.536ms call.
+   Next cheapest question is larger forward batching:128 is a historical host cap.
+   Screen same512 FFN activation rows as4x128/2x256/1x512 before changing session
+   planning or building full-model N512. Existing64x32MMA tile and query-grid-x
+   already reuse weights; batching promises no automatic arithmetic/byte reduction.
+   Only a repeatable gain earns persisted32K equal-work model replay. F32 MMA PV
+   follows as a separate arithmetic candidate against the now-delivered tile.
+   Historical pre-tile late32K N128 GPU1113.485ms was49.91%
    attention (42.76%full),38.43%FFN. Reuse KV across GQA siblings/token rows and use
    matrix QK while initially retaining F32 queries/probabilities. Screen against
    current online, not the old per-row loser. Only material primitive wins earn
@@ -187,9 +197,9 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    Preserve original failure, but do not treat the uncalibrated cutoff as a quality
    boundary. Frozen32K modelchunk transfer nowPASS17.953%wall saved (1113.428 ->
    913.536ms), endpoint+8fixedcontinuations/allwrittenKV/immutability pass. Persisted
-   32640 common prefix avoids another185.994s extension. Next: deliver frozen tile
-   through existing opt-in after smallestpacked/shortwork screen and actualCLI
-   packed+scalar-tail composition. No newcontextceiling or fresh32K speedupclaim.
+   32640 common prefix avoids another185.994s extension. DeliveredfullN128 passes
+   small/long plumbing and actualCLI; N16loses,remaindersconservativelystayonline.
+   No newcontextceiling or fresh32K speedupclaim.
    FasterPV is a separate subsequent candidate, not a confounded rescue.
 2. Structural FFN work/byte reduction:8K packed FFN57.0%,32K decode64.96% (44.200ms).
    Current packedN128 already usesQ8 MMA; repeated local tile/fusion changes need

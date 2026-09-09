@@ -487,7 +487,7 @@ const MUSE_GLIMMER_ATTENTION_HEAD_DIM: usize = 128;
 #[cfg(test)]
 thread_local! {
     static FORCE_PACKED_ONLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static FORCE_TILED_PREFILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_TILED_PREFILL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static TILED_PREFILL_DISPATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -498,13 +498,13 @@ pub(crate) fn tiled_prefill_dispatch_count() -> u64 {
 
 #[cfg(test)]
 pub(crate) fn with_tiled_prefill<R>(enabled: bool, run: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
+    struct Restore(Option<bool>);
     impl Drop for Restore {
         fn drop(&mut self) {
             FORCE_TILED_PREFILL.set(self.0);
         }
     }
-    let _restore = Restore(FORCE_TILED_PREFILL.replace(enabled));
+    let _restore = Restore(FORCE_TILED_PREFILL.replace(Some(enabled)));
     run()
 }
 
@@ -567,6 +567,45 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_online(
     head_dim: usize,
     sliding_window: Option<usize>,
     online: bool,
+) -> Result<(), MetalError> {
+    encode_muse_glimmer_attn_prefill_with_tiling(
+        ctx,
+        enc,
+        query,
+        key_cache,
+        value_cache,
+        output,
+        row_count,
+        base_position,
+        query_head_count,
+        kv_head_count,
+        head_dim,
+        sliding_window,
+        online,
+        false,
+    )
+}
+
+pub(crate) fn tiled_prefill_work_eligible(row_count: usize, query_offset: u64) -> bool {
+    row_count == 128 && query_offset.is_multiple_of(32)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_muse_glimmer_attn_prefill_with_tiling(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query: &MetalTensor,
+    key_cache: &MetalTensor,
+    value_cache: &MetalTensor,
+    output: &MetalTensor,
+    row_count: usize,
+    base_position: usize,
+    query_head_count: usize,
+    kv_head_count: usize,
+    head_dim: usize,
+    sliding_window: Option<usize>,
+    online: bool,
+    tiled_policy: bool,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "muse_glimmer_attn_prefill";
     if row_count == 0
@@ -638,10 +677,9 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_online(
                 return bad_shape(KERNEL, "unaligned packed online view".into());
             }
         }
+        let tiled = tiled_policy && tiled_prefill_work_eligible(row_count, query.offset);
         #[cfg(test)]
-        let tiled = FORCE_TILED_PREFILL.get();
-        #[cfg(not(test))]
-        let tiled = false;
+        let tiled = FORCE_TILED_PREFILL.get().unwrap_or(tiled);
         if tiled && !query.offset.is_multiple_of(32) {
             return bad_shape(
                 KERNEL,

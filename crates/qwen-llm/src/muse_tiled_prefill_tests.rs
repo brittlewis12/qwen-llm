@@ -191,3 +191,15 @@ fn tiled_prefill_current_online_screen() {
 fn tiled_prefill_model_context_crosschecks() {
     with_tiled_prefill(true, || attention_model_context_oracle(false));
 }
+
+#[test]
+fn tiled_prefill_policy_uses_work_not_context() {
+    for rows in [0, 1, 16, 32, 64, 112, 127, 128, 129] {
+        for offset in [0, 16, 32, 64] {
+            assert_eq!(
+                tiled_prefill_work_eligible(rows, offset),
+                rows == 128 && offset % 32 == 0
+            );
+        }
+    }
+}

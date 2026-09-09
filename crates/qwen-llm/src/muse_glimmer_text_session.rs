@@ -922,6 +922,7 @@ pub struct MuseGlimmerTextForward<'ctx, 'model> {
     weights: MuseGlimmerMetalModelWeights<'model>,
     packed_q8_mat_mat: bool,
     packed_online_attention: bool,
+    packed_tiled_attention: bool,
     packed_prefill_max_end: usize,
     packed_online_max_end: usize,
     #[cfg(test)]
@@ -1120,6 +1121,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             weights,
             packed_q8_mat_mat: false,
             packed_online_attention: false,
+            packed_tiled_attention: false,
             packed_prefill_max_end: context_length,
             packed_online_max_end: context_length,
             #[cfg(test)]
@@ -1144,6 +1146,16 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
     ) -> Result<Self, MuseGlimmerTextSessionError> {
         let mut forward = Self::new_with_packed_q8_mat_mat(ctx, resident, enabled)?;
         forward.packed_online_attention = enabled;
+        Ok(forward)
+    }
+
+    pub(crate) fn new_with_tiled_prefill(
+        ctx: &'ctx MetalContext,
+        resident: &'model MuseGlimmerMetalWeights,
+        enabled: bool,
+    ) -> Result<Self, MuseGlimmerTextSessionError> {
+        let mut forward = Self::new_with_optimized_prefill(ctx, resident, enabled)?;
+        forward.packed_tiled_attention = enabled;
         Ok(forward)
     }
 
@@ -2245,7 +2257,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             {
                 let (key_cache, value_cache) =
                     session.cache_prefix_views(layer_index, end_position)?;
-                crate::muse_glimmer_metal::encode_muse_glimmer_attn_prefill_with_online(
+                crate::muse_glimmer_metal::encode_muse_glimmer_attn_prefill_with_tiling(
                     self.ctx,
                     encoder,
                     &packed.query,
@@ -2259,6 +2271,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                     geometry.head_dim,
                     layer.sliding_attention.then_some(geometry.sliding_window),
                     online_attention,
+                    self.packed_tiled_attention,
                 )?;
             } else {
                 for row in 0..rows {

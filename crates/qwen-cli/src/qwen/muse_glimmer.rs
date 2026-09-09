@@ -228,8 +228,21 @@ pub(crate) fn run_muse_glimmer_single_turn(
     )
     .context("load admitted Muse Glimmer weights and text session")?;
     eprintln!(
-        "muse_glimmer: split_decode={} split_min_visible_positions=1024 model_context={} matrix_prefill={} optimized_packed_tokens={}",
-        split_decode, config.context_length, matrix_prefill, optimized_packed_tokens
+        "muse_glimmer: split_decode={} split_min_visible_positions=1024 model_context={} matrix_prefill={} optimized_packed_tokens={} packed_attention={} tiled_packed_tokens={}",
+        split_decode,
+        config.context_length,
+        matrix_prefill,
+        optimized_packed_tokens,
+        if matrix_prefill {
+            "tiled_n128+online_remainder"
+        } else {
+            "exact"
+        },
+        if matrix_prefill {
+            prompt_tokens.len() / 128 * 128
+        } else {
+            0
+        }
     );
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();

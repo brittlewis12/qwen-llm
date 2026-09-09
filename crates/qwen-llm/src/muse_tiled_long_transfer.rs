@@ -17,12 +17,118 @@ fn replay_tail(session: &MuseGlimmerTextSession, base: usize, rows: usize) -> Ve
 }
 
 #[test]
+#[ignore = "serial Metal, delivered N128 plus N16 plus scalar composition"]
+fn tiled_prefill_short_delivery() {
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let gguf = GgufFile::open(path).unwrap();
+    let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
+    let tokens = long_context_tokens(path, &config);
+    let ctx = MetalContext::new().unwrap();
+    let transaction = ctx.begin_allocation_transaction();
+    let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
+    let geometry = MuseGlimmerTextGeometry::from_config(&config, 153).unwrap();
+    let session_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry(&ctx, &geometry).unwrap();
+    let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+        plan.memory_plan().priced_upper_bytes() + session_plan.priced_upper_bytes(),
+        32 * 1024 * 1024,
+        MUSE_GLIMMER_TEXT_SESSION_RESERVE_BYTES,
+        ctx.memory_signals(),
+        true,
+    );
+    assert!(admission.admitted);
+    let weights =
+        MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
+            .unwrap()
+            .into_weights();
+    let old = MuseGlimmerTextForward::new_with_optimized_prefill(&ctx, &weights, true).unwrap();
+    let delivered = MuseGlimmerTextForward::new_with_tiled_prefill(&ctx, &weights, true).unwrap();
+    let disabled = MuseGlimmerTextForward::new_with_tiled_prefill(&ctx, &weights, false).unwrap();
+    assert!(
+        !disabled.packed_tiled_attention
+            && !disabled.packed_online_attention
+            && !disabled.packed_q8_mat_mat
+    );
+    let mut session = MuseGlimmerTextSession::new(&ctx, weights.config(), 153).unwrap();
+    drop(transaction);
+    let mut reference = vec![old.prefill(&tokens[..145], &mut session).unwrap()];
+    for &token in &tokens[145..153] {
+        reference.push(old.forward_generated_token(token, &mut session).unwrap());
+    }
+    let reference_kv = replay_tail(&session, 0, 153);
+    session.reset().unwrap();
+    let before = crate::muse_glimmer_metal::tiled_prefill_dispatch_count();
+    let endpoint = delivered.prefill(&tokens[..145], &mut session).unwrap();
+    assert_eq!(
+        crate::muse_glimmer_metal::tiled_prefill_dispatch_count() - before,
+        52
+    );
+    let endpoint_hash = long_context_prefix_hash(&session, 145);
+    let mut actual = vec![endpoint.clone()];
+    for &token in &tokens[145..153] {
+        actual.push(
+            delivered
+                .forward_generated_token(token, &mut session)
+                .unwrap(),
+        );
+    }
+    for (step, (a, b)) in reference.iter().zip(&actual).enumerate() {
+        let comparison = compare_logits(b, a);
+        assert!(
+            comparison.cosine > 0.999_99
+                && comparison.relative_rms < 0.002
+                && comparison.max_abs < 0.1,
+            "short step={step} {comparison:?}"
+        );
+        assert_eq!(comparison.reference_argmax, comparison.candidate_argmax);
+        eprintln!(
+            "MUSE_TILED32_JSON {}",
+            serde_json::json!({"kind":"short_logit","step":step,"max_abs":comparison.max_abs,"relative_rms":comparison.relative_rms})
+        );
+    }
+    let comparison = compare_logits(&replay_tail(&session, 0, 153), &reference_kv);
+    assert!(comparison.cosine > 0.9999 && comparison.relative_rms < 0.01);
+    assert_eq!(long_context_prefix_hash(&session, 145), endpoint_hash);
+    session.reset().unwrap();
+    crate::muse_glimmer_metal::with_tiled_prefill(true, || {
+        old.prefill(&tokens[..128], &mut session)
+    })
+    .unwrap();
+    let pilot = old.prefill(&tokens[128..145], &mut session).unwrap();
+    assert_logits_bitwise_equal(
+        "delivered packed/remainder/scalar versus pilot",
+        &endpoint,
+        &pilot,
+    );
+    assert_eq!(long_context_prefix_hash(&session, 145), endpoint_hash);
+    eprintln!(
+        "MUSE_TILED32_JSON {}",
+        serde_json::json!({"kind":"short_delivery","prompt":145,"tiled":128,"online":16,"scalar":1,"fixed_continuations":8,"pilot_bitwise":true,"active_kv_rms":comparison.relative_rms})
+    );
+}
+
+#[test]
 #[ignore = "serial Metal, frozen tiled32K local transfer; persisted common prefix, no full reference"]
 fn tiled_prefill_32k_local_transfer() {
+    tiled_prefill_32k_transfer(false);
+}
+
+#[test]
+#[ignore = "serial Metal, delivered tiled policy on saved32K state; no new timing verdict"]
+fn tiled_prefill_32k_delivery() {
+    tiled_prefill_32k_transfer(true);
+}
+
+fn tiled_prefill_32k_transfer(delivery: bool) {
     const BASE: usize = 32640;
     const ROWS: usize = 128;
     const CONTINUATION: usize = 8;
     let root = std::path::Path::new("target/profiles/muse-tiled-diagnostic");
+    if delivery {
+        assert!(
+            root.join("prefix32.json").is_file() && root.join("prefix32.bin").is_file(),
+            "delivery requires the saved32K replay boundary"
+        );
+    }
     let seed: serde_json::Value =
         serde_json::from_reader(std::fs::File::open(root.join("prefix.json")).unwrap()).unwrap();
     let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
@@ -245,6 +351,53 @@ fn tiled_prefill_32k_local_transfer() {
             comparison.cosine > cosine && comparison.relative_rms < rms,
             "aggregate {kind}: {comparison:?}"
         );
+    }
+    if delivery {
+        let delivered =
+            MuseGlimmerTextForward::new_with_tiled_prefill(&ctx, &weights, true).unwrap();
+        session.rewind_prefix(BASE).unwrap();
+        let before = crate::muse_glimmer_metal::tiled_prefill_dispatch_count();
+        let logits = delivered
+            .prefill(&tokens[BASE..BASE + ROWS], &mut session)
+            .unwrap();
+        assert_eq!(
+            crate::muse_glimmer_metal::tiled_prefill_dispatch_count() - before,
+            52
+        );
+        assert_logits_bitwise_equal(
+            "delivered128 versus frozen pilot",
+            &logits,
+            &oracles[1].0[0],
+        );
+        assert_eq!(
+            long_context_prefix_hash(&session, BASE + ROWS),
+            oracles[1].3
+        );
+        session.rewind_prefix(BASE).unwrap();
+        let reference = forward
+            .prefill(&tokens[BASE..BASE + 16], &mut session)
+            .unwrap();
+        let reference_hash = long_context_prefix_hash(&session, BASE + 16);
+        session.rewind_prefix(BASE).unwrap();
+        let before = crate::muse_glimmer_metal::tiled_prefill_dispatch_count();
+        let actual = delivered
+            .prefill(&tokens[BASE..BASE + 16], &mut session)
+            .unwrap();
+        assert_eq!(
+            crate::muse_glimmer_metal::tiled_prefill_dispatch_count(),
+            before
+        );
+        assert_logits_bitwise_equal("delivered16 retains online", &actual, &reference);
+        assert_eq!(
+            long_context_prefix_hash(&session, BASE + 16),
+            reference_hash
+        );
+        assert_eq!(long_context_prefix_hash(&session, BASE), prefix);
+        eprintln!(
+            "MUSE_TILED32_JSON {}",
+            serde_json::json!({"kind":"delivery","n128_pilot_bitwise":true,"n16_online_bitwise":true,"prefix_immutable":true})
+        );
+        return;
     }
     run(&mut session, false);
     run(&mut session, true);

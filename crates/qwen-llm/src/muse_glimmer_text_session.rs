@@ -5112,6 +5112,7 @@ mod tests {
     include!("muse_tiled_numerical_diagnostic.rs");
     include!("muse_tiled_long_transfer.rs");
     include!("muse_prefill_batch_screen.rs");
+    include!("muse_optimized_reuse_tests.rs");
 
     #[test]
     fn split_decode_selection_uses_visible_work() {

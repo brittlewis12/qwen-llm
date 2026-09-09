@@ -3,10 +3,14 @@
 use super::*;
 use serde_json::json;
 
+include!("muse_math_pilot.rs");
+
 #[derive(Default)]
 struct Sink {
     bytes: Vec<u8>,
     fail_tick: bool,
+    fail_tick_at: Option<usize>,
+    ticks: usize,
     fail_piece: Option<usize>,
     pieces: usize,
 }
@@ -22,7 +26,8 @@ impl GenerationSink for Sink {
     }
 
     fn tick(&mut self) -> io::Result<()> {
-        if self.fail_tick {
+        self.ticks += 1;
+        if self.fail_tick || self.fail_tick_at == Some(self.ticks) {
             Err(io::Error::other("injected prefill disconnect"))
         } else {
             Ok(())

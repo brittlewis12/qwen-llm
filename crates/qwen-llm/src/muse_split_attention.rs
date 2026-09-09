@@ -138,6 +138,8 @@ pub(crate) fn encode(
         enc.note_read(source);
     }
     enc.note_write(partial);
+    // Both PSOs are preloaded; census attribution must follow each binding.
+    crate::metal::census_record_pso("kernel_muse_split_attention_h128");
     enc.set_pipeline(&main);
     enc.set_bytes(0, &args);
     for (slot, tensor) in [query, key, value, partial].into_iter().enumerate() {
@@ -155,6 +157,7 @@ pub(crate) fn encode(
             depth: 1,
         },
     );
+    crate::metal::census_record_pso("kernel_muse_split_attention_reduce_h128");
     enc.set_pipeline(&reduce);
     enc.note_read(partial);
     enc.note_write(output);

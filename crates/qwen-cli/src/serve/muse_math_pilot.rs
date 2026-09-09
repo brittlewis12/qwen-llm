@@ -36,6 +36,10 @@ fn muse_served_math_prefix_composition() {
     let count = |name| census.iter().filter(|row| row.kernel == name).count();
     let tiled = count("kernel_muse_prefill_tiled_f32_h128");
     let split = count("kernel_muse_split_attention_h128");
+    eprintln!(
+        "MUSE_SERVE_MATH_JSON {}",
+        json!({"kind":"dispatch_preflight","input_tokens":ids.len(),"output_tokens":cold.usage.output_tokens,"tiled":tiled,"split":split,"reduce":count("kernel_muse_split_attention_reduce_h128")})
+    );
     assert_eq!(tiled, ids.len() / 128 * 52);
     assert_eq!(split, 52 * 3);
     assert_eq!(count("kernel_muse_split_attention_reduce_h128"), split);

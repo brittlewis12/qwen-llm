@@ -51,6 +51,16 @@ fn tiled_prefill_current_online_screen() {
         (31, 3, None, false),
         (31, 3, Some(1), false),
         (31, 3, Some(32), false),
+        (0, 16, None, false),
+        (0, 128, None, false),
+        (512, 16, None, false),
+        (512, 128, None, false),
+        (2048, 16, None, false),
+        (2048, 128, None, false),
+        (6208, 16, None, false),
+        (6208, 16, Some(2048), false),
+        (6096, 128, None, false),
+        (32640, 16, None, false),
         (32640, 128, None, false),
         (32640, 128, Some(2048), false),
         (32640, 128, None, true),
@@ -150,7 +160,7 @@ fn tiled_prefill_current_online_screen() {
             "MUSE_TILED_JSON {}",
             serde_json::json!({"kind":"correctness", "base":base,"rows":rows,"window":window,"uniform":uniform,"gpu_max_abs":gpu_delta,"f64_max_abs":f64_delta,"guards":true,"dispatch_witness":true})
         );
-        if rows == 128 && !uniform {
+        if rows >= 16 && !uniform {
             run(false);
             run(true);
             for (pair, order) in [[false, true], [true, false]].into_iter().enumerate() {

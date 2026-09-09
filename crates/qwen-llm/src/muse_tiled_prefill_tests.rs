@@ -1,16 +1,23 @@
 #[test]
 #[ignore = "serial Metal, F32 tiled prefill correctness and short current-online screen"]
 fn tiled_prefill_current_online_screen() {
-    tiled_prefill_primitive_screen(false);
+    tiled_prefill_primitive_screen(0);
 }
 
 #[test]
 #[ignore = "serial Metal, F32 matrix-PV versus delivered scalar-PV tile"]
 fn matrix_pv_prefill_screen() {
-    tiled_prefill_primitive_screen(true);
+    tiled_prefill_primitive_screen(1);
 }
 
-fn tiled_prefill_primitive_screen(matrix_pv: bool) {
+#[test]
+#[ignore = "serial Metal, half-P matrix-PV versus delivered F32 scalar-PV tile"]
+fn half_pv_prefill_screen() {
+    tiled_prefill_primitive_screen(2);
+}
+
+fn tiled_prefill_primitive_screen(kind: u8) {
+    let matrix_pv = kind != 0;
     use objc2_metal::MTLBuffer;
     let ctx = MetalContext::new().unwrap();
     let mut k = vec![0_u16; 256 + 32768 * 256];
@@ -94,7 +101,7 @@ fn tiled_prefill_primitive_screen(matrix_pv: bool) {
             let before = TILED_PREFILL_DISPATCHES.get();
             let pv_before = MATRIX_PV_DISPATCHES.get();
             with_tiled_prefill(tiled || matrix_pv, || {
-                with_matrix_pv(matrix_pv && tiled, || {
+                with_matrix_pv_kind(if tiled { kind } else { 0 }, || {
                     encode_muse_glimmer_attn_prefill_with_online(
                         &ctx,
                         &encoder,
@@ -177,7 +184,7 @@ fn tiled_prefill_primitive_screen(matrix_pv: bool) {
         }
         eprintln!(
             "MUSE_TILED_JSON {}",
-            serde_json::json!({"kind":"correctness", "matrix_pv_screen":matrix_pv,"base":base,"rows":rows,"window":window,"uniform":uniform,"gpu_max_abs":gpu_delta,"f64_max_abs":f64_delta,"guards":true,"dispatch_witness":true})
+            serde_json::json!({"kind":"correctness", "matrix_pv_screen":matrix_pv,"pv_kind":kind,"base":base,"rows":rows,"window":window,"uniform":uniform,"gpu_max_abs":gpu_delta,"f64_max_abs":f64_delta,"guards":true,"dispatch_witness":true})
         );
         if rows >= 16 && !uniform {
             run(false);
@@ -187,7 +194,7 @@ fn tiled_prefill_primitive_screen(matrix_pv: bool) {
                     let (wall_ms, gpu_ms) = run(tiled);
                     eprintln!(
                         "MUSE_TILED_JSON {}",
-                        serde_json::json!({"kind":"timing_screen","matrix_pv_screen":matrix_pv,"base":base,"rows":rows,"window":window,"pair":pair,"tiled":tiled,"wall_ms":wall_ms,"gpu_ms":gpu_ms})
+                        serde_json::json!({"kind":"timing_screen","matrix_pv_screen":matrix_pv,"pv_kind":kind,"base":base,"rows":rows,"window":window,"pair":pair,"tiled":tiled,"wall_ms":wall_ms,"gpu_ms":gpu_ms})
                     );
                 }
             }
@@ -216,6 +223,14 @@ fn tiled_prefill_model_context_crosschecks() {
 fn matrix_pv_model_context_crosschecks() {
     with_tiled_prefill(true, || {
         with_matrix_pv(true, || attention_model_context_oracle(false))
+    });
+}
+
+#[test]
+#[ignore = "serial Metal, half-P PV independent model-context prefill oracle"]
+fn half_pv_model_context_crosschecks() {
+    with_tiled_prefill(true, || {
+        with_matrix_pv_kind(2, || attention_model_context_oracle(false))
     });
 }
 

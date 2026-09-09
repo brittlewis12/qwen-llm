@@ -489,19 +489,25 @@ thread_local! {
     static FORCE_PACKED_ONLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_TILED_PREFILL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static TILED_PREFILL_DISPATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static FORCE_MATRIX_PV: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_MATRIX_PV: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     static MATRIX_PV_DISPATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn with_matrix_pv<R>(enabled: bool, run: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
+    with_matrix_pv_kind(u8::from(enabled), run)
+}
+
+#[cfg(test)]
+pub(crate) fn with_matrix_pv_kind<R>(kind: u8, run: impl FnOnce() -> R) -> R {
+    assert!(kind <= 2);
+    struct Restore(u8);
     impl Drop for Restore {
         fn drop(&mut self) {
             FORCE_MATRIX_PV.set(self.0);
         }
     }
-    let _restore = Restore(FORCE_MATRIX_PV.replace(enabled));
+    let _restore = Restore(FORCE_MATRIX_PV.replace(kind));
     run()
 }
 
@@ -706,14 +712,16 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_tiling(
             TILED_PREFILL_DISPATCHES.set(TILED_PREFILL_DISPATCHES.get() + 1);
         }
         #[cfg(test)]
-        let matrix_pv = tiled && FORCE_MATRIX_PV.get();
+        let matrix_pv = if tiled { FORCE_MATRIX_PV.get() } else { 0 };
         #[cfg(not(test))]
-        let matrix_pv = false;
+        let matrix_pv = 0;
         #[cfg(test)]
-        if matrix_pv {
+        if matrix_pv != 0 {
             MATRIX_PV_DISPATCHES.set(MATRIX_PV_DISPATCHES.get() + 1);
         }
-        let pipeline = ctx.pipeline(if matrix_pv {
+        let pipeline = ctx.pipeline(if matrix_pv == 2 {
+            "kernel_muse_prefill_half_pv_h128"
+        } else if matrix_pv == 1 {
             "kernel_muse_prefill_matrix_pv_f32_h128"
         } else if tiled {
             "kernel_muse_prefill_tiled_f32_h128"

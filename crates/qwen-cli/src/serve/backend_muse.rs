@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::muse_glimmer::{MuseGlimmerChatTemplateProfile, MuseGlimmerConfig};
-use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
+use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerRuntimeOptions};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use qwen_llm::tokenizer::LlamaCppTokenizer;
 use std::io;
@@ -18,6 +18,29 @@ use std::time::Instant;
 #[cfg(test)]
 #[path = "muse_prefix_pilot.rs"]
 mod prefix_pilot;
+
+pub(crate) const MATRIX_PREFILL_ENV: &str = "QWEN_SERVE_MUSE_MATRIX_PREFILL";
+pub(crate) const SPLIT_DECODE_ENV: &str = "QWEN_SERVE_MUSE_SPLIT_DECODE";
+
+fn parse_math_flag(name: &str, value: Option<&str>) -> anyhow::Result<bool> {
+    match value {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(value) => anyhow::bail!("{name} must be 0 or 1, got {value:?}"),
+    }
+}
+
+pub(crate) fn read_math_options() -> anyhow::Result<MuseGlimmerRuntimeOptions> {
+    let read = |name| match std::env::var(name) {
+        Ok(value) => parse_math_flag(name, Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_math_flag(name, None),
+        Err(error) => Err(error).with_context(|| format!("read {name}")),
+    };
+    Ok(MuseGlimmerRuntimeOptions {
+        matrix_prefill: read(MATRIX_PREFILL_ENV)?,
+        split_decode: read(SPLIT_DECODE_ENV)?,
+    })
+}
 
 pub(crate) struct MuseGlimmerBackend {
     ctx: MetalContext,
@@ -33,9 +56,11 @@ pub(crate) struct MuseGlimmerBackend {
     profile: MuseGlimmerChatTemplateProfile,
     consumed_tokens: Vec<u32>,
     prefix_reuse: bool,
+    math_options: MuseGlimmerRuntimeOptions,
 }
 
 impl MuseGlimmerBackend {
+    #[cfg(test)]
     pub(crate) fn new(
         ctx: MetalContext,
         gguf: GgufFile,
@@ -43,6 +68,26 @@ impl MuseGlimmerBackend {
         model_id: String,
         default_max_tokens: usize,
         capacity: usize,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_options(
+            ctx,
+            gguf,
+            model_path,
+            model_id,
+            default_max_tokens,
+            capacity,
+            MuseGlimmerRuntimeOptions::default(),
+        )
+    }
+
+    pub(crate) fn new_with_options(
+        ctx: MetalContext,
+        gguf: GgufFile,
+        model_path: &Path,
+        model_id: String,
+        default_max_tokens: usize,
+        capacity: usize,
+        math_options: MuseGlimmerRuntimeOptions,
     ) -> anyhow::Result<Self> {
         let config = MuseGlimmerConfig::from_gguf(&gguf)
             .context("bind Muse Glimmer release contract for serve")?;
@@ -58,7 +103,7 @@ impl MuseGlimmerBackend {
             .context("Muse Glimmer serve stop-token contract")?;
         let vocab_size = config.vocab_size;
         let profile = config.chat_template_profile;
-        let loaded = MuseGlimmerLoadedModel::load(&ctx, &gguf, capacity)
+        let loaded = MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, capacity, math_options)
             .context("load resident Muse Glimmer serve model")?;
         Ok(Self {
             ctx,
@@ -74,6 +119,7 @@ impl MuseGlimmerBackend {
             profile,
             consumed_tokens: Vec::new(),
             prefix_reuse: std::env::var("QWEN_MUSE_PREFIX_REUSE").is_ok_and(|value| value == "1"),
+            math_options,
         })
     }
 
@@ -158,8 +204,8 @@ impl GenerationBackend for MuseGlimmerBackend {
             runner.next_position(),
             self.prefix_reuse,
         );
-        // Only successful requests publish history. Cancellation or a failed
-        // command must never leave a partially advanced prefix eligible for reuse.
+        // Backend completion publishes history before HTTP finalization. Detected
+        // generation aborts must not leave a partially advanced prefix eligible.
         self.consumed_tokens.clear();
         runner
             .rewind_prefix(reused_tokens)
@@ -235,10 +281,15 @@ impl GenerationBackend for MuseGlimmerBackend {
         );
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: family=muse_glimmer tokenize_ms={tokenize_ms:.1} prefill_ms={prefill_ms:.1} reused_tokens={reused_tokens} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={}",
+            "serve phases: family=muse_glimmer tokenize_ms={tokenize_ms:.1} prefill_ms={prefill_ms:.1} reused_tokens={reused_tokens} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} matrix_prefill={} split_decode={} planned_tiled_tokens={} planned_online_tokens={}",
             prompt_ids.len() - reused_tokens,
             generation.wall_ms,
             self.capacity,
+            generation.transitions,
+            self.math_options.matrix_prefill,
+            self.math_options.split_decode,
+            if self.math_options.matrix_prefill { (prompt_ids.len()-reused_tokens)/128*128 } else { 0 },
+            if self.math_options.matrix_prefill { (prompt_ids.len()-reused_tokens)%128/16*16 } else { 0 },
         );
         Ok(super::outcome::finish_generation(
             prompt_ids.len(),
@@ -289,6 +340,27 @@ fn required_forwards(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serve_math_switches_are_strict_and_separate_from_run() {
+        assert_eq!(MATRIX_PREFILL_ENV, "QWEN_SERVE_MUSE_MATRIX_PREFILL");
+        assert_eq!(SPLIT_DECODE_ENV, "QWEN_SERVE_MUSE_SPLIT_DECODE");
+        for name in [MATRIX_PREFILL_ENV, SPLIT_DECODE_ENV] {
+            assert!(!parse_math_flag(name, None).unwrap());
+            assert!(!parse_math_flag(name, Some("0")).unwrap());
+            assert!(parse_math_flag(name, Some("1")).unwrap());
+            for invalid in ["", "true", "yes", " 1", "2"] {
+                assert!(
+                    parse_math_flag(name, Some(invalid))
+                        .unwrap_err()
+                        .to_string()
+                        .contains(name)
+                );
+            }
+        }
+        let defaults = MuseGlimmerRuntimeOptions::default();
+        assert!(!defaults.matrix_prefill && !defaults.split_decode);
+    }
 
     #[test]
     fn forward_admission_counts_only_required_transitions() {

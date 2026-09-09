@@ -168,6 +168,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .to_owned();
 
     if muse_glimmer {
+        let math_options = backend_muse::read_math_options()?;
         let config = qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(&gguf)
             .context("bind Muse Glimmer serve contract")?;
         let (context_limit, default_max_tokens) = muse_serve_limits(
@@ -178,16 +179,17 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         crate::shutdown::checkpoint()?;
         let ctx = qwen_llm::metal::MetalContext::new().context("initialize Metal context")?;
         let load_t0 = Instant::now();
-        let mut backend = backend_muse::MuseGlimmerBackend::new(
+        let mut backend = backend_muse::MuseGlimmerBackend::new_with_options(
             ctx,
             gguf,
             &invocation.model,
             model_id.clone(),
             default_max_tokens,
             context_limit,
+            math_options,
         )?;
         let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
-        tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0", context_limit, default_max_tokens);
+        tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0 matrix_prefill={} split_decode={}", context_limit, default_max_tokens, math_options.matrix_prefill, math_options.split_decode);
         crate::shutdown::checkpoint()?;
         return accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace);
     }

@@ -110,7 +110,14 @@ Flash-Next.
 
 Serving is single-flight: concurrent connections receive `503` with
 `Retry-After: 1`. Qwen and DeepSeek use bounded in-memory snapshot caches; Muse
-currently reports no cache reuse. Cross-restart durable warmth is not wired.
+can retain one consumed-token history with `QWEN_MUSE_PREFIX_REUSE=1`.
+Cross-restart durable warmth is not wired.
+Muse Q8_0 on Apple M4 Max has separate, default-off serving math switches:
+`QWEN_SERVE_MUSE_MATRIX_PREFILL=1` enables matrix/tiled prefill, and
+`QWEN_SERVE_MUSE_SPLIT_DECODE=1` enables split-position decode with admitted
+528 KiB scratch. Unset/`0` disables each; invalid values fail startup. The CLI
+math switches do not implicitly affect serving. Reuse matches tokens exactly,
+but optimized arithmetic is tolerance-qualified, not bitwise or sampled-exact.
 The exact protocol and capability matrix live in [`docs/SERVE.md`](docs/SERVE.md).
 
 ## Workspace Lens

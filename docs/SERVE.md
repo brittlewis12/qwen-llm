@@ -143,8 +143,9 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   Durable checkpoints remain the intended cross-restart substrate. The finite
   default Qwen context ceiling is 262,144 tokens; an omitted limit sizes each
   request to need without making the ceiling unbounded. Muse keeps one fixed
-  resident session, resets it between requests, and currently reports no cache
-  hits or restores. Its synthesized system prompt is stamped with the current
+  resident session and resets it between requests by default; its separate
+  live-prefix opt-in reports reused tokens without snapshot restores.
+  Its synthesized system prompt is stamped with the current
   UTC date for each request; when callers provide `instructions` or a system
   item, that explicit system text owns any date policy instead.
 - **Speculative decode (`--drafter`, v0.77 DFlash):** a request
@@ -384,13 +385,27 @@ because client model-pickers probe it).
   Muse defaults to fresh exact packed prefill in superchunks of up to128 tokens
   with a16-token packing quantum, followed by a scalar remainder. Set
   `QWEN_MUSE_PREFIX_REUSE=1` to reuse the exact consumed-token prefix of the last
-  successful request in its resident session, without snapshot copies. It always
+   completed backend generation in its resident session, without snapshot copies. It always
   recomputes at least the final prompt row, reports only actually reused tokens
   as cached/matched, and keeps `restore_ms=0`. Capacity rejection preserves the
-  prior history; a cancelled request clears reuse history. GPU poison remains
+   prior history; a detected generation abort clears reuse history. Publication
+   precedes final HTTP framing, so a late transport/framing failure may retain
+   the completed backend history. GPU poison remains
   fail-stop. This is one serial resident history, not durable or cross-process
   caching; it does not accelerate fresh prompts or per-token decode. Evidence:
-  `docs/bench/2026-09-08-muse-live-prefix/RESULT.md`.
+   `docs/bench/2026-09-08-muse-live-prefix/RESULT.md`.
+   Separate default-off `QWEN_SERVE_MUSE_MATRIX_PREFILL=1` and
+   `QWEN_SERVE_MUSE_SPLIT_DECODE=1` enable delivered optimized math for Muse Q8_0
+   on Apple M4 Max. Each accepts only unset/`0`/`1`, is resolved once at startup,
+   and keeps the existing model-context/capacity and device admission checks.
+   Matrix prefill uses tiled full128 chunks and online packed remainders; scalar
+   tails remain. Split decode admits528 KiB scratch and requires1024 visible KV
+   positions. CLI-only math variables remain independent. Native ATEM, sampling,
+   reasoning and terminal-token accounting do not change. Token-prefix identity
+   is exact, but changed chunk boundaries and generated-versus-prompt history
+   make optimized warm/reset arithmetic numerical, not bitwise or sampled-exact.
+   Diagnostics report resolved options, planned tiled/online token counts, and
+   actual generation transitions; planned counts are not dispatch measurements.
   Durable publication keeps the existing completed-else-prompt shadowing
   policy. **Durable publication remains parked**: current serve is RAM-only,
   so cross-restart warmth still re-prefills. `--durable-dual-publish` is

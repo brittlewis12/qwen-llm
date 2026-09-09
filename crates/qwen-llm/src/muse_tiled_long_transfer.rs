@@ -109,16 +109,22 @@ fn tiled_prefill_short_delivery() {
 #[test]
 #[ignore = "serial Metal, frozen tiled32K local transfer; persisted common prefix, no full reference"]
 fn tiled_prefill_32k_local_transfer() {
-    tiled_prefill_32k_transfer(false);
+    tiled_prefill_32k_transfer(false, false);
 }
 
 #[test]
 #[ignore = "serial Metal, delivered tiled policy on saved32K state; no new timing verdict"]
 fn tiled_prefill_32k_delivery() {
-    tiled_prefill_32k_transfer(true);
+    tiled_prefill_32k_transfer(true, false);
 }
 
-fn tiled_prefill_32k_transfer(delivery: bool) {
+#[test]
+#[ignore = "serial Metal, delivered tiled32K current-stage attribution from saved prefix"]
+fn tiled_prefill_32k_current_profile() {
+    tiled_prefill_32k_transfer(true, true);
+}
+
+fn tiled_prefill_32k_transfer(delivery: bool, profile: bool) {
     const BASE: usize = 32640;
     const ROWS: usize = 128;
     const CONTINUATION: usize = 8;
@@ -397,6 +403,13 @@ fn tiled_prefill_32k_transfer(delivery: bool) {
             "MUSE_TILED32_JSON {}",
             serde_json::json!({"kind":"delivery","n128_pilot_bitwise":true,"n16_online_bitwise":true,"prefix_immutable":true})
         );
+        if profile {
+            profile_actual_matrix_chunk(&delivered, &mut session, &tokens[BASE..BASE + ROWS], BASE);
+            assert_eq!(
+                long_context_prefix_hash(&session, BASE + ROWS),
+                oracles[1].3
+            );
+        }
         return;
     }
     run(&mut session, false);

@@ -163,7 +163,7 @@ Decision rules:
   for decision-changing results. A focused regression and ordinary endpoint
   check are preferable to replaying unrelated historical gates.
 
-## Muse Fresh / Decode Priority - 2026-09-08
+## Muse Fresh / Decode Priority - 2026-09-09
 
 The active Muse priority is **fresh prefill and decode**, not further cache work.
 Default original math remains; Q8/M4Max matrix/online and split opt-ins are numerical,
@@ -173,60 +173,42 @@ model context131072, actual capacity and kernel invariants govern admission. The
 attention checks and a512-transition32K live horizon pass, without another full
 slow-prefix reference. This is not full-model131K numerical equivalence.
 
-1. Tiled forward prefill attention delivery is complete under the existing opt-in.
-   Current native6229 CLI193.592prefilltok/s is a delivery diagnostic. Refreshed
-   delivered32K GPU954.503ms: FFN44.91%, attention38.16%,3.38%unassignedinterstage;
-   ordinary-wall1110.958ms retained, not substituted for controlled913.536ms call.
-   F32 MMA PV now has a positiveHOLD: observedprimitive maxdelta0, full/sliding
-   ~10.0/14.4%GPU saved, below frozen15%bothshape budget. Next is a separate half-P
-   PV candidate retaining F32QK/max/denominator/O; V is alreadyF16. Independent
-   cancellation/peaked/F64 checks precede saved-prefix model work; no gate widening.
-   Larger forward batching remains a
-   credible fallback: same512 FFN rows4x128/2x256/1x512 are bitwise identical, but
-   N512gate4.464%/down10.045%savings miss frozen5%bothdirections budget gate.
-   GeometryliftHOLD, not a slow-kernel kill or proof128optimal. Existing64x32MMA
-   tile and query-grid-x already reuse weights; weighted~2.9%modelchunk projection
-   assumes block0/alllayers and gate/up transfer, not end-to-end evidence. Preserve
-   down asymmetry for independently motivated scheduling work; no down-onlybatch
-   shortcut without activations from multiple chunks coexisting at the same layer.
-   Historical pre-tile late32K N128 GPU1113.485ms was49.91%
-   attention (42.76%full),38.43%FFN. Reuse KV across GQA siblings/token rows and use
-   matrix QK while initially retaining F32 queries/probabilities. Screen against
-   current online, not the old per-row loser. Only material primitive wins earn
-   live-state integration work. A2x full-attention win projects21.4%late-chunk
-   savings, not whole-prompt savings. PriorH256 one-pass failures constrain shape,
-   not a universal ban on this differentH128/G16 ownership mechanism.
-   FirstF32 tiled primitive saves~34% againstcurrentonline; live8K aggregate checks
-   pass but new uncalibrated per-row RMSscreenfails0.002921>0.002. No promotion;
-   same-input52-layer diagnosis now bounds observed deltas near5.2e-5; N2 shadows
-   match consumedN128 outputs, and allfive selected deployed-logit probes PASS.
-   Preserve original failure, but do not treat the uncalibrated cutoff as a quality
-   boundary. Frozen32K modelchunk transfer nowPASS17.953%wall saved (1113.428 ->
-   913.536ms), endpoint+8fixedcontinuations/allwrittenKV/immutability pass. Persisted
-   32640 common prefix avoids another185.994s extension. DeliveredfullN128 passes
-   small/long plumbing and actualCLI; N16loses,remaindersconservativelystayonline.
-   No newcontextceiling or fresh32K speedupclaim.
-   FasterPV is a separate subsequent candidate, not a confounded rescue.
-2. Structural FFN work/byte reduction:8K packed FFN57.0%,32K decode64.96% (44.200ms).
-   Current packedN128 already usesQ8 MMA; repeated local tile/fusion changes need
-   a new mechanism. Decode logical FFN payload22.029GB/44.2ms is498GB/s equivalent
-   payload rate, NOT measured DRAM or proof of saturation. Sparse skipping requires
-   distribution/error evidence and charged selection/gather costs, not free masks.
-3. Preserve complete-flow checks proportional to changes: current profiles use the
-   generated path and bitwise ordinary/profiled comparisons. Reuse optimized live
-   traversals and independent local oracles; do not impose benchmark endpoints as
-   production cliffs or pay an hour proving an obvious fallback is slow. Retain
-   ordinary33280 decode-wall360.418ms outlier; GPU67.424ms is attribution only.
-4. Retain delivered timing authority:32K controlled decode14.722forwards/s,
-   73.134%saved; fresh32K231.586s/141.494tok/s is a single diagnostic, notABBA.
-   Remaining32K decode attention12.43% makes further attention polishing secondary.
-   Historical online-overlapKILL and split-primitiveHOLD remain; independent
-   whole-forward PASS stands separately. Scratch remainsadmitted540672B.
-5. Retain live-prefix opt-in (6269-token repeated-turn backend216.803 ->3.827s),
-   but do not present avoided prefill as faster fresh inference. Native ATEM,
-   reasoning effort and sampling policy remain unchanged.
+1. Decode FFN removable-work census, especially for warm/long-output flows:
+   measured32K FFN64.96% (44.200ms), attention12.43%. Capture raw gate/up/product
+   before in-place overwrites, exact zeros, gate-only threshold versus product
+   energy, and block-aligned occupancy. Small gates do not bound products; knowing
+   a product after computing up is not avoided work. Price selection, gather and
+   weight-layout costs before a kernel proposal. Logical22.029GB/44.2ms equals
+   498GB/s payload rate, NOT measured DRAM or a roofline. No sparsity claim yet.
+2. Fresh-prefill structural work remains co-primary. Delivered32K GPU954.503ms
+   attribution is FFN44.91%, attention38.16%,3.38%unassignedinterstage; retain the
+   ordinary1110.958ms observer outlier separately from controlled913.536ms calls.
+   Larger batches are a credible fallback: same512 FFN rows4x128/2x256/1x512 are
+   bitwise identical, but N512gate4.464%/down10.045%savings miss frozen5%bothshape
+   budget. GeometryliftHOLD, not a slow-kernel kill or proof128optimal. Weighted
+   ~2.9%modelchunk projection assumes gate/up and block0/alllayer transfer. Down
+   asymmetry may guide scheduling, but down-only N512 needs cross-chunk activations.
+3. Do not keep polishing PV without a new mechanism. F32 MMA PV saves~10.0/14.4%
+   full/sliding, half-P PV~10.85/15.54%; both miss frozen15%full+sliding budget.
+   Numerical screens pass, but neither earns model replay or production precision
+   changes. Four-row/8SG reuse is another ownership tradeoff, not an automatic win:
+   more shared/register residency and a32KiB output spill need explicit handling.
+4. Product reachability is now delivered through separate default-off serving
+   matrix/split switches, with optimized warm/reset/generated-history and actual
+   dispatch proof. Native1158/17 HTTP first-request observations33.903 ->7.166s,
+   optimized SSE retry1.096s, firstmodel(reasoning)delta277ms. These are NOT balanced
+   speedup or OS-cold measurements. ATEM/framing, warm/reset outputs, busy503 and
+   detected-abort cold recovery pass. Do not generalize sampled equivalence or
+   final-user-text TTFT; backend publication still precedes final HTTP framing.
+5. Preserve qualified authority and tight feedback loops: controlled32K tiled
+   chunk17.953%wall saved, controlleddecode14.722forwards/s/73.134%saved. CLI6229
+   193.592prefilltok/s and fresh32K231.586s are diagnostics, not new ABBA evidence.
+   Use saved32640/8064 states, not another long prefix construction or slow reference.
+   Keep prior per-row FAIL, online KILL and split primitive HOLD intact; separate
+   numerical diagnosis and whole-forward PASS retain their own scope.
 
-Evidence: `docs/bench/2026-09-08-muse-long-context/RESULT.md`,
+Evidence: `docs/bench/2026-09-09-muse-serve-math/RESULT.md`,
+`docs/bench/2026-09-08-muse-long-context/RESULT.md`,
 `docs/bench/2026-09-08-muse-math/RESULT.md` and
 `docs/bench/2026-09-08-muse-live-prefix/RESULT.md`. Native ATEM, sampling and reasoning
 contracts stay unchanged; temperature1/top-k64/top-p0.95 is sampled, not greedy.

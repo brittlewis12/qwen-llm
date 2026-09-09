@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-09 - Muse Resident Math Opt-Ins / Real HTTP Delivery PASS
+
+- `5b23b814` separate default-off serve matrix/split startup switches reach the
+  delivered kernels through typed runtime options. Strict0/1 parsing, existing
+  Q8/M4Max/admission, immutable math policy; CLI-only flags remain independent.
+- `ee374e03` optimized warm/reset six-cohort logit/allactiveKV composition PASS
+  51.56s, including129-token suffix and generated-to-packed history. Worst logit
+  delta0.0101401, activeKVRMS0.00007649/newgeneratedKVRMS0.0003433; prefiximmutable.
+- Resident backend PASS21.62s: native1158/4 witnesses468tiled/156split/156reduce;
+  retry/followup/reset bytes/history, capacity preservation, partial-prefill and
+  decode abort recovery, short sampled retry cohort pass. Attempt01 observerFAIL
+  retained: last-lookup census mislabeled preloaded main as reduce; `09d70c1c`
+  tags actual bindings, no math/dispatch change. CPU serve109PASS/12ignored.
+- Actual HTTP1158/17 first request observed33.903s original ->7.166s optimized;
+  prefill32.595 ->6.156s, generation-loop wall1.301 ->1.005s including16forwards.
+  NOT balanced speedup authority
+  or OS-cold trial; startupready0.387/0.391s separate, busy probe onlyinB.
+- Optimized SSE retry1.096s/1157cached, firstmodel(reasoning)delta277ms; exactone
+  terminal plusDONE. Authoredfollowup1.796s/1159cached versus post-disconnectcold
+  recovery7.895s/0cached, retry1.101s/1197cached. Semantic outputs agree across
+  recorded comparisons. Busy503/Retry-After1, detectedBrokenpipe recovery, owned
+  SIGINT130 teardown pass. Bodyseed ignored by existingparser; greedy/default42.
+- Evidence: `docs/bench/2026-09-09-muse-serve-math/RESULT.md`. Defaults/lens unchanged;
+  backend publication precedes HTTPfinalization, caveat retained. Next: actual
+  decodeFFN removable-work census, not further small PV sweeps or roofline claims.
+
 ## 2026-09-09 - Muse Half-P Matrix-PV Screen / Product Reachability Pivot
 
 - `bb64aa8f` separate half-P/half-V PV preserves F32QK/max/denominator/O and

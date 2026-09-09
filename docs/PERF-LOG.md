@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Larger-Batch Projection Screen / Geometry Lift HOLD
+
+- `79538dba` actual block0 Q8 gate/down weights, identical512 synthetic activation
+  rows:4x128/2x256/1x512 dispatches in one encoder. All output bytes agree before
+  and after timing; poison/guards and positive timestamps pass. Test0.52s.
+- Gate GPU means10.542562 ->10.225896/10.071979ms (N256/N512 saves3.004/4.464%).
+  Down11.444479 ->10.518354/10.294896ms (8.092/10.045%). N128 control spreads
+  0.08182/0.11105%; N512 gate pairs4.412/4.516%, down9.960/10.130% saved.
+- Frozen>=5%bothrounds/BOTHdirections misses gate, so geometry lift HOLD as the
+  next priority. This is a real positive batching effect, NOT a slow-kernel kill,
+  correctness failure or proof128optimal. No rerun/rescore or session-cap change.
+- Rough2gate+down weighting suggests6.4%FFN/~2.9%model-chunk opportunity, assuming
+  gate represents up and block0 represents all layers. Not end-to-end evidence.
+  Down's longer reduction/fewer output groups motivates future scheduling work;
+  no causal occupancy claim or easy down-only N512 shortcut. Existing control
+  already includes fourN128 dispatches in one encoder.
+- Review reranks F32 MMA PV first: a concrete scalar-arithmetic reduction against
+  delivered tiled attention; retain larger batches as fallback. Raw:
+  `target/profiles/muse-live-prefix/batch-screen-01*`.
+
 ## 2026-09-08 - Muse Tiled Prefill Opt-In Delivered / Native CLI PASS
 
 - `0811cccd` moves the byte-identical frozen shader into the product library and

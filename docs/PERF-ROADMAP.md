@@ -177,12 +177,15 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    Current native6229 CLI193.592prefilltok/s is a delivery diagnostic. Refreshed
    delivered32K GPU954.503ms: FFN44.91%, attention38.16%,3.38%unassignedinterstage;
    ordinary-wall1110.958ms retained, not substituted for controlled913.536ms call.
-   Next cheapest question is larger forward batching:128 is a historical host cap.
-   Screen same512 FFN activation rows as4x128/2x256/1x512 before changing session
-   planning or building full-model N512. Existing64x32MMA tile and query-grid-x
-   already reuse weights; batching promises no automatic arithmetic/byte reduction.
-   Only a repeatable gain earns persisted32K equal-work model replay. F32 MMA PV
-   follows as a separate arithmetic candidate against the now-delivered tile.
+   Next is F32 MMA PV against the delivered tile, with same-input primitive
+   screening before saved-prefix model replay. Larger forward batching remains a
+   credible fallback: same512 FFN rows4x128/2x256/1x512 are bitwise identical, but
+   N512gate4.464%/down10.045%savings miss frozen5%bothdirections budget gate.
+   GeometryliftHOLD, not a slow-kernel kill or proof128optimal. Existing64x32MMA
+   tile and query-grid-x already reuse weights; weighted~2.9%modelchunk projection
+   assumes block0/alllayers and gate/up transfer, not end-to-end evidence. Preserve
+   down asymmetry for independently motivated scheduling work; no down-onlybatch
+   shortcut without activations from multiple chunks coexisting at the same layer.
    Historical pre-tile late32K N128 GPU1113.485ms was49.91%
    attention (42.76%full),38.43%FFN. Reuse KV across GQA siblings/token rows and use
    matrix QK while initially retaining F32 queries/probabilities. Screen against

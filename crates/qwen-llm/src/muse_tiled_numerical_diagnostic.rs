@@ -99,22 +99,25 @@ impl PackedNumericalCapture {
 }
 
 fn diagnostic_prefix_io(session: &MuseGlimmerTextSession, file: &mut std::fs::File, restore: bool) {
+    replay_prefix_io(session, file, restore, DIAGNOSTIC_BASE);
+}
+
+fn replay_prefix_io(
+    session: &MuseGlimmerTextSession,
+    file: &mut std::fs::File,
+    restore: bool,
+    end: usize,
+) {
     use std::io::{Read, Write};
     for layer in 0..52 {
         for tensor in [
-            session
-                .cache_prefix_views(layer, DIAGNOSTIC_BASE)
-                .unwrap()
-                .0,
-            session
-                .cache_prefix_views(layer, DIAGNOSTIC_BASE)
-                .unwrap()
-                .1,
+            session.cache_prefix_views(layer, end).unwrap().0,
+            session.cache_prefix_views(layer, end).unwrap().1,
         ] {
             unsafe {
                 let pointer =
                     (tensor.buffer.contents().as_ptr() as *mut u8).add(tensor.offset as usize);
-                let bytes = DIAGNOSTIC_BASE * 256 * 2;
+                let bytes = end * 256 * 2;
                 if restore {
                     file.read_exact(std::slice::from_raw_parts_mut(pointer, bytes))
                         .unwrap();

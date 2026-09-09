@@ -5097,6 +5097,7 @@ mod tests {
 
     include!("muse_long_context_tests.rs");
     include!("muse_tiled_numerical_diagnostic.rs");
+    include!("muse_tiled_long_transfer.rs");
 
     #[test]
     fn split_decode_selection_uses_visible_work() {

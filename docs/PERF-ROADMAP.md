@@ -185,10 +185,12 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    same-input52-layer diagnosis now bounds observed deltas near5.2e-5; N2 shadows
    match consumedN128 outputs, and allfive selected deployed-logit probes PASS.
    Preserve original failure, but do not treat the uncalibrated cutoff as a quality
-   boundary. Next: frozen-kernel32K live chunk/logit/KV/shortcontinuation transfer,
-   rowwise residuals diagnostic, no full slow-prefix reference. Persisted8064 state
-   reduces diagnostic turnaround51.37->5.47s; extend it once and retain32K replay
-   state. FasterPV is a separate subsequent candidate, not a confounded rescue.
+   boundary. Frozen32K modelchunk transfer nowPASS17.953%wall saved (1113.428 ->
+   913.536ms), endpoint+8fixedcontinuations/allwrittenKV/immutability pass. Persisted
+   32640 common prefix avoids another185.994s extension. Next: deliver frozen tile
+   through existing opt-in after smallestpacked/shortwork screen and actualCLI
+   packed+scalar-tail composition. No newcontextceiling or fresh32K speedupclaim.
+   FasterPV is a separate subsequent candidate, not a confounded rescue.
 2. Structural FFN work/byte reduction:8K packed FFN57.0%,32K decode64.96% (44.200ms).
    Current packedN128 already usesQ8 MMA; repeated local tile/fusion changes need
    a new mechanism. Decode logical FFN payload22.029GB/44.2ms is498GB/s equivalent

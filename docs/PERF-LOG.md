@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse Frozen Tiled 32K Model-Chunk Transfer PASS
+
+- `7d3fab2e` current-online versus frozen F32 tiled N128 at32640: controlled
+  ABBA1113.363/913.323/913.748/1113.492ms, means1113.428 ->913.536ms,
+  17.953%wall saved. Bothpairs17.967/17.939%, A-spread0.01156%; frozen10%mean/
+  bothpair and5%control gatesPASS. Real prefill-call wall, not just kernel timing.
+- Common prefix restores saved tiled8064 then extends current online/matrix once
+  to32640 (185.994s setup), persisting replay state before comparisons. This is a
+  hybrid common prefix, NOT completefresh32K or independent all-online equivalence.
+- Endpoint and8fixed-token continuation logits PASS, all9top1 equal, maxdelta
+  <=0.010963. All128 residual RMS0.000569645 and136newKV RMS0.000409228 pass
+  aggregate gates. Rowwise residual/KV RMS0.001472/0.003959 reported, not gated.
+  Prefix immutable, timed endpoints bitwise, finalB allactiveKV restoration exact.
+- Single admitted session1789870080B plus128MiB CPU allowance; no prefix copy.
+  Whole packet206.33s includes setup/oracles/serialization, not throughput. Raw:
+  `target/profiles/muse-live-prefix/tiled32-01*`; prefix hash
+  `2da45d5f9dbba777c32aa3ac871b9cfe8a35d9ddffdc699e1bc3036eabf3cca1`.
+- Review ranks frozen-tile opt-in delivery before a separate MMA-PV candidate.
+  Next: N16/short-work policy screen and actual packed+scalar-tail CLI plumbing;
+  no new context ceiling. Prior8K per-row FAIL and later diagnostic PASS unchanged.
+
 ## 2026-09-08 - Muse Tiled Same-Input Diagnosis / Selected Readouts PASS
 
 - `7106f3d2` test-only packed observer saves8064-prefix429391872B once; replay

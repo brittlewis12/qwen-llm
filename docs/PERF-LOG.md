@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-08 - Muse F32 Matrix-PV Screen / Positive HOLD
+
+- `dbe54780` test-only F32 QK/PV matrix attention retains delivered2row/G16/32KV
+  geometry. F32 diagonal rescales matrix accumulators only when alpha differs
+  from1; final shared-panel spill preserves float4 output alignment. Shared21504B,
+  no global scratch or production change. Source review precedes first execution.
+- All18 primitive cases pass with observed maxdelta0 versus delivered scalar-PV
+  tile; independent F64 checks unchanged, guards/poison/dispatch witnesses pass.
+  Full32K N128 GPU24.175/24.168 ->21.770/21.723ms (~10.0%saved); sliding2048
+  1.1669/1.1675 ->1.0009/0.9965ms (~14.4%saved). Test0.67s, stable primary controls.
+- Frozen15%mean/bothpairs on both shapes misses: positive HOLD, no live replay or
+  rescoring. Reviewer ranks separately scoped half-P/half-V PV next: preserve F32
+  QK/max/denominator/O; V already F16, probability rounding is the new error.
+  Separate2KiB half-P storage avoids score aliasing/barriers; gates stay unchanged.
+  Four-row/8SG tiling deferred: higher residency cost and32KiB output spill needs
+  another ownership change. Raw: `target/profiles/muse-live-prefix/matrix-pv-01*`.
+
 ## 2026-09-08 - Muse Larger-Batch Projection Screen / Geometry Lift HOLD
 
 - `79538dba` actual block0 Q8 gate/down weights, identical512 synthetic activation

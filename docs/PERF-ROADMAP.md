@@ -177,8 +177,11 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    Current native6229 CLI193.592prefilltok/s is a delivery diagnostic. Refreshed
    delivered32K GPU954.503ms: FFN44.91%, attention38.16%,3.38%unassignedinterstage;
    ordinary-wall1110.958ms retained, not substituted for controlled913.536ms call.
-   Next is F32 MMA PV against the delivered tile, with same-input primitive
-   screening before saved-prefix model replay. Larger forward batching remains a
+   F32 MMA PV now has a positiveHOLD: observedprimitive maxdelta0, full/sliding
+   ~10.0/14.4%GPU saved, below frozen15%bothshape budget. Next is a separate half-P
+   PV candidate retaining F32QK/max/denominator/O; V is alreadyF16. Independent
+   cancellation/peaked/F64 checks precede saved-prefix model work; no gate widening.
+   Larger forward batching remains a
    credible fallback: same512 FFN rows4x128/2x256/1x512 are bitwise identical, but
    N512gate4.464%/down10.045%savings miss frozen5%bothdirections budget gate.
    GeometryliftHOLD, not a slow-kernel kill or proof128optimal. Existing64x32MMA

@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-09 - Muse Half-P Matrix-PV Screen / Product Reachability Pivot
+
+- `bb64aa8f` separate half-P/half-V PV preserves F32QK/max/denominator/O and
+  rescaling. V alreadyF16; P rounding plus matrix accumulation are the arithmetic
+  changes. Shared23552B, no production path change. All18 numerical/guard cases
+  PASS0.68s; worst GPU delta0.000151247/F64error0.000151215 under unchanged gates.
+- Full32K N128 GPU24.140/24.099 ->21.499/21.504ms (~10.85%saved); sliding
+  1.1686/1.1685 ->0.9890/0.9849ms (~15.54%). Stable controls, but full misses
+  frozen15%budget. PositiveHOLD; no context/model replay, precision rollout or
+  rescoring. Extra precision risk earns little versus the F32 prototype here.
+- Fresh source audit identifies higher-confidence product leverage: resident
+  `serve/backend_muse.rs` still loads default math. Its runner already calls the
+  generated-token API, and typed runtime options price split scratch/reach tiled
+  prefill. Next: explicit serve-specific default-off switches, then modest native
+  HTTP and optimized warm/reset/cache composition. CLI timing is NOT HTTP evidence.
+  Keep detected-abort history clearing; backend publication precedes final HTTP
+  framing, an existing caveat rather than a new optimization claim.
+- Independent decodeFFN gate/product census ranks ahead of more PV polishing;
+  no removable-work or DRAM-roofline claim without data. Raw:
+  `target/profiles/muse-live-prefix/half-pv-01*`.
+
 ## 2026-09-08 - Muse F32 Matrix-PV Screen / Positive HOLD
 
 - `dbe54780` test-only F32 QK/PV matrix attention retains delivered2row/G16/32KV

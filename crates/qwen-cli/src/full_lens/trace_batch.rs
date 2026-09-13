@@ -358,6 +358,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
             prepared.token_ids.len(),
             layers.len(),
             args.top_k,
+            args.distribution_summaries,
             request.vectors.len(),
             manifest.transport.hidden_size as usize,
             MAX_TRACE_DOCUMENT_BYTES,
@@ -581,11 +582,12 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
                         })
                         .collect::<Vec<_>>();
                     prompt_workspace
-                        .apply_packed_capture_bound_f16_transport_topk_with_vectors(
+                        .apply_packed_capture_bound_f16_transport_topk_with_distribution_summaries(
                             capture,
                             layer,
                             args.top_k,
                             &tile_vector_positions,
+                            args.distribution_summaries,
                         )
                     .with_context(|| {
                         format!(

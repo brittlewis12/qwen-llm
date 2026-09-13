@@ -162,3 +162,51 @@ layer62 full-vocabulary comparisons in that panel are byte-identical. The earlie
 lease-blocked attempt remains historical evidence, not the current capability
 limit. This does not qualify generic Muse execution, interventions, or scientific
 transfer, and scalar/packed rounding differences remain distinct from fit quality.
+
+## Opt-in full-vocabulary trace summaries
+
+Native Qwen `trace-full --distribution-summaries` (including `--requests-jsonl`)
+adds `distribution_summary` to every returned cell. Without the flag, this field
+is absent and existing output semantics are unchanged. Muse rejects the flag
+before Metal initialization. This does not add live generation capture: packed
+token-ID replay remains a reconstruction, not bit-exact serial decode evidence.
+
+The summary contains `vocab_size`, `entropy_nats`, `logsumexp`, `top_k_mass`,
+`score_max`, `score_mean`, and `score_variance_population`. These are F64 CPU
+reductions of the full deployed F32 logit row, at temperature one, with no sampler
+filters. Variance uses population normalization. Entropy is computed with
+max-shifted weights, not by subtracting two large unshifted logit quantities.
+F64 logsumexp itself can still lose its small normalization increment at extreme
+offsets. These lens probabilities are not calibrated generation probabilities.
+
+The existing GPU path materializes the full vocabulary, selects 16 entries,
+masks those entries, then selects 16 more without a final mask. The summary
+restores all first-pass entries from their saved F32 IDs/values in one bounded
+host row and rejects any non-finite vocabulary tail. No new GPU kernel or head
+evaluation is used. The inspector validates optional fields, vocabulary and
+bounds, and rejects partially summarized trace documents; it never fills old
+artifacts with inferred statistics.
+
+Inspection validation version 2 permits only the immediately adjacent F64
+values around the selected F32 maximum when comparing `score_max`. A retained
+live trace reproduced a one-F64-ULP drift in serde_json's default decimal parser:
+`15.563257217407227` became bits `402f206340000001`, while the selected F32 score
+converted exactly to `402f206340000000`. All 8,384 rejected cells in that
+35,658-cell shard differed only by one ULP in this check. The 17-line score-only
+`distribution_roundtrip_fixture.json` records the first failure (layer 0,
+position 5), without prompt text or token identities. Two-ULP changes and
+neighboring F32 maxima remain rejected. No score calculation, kernel, stored
+statistic, or artifact is changed or clamped. `inspect ... summary` reports
+`distribution_summary_validation_version: 2` for summarized traces, so retained
+version-1-rejected captures can be revalidated without regeneration. Unsummarized
+legacy inspection output omits this field.
+
+For C cells and V vocabulary entries, added CPU work is O(CV), including
+exponentials and several scans, with 4CV bytes of logical shared-buffer readback
+and a 4V-byte host row. This may be expensive. Each summary has 52 bytes of
+numeric payload before layout/JSON overhead; admission reserves an additional
+512 JSON bytes per cell. Existing document/cohort caps remain enforced. GPU
+readout timing does not include CPU reduction; total trace execution wall time
+does. Collectors may explicitly choose a representative subset of complete
+traces for summaries while retaining frozen-reader top-k coverage elsewhere;
+they must record that subset, not claim that every collected cell has statistics.

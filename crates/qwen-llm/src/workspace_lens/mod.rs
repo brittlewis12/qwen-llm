@@ -36,6 +36,8 @@ use std::time::Instant;
 
 mod attn;
 mod dense_ffn;
+mod distribution;
+pub use distribution::WorkspaceLensDistributionSummary;
 mod error;
 mod fit;
 mod gdn;
@@ -814,6 +816,7 @@ pub struct WorkspaceLensPackedVocabularyPosition {
     /// The transported residual at `source_position` predicts this position.
     pub predicts_position: usize,
     pub scores: Vec<WorkspaceLensVocabularyScore>,
+    pub distribution_summary: Option<WorkspaceLensDistributionSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

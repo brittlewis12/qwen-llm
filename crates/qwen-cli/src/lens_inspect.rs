@@ -209,6 +209,8 @@ pub(crate) struct Cell {
     source_token_id: i32,
     predicts_position: usize,
     pub(crate) top_k: Vec<TokenScore>,
+    #[serde(default)]
+    distribution_summary: Option<qwen_llm::workspace_lens::WorkspaceLensDistributionSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -403,6 +405,8 @@ struct SummaryView {
     layer_count: usize,
     cell_count: usize,
     captured_top_k: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distribution_summary_validation_version: Option<u32>,
     score: ScoreView,
     rendering: Option<RenderingView>,
     vectors: Option<VectorView>,
@@ -919,6 +923,15 @@ fn validate_trace(document: &TraceDocument) -> Result<()> {
         document.cells.len()
     );
     let mut coordinates = HashSet::new();
+    let summarized_cells = document
+        .cells
+        .iter()
+        .filter(|cell| cell.distribution_summary.is_some())
+        .count();
+    ensure!(
+        summarized_cells == 0 || summarized_cells == document.cells.len(),
+        "trace distribution summaries must cover every cell when present"
+    );
     for cell in &document.cells {
         ensure!(
             layer_set.contains(&cell.source_layer),
@@ -948,6 +961,26 @@ fn validate_trace(document: &TraceDocument) -> Result<()> {
             "cell top-k exceeds captured top_k"
         );
         let mut token_ids = HashSet::new();
+        if let Some(summary) = &cell.distribution_summary {
+            let vocab_size = document
+                .deployed_model
+                .as_ref()
+                .and_then(|model| model.vocab_size)
+                .context("distribution summary requires deployed vocabulary size")?;
+            ensure!(
+                cell.top_k.len() == document.top_k,
+                "summarized cell must retain the declared top-k"
+            );
+            summary
+                .validate(vocab_size, cell.top_k.iter().map(|score| score.logit))
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "invalid distribution summary at layer {} position {}: {error}",
+                        cell.source_layer,
+                        cell.source_position
+                    )
+                })?;
+        }
         for (rank, score) in cell.top_k.iter().enumerate() {
             if let Some(vocab_size) = document
                 .deployed_model
@@ -1157,6 +1190,13 @@ fn summary_view(document: &TraceDocument) -> SummaryView {
         layer_count: document.selected_layers.len(),
         cell_count: document.cells.len(),
         captured_top_k: document.top_k,
+        distribution_summary_validation_version: document
+            .cells
+            .first()
+            .filter(|cell| cell.distribution_summary.is_some())
+            .map(|_| {
+                qwen_llm::workspace_lens::WorkspaceLensDistributionSummary::VALIDATION_VERSION
+            }),
         score: document.score_semantics.as_ref().map_or(
             ScoreView {
                 kind: None,
@@ -1994,6 +2034,9 @@ fn print_summary(view: &SummaryView) {
         "{} tokens x {} layers = {} cells | captured top-k {}",
         view.token_count, view.layer_count, view.cell_count, view.captured_top_k
     );
+    if let Some(version) = view.distribution_summary_validation_version {
+        println!("distribution summaries validated for all cells | validation version {version}");
+    }
     if let Some(source) = &view.input_source {
         println!(
             "input {source} | add_special_tokens {}",
@@ -2365,6 +2408,7 @@ mod tests {
                     source_token_id: 10 + position as i32,
                     predicts_position: position + 1,
                     top_k: scores(position, layer),
+                    distribution_summary: None,
                 });
             }
         }
@@ -2435,6 +2479,84 @@ mod tests {
             },
             batch: None,
         }
+    }
+
+    #[test]
+    fn distribution_summary_inspector_optional_schema_and_bounds() {
+        use qwen_llm::workspace_lens::WorkspaceLensDistributionSummary;
+        let mut document = fixture(3, true);
+        validate_trace(&document).unwrap();
+        assert!(
+            summary_json(&document)
+                .unwrap()
+                .get("distribution_summary_validation_version")
+                .is_none()
+        );
+        let old_cell = serde_json::json!({"source_layer":0,"source_position":0,
+            "source_token_id":1,"predicts_position":1,"top_k":[]});
+        let parsed: Cell = serde_json::from_value(old_cell.clone()).unwrap();
+        assert!(parsed.distribution_summary.is_none());
+        let mut malformed = old_cell;
+        malformed["distribution_summary"] = serde_json::json!({"vocab_size":32});
+        assert!(serde_json::from_value::<Cell>(malformed).is_err());
+        for cell in &mut document.cells {
+            // The unreturned 30 scores equal the second score; the first is the maximum.
+            let max = f64::from(cell.top_k[0].logit);
+            let other = f64::from(cell.top_k[1].logit);
+            let w = (other - max).exp();
+            let sum = 1.0 + 31.0 * w;
+            let mean = (max + 31.0 * other) / 32.0;
+            cell.distribution_summary = Some(WorkspaceLensDistributionSummary {
+                vocab_size: 32,
+                entropy_nats: sum.ln() - 31.0 * w * (other - max) / sum,
+                logsumexp: max + sum.ln(),
+                top_k_mass: (1.0 + w) / sum,
+                score_max: max,
+                score_mean: mean,
+                score_variance_population: ((max - mean).powi(2) + 31.0 * (other - mean).powi(2))
+                    / 32.0,
+            });
+        }
+        validate_trace(&document).unwrap();
+        assert_eq!(
+            summary_json(&document).unwrap()["distribution_summary_validation_version"],
+            2
+        );
+        let valid = document.cells[0].distribution_summary.clone();
+        document.cells[0].distribution_summary = None;
+        assert!(validate_trace(&document).is_err());
+        document.cells[0].distribution_summary = valid.clone();
+        for field in [
+            "vocab_size",
+            "entropy_nats",
+            "top_k_mass",
+            "score_variance_population",
+            "score_max",
+            "logsumexp",
+        ] {
+            let mut json = serde_json::to_value(valid.as_ref().unwrap()).unwrap();
+            json[field] = if field == "vocab_size" {
+                33.into()
+            } else {
+                (-1.0).into()
+            };
+            document.cells[0].distribution_summary = Some(serde_json::from_value(json).unwrap());
+            assert!(validate_trace(&document).is_err(), "{field}");
+        }
+        document.cells[0].distribution_summary = valid;
+        document.cells[0]
+            .distribution_summary
+            .as_mut()
+            .unwrap()
+            .score_mean = f64::NAN;
+        assert!(validate_trace(&document).is_err());
+        document.cells[0]
+            .distribution_summary
+            .as_mut()
+            .unwrap()
+            .score_mean = 0.0;
+        document.deployed_model.as_mut().unwrap().vocab_size = None;
+        assert!(validate_trace(&document).is_err());
     }
 
     fn score(token_id: u32, rank: usize, display: &str, logit: f32) -> TokenScore {
@@ -2773,6 +2895,7 @@ mod tests {
                     source_token_id: token_id,
                     predicts_position: position + 1,
                     top_k: vec![score(8, 0, "eight", 1.0), score(9, 1, "nine", 0.5)],
+                    distribution_summary: None,
                 });
             }
         }

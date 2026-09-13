@@ -961,6 +961,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         token_ids.len(),
         layers.len(),
         args.top_k,
+        false,
         vector_requests.len(),
         hidden_size,
         MAX_MUSE_TRACE_DOCUMENT_BYTES,
@@ -1510,6 +1511,10 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
 }
 
 fn validate_trace_args(args: &TraceFullArgs) -> Result<()> {
+    ensure!(
+        !args.distribution_summaries,
+        "--distribution-summaries is unsupported for Muse trace-full"
+    );
     validate_lens_input_spec(args.input_spec())?;
     ensure!(
         args.prompt.as_ref().is_none_or(|prompt| !prompt.is_empty()),
@@ -2394,6 +2399,32 @@ fn config_source_count(shards: &[ShardInput]) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn distribution_summary_muse_rejected_before_model_access() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "qwen-lens",
+            "trace-full",
+            "--model",
+            "nonexistent.gguf",
+            "--full-lens",
+            "nonexistent-lens",
+            "--prompt",
+            "hello",
+            "--distribution-summaries",
+        ])
+        .unwrap();
+        let crate::Command::TraceFull(args) = cli.command else {
+            panic!("expected trace-full")
+        };
+        assert!(args.distribution_summaries);
+        assert!(
+            super::validate_trace_args(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("--distribution-summaries")
+        );
+    }
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 

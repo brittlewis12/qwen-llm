@@ -4,6 +4,8 @@ use super::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceLensError {
+    #[error("invalid full-vocabulary distribution summary: {0}")]
+    InvalidDistributionSummary(&'static str),
     #[error("runtime: {0}")]
     Runtime(#[from] RuntimeError),
     #[error("forward: {0}")]

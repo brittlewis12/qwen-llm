@@ -8,6 +8,8 @@ pub(super) const TRACE_MIN_INPUT_TOKEN_JSON_BYTES: usize = 72;
 
 pub(super) const TRACE_MIN_CELL_JSON_BYTES: usize = 90;
 
+pub(super) const TRACE_DISTRIBUTION_SUMMARY_RESERVE_BYTES: usize = 512;
+
 pub(super) const TRACE_MIN_SCORE_JSON_BYTES: usize = 80;
 
 pub(super) const TRACE_VECTOR_JSON_METADATA_RESERVE_BYTES: usize = 256;
@@ -26,10 +28,12 @@ pub(crate) fn trace_vector_reserve_bytes(vector_count: usize, hidden_size: usize
         .context("trace vector reserve overflow")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ensure_trace_document_budget(
     position_count: usize,
     layer_count: usize,
     top_k: usize,
+    distribution_summaries: bool,
     vector_count: usize,
     hidden_size: usize,
     max_document_bytes: usize,
@@ -43,7 +47,16 @@ pub(crate) fn ensure_trace_document_budget(
         .context("trace score count overflow")?;
     let required_row_bytes = position_count
         .checked_mul(TRACE_MIN_INPUT_TOKEN_JSON_BYTES)
-        .and_then(|bytes| bytes.checked_add(cell_count.checked_mul(TRACE_MIN_CELL_JSON_BYTES)?))
+        .and_then(|bytes| {
+            bytes.checked_add(cell_count.checked_mul(
+                TRACE_MIN_CELL_JSON_BYTES
+                    + if distribution_summaries {
+                        TRACE_DISTRIBUTION_SUMMARY_RESERVE_BYTES
+                    } else {
+                        0
+                    },
+            )?)
+        })
         .and_then(|bytes| bytes.checked_add(score_count.checked_mul(TRACE_MIN_SCORE_JSON_BYTES)?))
         .context("trace document size lower bound overflow")?;
     let vector_reserve_bytes = trace_vector_reserve_bytes(vector_count, hidden_size)?;
@@ -193,6 +206,10 @@ pub(crate) struct TraceFullArgs {
     /// Full-vocabulary results per layer and position.
     #[arg(long, default_value_t = 8)]
     pub(crate) top_k: usize,
+
+    /// CPU F64 full-vocabulary statistics of restored F32 logits (native Qwen only).
+    #[arg(long)]
+    pub(crate) distribution_summaries: bool,
 
     /// Optional input-token budget below the model context; inputs are never truncated.
     #[arg(long)]
@@ -394,6 +411,9 @@ pub(super) struct TraceFullCell {
     pub(super) source_token_id: i32,
     pub(super) predicts_position: usize,
     pub(super) top_k: Vec<TraceFullTokenScore>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) distribution_summary:
+        Option<qwen_llm::workspace_lens::WorkspaceLensDistributionSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -611,6 +631,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         token_ids.len(),
         layers.len(),
         args.top_k,
+        args.distribution_summaries,
         args.vectors.len(),
         manifest.transport.hidden_size as usize,
         MAX_TRACE_DOCUMENT_BYTES,
@@ -767,11 +788,12 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
                 .filter(|position| *position >= capture.start_position() && *position < capture_end)
                 .collect::<Vec<_>>();
             let readout = full_readout_workspace
-                .apply_packed_capture_bound_f16_transport_topk_with_vectors(
+                .apply_packed_capture_bound_f16_transport_topk_with_distribution_summaries(
                     capture,
                     layer,
                     args.top_k,
                     &tile_vector_positions,
+                    args.distribution_summaries,
                 )
                 .with_context(|| {
                     format!(
@@ -823,6 +845,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
                     source_token_id: position.source_token_id,
                     predicts_position: position.predicts_position,
                     top_k,
+                    distribution_summary: position.distribution_summary,
                 });
             }
         }
@@ -977,6 +1000,7 @@ pub(super) fn append_trace_full_prompt_readout(
             source_token_id: position.source_token_id,
             predicts_position: position.predicts_position,
             top_k,
+            distribution_summary: position.distribution_summary,
         });
     }
     Ok(())

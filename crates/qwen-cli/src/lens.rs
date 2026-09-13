@@ -645,6 +645,10 @@ fn read_full(args: ReadFullArgs) -> Result<()> {
 
 fn trace_full(args: TraceFullArgs) -> Result<()> {
     let muse = muse_full_lens::is_artifact_for_model(&args.full_lens, &args.model)?;
+    ensure!(
+        !args.distribution_summaries || !muse,
+        "--distribution-summaries supports the native Qwen trace-full path only; Muse is unsupported"
+    );
     if args.requests_jsonl.is_some() {
         ensure!(
             !muse,

@@ -1,0 +1,17 @@
+{
+  "source_layer": 0,
+  "source_position": 5,
+  "top_logits": [
+    15.563257, 10.897903, 9.649909, 9.343021,
+    9.250001, 9.009391, 8.93995, 8.865671
+  ],
+  "distribution_summary": {
+    "vocab_size": 248320,
+    "entropy_nats": 2.035882831925981,
+    "logsumexp": 15.738919839360598,
+    "top_k_mass": 0.8556013402292195,
+    "score_max": 15.563257217407227,
+    "score_mean": -0.16582130341843082,
+    "score_variance_population": 2.768435976155596
+  }
+}

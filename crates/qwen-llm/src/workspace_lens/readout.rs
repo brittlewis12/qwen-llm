@@ -382,6 +382,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             Some(transport_bytes),
             top_k,
             transported_source_positions,
+            false,
         )?;
         self.bind_f16_transport(transport_bytes)?;
         self.apply_packed_capture_bound_f16_transport_topk_with_vectors(
@@ -401,6 +402,24 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
         top_k: usize,
         transported_source_positions: &[usize],
     ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
+        self.apply_packed_capture_bound_f16_transport_topk_with_distribution_summaries(
+            capture,
+            source_layer,
+            top_k,
+            transported_source_positions,
+            false,
+        )
+    }
+
+    /// Opt-in full-vocabulary CPU reduction; retains only one host logit row.
+    pub fn apply_packed_capture_bound_f16_transport_topk_with_distribution_summaries(
+        &mut self,
+        capture: &WorkspaceLensPackedPostBlockCapture<'_>,
+        source_layer: u32,
+        top_k: usize,
+        transported_source_positions: &[usize],
+        distribution_summaries: bool,
+    ) -> Result<WorkspaceLensPackedFullVocabularyReadout, WorkspaceLensError> {
         if !self.transport_bound {
             return Err(WorkspaceLensError::FullReadoutTransportNotBound);
         }
@@ -410,6 +429,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             None,
             top_k,
             transported_source_positions,
+            distribution_summaries,
         )?;
         let PackedFullReadoutValidation {
             layer_slot,
@@ -547,7 +567,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             pass_elements,
             "packed readout second-pass logits",
         )?;
-        let positions = build_packed_vocabulary_positions(
+        let mut positions = build_packed_vocabulary_positions(
             capture.token_ids(),
             capture.start_position(),
             top_k,
@@ -557,6 +577,29 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             &second_ids,
             &second_values,
         )?;
+        if distribution_summaries {
+            let row_bytes = checked_product(vocab_size, std::mem::size_of::<f32>())?;
+            enforce_workspace_lens_byte_budget("distribution summary CPU row", row_bytes)?;
+            for (row, position) in positions.iter_mut().enumerate() {
+                let tensor = logits.view_subrange(
+                    u64::try_from(checked_product(row, vocab_size)?)
+                        .map_err(|_| WorkspaceLensError::SizeOverflow)?,
+                    vec![vocab_size as u64],
+                );
+                let mut values =
+                    read_f32_fallible(&tensor, vocab_size, "distribution summary CPU row")?;
+                let start = checked_product(row, MPS_FULL_READOUT_TOP_K)?;
+                let end = start + MPS_FULL_READOUT_TOP_K;
+                super::distribution::restore_masked_distribution_row(
+                    &mut values,
+                    &first_ids[start..end],
+                    &first_values[start..end],
+                )?;
+                position.distribution_summary = Some(
+                    super::distribution::summarize_distribution_row(&values, &position.scores)?,
+                );
+            }
+        }
         let transported_vectors = read_packed_transported_vectors(
             &transported,
             capture,
@@ -585,6 +628,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
         transport_bytes: Option<&[u8]>,
         top_k: usize,
         transported_source_positions: &[usize],
+        distribution_summaries: bool,
     ) -> Result<PackedFullReadoutValidation, WorkspaceLensError> {
         if !std::ptr::eq(self.model, capture.model) {
             return Err(WorkspaceLensError::PackedCaptureModelMismatch);
@@ -632,6 +676,13 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             .and_then(|bytes| bytes.checked_add(logits_bytes))
             .and_then(|bytes| bytes.checked_add(compact_bytes))
             .and_then(|bytes| bytes.checked_add(transported_vector_bytes))
+            .and_then(|bytes| {
+                bytes.checked_add(if distribution_summaries {
+                    vocab_size.checked_mul(std::mem::size_of::<f32>())?
+                } else {
+                    0
+                })
+            })
             .ok_or(WorkspaceLensError::SizeOverflow)?;
         enforce_workspace_lens_byte_budget(
             "packed full-vocabulary F16 transport readout",
@@ -959,6 +1010,7 @@ pub(super) fn build_packed_vocabulary_positions(
             source_token_id,
             predicts_position,
             scores,
+            distribution_summary: None,
         });
     }
     Ok(positions)

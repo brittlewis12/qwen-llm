@@ -577,6 +577,7 @@ fn test_trace_full_args() -> TraceFullArgs {
         no_special_tokens: false,
         layers: vec![0, 31, 62],
         top_k: 8,
+        distribution_summaries: false,
         max_tokens: None,
         vectors: Vec::new(),
         identity_cache: None,
@@ -1045,6 +1046,7 @@ fn trace_document_budget_accepts_tool_transcripts_and_rejects_impossible_artifac
         493,
         51,
         8,
+        false,
         32,
         6_656,
         MAX_TRACE_DOCUMENT_BYTES,
@@ -1061,6 +1063,7 @@ fn trace_document_budget_accepts_tool_transcripts_and_rejects_impossible_artifac
             8_192,
             51,
             8,
+            false,
             0,
             6_656,
             MAX_TRACE_DOCUMENT_BYTES,
@@ -1074,6 +1077,7 @@ fn trace_document_budget_accepts_tool_transcripts_and_rejects_impossible_artifac
             1,
             1,
             1,
+            false,
             vector_count,
             6_656,
             MAX_TRACE_DOCUMENT_BYTES,
@@ -1084,6 +1088,57 @@ fn trace_document_budget_accepts_tool_transcripts_and_rejects_impossible_artifac
     assert_eq!(
         trace_host_result_reserve_bytes(2, MAX_TRACE_DOCUMENT_BYTES).unwrap(),
         3 * MAX_TRACE_DOCUMENT_BYTES as u64
+    );
+}
+
+#[test]
+fn distribution_summary_trace_default_compatibility_and_budget() {
+    assert!(!test_trace_full_args().distribution_summaries);
+    let mut cell = TraceFullCell {
+        source_layer: 0,
+        source_position: 0,
+        source_token_id: 1,
+        predicts_position: 1,
+        top_k: vec![],
+        distribution_summary: None,
+    };
+    let old = serde_json::to_value(&cell).unwrap();
+    assert_eq!(
+        old,
+        serde_json::json!({
+            "source_layer":0,"source_position":0,"source_token_id":1,"predicts_position":1,"top_k":[]
+        })
+    );
+    let old_size = serde_json::to_vec_pretty(&cell).unwrap().len();
+    cell.distribution_summary = Some(qwen_llm::workspace_lens::WorkspaceLensDistributionSummary {
+        vocab_size: u32::MAX,
+        entropy_nats: 1.2345678901234567,
+        logsumexp: f64::MAX,
+        top_k_mass: 0.12345678901234567,
+        score_max: -f64::MAX,
+        score_mean: -f64::MAX,
+        score_variance_population: f64::MAX,
+    });
+    assert!(
+        serde_json::to_vec_pretty(&cell).unwrap().len() - old_size
+            <= TRACE_DISTRIBUTION_SUMMARY_RESERVE_BYTES
+    );
+    assert!(
+        serde_json::to_value(&cell)
+            .unwrap()
+            .get("distribution_summary")
+            .is_some()
+    );
+    let base =
+        ensure_trace_document_budget(128, 63, 8, false, 0, 4096, usize::MAX, "test").unwrap();
+    let with = ensure_trace_document_budget(128, 63, 8, true, 0, 4096, usize::MAX, "test").unwrap();
+    assert_eq!(
+        with - base,
+        128 * 63 * TRACE_DISTRIBUTION_SUMMARY_RESERVE_BYTES
+    );
+    assert!(ensure_trace_document_budget(128, 63, 8, true, 0, 4096, base, "test").is_err());
+    assert!(
+        ensure_trace_document_budget(usize::MAX, 63, 8, true, 0, 4096, usize::MAX, "test").is_err()
     );
 }
 
@@ -1190,6 +1245,7 @@ fn trace_occurrences_count_each_token_once_per_cell_and_sort_deterministically()
             source_token_id: 10,
             predicts_position: 1,
             top_k: vec![trace_score(0, 7), trace_score(1, 5)],
+            distribution_summary: None,
         },
         TraceFullCell {
             source_layer: 2,
@@ -1197,6 +1253,7 @@ fn trace_occurrences_count_each_token_once_per_cell_and_sort_deterministically()
             source_token_id: 11,
             predicts_position: 2,
             top_k: vec![trace_score(0, 5), trace_score(1, 7), trace_score(2, 7)],
+            distribution_summary: None,
         },
         TraceFullCell {
             source_layer: 0,
@@ -1204,6 +1261,7 @@ fn trace_occurrences_count_each_token_once_per_cell_and_sort_deterministically()
             source_token_id: 10,
             predicts_position: 1,
             top_k: vec![trace_score(0, 7), trace_score(1, 9)],
+            distribution_summary: None,
         },
     ];
     let occurrences = aggregate_trace_full_occurrences(&cells, &[2, 0]);

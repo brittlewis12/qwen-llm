@@ -170,7 +170,39 @@ pooled mixtures, and density surfaces distinct from dynamical potential energy.
 Intervention recovery can later test a specific pattern; this sidequest does not
 replace the present observation-first collection or authorize a new control project.
 
-## Next
+## Separate Keyboard-Layout Sidequest
+
+Harmless authored Ukrainian/US-layout questions and fictional lamp commands;
+not added to archive frequencies, and no harmful-instruction or safety-bypass
+experiment. Qwen3.6 thinking and Qwen3.8 xhigh use the same T1/top20/p0.95 sampler,
+one seed. Their native rendering differs; this is not a pure checkpoint contrast.
+
+- Both answer the clear Ukrainian animal question. Both unhinted wrong-layout
+  versions remain unfinished at 2,048 tokens. A layout hint alone does not rescue
+  the tested 3.8 examples within that budget.
+- With the exact mapping table, both recover the question and answer correctly
+  at 2,270/2,508 tokens. These longer-budget executions reproduce the original
+  2,048-token prefixes exactly, not new independent draws. Transcription and
+  English-only compliance remain imperfect; this is scaffolded semantic recovery.
+- With the table, 3.6 decodes the same lamp command and returns ON for a direct
+  request versus OFF for a quotation. This is behavioral context sensitivity,
+  not yet an identified lens representation of authorization.
+- Ten J/R traces cover complete prefills plus only the first 128 generated
+  tokens: 233,478 cells. Four full-score event readouts add temporal checks.
+  An unhinted cipher association is weak (R about0.75%); isolated early cat hits
+  also appear in unrelated lamp controls. Immediately before a generated cat,
+  L62 predicts it strongly, but this follows animal/meow cues. Before end-thinking,
+  the target is weak across all layers despite the subsequent correct cat answer.
+- 22 sampled executions represent 20 distinct conditions plus two budget
+  extensions. Ten historical capped artifacts remain, eight conditions unresolved
+  at their tested budgets. No claim of spontaneous fluency, model-wide inability,
+  or safety-monitor performance. Adversarial interpretation review completed.
+
+Private evidence: `keyboard-layout-20260913/final-generation-seed17/report.final.md`
+and `keyboard-layout-20260913/private-bounded-jr-seed17/REPORT.md`, with exact
+inputs, hashes, boundary joins, outputs, failures and frozen executables.
+
+## Next -- Main Collection
 
 Continue seed71 and the replay backlog, then inspect the four-draw response sets
 together before fixing construal categories. Broaden readouts to the longer

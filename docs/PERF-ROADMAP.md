@@ -306,6 +306,42 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 
+### September 14 Reopening: Portable Donor Mechanisms
+
+Flash-Next is the active optimization priority, ahead of further Muse microkernel
+work. Inspect mechanisms before demanding a matched competitor benchmark or
+different quant downloads. DwarfStar `9139e2a` has real portable M4 decode paths;
+its special quant readers and M5 NAX are not prerequisites to transferring them.
+The community M4 report (~366-379 prefill, ~39-40 ordinary /50-52 MTP decode on
+older fork builds) shows a reported decode-throughput gap motivating investigation,
+not an isolated engine speedup or proof of a threefold M4 prefill deficit.
+
+1. **Native qualification of split decode QSA.** Research `cea41b05` passes12
+   independent-F64/guard cases and saves85.762%/85.521% of the complete warm
+   attention-chain GPU at2048/2051 IDs. First unstable timing remains
+   INCONCLUSIVE; separate symmetric-warmup confirmation is the authority.
+   This is not native throughput. Use the existing2179-token SSH fixture and
+   four teacher-forced tokens from one current packed prefix. Restore GPU state,
+   committed lengths and PLE history, prove baseline replay, then compare full
+   logits/downstream state and actual forward timing. One shared scratch, no
+   per-layer unpriced allocations, no slow scalar-prefill reference. Default
+   stays unchanged until this earns composition authority.
+2. **Delete redundant QSA RMS work.** Local singleton norm/RoPE kernels compute
+   an entire head's scalar RMS in every output thread; donor computes once per
+   head. Compare cooperative reduction versus exact-order broadcast. Preserve
+   our pooled-F16 rounding contract rather than importing donor arithmetic.
+3. **Projection-body work, not launch savings.** HC rank320 gate consumption
+   and local wide-Q8/strict-F32 packed projection donors remain concrete next
+   mechanisms. Generic Q8 GEMV already largely matches donor topology. GDN R4
+   vector ownership is lower priority given old complete-middle/blocked losses;
+   grouped-MoE source overlap does not justify retrying closed small bucket work.
+
+Primitive evidence and donor source map:
+`docs/bench/2026-09-14-qwen4exp-donor-split/RESULT.md`. `09553fb9` separately repairs
+the incumbent's36-byte dynamic scratch API violation by rounding to48 bytes,
+without changing arithmetic. Earlier lane closures below retain their original
+scope; they do not rule out the newly identified split-softmax algorithm.
+
 The first MoE checkpoint deliberately uses the scalar, stable 512-way top-10
 selector. After end-to-end decode exists, attribute routing separately and test
 a cooperative selector only if the scalar scan is material. Any replacement

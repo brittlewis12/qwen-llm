@@ -8,6 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 mod split_decode;
+mod rms_broadcast;
 
 const QSA_ORACLE_JSON: &str = include_str!("../../tests/fixtures/qwen4exp_qsa_text_f16_v1.json");
 const QSA_ORACLE_F32: &[u8] = include_bytes!("../../tests/fixtures/qwen4exp_qsa_text_f16_v1.f32");

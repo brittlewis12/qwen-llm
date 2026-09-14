@@ -1558,6 +1558,21 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
     for (query_count, repetitions) in [(1, 1), (32, 3)] {
         let fixture = selected_attention_fixture(&ctx, query_count);
         let g = fixture.geometry;
+        let (value_kernel, value_grid) = if configured_qwen4exp_qsa_gqa4_value_enabled() {
+            (
+                "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
+                [
+                    (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
+                    g.kv_heads as u64,
+                    query_count as u64,
+                ],
+            )
+        } else {
+            (
+                "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
+                [g.query_heads as u64, query_count as u64, 1],
+            )
+        };
         let start_position = g.output_width();
         let packed = fixture.scratch.views(query_count).unwrap();
         for _ in 0..repetitions {
@@ -1681,7 +1696,7 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
                     "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
                     "kernel_qwen4exp_qsa_expand_ids_packed_i32",
                     "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
-                    "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
+                    value_kernel,
                 ]
             );
             assert_dispatch_shape(
@@ -1699,12 +1714,8 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
             assert_dispatch_shape(
                 &census,
                 "qwen4exp.qsa.selected_attention.packet",
-                "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
-                [
-                    (g.query_heads / g.kv_heads / PACKED_ATTENTION_HEADS_PER_TG) as u64,
-                    g.kv_heads as u64,
-                    query_count as u64,
-                ],
+                value_kernel,
+                value_grid,
                 [ATTENTION_THREADS as u64, 1, 1],
             );
         }

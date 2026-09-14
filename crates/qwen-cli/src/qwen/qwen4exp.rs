@@ -9,6 +9,16 @@ pub(crate) const QWEN4EXP_PACKED_PREFILL_PROFILE_ENV: &str = "QWEN4EXP_PACKED_PR
 pub(crate) const QWEN4EXP_PACKED_SELECTED_QSA_ENV: &str = "QWEN4EXP_PACKED_SELECTED_QSA";
 
 pub(crate) const QWEN4EXP_FULL_SHARD_PREFETCH_ENV: &str = "QWEN4EXP_FULL_SHARD_PREFETCH";
+pub(crate) const QWEN4EXP_QSA_SPLIT_DECODE_ENV: &str = "QWEN4EXP_QSA_SPLIT_DECODE";
+
+pub(crate) fn parse_qwen4exp_split_decode(value: Option<&std::ffi::OsStr>) -> Result<bool> {
+    match value {
+        None => Ok(false),
+        Some(value) if value == "0" => Ok(false),
+        Some(value) if value == "1" => Ok(true),
+        _ => bail!("{QWEN4EXP_QSA_SPLIT_DECODE_ENV} must be 0 or 1"),
+    }
+}
 
 pub(crate) const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 
@@ -494,6 +504,11 @@ pub(crate) fn run_qwen4exp_single_turn(
         .stop_token_ids()
         .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
     validate_qwen4exp_stop_tokens(&stop_tokens, vocab_size)?;
+    let decode_options = qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions {
+        split_qsa: parse_qwen4exp_split_decode(
+            std::env::var_os(QWEN4EXP_QSA_SPLIT_DECODE_ENV).as_deref(),
+        )?,
+    };
     let layer_profile_enabled = qwen_llm::env_flag::read_default_off(QWEN4EXP_LAYER_PROFILE_ENV);
     let packed_profile_enabled =
         qwen_llm::env_flag::read_default_off(QWEN4EXP_PACKED_PREFILL_PROFILE_ENV);
@@ -577,11 +592,12 @@ pub(crate) fn run_qwen4exp_single_turn(
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for Qwen3.8-Flash-Next")?;
     let (mut loaded, packed_fallback) = if packed_prefill_requested {
-        match Qwen4ExpLoadedModel::load_with_packed_prefill(
+        match Qwen4ExpLoadedModel::load_with_decode_options(
             &ctx,
             gguf,
             capacity,
-            prompt_tokens.len(),
+            Some(prompt_tokens.len()),
+            decode_options,
         ) {
             Ok(loaded) => (loaded, false),
             Err(packed_error) => {
@@ -593,7 +609,13 @@ pub(crate) fn run_qwen4exp_single_turn(
                 eprintln!(
                     "qwen4exp: packed prefill unavailable ({packed_error}); retrying scalar admission"
                 );
-                match Qwen4ExpLoadedModel::load(&ctx, gguf, capacity) {
+                match Qwen4ExpLoadedModel::load_with_decode_options(
+                    &ctx,
+                    gguf,
+                    capacity,
+                    None,
+                    decode_options,
+                ) {
                     Ok(loaded) => (loaded, true),
                     Err(scalar_error) => {
                         return Err(anyhow!(
@@ -605,12 +627,22 @@ pub(crate) fn run_qwen4exp_single_turn(
         }
     } else {
         (
-            Qwen4ExpLoadedModel::load(&ctx, gguf, capacity)
-                .context("load admitted Qwen3.8-Flash-Next weights and text session")?,
+            Qwen4ExpLoadedModel::load_with_decode_options(
+                &ctx,
+                gguf,
+                capacity,
+                None,
+                decode_options,
+            )
+            .context("load admitted Qwen3.8-Flash-Next weights and text session")?,
             false,
         )
     };
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    eprintln!(
+        "qwen4exp: qsa_split_decode={} eligible_ids=2048..2051 rollback={QWEN4EXP_QSA_SPLIT_DECODE_ENV}=0",
+        loaded.split_decode_enabled()
+    );
     let admission = loaded.admission();
     let packed_prefill_capacity = loaded.packed_prefill_capacity();
     let packed_selected_requested = loaded.packed_selected_requested();

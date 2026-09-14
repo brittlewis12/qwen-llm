@@ -31,6 +31,13 @@ pub(crate) fn metal_process_lease_path() -> Result<PathBuf, MetalError> {
         std::env::temp_dir().join(format!("qwen-llm-metal-tests-{}", std::process::id()));
     #[cfg(not(test))]
     let directory = PathBuf::from("/tmp").join(format!("qwen-llm-{uid}"));
+    secure_metal_process_lease_path(directory, uid)
+}
+
+fn secure_metal_process_lease_path(
+    directory: PathBuf,
+    uid: libc::uid_t,
+) -> Result<PathBuf, MetalError> {
     match std::fs::symlink_metadata(&directory) {
         Ok(metadata) => {
             if !metadata.is_dir() || metadata.uid() != uid {
@@ -278,6 +285,10 @@ pub(crate) fn ensure_host_wired_memory_is_safe() -> Result<(), MetalError> {
         }
         return Ok(());
     }
+    check_host_wired_memory()
+}
+
+fn check_host_wired_memory() -> Result<(), MetalError> {
     let physical_bytes = host_physical_memory_bytes().ok_or_else(|| {
         MetalError::HostMemoryTelemetry("physical memory size is unavailable".to_string())
     })?;
@@ -296,6 +307,20 @@ pub(crate) fn ensure_host_wired_memory_is_safe() -> Result<(), MetalError> {
         std::thread::sleep(WIRED_MEMORY_STABILIZATION_INTERVAL);
     }
     unreachable!("wired-memory stabilization loop returns on every terminal poll")
+}
+
+/// Unit-test contexts have isolated locks. Model/performance tests must also
+/// retain this production lease until their contexts and GPU resources drop.
+#[cfg(test)]
+pub(crate) fn acquire_metal_benchmark_lease() -> Result<MetalProcessLease, MetalError> {
+    let uid = unsafe { libc::geteuid() };
+    let path = secure_metal_process_lease_path(
+        PathBuf::from("/tmp").join(format!("qwen-llm-{uid}")),
+        uid,
+    )?;
+    let lease = open_metal_process_lease(&path, false)?;
+    check_host_wired_memory()?;
+    Ok(lease)
 }
 
 pub(crate) fn acquire_metal_process_lease() -> Result<Arc<MetalProcessLease>, MetalError> {
@@ -1277,7 +1302,12 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    price_shared_buffer_upper(logical, priced(size, alignment), host_page, u64::MAX),
+                    price_shared_buffer_upper(
+                        logical,
+                        priced(size, alignment),
+                        host_page,
+                        u64::MAX
+                    ),
                     Err(SharedBufferPricingError::InvalidPricing { .. })
                 ),
                 "{logical} {size} {alignment} {host_page}"

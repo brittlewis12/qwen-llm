@@ -2,7 +2,7 @@ use super::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-pub(crate) const SCRATCH_FLOATS: usize = 24 * 64 * 258;
+pub(crate) use super::split_decode::SCRATCH_FLOATS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Record {
@@ -50,26 +50,17 @@ pub(crate) fn with_probe<R>(
     (value, records)
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Args {
-    ids: u32,
-    capacity: u32,
-    splits: u32,
-    keys_per_split: u32,
-}
-
 pub(super) fn try_encode(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     workspace: &QwenSparseAttentionMetalWorkspace,
     position: usize,
     ids: usize,
-) -> Result<bool, Qwen4ExpQsaError> {
+) -> Result<Option<bool>, Qwen4ExpQsaError> {
     BINDING.with(|slot| {
         let binding = slot.borrow();
         let Some(binding) = binding.as_ref() else {
-            return Ok(false);
+            return Ok(None);
         };
         let g = workspace.geometry;
         assert_eq!((g.query_heads, g.kv_heads, g.head_dim), (24, 2, 256));
@@ -82,7 +73,7 @@ pub(super) fn try_encode(
             split: binding.split,
         });
         if !binding.split {
-            return Ok(false);
+            return Ok(Some(false));
         }
         require_tensor(
             "split scratch",
@@ -95,51 +86,7 @@ pub(super) fn try_encode(
         let mut tensors = workspace_tensors(workspace);
         tensors.push(("split scratch", &binding.scratch));
         require_disjoint(&tensors)?;
-        let splits = ids.div_ceil(32).min(64);
-        let args = Args {
-            ids: ids as u32,
-            capacity: g.capacity as u32,
-            splits: splits as u32,
-            keys_per_split: ids.div_ceil(splits) as u32,
-        };
-        let pso = ctx.pipeline("kernel_qwen4exp_qsa_split_f16")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(0, &args);
-        enc.set_tensor(1, &workspace.query);
-        enc.set_tensor(2, &workspace.key_cache);
-        enc.set_tensor(3, &workspace.value_cache);
-        enc.set_tensor(4, &workspace.token_ids);
-        enc.set_tensor(5, &binding.scratch);
-        enc.dispatch(
-            MTLSize {
-                width: splits,
-                height: 2,
-                depth: 1,
-            },
-            MTLSize {
-                width: 128,
-                height: 1,
-                depth: 1,
-            },
-        );
-        let pso = ctx.pipeline("kernel_qwen4exp_qsa_split_merge_f32")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(0, &args);
-        enc.set_tensor(1, &binding.scratch);
-        enc.set_tensor(2, &workspace.raw_gate);
-        enc.set_tensor(3, &workspace.attention);
-        enc.dispatch(
-            MTLSize {
-                width: 24,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 32,
-                height: 1,
-                depth: 1,
-            },
-        );
-        Ok(true)
+        super::split_decode::encode(ctx, enc, workspace, &binding.scratch, ids)?;
+        Ok(Some(true))
     })
 }

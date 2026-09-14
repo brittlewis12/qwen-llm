@@ -98,6 +98,15 @@ serial single-turn generation lane. Multi-token prompts request packed prefill
 by default and log any fallback to scalar admission. JSONL batching, serving,
 prefix or durable caches, and DFlash are not supported for Flash-Next.
 
+Flash-Next has an experimental singleton-attention opt-in:
+`QWEN4EXP_QSA_SPLIT_DECODE=1 qwen run -m MODEL --user "Explain this"`.
+It adds one accounted 1.585 MB scratch per session and uses split attention at
+2048-2051 active IDs; shorter attention uses the existing path. Packed kernels
+are unchanged, but eligible scalar-prefill steps also use the option. Unset or
+`=0` retains default math; values other than 0/1 are rejected. The bounded M4 Max
+comparison saves about 16% decode GPU time, not a general throughput guarantee.
+See `docs/bench/2026-09-14-qwen4exp-donor-split/PRODUCT.md` for qualification limits.
+
 Run `qwen -h` for the common interface or `qwen --help` for the expanded
 research and diagnostics surface.
 

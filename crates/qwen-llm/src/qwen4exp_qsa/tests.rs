@@ -9,6 +9,70 @@ use sha2::{Digest, Sha256};
 
 mod split_decode;
 
+#[test]
+fn product_split_binding_and_route_boundaries() {
+    let _benchmark_lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+    let ctx = MetalContext::new().unwrap();
+    let g = selected_attention_test_geometry(2052);
+    for (ids, enabled) in [
+        (2047, false),
+        (2048, true),
+        (2049, true),
+        (2050, true),
+        (2051, true),
+        (2052, false),
+    ] {
+        assert_eq!(super::split_decode::eligible(g, ids), enabled);
+    }
+    let mut w = QwenSparseAttentionMetalWorkspace::new(&ctx, g).unwrap();
+    let scratch =
+        MetalTensor::zeros_f32(&ctx, vec![super::split_decode::SCRATCH_FLOATS as u64]).unwrap();
+    assert!(w.validate_split_binding(&ctx, Some(&w.query)).is_err());
+    let saved = w.output.clone();
+    w.output = scratch.view_subrange(0, vec![g.hidden_size as u64]);
+    assert!(w.validate_split_binding(&ctx, Some(&scratch)).is_err());
+    w.output = saved;
+    w.validate_split_binding(&ctx, Some(&scratch)).unwrap();
+    w.bind_split_scratch(Some(&scratch));
+    let weights = test_weights(&ctx, g);
+    let input = MetalTensor::zeros_f32(&ctx, vec![g.hidden_size as u64]).unwrap();
+    for length in [1, 2047, 2048, 2049, 2050, 2051] {
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&cmd);
+        crate::metal::dispatch_census_begin();
+        encode_step(
+            &ctx,
+            &enc,
+            &input,
+            weights.borrowed(),
+            &w,
+            length - 1,
+            length,
+        )
+        .unwrap();
+        let rows = crate::metal::dispatch_census_take();
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+        assert!(cmd.error().is_none());
+        assert!(read_f32(&w.output).iter().all(|v| v.is_finite()));
+        let expected = if length >= 2048 {
+            "kernel_qwen4exp_qsa_split_f16"
+        } else {
+            "kernel_qwen4exp_qsa_attention_logits_f16"
+        };
+        assert_eq!(rows.iter().filter(|r| r.kernel == expected).count(), 1);
+        let opposite = if length >= 2048 {
+            "kernel_qwen4exp_qsa_attention_logits_f16"
+        } else {
+            "kernel_qwen4exp_qsa_split_f16"
+        };
+        assert!(!rows.iter().any(|r| r.kernel == opposite));
+    }
+}
+
 const QSA_ORACLE_JSON: &str = include_str!("../../tests/fixtures/qwen4exp_qsa_text_f16_v1.json");
 const QSA_ORACLE_F32: &[u8] = include_bytes!("../../tests/fixtures/qwen4exp_qsa_text_f16_v1.f32");
 

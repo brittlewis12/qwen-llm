@@ -139,6 +139,22 @@ fn qwen4exp_full_shard_prefetch_scope_is_default_off_and_release_scoped() {
 }
 
 #[test]
+fn qwen4exp_split_decode_opt_in_is_strict_and_default_off() {
+    use std::ffi::OsStr;
+    assert!(!parse_qwen4exp_split_decode(None).unwrap());
+    assert!(!parse_qwen4exp_split_decode(Some(OsStr::new("0"))).unwrap());
+    assert!(parse_qwen4exp_split_decode(Some(OsStr::new("1"))).unwrap());
+    for value in ["", "true", "false", " 1", "2"] {
+        assert!(parse_qwen4exp_split_decode(Some(OsStr::new(value))).is_err());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(parse_qwen4exp_split_decode(Some(OsStr::from_bytes(&[0xff]))).is_err());
+    }
+}
+
+#[test]
 fn qwen4exp_full_shard_prefetch_report_requires_complete_exact_read() {
     assert!(validate_qwen4exp_full_shard_prefetch_report(3, 3, 3, 0, 90_000, 90_000).is_ok());
     for invalid in [(2, 3, 0, 90_000), (3, 2, 1, 90_000), (3, 3, 0, 89_999)] {

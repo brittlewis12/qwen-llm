@@ -25,6 +25,8 @@ fn check_guards(storage: &MetalTensor) {
 #[test]
 #[ignore = "serial Metal; model-free Flash-Next split attention numerical and timing screen"]
 fn split_decode_attention_screen() {
+    let _benchmark_lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let ctx = MetalContext::new().expect("real Metal required; no skipped screen");
     let config = Qwen4ExpConfig::flash_next_reference();
     let g = QwenSparseAttentionMetalGeometry::from_config(&config, 3, 4_100).unwrap();

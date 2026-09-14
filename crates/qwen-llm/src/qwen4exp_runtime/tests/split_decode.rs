@@ -61,7 +61,8 @@ fn run(
 }
 
 fn assert_replay(label: &str, a: &Observation, b: &Observation) {
-    for step in 0..STEPS {
+    assert!(a.logits.len() >= b.logits.len());
+    for step in 0..b.logits.len() {
         assert_f32_bits_eq(
             &format!("{label} logits{step}"),
             &a.logits[step],
@@ -99,7 +100,9 @@ fn numerical_state(label: &str, a: &[f32], b: &[f32], rms_limit: f64, abs_limit:
 }
 
 fn assert_numeric(a: &Observation, b: &Observation, tensors: &[MetalTensor]) {
-    for step in 0..STEPS {
+    assert_eq!(a.logits.len(), b.logits.len());
+    let steps = a.logits.len();
+    for step in 0..steps {
         assert_logit_arms_close(
             &format!("native_split step{step}"),
             &a.logits[step],
@@ -130,8 +133,8 @@ fn assert_numeric(a: &Observation, b: &Observation, tensors: &[MetalTensor]) {
             ),
             GgmlType::F16 => {
                 let (start, end) = match tensor.shape.as_slice() {
-                    [128, _] => ((PREFIX / 4) * 128 * 2, ((PREFIX + STEPS) / 4) * 128 * 2),
-                    [256, 2, _] => (PREFIX * 512 * 2, (PREFIX + STEPS) * 512 * 2),
+                    [128, _] => ((PREFIX / 4) * 128 * 2, ((PREFIX + steps) / 4) * 128 * 2),
+                    [256, 2, _] => (PREFIX * 512 * 2, (PREFIX + steps) * 512 * 2),
                     shape => panic!("unknown persistent F16 shape {shape:?}"),
                 };
                 assert_eq!(&a[..start], &b[..start], "old prefix differs {i}");
@@ -159,6 +162,209 @@ fn assert_numeric(a: &Observation, b: &Observation, tensors: &[MetalTensor]) {
             &b,
             rms_limit,
             abs_limit,
+        );
+    }
+}
+
+fn run_product(
+    runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+    tokens: &[u32],
+    split: bool,
+    state: bool,
+) -> Observation {
+    runner
+        .workspace
+        .set_split_decode_for_tests(runner.ctx, split)
+        .unwrap();
+    let mut observed = Observation {
+        logits: Vec::new(),
+        hyper: Vec::new(),
+        state: Vec::new(),
+        timing: Vec::new(),
+    };
+    for (step, &token) in tokens.iter().enumerate() {
+        assert_eq!(runner.next_position(), PREFIX + step);
+        observed
+            .logits
+            .push(runner.forward_token(token).unwrap().to_vec());
+        observed
+            .hyper
+            .push(runner.workspace.final_hyper_for_tests());
+        observed.timing.push(runner.last_token_timing().unwrap());
+        assert!(
+            runner
+                .workspace
+                .qsa_committed_lengths()
+                .iter()
+                .all(|(_, n)| *n == PREFIX + step + 1)
+        );
+        assert_eq!(*runner.workspace.ple_prior_tokens().last().unwrap(), token);
+    }
+    if state {
+        observed.state = snapshot_persistent_state(runner);
+    }
+    observed
+}
+
+#[test]
+#[ignore = "serial Metal; actual split product bindings, one existing prefix and 32 continuation tokens"]
+fn product_split_decode_shared_prefix() {
+    let _benchmark_lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+    let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
+    std::fs::create_dir_all(&parent).unwrap();
+    let artifact = parent.join(format!("qwen4exp-product-split-{}", std::process::id()));
+    std::fs::create_dir(&artifact).unwrap();
+    eprintln!("product_split raw_logit_artifacts={}", artifact.display());
+    let bytes = include_bytes!(
+        "../../../../../docs/bench/2026-08-29-qwen4exp-selected-semantic/natural-ssh.u32le"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97"
+    );
+    let tokens: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
+        .collect();
+    assert_eq!(tokens.len(), PREFIX + 32);
+    let ctx = MetalContext::new().unwrap();
+    let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
+    let config = Qwen4ExpConfig::flash_next_reference();
+    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, PREFIX + 32).unwrap();
+    let mut loaded = Qwen4ExpLoadedModel::load_with_decode_options(
+        &ctx,
+        &gguf,
+        capacity,
+        Some(PREFIX),
+        Qwen4ExpDecodeOptions { split_qsa: true },
+    )
+    .unwrap();
+    assert!(loaded.split_decode_enabled());
+    let mut runner = loaded.create_runner(&ctx).unwrap();
+    assert_eq!(
+        runner
+            .workspace
+            .memory_plan()
+            .allocations()
+            .iter()
+            .filter(|a| a.name == "session.qsa_split")
+            .count(),
+        1
+    );
+    let _selected = Qwen4ExpPackedSelectedQsaOverride::set(true);
+    crate::metal::dispatch_census_begin();
+    let endpoint = runner.prefill(&tokens[..PREFIX]).unwrap().to_vec();
+    let prefill_census = crate::metal::dispatch_census_take();
+    assert!(
+        !prefill_census
+            .iter()
+            .any(|r| r.kernel == "kernel_qwen4exp_qsa_split_f16")
+    );
+    assert_eq!(
+        runner.last_prefill_timing().unwrap().packed_token_count,
+        PREFIX
+    );
+    eprintln!(
+        "product_split prefix {:?}",
+        runner.last_prefill_timing().unwrap()
+    );
+    let checkpoint = runner.workspace.checkpoint_for_tests();
+    let tensors = runner.workspace.persistent_state_tensors();
+    let state_bytes: usize = tensors.iter().map(|t| t.n_bytes() as usize).sum();
+    assert!(state_bytes * 4 + config.vocab_size as usize * 32 * 4 * 3 < 1024 * 1024 * 1024);
+    let prefix = prefix_bytes(&runner);
+    let baseline = run_product(&mut runner, &tokens[PREFIX..], false, true);
+    assert_state_bytes_eq(
+        "product baseline old prefix",
+        &prefix,
+        &prefix_bytes(&runner),
+    );
+    runner.workspace.restore_checkpoint_for_tests(&checkpoint);
+    assert_f32_bits_eq(
+        "product restored endpoint",
+        &endpoint,
+        &runner.logits().unwrap().to_vec(),
+    );
+    let replay = run_product(&mut runner, &tokens[PREFIX..], false, true);
+    assert_replay("product restored baseline", &baseline, &replay);
+    drop(replay);
+    runner.workspace.restore_checkpoint_for_tests(&checkpoint);
+    crate::metal::dispatch_census_begin();
+    let candidate = run_product(&mut runner, &tokens[PREFIX..], true, true);
+    let census = crate::metal::dispatch_census_take();
+    for (name, observation) in [("baseline", &baseline), ("candidate", &candidate)] {
+        let rows: Vec<u8> = observation
+            .logits
+            .iter()
+            .flatten()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        std::fs::write(artifact.join(format!("{name}-32x248320.f32le")), rows).unwrap();
+    }
+    for name in [
+        "kernel_qwen4exp_qsa_split_f16",
+        "kernel_qwen4exp_qsa_split_merge_f32",
+    ] {
+        assert_eq!(
+            census.iter().filter(|r| r.kernel == name).count(),
+            384,
+            "product witness {name}"
+        );
+    }
+    assert!(
+        !census
+            .iter()
+            .any(|r| r.kernel == "kernel_qwen4exp_qsa_attention_logits_f16")
+    );
+    assert_numeric(&baseline, &candidate, &tensors);
+    assert_state_bytes_eq(
+        "product candidate old prefix",
+        &prefix,
+        &prefix_bytes(&runner),
+    );
+    eprintln!(
+        "product_split numerical PASS rows=32 persistent_tensors={} pairs=384",
+        tensors.len()
+    );
+    let mut timings = Vec::new();
+    for measured in [false, true] {
+        for split in [false, true, true, false] {
+            runner.workspace.restore_checkpoint_for_tests(&checkpoint);
+            let observed = run_product(&mut runner, &tokens[PREFIX..PREFIX + 4], split, false);
+            assert_replay(
+                "product timed replay",
+                if split { &candidate } else { &baseline },
+                &observed,
+            );
+            if measured {
+                let gpu: f64 = observed.timing.iter().map(|t| t.gpu_ms.unwrap()).sum();
+                let wall: f64 = observed.timing.iter().map(|t| t.total_wall_ms).sum();
+                assert!(gpu.is_finite() && gpu > 0.0 && wall.is_finite() && wall > 0.0);
+                timings.push((gpu, wall));
+            }
+        }
+    }
+    for (label, axis, floor) in [("GPU", 0, 0.05), ("wall", 1, 0.03)] {
+        let v: Vec<f64> = timings
+            .iter()
+            .map(|t| if axis == 0 { t.0 } else { t.1 })
+            .collect();
+        let a = (v[0] + v[3]) * 0.5;
+        let b = (v[1] + v[2]) * 0.5;
+        let spread = (v[0] - v[3]).abs() / a;
+        let useful =
+            b <= a * (1.0 - floor) && v[1] <= v[0] * (1.0 - floor) && v[2] <= v[3] * (1.0 - floor);
+        let verdict = if spread > 0.05 {
+            "INCONCLUSIVE"
+        } else if useful {
+            "USEFUL"
+        } else {
+            "HOLD"
+        };
+        eprintln!(
+            "product_split {label} four_forwards_abba_ms={v:?} saved_pct={} spread={spread} verdict={verdict}",
+            (1.0 - b / a) * 100.0
         );
     }
 }
@@ -196,6 +402,8 @@ fn prefix_bytes(runner: &Qwen4ExpTextRunner<'_, '_, '_>) -> Vec<Vec<u8>> {
 #[test]
 #[ignore = "serial Metal; one existing UD-Q3_K_XL packed prefix and shared-state decode qualification"]
 fn native_split_decode_shared_prefix() {
+    let _benchmark_lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let bytes = include_bytes!(
         "../../../../../docs/bench/2026-08-29-qwen4exp-selected-semantic/natural-ssh.u32le"
     );

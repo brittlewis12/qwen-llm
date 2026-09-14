@@ -387,6 +387,7 @@ pub struct Qwen4ExpTextSessionMemoryPlan {
     session_priced_upper_bytes: u64,
     packed_capacity: Option<usize>,
     packed_selected_capable: bool,
+    split_decode: bool,
     allocations: Vec<Qwen4ExpTextSessionAllocation>,
 }
 
@@ -449,10 +450,38 @@ impl Qwen4ExpTextSessionMemoryPlan {
         packed_capacity: Option<usize>,
         packed_selected_capable: bool,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
+        Self::for_geometry_with_split_options(
+            ctx,
+            geometry,
+            residency_priced_upper_bytes,
+            packed_capacity,
+            packed_selected_capable,
+            false,
+        )
+    }
+
+    fn for_geometry_with_split_options(
+        ctx: &MetalContext,
+        geometry: &Qwen4ExpTextSessionMetalGeometry,
+        residency_priced_upper_bytes: u64,
+        packed_capacity: Option<usize>,
+        packed_selected_capable: bool,
+        split_decode: bool,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
         if packed_capacity.is_none() && packed_selected_capable {
             return invalid("selected packed QSA scratch requires packed prefill");
         }
         let mut builder = AllocationBuilder::default();
+        if split_decode {
+            if !geometry.packed_qsa_geometry()?.supports_split_decode() {
+                return invalid("split decode requires released QSA geometry");
+            }
+            crate::qwen4exp_qsa::split_decode::preflight(ctx)?;
+            builder.f32(
+                "session.qsa_split",
+                crate::qwen4exp_qsa::split_decode::SCRATCH_FLOATS,
+            )?;
+        }
         add_zero_one_allocations(&mut builder, geometry.zero_one)?;
         if let Some(capacity) = packed_capacity {
             let maximum = geometry.packed_capacity()?;
@@ -514,6 +543,7 @@ impl Qwen4ExpTextSessionMemoryPlan {
             session_priced_upper_bytes,
             packed_capacity,
             packed_selected_capable,
+            split_decode,
             allocations,
         })
     }
@@ -540,6 +570,10 @@ impl Qwen4ExpTextSessionMemoryPlan {
 
     pub fn packed_selected_capable(&self) -> bool {
         self.packed_selected_capable
+    }
+
+    pub fn split_decode_enabled(&self) -> bool {
+        self.split_decode
     }
 
     pub fn priced_upper_bytes_for_sessions(
@@ -622,6 +656,27 @@ pub struct Qwen4ExpTextSessionPlan {
 }
 
 impl Qwen4ExpTextSessionPlan {
+    pub fn with_split_decode(
+        mut self,
+        ctx: &MetalContext,
+        enabled: bool,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        if self.device_registry_id != ctx.device.registryID() {
+            return invalid("split decode plan device mismatch");
+        }
+        if self.memory.split_decode_enabled() == enabled {
+            return Ok(self);
+        }
+        self.memory = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_split_options(
+            ctx,
+            &self.geometry,
+            self.memory.residency_priced_upper_bytes,
+            self.memory.packed_capacity,
+            self.memory.packed_selected_capable,
+            enabled,
+        )?;
+        Ok(self)
+    }
     pub fn for_config(
         ctx: &MetalContext,
         config: &Qwen4ExpConfig,
@@ -963,6 +1018,7 @@ impl Qwen4ExpTextPackedScratch {
 
 pub struct Qwen4ExpTextSessionMetalWorkspace {
     geometry: Qwen4ExpTextSessionMetalGeometry,
+    split_decode_scratch: Option<MetalTensor>,
     zero_one: Qwen4ExpLayersZeroOneMetalWorkspace,
     packed: Option<Qwen4ExpTextPackedScratch>,
     hyper_residual: MetalTensor,
@@ -1027,9 +1083,23 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         admission: MetalMemoryAdmission,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let allocated_before = ctx.current_allocated_size();
+        let split_decode_scratch = if memory.split_decode_enabled() {
+            Some(MetalTensor::zeros_f32(
+                ctx,
+                vec![crate::qwen4exp_qsa::split_decode::SCRATCH_FLOATS as u64],
+            )?)
+        } else {
+            None
+        };
         let mut post_ple = Vec::with_capacity(geometry.post_ple.len());
         for block in &geometry.post_ple {
             post_ple.push(Qwen4ExpPostPleBlockMetalWorkspace::new(ctx, *block)?);
+        }
+        for block in &post_ple {
+            block.validate_split_binding(ctx, split_decode_scratch.as_ref())?;
+        }
+        for block in &mut post_ple {
+            block.bind_split_scratch(split_decode_scratch.as_ref());
         }
         let packed = if let Some(planned_capacity) = memory.packed_prefill_capacity() {
             let scratch = Qwen4ExpTextPackedScratch::new(
@@ -1052,6 +1122,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             None
         };
         let workspace = Self {
+            split_decode_scratch,
             zero_one: Qwen4ExpLayersZeroOneMetalWorkspace::new(ctx, geometry.zero_one)?,
             packed,
             hyper_residual: MetalTensor::zeros_f32(ctx, vec![geometry.hyper_width() as u64])?,
@@ -1144,6 +1215,36 @@ impl Qwen4ExpTextSessionMetalWorkspace {
 
     pub fn geometry(&self) -> &Qwen4ExpTextSessionMetalGeometry {
         &self.geometry
+    }
+
+    pub fn split_decode_enabled(&self) -> bool {
+        self.split_decode_scratch.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_split_decode_for_tests(
+        &mut self,
+        ctx: &MetalContext,
+        enabled: bool,
+    ) -> Result<(), Qwen4ExpTextSessionError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed || self.pending_length.is_some() {
+            return invalid("split binding switch requires a healthy released session");
+        }
+        let scratch = if enabled {
+            Some(self.split_decode_scratch.as_ref().ok_or_else(|| {
+                Qwen4ExpTextSessionError::Invalid("split scratch was not admitted".into())
+            })?)
+        } else {
+            None
+        };
+        for block in &self.post_ple {
+            block.validate_split_binding(ctx, scratch)?;
+        }
+        for block in &mut self.post_ple {
+            block.bind_split_scratch(scratch);
+        }
+        Ok(())
     }
 
     pub fn memory_plan(&self) -> &Qwen4ExpTextSessionMemoryPlan {
@@ -3473,11 +3574,16 @@ fn price_session_allocation(
     host_page_size: u64,
     max_buffer_length: u64,
 ) -> Result<(u64, u64), Qwen4ExpTextSessionError> {
-    crate::metal::price_shared_buffer_upper(logical_bytes, priced, host_page_size, max_buffer_length)
-        .map(|priced| (priced.priced_upper_bytes, priced.alignment))
-        .map_err(|error| {
-            Qwen4ExpTextSessionError::Invalid(format!("session allocation {name:?} {error}"))
-        })
+    crate::metal::price_shared_buffer_upper(
+        logical_bytes,
+        priced,
+        host_page_size,
+        max_buffer_length,
+    )
+    .map(|priced| (priced.priced_upper_bytes, priced.alignment))
+    .map_err(|error| {
+        Qwen4ExpTextSessionError::Invalid(format!("session allocation {name:?} {error}"))
+    })
 }
 
 fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpTextSessionError> {

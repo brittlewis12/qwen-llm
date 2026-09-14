@@ -463,6 +463,11 @@ pub struct Qwen4ExpLoadedModel<'gguf> {
     device_registry_id: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Qwen4ExpDecodeOptions {
+    pub split_qsa: bool,
+}
+
 impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
     pub fn load(
         ctx: &MetalContext,
@@ -500,6 +505,27 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         capacity: Qwen4ExpSessionCapacity,
         packed_prefill_tokens: Option<usize>,
     ) -> Result<Self, Qwen4ExpRuntimeError> {
+        Self::load_with_decode_options(
+            ctx,
+            gguf,
+            capacity,
+            packed_prefill_tokens,
+            Qwen4ExpDecodeOptions::default(),
+        )
+    }
+
+    pub fn load_with_decode_options(
+        ctx: &MetalContext,
+        gguf: &'gguf GgufFile,
+        capacity: Qwen4ExpSessionCapacity,
+        packed_prefill_tokens: Option<usize>,
+        decode: Qwen4ExpDecodeOptions,
+    ) -> Result<Self, Qwen4ExpRuntimeError> {
+        if let Some(tokens) = packed_prefill_tokens
+            && !(2..=capacity.forward_limit).contains(&tokens)
+        {
+            return invalid("packed prompt extent is outside the admitted forward limit");
+        }
         let weight_plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(ctx, gguf)?;
         let expected_capacity = Qwen4ExpSessionCapacity::for_forward_limit(
             weight_plan.config(),
@@ -525,6 +551,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             )?
         };
 
+        let session_plan = session_plan.with_split_decode(ctx, decode.split_qsa)?;
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let aggregate = session_plan
             .memory_plan()
@@ -599,6 +626,12 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
 
     pub fn packed_selected_requested(&self) -> bool {
         qwen4exp_packed_selected_qsa_enabled()
+    }
+
+    pub fn split_decode_enabled(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(Qwen4ExpTextSessionMetalWorkspace::split_decode_enabled)
     }
 
     pub fn packed_selected_active(&self) -> bool {
@@ -4660,9 +4693,8 @@ mod tests {
             ),
         ];
 
-        let model_path = std::path::PathBuf::from(
-            crate::test_fixtures::QWEN4EXP_Q3_K_XL.required(),
-        );
+        let model_path =
+            std::path::PathBuf::from(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required());
         let output_path = std::path::PathBuf::from(
             std::env::var_os("QWEN4EXP_ROUTE_COUNT_CENSUS_OUT")
                 .expect("QWEN4EXP_ROUTE_COUNT_CENSUS_OUT must name the census JSON output"),
@@ -5130,9 +5162,8 @@ mod tests {
             .as_f64()
             .unwrap();
 
-        let model_path = std::path::PathBuf::from(
-            crate::test_fixtures::QWEN4EXP_Q3_K_XL.required(),
-        );
+        let model_path =
+            std::path::PathBuf::from(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required());
         let output_path = std::path::PathBuf::from(
             std::env::var_os("QWEN4EXP_IQ3_GATE_UP_PROBE_OUT")
                 .expect("QWEN4EXP_IQ3_GATE_UP_PROBE_OUT must name a new JSON report"),

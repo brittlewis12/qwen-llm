@@ -308,6 +308,20 @@ impl Qwen4ExpLayersZeroOneMetalWorkspace {
     }
 
     #[cfg(test)]
+    pub(crate) fn checkpoint_history_for_tests(&self) -> PleHistory {
+        self.require_idle().unwrap();
+        assert!(self.pending_history.is_none() && !self.state_poisoned && !self.encode_failed);
+        self.history.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn restore_history_for_tests(&mut self, history: &PleHistory) {
+        self.checkpoint_history_for_tests();
+        assert!(history.next_position() <= self.history.next_position());
+        self.history = history.clone();
+    }
+
+    #[cfg(test)]
     pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
         let mut tensors = self.layer_zero.persistent_state_tensors();
         tensors.extend(self.ple.persistent_state_tensors());

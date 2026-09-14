@@ -466,6 +466,16 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
     }
 
     #[cfg(test)]
+    pub(crate) fn restore_mixer_length_for_tests(&mut self, length: usize) {
+        self.require_idle().unwrap();
+        assert!(!self.state_poisoned && !self.encode_failed);
+        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) = &mut self.mixer
+        {
+            workspace.restore_length_for_tests(length);
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
         self.mixer.persistent_state_tensors()
     }

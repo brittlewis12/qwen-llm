@@ -55,6 +55,9 @@ use std::fmt;
 use std::mem::size_of;
 use std::time::Instant;
 
+#[cfg(test)]
+mod checkpoint;
+
 #[inline(always)]
 fn with_diagnostic_execution_range<R>(
     start_position: usize,

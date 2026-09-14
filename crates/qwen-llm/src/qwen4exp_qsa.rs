@@ -48,6 +48,9 @@ const SELECTED_AUDIT_ORDER_MISMATCH_STATUS: i32 = 5;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
+#[cfg(test)]
+pub(crate) mod split_decode_probe;
+
 crate::env_flag!(
     default_on configured_qwen4exp_qsa_gqa4_logits_enabled,
     "QWEN4EXP_QSA_GQA4_LOGITS"
@@ -1550,6 +1553,15 @@ impl QwenSparseAttentionMetalWorkspace {
 
     pub fn committed_length(&self) -> usize {
         self.committed_length
+    }
+
+    #[cfg(test)]
+    pub(crate) fn restore_length_for_tests(&mut self, length: usize) {
+        self.require_idle().unwrap();
+        assert!(!self.state_poisoned);
+        assert!(self.pending_length.is_none() && self.pending_selected_bands.is_none());
+        assert!(length <= self.committed_length);
+        self.committed_length = length;
     }
 
     #[cfg(test)]
@@ -4248,8 +4260,14 @@ fn encode_step(
     encode_publish_kv(ctx, enc, workspace, position)?;
     let active_id_count =
         visible_blocks.min(g.block_budget()) * g.ratio + sequence_length % g.ratio;
-    encode_attention_logits(ctx, enc, workspace, active_id_count)?;
-    encode_attention_softmax_value(ctx, enc, workspace, active_id_count)?;
+    #[cfg(test)]
+    let split = split_decode_probe::try_encode(ctx, enc, workspace, position, active_id_count)?;
+    #[cfg(not(test))]
+    let split = false;
+    if !split {
+        encode_attention_logits(ctx, enc, workspace, active_id_count)?;
+        encode_attention_softmax_value(ctx, enc, workspace, active_id_count)?;
+    }
     encode_mat_vec_dispatch(
         ctx,
         enc,

@@ -1732,6 +1732,7 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod split_decode;
     use crate::metal::{DispatchCensusRow, evaluate_metal_memory_admission, host_page_size_bytes};
     use crate::qwen4exp_composition_trace::{
         Qwen4ExpCompositionTraceBanks, Qwen4ExpCompositionTracePhase,

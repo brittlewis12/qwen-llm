@@ -308,6 +308,18 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ### September 14 Reopening: Portable Donor Mechanisms
 
+**Lease correction and exclusive completion.** The first real CLI found an
+existing Qwen server holding the production lease. Test contexts had used
+per-process test locks, so all September14 Flash-Next timing/profile authority
+below is provisional; numeric/state checks remain observed passes. The new
+benchmark guard acquires the real production lease and wired-memory check
+before Metal setup and correctly refused the occupied lease. The user then
+approved SIGINT to the verified server; it exited and was not restarted. The
+guarded actual-product32-token packet and real CLI known-answer check now pass.
+New exclusive GPU/executor-wall savings are16.0366%/15.7158%; older unguarded
+timings and coarse profiles remain provisional, not retroactively promoted.
+See `docs/bench/2026-09-14-qwen4exp-donor-split/PRODUCT.md`.
+
 Flash-Next is the active optimization priority, ahead of further Muse microkernel
 work. Inspect mechanisms before demanding a matched competitor benchmark or
 different quant downloads. DwarfStar `9139e2a` has real portable M4 decode paths;
@@ -316,16 +328,18 @@ The community M4 report (~366-379 prefill, ~39-40 ordinary /50-52 MTP decode on
 older fork builds) shows a reported decode-throughput gap motivating investigation,
 not an isolated engine speedup or proof of a threefold M4 prefill deficit.
 
-1. **Deliver native-qualified split decode as an experimental opt-in.**
+1. **Delivered split opt-in; preserve the qualification boundary.**
    `0557d812` passes strict full-logit/hyper/121-state gates over four native
    teacher-forced forwards from one current packed2179 prefix. Warm shared-state
    ABBA saves16.566%GPU/16.143%executorwall; controls agree within0.04%. This is
-   not request throughput or broad quality authority. Replace test-only routing
-   with default-off session-scoped bindings and one priced shared scratch;
-   initially24/2/256 F16 and2048-2051IDs, incumbent outside that envelope. Use
-   the existing32-token continuation for actual-product numerical qualification
-   under unchanged gates, plus the four-forward timing bracket. No new weights,
-   second reference prefix, or repeated coarse profiles required.
+   not request throughput, broad quality authority, or production-exclusive
+   performance evidence. Default-off session-scoped product bindings and one
+   priced shared scratch are implemented;24/2/256 F16 and2048-2051IDs only.
+   Actual-product32-token numeric/state/census checks pass under unchanged gates.
+   New production-lease-protected ABBA saves16.0366%GPU/15.7158%executorwall;
+   real CLI2578/23 known-answer request succeeds. Use explicit
+   `QWEN4EXP_QSA_SPLIT_DECODE=1`; default remains off. No default-promotion claim,
+   new weights, second reference prefix, or repeated coarse profiles.
 2. **Price remaining HC/FFN projection bodies.** Diagnostic native profiles put
    complete QSA blocks at15.304ms aftersplit and34GDN-containing blocks at31.054ms;
    both include HC/FFN, so do not call the latter recurrence cost. HC up K320 has

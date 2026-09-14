@@ -1,5 +1,10 @@
 # Native Split Decode And Leverage Rechart
 
+**Authority correction:** the native test did not hold the production GPU
+lease; `cfg(test)` contexts used isolated per-process locks. Timing and coarse
+attribution below are provisional, not exclusive speedup/delivery authority.
+Numerical/state checks remain observed passes. See [current status](PRODUCT.md).
+
 Decision: **native bounded qualification PASS; GO to experimental opt-in delivery.**
 Implementation `0557d812`, local M4 Max, existing UD-Q3_K_XL. Production math
 and defaults remain unchanged: this checkpoint uses a test-only body override.

@@ -1,5 +1,11 @@
 # Flash-Next Donor Investigation And Split Decode Screen
 
+**Authority correction:** test builds used per-process locks rather than the
+production GPU lease. September14 timing claims here are provisional pending
+exclusive revalidation; numerical checks remain recorded passes. See
+[product status and lease correction](PRODUCT.md). The historical timing
+interpretations below are retained, not current delivery authority.
+
 Follow-up: [native qualification and leverage rechart](NATIVE.md) passes a
 bounded real-model comparison; production opt-in delivery remains next.
 

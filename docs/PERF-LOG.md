@@ -6,6 +6,55 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-14 - Flash-Next Split Product Opt-In / Exclusive Delivery PASS
+
+- Explicit typed library option and strict CLI `QWEN4EXP_QSA_SPLIT_DECODE=1`
+  reach the unchanged split shader in the product metallib. Default remains off;
+  packed/scalar retry loaders retain the option. One priced1,585,152-byte session
+  scratch is shared serially across private QSA children; other sessions separate.
+- User-approved SIGINT stopped only verified serverPID48728; exit confirmed,
+  no forced termination/bypass, server not restarted. New release benchmark
+  acquired production lease plus real wired-memory check before Metal setup.
+- Exclusive actual-product32-row/121-state qualification PASS12.96s,384pairs;
+  sameargmax throughout and unchanged strict numeric gates. Raw32x248320 rows
+  retained in `target/profiles/qwen4exp-product-split-82130/`.
+- Exclusive four-forward ABBA GPU232.632/195.117/195.029/232.032ms, executor-wall
+  237.025/199.644/199.427/236.456ms: savings16.0366%/15.7158%, controlspread
+  0.2582%/0.2403%. Mean and both-pair gates PASS; not request throughput.
+- Actual CLI2578/23 known-answer request returns correct FINAL_JSON at EOS;
+  configuredoptin visible, requeststatusok. Unpaired observed prefill404.88tps,
+  reporteddecode19.79tps/22transitions; not a new speedup or cold-cache claim.
+- Earlier unguarded Sept14 timings/coarse profiles stay PROVISIONAL; this packet
+  establishes new delivery authority, not retroactive promotion. Next HC K320
+  projection body/complete-MoE observation, not further attention polishing.
+  Evidence: `docs/bench/2026-09-14-qwen4exp-donor-split/PRODUCT.md`.
+
+## 2026-09-14 - Flash-Next Production-Lease Correction / Delivery HOLD
+
+- The real opt-in CLI attempt was refused before Metal initialization: production
+  lease owner PID48728 is a long-running `qwen serve` for Qwen3.8-27B-Q8_0. It was
+  not stopped at that stage. No CLI answer or request timing was produced.
+- Investigation found `cfg(test)` Metal contexts use per-process test locks,
+  not the production lock. Earlier September14 Flash-Next component, native and
+  product timings therefore did not establish production-exclusive GPU access.
+  Their performance/attribution authority is PROVISIONAL, superseding earlier
+  PASS/GO timing interpretations here. Stable ABBA controls do not remove this
+  confound. Numerical/state/API-validation checks remain observed passes.
+- Default-off typed product option and shared session scratch are implemented.
+  Actual product bindings pass32 full-logit rows and121 persistent-state gates,
+  with384 split/merge pairs. Unguarded timing observed16.512%GPU/16.151%executor
+  wall savings, NOT accepted exclusive speedup authority. Raw rows preserved in
+  `target/profiles/qwen4exp-product-split-80500/`.
+- Flash-Next qualification entry points now acquire and retain the secured
+  production lease and real wired-memory check before creating Metal contexts.
+  Generic unit-test namespaces are unchanged. The guarded product test refuses
+  PID48728 in0.00s before GPU work, as required; production build check passes.
+- HOLD live-CLI completion and performance-based delivery until an approved
+  exclusive validation window. Rerun only the guarded actual-product packet and
+  real CLI known-answer request, not every historical experiment. No server
+  shutdown, lease bypass, or new model download authorized/performed at that stage.
+  Detail: `docs/bench/2026-09-14-qwen4exp-donor-split/PRODUCT.md`.
+
 ## 2026-09-14 - Flash-Next Native Split PASS / RMS Broadcast Demoted
 
 - `0557d812`: one existing UD-Q3_K_XL current-packed SSH2179 prefix, shared

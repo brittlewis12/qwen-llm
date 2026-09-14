@@ -316,25 +316,35 @@ The community M4 report (~366-379 prefill, ~39-40 ordinary /50-52 MTP decode on
 older fork builds) shows a reported decode-throughput gap motivating investigation,
 not an isolated engine speedup or proof of a threefold M4 prefill deficit.
 
-1. **Native qualification of split decode QSA.** Research `cea41b05` passes12
-   independent-F64/guard cases and saves85.762%/85.521% of the complete warm
-   attention-chain GPU at2048/2051 IDs. First unstable timing remains
-   INCONCLUSIVE; separate symmetric-warmup confirmation is the authority.
-   This is not native throughput. Use the existing2179-token SSH fixture and
-   four teacher-forced tokens from one current packed prefix. Restore GPU state,
-   committed lengths and PLE history, prove baseline replay, then compare full
-   logits/downstream state and actual forward timing. One shared scratch, no
-   per-layer unpriced allocations, no slow scalar-prefill reference. Default
-   stays unchanged until this earns composition authority.
-2. **Delete redundant QSA RMS work.** Local singleton norm/RoPE kernels compute
-   an entire head's scalar RMS in every output thread; donor computes once per
-   head. Compare cooperative reduction versus exact-order broadcast. Preserve
-   our pooled-F16 rounding contract rather than importing donor arithmetic.
-3. **Projection-body work, not launch savings.** HC rank320 gate consumption
-   and local wide-Q8/strict-F32 packed projection donors remain concrete next
-   mechanisms. Generic Q8 GEMV already largely matches donor topology. GDN R4
-   vector ownership is lower priority given old complete-middle/blocked losses;
-   grouped-MoE source overlap does not justify retrying closed small bucket work.
+1. **Deliver native-qualified split decode as an experimental opt-in.**
+   `0557d812` passes strict full-logit/hyper/121-state gates over four native
+   teacher-forced forwards from one current packed2179 prefix. Warm shared-state
+   ABBA saves16.566%GPU/16.143%executorwall; controls agree within0.04%. This is
+   not request throughput or broad quality authority. Replace test-only routing
+   with default-off session-scoped bindings and one priced shared scratch;
+   initially24/2/256 F16 and2048-2051IDs, incumbent outside that envelope. Use
+   the existing32-token continuation for actual-product numerical qualification
+   under unchanged gates, plus the four-forward timing bracket. No new weights,
+   second reference prefix, or repeated coarse profiles required.
+2. **Price remaining HC/FFN projection bodies.** Diagnostic native profiles put
+   complete QSA blocks at15.304ms aftersplit and34GDN-containing blocks at31.054ms;
+   both include HC/FFN, so do not call the latter recurrence cost. HC up K320 has
+   ten Q8 blocks against the generic GEMV's32 initial block slots: two SIMDgroups
+   do no weight-loop work. Investigate a rank-specialized up-plus-gated-mean body,
+   and obtain a bounded complete-MoE observation before another IQ3 topology.
+   Generic large-Q8 GEMV already matches donor topology; keep launch-only fusion,
+   small bucket work and GDN-middle retuning parked.
+3. **Stop polishing the attention body; RMS broadcast demoted.** The exact-order
+   once-per-head candidate `30f65ca5` passes144 component comparisons but shows
+   no timing gain; unstable controls mean INCONCLUSIVE, not a quantified
+   regression. Source is preserved in history and removed from the active tree;
+   no sweep/model replay. Indexer work still grows withcontext/4 beyond the
+   selected-ID plateau: price it at a naturally available long checkpoint,
+   not from this2179-token packet. Other projection donors outrank another RMS
+   implementation unless a new concrete execution mechanism changes the case.
+
+Native outcomes and updated leverage map:
+`docs/bench/2026-09-14-qwen4exp-donor-split/NATIVE.md`.
 
 Primitive evidence and donor source map:
 `docs/bench/2026-09-14-qwen4exp-donor-split/RESULT.md`. `09553fb9` separately repairs

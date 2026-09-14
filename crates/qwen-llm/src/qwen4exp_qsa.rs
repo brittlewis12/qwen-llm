@@ -38,6 +38,8 @@ const INDEX_QUERY_HEADS: usize = 4;
 const MAIN_HEAD_DIM: usize = 256;
 const ATTENTION_THREADS: usize = 256;
 const ATTENTION_SCRATCH_FLOATS: usize = 9;
+const ATTENTION_SCRATCH_BYTES: usize =
+    (ATTENTION_SCRATCH_FLOATS * size_of::<f32>()).next_multiple_of(16);
 const LOGITS_SIMDGROUPS_PER_TG: usize = 8;
 const PACKED_ATTENTION_HEADS_PER_TG: usize = 4;
 const PACKED_ATTENTION_THREADS: usize = 128;
@@ -2815,7 +2817,7 @@ fn preflight_selected_attention_primitives(ctx: &MetalContext) -> Result<(), Qwe
         (
             "kernel_qwen4exp_qsa_attention_softmax_value_packed_f16",
             ATTENTION_THREADS,
-            ATTENTION_SCRATCH_FLOATS * size_of::<f32>(),
+            ATTENTION_SCRATCH_BYTES,
         ),
     ] {
         let pipeline = ctx.pipeline(kernel)?;
@@ -4571,7 +4573,7 @@ pub(crate) fn preflight(
         ("kernel_qwen4exp_qsa_attention_logits_f16", 0),
         (
             "kernel_qwen4exp_qsa_attention_softmax_value_f16",
-            ATTENTION_SCRATCH_FLOATS * size_of::<f32>(),
+            ATTENTION_SCRATCH_BYTES,
         ),
         (
             "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
@@ -5371,7 +5373,7 @@ fn encode_attention_softmax_value_tensors(
     enc.set_tensor(3, token_ids);
     enc.set_tensor(4, logits);
     enc.set_tensor(5, attention);
-    enc.set_threadgroup_memory(0, ATTENTION_SCRATCH_FLOATS * size_of::<f32>());
+    enc.set_threadgroup_memory(0, ATTENTION_SCRATCH_BYTES);
     enc.dispatch(
         MTLSize {
             width: g.query_heads,
@@ -5530,7 +5532,7 @@ fn encode_attention_softmax_value_packed(
     enc.set_tensor(5, selector_status);
     enc.set_tensor(6, logits);
     enc.set_tensor(7, attention);
-    enc.set_threadgroup_memory(0, ATTENTION_SCRATCH_FLOATS * size_of::<f32>());
+    enc.set_threadgroup_memory(0, ATTENTION_SCRATCH_BYTES);
     enc.dispatch(
         MTLSize {
             width: g.query_heads,

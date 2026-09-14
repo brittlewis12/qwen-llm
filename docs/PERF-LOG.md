@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-14 - Flash-Next Donor Split Decode Primitive KEEP
+
+- Investigated pinned DwarfStar `9139e2a` portable Metal paths without new
+  weights or a matched competitor benchmark. M4 community measurements correct
+  the headline comparison: ~366-379 prefill /39-40 ordinary decode /50-52 MTP,
+  on a different quant; not evidence of a threefold prefill gap on our chip.
+- `cea41b05` research-only direct-cache split/GQA attention replaces the long
+  serial value chain in a component fixture, retaining local QK partition,
+  scale, sigmoid and F16 caches. No production route/default or session change.
+- Twelve independent-F64 cases PASS; maximum absolute error `1.148e-6`, all
+  poison/offset guards and immutable cache checks pass. Initial capacity4099
+  admission failure retained; repaired to4100, not a numerical gate change.
+- First timing long-ID controls unstable (82.48%/53.98%): INCONCLUSIVE. Separate
+  fixed symmetric-warmup confirmation passes: 2048 IDs `0.49805 -> 0.07091 ms`,
+  2051 IDs `0.49327 -> 0.07142 ms` complete attention-chain GPU; 85.762%/85.521%
+  saved, A spreads0.0335%/0.0605%. One ABBA of12-chain commands, not12 samples.
+- Metal API validation exposed incumbent36-byte threadgroup scratch rejection;
+  `09553fb9` rounds singleton/packed-fallback binding and preflight to48 bytes,
+  preserving arithmetic. Incumbent and split component API-validation pass
+  afterward; original abort retained. No shader-validation claim.
+- Packed value rollback first failed a hardcoded GQA4 census after GPU/numerical
+  checks succeeded. Corrected test asserts each configured kernel and grid;
+  separate rollback/default API-validation runs pass0.36/0.38s. Failure retained.
+- KEEP prototype, GO to one current native packed prefix plus shared-state
+  teacher-forced forward comparisons. No model-level quality or decode-tps win
+  yet. Next source transfer is once-per-head QSA RMS, not another tiny fusion.
+  Evidence: `docs/bench/2026-09-14-qwen4exp-donor-split/RESULT.md`.
+
 ## 2026-09-09 - Muse Resident Math Opt-Ins / Real HTTP Delivery PASS
 
 - `5b23b814` separate default-off serve matrix/split startup switches reach the

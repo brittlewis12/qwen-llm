@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-14 - Flash-Next Native Split PASS / RMS Broadcast Demoted
+
+- `0557d812`: one existing UD-Q3_K_XL current-packed SSH2179 prefix, shared
+  in-memory checkpoint, four teacher-forced forwards. Baseline restore/replay
+  bitwise across full logits/hyper/final state; candidate48split+48merge witness.
+- Strict full-vocabulary/state gates PASS, all four argmax equal. Worst logit
+  RMS5.720e-6/maxabs1.411e-4; F32 state maxabs6.866e-5, new F16 rows0.001953125.
+  All121persistent tensors checked, oldQSAprefix immutable, unusedsuffix equal.
+- Warm four-forward ABBA: GPU231.342/193.915/192.155/231.385ms, executor-wall
+  235.684/198.530/196.816/235.768ms. Savings16.566%/16.143%, A spreads0.01884%/
+  0.03571%; mean and both-pair gates pass. Not request throughput or general
+  generated-token rate. Total test33.75s; one first-use prefix included.
+- Diagnostic profiles reproduce own-arm full rows/hyper. Complete QSA blocks
+  24.729->15.304ms; remaining34GDN-containing blocks31.054ms includes HC/FFN,
+  not recurrence attribution. Rechart toward HC/FFN projection execution.
+- `30f65ca5` exact-order RMS broadcast:144 component comparisons bytewise PASS,
+  but timingINCONCLUSIVE (A spread28.93%, ABBA0.581524/0.605031/0.588042/0.434545ms
+  for all36calls). No demonstrated gain; remove candidate, keep source/history,
+  no sweep or model replay. Not a reliable regression magnitude or universal kill.
+- Next: default-off split product bindings with one priced shared session scratch
+  and bounded32-token continuation qualification, then HC K320 body / complete-MoE
+  attribution. Default math unchanged; four-token evidence is not broad quality
+  or default-promotion authority. Evidence:
+  `docs/bench/2026-09-14-qwen4exp-donor-split/NATIVE.md`.
+
 ## 2026-09-14 - Flash-Next Donor Split Decode Primitive KEEP
 
 - Investigated pinned DwarfStar `9139e2a` portable Metal paths without new

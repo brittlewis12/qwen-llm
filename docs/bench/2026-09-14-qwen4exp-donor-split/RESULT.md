@@ -1,5 +1,8 @@
 # Flash-Next Donor Investigation And Split Decode Screen
 
+Follow-up: [native qualification and leverage rechart](NATIVE.md) passes a
+bounded real-model comparison; production opt-in delivery remains next.
+
 Decision: **KEEP research prototype; GO to bounded native qualification.**
 No new model download, competitor build, full-model run, default change, or
 end-to-end speedup claim. Implementation: `cea41b05`; separate incumbent Metal

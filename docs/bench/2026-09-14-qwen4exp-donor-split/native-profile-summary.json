@@ -1,0 +1,48 @@
+{
+  "profiles": [
+    {
+      "split": false,
+      "gpu_ms": {
+        "LayersZeroOne": 2.0802089942252855,
+        "GDN_blocks": 30.91491691417938,
+        "QSA_blocks": 24.72895893135177,
+        "Tail": 1.0853749969869708
+      },
+      "counts": {
+        "LayersZeroOne": 1,
+        "GDN_blocks": 34,
+        "QSA_blocks": 12,
+        "Tail": 1
+      }
+    },
+    {
+      "split": true,
+      "gpu_ms": {
+        "LayersZeroOne": 1.9600420012810502,
+        "GDN_blocks": 31.054499020296696,
+        "QSA_blocks": 15.30350101000211,
+        "Tail": 1.0875410007107984
+      },
+      "counts": {
+        "LayersZeroOne": 1,
+        "GDN_blocks": 34,
+        "QSA_blocks": 12,
+        "Tail": 1
+      }
+    }
+  ],
+  "maxima": {
+    "hyper": {
+      "relative_rms": 6.063125576e-06,
+      "absolute": 1.621246338e-05
+    },
+    "F32": {
+      "relative_rms": 3.72524936e-06,
+      "absolute": 6.866455078e-05
+    },
+    "F16": {
+      "relative_rms": 4.937311356e-05,
+      "absolute": 0.001953125
+    }
+  }
+}

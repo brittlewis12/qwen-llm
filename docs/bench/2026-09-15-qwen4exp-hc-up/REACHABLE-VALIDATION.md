@@ -1,5 +1,10 @@
 # Bound The Remaining Packed Signatures Before More Model Runs
 
+Outcome: paired source `c580f0a0`, product repairs `09f54356`. Both original
+signatures reproduce; six paired tests and six final product regressions pass.
+The unchanged native HC packet subsequently passes. See `NATIVE-RESULT.md` for
+numbers and current priorities; the strategy below was frozen before these runs.
+
 IQ4_NL down is repaired at `82a21f9d`, paired proof at `958adb2f`. Native03 still
 aborts before prefix completion. This is not HC numerical/performance evidence.
 Instead of one full-prefix attempt per kernel, inventory the actual artifact and
@@ -7,10 +12,10 @@ source selectors, then test only remaining reachable signatures in isolation.
 
 CPU-only metadata inventory (no Metal or tensor-payload reads), PASS0.04s:
 
--94 IQ3_XXS gate/up tensors (47 layers), already repaired.
--2 IQ4_XS gate/up tensors, both layer2, not yet repaired.
--43 IQ4_NL down tensors, already repaired for M64xN32.
--5 Q8_0 down tensors at layers2,4,30,46,47, not yet repaired.
+- 94 IQ3_XXS gate/up tensors (47 layers), already repaired.
+- 2 IQ4_XS gate/up tensors, both layer2, not yet repaired.
+- 43 IQ4_NL down tensors, already repaired for M64xN32.
+- 5 Q8_0 down tensors at layers2,4,30,46,47, not yet repaired.
 
 All banks have512 experts. Gate/up K2560/M640, down K640/M2560. Source selectors
 in `qwen4exp_moe.rs` use exactly these four dtype/kernel paths. The IQ4_NL

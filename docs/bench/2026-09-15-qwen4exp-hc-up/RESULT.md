@@ -1,5 +1,10 @@
 # HC Component Useful; Native Qualification On Hold
 
+**Current follow-up:** the bounded packed-signature repairs now allow the unchanged
+native HC packet to pass strict32-token/state checks and incremental timing gates.
+See `NATIVE-RESULT.md` for current authority. The earlier HOLD/failures below remain
+historical evidence, not the current first action.
+
 Research implementation/reproducer: `60e644ae`. Isolated product MoE builtin
 repair: `95a71437`. Local M4 Max, existing UD-Q3_K_XL; no new weight downloads.
 All GPU runs hold the production benchmark lease and real wired-memory check.

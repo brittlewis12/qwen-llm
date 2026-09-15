@@ -1,5 +1,10 @@
 # Remaining Packed Boundary: IQ4_NL Down M64xN32
 
+Outcome: paired source `958adb2f`, product repair `82a21f9d`. All planned controls,
+widened boundary and populated equivalence pass; narrow512 reproduces the assertion.
+Final checked-host regressions match the original narrow output fingerprint.
+Further source-bounded repairs complete native qualification; see `NATIVE-RESULT.md`.
+
 Follow-up to `11dcdb5a`. One production-lease-protected native trace identifies
 the remaining assertion at `kernel_moe_down_iq4_nl_f32_grouped_slots`, after the
 repaired grouped-IQ3 dispatch passes encoding. Grid64x40x512, TG128x1x1; the

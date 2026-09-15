@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-15 - Packed Validation Repaired / Native HC Qualification PASS
+
+- IQ4_NL down localized and repaired: paired `958adb2f`, minimal fix `82a21f9d`.
+  Original511 passes/512 asserts; wide512 and populated bitwise comparison pass.
+  Three retained regressions PASS0.12s, checked host matches original output hash.
+- CPU artifact inventory bounds remaining variants: layer2 IQ4_XS gate/up and
+  five Q8 down layers. Both original signatures independently reproduce. Paired
+  `c580f0a0` six tests PASS0.26s; minimal repairs `09f54356` six regressions
+  PASS0.19s, checked-host hashes match original captures. No unrelated signatures,
+  local arithmetic, dispatch shapes, or HC production routing changed.
+- Native04 PASS32.74s, production lease and API validation throughout: one packed
+  SSH2179 prefix, baseline/restored bitwise replay, all32 full-logit/hyper and121
+  state gates,3104 HC calls. Split-QSA ON in both arms. Same argmax throughout,
+  logits maxabs7.624626e-4/RMS3.909643e-5; old prefixes immutable. Raw rows retained
+  in `target/profiles/qwen4exp-native-hc-up-23497/` before candidate gates.
+- Four-forward GPU ABBA193.693500/183.868625/184.009042/194.670708ms saves5.2751%;
+  executor-wall215.273000/204.555957/205.351875/216.268710ms saves5.0132%.
+  Controls0.5032%/0.4615%; frozen mean/pair floors pass, GPU first pair narrowly
+  clears5%. Incremental native executor evidence, not request/default-config speed.
+- Earlier native aborts and component protocol1 failure stay recorded. Final
+  production CLI check passes. Next narrow default-off HC delivery, qualified with
+  split-QSA; complete-MoE observation is next research, not a delivery prerequisite.
+  Keep HC/attention/RMS sweeps parked. Server remains stopped; nothing pushed.
+  Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/NATIVE-RESULT.md`.
+
 ## 2026-09-15 - HC Scheduling Useful / Native Held At Packed MoE Validation
 
 - `60e644ae`: research-only HC K320 Q8 up-plus-mix, eight lanes per branch;

@@ -1,62 +1,74 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 fn dispatch(
     ctx: &MetalContext,
     tensors: &[&MetalTensor],
     gate: bool,
-    wide: bool,
+    checked_host: bool,
     experts: usize,
     n: usize,
     m: usize,
     k: usize,
 ) {
-    let base = if gate {
+    let name = if gate {
         "kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16"
     } else {
         "kernel_moe_down_q8_0_f32_grouped_slots"
     };
-    let name = if wide {
-        format!("{base}_wide_probe")
-    } else {
-        base.into()
-    };
     let command = ctx.queue.commandBuffer().unwrap();
     let encoder = KernelEncoder::begin(&command);
-    encoder.set_pipeline(&ctx.pipeline(&name).unwrap());
-    let args = if gate {
-        vec![
-            m as u32,
-            k as u32,
-            experts as u32,
-            if n == 2048 { 10 } else { 2 },
-            n as u32,
-            (k / 256) as u32,
-            k as u32,
-            0,
-            n as u32,
-        ]
+    if checked_host {
+        if gate {
+            crate::metal::encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16(
+                ctx, &encoder, tensors[0], tensors[1], tensors[2], tensors[3], tensors[4],
+                tensors[5], k, m, experts, 2, n,
+            )
+            .unwrap();
+        } else {
+            crate::metal::encode_moe_down_q8_0_f32_grouped_slots(
+                ctx, &encoder, tensors[0], tensors[1], tensors[2], tensors[3], tensors[4], k, m,
+                experts, n,
+            )
+            .unwrap();
+        }
     } else {
-        vec![m as u32, n as u32, k as u32, (k / 32 * 34) as u32, k as u32]
-    };
-    encoder.set_bytes_slice(0, &args);
-    for (i, tensor) in tensors.iter().enumerate() {
-        encoder.set_tensor(i + 1, tensor);
+        encoder.set_pipeline(&ctx.pipeline(name).unwrap());
+        let args = if gate {
+            vec![
+                m as u32,
+                k as u32,
+                experts as u32,
+                if n == 2048 { 10 } else { 2 },
+                n as u32,
+                (k / 256) as u32,
+                k as u32,
+                0,
+                n as u32,
+            ]
+        } else {
+            vec![m as u32, n as u32, k as u32, (k / 32 * 34) as u32, k as u32]
+        };
+        encoder.set_bytes_slice(0, &args);
+        for (i, tensor) in tensors.iter().enumerate() {
+            encoder.set_tensor(i + 1, tensor);
+        }
+        encoder.set_threadgroup_memory(0, if gate { 16384 } else { 8192 });
+        let grid = MTLSize {
+            width: n.div_ceil(if gate { 16 } else { 32 }),
+            height: m.div_ceil(64),
+            depth: experts,
+        };
+        eprintln!("remaining_index kernel={name} grid={grid:?} TG=128 k={k}");
+        encoder.dispatch(
+            grid,
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
     }
-    encoder.set_threadgroup_memory(0, if gate { 16384 } else { 8192 });
-    let grid = MTLSize {
-        width: n.div_ceil(if gate { 16 } else { 32 }),
-        height: m.div_ceil(64),
-        depth: experts,
-    };
-    eprintln!("remaining_index kernel={name} grid={grid:?} TG=128 k={k}");
-    encoder.dispatch(
-        grid,
-        MTLSize {
-            width: 128,
-            height: 1,
-            depth: 1,
-        },
-    );
     encoder.end();
     command.commit();
     command.waitUntilCompleted();
@@ -64,7 +76,7 @@ fn dispatch(
     assert!(command.error().is_none(), "{:?}", command.error());
 }
 
-fn empty(gate: bool, wide: bool, experts: usize) {
+fn empty(gate: bool, experts: usize) {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let ctx = MetalContext::new().expect("real Metal required");
@@ -86,7 +98,7 @@ fn empty(gate: bool, wide: bool, experts: usize) {
         &ctx,
         &tensors,
         gate,
-        wide,
+        false,
         experts,
         2048,
         if gate { 640 } else { 2560 },
@@ -99,38 +111,26 @@ fn empty(gate: bool, wide: bool, experts: usize) {
 
 #[test]
 #[ignore = "serial production lease; actual-artifact IQ4_XS empty-route validation"]
-fn iq4_xs_original_empty_512() {
-    empty(true, false, 512);
+fn iq4_xs_empty_experts_512() {
+    empty(true, 512);
 }
 
 #[test]
 #[ignore = "serial production lease; actual-artifact Q8 down empty-route validation"]
-fn q8_down_original_empty_512() {
-    empty(false, false, 512);
+fn q8_down_empty_experts_512() {
+    empty(false, 512);
 }
 
 #[test]
-#[ignore = "serial production lease; original IQ4_XS boundary control"]
-fn qualified_iq4_xs_narrow_511() {
-    empty(true, false, 511);
+#[ignore = "serial production lease; IQ4_XS boundary control"]
+fn iq4_xs_empty_experts_511() {
+    empty(true, 511);
 }
 
 #[test]
-#[ignore = "serial production lease; widened IQ4_XS boundary"]
-fn qualified_iq4_xs_wide_512() {
-    empty(true, true, 512);
-}
-
-#[test]
-#[ignore = "serial production lease; original Q8 down boundary control"]
-fn qualified_q8_down_narrow_511() {
-    empty(false, false, 511);
-}
-
-#[test]
-#[ignore = "serial production lease; widened Q8 down boundary"]
-fn qualified_q8_down_wide_512() {
-    empty(false, true, 512);
+#[ignore = "serial production lease; Q8 down boundary control"]
+fn q8_down_empty_experts_511() {
+    empty(false, 511);
 }
 
 fn populated(gate: bool) {
@@ -205,9 +205,9 @@ fn populated(gate: bool) {
     let frozen: Vec<_> = inputs.iter().map(|t| bytes(t)).collect();
     inputs.push(&output);
     let mut observations = Vec::new();
-    for (wide, name) in [(false, "narrow"), (true, "wide")] {
+    for name in ["product", "replay"] {
         write(&output, &vec![f32::NAN; 66 * 70]);
-        dispatch(&ctx, &inputs, gate, wide, 2, 33, 70, k);
+        dispatch(&ctx, &inputs, gate, true, 2, 33, 70, k);
         let values = read(&output);
         std::fs::write(
             artifact.join(format!("{name}-66x70.f32le")),
@@ -218,6 +218,19 @@ fn populated(gate: bool) {
     }
     eprintln!("remaining_index artifacts={}", artifact.display());
     assert_bits(&observations[0], &observations[1]);
+    // Original narrow-signature captures on M4 Max, retained across product replacement.
+    let expected = if gate {
+        "49c3d0b8ebca5a7d1fa78535835446d6b199bd40bfc21141030804d983e3d933"
+    } else {
+        "f9a505f4ce5e8216b078d570f593fbe46e5c67022bb8b7851afc52daecf0b029"
+    };
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(bytemuck::cast_slice(&observations[0]))
+        ),
+        expected
+    );
     let mut nonzero = 0;
     for slot in 0..66 {
         for &value in &observations[1][slot * 70..(slot + 1) * 70] {
@@ -241,13 +254,13 @@ fn populated(gate: bool) {
 }
 
 #[test]
-#[ignore = "serial production lease; IQ4_XS narrow/wide populated equivalence"]
-fn qualified_iq4_xs_populated() {
+#[ignore = "serial production lease; checked IQ4_XS host route against original M4 capture"]
+fn iq4_xs_populated_regression() {
     populated(true);
 }
 
 #[test]
-#[ignore = "serial production lease; Q8 down narrow/wide populated equivalence"]
-fn qualified_q8_down_populated() {
+#[ignore = "serial production lease; checked Q8 down host route against original M4 capture"]
+fn q8_down_populated_regression() {
     populated(false);
 }

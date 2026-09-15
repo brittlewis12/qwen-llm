@@ -1646,7 +1646,8 @@ kernel void kernel_moe_swiglu_bf16_f32_grouped_slots_n16(
     }
 }
 
-kernel void kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
+template <typename Tid>
+kernel void moe_swiglu_iq3_xxs_f32_grouped_slots_n16_index_probe(
         constant moe_group_q4k_args & args [[buffer(0)]],
         device const uchar * srcA_gate     [[buffer(1)]],
         device const uchar * srcA_up       [[buffer(2)]],
@@ -1656,8 +1657,9 @@ kernel void kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
         device       float * dst           [[buffer(6)]],
         threadgroup  uchar * shmem         [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
+        Tid tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const ushort tiitg = ushort(tiitg_wide);
     threadgroup half * sa_g = (threadgroup half *)(shmem);
     threadgroup half * sa_u = (threadgroup half *)(shmem + 4096);
     threadgroup half * sb   = (threadgroup half *)(shmem + 8192);
@@ -1806,6 +1808,18 @@ kernel void kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
     }
 }
 
+
+template [[host_name("kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16")]]
+kernel void moe_swiglu_iq3_xxs_f32_grouped_slots_n16_index_probe<ushort>(
+    constant moe_group_q4k_args &, device const uchar *, device const uchar *,
+    device const float *, device const int *, device const int *, device float *,
+    threadgroup uchar *, uint3, ushort, ushort);
+
+template [[host_name("kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_wide_probe")]]
+kernel void moe_swiglu_iq3_xxs_f32_grouped_slots_n16_index_probe<uint>(
+    constant moe_group_q4k_args &, device const uchar *, device const uchar *,
+    device const float *, device const int *, device const int *, device float *,
+    threadgroup uchar *, uint3, uint, ushort);
 
 kernel void kernel_moe_swiglu_iq3_s_f32_grouped_slots_n16(
         constant moe_group_q4k_args & args [[buffer(0)]],

@@ -15,6 +15,14 @@ use objc2_metal::{
 const SIMD_WIDTH: usize = 32;
 
 #[cfg(test)]
+#[path = "qwen4exp_hc_up_screen.rs"]
+mod hc_up_screen;
+
+#[cfg(test)]
+#[path = "qwen4exp_hc_up_probe.rs"]
+pub(crate) mod hc_up_probe;
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Qwen4ExpHcPackedProjectionArm {
     WideF32Down,
@@ -1081,6 +1089,10 @@ fn encode_read(
         scratch.low_rank,
     )?;
     encode_hc_low_activation(ctx, enc, &scratch.low, scratch.branch_count)?;
+    #[cfg(test)]
+    if hc_up_probe::encode_if_requested(ctx, enc, weights.up, scratch)? {
+        return Ok(());
+    }
     encode_mat_vec_dispatch(
         ctx,
         enc,

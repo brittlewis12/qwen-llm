@@ -4,6 +4,9 @@ use crate::qwen4exp_qsa::split_decode_probe::{SCRATCH_FLOATS, with_probe};
 const PREFIX: usize = 2179;
 const STEPS: usize = 4;
 
+#[path = "hc_up.rs"]
+mod hc_up;
+
 struct Observation {
     logits: Vec<Vec<f32>>,
     hyper: Vec<Vec<f32>>,

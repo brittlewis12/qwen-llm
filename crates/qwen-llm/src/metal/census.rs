@@ -205,6 +205,13 @@ pub(crate) fn census_record_dispatch(grid: MTLSize, threads: MTLSize) {
     }
     DISPATCH_CENSUS.with(|c| {
         if let Some(rows) = c.borrow_mut().as_mut() {
+            #[cfg(test)]
+            if std::env::var_os("QWEN_TEST_DISPATCH_TRACE").is_some() {
+                eprintln!(
+                    "validation_dispatch kernel={} grid={grid:?} threads={threads:?}",
+                    CENSUS_LAST_PSO.with(|p| p.borrow().clone())
+                );
+            }
             rows.push(DispatchCensusRow {
                 family: CENSUS_FAMILY.with(|f| f.get()),
                 tag: CENSUS_TAG.with(|tag| tag.borrow().clone()),

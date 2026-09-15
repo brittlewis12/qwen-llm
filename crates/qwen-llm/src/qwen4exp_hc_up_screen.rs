@@ -11,6 +11,9 @@ const GUARD: usize = 32;
 #[path = "qwen4exp_moe_index_probe.rs"]
 mod moe_index_probe;
 
+#[path = "qwen4exp_moe_down_index_probe.rs"]
+mod moe_down_index_probe;
+
 fn bytes(t: &MetalTensor) -> Vec<u8> {
     unsafe {
         std::slice::from_raw_parts(t.buffer.contents().as_ptr().cast(), t.buffer.length()).to_vec()

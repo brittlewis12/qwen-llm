@@ -306,6 +306,32 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 
+### September 15 Completion: Native HC Useful, Delivery Next
+
+The remaining packed validation blockers are repaired with isolated boundary and
+populated bitwise evidence, not speculative broad edits: `82a21f9d` IQ4_NL down,
+`09f54356` artifact-reachable IQ4_XS gate/up and Q8 down. Unreachable variants stay
+unchanged. The unchanged native HC packet now passes under production GPU custody
+and API validation:32 full-logit/hyper/121-state checks, then incremental GPU
+5.2751% and executor-wall5.0132% savings with split-QSA enabled in both arms.
+Controls0.5032%/0.4615%; frozen mean AND pair floors pass. This is not request
+throughput, default-configuration performance, or broad quality authority.
+
+1. **Deliver narrow default-off HC opt-in**, initially qualified together with
+   split-QSA. Keep the same Q8/four-branch/hidden2560/rank320 shader, incumbent
+   fallback and existing scratch. Exercise actual product bindings with the
+   existing32-token numerical packet and four-forward bracket. HC independently
+   enabled without split needs a separate bounded composition check.
+2. **Measure complete-MoE costs as the next research step**, covering routing,
+   expert work and combination on representative native decode state before
+   choosing another topology. Do not make this a prerequisite for HC delivery.
+3. **Park further HC/attention/RMS body sweeps.** Context-growing index scoring
+   remains separate;2179-token results do not price far-context selection.
+
+Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/NATIVE-RESULT.md`.
+Earlier validation failures and component protocol1 failure remain recorded;
+the HOLD map below is historical, not the current first action.
+
 ### September 15 Rechart: HC Useful, Native Held At Validation Boundary
 
 The source-led rank320 HC up-plus-mix screen is useful: protocol2 complete-HC

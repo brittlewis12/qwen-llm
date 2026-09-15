@@ -1,6 +1,39 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+#[test]
+#[ignore = "CPU-only existing artifact inventory; no Metal context or tensor data reads"]
+fn artifact_packed_expert_dtype_inventory() {
+    let gguf =
+        crate::gguf::GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
+    let mut inventory = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for tensor in &gguf.tensors {
+        if [
+            ".ffn_gate_exps.weight",
+            ".ffn_up_exps.weight",
+            ".ffn_down_exps.weight",
+        ]
+        .iter()
+        .any(|suffix| tensor.name.ends_with(suffix))
+        {
+            eprintln!(
+                "packed_expert_inventory {} {:?} {:?}",
+                tensor.name, tensor.dtype, tensor.shape
+            );
+            inventory
+                .entry(format!("{:?}", tensor.dtype))
+                .or_default()
+                .push(tensor.name.clone());
+        }
+    }
+    for (dtype, names) in inventory {
+        eprintln!(
+            "packed_expert_inventory dtype={dtype} tensors={}",
+            names.len()
+        );
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Args {

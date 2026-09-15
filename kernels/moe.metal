@@ -4890,7 +4890,8 @@ inline void dequantize_iq4_xs_half_grouped(device const block_iq4_xs_local * blk
     }
 }
 
-kernel void kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16(
+template <typename Tid>
+kernel void moe_swiglu_iq4_xs_f32_grouped_slots_n16_index_probe(
         constant moe_group_q4k_args & args                 [[buffer(0)]],
         device const block_iq4_xs_local * srcA_gate        [[buffer(1)]],
         device const block_iq4_xs_local * srcA_up          [[buffer(2)]],
@@ -4900,8 +4901,9 @@ kernel void kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16(
         device       float              * dst              [[buffer(6)]],
         threadgroup  uchar              * shmem            [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
+        Tid tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const ushort tiitg = ushort(tiitg_wide);
     threadgroup half * sa_g = (threadgroup half *)(shmem);
     threadgroup half * sa_u = (threadgroup half *)(shmem + 4096);
     threadgroup half * sb   = (threadgroup half *)(shmem + 8192);
@@ -5051,6 +5053,18 @@ kernel void kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16(
         }
     }
 }
+
+template [[host_name("kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16")]]
+kernel void moe_swiglu_iq4_xs_f32_grouped_slots_n16_index_probe<ushort>(
+    constant moe_group_q4k_args &, device const block_iq4_xs_local *, device const block_iq4_xs_local *,
+    device const float *, device const int *, device const int *, device float *,
+    threadgroup uchar *, uint3, ushort, ushort);
+
+template [[host_name("kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16_wide_probe")]]
+kernel void moe_swiglu_iq4_xs_f32_grouped_slots_n16_index_probe<uint>(
+    constant moe_group_q4k_args &, device const block_iq4_xs_local *, device const block_iq4_xs_local *,
+    device const float *, device const int *, device const int *, device float *,
+    threadgroup uchar *, uint3, uint, ushort);
 
 kernel void kernel_moe_down_q5_K_f32_grouped_slots(
         constant moe_group_q5k_args & args [[buffer(0)]],
@@ -5875,7 +5889,8 @@ kernel void kernel_moe_down_q6_K_f32_grouped_slots(
     }
 }
 
-kernel void kernel_moe_down_q8_0_f32_grouped_slots(
+template <typename Tid>
+kernel void moe_down_q8_0_f32_grouped_slots_index_probe(
         constant moe_group_q6k_args & args [[buffer(0)]],
         device const uchar * srcA         [[buffer(1)]],
         device const float * srcB         [[buffer(2)]],
@@ -5884,8 +5899,9 @@ kernel void kernel_moe_down_q8_0_f32_grouped_slots(
         device       float * dst          [[buffer(5)]],
         threadgroup  uchar * shmem        [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
+        Tid tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const ushort tiitg = ushort(tiitg_wide);
     threadgroup half * sa = (threadgroup half *)(shmem);
     threadgroup half * sb = (threadgroup half *)(shmem + 4096);
 
@@ -5999,6 +6015,16 @@ kernel void kernel_moe_down_q8_0_f32_grouped_slots(
         }
     }
 }
+
+template [[host_name("kernel_moe_down_q8_0_f32_grouped_slots")]]
+kernel void moe_down_q8_0_f32_grouped_slots_index_probe<ushort>(
+    constant moe_group_q6k_args &, device const uchar *, device const float *,
+    device const int *, device const int *, device float *, threadgroup uchar *, uint3, ushort, ushort);
+
+template [[host_name("kernel_moe_down_q8_0_f32_grouped_slots_wide_probe")]]
+kernel void moe_down_q8_0_f32_grouped_slots_index_probe<uint>(
+    constant moe_group_q6k_args &, device const uchar *, device const float *,
+    device const int *, device const int *, device float *, threadgroup uchar *, uint3, uint, ushort);
 
 kernel void kernel_moe_down_bf16_f32_grouped_slots(
         constant moe_group_bf16_args & args [[buffer(0)]],

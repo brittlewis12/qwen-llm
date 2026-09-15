@@ -14,12 +14,8 @@ struct Args {
     max_count: u32,
 }
 
-fn dispatch(ctx: &MetalContext, tensors: &[&MetalTensor; 6], args: Args, wide: bool) {
-    let name = if wide {
-        "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_wide_probe"
-    } else {
-        "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16"
-    };
+fn dispatch(ctx: &MetalContext, tensors: &[&MetalTensor; 6], args: Args) {
+    let name = "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16";
     let command = ctx.queue.commandBuffer().unwrap();
     let encoder = KernelEncoder::begin(&command);
     encoder.set_pipeline(&ctx.pipeline(name).unwrap());
@@ -51,7 +47,7 @@ fn dispatch(ctx: &MetalContext, tensors: &[&MetalTensor; 6], args: Args, wide: b
     assert!(command.error().is_none(), "{:?}", command.error());
 }
 
-fn empty(experts: u32, wide: bool) {
+fn empty(experts: u32) {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let ctx = MetalContext::new().expect("real Metal required");
@@ -82,7 +78,6 @@ fn empty(experts: u32, wide: bool) {
             min_count: 0,
             max_count: i32::MAX as u32,
         },
-        wide,
     );
     assert_eq!(bytes(&placeholder), before);
     assert_eq!(bytes(&counts), counts_before);
@@ -90,26 +85,20 @@ fn empty(experts: u32, wide: bool) {
 }
 
 #[test]
-#[ignore = "serial production lease; isolated potentially aborting validation boundary"]
-fn empty_narrow_511() {
-    empty(511, false);
+#[ignore = "serial production lease; API-validation index boundary"]
+fn empty_experts_511() {
+    empty(511);
 }
 
 #[test]
-#[ignore = "serial production lease; expected API validation abort, diagnostic only"]
-fn empty_narrow_512() {
-    empty(512, false);
+#[ignore = "serial production lease; API-validation index boundary"]
+fn empty_experts_512() {
+    empty(512);
 }
 
 #[test]
-#[ignore = "serial production lease; isolated wide builtin validation probe"]
-fn empty_wide_512() {
-    empty(512, true);
-}
-
-#[test]
-#[ignore = "serial production lease; narrow versus wide nonempty index equivalence"]
-fn populated_index_equivalence() {
+#[ignore = "serial production lease; nonempty index guards and bitwise replay"]
+fn populated_index_replay() {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let ctx = MetalContext::new().expect("real Metal required");
@@ -160,10 +149,10 @@ fn populated_index_equivalence() {
         min_count: 0,
         max_count: i32::MAX as u32,
     };
-    dispatch(&ctx, &[&gate, &up, &x, &counts, &ids, &output], args, false);
+    dispatch(&ctx, &[&gate, &up, &x, &counts, &ids, &output], args);
     let baseline = read(&output);
     write(&output, &vec![f32::NAN; 34 * 64]);
-    dispatch(&ctx, &[&gate, &up, &x, &counts, &ids, &output], args, true);
+    dispatch(&ctx, &[&gate, &up, &x, &counts, &ids, &output], args);
     let candidate = read(&output);
     assert_bits(&candidate, &baseline);
     let mut nonzero = 0;

@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -15,35 +16,48 @@ fn dispatch(
     tensors: &[&MetalTensor; 5],
     args: Args,
     experts: usize,
-    wide: bool,
+    checked_host: bool,
 ) {
-    let name = if wide {
-        "kernel_moe_down_iq4_nl_f32_grouped_slots_wide_probe"
-    } else {
-        "kernel_moe_down_iq4_nl_f32_grouped_slots"
-    };
+    let name = "kernel_moe_down_iq4_nl_f32_grouped_slots";
     let command = ctx.queue.commandBuffer().unwrap();
     let encoder = KernelEncoder::begin(&command);
-    encoder.set_pipeline(&ctx.pipeline(name).unwrap());
-    encoder.set_bytes(0, &args);
-    for (index, tensor) in tensors.iter().enumerate() {
-        encoder.set_tensor(index + 1, tensor);
-    }
-    encoder.set_threadgroup_memory(0, 8192);
     let grid = MTLSize {
         width: (args.n as usize).div_ceil(32),
         height: (args.m as usize).div_ceil(64),
         depth: experts,
     };
     eprintln!("moe_down_index kernel={name} grid={grid:?} TG=128 shared_bytes=8192");
-    encoder.dispatch(
-        grid,
-        MTLSize {
-            width: 128,
-            height: 1,
-            depth: 1,
-        },
-    );
+    if checked_host {
+        crate::metal::encode_moe_down_iq4_nl_f32_grouped_slots(
+            ctx,
+            &encoder,
+            tensors[0],
+            tensors[1],
+            tensors[2],
+            tensors[3],
+            tensors[4],
+            args.k as usize,
+            args.m as usize,
+            experts,
+            args.n as usize,
+        )
+        .unwrap();
+    } else {
+        encoder.set_pipeline(&ctx.pipeline(name).unwrap());
+        encoder.set_bytes(0, &args);
+        for (index, tensor) in tensors.iter().enumerate() {
+            encoder.set_tensor(index + 1, tensor);
+        }
+        encoder.set_threadgroup_memory(0, 8192);
+        encoder.dispatch(
+            grid,
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
     encoder.end();
     command.commit();
     command.waitUntilCompleted();
@@ -51,7 +65,7 @@ fn dispatch(
     assert!(command.error().is_none(), "{:?}", command.error());
 }
 
-fn empty(experts: usize, wide: bool) {
+fn empty(experts: usize) {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let ctx = MetalContext::new().expect("real Metal required");
@@ -75,7 +89,7 @@ fn empty(experts: usize, wide: bool) {
             stride_b: 640,
         },
         experts,
-        wide,
+        false,
     );
     for (tensor, original) in [&placeholder, &counts, &output].into_iter().zip(before) {
         assert_eq!(bytes(tensor), original);
@@ -83,26 +97,20 @@ fn empty(experts: usize, wide: bool) {
 }
 
 #[test]
-#[ignore = "serial production lease; isolated narrow builtin control"]
-fn empty_narrow_511() {
-    empty(511, false);
+#[ignore = "serial production lease; IQ4 down API-validation boundary"]
+fn empty_experts_511() {
+    empty(511);
 }
 
 #[test]
-#[ignore = "serial production lease; expected API-validation abort, diagnostic only"]
-fn empty_narrow_512() {
-    empty(512, false);
+#[ignore = "serial production lease; IQ4 down API-validation boundary"]
+fn empty_experts_512() {
+    empty(512);
 }
 
 #[test]
-#[ignore = "serial production lease; isolated widened builtin boundary"]
-fn empty_wide_512() {
-    empty(512, true);
-}
-
-#[test]
-#[ignore = "serial production lease; nonempty narrow/wide IQ4 down equivalence"]
-fn populated_down_index_equivalence() {
+#[ignore = "serial production lease; populated IQ4 down host route and captured M4 output"]
+fn populated_down_index_regression() {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
@@ -149,14 +157,14 @@ fn populated_down_index_equivalence() {
         stride_b: 64,
     };
     let mut observations = Vec::new();
-    for (wide, name) in [(false, "narrow"), (true, "wide")] {
+    for name in ["product", "replay"] {
         write(&output, &vec![f32::NAN; 66 * 70]);
         dispatch(
             &ctx,
             &[&weights, &input, &counts, &ids, &output],
             args,
             2,
-            wide,
+            true,
         );
         let values = read(&output);
         std::fs::write(
@@ -168,6 +176,14 @@ fn populated_down_index_equivalence() {
     }
     eprintln!("moe_down_index artifacts={}", artifact.display());
     assert_bits(&observations[0], &observations[1]);
+    // Captured from the original narrow signature on M4 Max before its replacement.
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(bytemuck::cast_slice(&observations[0]))
+        ),
+        "7c36d7a8a5de6bb555b9db8d6111fc59b06e81c496c6577ebf1aafe16b253062"
+    );
     let mut nonzero = 0;
     for slot in 0..66 {
         for &value in &observations[1][slot * 70..(slot + 1) * 70] {

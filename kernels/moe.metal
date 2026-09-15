@@ -5441,8 +5441,7 @@ kernel void kernel_moe_down_iq4_xs_f32_grouped_slots(
     }
 }
 
-template <typename Tid>
-kernel void moe_down_iq4_nl_f32_grouped_slots_index_probe(
+kernel void kernel_moe_down_iq4_nl_f32_grouped_slots(
         constant moe_group_q6k_args & args           [[buffer(0)]],
         device const block_iq4_nl_local * srcA       [[buffer(1)]],
         device const float              * srcB       [[buffer(2)]],
@@ -5451,8 +5450,9 @@ kernel void moe_down_iq4_nl_f32_grouped_slots_index_probe(
         device       float              * dst        [[buffer(5)]],
         threadgroup  uchar              * shmem      [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
-        Tid tiitg_wide [[thread_index_in_threadgroup]],
+        uint tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    // Match the validated wide builtin while retaining the original TG128 local arithmetic.
     const ushort tiitg = ushort(tiitg_wide);
     threadgroup half * sa = (threadgroup half *)(shmem);
     threadgroup half * sb = (threadgroup half *)(shmem + 4096);
@@ -5568,18 +5568,6 @@ kernel void moe_down_iq4_nl_f32_grouped_slots_index_probe(
         }
     }
 }
-
-template [[host_name("kernel_moe_down_iq4_nl_f32_grouped_slots")]]
-kernel void moe_down_iq4_nl_f32_grouped_slots_index_probe<ushort>(
-    constant moe_group_q6k_args &, device const block_iq4_nl_local *,
-    device const float *, device const int *, device const int *, device float *,
-    threadgroup uchar *, uint3, ushort, ushort);
-
-template [[host_name("kernel_moe_down_iq4_nl_f32_grouped_slots_wide_probe")]]
-kernel void moe_down_iq4_nl_f32_grouped_slots_index_probe<uint>(
-    constant moe_group_q6k_args &, device const block_iq4_nl_local *,
-    device const float *, device const int *, device const int *, device float *,
-    threadgroup uchar *, uint3, uint, ushort);
 
 kernel void kernel_moe_down_iq4_nl_f32_grouped_slots_m128_n16(
         constant moe_group_q6k_args & args           [[buffer(0)]],

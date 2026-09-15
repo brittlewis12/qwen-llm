@@ -306,6 +306,37 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 
+### September 15 Rechart: HC Useful, Native Held At Validation Boundary
+
+The source-led rank320 HC up-plus-mix screen is useful: protocol2 complete-HC
+GPU saves38.2602%, controls2.0899%, frozen mean/pair floors pass. This is a
+component result, not native attribution. Protocol1 failed an incumbent hostile
+raw-dot criterion; preserve that failure and the explicitly versioned
+conditioning correction. All mixed-output and RMS gates stayed unchanged.
+HC remains research-only; no new production option or default change.
+
+Native qualification is HOLD before candidate execution: the unchanged packed
+prefix hits a Metal API-validation boundary. `95a71437` fixes the independently
+isolated grouped IQ3_XXS builtin-width case at512 experts, with historical
+narrow/wide bitwise agreement and retained product regressions. Full packed
+validation still aborts, and the remaining offending kernel is not identified.
+Do not interpret either aborted native run as HC quality or performance evidence.
+
+1. **Localize remaining packed-prefix validation boundary**, then qualify only
+   the smallest isolated repair. Keep API validation on; no speculative broad
+   builtin edits or repeated full-model attempts before an isolated packet.
+2. **Resume the unchanged native HC packet**, one existing2179 prefix/32-token
+   continuation, strict full-logit/state gates and frozen four-forward ABBA.
+   Split-QSA stays enabled in both arms to measure incremental HC leverage.
+3. **Observe complete-MoE costs**, then choose an expert scheduling mechanism.
+   The prior GDN-containing block aggregate includes HC/FFN, not recurrence cost.
+4. **Keep further HC, attention-body and RMS tuning parked.** Long-context
+   index scoring remains a separate context-growing lane, unpriced by2179.
+
+Implementation/reproducer `60e644ae`; partial validation repair `95a71437`.
+Current evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/RESULT.md`.
+The September14 map below is retained as history, not the current first action.
+
 ### September 14 Reopening: Portable Donor Mechanisms
 
 **Lease correction and exclusive completion.** The first real CLI found an

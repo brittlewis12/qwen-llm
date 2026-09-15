@@ -1,5 +1,12 @@
 # Native HC Hold: Existing Packed MoE Validation Boundary
 
+Outcome: paired reproducer preserved at `60e644ae`; isolated width repair at
+`95a71437`. Narrow511 passes, narrow512 reproduces, wide512 passes, populated
+outputs match bitwise. Temporary shader/trace removed; retained product
+regressions pass. Native attempt02 still asserts before prefix completion; no
+remaining kernel is identified. Park per stop rule. See `RESULT.md` for current
+authority and next actions; the protocol below is retained as written before runs.
+
 Native attempt01 aborts under Metal API validation during the unchanged packed
 prefix, before HC candidate execution or native timing. A temporary test-only
 census trace localizes the abort to

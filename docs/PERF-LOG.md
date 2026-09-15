@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-15 - HC Scheduling Useful / Native Held At Packed MoE Validation
+
+- `60e644ae`: research-only HC K320 Q8 up-plus-mix, eight lanes per branch;
+  retain existing low SiLU, raw-gate scratch and sequential branch mean. No
+  production HC option or routing change; all GPU work holds production lease.
+- Protocol1 fails incumbent x256 cancellation-sensitive raw pointwise gate before
+  timing. One diagnostic supports an explicitly frozen protocol2 conditioning
+  correction for that raw case only; all mixed/RMS and other gates unchanged.
+- Protocol2 PASS0.37s under API validation: twelve complete-HC reads GPU ABBA
+  0.818250/0.505307/0.515734/0.835531ms,38.2602% saved,2.0899% control spread.
+  Mean/pair floors pass. Leaf60.0479% diagnostic;2.5573ms/97-call extrapolation
+  is NOT native attribution or throughput. No topology/timing sweep.
+- Native attempt01 aborts during unchanged packed prefix. A bounded model-free
+  packet isolates grouped IQ3_XXS N16 narrow builtin at512 experts:511 passes,
+  512 asserts; widened builtin512 passes and populated narrow/wide outputs match
+  bitwise. `95a71437` keeps only uint builtin plus unchanged ushort local math;
+  temporary paired shader/trace removed. Final three regressions PASS0.13s.
+- Native attempt02 still asserts before prefix completion; remaining kernel not
+  identified. Stop per protocol: no native HC numerical/performance result, no
+  validation bypass or broad builtin edits. Partial repair remains independently
+  qualified, not a full-prefix validation claim. Production CLI check passes.
+- Next localize remaining packed validation boundary, qualify minimal repair,
+  resume unchanged native HC packet, then observe complete-MoE costs. Keep further
+  HC/attention/RMS tuning parked. Server remains stopped; no additional shutdown.
+  Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/RESULT.md`.
+
 ## 2026-09-14 - Flash-Next Split Product Opt-In / Exclusive Delivery PASS
 
 - Explicit typed library option and strict CLI `QWEN4EXP_QSA_SPLIT_DECODE=1`

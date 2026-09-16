@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-16 - Settled Defaults Rechart Toward A Common Late QSA-Containing Block
+
+- One fixed parent ledger, default guarded+HC/incumbent QSA,2179prefix+5 same-token
+  forwards. Raw before gates, measured fullrows/hyper/terminalstate bitwise, exact
+  dispatch shapes/order,96 valid timestamps. PASS7.95s and qualified observer.
+- GPU A/P/A50.842875/50.735917/51.177375ms, control0.65575%, observer-0.53756%;
+  wall56.658958/56.785625/56.891042ms, control0.40878%, observer+0.01871%. All frozen
+  gates pass; no retry. Inclusive normalized QSA-containing12=25.707522ms,
+  GDN-containing34=20.138984ms,bootstrap3.795122,tail1.069374,boundary0.024915.
+- Strong front-loading repeats in warm profile: firstQSA6.52ms versus late1.6ms;
+  earlyGDN also inflated. Do not extrapolate early blocks or label complete parents
+  attention-only. Single position2179 also includes periodic index pool publication.
+- Source/cx rechart: one captured common-late layer39 complete-block child ledger,
+  native state/output/census proof, GPU and host encode attribution. Separate HC,
+  index preparation, QKV/publication, attention, output/combine, routing and experts.
+  Weight QSA12 versus common48/actual dtype cohorts before another mechanism.
+- No direct kernel rewrite, retired attention resurrection or parent timing retry.
+  Evidence: `docs/bench/2026-09-16-flash-defaults/PARENT-RESULT.md`; raw24985. All
+  GPU custody/API gates held, server still stopped, nothing pushed remotely.
+
 ## 2026-09-16 - Qualified Defaults Ship; QSA Timebox Ends In Retirement
 
 - User policy correction: qualified wins default on; unfinished worthwhile work

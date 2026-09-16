@@ -306,7 +306,37 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 
-### September 16 Delivery: Guarded Routing PASS, Reprice Remaining MoE
+### September 16 Current Defaults: Guarded Routing And HC On, Split QSA Retired
+
+Qualified improvements ship enabled, not behind indefinite opt-ins. Candidates
+must have a bounded qualification/disposition; remove production surface when the
+timebox ends without qualification. Keep failed evidence in history/research.
+
+Current Flash-Next CLI/library defaults on exact Apple M4 Max, capability checked:
+guarded N512/K10 routing and singleton Q8 HC up-plus-mix. Independent strict0
+rollback controls remain;1 permits qualified execution, never unsupported forcing.
+Production split QSA and its CLI/API/scratch/route are removed after the original
+dissimilar failure and one failed composed repair closure. Do not revive old flags
+or broaden frozen tolerances. See `docs/bench/2026-09-16-flash-defaults/RESULT.md`.
+
+Final default144-forward closure passes bitwise top-k/default identity and numerical
+HC on natural32+dissimilar8,121terminalstates and route/scratch gates. Final HC
+increment over guarded+incumbent QSA saves6.5551% GPU/5.7323% executor wall, both
+mean/pair floors and controls pass. Actual unflagged known-answer CLI passes.
+Earlier HC HOLD and QSA speed evidence remain historical, not current defaults.
+
+1. **One bounded whole-forward parent ledger on settled defaults:** guarded ON,
+   HC ON, incumbent QSA. Old guarded+split-QSA/HC-off costs cannot rank this baseline.
+2. **Inspect only the largest current parent before another kernel.** Account
+   complete GDN-containing/QSA-containing blocks, bootstrap and tail; never label
+   complete block cost as recurrence-only or attention-only work.
+3. **Keep retired QSA, HC tuning and speculative expert retiles parked.** No new
+   quant download, tolerance adjustment or measurement repeat without a new reason.
+
+All GPU work requires production lease, real wired-memory gate and API validation.
+The server remains stopped; preserve user V4.1 work and do not push remotely.
+
+### September 16 Earlier Delivery (Superseded): Guarded Routing PASS
 
 Follow-up complete: `docs/bench/2026-09-15-qwen4exp-hc-up/MOE-GUARDED-BUDGET.md`.
 Three-dtype capture/replay is bitwise with correct guarded routing. Rare layer2

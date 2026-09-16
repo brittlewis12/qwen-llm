@@ -331,18 +331,25 @@ blocks25.71ms exceed GDN-containing20.14ms; bootstrap3.80ms/tail1.07ms. Strong
 front-loading affects both families, so use the common late cohort rather than
 multiply first-QSA6.52ms by12. These are complete blocks, not leaf attention costs.
 
-1. **One common-late QSA-containing child ledger (layer39), no candidate.** Capture
-   native input and actual QSA state at2179; prove isolated output/state/census,
-   preserve default guarded+HC/incumbent QSA in replay. Separate HC, index work,
-   QKV/publication, attention, output/combine, router and expert bodies; record GPU
-   intervals and host encode spans. Fixed warmup/ordinary-profiled-ordinary, no retry.
-2. **Rank recoverable costs by frequency before coding.** QSA-only12 blocks versus
-   common HC/MoE up to48, rare dtypes only their cohorts. Require a credible exact
-   deletion mechanism and whole-forward ceiling, not an attractive tiny copy/fusion.
-   Untimed layer3 source/dtype/census comparison may illuminate front-loading;
-   isolated timing cannot reproduce its command-position conditions.
-3. **Keep retired QSA, HC tuning and speculative expert retiles parked.** No new
-   quant download, tolerance adjustment or measurement repeat without a new reason.
+The bounded child line is now closed: `docs/bench/2026-09-16-flash-defaults/CHILD-RESULT.md`.
+Native dispatch sampling is unsupported; source/host-only five-forward packet is
+bitwise/census exact but GPU observer-7.024% exceeds5%, so timing is INCONCLUSIVE
+with no retry/segmentation/replay. Eleven QSA3..43 paths match structurally; layer47
+is a distinct Q8-down cohort. No child GPU bottleneck ranking is established.
+
+1. **No justified next local candidate from these packets.** The independent
+   CPU-only whole-root validation median0.1719ms misses its1ms design floor; keep
+   every safety check. Weight binding already occurs once. BF16 index/QKV/copy
+   source accounting does not expose enough deleted work to justify a rewrite.
+2. **Continue only source-led screening of genuinely new mechanisms.** Donor
+   9139e2a..8db1d1d refresh adds mostlyCUDA/C16 batching, not BS=1 authority. Its new
+   on-demand parallel BF16 PLE preads use a different I/O contract from local IQ4
+   mmap gather; no automatic port, gain claim or storage-policy reopening.
+3. **Preserve closed lanes and context.** No retired attention, stage-observer
+   retry, tiny-copy fusion, validation bypass, cold-storage/range warming or
+   speculative expert retile without a genuinely new source of leverage. Harness
+   checkpoint/readback/disk idle is not production continuous-decode startup.
+   These local negative results do not establish global optimization exhaustion.
 
 All GPU work requires production lease, real wired-memory gate and API validation.
 The server remains stopped; preserve user V4.1 work and do not push remotely.

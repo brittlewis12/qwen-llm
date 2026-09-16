@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-16 - Guarded-Baseline MoE Budget Recharts Toward Whole-Forward Parents
+
+- One prefix/two native forwards, guarded top-k+QSA on/HC off. Ordinary/observed
+  logits/hyper/terminal121states bitwise. All three captured inputs persist before
+  per-layer qualification; explicit guarded private bindings, exact8/8/9 census
+  and bitwise output/routes/input immutability pass, including measured packets.
+- Layer2 IQ4_XS/Q8 before0.743958/after0.280214ms drifts90.56%: INCONCLUSIVE, no
+  retry. Layer4 IQ3/Q8 before0.165555/after0.167805ms drifts1.35%; layer5 IQ3/IQ4_NL
+  before0.145440/after0.146477ms drifts0.71%. Test5.10s, allGPUcustody/API gates held.
+- Stable common rows distribute inclusive sampled time across router group,
+  gate/up and down/sum: layer4 approximately0.0491/0.0455/0.0504ms, layer5
+  0.0493/0.0439/0.0356ms. Normalized intervals are not exclusive native attribution;
+  rare unstable IQ4 gate/up cannot justify a common IQ3 rewrite.
+- Next one bounded whole-forward parent ledger on the optimized baseline, then
+  source investigation of the largest parent. No expert retile, selector polish,
+  HC timing retry or new weights yet. Guarded product delivery remains PASS and
+  HC promotion remains HOLD. Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/MOE-GUARDED-BUDGET.md`.
+
 ## 2026-09-16 - Guarded Singleton Selector Product And CLI PASS
 
 - Default-off typed `guarded_topk`/strict `QWEN4EXP_GUARDED_TOPK=0/1`, N512/K10

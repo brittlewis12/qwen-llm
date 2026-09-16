@@ -98,3 +98,8 @@ budget is obsolete. Reuse saved inputs where sufficient; add IQ3/IQ4 dtype evide
 only where it can change that decision. Keep HC/attention/RMS body sweeps parked;
 HC's independent performance promotion remains HOLD. No new quants downloaded.
 Server remains stopped; nothing pushed remotely.
+
+Follow-up: `MOE-GUARDED-BUDGET.md` records the completed three-dtype observation.
+Common IQ3 paths show distributed remaining costs; layer2 timing is INCONCLUSIVE.
+The next rechart is a bounded whole-forward parent ledger, not a speculative
+expert rewrite or an HC timing retry.

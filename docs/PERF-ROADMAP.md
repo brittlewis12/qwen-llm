@@ -306,6 +306,31 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 
+### September 15 Product Decision: HC HOLD, Complete MoE Next
+
+Default-off experimental HC option is numerically qualified independently with
+QSA on/off, empty scalar prefix and actual CLI. No new GPU memory, packed math
+unchanged. Actual-product GPU mean5.1092% but first pair4.814% misses frozen5%:
+performance promotion HOLD; no speed recommendation or timing retry. CLI's
+M128 IQ4_NL527 boundary is isolated/repaired with original-output bitwise proof.
+
+1. **Complete-MoE accounting first**, QSA on/HC off. Native capture is bitwise
+   through full logits/hyper/121states, but initial stage packet fails global
+   timestamp ordering. Separate saved-layer2 diagnostic proves valid individual
+   spans can appear in reversed encoded order across independent routed/shared
+   branches. They are reordered disjoint spans, not demonstrated overlap.
+2. **Use saved layer2 for a versioned interval-aware observation**, no new prefix
+   prerequisite. Exact dispatch census, positive individual spans, sorted interval
+   union/envelope, inclusive stage durations; no exclusive-cost inference from
+   summed spans. Layers4/5 replay/three-dtype budget still pending. Select the next
+   expert mechanism only after that parent budget, not a leaf-timing sweep.
+3. **Keep HC/attention/RMS tuning parked.** Preserve product performance HOLD and
+   failed instrumentation evidence. No special quants needed for this work.
+
+Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/PRODUCT.md` and `MOE-RESULT.md` in
+the same directory. Server remains stopped; production lease and real wired gate
+remain mandatory for every GPU experiment.
+
 ### September 15 Completion: Native HC Useful, Delivery Next
 
 The remaining packed validation blockers are repaired with isolated boundary and

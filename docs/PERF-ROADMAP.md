@@ -337,14 +337,17 @@ bitwise/census exact but GPU observer-7.024% exceeds5%, so timing is INCONCLUSIV
 with no retry/segmentation/replay. Eleven QSA3..43 paths match structurally; layer47
 is a distinct Q8-down cohort. No child GPU bottleneck ranking is established.
 
-1. **No justified next local candidate from these packets.** The independent
-   CPU-only whole-root validation median0.1719ms misses its1ms design floor; keep
-   every safety check. Weight binding already occurs once. BF16 index/QKV/copy
-   source accounting does not expose enough deleted work to justify a rewrite.
-2. **Continue only source-led screening of genuinely new mechanisms.** Donor
-   9139e2a..8db1d1d refresh adds mostlyCUDA/C16 batching, not BS=1 authority. Its new
-   on-demand parallel BF16 PLE preads use a different I/O contract from local IQ4
-   mmap gather; no automatic port, gain claim or storage-policy reopening.
+1. **N1024 policy coverage is now delivered.** The existing strict E8P32 packed
+   router defaults on at512/527/1024/2048 only. Native1024 prefill GPU14.7703% and
+   wall14.6757% savings pass frozen gates, with bitwise endpoint/every continuation
+   state and real CLI default/rollback delivery. No new shader, memory or switch.
+   Evidence: `docs/bench/2026-09-16-flash-defaults/ROUTER-1024-RESULT.md`.
+2. **Rechart coverage by source and real planner reachability, not a width sweep.**
+   N1024 proves one useful policy gap, not an arbitrary interval. Other widths stay
+   generic unless independently qualified;3072 plans2048+3+1021, not2048+1024.
+   The earlier CPU validation0.1719ms remains below its1ms floor; weights bind once.
+   Donor CUDA/C16 changes and parallel uncached BF16 PLE preads do not establish
+   local BS=1 or IQ4 mmap gains. No automatic port or storage-policy reopening.
 3. **Preserve closed lanes and context.** No retired attention, stage-observer
    retry, tiny-copy fusion, validation bypass, cold-storage/range warming or
    speculative expert retile without a genuinely new source of leverage. Harness

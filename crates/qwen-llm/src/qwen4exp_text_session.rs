@@ -1082,6 +1082,17 @@ pub(crate) struct Qwen4ExpPostLayerHyperProbe<'a> {
 }
 
 impl Qwen4ExpTextSessionMetalWorkspace {
+    #[cfg(test)]
+    pub(crate) fn scalar_preflight_only_for_tests(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        token: u32,
+        weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    ) -> Result<(), Qwen4ExpTextSessionError> {
+        validate_and_preflight(ctx, enc, token, self.committed_length, weights, self)
+    }
+
     pub fn from_admitted(
         ctx: &MetalContext,
         admitted: Qwen4ExpAdmittedTextSessionPlan,

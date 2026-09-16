@@ -20,7 +20,7 @@ fn shapes(rows: &[DispatchCensusRow]) -> Vec<(String, [u64; 6], bool)> {
         .collect()
 }
 
-fn report(records: &[Record], raw: &[u64], command_ms: f64) -> bool {
+fn report(records: &[Record]) -> bool {
     const LEAVES: [&str; 16] = [
         "attention_hc",
         "index_projection_norm_pending",
@@ -39,28 +39,27 @@ fn report(records: &[Record], raw: &[u64], command_ms: f64) -> bool {
         "moe_output_copy",
         "ffn_combine",
     ];
-    assert_eq!(raw.len(), records.len() * 2);
     assert_eq!(records.len(), LEAVES.len() + 2);
     assert!(records.iter().all(|r| r.completed && r.host_ms.is_finite()));
     let pair = |name| {
         let rows: Vec<_> = records.iter().filter(|r| r.name == name).collect();
         assert_eq!(rows.len(), 1, "{name}");
         let row = rows[0];
-        (raw[row.start], raw[row.end])
+        (row.host_start_ns, row.host_end_ns)
     };
     let command = pair("command");
     let block = pair("block");
     assert!(command.1 > command.0 && block.0 >= command.0 && block.1 <= command.1);
     let pairs: Vec<_> = LEAVES.iter().map(|name| pair(*name)).collect();
     let coverage = child::coverage(block, &pairs).expect("valid positive in-envelope leaf spans");
-    let scale = command_ms / (command.1 - command.0) as f64;
+    let scale = 1e-6;
     let mut largest = ("", 0.0);
     for name in LEAVES {
         let (a, b) = pair(name);
         let ms = (b - a) as f64 * scale;
         let row = records.iter().find(|r| r.name == name).unwrap();
         eprintln!(
-            "child_ledger group={name} raw_start={a} raw_end={b} ticks={} normalized_ms={ms:.9} host_encode_ms={:.9}",
+            "child_host group={name} host_start_ns={a} host_end_ns={b} duration_ns={} host_ms={ms:.9} host_encode_ms={:.9}",
             b - a,
             row.host_ms
         );
@@ -75,27 +74,24 @@ fn report(records: &[Record], raw: &[u64], command_ms: f64) -> bool {
         .map(|r| r.host_ms)
         .sum();
     eprintln!(
-        "child_ledger coverage={coverage:?} envelope_ms={} union_ms={} sum_ms={} overlap_ms={} gap_ms={} block_host_ms={block_host} leaf_host_sum_ms={leaf_host} largest_inclusive={largest:?}",
+        "child_host coverage_ns={coverage:?} envelope_ms={} union_ms={} sum_ms={} overlap_ms={} gap_ms={} block_host_ms={block_host} leaf_host_sum_ms={leaf_host} largest_host_leaf={largest:?}; NO_GPU_SUBGROUP_TIMING",
         coverage.envelope as f64 * scale,
         coverage.union as f64 * scale,
         coverage.sum as f64 * scale,
         coverage.overlap as f64 * scale,
         coverage.gaps as f64 * scale
     );
-    // Overlap is retained as a telemetry finding, not silently added as exclusive work.
-    coverage.overlap == 0 && coverage.gaps as f64 / coverage.envelope as f64 <= 0.05
+    // Host gaps include validation and dispatch setup outside the named leaves.
+    coverage.overlap == 0
 }
 
 #[test]
-#[ignore = "production lease; single native layer39 child ledger on settled defaults, no candidate or replay"]
-fn native_qsa39_child_ledger() {
+#[ignore = "production lease; one native layer39 host/source packet, no GPU subgroup counters or candidate"]
+fn native_qsa39_host_source_ledger() {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
-    let artifact = parent.join(format!(
-        "qwen4exp-native-child-ledger-{}",
-        std::process::id()
-    ));
+    let artifact = parent.join(format!("qwen4exp-native-child-host-{}", std::process::id()));
     std::fs::create_dir(&artifact).unwrap();
     eprintln!("child_ledger artifacts={}", artifact.display());
     let bytes = include_bytes!(
@@ -110,7 +106,7 @@ fn native_qsa39_child_ledger() {
         .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
         .collect();
     let ctx = MetalContext::new().unwrap();
-    let bank = Bank::new(&ctx);
+    let bank = Bank::new();
     let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
     let config = Qwen4ExpConfig::flash_next_reference();
     let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, PREFIX + 1).unwrap();
@@ -188,7 +184,7 @@ fn native_qsa39_child_ledger() {
             run()
         };
         let census = crate::metal::dispatch_census_take();
-        let profile = profiled.then(|| bank.resolve(&ctx));
+        let profile = profiled.then(|| bank.records());
         defaults::save(&artifact, name, &observed);
         std::fs::write(
             artifact.join(format!("{name}.hyper.f32le")),
@@ -208,12 +204,31 @@ fn native_qsa39_child_ledger() {
             ),
         )
         .unwrap();
-        if let Some((_, Ok(raw))) = &profile {
+        if profiled {
+            let groups: BTreeMap<_, Vec<_>> = census
+                .iter()
+                .filter_map(|r| {
+                    r.tag
+                        .as_deref()
+                        .and_then(|tag| tag.strip_prefix("native.layer39."))
+                        .map(|group| (group, r))
+                })
+                .fold(BTreeMap::new(), |mut map, (group, row)| {
+                    map.entry(group).or_default().push(row);
+                    map
+                });
             std::fs::write(
-                artifact.join(format!("{name}.timestamps.u64le")),
-                raw.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+                artifact.join(format!("{name}.source-groups.txt")),
+                format!("{groups:#?}"),
             )
             .unwrap();
+            for (group, rows) in groups {
+                eprintln!(
+                    "child_source pass={name} group={group} dispatches={} kernels={:?}",
+                    rows.len(),
+                    rows.iter().map(|r| &r.kernel).collect::<Vec<_>>()
+                );
+            }
         }
         defaults::witness(&census, 1, [true, false, true]);
         let rows = shapes(&census);
@@ -252,7 +267,7 @@ fn native_qsa39_child_ledger() {
             timings.push(observed.timing[0]);
         }
         if let Some(profile) = profile {
-            profiles.push((name, observed.timing[0], profile));
+            profiles.push((name, profile));
         }
         if reference.is_none() {
             reference = Some(observed);
@@ -281,9 +296,9 @@ fn native_qsa39_child_ledger() {
             "child_ledger {axis} A_P_A_ms={values:?} control_drift={drift} observer_delta={observer} accepted={valid}"
         );
     }
-    for (name, timing, (records, raw)) in profiles {
+    for (name, records) in profiles {
         eprintln!("child_ledger profile={name}");
-        let valid = report(&records, &raw.unwrap(), timing.gpu_ms.unwrap());
+        let valid = report(&records);
         if name == "profiled" {
             accepted &= valid;
         }
@@ -291,7 +306,7 @@ fn native_qsa39_child_ledger() {
     eprintln!(
         "child_ledger verdict={}",
         if accepted {
-            "QUALIFIED_NATIVE_CHILD_OBSERVATION"
+            "QUALIFIED_HOST_SOURCE_ONLY_NO_GPU_CHILD_TIMING"
         } else {
             "INCONCLUSIVE_NO_RETRY"
         }

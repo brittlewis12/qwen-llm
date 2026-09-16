@@ -1,41 +1,35 @@
-use crate::metal::{KernelEncoder, MetalContext, MetalTimestampSampleBuffer};
+use crate::metal::KernelEncoder;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) const TARGET_LAYER: u32 = 39;
-const SAMPLE_CAPACITY: usize = 64;
+const RECORD_CAPACITY: usize = 32;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Record {
     pub name: &'static str,
-    pub start: usize,
-    pub end: usize,
+    pub host_start_ns: u64,
+    pub host_end_ns: u64,
     pub host_ms: f64,
     pub completed: bool,
 }
 
 pub(crate) struct Bank {
-    samples: MetalTimestampSampleBuffer,
+    epoch: Cell<Instant>,
     records: RefCell<Vec<Record>>,
 }
 
 impl Bank {
-    pub fn new(ctx: &MetalContext) -> Rc<Self> {
+    pub fn new() -> Rc<Self> {
         Rc::new(Self {
-            samples: ctx
-                .timestamp_dispatch_sample_buffer(SAMPLE_CAPACITY)
-                .unwrap(),
-            records: RefCell::new(Vec::with_capacity(SAMPLE_CAPACITY / 2)),
+            epoch: Cell::new(Instant::now()),
+            records: RefCell::new(Vec::with_capacity(RECORD_CAPACITY)),
         })
     }
 
-    pub fn resolve(&self, ctx: &MetalContext) -> (Vec<Record>, Result<Vec<u64>, String>) {
-        let records = self.records.borrow().clone();
-        let raw = ctx
-            .resolve_timestamp_samples(&self.samples, records.len() * 2)
-            .map_err(|e| e.to_string());
-        (records, raw)
+    pub fn records(&self) -> Vec<Record> {
+        self.records.borrow().clone()
     }
 }
 
@@ -54,6 +48,7 @@ pub(crate) fn with_bank<R>(bank: &Rc<Bank>, f: impl FnOnce() -> R) -> R {
     BANK.with(|slot| {
         assert!(slot.borrow().is_none(), "child profiles cannot nest");
         bank.records.borrow_mut().clear();
+        bank.epoch.set(Instant::now());
         *slot.borrow_mut() = Some(bank.clone());
     });
     let _restore = Restore;
@@ -78,53 +73,63 @@ impl Drop for LayerScope {
     }
 }
 
-pub(crate) struct Span<'a> {
+pub(crate) struct Span {
     bank: Rc<Bank>,
-    encoder: &'a KernelEncoder,
     ordinal: usize,
-    started: Instant,
+    _tag: Option<crate::metal::DispatchCensusTagGuard>,
 }
 
-fn begin<'a>(encoder: &'a KernelEncoder, name: &'static str) -> Option<Span<'a>> {
+fn begin(name: &'static str) -> Option<Span> {
     BANK.with(|slot| {
         let bank = slot.borrow().as_ref()?.clone();
         let ordinal = bank.records.borrow().len();
-        assert!((ordinal + 1) * 2 <= SAMPLE_CAPACITY);
+        assert!(ordinal < RECORD_CAPACITY);
+        let tag = crate::metal::dispatch_census_tag_scope(|| {
+            if name == "command" {
+                "native.command".into()
+            } else {
+                format!("native.layer39.{name}")
+            }
+        });
         bank.records.borrow_mut().push(Record {
             name,
-            start: ordinal * 2,
-            end: ordinal * 2 + 1,
+            host_start_ns: bank.epoch.get().elapsed().as_nanos().try_into().unwrap(),
+            host_end_ns: 0,
             host_ms: 0.0,
             completed: false,
         });
-        encoder.sample_counters(&bank.samples, ordinal * 2, true);
         Some(Span {
             bank,
-            encoder,
             ordinal,
-            started: Instant::now(),
+            _tag: tag,
         })
     })
 }
 
-pub(crate) fn command(encoder: &KernelEncoder) -> Option<Span<'_>> {
-    begin(encoder, "command")
+pub(crate) fn command(_encoder: &KernelEncoder) -> Option<Span> {
+    begin("command")
 }
 
-pub(crate) fn span<'a>(encoder: &'a KernelEncoder, name: &'static str) -> Option<Span<'a>> {
+pub(crate) fn span(_encoder: &KernelEncoder, name: &'static str) -> Option<Span> {
     if LAYER.with(|slot| slot.get()) != Some(TARGET_LAYER) {
         return None;
     }
-    begin(encoder, name)
+    begin(name)
 }
 
-impl Drop for Span<'_> {
+impl Drop for Span {
     fn drop(&mut self) {
-        let host_ms = self.started.elapsed().as_secs_f64() * 1e3;
-        self.encoder
-            .sample_counters(&self.bank.samples, self.ordinal * 2 + 1, true);
+        let end: u64 = self
+            .bank
+            .epoch
+            .get()
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap();
         let mut records = self.bank.records.borrow_mut();
-        records[self.ordinal].host_ms = host_ms;
+        records[self.ordinal].host_end_ns = end;
+        records[self.ordinal].host_ms = (end - records[self.ordinal].host_start_ns) as f64 * 1e-6;
         records[self.ordinal].completed = true;
     }
 }

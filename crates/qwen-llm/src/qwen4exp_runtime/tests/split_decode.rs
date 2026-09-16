@@ -28,6 +28,9 @@ mod parent_ledger;
 #[path = "child_ledger.rs"]
 mod child_ledger;
 
+#[path = "validation_ceiling.rs"]
+mod validation_ceiling;
+
 struct Observation {
     logits: Vec<Vec<f32>>,
     hyper: Vec<Vec<f32>>,

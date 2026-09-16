@@ -1506,6 +1506,10 @@ fn encode_step(
 ) -> Result<(), Qwen4ExpPostPleBlockError> {
     let g = workspace.geometry;
     #[cfg(test)]
+    let _child_layer = crate::qwen4exp_child_profile::layer(g.layer());
+    #[cfg(test)]
+    let _child_block = crate::qwen4exp_child_profile::span(enc, "block");
+    #[cfg(test)]
     capture_composition_stage(
         ctx,
         enc,
@@ -1514,6 +1518,8 @@ fn encode_step(
         hyper_residual,
         g.hyper_width(),
     )?;
+    #[cfg(test)]
+    let child_attention_hc = crate::qwen4exp_child_profile::span(enc, "attention_hc");
     let attention = encode_gated_residual_mix(
         ctx,
         enc,
@@ -1524,6 +1530,8 @@ fn encode_step(
         weights.attention_residual.inject,
         &mut workspace.residual,
     )?;
+    #[cfg(test)]
+    drop(child_attention_hc);
     #[cfg(test)]
     capture_composition_stage(
         ctx,
@@ -1550,6 +1558,8 @@ fn encode_step(
             let read = with_qwen4exp_qsa_capture_layer(g.layer(), || {
                 encode_qwen_sparse_attention_text(ctx, enc, attention.mixed(), weights, mixer)
             })?;
+            #[cfg(test)]
+            let _child_copy = crate::qwen4exp_child_profile::span(enc, "mixer_output_copy");
             read.output()
                 .encode_copy_to(ctx, enc, &workspace.mixer_output)?;
             drop(read);
@@ -1565,7 +1575,11 @@ fn encode_step(
         &workspace.mixer_output,
         g.hidden_size,
     )?;
+    #[cfg(test)]
+    let child_attention_combine = crate::qwen4exp_child_profile::span(enc, "attention_combine");
     attention.encode_combine()?;
+    #[cfg(test)]
+    drop(child_attention_combine);
     #[cfg(test)]
     capture_composition_stage(
         ctx,
@@ -1576,6 +1590,8 @@ fn encode_step(
         g.hyper_width(),
     )?;
 
+    #[cfg(test)]
+    let child_ffn_hc = crate::qwen4exp_child_profile::span(enc, "ffn_hc");
     let ffn = encode_gated_residual_mix(
         ctx,
         enc,
@@ -1587,6 +1603,8 @@ fn encode_step(
         &mut workspace.residual,
     )?;
     #[cfg(test)]
+    drop(child_ffn_hc);
+    #[cfg(test)]
     capture_composition_stage(
         ctx,
         enc,
@@ -1596,8 +1614,12 @@ fn encode_step(
         g.hidden_size,
     )?;
     let moe = encode_qwen4exp_moe(ctx, enc, ffn.mixed(), weights.moe, &mut workspace.moe)?;
+    #[cfg(test)]
+    let child_moe_copy = crate::qwen4exp_child_profile::span(enc, "moe_output_copy");
     moe.output()
         .encode_copy_to(ctx, enc, &workspace.moe_output)?;
+    #[cfg(test)]
+    drop(child_moe_copy);
     #[cfg(test)]
     capture_composition_stage(
         ctx,
@@ -1608,7 +1630,11 @@ fn encode_step(
         g.hidden_size,
     )?;
     drop(moe);
+    #[cfg(test)]
+    let child_ffn_combine = crate::qwen4exp_child_profile::span(enc, "ffn_combine");
     ffn.encode_combine()?;
+    #[cfg(test)]
+    drop(child_ffn_combine);
     #[cfg(test)]
     capture_composition_stage(
         ctx,

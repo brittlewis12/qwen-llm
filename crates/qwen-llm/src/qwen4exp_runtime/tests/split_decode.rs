@@ -25,6 +25,9 @@ mod defaults;
 #[path = "parent_ledger.rs"]
 mod parent_ledger;
 
+#[path = "child_ledger.rs"]
+mod child_ledger;
+
 struct Observation {
     logits: Vec<Vec<f32>>,
     hyper: Vec<Vec<f32>>,

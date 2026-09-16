@@ -1716,6 +1716,8 @@ fn encode_qwen4exp_text_token_inner<'a>(
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
     probe: Option<&Qwen4ExpPostLayerHyperProbe<'_>>,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    #[cfg(test)]
+    let _child_command = crate::qwen4exp_child_profile::command(enc);
     if let Some(probe) = probe {
         validate_post_layer_hyper_probe(
             ctx,

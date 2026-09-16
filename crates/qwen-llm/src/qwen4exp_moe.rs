@@ -1375,12 +1375,28 @@ fn encode_singleton_step(
     let capture = singleton_observe::before(ctx, enc, input, weights)?;
     #[cfg(test)]
     let tag = capture.and_then(|layer| dispatch_census_tag_scope(|| format!("moe.native.{layer}")));
+    #[cfg(test)]
+    let child_router = crate::qwen4exp_child_profile::span(enc, "moe_router");
     encode_singleton_router(ctx, enc, input, weights, buffers)?;
+    #[cfg(test)]
+    drop(child_router);
+    #[cfg(test)]
+    let child_routed = crate::qwen4exp_child_profile::span(enc, "moe_routed");
     encode_singleton_gate_up(ctx, enc, input, weights, buffers)?;
     encode_singleton_down(ctx, enc, weights, buffers)?;
+    #[cfg(test)]
+    drop(child_routed);
+    #[cfg(test)]
+    let child_shared = crate::qwen4exp_child_profile::span(enc, "moe_shared");
     encode_singleton_shared_gate_up(ctx, enc, input, weights, buffers)?;
     encode_singleton_shared_down(ctx, enc, weights, buffers)?;
+    #[cfg(test)]
+    drop(child_shared);
+    #[cfg(test)]
+    let child_accumulate = crate::qwen4exp_child_profile::span(enc, "moe_accumulate");
     encode_singleton_accumulate(ctx, enc, buffers)?;
+    #[cfg(test)]
+    drop(child_accumulate);
     #[cfg(test)]
     {
         drop(tag);

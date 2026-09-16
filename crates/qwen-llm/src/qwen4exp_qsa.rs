@@ -4208,6 +4208,8 @@ fn encode_step(
     sequence_length: usize,
 ) -> Result<(), Qwen4ExpQsaError> {
     let g = workspace.geometry;
+    #[cfg(test)]
+    let child_index = crate::qwen4exp_child_profile::span(enc, "index_projection_norm_pending");
     encode_mat_vec_dispatch(
         ctx,
         enc,
@@ -4240,7 +4242,11 @@ fn encode_step(
         g.eps,
     )?;
     encode_write_pending(ctx, enc, workspace, position % g.ratio)?;
+    #[cfg(test)]
+    drop(child_index);
     if sequence_length.is_multiple_of(g.ratio) {
+        #[cfg(test)]
+        let _child_pool = crate::qwen4exp_child_profile::span(enc, "pool_publish");
         encode_pool_publish(
             ctx,
             enc,
@@ -4250,6 +4256,8 @@ fn encode_step(
         )?;
     }
 
+    #[cfg(test)]
+    let child_selection = crate::qwen4exp_child_profile::span(enc, "index_score_select_expand");
     let visible_blocks = sequence_length / g.ratio;
     if visible_blocks > 0 {
         encode_index_scores(ctx, enc, workspace, visible_blocks)?;
@@ -4260,6 +4268,8 @@ fn encode_step(
         encode_fill_blocks(ctx, enc, workspace, visible_blocks, sequence_length)?;
     }
     encode_expand_ids(ctx, enc, workspace, visible_blocks, sequence_length)?;
+    #[cfg(test)]
+    drop(child_selection);
     #[cfg(test)]
     if visible_blocks > g.block_budget() {
         encode_qwen4exp_qsa_decision_capture(
@@ -4278,6 +4288,8 @@ fn encode_step(
         )?;
     }
 
+    #[cfg(test)]
+    let child_qkv = crate::qwen4exp_child_profile::span(enc, "qkv_norm_publish");
     encode_mat_vec_dispatch(
         ctx,
         enc,
@@ -4320,6 +4332,10 @@ fn encode_step(
         g.eps,
     )?;
     encode_publish_kv(ctx, enc, workspace, position)?;
+    #[cfg(test)]
+    drop(child_qkv);
+    #[cfg(test)]
+    let child_attention = crate::qwen4exp_child_profile::span(enc, "attention_logits_value");
     let active_id_count =
         visible_blocks.min(g.block_budget()) * g.ratio + sequence_length % g.ratio;
     #[cfg(test)]
@@ -4342,6 +4358,10 @@ fn encode_step(
         encode_attention_logits(ctx, enc, workspace, active_id_count)?;
         encode_attention_softmax_value(ctx, enc, workspace, active_id_count)?;
     }
+    #[cfg(test)]
+    drop(child_attention);
+    #[cfg(test)]
+    let _child_output = crate::qwen4exp_child_profile::span(enc, "qsa_output_projection");
     encode_mat_vec_dispatch(
         ctx,
         enc,

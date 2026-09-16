@@ -169,3 +169,111 @@ pub(crate) fn observe_saved_layer2(
         sampled["intervals"]
     );
 }
+
+pub(crate) fn observe_guarded_captures(
+    ctx: &MetalContext,
+    captures: &[Capture],
+    native: &[DispatchCensusRow],
+    artifact: &std::path::Path,
+) {
+    for c in captures {
+        for (label, t) in [
+            ("input", &c.input),
+            ("output", &c.output),
+            ("ids", &c.ids),
+            ("topk", &c.topk),
+        ] {
+            std::fs::write(
+                artifact.join(format!("layer{}-{label}.bin", c.layer)),
+                bytes(t),
+            )
+            .unwrap();
+        }
+    }
+    let mut qualified = Vec::new();
+    for c in captures {
+        let (gate, down, count) = match c.layer {
+            2 => (GgmlType::IQ4_XS, GgmlType::Q8_0, 8),
+            4 => (GgmlType::IQ3_XXS, GgmlType::Q8_0, 8),
+            5 => (GgmlType::IQ3_XXS, GgmlType::IQ4_NL, 9),
+            _ => unreachable!(),
+        };
+        assert_eq!((c.bank[1].dtype, c.bank[3].dtype), (gate, down));
+        let tag = format!("moe.native.{}", c.layer);
+        let rows: Vec<_> = native
+            .iter()
+            .filter(|r| r.tag.as_deref() == Some(&tag))
+            .map(row_json)
+            .collect();
+        std::fs::write(
+            artifact.join(format!("layer{}-native-census.json", c.layer)),
+            serde_json::to_vec_pretty(&rows).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), count);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["kernel"] == guarded_topk::KERNEL)
+                .count(),
+            1
+        );
+        for t in [&c.input, &c.output, &c.topk] {
+            assert_finite(t);
+        }
+        let ids: Vec<i32> = bytes(&c.ids)
+            .chunks_exact(4)
+            .map(|v| i32::from_le_bytes(v.try_into().unwrap()))
+            .collect();
+        assert!(
+            ids.iter()
+                .all(|&id| id >= 0 && (id as usize) < c.geometry.expert_count)
+        );
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            ids.len()
+        );
+        let mut w = Qwen4ExpMoeMetalWorkspace::new(ctx, c.geometry).unwrap();
+        w.validate_topk_binding(ctx).unwrap();
+        guarded_topk::preflight(ctx).unwrap();
+        w.bind_guarded_topk(true);
+        validate_contract(ctx, &c.input, c.weights(), &w).unwrap();
+        preflight(ctx, c.weights()).unwrap();
+        let frozen = bytes(&c.input);
+        let (_, replayed) =
+            replay_packet(ctx, c, &w, 1, false, true, artifact, "guarded-census", true);
+        assert_eq!(rows, replayed.iter().map(row_json).collect::<Vec<_>>());
+        assert_eq!(bytes(&c.input), frozen);
+        qualified.push((c, w, rows, frozen, ids));
+    }
+    for (c, w, rows, frozen, ids) in qualified {
+        replay_packet(ctx, c, &w, 3, false, false, artifact, "guarded-warm", true);
+        let mut packets = Vec::new();
+        for (name, sampled) in [
+            ("guarded-before", false),
+            ("guarded-sampled", true),
+            ("guarded-after", false),
+        ] {
+            let (packet, census) =
+                replay_packet(ctx, c, &w, REPEATS, sampled, true, artifact, name, true);
+            assert_eq!(census.len(), rows.len() * REPEATS);
+            for group in census.chunks_exact(rows.len()) {
+                assert_eq!(rows, group.iter().map(row_json).collect::<Vec<_>>());
+            }
+            assert_eq!(bytes(&c.input), frozen);
+            packets.push(packet);
+        }
+        let before = packets[0]["gpu_ms_per_moe"].as_f64().unwrap();
+        let after = packets[2]["gpu_ms_per_moe"].as_f64().unwrap();
+        let drift = (before - after).abs() / ((before + after) * 0.5);
+        let result = serde_json::json!({"protocol":"guarded-native-input-budget-v1","layer":c.layer,"guarded_topk":true,"gate_dtype":format!("{:?}",c.bank[1].dtype),"down_dtype":format!("{:?}",c.bank[3].dtype),"weight_shapes":c.bank.iter().map(|t|&t.shape).collect::<Vec<_>>(),"selected_experts":ids,"packets":packets,"unsampled_drift_fraction":drift,"stability":if drift<=0.05{"bounded"}else{"INCONCLUSIVE"},"input_immutable_output_routes_bitwise":true,"native_census_matches_all_recorded_replays":true,"interpretation":"warm isolated captured native input; inclusive normalized intervals, not all-layer attribution or speedup"});
+        std::fs::write(
+            artifact.join(format!("layer{}-guarded-result.json", c.layer)),
+            serde_json::to_vec_pretty(&result).unwrap(),
+        )
+        .unwrap();
+        eprintln!(
+            "guarded_moe_budget layer={} before_ms={before} after_ms={after} drift={drift} intervals={}",
+            c.layer, packets[1]["intervals"]
+        );
+    }
+}

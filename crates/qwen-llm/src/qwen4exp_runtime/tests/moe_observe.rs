@@ -97,11 +97,24 @@ fn saved_moe_stage_interval_diagnostic() {
 #[test]
 #[ignore = "serial production lease; bounded native MoE capture and isolated complete-path observation"]
 fn native_moe_complete_path_observation() {
+    native_moe_observation(false);
+}
+
+#[test]
+#[ignore = "serial production lease; guarded routing baseline across three native MoE dtype combinations"]
+fn native_guarded_moe_budget() {
+    native_moe_observation(true);
+}
+
+fn native_moe_observation(guarded: bool) {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
     std::fs::create_dir_all(&parent).unwrap();
-    let artifact = parent.join(format!("qwen4exp-moe-observe-{}", std::process::id()));
+    let artifact = parent.join(format!(
+        "qwen4exp-moe-observe-guarded{guarded}-{}",
+        std::process::id()
+    ));
     std::fs::create_dir(&artifact).unwrap();
     eprintln!("moe_observe artifacts={}", artifact.display());
     let bytes = include_bytes!(
@@ -125,9 +138,9 @@ fn native_moe_complete_path_observation() {
         capacity,
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
+            guarded_topk: guarded,
             split_qsa: true,
             hc_up_mix: false,
-            ..Default::default()
         },
     )
     .unwrap();
@@ -148,11 +161,30 @@ fn native_moe_complete_path_observation() {
     });
     let census = crate::metal::dispatch_census_take();
     for (name, observation) in [("ordinary", &baseline), ("observed", &observed)] {
-        std::fs::write(
-            artifact.join(format!("{name}-logits.f32le")),
-            bytemuck::cast_slice(&observation.logits[0]),
-        )
-        .unwrap();
+        for (label, values) in [
+            ("logits", &observation.logits[0]),
+            ("hyper", &observation.hyper[0]),
+        ] {
+            std::fs::write(
+                artifact.join(format!("{name}-{label}.f32le")),
+                bytemuck::cast_slice(values),
+            )
+            .unwrap();
+        }
+    }
+    if guarded {
+        assert_eq!(
+            census
+                .iter()
+                .filter(|r| r.kernel == crate::qwen4exp_moe::guarded_topk::KERNEL)
+                .count(),
+            48
+        );
+        assert!(
+            !census
+                .iter()
+                .any(|r| r.kernel == "kernel_topk_logits_softmax_f32")
+        );
     }
     assert_replay("MoE capture preserves native forward", &baseline, &observed);
     for observation in [&baseline, &observed] {
@@ -182,5 +214,11 @@ fn native_moe_complete_path_observation() {
     drop(baseline);
     drop(observed);
     drop(checkpoint);
-    profile(&ctx, &captures, &census, &artifact);
+    if guarded {
+        crate::qwen4exp_moe::singleton_observe::intervals::observe_guarded_captures(
+            &ctx, &captures, &census, &artifact,
+        );
+    } else {
+        profile(&ctx, &captures, &census, &artifact);
+    }
 }

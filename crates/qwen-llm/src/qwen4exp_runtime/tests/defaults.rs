@@ -35,7 +35,7 @@ fn decode_policy_defaults_and_independent_qualification() {
     }
 }
 
-fn witness(census: &[DispatchCensusRow], steps: usize, flags: [bool; 3]) {
+pub(super) fn witness(census: &[DispatchCensusRow], steps: usize, flags: [bool; 3]) {
     for (name, per_step, enabled) in [
         (crate::qwen4exp_moe::guarded_topk::KERNEL, 48, flags[0]),
         ("kernel_qwen4exp_qsa_split_f16", 12, flags[1]),
@@ -52,7 +52,7 @@ fn witness(census: &[DispatchCensusRow], steps: usize, flags: [bool; 3]) {
     }
 }
 
-fn save(directory: &std::path::Path, name: &str, observation: &Observation) {
+pub(super) fn save(directory: &std::path::Path, name: &str, observation: &Observation) {
     let bytes: Vec<u8> = observation
         .logits
         .iter()

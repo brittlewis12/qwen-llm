@@ -22,6 +22,9 @@ mod topk_product;
 #[path = "defaults.rs"]
 mod defaults;
 
+#[path = "parent_ledger.rs"]
+mod parent_ledger;
+
 struct Observation {
     logits: Vec<Vec<f32>>,
     hyper: Vec<Vec<f32>>,

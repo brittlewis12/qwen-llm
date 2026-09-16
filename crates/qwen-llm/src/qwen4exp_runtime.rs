@@ -451,6 +451,8 @@ pub struct Qwen4ExpLayerProfileError {
 pub struct Qwen4ExpLayerProfileOutcome {
     pub token: Qwen4ExpTokenTiming,
     pub profile: Result<Qwen4ExpLayerProfile, Qwen4ExpLayerProfileError>,
+    #[cfg(test)]
+    pub raw_timestamps: Result<Vec<u64>, String>,
 }
 
 pub struct Qwen4ExpLoadedModel<'gguf> {
@@ -1607,11 +1609,18 @@ fn execute_qwen4exp_text_token_layer_profiled_sync(
         gpu_ms,
         total_wall_ms: wall_started.elapsed().as_secs_f64() * 1e3,
     };
-    let profile = ctx
-        .resolve_timestamp_samples(&samples, sample_count)
+    let timestamps = ctx.resolve_timestamp_samples(&samples, sample_count);
+    #[cfg(test)]
+    let raw_timestamps = timestamps.as_ref().cloned().map_err(ToString::to_string);
+    let profile = timestamps
         .map_err(|error| layer_profile_error(error.to_string()))
         .and_then(|timestamps| resolve_qwen4exp_layer_profile(token, &stages, &timestamps));
-    Ok(Qwen4ExpLayerProfileOutcome { token, profile })
+    Ok(Qwen4ExpLayerProfileOutcome {
+        token,
+        profile,
+        #[cfg(test)]
+        raw_timestamps,
+    })
 }
 
 fn qwen4exp_layer_stages(weights: &Qwen4ExpTextSessionMetalWeights<'_>) -> Vec<Qwen4ExpLayerStage> {

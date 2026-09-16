@@ -306,6 +306,29 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 
+### September 16 Delivery: Guarded Routing PASS, Reprice Remaining MoE
+
+Default-off `QWEN4EXP_GUARDED_TOPK=1` is now actual-product/CLI qualified. N512/K10
+singleton only, zero extra GPU memory, packed routing unchanged.53-case nonfinite
+compatibility packet passes after a preserved failed variant. Empty/QSA-on/off/HC
+composition rows and terminal121 states are bitwise. Fixed four-forward product
+ABBA saves41.7428% GPU/37.0533% executor wall with QSA on/HC off; controls0.0369%/
+0.0550%. Actual CLI known answer/status/EOS pass. No default promotion, additive
+QSA percentage, prefill or request-speedup claim.
+
+1. **Use guarded routing as the next measurement baseline**, QSA on and HC off.
+   The serial-router budget is obsolete; do not keep optimizing its old bottleneck.
+2. **Observe remaining complete-MoE costs before another expert body.** Reuse saved
+   inputs and interval-aware accounting, then add IQ3/IQ4 dtype coverage where it
+   can select between routed gate/up, down/sum and shared experts. Compare with
+   the remaining native parent budget rather than extrapolating a leaf win.
+3. **Keep HC/attention/RMS sweeps parked.** HC's own promotion HOLD is unchanged.
+   No new quant download or broad fusion/geometry expansion prerequisite.
+
+Evidence and coverage limits: `docs/bench/2026-09-15-qwen4exp-hc-up/TOPK-PRODUCT.md`.
+Server remains stopped; production lease/real wired gate/API validation remain
+mandatory for GPU work. Prior compatibility and timing failures remain recorded.
+
 ### September 15 Routing Rechart: Native Bitwise Gain, Guarded Delivery Next
 
 The parent-budget investigation found a source-level one-thread N512/K10 selector.

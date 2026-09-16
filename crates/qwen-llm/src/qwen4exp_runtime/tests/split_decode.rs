@@ -13,6 +13,9 @@ mod hc_up_product;
 #[path = "moe_observe.rs"]
 mod moe_observe;
 
+#[path = "topk_native.rs"]
+mod topk_native;
+
 struct Observation {
     logits: Vec<Vec<f32>>,
     hyper: Vec<Vec<f32>>,

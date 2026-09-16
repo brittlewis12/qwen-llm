@@ -1383,15 +1383,21 @@ fn encode_singleton_router(
         g.hidden_size,
         g.expert_count,
     )?;
-    encode_topk_logits_softmax_f32(
-        ctx,
-        enc,
-        buffers.router_logits,
-        buffers.topk_ids,
-        buffers.topk_weights,
-        g.expert_count,
-        g.experts_per_token,
-    )?;
+    #[cfg(test)]
+    let probed = singleton_observe::topk_native::encode_if_active(ctx, enc, buffers, g);
+    #[cfg(not(test))]
+    let probed = false;
+    if !probed {
+        encode_topk_logits_softmax_f32(
+            ctx,
+            enc,
+            buffers.router_logits,
+            buffers.topk_ids,
+            buffers.topk_weights,
+            g.expert_count,
+            g.experts_per_token,
+        )?;
+    }
     encode_dot_sigmoid_f32(
         ctx,
         enc,

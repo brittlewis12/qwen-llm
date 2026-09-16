@@ -13,6 +13,15 @@ const STAGES: [&str; 6] = [
 ];
 const REPEATS: usize = 16;
 
+#[path = "qwen4exp_moe_intervals.rs"]
+pub(crate) mod intervals;
+
+#[path = "qwen4exp_moe_topk_screen.rs"]
+pub(crate) mod topk_screen;
+
+#[path = "qwen4exp_moe_topk_native.rs"]
+pub(crate) mod topk_native;
+
 fn intervals_overlap(a: (u64, u64), b: (u64, u64)) -> bool {
     a.0.max(b.0) < a.1.min(b.1)
 }
@@ -296,6 +305,20 @@ fn replay(
     artifact: &std::path::Path,
     packet: &str,
 ) -> (serde_json::Value, Vec<DispatchCensusRow>) {
+    replay_packet(ctx, c, w, repeats, sampled, census, artifact, packet, false)
+}
+
+fn replay_packet(
+    ctx: &MetalContext,
+    c: &Capture,
+    w: &Qwen4ExpMoeMetalWorkspace,
+    repeats: usize,
+    sampled: bool,
+    census: bool,
+    artifact: &std::path::Path,
+    packet: &str,
+    interval_aware: bool,
+) -> (serde_json::Value, Vec<DispatchCensusRow>) {
     poison(w);
     let samples = sampled.then(|| ctx.timestamp_sample_buffer(repeats * 12).unwrap());
     if census {
@@ -353,7 +376,7 @@ fn replay(
     let mut stages = serde_json::Map::new();
     let mut scale = None;
     let mut stage_sum = 0.0;
-    if sampled {
+    if sampled && !interval_aware {
         assert_eq!(raw.len(), repeats * 12);
         assert!(
             raw.iter().all(|&v| v != 0 && v != u64::MAX),
@@ -376,8 +399,13 @@ fn replay(
             stages.insert(name.to_string(), serde_json::json!(stage_ms));
         }
     }
-    let result = serde_json::json!({"repeats":repeats,"sampled":sampled,"gpu_ms_per_moe":gpu_ms/repeats as f64,"scaled_stage_ms":stages,"normalization_ms_per_tick":scale,"stage_sum_ms":sampled.then_some(stage_sum),"unattributed_ms":sampled.then_some(gpu_ms/repeats as f64-stage_sum),"raw_timestamps":raw,"native_output_and_routes_bitwise":true});
-    evidence["validation"] = serde_json::json!("passed");
+    let result = if interval_aware {
+        serde_json::json!({"protocol":"interval-aware-v2","repeats":repeats,"sampled":sampled,"gpu_ms_per_moe":gpu_ms/repeats as f64,"intervals":sampled.then(|| intervals::summarize(&raw, repeats, gpu_ms)),"raw_timestamps":raw,"native_output_and_routes_bitwise":true})
+    } else {
+        serde_json::json!({"repeats":repeats,"sampled":sampled,"gpu_ms_per_moe":gpu_ms/repeats as f64,"scaled_stage_ms":stages,"normalization_ms_per_tick":scale,"stage_sum_ms":sampled.then_some(stage_sum),"unattributed_ms":sampled.then_some(gpu_ms/repeats as f64-stage_sum),"raw_timestamps":raw,"native_output_and_routes_bitwise":true})
+    };
+    evidence["validation"] =
+        serde_json::json!("replay_checks_passed; caller_census_and_immutability_pending");
     evidence["result"] = result.clone();
     std::fs::write(&packet_path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     (result, rows)
@@ -543,12 +571,11 @@ fn stage_timestamp_interval_diagnostic() {
     assert_eq!(bad_pairs, 0);
 }
 
-pub(crate) fn captured_interval_diagnostic(
+fn load_saved_layer2(
     ctx: &MetalContext,
     weights: &Qwen4ExpMetalWeights,
     source: &std::path::Path,
-    artifact: &std::path::Path,
-) {
+) -> Capture {
     use sha2::{Digest, Sha256};
     let c = Capture::new(ctx, weights, 2);
     assert_eq!(
@@ -596,6 +623,16 @@ pub(crate) fn captured_interval_diagnostic(
     for t in [&c.input, &c.output, &c.topk] {
         assert_finite(t);
     }
+    c
+}
+
+pub(crate) fn captured_interval_diagnostic(
+    ctx: &MetalContext,
+    weights: &Qwen4ExpMetalWeights,
+    source: &std::path::Path,
+    artifact: &std::path::Path,
+) {
+    let c = load_saved_layer2(ctx, weights, source);
     let w = Qwen4ExpMoeMetalWorkspace::new(ctx, c.geometry).unwrap();
     validate_contract(ctx, &c.input, c.weights(), &w).unwrap();
     preflight(ctx, c.weights()).unwrap();

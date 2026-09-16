@@ -2,6 +2,67 @@ use super::*;
 use crate::qwen4exp_moe::singleton_observe::{Capture, profile, with_capture};
 
 #[test]
+#[ignore = "serial production lease; finite N512/K10 parallel selector screen, no production routing change"]
+fn saved_moe_parallel_topk_screen() {
+    let _lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+    let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
+    let source = parent.join("qwen4exp-moe-observe-905");
+    assert!(source.is_dir());
+    let artifact = parent.join(format!("qwen4exp-topk-screen-{}", std::process::id()));
+    std::fs::create_dir(&artifact).unwrap();
+    eprintln!("topk_screen artifacts={}", artifact.display());
+    let ctx = MetalContext::new().unwrap();
+    let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
+    let config = Qwen4ExpConfig::flash_next_reference();
+    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, 1).unwrap();
+    let loaded = Qwen4ExpLoadedModel::load_with_decode_options(
+        &ctx,
+        &gguf,
+        capacity,
+        None,
+        Qwen4ExpDecodeOptions::default(),
+    )
+    .unwrap();
+    crate::qwen4exp_moe::singleton_observe::topk_screen::screen(
+        &ctx,
+        &loaded.weights,
+        &source,
+        &artifact,
+    );
+}
+
+#[test]
+#[ignore = "serial production lease; versioned saved native layer2 inclusive-interval budget"]
+fn saved_moe_interval_budget_v2() {
+    let _lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+    let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
+    let source = parent.join("qwen4exp-moe-observe-905");
+    assert!(source.is_dir(), "requires preserved observation01 captures");
+    let artifact = parent.join(format!("qwen4exp-moe-interval-v2-{}", std::process::id()));
+    std::fs::create_dir(&artifact).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
+    let config = Qwen4ExpConfig::flash_next_reference();
+    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, 1).unwrap();
+    let loaded = Qwen4ExpLoadedModel::load_with_decode_options(
+        &ctx,
+        &gguf,
+        capacity,
+        None,
+        Qwen4ExpDecodeOptions::default(),
+    )
+    .unwrap();
+    crate::qwen4exp_moe::singleton_observe::intervals::observe_saved_layer2(
+        &ctx,
+        &loaded.weights,
+        &source,
+        &artifact,
+    );
+}
+
+#[test]
 #[ignore = "serial production lease; saved native layer2 timestamp classification, no prefix or performance retry"]
 fn saved_moe_stage_interval_diagnostic() {
     let _lease =

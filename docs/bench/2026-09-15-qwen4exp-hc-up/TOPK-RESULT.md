@@ -1,5 +1,9 @@
 # Parallel Singleton Routing: Native Research PASS
 
+Later guarded actual-product and CLI qualification passes; current delivery and
+41.7428% GPU/37.0533% executor-wall result are in `TOPK-PRODUCT.md`. Research
+results and the finite-only restrictions below remain historical evidence.
+
 ## Rechart
 
 Guarded selector delivery is now the highest-leverage next step. The native

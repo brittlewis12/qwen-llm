@@ -107,6 +107,16 @@ are unchanged, but eligible scalar-prefill steps also use the option. Unset or
 comparison saves about 16% decode GPU time, not a general throughput guarantee.
 See `docs/bench/2026-09-14-qwen4exp-donor-split/PRODUCT.md` for qualification limits.
 
+Flash-Next also supports `QWEN4EXP_GUARDED_TOPK=1` for parallel singleton expert
+selection at N512/K10, with the incumbent serial algorithm for nonfinite inputs.
+It is default-off, accepts only 0/1, adds no GPU scratch, and leaves packed
+routing unchanged. The bounded M4 Max product comparison preserves outputs/state
+bitwise and reduces decode GPU time by41.7% and executor wall time by37.1%, with
+split-QSA already enabled. These are not general request-throughput guarantees.
+Use both options with `QWEN4EXP_GUARDED_TOPK=1 QWEN4EXP_QSA_SPLIT_DECODE=1 qwen run -m MODEL --user "Explain this"`;
+unset the guarded flag or set it to0 to roll back. See
+`docs/bench/2026-09-15-qwen4exp-hc-up/TOPK-PRODUCT.md` for compatibility limits.
+
 `QWEN4EXP_HC_UP_MIX=1` independently enables an experimental singleton Q8 HC
 up-plus-mix route. It adds no GPU scratch; packed paths retain incumbent math.
 Default off; strict 0/1 parsing. Numerical and CLI checks pass, but performance

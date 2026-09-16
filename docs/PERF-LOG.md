@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-16 - Guarded Singleton Selector Product And CLI PASS
+
+- Default-off typed `guarded_topk`/strict `QWEN4EXP_GUARDED_TOPK=0/1`, N512/K10
+  singleton only.48 private bindings, two-pass ownership validation, zero extra
+  GPU allocation or memory-plan change. Packed bodies/N1 remain incumbent.
+- Compat01 fails all-negative-infinity after passing finite cases. Preserve it.
+  Replacing explicit shader equality constraints with dynamic fallback bounds,
+  while retaining exact host geometry checks, passes all53 cases in0.22s. Exact
+  IDs/non-NaN bits, matching NaN placement,0 observed payload differences. No
+  proven compiler-cause or exhaustive nonfinite claim; no indirect architecture.
+- Parser/build and model-free custody PASS. Actual-product212-forward packet
+  PASS39.69s: empty4/QSA-on32/QSA-off32/HC-on4 full logits/hyper and terminal121
+  states bitwise. Option-composition census passes; zero candidate packed calls.
+- Four-forward GPU ABBA186.734749/108.798041/108.814875/186.803625ms saves41.7428%;
+  wall209.369958/131.798001/131.857375/209.485209ms saves37.0533%. Controls0.0369%/
+  0.0550%, both mean/pair floors pass, no retry. QSA on/HC off; incremental native
+  executor result, not request/prefill speedup or additive QSA savings.
+- Rebuilt real CLI with guarded/QSA on and HC off returns exact known answer,
+  statusok,2578prompt/23output/EOS. Reported29.23 decode tps is unpaired, not gain
+  authority. Default-off experimental delivery; HC performance HOLD unchanged.
+- Next remaining MoE budget with guarded router baseline, then expert mechanism
+  selection. Preserve original failures and source-only boundary limits. All GPU
+  work production lease/real wired gate/API validation; no new weights, server
+  restart or push. Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/TOPK-PRODUCT.md`.
+
 ## 2026-09-15 - Parallel Singleton Routing Native Research PASS
 
 - Interval-aware saved-layer2 V2 validates counters/census/exactness, but unsampled

@@ -1,14 +1,5 @@
 use super::*;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct SplitArgs {
-    id_count: u32,
-    cache_capacity: u32,
-    splits: u32,
-    keys_per_split: u32,
-}
-
 fn guarded(ctx: &MetalContext, count: usize) -> (MetalTensor, MetalTensor) {
     let storage = MetalTensor::zeros_f32(ctx, vec![(count + 8) as u64]).unwrap();
     write_f32_tensor(&storage, &vec![-777.0; count + 8]);
@@ -25,14 +16,23 @@ fn check_guards(storage: &MetalTensor) {
 #[test]
 #[ignore = "serial Metal; model-free Flash-Next split attention numerical and timing screen"]
 fn split_decode_attention_screen() {
+    qualify_split_attention(true);
+}
+
+#[test]
+#[ignore = "production lease; one numerical-only primitive qualification for incumbent-softmax repair"]
+fn split_decode_compatibility_repair_primitives() {
+    qualify_split_attention(false);
+}
+
+fn qualify_split_attention(timing: bool) {
     let _benchmark_lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let ctx = MetalContext::new().expect("real Metal required; no skipped screen");
     let config = Qwen4ExpConfig::flash_next_reference();
     let g = QwenSparseAttentionMetalGeometry::from_config(&config, 3, 4_100).unwrap();
     let workspace = QwenSparseAttentionMetalWorkspace::new(&ctx, g).unwrap();
-    let split_pso = ctx.pipeline("kernel_qwen4exp_qsa_split_f16").unwrap();
-    let merge_pso = ctx.pipeline("kernel_qwen4exp_qsa_split_merge_f32").unwrap();
+    super::super::split_decode::preflight(&ctx).unwrap();
     let mut random = 0x4d595df4d0f33173_u64;
     let mut sample = || {
         random ^= random << 13;
@@ -92,12 +92,6 @@ fn split_decode_attention_screen() {
             .collect();
         write_i32_tensor(&workspace.token_ids, &ids);
         let splits = count.div_ceil(32).clamp(1, 64);
-        let args = SplitArgs {
-            id_count: count as u32,
-            cache_capacity: g.capacity as u32,
-            splits: splits as u32,
-            keys_per_split: count.div_ceil(splits).max(1) as u32,
-        };
         let active_partials = partials.view_subrange(0, vec![(24 * splits * 258) as u64]);
         let run = |candidate: bool, repeats: usize| {
             let command = ctx.queue.commandBuffer().unwrap();
@@ -105,42 +99,15 @@ fn split_decode_attention_screen() {
             let started = std::time::Instant::now();
             for _ in 0..repeats {
                 if candidate {
-                    encoder.set_pipeline(&split_pso);
-                    encoder.set_bytes(0, &args);
-                    encoder.set_tensor(1, &workspace.query);
-                    encoder.set_tensor(2, &workspace.key_cache);
-                    encoder.set_tensor(3, &workspace.value_cache);
-                    encoder.set_tensor(4, &workspace.token_ids);
-                    encoder.set_tensor(5, &active_partials);
-                    encoder.dispatch(
-                        MTLSize {
-                            width: splits,
-                            height: 2,
-                            depth: 1,
-                        },
-                        MTLSize {
-                            width: 128,
-                            height: 1,
-                            depth: 1,
-                        },
-                    );
-                    encoder.set_pipeline(&merge_pso);
-                    encoder.set_bytes(0, &args);
-                    encoder.set_tensor(1, &active_partials);
-                    encoder.set_tensor(2, &workspace.raw_gate);
-                    encoder.set_tensor(3, &output);
-                    encoder.dispatch(
-                        MTLSize {
-                            width: 24,
-                            height: 1,
-                            depth: 1,
-                        },
-                        MTLSize {
-                            width: 32,
-                            height: 1,
-                            depth: 1,
-                        },
-                    );
+                    super::super::split_decode::encode_to(
+                        &ctx,
+                        &encoder,
+                        &workspace,
+                        &active_partials,
+                        &output,
+                        count,
+                    )
+                    .unwrap();
                 } else {
                     encode_attention_logits(&ctx, &encoder, &workspace, count).unwrap();
                     encode_attention_softmax_value_tensors(
@@ -205,7 +172,7 @@ fn split_decode_attention_screen() {
             "split_qsa correctness count={count} amplitude={amplitude} id_mode={id_mode} splits={splits} max_abs_f64={max_abs:.9e}"
         );
 
-        if matches!(count, 128 | 2_048 | 2_051) && amplitude == 1.0 && id_mode == 0 {
+        if timing && matches!(count, 128 | 2_048 | 2_051) && amplitude == 1.0 && id_mode == 0 {
             for candidate_arm in [false, true, true, false] {
                 run(candidate_arm, 12);
             }

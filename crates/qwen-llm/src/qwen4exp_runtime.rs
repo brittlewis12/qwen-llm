@@ -463,11 +463,71 @@ pub struct Qwen4ExpLoadedModel<'gguf> {
     device_registry_id: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen4ExpDecodeOptions {
+    /// Allow qualified execution; device/capability checks may retain the incumbent.
     pub guarded_topk: bool,
     pub split_qsa: bool,
     pub hc_up_mix: bool,
+}
+
+impl Default for Qwen4ExpDecodeOptions {
+    fn default() -> Self {
+        Self {
+            guarded_topk: true,
+            split_qsa: true,
+            hc_up_mix: true,
+        }
+    }
+}
+
+impl Qwen4ExpDecodeOptions {
+    fn qualified(self, device: &str, forward_limit: usize, capabilities: [bool; 3]) -> Self {
+        let qualified = device == "Apple M4 Max";
+        Self {
+            guarded_topk: self.guarded_topk && qualified && capabilities[0],
+            split_qsa: self.split_qsa
+                && qualified
+                && crate::qwen4exp_qsa::split_decode::horizon_reachable(forward_limit)
+                && capabilities[1],
+            hc_up_mix: self.hc_up_mix && qualified && capabilities[2],
+        }
+    }
+
+    fn resolve(
+        self,
+        ctx: &MetalContext,
+        forward_limit: usize,
+    ) -> Result<Self, Qwen4ExpRuntimeError> {
+        let device = ctx.device.name().to_string();
+        let requested = self.qualified(&device, forward_limit, [true; 3]);
+        let topk = requested.guarded_topk
+            && crate::qwen4exp_moe::guarded_topk::supported(ctx)
+                .map_err(Qwen4ExpTextSessionError::from)?;
+        let split = requested.split_qsa
+            && crate::qwen4exp_qsa::split_decode::supported(ctx)
+                .map_err(Qwen4ExpTextSessionError::from)?;
+        let hc = requested.hc_up_mix
+            && crate::qwen4exp_metal::hc_up::supported(ctx)
+                .map_err(Qwen4ExpTextSessionError::from)?;
+        let resolved = self.qualified(&device, forward_limit, [topk, split, hc]);
+        if self != resolved {
+            eprintln!(
+                "qwen4exp: decode policy requested={self:?} effective={resolved:?} device={device:?} logical_forward_limit={forward_limit} qualified_device={} pipeline_capabilities={:?}",
+                device == "Apple M4 Max",
+                [topk, split, hc]
+            );
+        }
+        Ok(resolved)
+    }
+}
+
+fn optional_split_admission_fallback(
+    requested: bool,
+    baseline_admitted: bool,
+    optimized_admitted: bool,
+) -> bool {
+    requested && baseline_admitted && !optimized_admitted
 }
 
 impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
@@ -536,6 +596,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         if expected_capacity != capacity {
             return invalid("session capacity differs from the released model geometry");
         }
+        let decode = decode.resolve(ctx, capacity.forward_limit)?;
         let session_plan = if let Some(prompt_tokens) = packed_prefill_tokens {
             Qwen4ExpTextSessionPlan::for_config_with_packed_prefill_tokens(
                 ctx,
@@ -553,7 +614,6 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             )?
         };
 
-        let session_plan = session_plan.with_split_decode(ctx, decode.split_qsa)?;
         if decode.guarded_topk {
             crate::qwen4exp_moe::guarded_topk::preflight(ctx)
                 .map_err(Qwen4ExpTextSessionError::from)?;
@@ -562,9 +622,25 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             crate::qwen4exp_metal::hc_up::preflight(ctx).map_err(Qwen4ExpTextSessionError::from)?;
         }
         let _allocation_transaction = ctx.begin_allocation_transaction();
-        let aggregate = session_plan
+        let signals = ctx.memory_signals();
+        let without_split = session_plan
             .memory_plan()
-            .admission_before_residency(ctx.memory_signals(), 1)?;
+            .admission_before_residency(signals, 1)?;
+        let mut session_plan = session_plan.with_split_decode(ctx, decode.split_qsa)?;
+        let mut aggregate = session_plan
+            .memory_plan()
+            .admission_before_residency(signals, 1)?;
+        if optional_split_admission_fallback(
+            decode.split_qsa,
+            without_split.admitted,
+            aggregate.admitted,
+        ) {
+            session_plan = session_plan.with_split_decode(ctx, false)?;
+            aggregate = without_split;
+            eprintln!(
+                "qwen4exp: split_qsa=false reason=optional_scratch_admission; retaining admissible incumbent plan"
+            );
+        }
         if !aggregate.admitted {
             return invalid(format!(
                 "combined weight and session admission denied: reason={} required={:?}",

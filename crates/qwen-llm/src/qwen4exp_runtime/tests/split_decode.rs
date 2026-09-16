@@ -19,6 +19,9 @@ mod topk_native;
 #[path = "topk_product.rs"]
 mod topk_product;
 
+#[path = "defaults.rs"]
+mod defaults;
+
 struct Observation {
     logits: Vec<Vec<f32>>,
     hyper: Vec<Vec<f32>>,
@@ -205,6 +208,15 @@ fn run_product_at(
         .workspace
         .set_split_decode_for_tests(runner.ctx, split)
         .unwrap();
+    observe_product_at(runner, tokens, state, prefix)
+}
+
+fn observe_product_at(
+    runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+    tokens: &[u32],
+    state: bool,
+    prefix: usize,
+) -> Observation {
     let mut observed = Observation {
         logits: Vec::new(),
         hyper: Vec::new(),
@@ -267,8 +279,9 @@ fn product_split_decode_shared_prefix() {
         capacity,
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
+            guarded_topk: false,
             split_qsa: true,
-            ..Default::default()
+            hc_up_mix: false,
         },
     )
     .unwrap();
@@ -452,8 +465,18 @@ fn native_split_decode_shared_prefix() {
     let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
     let config = Qwen4ExpConfig::flash_next_reference();
     let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, PREFIX + STEPS).unwrap();
-    let mut loaded =
-        Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, PREFIX).unwrap();
+    let mut loaded = Qwen4ExpLoadedModel::load_with_decode_options(
+        &ctx,
+        &gguf,
+        capacity,
+        Some(PREFIX),
+        Qwen4ExpDecodeOptions {
+            guarded_topk: false,
+            split_qsa: false,
+            hc_up_mix: false,
+        },
+    )
+    .unwrap();
     let mut runner = loaded.create_runner(&ctx).unwrap();
     let scratch = MetalTensor::zeros_f32(&ctx, vec![SCRATCH_FLOATS as u64]).unwrap();
     ctx.pipeline("kernel_qwen4exp_qsa_split_f16").unwrap();

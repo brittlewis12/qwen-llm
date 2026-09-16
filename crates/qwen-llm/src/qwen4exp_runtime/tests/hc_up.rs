@@ -50,8 +50,9 @@ fn native_hc_up_shared_prefix() {
         capacity,
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
+            guarded_topk: false,
             split_qsa: true,
-            ..Default::default()
+            hc_up_mix: false,
         },
     )
     .unwrap();

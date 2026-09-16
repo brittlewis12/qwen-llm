@@ -25,7 +25,14 @@ fn save_rows(directory: &std::path::Path, name: &str, observation: &Observation)
     std::fs::write(directory.join(format!("{name}.f32le")), rows).unwrap();
 }
 
-fn witness(census: &[crate::metal::DispatchCensusRow], steps: usize, split: bool) {
+fn witness(census: &[crate::metal::DispatchCensusRow], steps: usize, split: bool, guarded: bool) {
+    assert_eq!(
+        census
+            .iter()
+            .filter(|r| r.kernel == crate::qwen4exp_moe::guarded_topk::KERNEL)
+            .count(),
+        if guarded { steps * 48 } else { 0 }
+    );
     assert_eq!(
         census
             .iter()
@@ -59,11 +66,24 @@ fn witness(census: &[crate::metal::DispatchCensusRow], steps: usize, split: bool
 #[test]
 #[ignore = "serial production lease; HC actual-product composition and incremental decode timing"]
 fn product_hc_up_shared_prefix() {
+    qualify_hc_product(false);
+}
+
+#[test]
+#[ignore = "serial production lease; one disposition timebox for HC on the new guarded-router baseline"]
+fn hc_guarded_baseline_disposition() {
+    qualify_hc_product(true);
+}
+
+fn qualify_hc_product(guarded: bool) {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
     std::fs::create_dir_all(&parent).unwrap();
-    let artifact = parent.join(format!("qwen4exp-product-hc-{}", std::process::id()));
+    let artifact = parent.join(format!(
+        "qwen4exp-product-hc-guarded{guarded}-{}",
+        std::process::id()
+    ));
     std::fs::create_dir(&artifact).unwrap();
     eprintln!("product_hc artifacts={}", artifact.display());
     let bytes = include_bytes!(
@@ -88,13 +108,14 @@ fn product_hc_up_shared_prefix() {
         capacity,
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
+            guarded_topk: guarded,
             split_qsa: true,
             hc_up_mix: true,
-            ..Default::default()
         },
     )
     .unwrap();
     assert!(loaded.hc_up_mix_enabled() && loaded.split_decode_enabled());
+    assert_eq!(loaded.guarded_topk_enabled(), guarded);
     let mut runner = loaded.create_runner(&ctx).unwrap();
     let tensors = runner.workspace.persistent_state_tensors();
     let state_bytes: usize = tensors.iter().map(|t| t.n_bytes() as usize).sum();
@@ -116,7 +137,7 @@ fn product_hc_up_shared_prefix() {
         let census = crate::metal::dispatch_census_take();
         save_rows(&artifact, "empty-scalar-baseline-4x248320", &baseline);
         save_rows(&artifact, "empty-scalar-candidate-4x248320", &candidate);
-        witness(&census, 4, false);
+        witness(&census, 4, false, guarded);
         assert_numeric_at(&baseline, &candidate, &tensors, 0);
         runner.workspace.restore_checkpoint_for_tests(&empty);
         assert!(runner.logits().is_err());
@@ -167,7 +188,7 @@ fn product_hc_up_shared_prefix() {
     let census = crate::metal::dispatch_census_take();
     save_rows(&artifact, "split-on-baseline-32x248320", &baseline);
     save_rows(&artifact, "split-on-candidate-32x248320", &candidate);
-    witness(&census, 32, true);
+    witness(&census, 32, true, guarded);
     assert_numeric(&baseline, &candidate, &tensors);
     assert_state_bytes_eq(
         "product HC candidate old prefix",
@@ -194,7 +215,7 @@ fn product_hc_up_shared_prefix() {
         let census = crate::metal::dispatch_census_take();
         save_rows(&artifact, "split-off-baseline-32x248320", &baseline);
         save_rows(&artifact, "split-off-candidate-32x248320", &candidate);
-        witness(&census, 32, false);
+        witness(&census, 32, false, guarded);
         assert_numeric(&baseline, &candidate, &tensors);
         assert_state_bytes_eq(
             "independent HC candidate old prefix",

@@ -2,6 +2,15 @@ use super::*;
 
 pub(crate) const KERNEL: &str = "kernel_qwen4exp_topk_guarded_f32";
 
+pub(crate) fn supported(ctx: &MetalContext) -> Result<bool, Qwen4ExpMoeError> {
+    let p = ctx.pipeline(KERNEL)?;
+    Ok(p.threadExecutionWidth() == 32
+        && p.maxTotalThreadsPerThreadgroup() >= 512
+        && p.staticThreadgroupMemoryLength()
+            .checked_add(6144)
+            .is_some_and(|bytes| bytes <= ctx.device.maxThreadgroupMemoryLength()))
+}
+
 pub(super) fn eligible(n: usize, k: usize) -> bool {
     (n, k) == (512, 10)
 }

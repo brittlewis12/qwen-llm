@@ -2,12 +2,44 @@ use super::*;
 
 pub(crate) const SCRATCH_FLOATS: usize = 24 * 64 * 258;
 
+pub(crate) fn horizon_reachable(forward_limit: usize) -> bool {
+    // In the released geometry, scalar active IDs first reach2048 at sequence length2048.
+    forward_limit >= 2048
+}
+
+pub(crate) fn supported(ctx: &MetalContext) -> Result<bool, Qwen4ExpQsaError> {
+    for (name, threads) in [
+        ("kernel_qwen4exp_qsa_attention_logits_f16", 256),
+        ("kernel_qwen4exp_qsa_split_softmax_f32", 256),
+        ("kernel_qwen4exp_qsa_split_f16", 128),
+        ("kernel_qwen4exp_qsa_split_merge_f32", 32),
+    ] {
+        let p = ctx.pipeline(name)?;
+        if p.threadExecutionWidth() != 32
+            || p.maxTotalThreadsPerThreadgroup() < threads
+            || !p
+                .staticThreadgroupMemoryLength()
+                .checked_add(if name == "kernel_qwen4exp_qsa_split_softmax_f32" {
+                    ATTENTION_SCRATCH_BYTES
+                } else {
+                    0
+                })
+                .is_some_and(|n| n <= ctx.device.maxThreadgroupMemoryLength())
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn eligible(g: QwenSparseAttentionMetalGeometry, ids: usize) -> bool {
     g.supports_split_decode() && (2048..=2051).contains(&ids)
 }
 
 pub(crate) fn preflight(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
     for (name, threads) in [
+        ("kernel_qwen4exp_qsa_attention_logits_f16", 256),
+        ("kernel_qwen4exp_qsa_split_softmax_f32", 256),
         ("kernel_qwen4exp_qsa_split_f16", 128),
         ("kernel_qwen4exp_qsa_split_merge_f32", 32),
     ] {
@@ -18,7 +50,11 @@ pub(crate) fn preflight(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
             pso.maxTotalThreadsPerThreadgroup(),
             threads,
             pso.staticThreadgroupMemoryLength(),
-            0,
+            if name == "kernel_qwen4exp_qsa_split_softmax_f32" {
+                ATTENTION_SCRATCH_BYTES
+            } else {
+                0
+            },
             ctx.device.maxThreadgroupMemoryLength(),
         )?;
     }
@@ -32,6 +68,7 @@ struct Args {
     capacity: u32,
     splits: u32,
     keys_per_split: u32,
+    row_stride: u32,
 }
 
 pub(super) fn encode(
@@ -41,18 +78,49 @@ pub(super) fn encode(
     scratch: &MetalTensor,
     ids: usize,
 ) -> Result<(), MetalError> {
-    let splits = ids.div_ceil(32).min(64);
+    encode_to(ctx, enc, workspace, scratch, &workspace.attention, ids)
+}
+
+pub(super) fn encode_to(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    workspace: &QwenSparseAttentionMetalWorkspace,
+    scratch: &MetalTensor,
+    output: &MetalTensor,
+    ids: usize,
+) -> Result<(), MetalError> {
+    let splits = ids.div_ceil(32).clamp(1, 64);
     let args = Args {
         ids: ids as u32,
         capacity: workspace.geometry.capacity as u32,
         splits: splits as u32,
-        keys_per_split: ids.div_ceil(splits) as u32,
+        keys_per_split: ids.div_ceil(splits).max(1) as u32,
+        row_stride: workspace.geometry.output_width() as u32,
     };
+    if ids > 0 {
+        encode_attention_logits(ctx, enc, workspace, ids)?;
+    }
+    enc.set_pipeline(&ctx.pipeline("kernel_qwen4exp_qsa_split_softmax_f32")?);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, &workspace.attention_logits);
+    enc.set_tensor(2, scratch);
+    enc.set_threadgroup_memory(0, ATTENTION_SCRATCH_BYTES);
+    enc.dispatch(
+        MTLSize {
+            width: 24,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
     let pso = ctx.pipeline("kernel_qwen4exp_qsa_split_f16")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &args);
-    enc.set_tensor(1, &workspace.query);
-    enc.set_tensor(2, &workspace.key_cache);
+    enc.set_tensor(1, &workspace.attention_logits);
     enc.set_tensor(3, &workspace.value_cache);
     enc.set_tensor(4, &workspace.token_ids);
     enc.set_tensor(5, scratch);
@@ -73,7 +141,7 @@ pub(super) fn encode(
     enc.set_bytes(0, &args);
     enc.set_tensor(1, scratch);
     enc.set_tensor(2, &workspace.raw_gate);
-    enc.set_tensor(3, &workspace.attention);
+    enc.set_tensor(3, output);
     enc.dispatch(
         MTLSize {
             width: 24,

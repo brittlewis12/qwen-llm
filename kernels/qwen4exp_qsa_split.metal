@@ -1,5 +1,5 @@
 // Split/GQA decode adapted from antirez/ds4 9139e2a, metal/qwen4.metal.
-// Retains local strided QK accumulation, post-dot scaling and sigmoid order.
+// Incumbent QK/global-softmax order; split only the value accumulation.
 // MIT License
 // Copyright (c) 2026 The ds4.c authors
 // Copyright (c) 2023-2026 The ggml authors
@@ -28,14 +28,60 @@ struct qwen4exp_split_args {
     uint cache_capacity;
     uint splits;
     uint keys_per_split;
+    uint row_stride;
 };
+
+kernel void kernel_qwen4exp_qsa_split_softmax_f32(
+        constant qwen4exp_split_args & args [[buffer(0)]],
+        device float * logits [[buffer(1)]],
+        device float * partials [[buffer(2)]],
+        threadgroup float * scratch [[threadgroup(0)]],
+        uint head [[threadgroup_position_in_grid]],
+        uint lane [[thread_position_in_threadgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    device float * row = logits + (ulong)head * args.row_stride;
+    float local_maximum = -INFINITY;
+    for (uint slot = lane; slot < args.id_count; slot += 256u) {
+        local_maximum = max(local_maximum, row[slot]);
+    }
+    local_maximum = simd_max(local_maximum);
+    if (simd_lane == 0u) scratch[uint(sg)] = local_maximum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0u) {
+        const float candidate = simd_lane < 8u ? scratch[uint(simd_lane)] : -INFINITY;
+        const float maximum = simd_max(candidate);
+        if (simd_lane == 0u) scratch[8] = maximum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float maximum = scratch[8];
+    float local_denominator = 0.0f;
+    for (uint slot = lane; slot < args.id_count; slot += 256u) {
+        const float mass = maximum == -INFINITY ? 0.0f : exp(row[slot] - maximum);
+        row[slot] = mass;
+        local_denominator += mass;
+    }
+    local_denominator = simd_sum(local_denominator);
+    if (simd_lane == 0u) scratch[uint(sg)] = local_denominator;
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    if (sg == 0u) {
+        const float candidate = simd_lane < 8u ? scratch[uint(simd_lane)] : 0.0f;
+        const float denominator = simd_sum(candidate);
+        if (simd_lane == 0u) scratch[8] = denominator;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane < args.splits) {
+        const ulong base = ((ulong)head * args.splits + lane) * 258u;
+        partials[base] = scratch[8];
+        partials[base + 1u] = 0.0f;
+    }
+}
 
 // Released geometry only: 24 query heads / 2 KV heads / 256 dimensions.
 // One SIMDgroup owns three heads; four SIMDgroups cover one KV head.
 kernel void kernel_qwen4exp_qsa_split_f16(
         constant qwen4exp_split_args & args [[buffer(0)]],
-        device const float * query [[buffer(1)]],
-        device const half * keys [[buffer(2)]],
+        device const float * masses [[buffer(1)]],
         device const half * values [[buffer(3)]],
         device const int * ids [[buffer(4)]],
         device float * partials [[buffer(5)]],
@@ -44,46 +90,25 @@ kernel void kernel_qwen4exp_qsa_split_f16(
         ushort lane [[thread_index_in_simdgroup]]) {
     if (group.x >= args.splits || group.y >= 2u) return;
     const uint first_head = group.y * 12u + uint(sg) * 3u;
-    float q[3][8], numerator[3][8];
-    float maximum[3], denominator[3];
-    for (uint h = 0u; h < 3u; ++h) {
-        maximum[h] = -INFINITY;
-        denominator[h] = 0.0f;
-        for (uint d = 0u; d < 8u; ++d) {
-            q[h][d] = query[(first_head + h) * 256u + uint(lane) + d * 32u];
-            numerator[h][d] = 0.0f;
-        }
-    }
+    float numerator[3][8] = {};
     const uint end = min(args.id_count, (group.x + 1u) * args.keys_per_split);
     for (uint slot = group.x * args.keys_per_split; slot < end; ++slot) {
         const int position = ids[slot];
         if (position < 0 || uint(position) >= args.cache_capacity) continue;
         const ulong base = ((ulong)uint(position) * 2u + group.y) * 256u + uint(lane);
-        float key[8], value[8];
+        float value[8];
         for (uint d = 0u; d < 8u; ++d) {
-            key[d] = float(keys[base + d * 32u]);
             value[d] = float(values[base + d * 32u]);
         }
         for (uint h = 0u; h < 3u; ++h) {
-            float score = 0.0f;
-            for (uint d = 0u; d < 8u; ++d) score += q[h][d] * key[d];
-            score = simd_sum(score) * 0.0625f;
-            const float next_maximum = max(maximum[h], score);
-            const float correction = exp(maximum[h] - next_maximum);
-            const float mass = exp(score - next_maximum);
-            denominator[h] = denominator[h] * correction + mass;
+            const float mass = masses[(ulong)(first_head + h) * args.row_stride + slot];
             for (uint d = 0u; d < 8u; ++d) {
-                numerator[h][d] = numerator[h][d] * correction + value[d] * mass;
+                numerator[h][d] += value[d] * mass;
             }
-            maximum[h] = next_maximum;
         }
     }
     for (uint h = 0u; h < 3u; ++h) {
         const ulong base = ((ulong)(first_head + h) * args.splits + group.x) * 258u;
-        if (lane == 0u) {
-            partials[base] = maximum[h];
-            partials[base + 1u] = denominator[h];
-        }
         for (uint d = 0u; d < 8u; ++d) {
             partials[base + 2u + uint(lane) + d * 32u] = numerator[h][d];
         }
@@ -99,19 +124,12 @@ kernel void kernel_qwen4exp_qsa_split_merge_f32(
         ushort lane [[thread_index_in_simdgroup]]) {
     if (head >= 24u) return;
     device const float * row = partials + (ulong)head * args.splits * 258u;
-    float maximum = -INFINITY;
-    for (uint split = 0u; split < args.splits; ++split) {
-        maximum = max(maximum, row[split * 258u]);
-    }
-    float denominator = 0.0f;
+    const float denominator = row[0];
     float numerator[8] = {};
     for (uint split = 0u; split < args.splits; ++split) {
         device const float * part = row + split * 258u;
-        if (part[1] == 0.0f) continue;
-        const float correction = exp(part[0] - maximum);
-        denominator += part[1] * correction;
         for (uint d = 0u; d < 8u; ++d) {
-            numerator[d] += part[2u + uint(lane) + d * 32u] * correction;
+            numerator[d] += part[2u + uint(lane) + d * 32u];
         }
     }
     for (uint d = 0u; d < 8u; ++d) {

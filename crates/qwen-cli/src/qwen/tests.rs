@@ -139,9 +139,9 @@ fn qwen4exp_full_shard_prefetch_scope_is_default_off_and_release_scoped() {
 }
 
 #[test]
-fn qwen4exp_split_decode_opt_in_is_strict_and_default_off() {
+fn qwen4exp_split_decode_default_on_has_strict_rollback() {
     use std::ffi::OsStr;
-    assert!(!parse_qwen4exp_split_decode(None).unwrap());
+    assert!(parse_qwen4exp_split_decode(None).unwrap());
     assert!(!parse_qwen4exp_split_decode(Some(OsStr::new("0"))).unwrap());
     assert!(parse_qwen4exp_split_decode(Some(OsStr::new("1"))).unwrap());
     for value in ["", "true", "false", " 1", "2"] {
@@ -155,10 +155,10 @@ fn qwen4exp_split_decode_opt_in_is_strict_and_default_off() {
 }
 
 #[test]
-fn qwen4exp_hc_up_mix_opt_in_is_strict_and_default_off() {
+fn qwen4exp_hc_up_mix_default_on_has_strict_rollback() {
     use std::ffi::OsStr;
     let parse = |value| parse_qwen4exp_decode_flag(value, QWEN4EXP_HC_UP_MIX_ENV);
-    assert!(!parse(None).unwrap());
+    assert!(parse(None).unwrap());
     assert!(!parse(Some(OsStr::new("0"))).unwrap());
     assert!(parse(Some(OsStr::new("1"))).unwrap());
     for value in ["", "true", "false", " 1", "1 ", "2"] {
@@ -177,10 +177,10 @@ fn qwen4exp_hc_up_mix_opt_in_is_strict_and_default_off() {
 }
 
 #[test]
-fn qwen4exp_guarded_topk_opt_in_is_strict_and_default_off() {
+fn qwen4exp_guarded_topk_default_on_has_strict_rollback() {
     use std::ffi::OsStr;
     let parse = |value| parse_qwen4exp_decode_flag(value, QWEN4EXP_GUARDED_TOPK_ENV);
-    assert!(!parse(None).unwrap());
+    assert!(parse(None).unwrap());
     assert!(!parse(Some(OsStr::new("0"))).unwrap());
     assert!(parse(Some(OsStr::new("1"))).unwrap());
     for value in ["", "true", "false", " 1", "1 ", "2"] {
@@ -196,7 +196,7 @@ fn qwen4exp_guarded_topk_opt_in_is_strict_and_default_off() {
         use std::os::unix::ffi::OsStrExt;
         assert!(parse(Some(OsStr::from_bytes(&[0xff]))).is_err());
     }
-    assert!(!qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions::default().guarded_topk);
+    assert!(qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions::default().guarded_topk);
 }
 
 #[test]

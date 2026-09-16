@@ -22,7 +22,7 @@ pub(crate) fn parse_qwen4exp_decode_flag(
     name: &str,
 ) -> Result<bool> {
     match value {
-        None => Ok(false),
+        None => Ok(true),
         Some(value) if value == "0" => Ok(false),
         Some(value) if value == "1" => Ok(true),
         _ => bail!("{name} must be 0 or 1"),

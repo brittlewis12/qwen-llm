@@ -3721,6 +3721,95 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "production lease; model-free optional QSA pricing and admission boundary"]
+    fn qualified_defaults_optional_scratch_plan() {
+        let _lease =
+            crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+        let ctx = MetalContext::new().unwrap();
+        let config = Qwen4ExpConfig::flash_next_reference();
+        for packed in [false, true] {
+            let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 2588).unwrap();
+            let memory = Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+                &ctx,
+                &geometry,
+                0,
+                packed.then_some(128),
+                packed,
+            )
+            .unwrap();
+            let baseline = memory.clone();
+            assert!(!baseline.split_decode_enabled());
+            let plan = Qwen4ExpTextSessionPlan {
+                geometry,
+                memory,
+                device_registry_id: ctx.device.registryID(),
+            };
+            let plan = plan.with_split_decode(&ctx, false).unwrap();
+            assert_eq!(plan.memory_plan(), &baseline);
+            let plan = plan.with_split_decode(&ctx, true).unwrap();
+            let optimized = plan.memory_plan();
+            assert_eq!(
+                optimized.session_logical_bytes() - baseline.session_logical_bytes(),
+                1_585_152
+            );
+            assert_eq!(
+                optimized.allocations().len(),
+                baseline.allocations().len() + 1
+            );
+            assert_eq!(
+                optimized
+                    .allocations()
+                    .iter()
+                    .filter(|a| a.name == "session.qsa_split")
+                    .count(),
+                1
+            );
+            let available = baseline.priced_upper_bytes_for_sessions(1).unwrap()
+                + QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES;
+            assert!(
+                baseline
+                    .admission_before_residency(signals(available), 1)
+                    .unwrap()
+                    .admitted
+            );
+            assert!(
+                !optimized
+                    .admission_before_residency(signals(available), 1)
+                    .unwrap()
+                    .admitted
+            );
+            assert!(
+                optimized
+                    .admission_before_residency(
+                        signals(
+                            available + optimized.session_priced_upper_bytes()
+                                - baseline.session_priced_upper_bytes()
+                        ),
+                        1
+                    )
+                    .unwrap()
+                    .admitted
+            );
+            let fallback = plan.with_split_decode(&ctx, false).unwrap();
+            assert_eq!(fallback.memory_plan(), &baseline);
+            assert!(
+                fallback
+                    .memory_plan()
+                    .admission_before_residency(signals(available), 1)
+                    .unwrap()
+                    .admitted
+            );
+            assert!(
+                !fallback
+                    .memory_plan()
+                    .admission_before_residency(signals(available - 1), 1)
+                    .unwrap()
+                    .admitted
+            );
+        }
+    }
+
     fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
         assert_eq!(tensor.dtype, GgmlType::F32);
         unsafe {

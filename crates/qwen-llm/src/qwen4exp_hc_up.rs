@@ -18,6 +18,13 @@ pub(crate) fn preflight(ctx: &MetalContext) -> Result<(), Qwen4ExpMetalError> {
     Ok(())
 }
 
+pub(crate) fn supported(ctx: &MetalContext) -> Result<bool, Qwen4ExpMetalError> {
+    let p = ctx.pipeline("kernel_qwen4exp_hc_up_mix_q8_k320")?;
+    Ok(p.threadExecutionWidth() == 32
+        && p.maxTotalThreadsPerThreadgroup() >= 128
+        && p.staticThreadgroupMemoryLength() <= ctx.device.maxThreadgroupMemoryLength())
+}
+
 pub(super) fn encode(
     ctx: &MetalContext,
     enc: &KernelEncoder,

@@ -21,7 +21,11 @@ fn saved_moe_parallel_topk_screen() {
         &gguf,
         capacity,
         None,
-        Qwen4ExpDecodeOptions::default(),
+        Qwen4ExpDecodeOptions {
+            guarded_topk: false,
+            split_qsa: false,
+            hc_up_mix: false,
+        },
     )
     .unwrap();
     crate::qwen4exp_moe::singleton_observe::topk_screen::screen(
@@ -51,7 +55,11 @@ fn saved_moe_interval_budget_v2() {
         &gguf,
         capacity,
         None,
-        Qwen4ExpDecodeOptions::default(),
+        Qwen4ExpDecodeOptions {
+            guarded_topk: false,
+            split_qsa: false,
+            hc_up_mix: false,
+        },
     )
     .unwrap();
     crate::qwen4exp_moe::singleton_observe::intervals::observe_saved_layer2(
@@ -83,7 +91,11 @@ fn saved_moe_stage_interval_diagnostic() {
         &gguf,
         capacity,
         None,
-        Qwen4ExpDecodeOptions::default(),
+        Qwen4ExpDecodeOptions {
+            guarded_topk: false,
+            split_qsa: false,
+            hc_up_mix: false,
+        },
     )
     .unwrap();
     crate::qwen4exp_moe::singleton_observe::captured_interval_diagnostic(

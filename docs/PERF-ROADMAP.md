@@ -308,6 +308,14 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ### September 16 Delivery: Guarded Routing PASS, Reprice Remaining MoE
 
+Follow-up complete: `docs/bench/2026-09-15-qwen4exp-hc-up/MOE-GUARDED-BUDGET.md`.
+Three-dtype capture/replay is bitwise with correct guarded routing. Rare layer2
+timing is INCONCLUSIVE; common layers4/5 have stable controls but distributed
+router/gate-up/down costs. **Next is one small whole-forward parent ledger on
+this baseline**, then inspect the largest parent's source before another kernel.
+Use complete GDN-containing/QSA-containing blocks, bootstrap and tail, not false
+recurrence-only/attention-only labels. The delivery evidence and prior queue follow.
+
 Default-off `QWEN4EXP_GUARDED_TOPK=1` is now actual-product/CLI qualified. N512/K10
 singleton only, zero extra GPU memory, packed routing unchanged.53-case nonfinite
 compatibility packet passes after a preserved failed variant. Empty/QSA-on/off/HC

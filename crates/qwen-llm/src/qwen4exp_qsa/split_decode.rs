@@ -2,36 +2,6 @@ use super::*;
 
 pub(crate) const SCRATCH_FLOATS: usize = 24 * 64 * 258;
 
-pub(crate) fn horizon_reachable(forward_limit: usize) -> bool {
-    // In the released geometry, scalar active IDs first reach2048 at sequence length2048.
-    forward_limit >= 2048
-}
-
-pub(crate) fn supported(ctx: &MetalContext) -> Result<bool, Qwen4ExpQsaError> {
-    for (name, threads) in [
-        ("kernel_qwen4exp_qsa_attention_logits_f16", 256),
-        ("kernel_qwen4exp_qsa_split_softmax_f32", 256),
-        ("kernel_qwen4exp_qsa_split_f16", 128),
-        ("kernel_qwen4exp_qsa_split_merge_f32", 32),
-    ] {
-        let p = ctx.pipeline(name)?;
-        if p.threadExecutionWidth() != 32
-            || p.maxTotalThreadsPerThreadgroup() < threads
-            || !p
-                .staticThreadgroupMemoryLength()
-                .checked_add(if name == "kernel_qwen4exp_qsa_split_softmax_f32" {
-                    ATTENTION_SCRATCH_BYTES
-                } else {
-                    0
-                })
-                .is_some_and(|n| n <= ctx.device.maxThreadgroupMemoryLength())
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 pub(crate) fn eligible(g: QwenSparseAttentionMetalGeometry, ids: usize) -> bool {
     g.supports_split_decode() && (2048..=2051).contains(&ids)
 }

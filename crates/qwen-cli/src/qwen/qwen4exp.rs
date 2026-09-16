@@ -9,13 +9,8 @@ pub(crate) const QWEN4EXP_PACKED_PREFILL_PROFILE_ENV: &str = "QWEN4EXP_PACKED_PR
 pub(crate) const QWEN4EXP_PACKED_SELECTED_QSA_ENV: &str = "QWEN4EXP_PACKED_SELECTED_QSA";
 
 pub(crate) const QWEN4EXP_FULL_SHARD_PREFETCH_ENV: &str = "QWEN4EXP_FULL_SHARD_PREFETCH";
-pub(crate) const QWEN4EXP_QSA_SPLIT_DECODE_ENV: &str = "QWEN4EXP_QSA_SPLIT_DECODE";
 pub(crate) const QWEN4EXP_HC_UP_MIX_ENV: &str = "QWEN4EXP_HC_UP_MIX";
 pub(crate) const QWEN4EXP_GUARDED_TOPK_ENV: &str = "QWEN4EXP_GUARDED_TOPK";
-
-pub(crate) fn parse_qwen4exp_split_decode(value: Option<&std::ffi::OsStr>) -> Result<bool> {
-    parse_qwen4exp_decode_flag(value, QWEN4EXP_QSA_SPLIT_DECODE_ENV)
-}
 
 pub(crate) fn parse_qwen4exp_decode_flag(
     value: Option<&std::ffi::OsStr>,
@@ -522,9 +517,6 @@ pub(crate) fn run_qwen4exp_single_turn(
             std::env::var_os(QWEN4EXP_HC_UP_MIX_ENV).as_deref(),
             QWEN4EXP_HC_UP_MIX_ENV,
         )?,
-        split_qsa: parse_qwen4exp_split_decode(
-            std::env::var_os(QWEN4EXP_QSA_SPLIT_DECODE_ENV).as_deref(),
-        )?,
     };
     let layer_profile_enabled = qwen_llm::env_flag::read_default_off(QWEN4EXP_LAYER_PROFILE_ENV);
     let packed_profile_enabled =
@@ -656,10 +648,6 @@ pub(crate) fn run_qwen4exp_single_turn(
         )
     };
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
-    eprintln!(
-        "qwen4exp: qsa_split_decode={} eligible_ids=2048..2051 rollback={QWEN4EXP_QSA_SPLIT_DECODE_ENV}=0",
-        loaded.split_decode_enabled()
-    );
     eprintln!(
         "qwen4exp: hc_up_mix={} eligible=Q8_0/4x2560/K320 rollback={QWEN4EXP_HC_UP_MIX_ENV}=0",
         loaded.hc_up_mix_enabled()

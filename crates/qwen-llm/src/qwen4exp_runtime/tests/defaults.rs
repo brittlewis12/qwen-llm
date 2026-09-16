@@ -4,7 +4,7 @@ use super::*;
 fn decode_policy_defaults_and_independent_qualification() {
     let on = Qwen4ExpDecodeOptions {
         guarded_topk: true,
-        split_qsa: true,
+        split_qsa: false,
         hc_up_mix: true,
     };
     let off = Qwen4ExpDecodeOptions {
@@ -13,7 +13,7 @@ fn decode_policy_defaults_and_independent_qualification() {
         hc_up_mix: false,
     };
     assert_eq!(Qwen4ExpDecodeOptions::default(), on);
-    assert_eq!(on.qualified("Apple M4 Max", 2048, [true; 3]), on);
+    assert_eq!(on.qualified("Apple M4 Max", [true; 2]), on);
     for device in [
         "Apple M4",
         "Apple M4 Pro",
@@ -21,45 +21,17 @@ fn decode_policy_defaults_and_independent_qualification() {
         "Apple M5 Max",
         "",
     ] {
-        assert_eq!(on.qualified(device, 8192, [true; 3]), off);
+        assert_eq!(on.qualified(device, [true; 2]), off);
     }
-    for bits in 0..8 {
-        let flags = [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0];
+    for bits in 0..4 {
+        let flags = [bits & 1 != 0, bits & 2 != 0];
         let expected = Qwen4ExpDecodeOptions {
             guarded_topk: flags[0],
-            split_qsa: flags[1],
-            hc_up_mix: flags[2],
-        };
-        assert_eq!(on.qualified("Apple M4 Max", 2048, flags), expected);
-        assert_eq!(
-            expected.qualified("Apple M4 Max", 2048, [true; 3]),
-            expected
-        );
-    }
-    let capacity =
-        Qwen4ExpSessionCapacity::for_forward_limit(&Qwen4ExpConfig::flash_next_reference(), 2047)
-            .unwrap();
-    assert_eq!(capacity.qsa_physical_capacity, 2048);
-    assert_eq!(
-        on.qualified("Apple M4 Max", capacity.forward_limit, [true; 3]),
-        Qwen4ExpDecodeOptions {
             split_qsa: false,
-            ..on
-        }
-    );
-}
-
-#[test]
-fn decode_policy_optional_scratch_admission_truth_table() {
-    for requested in [false, true] {
-        for baseline in [false, true] {
-            for optimized in [false, true] {
-                assert_eq!(
-                    optional_split_admission_fallback(requested, baseline, optimized),
-                    (requested, baseline, optimized) == (true, true, false)
-                );
-            }
-        }
+            hc_up_mix: flags[1],
+        };
+        assert_eq!(on.qualified("Apple M4 Max", flags), expected);
+        assert_eq!(expected.qualified("Apple M4 Max", [true; 2]), expected);
     }
 }
 
@@ -94,8 +66,8 @@ fn save(directory: &std::path::Path, name: &str, observation: &Observation) {
 }
 
 #[test]
-#[ignore = "production lease; default identity, independent rollbacks, dissimilar QSA guardrail; no timing bracket"]
-fn qualified_defaults_product_closure() {
+#[ignore = "production lease; final default identity, independent rollbacks, dissimilar HC guardrail; no timing bracket"]
+fn qualified_defaults_final_closure() {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
@@ -122,10 +94,18 @@ fn qualified_defaults_product_closure() {
         Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, 2578).unwrap();
     assert!(
         loaded.guarded_topk_enabled()
-            && loaded.split_decode_enabled()
+            && !loaded.split_decode_enabled()
             && loaded.hc_up_mix_enabled()
     );
     let mut runner = loaded.create_runner(&ctx).unwrap();
+    assert!(
+        !runner
+            .workspace
+            .memory_plan()
+            .allocations()
+            .iter()
+            .any(|a| a.name == "session.qsa_split")
+    );
     let tensors = runner.workspace.persistent_state_tensors();
     assert_eq!(tensors.len(), 121);
     let state_bytes: usize = tensors.iter().map(|t| t.n_bytes() as usize).sum();
@@ -152,14 +132,17 @@ fn qualified_defaults_product_closure() {
         let old_prefix = prefix_bytes(&runner);
         crate::metal::dispatch_census_begin();
         let defaults = observe_product_at(&mut runner, &tokens[PREFIX..], true, PREFIX);
-        witness(&crate::metal::dispatch_census_take(), 32, [true; 3]);
+        witness(
+            &crate::metal::dispatch_census_take(),
+            32,
+            [true, false, true],
+        );
         save(&artifact, "defaults-32x248320", &defaults);
         assert_state_bytes_eq("default old prefix", &old_prefix, &prefix_bytes(&runner));
         for (name, flags) in [
-            ("explicit", [true, true, true]),
-            ("topk-off", [false, true, true]),
-            ("hc-off", [true, true, false]),
-            ("qsa-off", [true, false, true]),
+            ("explicit", [true, false, true]),
+            ("topk-off", [false, false, true]),
+            ("hc-off", [true, false, false]),
         ] {
             runner.workspace.restore_checkpoint_for_tests(&checkpoint);
             runner
@@ -178,7 +161,7 @@ fn qualified_defaults_product_closure() {
             let observed = observe_product_at(&mut runner, &tokens[PREFIX..], true, PREFIX);
             witness(&crate::metal::dispatch_census_take(), 32, flags);
             save(&artifact, name, &observed);
-            if flags[1] && flags[2] {
+            if flags[2] {
                 assert_replay(name, &defaults, &observed);
             } else {
                 assert_numeric(&observed, &defaults, &tensors);
@@ -193,7 +176,7 @@ fn qualified_defaults_product_closure() {
     runner.workspace.configure_hc_up_mix(&ctx, true).unwrap();
     runner
         .workspace
-        .set_split_decode_for_tests(&ctx, true)
+        .set_split_decode_for_tests(&ctx, false)
         .unwrap();
     let bytes = include_bytes!(
         "../../../../../docs/bench/2026-08-29-qwen4exp-selected-semantic/known-answer.u32le"
@@ -213,10 +196,7 @@ fn qualified_defaults_product_closure() {
         prompt.len()
     );
     let checkpoint = runner.workspace.checkpoint_for_tests();
-    runner
-        .workspace
-        .set_split_decode_for_tests(&ctx, false)
-        .unwrap();
+    runner.workspace.configure_hc_up_mix(&ctx, false).unwrap();
     let mut continuation = Vec::new();
     let mut baseline = Observation {
         logits: Vec::new(),
@@ -236,15 +216,20 @@ fn qualified_defaults_product_closure() {
     witness(
         &crate::metal::dispatch_census_take(),
         8,
-        [true, false, true],
+        [true, false, false],
     );
     baseline.state = snapshot_persistent_state(&runner);
     runner.workspace.restore_checkpoint_for_tests(&checkpoint);
+    runner.workspace.configure_hc_up_mix(&ctx, true).unwrap();
     crate::metal::dispatch_census_begin();
-    let candidate = run_product_at(&mut runner, &continuation, true, true, prompt.len());
-    witness(&crate::metal::dispatch_census_take(), 8, [true; 3]);
-    save(&artifact, "known-answer-qsa-off-8x248320", &baseline);
-    save(&artifact, "known-answer-qsa-on-8x248320", &candidate);
+    let candidate = observe_product_at(&mut runner, &continuation, true, prompt.len());
+    witness(
+        &crate::metal::dispatch_census_take(),
+        8,
+        [true, false, true],
+    );
+    save(&artifact, "known-answer-hc-off-8x248320", &baseline);
+    save(&artifact, "known-answer-hc-on-8x248320", &candidate);
     std::fs::write(
         artifact.join("known-answer-continuation.u32le"),
         continuation
@@ -255,6 +240,6 @@ fn qualified_defaults_product_closure() {
     .unwrap();
     assert_numeric_at(&baseline, &candidate, &tensors, prompt.len());
     eprintln!(
-        "defaults dissimilar QSA numerical PASS steps=8 states=121 continuation={continuation:?}"
+        "defaults dissimilar HC numerical PASS steps=8 states=121 continuation={continuation:?}"
     );
 }

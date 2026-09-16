@@ -515,6 +515,7 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
         self.active_command = command;
     }
 
+    #[cfg(test)]
     pub(crate) fn validate_split_binding(
         &self,
         ctx: &MetalContext,
@@ -530,6 +531,7 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn bind_split_scratch(&mut self, scratch: Option<&MetalTensor>) {
         if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) = &mut self.mixer
         {

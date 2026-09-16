@@ -1,4 +1,5 @@
 // Split/GQA decode adapted from antirez/ds4 9139e2a, metal/qwen4.metal.
+// Retired compatibility experiment; not a production route.
 // Incumbent QK/global-softmax order; split only the value accumulation.
 // MIT License
 // Copyright (c) 2026 The ds4.c authors

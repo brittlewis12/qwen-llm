@@ -387,6 +387,7 @@ pub struct Qwen4ExpTextSessionMemoryPlan {
     session_priced_upper_bytes: u64,
     packed_capacity: Option<usize>,
     packed_selected_capable: bool,
+    #[cfg(test)]
     split_decode: bool,
     allocations: Vec<Qwen4ExpTextSessionAllocation>,
 }
@@ -450,38 +451,10 @@ impl Qwen4ExpTextSessionMemoryPlan {
         packed_capacity: Option<usize>,
         packed_selected_capable: bool,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
-        Self::for_geometry_with_split_options(
-            ctx,
-            geometry,
-            residency_priced_upper_bytes,
-            packed_capacity,
-            packed_selected_capable,
-            false,
-        )
-    }
-
-    fn for_geometry_with_split_options(
-        ctx: &MetalContext,
-        geometry: &Qwen4ExpTextSessionMetalGeometry,
-        residency_priced_upper_bytes: u64,
-        packed_capacity: Option<usize>,
-        packed_selected_capable: bool,
-        split_decode: bool,
-    ) -> Result<Self, Qwen4ExpTextSessionError> {
         if packed_capacity.is_none() && packed_selected_capable {
             return invalid("selected packed QSA scratch requires packed prefill");
         }
         let mut builder = AllocationBuilder::default();
-        if split_decode {
-            if !geometry.packed_qsa_geometry()?.supports_split_decode() {
-                return invalid("split decode requires released QSA geometry");
-            }
-            crate::qwen4exp_qsa::split_decode::preflight(ctx)?;
-            builder.f32(
-                "session.qsa_split",
-                crate::qwen4exp_qsa::split_decode::SCRATCH_FLOATS,
-            )?;
-        }
         add_zero_one_allocations(&mut builder, geometry.zero_one)?;
         if let Some(capacity) = packed_capacity {
             let maximum = geometry.packed_capacity()?;
@@ -543,13 +516,66 @@ impl Qwen4ExpTextSessionMemoryPlan {
             session_priced_upper_bytes,
             packed_capacity,
             packed_selected_capable,
-            split_decode,
+            #[cfg(test)]
+            split_decode: false,
             allocations,
         })
     }
 
     pub fn residency_priced_upper_bytes(&self) -> u64 {
         self.residency_priced_upper_bytes
+    }
+
+    #[cfg(test)]
+    fn for_geometry_with_split_options(
+        ctx: &MetalContext,
+        geometry: &Qwen4ExpTextSessionMetalGeometry,
+        residency: u64,
+        packed_capacity: Option<usize>,
+        packed_selected: bool,
+        split: bool,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        let mut memory = Self::for_geometry_with_options(
+            ctx,
+            geometry,
+            residency,
+            packed_capacity,
+            packed_selected,
+        )?;
+        if split {
+            if !geometry.packed_qsa_geometry()?.supports_split_decode() {
+                return invalid("split decode requires released QSA geometry");
+            }
+            crate::qwen4exp_qsa::split_decode::preflight(ctx)?;
+            let logical_bytes = (crate::qwen4exp_qsa::split_decode::SCRATCH_FLOATS * 4) as u64;
+            let (priced_bytes, alignment) = price_session_allocation(
+                "session.qsa_split",
+                logical_bytes,
+                ctx.shared_buffer_size_and_align(logical_bytes)?,
+                host_page_size_bytes()? as u64,
+                ctx.max_buffer_length() as u64,
+            )?;
+            memory.session_logical_bytes = memory
+                .session_logical_bytes
+                .checked_add(logical_bytes)
+                .ok_or_else(|| {
+                    Qwen4ExpTextSessionError::Invalid("research logical byte overflow".into())
+                })?;
+            memory.session_priced_upper_bytes = memory
+                .session_priced_upper_bytes
+                .checked_add(priced_bytes)
+                .ok_or_else(|| {
+                    Qwen4ExpTextSessionError::Invalid("research priced byte overflow".into())
+                })?;
+            memory.allocations.push(Qwen4ExpTextSessionAllocation {
+                name: "session.qsa_split".into(),
+                logical_bytes,
+                priced_bytes,
+                alignment,
+            });
+            memory.split_decode = true;
+        }
+        Ok(memory)
     }
 
     pub fn session_logical_bytes(&self) -> u64 {
@@ -572,6 +598,7 @@ impl Qwen4ExpTextSessionMemoryPlan {
         self.packed_selected_capable
     }
 
+    #[cfg(test)]
     pub fn split_decode_enabled(&self) -> bool {
         self.split_decode
     }
@@ -656,6 +683,7 @@ pub struct Qwen4ExpTextSessionPlan {
 }
 
 impl Qwen4ExpTextSessionPlan {
+    #[cfg(test)]
     pub fn with_split_decode(
         mut self,
         ctx: &MetalContext,
@@ -1021,6 +1049,7 @@ use crate::qwen4exp_metal::encode_final_gated_residual_mix;
 
 pub struct Qwen4ExpTextSessionMetalWorkspace {
     geometry: Qwen4ExpTextSessionMetalGeometry,
+    #[cfg(test)]
     split_decode_scratch: Option<MetalTensor>,
     zero_one: Qwen4ExpLayersZeroOneMetalWorkspace,
     packed: Option<Qwen4ExpTextPackedScratch>,
@@ -1086,6 +1115,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         admission: MetalMemoryAdmission,
     ) -> Result<Self, Qwen4ExpTextSessionError> {
         let allocated_before = ctx.current_allocated_size();
+        #[cfg(test)]
         let split_decode_scratch = if memory.split_decode_enabled() {
             Some(MetalTensor::zeros_f32(
                 ctx,
@@ -1098,9 +1128,11 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         for block in &geometry.post_ple {
             post_ple.push(Qwen4ExpPostPleBlockMetalWorkspace::new(ctx, *block)?);
         }
+        #[cfg(test)]
         for block in &post_ple {
             block.validate_split_binding(ctx, split_decode_scratch.as_ref())?;
         }
+        #[cfg(test)]
         for block in &mut post_ple {
             block.bind_split_scratch(split_decode_scratch.as_ref());
         }
@@ -1125,6 +1157,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             None
         };
         let workspace = Self {
+            #[cfg(test)]
             split_decode_scratch,
             zero_one: Qwen4ExpLayersZeroOneMetalWorkspace::new(ctx, geometry.zero_one)?,
             packed,
@@ -1220,6 +1253,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         &self.geometry
     }
 
+    #[cfg(test)]
     pub fn split_decode_enabled(&self) -> bool {
         self.split_decode_scratch.is_some()
     }

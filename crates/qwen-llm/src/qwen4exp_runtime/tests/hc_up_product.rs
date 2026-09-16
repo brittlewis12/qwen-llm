@@ -66,22 +66,28 @@ fn witness(census: &[crate::metal::DispatchCensusRow], steps: usize, split: bool
 #[test]
 #[ignore = "serial production lease; HC actual-product composition and incremental decode timing"]
 fn product_hc_up_shared_prefix() {
-    qualify_hc_product(false);
+    qualify_hc_product(false, true);
 }
 
 #[test]
 #[ignore = "serial production lease; one disposition timebox for HC on the new guarded-router baseline"]
 fn hc_guarded_baseline_disposition() {
-    qualify_hc_product(true);
+    qualify_hc_product(true, true);
 }
 
-fn qualify_hc_product(guarded: bool) {
+#[test]
+#[ignore = "production lease; final HC disposition on guarded routing and incumbent QSA"]
+fn hc_final_baseline_disposition() {
+    qualify_hc_product(true, false);
+}
+
+fn qualify_hc_product(guarded: bool, split_baseline: bool) {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/profiles");
     std::fs::create_dir_all(&parent).unwrap();
     let artifact = parent.join(format!(
-        "qwen4exp-product-hc-guarded{guarded}-{}",
+        "qwen4exp-product-hc-guarded{guarded}-split{split_baseline}-{}",
         std::process::id()
     ));
     std::fs::create_dir(&artifact).unwrap();
@@ -109,12 +115,13 @@ fn qualify_hc_product(guarded: bool) {
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
             guarded_topk: guarded,
-            split_qsa: true,
+            split_qsa: split_baseline,
             hc_up_mix: true,
         },
     )
     .unwrap();
-    assert!(loaded.hc_up_mix_enabled() && loaded.split_decode_enabled());
+    assert!(loaded.hc_up_mix_enabled());
+    assert_eq!(loaded.split_decode_enabled(), split_baseline);
     assert_eq!(loaded.guarded_topk_enabled(), guarded);
     let mut runner = loaded.create_runner(&ctx).unwrap();
     let tensors = runner.workspace.persistent_state_tensors();
@@ -146,7 +153,7 @@ fn qualify_hc_product(guarded: bool) {
     runner.workspace.configure_hc_up_mix(&ctx, true).unwrap();
     runner
         .workspace
-        .set_split_decode_for_tests(&ctx, true)
+        .set_split_decode_for_tests(&ctx, split_baseline)
         .unwrap();
     let _selected = Qwen4ExpPackedSelectedQsaOverride::set(true);
     crate::metal::dispatch_census_begin();
@@ -167,7 +174,14 @@ fn qualify_hc_product(guarded: bool) {
     );
     let checkpoint = runner.workspace.checkpoint_for_tests();
     let prefix = prefix_bytes(&runner);
-    let mut baseline = run_hc_product(&mut runner, &tokens[PREFIX..], false, true, true, PREFIX);
+    let mut baseline = run_hc_product(
+        &mut runner,
+        &tokens[PREFIX..],
+        false,
+        split_baseline,
+        true,
+        PREFIX,
+    );
     assert_state_bytes_eq(
         "product HC baseline old prefix",
         &prefix,
@@ -179,16 +193,30 @@ fn qualify_hc_product(guarded: bool) {
         &endpoint,
         &runner.logits().unwrap().to_vec(),
     );
-    let replay = run_hc_product(&mut runner, &tokens[PREFIX..], false, true, true, PREFIX);
+    let replay = run_hc_product(
+        &mut runner,
+        &tokens[PREFIX..],
+        false,
+        split_baseline,
+        true,
+        PREFIX,
+    );
     assert_replay("product HC restored baseline", &baseline, &replay);
     drop(replay);
     runner.workspace.restore_checkpoint_for_tests(&checkpoint);
     crate::metal::dispatch_census_begin();
-    let mut candidate = run_hc_product(&mut runner, &tokens[PREFIX..], true, true, true, PREFIX);
+    let mut candidate = run_hc_product(
+        &mut runner,
+        &tokens[PREFIX..],
+        true,
+        split_baseline,
+        true,
+        PREFIX,
+    );
     let census = crate::metal::dispatch_census_take();
     save_rows(&artifact, "split-on-baseline-32x248320", &baseline);
     save_rows(&artifact, "split-on-candidate-32x248320", &candidate);
-    witness(&census, 32, true, guarded);
+    witness(&census, 32, split_baseline, guarded);
     assert_numeric(&baseline, &candidate, &tensors);
     assert_state_bytes_eq(
         "product HC candidate old prefix",
@@ -198,7 +226,7 @@ fn qualify_hc_product(guarded: bool) {
     baseline.state.clear();
     candidate.state.clear();
     eprintln!(
-        "product_hc split=true numerical PASS steps=32 states={}",
+        "product_hc split={split_baseline} numerical PASS steps=32 states={}",
         tensors.len()
     );
     {
@@ -235,7 +263,7 @@ fn qualify_hc_product(guarded: bool) {
                 &mut runner,
                 &tokens[PREFIX..PREFIX + 4],
                 hc,
-                true,
+                split_baseline,
                 false,
                 PREFIX,
             );

@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-16 - Close Child Attribution And Bound Validation Before More Kernels
+
+- Fresh cx challenge replaces unused isolated replay with native-only attribution.
+  Dispatch-counter capability fails before model load/forward0.03s; preserve it,
+  remove unsupported markers, never substitute manual samples on stage-only buffers.
+- Five-forward host/source packet preserves all rows/hyper/121states bitwise and
+  exact all-48 dispatch shapes/order, but GPU observer-7.02443% fails frozen5%.
+  Controls3.30036% GPU/3.05489% wall pass; wall observer-6.12639% passes10% but
+  cannot override GPU failure. INCONCLUSIVE_NO_RETRY; no child GPU timing exists.
+- Structural cohort: QSA3..43 eleven identical40-dispatch/type/shape paths;
+  layer47 uses Q8 routed down and39 dispatches. Source groups and all raw evidence
+  persist in child-host35634. Raw hostblock113us is not GPU cost or a win.
+- Source repeated-validation hypothesis gets a separate no-commit CPU ceiling:
+ 2warm+32calls, diagnostic-off timing, real metadata, state/census checks. Entire
+  root pass median0.1718545ms misses>=1ms design gate; HOLD/no caching or bypass.
+  Runner weights already bind once. Artifact validation-ceiling40224, PASS0.19s.
+- Source-only donor refresh9139e2a..8db1d1d finds37 commits, mostlyCUDA/batched work.
+  New d0b7434 parallel uncached BF16 PLE preads improves donorBS1, but localIQ4 mmap
+  gather has a different I/O contract; do not import its gain or scheduling policy.
+- No justified next local candidate from this packet. Source screening may continue;
+  do not re-open closed storage/attention/dtype lanes or infer global exhaustion.
+  Evidence/reviewer disagreements: `docs/bench/2026-09-16-flash-defaults/CHILD-RESULT.md`.
+
 ## 2026-09-16 - Settled Defaults Rechart Toward A Common Late QSA-Containing Block
 
 - One fixed parent ledger, default guarded+HC/incumbent QSA,2179prefix+5 same-token

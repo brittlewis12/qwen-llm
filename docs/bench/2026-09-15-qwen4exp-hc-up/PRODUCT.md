@@ -61,6 +61,10 @@ or cold-cache claim. Correctness/CLI qualification does not lift performance HOL
 
 ## Leverage Map
 
+Update: `TOPK-RESULT.md` now establishes a separate native bitwise parallel-routing
+gain. Guarded selector compatibility/delivery outranks further MoE dtype profiling;
+HC's own promotion HOLD remains unchanged. The following records the prior queue.
+
 1. Complete-MoE budget remains next: QSA on/HC off, layers2/4/5 covering artifact
    dtype combinations, whole router-to-accumulation path. Do not optimize a leaf
    before its parent cost is established.

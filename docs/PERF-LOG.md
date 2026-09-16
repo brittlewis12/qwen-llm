@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-15 - Parallel Singleton Routing Native Research PASS
+
+- Interval-aware saved-layer2 V2 validates counters/census/exactness, but unsampled
+  18.7559% drift makes absolute timing INCONCLUSIVE. No retry. Large sampled
+  routing group plus source one-thread N512/K10 selector motivates a mechanism
+  screen, not a claim that65.434% is top-k cost or a projected all-layer gain.
+- Existing parallel shader at research-only512 threads passes13 finite fixtures,
+  CPU order/softmax, exact IDs/weights and complete-router/MoE intermediates. Fixed
+  ABBA complete saved-MoE saves59.5064% GPU/56.3853% wall with tight controls.
+- Native128-forward packet PASS32.62s, one2179 prefix, QSA on/HC off.32 full
+  logits/hyper rows and terminal121 states bitwise;1536 finite router input rows,
+  IDs/weights bitwise and CPU-exact ordering. No capture copies in timed arms.
+- Four-forward GPU ABBA194.503416/116.220458/116.257625/194.191334ms saves40.1901%;
+  executor wall216.605667/138.218458/137.859960/215.908416ms saves36.1689%.
+  Controls0.1606%/0.3224%, both mean/pair floors pass; no timing retry. Incremental
+  native executor result, not prefill/request throughput or additive QSA savings.
+- Next guarded selector compatibility and actual-product delivery, before more
+  MoE4/5 profiling. Nonfinite semantics remain unqualified: exponent-bit detection
+  plus uniform incumbent-serial fallback is the narrow next design. Existing
+  product routes/defaults and n<=256 host path unchanged; HC promotion stays HOLD.
+- All GPU work production lease/real wired gate/API validation. No new weights,
+  server restart or push. Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/TOPK-RESULT.md`.
+
 ## 2026-09-15 - HC Product Numerical/CLI PASS, Performance HOLD; MoE Instrumentation
 
 - Default-off typed/strict CLI HC option, independent QSA composition, existing

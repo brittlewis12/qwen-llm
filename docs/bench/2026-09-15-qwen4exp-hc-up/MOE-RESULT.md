@@ -1,5 +1,10 @@
 # Complete MoE Observation: Timing Invalid
 
+Later interval V2 remains absolute-timing INCONCLUSIVE, but its source lead earns
+a separate exact parallel-selector screen and native PASS. Current leverage map
+and bounded40.1901% native GPU gain are in `TOPK-RESULT.md`; original failures below
+remain failures, not retroactively qualified timings.
+
 Observation01, API validation and production lease/real wired gate,5.10s:
 `target/profiles/2026-09-15-qwen4exp-moe-observe-01.log`.
 One2179 prefix, QSA on/HC off, ordinary and observed forward at2179. Scoped

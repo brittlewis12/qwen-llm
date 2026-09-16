@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-16 - Existing Strict Packed Router Gains Exact N1024 Coverage
+
+- Source-led policy gap, not a new kernel: default strict E8P32 router set expands
+  from512/527/2048 to512/527/1024/2048, same M4 Max/H2560/E512/F32 gates and rollback.
+  No extra GPU memory, flag, planner change or singleton-decode claim.
+- CPU scope/planner and component differential PASS. Native natural-SSH first1024
+  tokens plus4 original continuations: full logits/hyper/121states/causal metadata
+  bitwise at prefill AND every continuation; exactly48 packed router substitutions.
+- Sole census-free native prefill ABBA GPU2107.862625/1794.884875/1797.552375/
+  2107.145625ms saves14.77034%; wall2117.348166/1805.355792/1807.597875/2117.032375
+  saves14.67574%. Control spreads0.03402%/0.01492%; all frozen mean/pair/wall gates
+  pass, explicitKEEP. Native36.76s; raw router-n1024-46237, no timing retry.
+- First native attempt stopped before execution at snapshot budget; preserve0.13s
+  failure. Per-tensor disk comparisons retain all coverage under the same<1GiB cap.
+- ActualCLI strictUNSET/rollback0:1024prompt/16output/15transitions/token_limit,
+  statusok, identical stdout/token fingerprint. Delivery only, not cold-performance
+  evidence. Existingguarded/HC defaults and incumbentQSA unchanged.
+- cx adversarial review confirms exact-width promotion, rejects broader inference;
+  planner3072 actually2048+3+1021. No automatic next-width sweep or reopening of
+  closed child/storage/attention/validation candidates. Evidence:
+  `docs/bench/2026-09-16-flash-defaults/ROUTER-1024-RESULT.md`.
+
 ## 2026-09-16 - Close Child Attribution And Bound Validation Before More Kernels
 
 - Fresh cx challenge replaces unused isolated replay with native-only attribution.

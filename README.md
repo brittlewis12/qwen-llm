@@ -115,6 +115,12 @@ and one unsuccessful repair timebox. Its environment variable has no effect;
 production uses incumbent QSA without split scratch. Failed attempts and earlier
 measurements remain documented in `docs/bench/2026-09-16-flash-defaults/RESULT.md`.
 
+The existing strict-order packed router now also defaults on at exact1024 rows,
+alongside512,527,2048, within its qualified M4 Max geometry. The natural1024-token
+packet saves14.77% prefill GPU time with bitwise endpoint/state agreement; no shader
+or new switch is added. `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0` remains the rollback.
+See `docs/bench/2026-09-16-flash-defaults/ROUTER-1024-RESULT.md` for scope and evidence.
+
 Run `qwen -h` for the common interface or `qwen --help` for the expanded
 research and diagnostics surface.
 

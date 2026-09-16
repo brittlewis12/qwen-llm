@@ -31,6 +31,9 @@ mod child_ledger;
 #[path = "validation_ceiling.rs"]
 mod validation_ceiling;
 
+#[path = "router_width.rs"]
+mod router_width;
+
 struct Observation {
     logits: Vec<Vec<f32>>,
     hyper: Vec<Vec<f32>>,

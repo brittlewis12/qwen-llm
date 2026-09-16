@@ -407,6 +407,23 @@ fn packed_router_e8p32_strict_matches_generic_route_bits() {
         return;
     }
 
+    check_packed_router_e8p32_bits(ctx, &PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS);
+}
+
+#[test]
+#[ignore = "production lease; exact N1024 existing packed-router differential"]
+fn packed_router_n1024_component_qualification() {
+    let _lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+    let ctx = MetalContext::new().expect("real Metal required");
+    assert_eq!(
+        ctx.device.name().to_string(),
+        PACKED_ROUTER_E8P32_STRICT_DEVICE
+    );
+    check_packed_router_e8p32_bits(ctx, &[1024]);
+}
+
+fn check_packed_router_e8p32_bits(ctx: MetalContext, token_counts: &[usize]) {
     const TOP_K: usize = 10;
     let geometry = Qwen4ExpMoeMetalGeometry::new(
         PACKED_ROUTER_E8P32_STRICT_HIDDEN,
@@ -433,7 +450,7 @@ fn packed_router_e8p32_strict_matches_generic_route_bits() {
         vec![geometry.hidden_size as u64],
     );
 
-    for tokens in PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS {
+    for &tokens in token_counts {
         let input_values = (0..tokens * geometry.hidden_size)
             .map(|index| {
                 let token = index / geometry.hidden_size;

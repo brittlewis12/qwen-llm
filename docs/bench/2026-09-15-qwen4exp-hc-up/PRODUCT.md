@@ -1,5 +1,9 @@
 # HC Product: Numerical PASS, Performance HOLD
 
+Historical serial-router composition; its HOLD is unchanged. September16 qualifies
+HC default-on on the guarded-router/incumbent-QSA baseline instead:
+`../2026-09-16-flash-defaults/RESULT.md`. Do not apply this packet's old default policy.
+
 `Qwen4ExpDecodeOptions.hc_up_mix` and strict CLI `QWEN4EXP_HC_UP_MIX=0/1`
 provide a default-off experimental route. Unset/0 retain incumbent; malformed
 values fail. Eligible singleton Q8 up /four branches /hidden2560 /rank320 only.

@@ -107,3 +107,10 @@ gates in `target/profiles/qwen4exp-defaults-15813/`. The original online route a
 remains failed on the dissimilar guardrail. Retire both from production; preserve
 research/history, not a hidden opt-in. Final HC disposition uses guarded routing
 and incumbent QSA, existing numerical/state gates and one frozen performance bracket.
+
+Final-default closure: same natural128 forwards (default32, explicit32, top-k-off32,
+HC-off32), no split scratch admitted or bound; dissimilar known-answer8 HC-off
+greedy then same-input HC-on8. Numerical gates precede HC performance authority.
+One final HC product harness run retains the existing204-forward structure and
+floors, with guarded top-k always on and incumbent QSA in every arm. Duplicate
+QSA-off checks in the historical harness are harmless, not extra timing attempts.

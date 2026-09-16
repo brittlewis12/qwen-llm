@@ -98,30 +98,22 @@ serial single-turn generation lane. Multi-token prompts request packed prefill
 by default and log any fallback to scalar admission. JSONL batching, serving,
 prefix or durable caches, and DFlash are not supported for Flash-Next.
 
-Flash-Next has an experimental singleton-attention opt-in:
-`QWEN4EXP_QSA_SPLIT_DECODE=1 qwen run -m MODEL --user "Explain this"`.
-It adds one accounted 1.585 MB scratch per session and uses split attention at
-2048-2051 active IDs; shorter attention uses the existing path. Packed kernels
-are unchanged, but eligible scalar-prefill steps also use the option. Unset or
-`=0` retains default math; values other than 0/1 are rejected. The bounded M4 Max
-comparison saves about 16% decode GPU time, not a general throughput guarantee.
-See `docs/bench/2026-09-14-qwen4exp-donor-split/PRODUCT.md` for qualification limits.
+Flash-Next automatically uses qualified singleton optimizations on Apple M4 Max:
+parallel N512/K10 expert selection with serial fallback for nonfinite inputs, and
+Q8 HC up-plus-mix. Both CLI and library defaults enable these routes after pipeline
+capability checks; other devices retain incumbent execution. Neither adds GPU
+scratch or changes packed kernels. Top-k qualification is bitwise; HC is numerical.
 
-Flash-Next also supports `QWEN4EXP_GUARDED_TOPK=1` for parallel singleton expert
-selection at N512/K10, with the incumbent serial algorithm for nonfinite inputs.
-It is default-off, accepts only 0/1, adds no GPU scratch, and leaves packed
-routing unchanged. The bounded M4 Max product comparison preserves outputs/state
-bitwise and reduces decode GPU time by41.7% and executor wall time by37.1%, with
-split-QSA already enabled. These are not general request-throughput guarantees.
-Use both options with `QWEN4EXP_GUARDED_TOPK=1 QWEN4EXP_QSA_SPLIT_DECODE=1 qwen run -m MODEL --user "Explain this"`;
-unset the guarded flag or set it to0 to roll back. See
-`docs/bench/2026-09-15-qwen4exp-hc-up/TOPK-PRODUCT.md` for compatibility limits.
+`QWEN4EXP_GUARDED_TOPK=0` and `QWEN4EXP_HC_UP_MIX=0` independently roll back these
+defaults. Unset or `=1` allows qualified execution, not force-on for unsupported
+hardware; other values fail. HC's final guarded-router/incumbent-QSA comparison
+saves6.56% GPU time and5.73% executor wall time. These are bounded continuation
+measurements, not a general request-throughput guarantee or additive gain claim.
 
-`QWEN4EXP_HC_UP_MIX=1` independently enables an experimental singleton Q8 HC
-up-plus-mix route. It adds no GPU scratch; packed paths retain incumbent math.
-Default off; strict 0/1 parsing. Numerical and CLI checks pass, but performance
-promotion is on HOLD after a frozen timing-floor miss: this is not a speed
-recommendation. See `docs/bench/2026-09-15-qwen4exp-hc-up/PRODUCT.md`.
+The split-QSA production option is removed after a failed compatibility guardrail
+and one unsuccessful repair timebox. Its environment variable has no effect;
+production uses incumbent QSA without split scratch. Failed attempts and earlier
+measurements remain documented in `docs/bench/2026-09-16-flash-defaults/RESULT.md`.
 
 Run `qwen -h` for the common interface or `qwen --help` for the expanded
 research and diagnostics surface.

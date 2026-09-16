@@ -1,5 +1,9 @@
 # Split Attention Product Opt-In Delivery
 
+Historical packet. September16 production retirement supersedes this opt-in:
+`../2026-09-16-flash-defaults/RESULT.md`. The measurements below remain unchanged;
+they do not override the later failed default guardrail and finite repair outcome.
+
 Status: **exclusive actual-product qualification and live CLI PASS**. Default
 remains off. The earlier unguarded runs below stay provisional; the new exclusive
 runs supply delivery authority rather than retroactively validating them.

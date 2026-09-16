@@ -1,5 +1,9 @@
 # Guarded Singleton Selector: Product Opt-In PASS
 
+Historical delivery policy. September16 promotes qualified M4 Max defaults and
+retires split QSA: `../2026-09-16-flash-defaults/RESULT.md`. Measurements below retain
+their original QSA-on/HC-off composition; do not relabel them as a new joint gain.
+
 Default-off `QWEN4EXP_GUARDED_TOPK=1`, independently selectable from QSA and HC.
 Unset/0 retains incumbent routing; malformed/non-Unicode values fail. Library
 configuration is typed `Qwen4ExpDecodeOptions.guarded_topk`, not a global environment

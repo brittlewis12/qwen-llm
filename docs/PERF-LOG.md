@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-16 - Qualified Defaults Ship; QSA Timebox Ends In Retirement
+
+- User policy correction: qualified wins default on; unfinished worthwhile work
+  gets a finite disposition, not an indefinite opt-in. Fresh cx Sol/Luna challenge
+  favors narrow capability scope, independent rollback and explicit old baselines.
+- Original online-QSA fails dissimilar first-row maxabs0.0012910366 against<0.001.
+  One incumbent-softmax/split-PV repair passes12 primitive cases but fails composed
+  HC-off/on natural step23 maxabs0.0010004044. Isolated repaired-QSA comparisons
+  were not reached. No relaxed gate or repair timing; retire production QSA.
+- CLI/API split option, production scratch/admission/bindings/route removed;
+  retired shader and host plumbing retained only in research/test scope. Old
+  speed observations remain historical, not permission to keep a hidden switch.
+- Guarded top-k and HC default on in CLI/library for exact M4 Max plus pipeline
+  capabilities. Independent strict0 rollbacks;1 means allow qualified, not force.
+  Final144-forward closure PASS18.53s: default/explicit32 and top-k-off32 bitwise;
+  HC-off32 and dissimilar8 numerical, terminal121states, census/no split scratch.
+- FinalHC204-forward packet PASS14.47s, guarded routing/incumbent QSA. Four-forward
+  GPU154.443500/144.441334/144.219417/154.466584ms saves6.5551%; wall176.582374/
+  166.795667/166.821334/177.321624ms saves5.7323%. Both mean/pair5%/3% floors pass;
+  controls0.01495%/0.41777%. Earlier serial-router HOLD and guarded+online-QSA PASS
+  remain tied to their own compositions, not overwritten.
+- Unflagged real CLI PASS: exact FINAL_JSON amber-lattice-2049/K-17,2578prompt,
+  23output,22transitions,EOS,statusok,guarded/HC=true.24.15 reported decode TPS
+  is unpaired, not a gain. Release build clean; production GPU lease/real wired
+  gate/API validation throughout. No server restart, new quants or remote push.
+- NEXT bounded whole-forward parent ledger on ACTUAL defaults: guarded+HC on,
+  incumbent QSA. Old guarded+split-QSA/HC-off ledger cannot rank current parents.
+  Details, limitations and cx tradeoffs: `docs/bench/2026-09-16-flash-defaults/RESULT.md`.
+
 ## 2026-09-16 - Guarded-Baseline MoE Budget Recharts Toward Whole-Forward Parents
 
 - One prefix/two native forwards, guarded top-k+QSA on/HC off. Ordinary/observed

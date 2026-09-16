@@ -310,6 +310,27 @@ impl Qwen4ExpLayerZeroMetalWorkspace {
         self.state_poisoned
     }
 
+    pub(crate) fn validate_hc_up_binding(
+        &self,
+        ctx: &MetalContext,
+    ) -> Result<(), Qwen4ExpLayerZeroError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed {
+            return invalid("HC configuration requires a healthy layer zero");
+        }
+        self.residual.validate_hc_up_binding(ctx)?;
+        Ok(())
+    }
+
+    pub(crate) fn bind_hc_up_mix(&mut self, enabled: bool) {
+        self.residual.bind_hc_up_mix(enabled);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hc_up_mix_enabled(&self) -> bool {
+        self.residual.hc_up_mix_enabled()
+    }
+
     #[cfg(test)]
     pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
         self.gdn.persistent_state_tensors()

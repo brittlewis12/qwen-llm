@@ -17,6 +17,9 @@ mod moe_down_index_probe;
 #[path = "qwen4exp_moe_remaining_index_probe.rs"]
 mod moe_remaining_index_probe;
 
+#[path = "qwen4exp_moe_m128_index_probe.rs"]
+mod moe_m128_index_probe;
+
 fn bytes(t: &MetalTensor) -> Vec<u8> {
     unsafe {
         std::slice::from_raw_parts(t.buffer.contents().as_ptr().cast(), t.buffer.length()).to_vec()
@@ -136,6 +139,7 @@ impl Fixture {
             GgmlType::Q8_0,
         );
         let scratch = GatedResidualMetalScratch {
+            hc_up_mix: false,
             branch_count: 4,
             hidden_size: HIDDEN,
             low_rank: RANK,
@@ -332,6 +336,112 @@ fn compare_with_bound(
 
 fn outputs(f: &Fixture) -> (Vec<f32>, Vec<f32>) {
     (read(&f.scratch.raw_gate), read(&f.scratch.mixed))
+}
+
+#[test]
+#[ignore = "serial production lease; actual HC product route and fallback boundaries"]
+fn hc_up_product_routes() {
+    let _lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+    let ctx = MetalContext::new().unwrap();
+    let mut fixture = Fixture::new(&ctx, 0x4d595df4d0f33173);
+    let run_product = |f: &mut Fixture, enabled, allow| {
+        f.scratch.validate_hc_up_binding(&ctx).unwrap();
+        f.scratch.bind_hc_up_mix(enabled);
+        f.poison(true);
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let read = encode_final_gated_residual_mix_with_policy(
+            &ctx,
+            &enc,
+            &f.input,
+            1e-6,
+            GatedResidualMetalReadWeights {
+                norm: &f.norm,
+                down: &f.down,
+                up: &f.up,
+            },
+            &mut f.scratch,
+            allow,
+        )
+        .unwrap();
+        drop(read);
+        assert!(
+            f.scratch.validate_hc_up_binding(&ctx).is_err(),
+            "pending owner must reject configuration"
+        );
+        enc.end();
+        command.commit();
+        f.scratch.release_after().unwrap();
+        let census = crate::metal::dispatch_census_take();
+        let routed = census
+            .iter()
+            .filter(|row| row.kernel == "kernel_qwen4exp_hc_up_mix_q8_k320")
+            .count();
+        f.check();
+        (outputs(f), routed)
+    };
+    let (baseline, calls) = run_product(&mut fixture, false, true);
+    assert_eq!(calls, 0);
+    let expected = oracle(&fixture);
+    let (candidate, calls) = run_product(&mut fixture, true, true);
+    assert_eq!(calls, 1);
+    compare(&baseline.0, &expected.0, "product baseline raw");
+    compare(&candidate.0, &expected.0, "product candidate raw");
+    compare(&candidate.1, &expected.1, "product candidate mixed");
+    let (packed_tail, calls) = run_product(&mut fixture, true, false);
+    assert_eq!(calls, 0);
+    assert_bits(&packed_tail.0, &baseline.0);
+    assert_bits(&packed_tail.1, &baseline.1);
+    assert!(fixture.scratch.hc_up_mix_enabled());
+    let frozen = bytes(&fixture.up);
+    let desc = crate::tensor::TensorDesc {
+        name: "hc-fallback".into(),
+        shape: vec![320, WIDTH as u64],
+        dtype: GgmlType::Q8_0,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: (WIDTH * RANK / 32 * 34) as u64,
+    };
+    let floats = crate::codec::dequant_to_f32(&desc, &frozen[GUARD..frozen.len() - GUARD]).unwrap();
+    fixture.up = guarded(
+        &ctx,
+        bytemuck::cast_slice(&floats),
+        desc.shape,
+        GgmlType::F32,
+    );
+    fixture.frozen[3] = bytes(&fixture.up);
+    let (off, _) = run_product(&mut fixture, false, true);
+    let (on, calls) = run_product(&mut fixture, true, true);
+    assert_eq!(calls, 0);
+    assert_bits(&off.0, &on.0);
+    assert_bits(&off.1, &on.1);
+    let small = GatedResidualMetalScratch::new(&ctx, 4, 64, 32).unwrap();
+    assert!(!hc_up::eligible(&small, GgmlType::Q8_0));
+    assert!(!hc_up::eligible(&fixture.scratch, GgmlType::F32));
+    let alias = fixture.scratch.normalized.clone();
+    let command = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&command);
+    crate::metal::dispatch_census_begin();
+    assert!(
+        encode_final_gated_residual_mix(
+            &ctx,
+            &enc,
+            &alias,
+            1e-6,
+            GatedResidualMetalReadWeights {
+                norm: &fixture.norm,
+                down: &fixture.down,
+                up: &fixture.up
+            },
+            &mut fixture.scratch
+        )
+        .is_err()
+    );
+    assert!(crate::metal::dispatch_census_take().is_empty());
+    enc.end();
+    assert!(fixture.scratch.active_command.is_none());
 }
 
 fn assert_bits(actual: &[f32], expected: &[f32]) {

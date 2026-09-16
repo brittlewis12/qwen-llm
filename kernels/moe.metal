@@ -5580,8 +5580,9 @@ kernel void kernel_moe_down_iq4_nl_f32_grouped_slots_m128_n16(
         device       float              * dst        [[buffer(5)]],
         threadgroup  uchar              * shmem      [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
+        uint tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const ushort tiitg = ushort(tiitg_wide);
     const short TILE_M = 128;
     const short TILE_N = 16;
     const short TILE_K = 32;

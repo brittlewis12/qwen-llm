@@ -10,13 +10,21 @@ pub(crate) const QWEN4EXP_PACKED_SELECTED_QSA_ENV: &str = "QWEN4EXP_PACKED_SELEC
 
 pub(crate) const QWEN4EXP_FULL_SHARD_PREFETCH_ENV: &str = "QWEN4EXP_FULL_SHARD_PREFETCH";
 pub(crate) const QWEN4EXP_QSA_SPLIT_DECODE_ENV: &str = "QWEN4EXP_QSA_SPLIT_DECODE";
+pub(crate) const QWEN4EXP_HC_UP_MIX_ENV: &str = "QWEN4EXP_HC_UP_MIX";
 
 pub(crate) fn parse_qwen4exp_split_decode(value: Option<&std::ffi::OsStr>) -> Result<bool> {
+    parse_qwen4exp_decode_flag(value, QWEN4EXP_QSA_SPLIT_DECODE_ENV)
+}
+
+pub(crate) fn parse_qwen4exp_decode_flag(
+    value: Option<&std::ffi::OsStr>,
+    name: &str,
+) -> Result<bool> {
     match value {
         None => Ok(false),
         Some(value) if value == "0" => Ok(false),
         Some(value) if value == "1" => Ok(true),
-        _ => bail!("{QWEN4EXP_QSA_SPLIT_DECODE_ENV} must be 0 or 1"),
+        _ => bail!("{name} must be 0 or 1"),
     }
 }
 
@@ -505,6 +513,10 @@ pub(crate) fn run_qwen4exp_single_turn(
         .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
     validate_qwen4exp_stop_tokens(&stop_tokens, vocab_size)?;
     let decode_options = qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions {
+        hc_up_mix: parse_qwen4exp_decode_flag(
+            std::env::var_os(QWEN4EXP_HC_UP_MIX_ENV).as_deref(),
+            QWEN4EXP_HC_UP_MIX_ENV,
+        )?,
         split_qsa: parse_qwen4exp_split_decode(
             std::env::var_os(QWEN4EXP_QSA_SPLIT_DECODE_ENV).as_deref(),
         )?,
@@ -642,6 +654,10 @@ pub(crate) fn run_qwen4exp_single_turn(
     eprintln!(
         "qwen4exp: qsa_split_decode={} eligible_ids=2048..2051 rollback={QWEN4EXP_QSA_SPLIT_DECODE_ENV}=0",
         loaded.split_decode_enabled()
+    );
+    eprintln!(
+        "qwen4exp: hc_up_mix={} eligible=Q8_0/4x2560/K320 rollback={QWEN4EXP_HC_UP_MIX_ENV}=0",
+        loaded.hc_up_mix_enabled()
     );
     let admission = loaded.admission();
     let packed_prefill_capacity = loaded.packed_prefill_capacity();

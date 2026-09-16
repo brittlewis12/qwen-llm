@@ -14,6 +14,9 @@ use objc2_metal::{
 
 const SIMD_WIDTH: usize = 32;
 
+#[path = "qwen4exp_hc_up.rs"]
+pub(crate) mod hc_up;
+
 #[cfg(test)]
 #[path = "qwen4exp_hc_up_screen.rs"]
 mod hc_up_screen;
@@ -123,6 +126,7 @@ pub struct GatedResidualMetalReadWeights<'a> {
 }
 
 pub struct GatedResidualMetalScratch {
+    hc_up_mix: bool,
     branch_count: usize,
     hidden_size: usize,
     low_rank: usize,
@@ -143,6 +147,7 @@ impl GatedResidualMetalScratch {
     ) -> Result<Self, Qwen4ExpMetalError> {
         let hyper_hidden = validate_geometry(branch_count, hidden_size, low_rank)?;
         Ok(Self {
+            hc_up_mix: false,
             branch_count,
             hidden_size,
             low_rank,
@@ -165,6 +170,33 @@ impl GatedResidualMetalScratch {
 
     pub fn low_rank(&self) -> usize {
         self.low_rank
+    }
+
+    pub(crate) fn hc_up_mix_enabled(&self) -> bool {
+        self.hc_up_mix
+    }
+
+    pub(crate) fn validate_hc_up_binding(
+        &self,
+        ctx: &MetalContext,
+    ) -> Result<(), Qwen4ExpMetalError> {
+        if self.active_command.is_some() {
+            return Err(invalid("HC configuration requires released scratch"));
+        }
+        require_same_device(
+            ctx,
+            &[
+                ("HC normalized", &self.normalized),
+                ("HC low", &self.low),
+                ("HC raw gate", &self.raw_gate),
+                ("HC mixed", &self.mixed),
+                ("HC injection", &self.injection),
+            ],
+        )
+    }
+
+    pub(crate) fn bind_hc_up_mix(&mut self, enabled: bool) {
+        self.hc_up_mix = enabled;
     }
 
     pub(crate) fn mixed_tensor(&self) -> &MetalTensor {
@@ -470,7 +502,16 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
     )?;
     reserve_command(scratch, enc)?;
     let hyper_hidden = scratch.branch_count * scratch.hidden_size;
-    encode_read(ctx, enc, hyper_input, eps, weights, scratch, hyper_hidden)?;
+    encode_read(
+        ctx,
+        enc,
+        hyper_input,
+        eps,
+        weights,
+        scratch,
+        hyper_hidden,
+        true,
+    )?;
     Ok(GatedResidualMetalRead {
         ctx,
         encoder: enc,
@@ -846,7 +887,7 @@ pub(crate) fn validate_and_preflight_gated_residual_mix(
             ("injection scratch", &scratch.injection),
         ],
     )?;
-    preflight_mix(ctx, weights.down.dtype, weights.up.dtype)?;
+    preflight_mix(ctx, weights.down.dtype, weights.up.dtype, scratch)?;
     preflight_combine(ctx)
 }
 
@@ -966,11 +1007,32 @@ pub fn encode_final_gated_residual_mix<'scratch>(
     weights: GatedResidualMetalReadWeights<'_>,
     scratch: &'scratch mut GatedResidualMetalScratch,
 ) -> Result<GatedResidualMetalFinalRead<'scratch>, Qwen4ExpMetalError> {
+    encode_final_gated_residual_mix_with_policy(ctx, enc, hyper_input, eps, weights, scratch, true)
+}
+
+pub(crate) fn encode_final_gated_residual_mix_with_policy<'scratch>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    hyper_input: &MetalTensor,
+    eps: f32,
+    weights: GatedResidualMetalReadWeights<'_>,
+    scratch: &'scratch mut GatedResidualMetalScratch,
+    allow_hc_up_mix: bool,
+) -> Result<GatedResidualMetalFinalRead<'scratch>, Qwen4ExpMetalError> {
     validate_encoder(ctx, enc)?;
     validate_and_preflight_final_gated_residual_mix(ctx, hyper_input, eps, weights, scratch)?;
     let hyper_hidden = scratch.branch_count * scratch.hidden_size;
     reserve_command(scratch, enc)?;
-    encode_read(ctx, enc, hyper_input, eps, weights, scratch, hyper_hidden)?;
+    encode_read(
+        ctx,
+        enc,
+        hyper_input,
+        eps,
+        weights,
+        scratch,
+        hyper_hidden,
+        allow_hc_up_mix,
+    )?;
     Ok(GatedResidualMetalFinalRead { scratch })
 }
 
@@ -1005,7 +1067,7 @@ pub(crate) fn validate_and_preflight_final_gated_residual_mix(
             ("mixed output", &scratch.mixed),
         ],
     )?;
-    preflight_mix(ctx, weights.down.dtype, weights.up.dtype)
+    preflight_mix(ctx, weights.down.dtype, weights.up.dtype, scratch)
 }
 
 fn validate_read_contract(
@@ -1068,6 +1130,7 @@ fn encode_read(
     weights: GatedResidualMetalReadWeights<'_>,
     scratch: &GatedResidualMetalScratch,
     hyper_hidden: usize,
+    allow_hc_up_mix: bool,
 ) -> Result<(), Qwen4ExpMetalError> {
     encode_hc_norm(
         ctx,
@@ -1089,8 +1152,11 @@ fn encode_read(
         scratch.low_rank,
     )?;
     encode_hc_low_activation(ctx, enc, &scratch.low, scratch.branch_count)?;
+    let use_hc = scratch.hc_up_mix && hc_up::eligible(scratch, weights.up.dtype);
     #[cfg(test)]
-    if hc_up_probe::encode_if_requested(ctx, enc, weights.up, scratch)? {
+    let use_hc = hc_up_probe::route_if_requested(weights.up.dtype, scratch).unwrap_or(use_hc);
+    if use_hc && allow_hc_up_mix {
+        hc_up::encode(ctx, enc, weights.up, scratch)?;
         return Ok(());
     }
     encode_mat_vec_dispatch(
@@ -1160,7 +1226,11 @@ fn preflight_mix(
     ctx: &MetalContext,
     down_dtype: GgmlType,
     up_dtype: GgmlType,
+    scratch: &GatedResidualMetalScratch,
 ) -> Result<(), Qwen4ExpMetalError> {
+    if scratch.hc_up_mix && hc_up::eligible(scratch, up_dtype) {
+        hc_up::preflight(ctx)?;
+    }
     ctx.pipeline("kernel_qwen4exp_hc_rms_norm_f32")?;
     ctx.pipeline("kernel_qwen4exp_hc_low_silu_f32")?;
     ctx.pipeline("kernel_qwen4exp_hc_gated_mean_f32")?;

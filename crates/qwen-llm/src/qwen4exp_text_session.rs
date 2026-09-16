@@ -18,8 +18,8 @@ use crate::qwen4exp_layers_zero_one::{
 };
 use crate::qwen4exp_metal::{
     GatedResidualMetalReadWeights, GatedResidualMetalScratch, GatedResidualPackedScratch,
-    Qwen4ExpMetalError, encode_final_gated_residual_mix, encode_hc_repeat_packed,
-    validate_and_preflight_final_gated_residual_mix, validate_and_preflight_hc_repeat_packed,
+    Qwen4ExpMetalError, encode_hc_repeat_packed, validate_and_preflight_final_gated_residual_mix,
+    validate_and_preflight_hc_repeat_packed,
 };
 use crate::qwen4exp_moe::{
     Qwen4ExpMoeError, Qwen4ExpMoeMetalGeometry, Qwen4ExpMoePackedMotorScratch,
@@ -1016,6 +1016,9 @@ impl Qwen4ExpTextPackedScratch {
     }
 }
 
+#[cfg(test)]
+use crate::qwen4exp_metal::encode_final_gated_residual_mix;
+
 pub struct Qwen4ExpTextSessionMetalWorkspace {
     geometry: Qwen4ExpTextSessionMetalGeometry,
     split_decode_scratch: Option<MetalTensor>,
@@ -1219,6 +1222,35 @@ impl Qwen4ExpTextSessionMetalWorkspace {
 
     pub fn split_decode_enabled(&self) -> bool {
         self.split_decode_scratch.is_some()
+    }
+
+    pub fn hc_up_mix_enabled(&self) -> bool {
+        self.final_read.hc_up_mix_enabled()
+    }
+
+    pub(crate) fn configure_hc_up_mix(
+        &mut self,
+        ctx: &MetalContext,
+        enabled: bool,
+    ) -> Result<(), Qwen4ExpTextSessionError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed || self.pending_length.is_some() {
+            return invalid("HC configuration requires a healthy released session");
+        }
+        self.zero_one.validate_hc_up_binding(ctx)?;
+        for block in &self.post_ple {
+            block.validate_hc_up_binding(ctx)?;
+        }
+        self.final_read.validate_hc_up_binding(ctx)?;
+        if enabled {
+            crate::qwen4exp_metal::hc_up::preflight(ctx)?;
+        }
+        self.zero_one.bind_hc_up_mix(enabled);
+        for block in &mut self.post_ple {
+            block.bind_hc_up_mix(enabled);
+        }
+        self.final_read.bind_hc_up_mix(enabled);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1947,7 +1979,7 @@ pub fn encode_qwen4exp_text_token_layer_sampled<'a>(
         }
         let tail = sampled_stage_encoder(command, samples, stage_count - 1)?;
         let hyper_residual = workspace.hyper_residual.clone();
-        encode_tail_stage(ctx, &tail, &hyper_residual, weights, workspace)?;
+        encode_tail_stage(ctx, &tail, &hyper_residual, weights, workspace, true)?;
         tail.end();
         Ok(())
     })();
@@ -2363,7 +2395,7 @@ unsafe fn encode_packed_step(
         enc,
         Qwen4ExpPackedProfileLabel::coarse("tail", None, None),
     )?;
-    encode_tail_stage(ctx, enc, &last_hyper, weights, workspace)?;
+    encode_tail_stage(ctx, enc, &last_hyper, weights, workspace, false)?;
     end_optional(&mut profile, enc, marker)?;
     Ok(())
 }
@@ -2529,7 +2561,7 @@ unsafe fn encode_packed_step_layer_sampled(
         ((tokens - 1) * workspace.geometry.hyper_width()) as u64,
         vec![workspace.geometry.hyper_width() as u64],
     );
-    encode_tail_stage(ctx, &tail, &last_hyper, weights, workspace)?;
+    encode_tail_stage(ctx, &tail, &last_hyper, weights, workspace, false)?;
     tail.end();
     spans.push(Qwen4ExpPackedProfileSpan {
         label: Qwen4ExpPackedProfileLabel::coarse("tail", None, None),
@@ -2715,7 +2747,7 @@ fn encode_step(
         )?;
     }
     let hyper_residual = workspace.hyper_residual.clone();
-    encode_tail_stage(ctx, enc, &hyper_residual, weights, workspace)
+    encode_tail_stage(ctx, enc, &hyper_residual, weights, workspace, true)
 }
 
 fn validate_post_layer_hyper_probe(
@@ -2863,14 +2895,16 @@ fn encode_tail_stage(
     hyper_residual: &MetalTensor,
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+    allow_hc_up_mix: bool,
 ) -> Result<(), Qwen4ExpTextSessionError> {
-    let final_read = encode_final_gated_residual_mix(
+    let final_read = crate::qwen4exp_metal::encode_final_gated_residual_mix_with_policy(
         ctx,
         enc,
         hyper_residual,
         workspace.geometry.eps(),
         weights.final_read,
         &mut workspace.final_read,
+        allow_hc_up_mix,
     )?;
     encode_mat_vec_dispatch(
         ctx,

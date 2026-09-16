@@ -39,6 +39,10 @@ use objc2_metal::{
 };
 
 const MAX_TOP_K: usize = 16;
+
+#[cfg(test)]
+#[path = "qwen4exp_moe_observe.rs"]
+pub(crate) mod singleton_observe;
 const MAX_PACKED_TOKENS: usize = 2_048;
 const PACKED_ROUTER_E8P32_STRICT_DEVICE: &str = "Apple M4 Max";
 const PACKED_ROUTER_E8P32_STRICT_HIDDEN: usize = 2_560;
@@ -1344,6 +1348,31 @@ fn encode_singleton_step(
     weights: Qwen4ExpMoeMetalWeights<'_>,
     buffers: Qwen4ExpMoeSingletonBuffers<'_>,
 ) -> Result<(), Qwen4ExpMoeError> {
+    #[cfg(test)]
+    let capture = singleton_observe::before(ctx, enc, input, weights)?;
+    #[cfg(test)]
+    let tag = capture.and_then(|layer| dispatch_census_tag_scope(|| format!("moe.native.{layer}")));
+    encode_singleton_router(ctx, enc, input, weights, buffers)?;
+    encode_singleton_gate_up(ctx, enc, input, weights, buffers)?;
+    encode_singleton_down(ctx, enc, weights, buffers)?;
+    encode_singleton_shared_gate_up(ctx, enc, input, weights, buffers)?;
+    encode_singleton_shared_down(ctx, enc, weights, buffers)?;
+    encode_singleton_accumulate(ctx, enc, buffers)?;
+    #[cfg(test)]
+    {
+        drop(tag);
+        singleton_observe::after(ctx, enc, capture, buffers)?;
+    }
+    Ok(())
+}
+
+fn encode_singleton_router(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    buffers: Qwen4ExpMoeSingletonBuffers<'_>,
+) -> Result<(), Qwen4ExpMoeError> {
     let g = weights.geometry;
     encode_mat_vec_dispatch(
         ctx,
@@ -1371,7 +1400,17 @@ fn encode_singleton_step(
         buffers.shared_scale,
         g.hidden_size,
     )?;
+    Ok(())
+}
 
+fn encode_singleton_gate_up(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    buffers: Qwen4ExpMoeSingletonBuffers<'_>,
+) -> Result<(), Qwen4ExpMoeError> {
+    let g = weights.geometry;
     match weights.routed_gate.dtype {
         GgmlType::IQ3_XXS => {
             let encode = if qwen4exp_moe_iq3_fast_enabled() {
@@ -1408,7 +1447,16 @@ fn encode_singleton_step(
         )?,
         dtype => return invalid(format!("unsupported routed gate/up dtype {dtype:?}")),
     }
+    Ok(())
+}
 
+fn encode_singleton_down(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    buffers: Qwen4ExpMoeSingletonBuffers<'_>,
+) -> Result<(), Qwen4ExpMoeError> {
+    let g = weights.geometry;
     match weights.routed_down.dtype {
         GgmlType::IQ4_NL => {
             let encode = if qwen4exp_moe_iq4_down_fast_enabled() {
@@ -1453,7 +1501,17 @@ fn encode_singleton_step(
         )?,
         dtype => return invalid(format!("unsupported routed down dtype {dtype:?}")),
     }
+    Ok(())
+}
 
+fn encode_singleton_shared_gate_up(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    buffers: Qwen4ExpMoeSingletonBuffers<'_>,
+) -> Result<(), Qwen4ExpMoeError> {
+    let g = weights.geometry;
     encode_shared_swiglu_q8_0_f32(
         ctx,
         enc,
@@ -1464,6 +1522,16 @@ fn encode_singleton_step(
         g.hidden_size,
         g.shared_intermediate_size,
     )?;
+    Ok(())
+}
+
+fn encode_singleton_shared_down(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weights: Qwen4ExpMoeMetalWeights<'_>,
+    buffers: Qwen4ExpMoeSingletonBuffers<'_>,
+) -> Result<(), Qwen4ExpMoeError> {
+    let g = weights.geometry;
     encode_mat_vec_dispatch(
         ctx,
         enc,
@@ -1473,6 +1541,14 @@ fn encode_singleton_step(
         g.shared_intermediate_size,
         g.hidden_size,
     )?;
+    Ok(())
+}
+
+fn encode_singleton_accumulate(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    buffers: Qwen4ExpMoeSingletonBuffers<'_>,
+) -> Result<(), Qwen4ExpMoeError> {
     encode_axpy_scalar_f32(
         ctx,
         enc,

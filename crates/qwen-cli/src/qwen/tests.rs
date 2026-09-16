@@ -155,6 +155,28 @@ fn qwen4exp_split_decode_opt_in_is_strict_and_default_off() {
 }
 
 #[test]
+fn qwen4exp_hc_up_mix_opt_in_is_strict_and_default_off() {
+    use std::ffi::OsStr;
+    let parse = |value| parse_qwen4exp_decode_flag(value, QWEN4EXP_HC_UP_MIX_ENV);
+    assert!(!parse(None).unwrap());
+    assert!(!parse(Some(OsStr::new("0"))).unwrap());
+    assert!(parse(Some(OsStr::new("1"))).unwrap());
+    for value in ["", "true", "false", " 1", "1 ", "2"] {
+        assert!(
+            parse(Some(OsStr::new(value)))
+                .unwrap_err()
+                .to_string()
+                .contains(QWEN4EXP_HC_UP_MIX_ENV)
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(parse(Some(OsStr::from_bytes(&[0xff]))).is_err());
+    }
+}
+
+#[test]
 fn qwen4exp_full_shard_prefetch_report_requires_complete_exact_read() {
     assert!(validate_qwen4exp_full_shard_prefetch_report(3, 3, 3, 0, 90_000, 90_000).is_ok());
     for invalid in [(2, 3, 0, 90_000), (3, 2, 1, 90_000), (3, 3, 0, 89_999)] {

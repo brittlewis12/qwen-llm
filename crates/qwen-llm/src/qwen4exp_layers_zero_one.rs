@@ -299,6 +299,32 @@ impl Qwen4ExpLayersZeroOneMetalWorkspace {
         self.state_poisoned
     }
 
+    pub(crate) fn validate_hc_up_binding(
+        &self,
+        ctx: &MetalContext,
+    ) -> Result<(), Qwen4ExpLayersZeroOneError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed || self.pending_history.is_some() {
+            return invalid("HC configuration requires healthy released bootstrap layers");
+        }
+        self.layer_zero.validate_hc_up_binding(ctx)?;
+        self.residual.validate_hc_up_binding(ctx)?;
+        Ok(())
+    }
+
+    pub(crate) fn bind_hc_up_mix(&mut self, enabled: bool) {
+        self.layer_zero.bind_hc_up_mix(enabled);
+        self.residual.bind_hc_up_mix(enabled);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hc_up_binding_states(&self) -> [bool; 2] {
+        [
+            self.layer_zero.hc_up_mix_enabled(),
+            self.residual.hc_up_mix_enabled(),
+        ]
+    }
+
     pub fn next_position(&self) -> Option<u64> {
         self.history.next_position()
     }

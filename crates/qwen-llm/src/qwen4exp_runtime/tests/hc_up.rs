@@ -49,7 +49,10 @@ fn native_hc_up_shared_prefix() {
         &gguf,
         capacity,
         Some(PREFIX),
-        Qwen4ExpDecodeOptions { split_qsa: true },
+        Qwen4ExpDecodeOptions {
+            split_qsa: true,
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut runner = loaded.create_runner(&ctx).unwrap();

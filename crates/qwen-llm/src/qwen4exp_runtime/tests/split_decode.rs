@@ -7,6 +7,12 @@ const STEPS: usize = 4;
 #[path = "hc_up.rs"]
 mod hc_up;
 
+#[path = "hc_up_product.rs"]
+mod hc_up_product;
+
+#[path = "moe_observe.rs"]
+mod moe_observe;
+
 struct Observation {
     logits: Vec<Vec<f32>>,
     hyper: Vec<Vec<f32>>,
@@ -103,6 +109,10 @@ fn numerical_state(label: &str, a: &[f32], b: &[f32], rms_limit: f64, abs_limit:
 }
 
 fn assert_numeric(a: &Observation, b: &Observation, tensors: &[MetalTensor]) {
+    assert_numeric_at(a, b, tensors, PREFIX);
+}
+
+fn assert_numeric_at(a: &Observation, b: &Observation, tensors: &[MetalTensor], prefix: usize) {
     assert_eq!(a.logits.len(), b.logits.len());
     let steps = a.logits.len();
     for step in 0..steps {
@@ -136,8 +146,8 @@ fn assert_numeric(a: &Observation, b: &Observation, tensors: &[MetalTensor]) {
             ),
             GgmlType::F16 => {
                 let (start, end) = match tensor.shape.as_slice() {
-                    [128, _] => ((PREFIX / 4) * 128 * 2, ((PREFIX + steps) / 4) * 128 * 2),
-                    [256, 2, _] => (PREFIX * 512 * 2, (PREFIX + steps) * 512 * 2),
+                    [128, _] => ((prefix / 4) * 128 * 2, ((prefix + steps) / 4) * 128 * 2),
+                    [256, 2, _] => (prefix * 512 * 2, (prefix + steps) * 512 * 2),
                     shape => panic!("unknown persistent F16 shape {shape:?}"),
                 };
                 assert_eq!(&a[..start], &b[..start], "old prefix differs {i}");
@@ -175,6 +185,16 @@ fn run_product(
     split: bool,
     state: bool,
 ) -> Observation {
+    run_product_at(runner, tokens, split, state, PREFIX)
+}
+
+fn run_product_at(
+    runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+    tokens: &[u32],
+    split: bool,
+    state: bool,
+    prefix: usize,
+) -> Observation {
     runner
         .workspace
         .set_split_decode_for_tests(runner.ctx, split)
@@ -186,7 +206,7 @@ fn run_product(
         timing: Vec::new(),
     };
     for (step, &token) in tokens.iter().enumerate() {
-        assert_eq!(runner.next_position(), PREFIX + step);
+        assert_eq!(runner.next_position(), prefix + step);
         observed
             .logits
             .push(runner.forward_token(token).unwrap().to_vec());
@@ -199,7 +219,7 @@ fn run_product(
                 .workspace
                 .qsa_committed_lengths()
                 .iter()
-                .all(|(_, n)| *n == PREFIX + step + 1)
+                .all(|(_, n)| *n == prefix + step + 1)
         );
         assert_eq!(*runner.workspace.ple_prior_tokens().last().unwrap(), token);
     }
@@ -240,7 +260,10 @@ fn product_split_decode_shared_prefix() {
         &gguf,
         capacity,
         Some(PREFIX),
-        Qwen4ExpDecodeOptions { split_qsa: true },
+        Qwen4ExpDecodeOptions {
+            split_qsa: true,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(loaded.split_decode_enabled());

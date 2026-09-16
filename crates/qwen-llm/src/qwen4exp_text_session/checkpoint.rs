@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+#[ignore = "serial production lease; HC option custody and allocation identity"]
+fn hc_up_product_binding_custody() {
+    use objc2_metal::MTLCommandQueue;
+    let _lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+    let ctx = MetalContext::new().unwrap();
+    crate::qwen4exp_metal::hc_up::preflight(&ctx).unwrap();
+    let geometry =
+        Qwen4ExpTextSessionMetalGeometry::from_config(&Qwen4ExpConfig::flash_next_reference(), 4)
+            .unwrap();
+    let mut first =
+        Qwen4ExpTextSessionMetalWorkspace::new_for_tests(&ctx, geometry.clone()).unwrap();
+    let second = Qwen4ExpTextSessionMetalWorkspace::new_for_tests(&ctx, geometry).unwrap();
+    let states = |w: &Qwen4ExpTextSessionMetalWorkspace| {
+        w.zero_one
+            .hc_up_binding_states()
+            .into_iter()
+            .chain(w.post_ple.iter().map(|b| b.hc_up_mix_enabled()))
+            .chain(std::iter::once(w.final_read.hc_up_mix_enabled()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(states(&first), vec![false; 49]);
+    let plan = first.memory_plan().clone();
+    crate::metal::allocation_census_begin();
+    first.configure_hc_up_mix(&ctx, true).unwrap();
+    first.configure_hc_up_mix(&ctx, true).unwrap();
+    assert!(crate::metal::allocation_census_take().is_empty());
+    assert_eq!(first.memory_plan(), &plan);
+    assert_eq!(states(&first), vec![true; 49]);
+    assert_eq!(states(&second), vec![false; 49]);
+    assert!(!first.split_decode_enabled());
+    first.active_command = Some(ctx.queue.commandBuffer().unwrap());
+    assert!(first.configure_hc_up_mix(&ctx, true).is_err());
+    assert!(first.configure_hc_up_mix(&ctx, false).is_err());
+    first.active_command = None;
+    first.pending_length = Some(1);
+    assert!(first.configure_hc_up_mix(&ctx, false).is_err());
+    first.pending_length = None;
+    first
+        .post_ple
+        .last_mut()
+        .unwrap()
+        .set_owner_for_binding_test(Some(ctx.queue.commandBuffer().unwrap()));
+    assert!(first.configure_hc_up_mix(&ctx, false).is_err());
+    assert_eq!(
+        states(&first),
+        vec![true; 49],
+        "no early child changed before late refusal"
+    );
+    first
+        .post_ple
+        .last_mut()
+        .unwrap()
+        .set_owner_for_binding_test(None);
+    first.reset().unwrap();
+    assert_eq!(states(&first), vec![true; 49]);
+    let empty = first.checkpoint_for_tests();
+    assert!(first.logits().is_err());
+    first.configure_hc_up_mix(&ctx, false).unwrap();
+    first.restore_checkpoint_for_tests(&empty);
+    assert_eq!(
+        states(&first),
+        vec![false; 49],
+        "checkpoint must not change configured math"
+    );
+    assert!(first.logits().is_err());
+}
+
+#[test]
 fn split_decode_plan_and_session_custody() {
     let _benchmark_lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
@@ -83,6 +152,7 @@ fn split_decode_plan_and_session_custody() {
 pub(crate) struct Checkpoint {
     owner: usize,
     length: usize,
+    logits_ready: bool,
     history: PleHistory,
     storage: Vec<Vec<u8>>,
 }
@@ -98,17 +168,21 @@ impl Qwen4ExpTextSessionMetalWorkspace {
     pub(crate) fn checkpoint_for_tests(&self) -> Checkpoint {
         self.require_idle().unwrap();
         assert!(self.pending_length.is_none() && !self.state_poisoned && !self.encode_failed);
-        assert!(self.logits_ready);
+        assert_eq!(self.logits_ready, self.committed_length > 0);
         assert!(
             self.qsa_committed_lengths()
                 .iter()
                 .all(|(_, n)| *n == self.committed_length)
         );
         let history = self.zero_one.checkpoint_history_for_tests();
-        assert_eq!(history.next_position(), Some(self.committed_length as u64));
+        assert_eq!(
+            history.next_position(),
+            (self.committed_length > 0).then_some(self.committed_length as u64)
+        );
         Checkpoint {
             owner: self.logits.buffer.contents().as_ptr() as usize,
             length: self.committed_length,
+            logits_ready: self.logits_ready,
             history,
             storage: self
                 .checkpoint_tensors()
@@ -156,7 +230,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             }
         }
         self.committed_length = checkpoint.length;
-        self.logits_ready = true;
+        self.logits_ready = checkpoint.logits_ready;
     }
 
     pub(crate) fn final_hyper_for_tests(&self) -> Vec<f32> {

@@ -466,6 +466,7 @@ pub struct Qwen4ExpLoadedModel<'gguf> {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Qwen4ExpDecodeOptions {
     pub split_qsa: bool,
+    pub hc_up_mix: bool,
 }
 
 impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
@@ -552,6 +553,9 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         };
 
         let session_plan = session_plan.with_split_decode(ctx, decode.split_qsa)?;
+        if decode.hc_up_mix {
+            crate::qwen4exp_metal::hc_up::preflight(ctx).map_err(Qwen4ExpTextSessionError::from)?;
+        }
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let aggregate = session_plan
             .memory_plan()
@@ -571,7 +575,11 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         let ple_table = weights.ple_source().bind(gguf)?;
         let admitted_session =
             session_plan.admit_after_residency(&weights, ctx.memory_signals())?;
-        let workspace = Qwen4ExpTextSessionMetalWorkspace::from_admitted(ctx, admitted_session)?;
+        let mut workspace =
+            Qwen4ExpTextSessionMetalWorkspace::from_admitted(ctx, admitted_session)?;
+        if decode.hc_up_mix {
+            workspace.configure_hc_up_mix(ctx, true)?;
+        }
         let session_admission = workspace.admission();
 
         Ok(Self {
@@ -632,6 +640,12 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         self.workspace
             .as_ref()
             .is_some_and(Qwen4ExpTextSessionMetalWorkspace::split_decode_enabled)
+    }
+
+    pub fn hc_up_mix_enabled(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(Qwen4ExpTextSessionMetalWorkspace::hc_up_mix_enabled)
     }
 
     pub fn packed_selected_active(&self) -> bool {

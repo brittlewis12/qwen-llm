@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Research-only singleton HC: four branches, hidden 2560, rank 320, native Q8_0.
+// Opt-in singleton HC: four branches, hidden 2560, rank 320, native Q8_0.
 // Keep the existing activated low vector; do not repeat its division or SiLU.
 kernel void kernel_qwen4exp_hc_up_mix_q8_k320(
         device const uchar * weight [[buffer(0)]],

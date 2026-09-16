@@ -465,6 +465,35 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
         self.mixer.committed_length()
     }
 
+    pub(crate) fn validate_hc_up_binding(
+        &self,
+        ctx: &MetalContext,
+    ) -> Result<(), Qwen4ExpPostPleBlockError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed {
+            return invalid("HC configuration requires a healthy released block");
+        }
+        self.residual.validate_hc_up_binding(ctx)?;
+        Ok(())
+    }
+
+    pub(crate) fn bind_hc_up_mix(&mut self, enabled: bool) {
+        self.residual.bind_hc_up_mix(enabled);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hc_up_mix_enabled(&self) -> bool {
+        self.residual.hc_up_mix_enabled()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_owner_for_binding_test(
+        &mut self,
+        command: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    ) {
+        self.active_command = command;
+    }
+
     pub(crate) fn validate_split_binding(
         &self,
         ctx: &MetalContext,

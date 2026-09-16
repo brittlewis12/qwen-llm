@@ -1,6 +1,68 @@
 use super::*;
 
 #[test]
+#[ignore = "serial production lease; guarded selector atomic session binding and allocation custody"]
+fn guarded_topk_binding_custody() {
+    use objc2_metal::MTLCommandQueue;
+    let _lease =
+        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+    let ctx = MetalContext::new().unwrap();
+    crate::qwen4exp_moe::guarded_topk::preflight(&ctx).unwrap();
+    let geometry =
+        Qwen4ExpTextSessionMetalGeometry::from_config(&Qwen4ExpConfig::flash_next_reference(), 4)
+            .unwrap();
+    let mut first =
+        Qwen4ExpTextSessionMetalWorkspace::new_for_tests(&ctx, geometry.clone()).unwrap();
+    let second = Qwen4ExpTextSessionMetalWorkspace::new_for_tests(&ctx, geometry).unwrap();
+    let states = |w: &Qwen4ExpTextSessionMetalWorkspace| {
+        w.zero_one
+            .topk_binding_states()
+            .into_iter()
+            .chain(w.post_ple.iter().map(|b| b.guarded_topk_enabled()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(states(&first), vec![false; 48]);
+    let plan = first.memory_plan().clone();
+    crate::metal::allocation_census_begin();
+    first.configure_guarded_topk(&ctx, true).unwrap();
+    first.configure_guarded_topk(&ctx, true).unwrap();
+    assert!(crate::metal::allocation_census_take().is_empty());
+    assert_eq!(first.memory_plan(), &plan);
+    assert_eq!(states(&first), vec![true; 48]);
+    assert_eq!(states(&second), vec![false; 48]);
+    assert!(!first.hc_up_mix_enabled() && !first.split_decode_enabled());
+    first.active_command = Some(ctx.queue.commandBuffer().unwrap());
+    assert!(first.configure_guarded_topk(&ctx, true).is_err());
+    assert!(first.configure_guarded_topk(&ctx, false).is_err());
+    first.active_command = None;
+    first.pending_length = Some(1);
+    assert!(first.configure_guarded_topk(&ctx, false).is_err());
+    first.pending_length = None;
+    first
+        .post_ple
+        .last_mut()
+        .unwrap()
+        .set_owner_for_binding_test(Some(ctx.queue.commandBuffer().unwrap()));
+    assert!(first.configure_guarded_topk(&ctx, false).is_err());
+    assert_eq!(states(&first), vec![true; 48]);
+    first
+        .post_ple
+        .last_mut()
+        .unwrap()
+        .set_owner_for_binding_test(None);
+    first.state_poisoned = true;
+    assert!(first.configure_guarded_topk(&ctx, false).is_err());
+    first.state_poisoned = false;
+    first.reset().unwrap();
+    assert_eq!(states(&first), vec![true; 48]);
+    let empty = first.checkpoint_for_tests();
+    first.configure_guarded_topk(&ctx, false).unwrap();
+    first.restore_checkpoint_for_tests(&empty);
+    assert_eq!(states(&first), vec![false; 48]);
+    assert!(first.logits().is_err());
+}
+
+#[test]
 #[ignore = "serial production lease; HC option custody and allocation identity"]
 fn hc_up_product_binding_custody() {
     use objc2_metal::MTLCommandQueue;

@@ -461,6 +461,109 @@ kernel void kernel_topk_logits_softmax_parallel_f32(
     }
 }
 
+// Match the incumbent serial path for every nonfinite input; only finite
+// logits may use score invalidation by -INFINITY in the parallel reduction.
+kernel void kernel_qwen4exp_topk_guarded_f32(
+        constant topk_logits_args & args [[buffer(0)]],
+        device const float * logits [[buffer(1)]],
+        device int * out_idx [[buffer(2)]],
+        device float * out_w [[buffer(3)]],
+        threadgroup float * sh_score [[threadgroup(0)]],
+        threadgroup float * red_val [[threadgroup(1)]],
+        threadgroup int * red_idx [[threadgroup(2)]],
+        uint tid [[thread_position_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    // The checked host fixes N512/K10/TG512. Keep fallback loop bounds dynamic.
+    if (args.k == 0 || args.k > 16) return;
+    const device uint * bits = reinterpret_cast<const device uint *>(logits);
+    const bool nonfinite = simd_any((bits[tid] & 0x7f800000u) == 0x7f800000u);
+    if (lane == 0) red_idx[tid / 32] = nonfinite ? 1 : 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        int any = 0;
+        for (uint i = 0; i < 16; ++i) any |= red_idx[i];
+        red_idx[0] = any;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const bool serial = red_idx[0] != 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (serial) {
+        if (tid == 0) {
+            const uint MAX_K = 16;
+            int top_idx[MAX_K];
+            float top_val[MAX_K];
+            for (uint i = 0; i < args.k; ++i) {
+                top_idx[i] = -1;
+                top_val[i] = -INFINITY;
+            }
+            for (uint i = 0; i < args.n; ++i) {
+                const float v = logits[i];
+                for (uint j = 0; j < args.k; ++j) {
+                    const bool better = (v > top_val[j]) || (v == top_val[j] && (top_idx[j] < 0 || int(i) < top_idx[j]));
+                    if (better) {
+                        for (uint m = args.k - 1; m > j; --m) {
+                            top_val[m] = top_val[m - 1];
+                            top_idx[m] = top_idx[m - 1];
+                        }
+                        top_val[j] = v;
+                        top_idx[j] = int(i);
+                        break;
+                    }
+                }
+            }
+            const float max_top = top_val[0];
+            float sum = 0.0f;
+            float exp_val[MAX_K];
+            for (uint i = 0; i < args.k; ++i) {
+                exp_val[i] = top_idx[i] >= 0 ? exp(top_val[i] - max_top) : 0.0f;
+                sum += exp_val[i];
+            }
+            sum = max(sum, 6.103515625e-5f);
+            for (uint i = 0; i < args.k; ++i) {
+                out_idx[i] = max(top_idx[i], 0);
+                out_w[i] = exp_val[i] / sum;
+            }
+        }
+        return;
+    }
+    sh_score[tid] = logits[tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint slot = 0; slot < args.k; ++slot) {
+        red_val[tid] = sh_score[tid];
+        red_idx[tid] = int(tid);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint stride = 256; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                const float cand_v = red_val[tid + stride];
+                const int cand_i = red_idx[tid + stride];
+                if (moe_better_pair(cand_v, cand_i, red_val[tid], red_idx[tid])) {
+                    red_val[tid] = cand_v;
+                    red_idx[tid] = cand_i;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        if (tid == 0) {
+            out_idx[slot] = max(red_idx[0], 0);
+            out_w[slot] = red_val[0];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (int(tid) == red_idx[0]) sh_score[tid] = -INFINITY;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        const float max_top = out_w[0];
+        float sum = 0.0f;
+        float exp_val[16];
+        for (uint i = 0; i < args.k; ++i) {
+            exp_val[i] = exp(out_w[i] - max_top);
+            sum += exp_val[i];
+        }
+        sum = max(sum, 6.103515625e-5f);
+        for (uint i = 0; i < args.k; ++i) out_w[i] = exp_val[i] / sum;
+    }
+}
+
 kernel void kernel_dot_sigmoid_f32(
         constant dot_sigmoid_args & args [[buffer(0)]],
         device const float       * weight [[buffer(1)]],

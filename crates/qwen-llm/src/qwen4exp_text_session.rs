@@ -1228,6 +1228,33 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         self.final_read.hc_up_mix_enabled()
     }
 
+    pub fn guarded_topk_enabled(&self) -> bool {
+        self.zero_one.guarded_topk_enabled()
+    }
+
+    pub(crate) fn configure_guarded_topk(
+        &mut self,
+        ctx: &MetalContext,
+        enabled: bool,
+    ) -> Result<(), Qwen4ExpTextSessionError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed || self.pending_length.is_some() {
+            return invalid("top-k configuration requires a healthy released session");
+        }
+        self.zero_one.validate_topk_binding(ctx)?;
+        for block in &self.post_ple {
+            block.validate_topk_binding(ctx)?;
+        }
+        if enabled {
+            crate::qwen4exp_moe::guarded_topk::preflight(ctx)?;
+        }
+        self.zero_one.bind_guarded_topk(enabled);
+        for block in &mut self.post_ple {
+            block.bind_guarded_topk(enabled);
+        }
+        Ok(())
+    }
+
     pub(crate) fn configure_hc_up_mix(
         &mut self,
         ctx: &MetalContext,

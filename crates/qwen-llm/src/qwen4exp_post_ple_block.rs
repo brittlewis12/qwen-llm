@@ -481,6 +481,27 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
         self.residual.bind_hc_up_mix(enabled);
     }
 
+    pub(crate) fn validate_topk_binding(
+        &self,
+        ctx: &MetalContext,
+    ) -> Result<(), Qwen4ExpPostPleBlockError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed {
+            return invalid("top-k configuration requires a healthy released block");
+        }
+        self.moe.validate_topk_binding(ctx)?;
+        Ok(())
+    }
+
+    pub(crate) fn bind_guarded_topk(&mut self, enabled: bool) {
+        self.moe.bind_guarded_topk(enabled);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn guarded_topk_enabled(&self) -> bool {
+        self.moe.guarded_topk_enabled()
+    }
+
     #[cfg(test)]
     pub(crate) fn hc_up_mix_enabled(&self) -> bool {
         self.residual.hc_up_mix_enabled()

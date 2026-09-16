@@ -39,7 +39,7 @@ pub(super) fn select(
     );
 }
 
-fn guarded(ctx: &MetalContext, data: &[u8], dtype: GgmlType) -> MetalTensor {
+pub(super) fn guarded(ctx: &MetalContext, data: &[u8], dtype: GgmlType) -> MetalTensor {
     let mut storage = vec![0xa5; GUARD];
     storage.extend_from_slice(data);
     storage.extend_from_slice(&[0x5a; GUARD]);
@@ -52,27 +52,27 @@ fn guarded(ctx: &MetalContext, data: &[u8], dtype: GgmlType) -> MetalTensor {
     }
 }
 
-fn allocation(t: &MetalTensor) -> Vec<u8> {
+pub(super) fn allocation(t: &MetalTensor) -> Vec<u8> {
     unsafe {
         std::slice::from_raw_parts(t.buffer.contents().as_ptr().cast::<u8>(), t.buffer.length())
             .to_vec()
     }
 }
 
-fn guards(t: &MetalTensor) {
+pub(super) fn guards(t: &MetalTensor) {
     let b = allocation(t);
     assert_eq!(&b[..GUARD], &[0xa5; GUARD]);
     assert_eq!(&b[b.len() - GUARD..], &[0x5a; GUARD]);
 }
 
-fn f32s(t: &MetalTensor) -> Vec<f32> {
+pub(super) fn f32s(t: &MetalTensor) -> Vec<f32> {
     bytes(t)
         .chunks_exact(4)
         .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
         .collect()
 }
 
-fn oracle(values: &[f32], ids: &MetalTensor, weights: &MetalTensor) {
+pub(super) fn oracle(values: &[f32], ids: &MetalTensor, weights: &MetalTensor) {
     assert!(values.iter().all(|v| v.is_finite()));
     let mut expected: Vec<_> = (0..N).collect();
     expected.sort_by(|&a, &b| values[b].partial_cmp(&values[a]).unwrap().then(a.cmp(&b)));
@@ -94,7 +94,7 @@ fn oracle(values: &[f32], ids: &MetalTensor, weights: &MetalTensor) {
     }
 }
 
-fn fixtures(native: Vec<f32>) -> Vec<(&'static str, Vec<f32>)> {
+pub(super) fn fixtures(native: Vec<f32>) -> Vec<(&'static str, Vec<f32>)> {
     let mut state = 0x4d595df4d0f33173u64;
     let mut result = Vec::new();
     for label in ["random0", "random1", "random2", "random3"] {

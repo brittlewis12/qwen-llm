@@ -22,6 +22,9 @@ pub(crate) mod topk_screen;
 #[path = "qwen4exp_moe_topk_native.rs"]
 pub(crate) mod topk_native;
 
+#[path = "qwen4exp_topk_compat.rs"]
+mod topk_compat;
+
 fn intervals_overlap(a: (u64, u64), b: (u64, u64)) -> bool {
     a.0.max(b.0) < a.1.min(b.1)
 }
@@ -222,6 +225,7 @@ fn assert_finite(t: &MetalTensor) {
 
 fn buffers(w: &Qwen4ExpMoeMetalWorkspace) -> Qwen4ExpMoeSingletonBuffers<'_> {
     Qwen4ExpMoeSingletonBuffers {
+        guarded_topk: w.guarded_topk,
         router_logits: &w.router_logits,
         topk_ids: &w.topk_ids,
         topk_weights: &w.topk_weights,

@@ -127,6 +127,7 @@ fn native_moe_complete_path_observation() {
         Qwen4ExpDecodeOptions {
             split_qsa: true,
             hc_up_mix: false,
+            ..Default::default()
         },
     )
     .unwrap();

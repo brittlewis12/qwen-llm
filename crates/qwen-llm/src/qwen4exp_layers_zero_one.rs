@@ -317,6 +317,36 @@ impl Qwen4ExpLayersZeroOneMetalWorkspace {
         self.residual.bind_hc_up_mix(enabled);
     }
 
+    pub(crate) fn validate_topk_binding(
+        &self,
+        ctx: &MetalContext,
+    ) -> Result<(), Qwen4ExpLayersZeroOneError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed || self.pending_history.is_some() {
+            return invalid("top-k configuration requires healthy released bootstrap layers");
+        }
+        self.layer_zero.validate_topk_binding(ctx)?;
+        self.layer_one_moe.validate_topk_binding(ctx)?;
+        Ok(())
+    }
+
+    pub(crate) fn bind_guarded_topk(&mut self, enabled: bool) {
+        self.layer_zero.bind_guarded_topk(enabled);
+        self.layer_one_moe.bind_guarded_topk(enabled);
+    }
+
+    pub(crate) fn guarded_topk_enabled(&self) -> bool {
+        self.layer_one_moe.guarded_topk_enabled()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn topk_binding_states(&self) -> [bool; 2] {
+        [
+            self.layer_zero.guarded_topk_enabled(),
+            self.guarded_topk_enabled(),
+        ]
+    }
+
     #[cfg(test)]
     pub(crate) fn hc_up_binding_states(&self) -> [bool; 2] {
         [

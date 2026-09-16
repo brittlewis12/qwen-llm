@@ -465,6 +465,7 @@ pub struct Qwen4ExpLoadedModel<'gguf> {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Qwen4ExpDecodeOptions {
+    pub guarded_topk: bool,
     pub split_qsa: bool,
     pub hc_up_mix: bool,
 }
@@ -553,6 +554,10 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         };
 
         let session_plan = session_plan.with_split_decode(ctx, decode.split_qsa)?;
+        if decode.guarded_topk {
+            crate::qwen4exp_moe::guarded_topk::preflight(ctx)
+                .map_err(Qwen4ExpTextSessionError::from)?;
+        }
         if decode.hc_up_mix {
             crate::qwen4exp_metal::hc_up::preflight(ctx).map_err(Qwen4ExpTextSessionError::from)?;
         }
@@ -577,6 +582,9 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             session_plan.admit_after_residency(&weights, ctx.memory_signals())?;
         let mut workspace =
             Qwen4ExpTextSessionMetalWorkspace::from_admitted(ctx, admitted_session)?;
+        if decode.guarded_topk {
+            workspace.configure_guarded_topk(ctx, true)?;
+        }
         if decode.hc_up_mix {
             workspace.configure_hc_up_mix(ctx, true)?;
         }
@@ -646,6 +654,12 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         self.workspace
             .as_ref()
             .is_some_and(Qwen4ExpTextSessionMetalWorkspace::hc_up_mix_enabled)
+    }
+
+    pub fn guarded_topk_enabled(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(Qwen4ExpTextSessionMetalWorkspace::guarded_topk_enabled)
     }
 
     pub fn packed_selected_active(&self) -> bool {

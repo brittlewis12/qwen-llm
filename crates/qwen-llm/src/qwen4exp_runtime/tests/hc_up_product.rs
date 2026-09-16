@@ -90,6 +90,7 @@ fn product_hc_up_shared_prefix() {
         Qwen4ExpDecodeOptions {
             split_qsa: true,
             hc_up_mix: true,
+            ..Default::default()
         },
     )
     .unwrap();

@@ -40,6 +40,9 @@ use objc2_metal::{
 
 const MAX_TOP_K: usize = 16;
 
+#[path = "qwen4exp_topk.rs"]
+pub(crate) mod guarded_topk;
+
 #[cfg(test)]
 #[path = "qwen4exp_moe_observe.rs"]
 pub(crate) mod singleton_observe;
@@ -736,6 +739,7 @@ impl<'a> Qwen4ExpMoeMetalWeights<'a> {
 }
 
 pub struct Qwen4ExpMoeMetalWorkspace {
+    guarded_topk: bool,
     geometry: Qwen4ExpMoeMetalGeometry,
     router_logits: MetalTensor,
     topk_ids: MetalTensor,
@@ -1099,12 +1103,29 @@ impl Qwen4ExpMoePackedMotorScratch {
 }
 
 impl Qwen4ExpMoeMetalWorkspace {
+    pub(crate) fn validate_topk_binding(&self, ctx: &MetalContext) -> Result<(), Qwen4ExpMoeError> {
+        self.require_idle()?;
+        if self.state_poisoned {
+            return invalid("top-k binding requires a healthy released workspace");
+        }
+        require_same_device(ctx, &workspace_tensors(self))
+    }
+
+    pub(crate) fn bind_guarded_topk(&mut self, enabled: bool) {
+        self.guarded_topk = enabled;
+    }
+
+    pub(crate) fn guarded_topk_enabled(&self) -> bool {
+        self.guarded_topk
+    }
+
     pub fn new(
         ctx: &MetalContext,
         geometry: Qwen4ExpMoeMetalGeometry,
     ) -> Result<Self, Qwen4ExpMoeError> {
         geometry.validate()?;
         Ok(Self {
+            guarded_topk: false,
             geometry,
             router_logits: MetalTensor::zeros_f32(ctx, vec![geometry.expert_count as u64])?,
             topk_ids: MetalTensor::zeros_i32(ctx, vec![geometry.experts_per_token as u64])?,
@@ -1315,6 +1336,7 @@ fn encode_step(
         input,
         weights,
         Qwen4ExpMoeSingletonBuffers {
+            guarded_topk: workspace.guarded_topk,
             router_logits: &workspace.router_logits,
             topk_ids: &workspace.topk_ids,
             topk_weights: &workspace.topk_weights,
@@ -1330,6 +1352,7 @@ fn encode_step(
 
 #[derive(Clone, Copy)]
 struct Qwen4ExpMoeSingletonBuffers<'a> {
+    guarded_topk: bool,
     router_logits: &'a MetalTensor,
     topk_ids: &'a MetalTensor,
     topk_weights: &'a MetalTensor,
@@ -1388,15 +1411,25 @@ fn encode_singleton_router(
     #[cfg(not(test))]
     let probed = false;
     if !probed {
-        encode_topk_logits_softmax_f32(
-            ctx,
-            enc,
-            buffers.router_logits,
-            buffers.topk_ids,
-            buffers.topk_weights,
-            g.expert_count,
-            g.experts_per_token,
-        )?;
+        if buffers.guarded_topk && guarded_topk::eligible(g.expert_count, g.experts_per_token) {
+            guarded_topk::encode(
+                ctx,
+                enc,
+                buffers.router_logits,
+                buffers.topk_ids,
+                buffers.topk_weights,
+            )?;
+        } else {
+            encode_topk_logits_softmax_f32(
+                ctx,
+                enc,
+                buffers.router_logits,
+                buffers.topk_ids,
+                buffers.topk_weights,
+                g.expert_count,
+                g.experts_per_token,
+            )?;
+        }
     }
     encode_dot_sigmoid_f32(
         ctx,
@@ -2309,6 +2342,7 @@ unsafe fn encode_qwen4exp_moe_packed_motor_inner(
             input,
             weights,
             Qwen4ExpMoeSingletonBuffers {
+                guarded_topk: false,
                 router_logits: &views.router_logits,
                 topk_ids: &views.topk_ids,
                 topk_weights: &views.topk_weights,

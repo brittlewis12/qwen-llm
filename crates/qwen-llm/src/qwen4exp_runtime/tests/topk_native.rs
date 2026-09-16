@@ -45,6 +45,7 @@ fn native_parallel_topk_shared_prefix() {
         Qwen4ExpDecodeOptions {
             split_qsa: true,
             hc_up_mix: false,
+            ..Default::default()
         },
     )
     .unwrap();

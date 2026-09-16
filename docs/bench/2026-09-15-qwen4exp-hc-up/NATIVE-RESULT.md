@@ -1,5 +1,8 @@
 # Native HC Qualification PASS
 
+Historical research qualification. Later actual-product numerical/CLI checks
+pass but performance promotion is HOLD; current authority is `PRODUCT.md`.
+
 Current authority supersedes the earlier native HOLD, without changing the
 historical failures in `RESULT.md`. HC remains research-only: no production HC
 option or default change. Existing UD-Q3_K_XL, local M4 Max, production GPU lease
@@ -25,7 +28,7 @@ a CPU-only metadata inventory bounds the other reachable packed-MoE signatures:
 | Down Q8_0 | Layers 2,4,30,46,47 | Independently reproduced, then repaired |
 
 All expert banks have512 experts. The IQ4_NL M128xN16 option is restricted to
-512/527-token chunks; this packet uses2048/131 and does not justify editing that
+512/527-token chunks; this packet uses2048/3/128 and does not justify editing that
 variant. The inventory is source/metadata evidence, not a blanket runtime claim.
 
 Both remaining narrow signatures independently reproduce the512-expert assertion.

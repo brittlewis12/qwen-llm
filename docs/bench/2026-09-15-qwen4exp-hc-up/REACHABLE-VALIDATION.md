@@ -20,7 +20,7 @@ CPU-only metadata inventory (no Metal or tensor-payload reads), PASS0.04s:
 All banks have512 experts. Gate/up K2560/M640, down K640/M2560. Source selectors
 in `qwen4exp_moe.rs` use exactly these four dtype/kernel paths. The IQ4_NL
 M128xN16 option is restricted to512/527-token chunks; it is not selected for this
-packet's2048/131 extents. Do not edit that unreachable variant speculatively.
+packet's2048/3/128 extents. Do not edit that unreachable variant speculatively.
 
 ## Frozen Additional Scope
 

@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-15 - HC Product Numerical/CLI PASS, Performance HOLD; MoE Instrumentation
+
+- Default-off typed/strict CLI HC option, independent QSA composition, existing
+  scratch only. Actual-product empty4/split-on32/split-off32 full logits/hyper/121
+  states pass unchanged gates. Attempt01 packed-tail routing leak preserved and
+  repaired by explicit encode-time policy; candidate stays out of packed prefix.
+- Product02 GPU mean5.1092%, first pair4.814% misses frozen5%; wall4.6678% passes.
+  Performance promotion HOLD, no timing rerun or speed recommendation. Earlier
+  research PASS does not replace this actual-product verdict.
+- CLI01 exposes M128 IQ4_NL down at527 tokens. Original511 passes/512 reproduces
+  API abort; minimal uint builtin/ushort local repair passes511/512/populated
+  original-SHA regression. CLI02 both flags/API validation: expected FINAL_JSON,
+  statusok,2578prompt/23output/EOS. Unpaired delivery check, not a speedup.
+- Complete-MoE observation01 captures native layers2/4/5, ordinary/observed full
+  logits/hyper/121states bitwise. Layer2 replay bitwise and eight-dispatch census
+  pass; timing fails global timestamp ordering. No stage-cost authority; original
+  counters lost to late persistence, now corrected before gates. No packet retry.
+- Separate model-free interval control passes. SHA-pinned saved-layer2 diagnostic,
+  no prefix/native forward, passes with three reordered DISJOINT stage intervals,
+  not overlap. Correct offline classification; stage2->3 independent branches
+  invalidate the global encoded-order assumption. Next versioned saved-layer2
+  interval-aware budget, then remaining dtype classes; no body topology sweep.
+- All GPU work production lease/real wired gate/API validation. No new weights,
+  no server restart or remote push. Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/PRODUCT.md`
+  and `docs/bench/2026-09-15-qwen4exp-hc-up/MOE-RESULT.md`.
+
 ## 2026-09-15 - Packed Validation Repaired / Native HC Qualification PASS
 
 - IQ4_NL down localized and repaired: paired `958adb2f`, minimal fix `82a21f9d`.

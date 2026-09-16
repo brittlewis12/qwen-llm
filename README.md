@@ -107,6 +107,12 @@ are unchanged, but eligible scalar-prefill steps also use the option. Unset or
 comparison saves about 16% decode GPU time, not a general throughput guarantee.
 See `docs/bench/2026-09-14-qwen4exp-donor-split/PRODUCT.md` for qualification limits.
 
+`QWEN4EXP_HC_UP_MIX=1` independently enables an experimental singleton Q8 HC
+up-plus-mix route. It adds no GPU scratch; packed paths retain incumbent math.
+Default off; strict 0/1 parsing. Numerical and CLI checks pass, but performance
+promotion is on HOLD after a frozen timing-floor miss: this is not a speed
+recommendation. See `docs/bench/2026-09-15-qwen4exp-hc-up/PRODUCT.md`.
+
 Run `qwen -h` for the common interface or `qwen --help` for the expanded
 research and diagnostics surface.
 

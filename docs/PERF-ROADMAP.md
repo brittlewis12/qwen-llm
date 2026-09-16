@@ -306,6 +306,29 @@ generated, and greedy/sampled authority separate. No production flag is added.
 
 ## Qwen3.8 Flash-Next Optimization Lane — 2026-08-26
 
+### September 15 Routing Rechart: Native Bitwise Gain, Guarded Delivery Next
+
+The parent-budget investigation found a source-level one-thread N512/K10 selector.
+Interval V2 absolute timing remains INCONCLUSIVE; a separate finite parallel-selector
+screen and native packet now establish the mechanism. With QSA on/HC off,32 full
+logits/hyper rows, terminal121 states and1536 router rows are bitwise. Fixed native
+four-forward ABBA saves40.1901% GPU/36.1689% executor wall, controls0.1606%/0.3224%,
+all frozen mean/pair floors pass. No prefill/request throughput or additive-QSA claim.
+
+1. **Deliver a guarded singleton selector next.** Existing research parallel path
+   is finite-only; preserve incumbent NaN/infinity behavior with bit-pattern
+   classification and uniform serial fallback. Qualify compatibility, capability,
+   custody and actual product route; added guard requires its own qualification.
+2. **Do not gate this behind more expert-dtype profiling.** Native proof covers
+   common routing across all48 layers. Layers4/5 complete-cost replay matters only
+   when selecting a subsequent expert-body mechanism after this route saving.
+3. **Keep HC/attention/RMS sweeps parked.** HC performance HOLD is independent and
+   unchanged. No broad router fusion, geometry expansion or new quant prerequisite.
+
+Evidence: `docs/bench/2026-09-15-qwen4exp-hc-up/TOPK-RESULT.md`. Production defaults
+and existing parallel host n<=256 remain unchanged; this is native research PASS,
+not product delivery. Every GPU experiment retains production lease/real wired gate.
+
 ### September 15 Product Decision: HC HOLD, Complete MoE Next
 
 Default-off experimental HC option is numerically qualified independently with

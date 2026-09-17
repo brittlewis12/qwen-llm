@@ -3546,12 +3546,7 @@ fn metal_single_token_concurrent_gdn_attn_matches_serial() {
 
 #[test]
 fn metal_single_token_concurrent_gdn_moe_matches_serial_a3b() {
-    run_concurrent_gdn_moe_equivalence(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        4,
-        0.995,
-    );
+    run_concurrent_gdn_moe_equivalence(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 4, 0.995);
 }
 
 #[test]
@@ -4018,11 +4013,7 @@ fn metal_argmax_chain_matches_full_logits_dense() {
 
 #[test]
 fn metal_argmax_chain_matches_full_logits_moe() {
-    run_argmax_chain_equivalence(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "moe-a3b",
-        0.995,
-    );
+    run_argmax_chain_equivalence(crate::test_fixtures::A3B_Q4_K_M.path(), "moe-a3b", 0.995);
 }
 
 #[test]
@@ -4032,10 +4023,7 @@ fn metal_exact_greedy_chain_matches_full_logits_dense() {
 
 #[test]
 fn metal_exact_greedy_chain_matches_full_logits_moe() {
-    run_exact_greedy_chain_equivalence(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "moe-a3b",
-    );
+    run_exact_greedy_chain_equivalence(crate::test_fixtures::A3B_Q4_K_M.path(), "moe-a3b");
 }
 
 /// **H5.2** — Metal multi-layer hidden capture matches CPU oracle.
@@ -7091,21 +7079,13 @@ fn run_moe_intra_profile(model_path: &str, label: &str, n_runs: usize) {
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_intra_profile() {
-    run_moe_intra_profile(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        6,
-    );
+    run_moe_intra_profile(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 6);
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_intra_profile() {
-    run_moe_intra_profile(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b",
-        4,
-    );
+    run_moe_intra_profile(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b", 4);
 }
 
 /// **Context-length sweep**: how does decode throughput scale as the

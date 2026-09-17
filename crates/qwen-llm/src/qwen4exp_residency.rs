@@ -729,7 +729,9 @@ fn price_shared_buffer(
 ) -> Result<u64, Qwen4ExpResidencyError> {
     ctx.price_shared_buffer_upper(logical_bytes)
         .map(|priced| priced.priced_upper_bytes)
-        .map_err(|error| Qwen4ExpResidencyError::Invalid(format!("planned Metal buffer {name:?} {error}")))
+        .map_err(|error| {
+            Qwen4ExpResidencyError::Invalid(format!("planned Metal buffer {name:?} {error}"))
+        })
 }
 
 fn build_weight_memory_plan(

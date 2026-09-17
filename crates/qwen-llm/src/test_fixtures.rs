@@ -228,14 +228,28 @@ pub fn metal_tests_required() -> bool {
         .unwrap_or(false)
 }
 
-/// A Metal context for a test, or `None` when this machine has no usable
-/// device and the test may skip. Any other initialization error, or a
-/// missing device when Metal tests are required, is a failure.
+/// A Metal context for a test, or `None` when the GPU is not available to
+/// this process (no device, or another qwen process holds the lease —
+/// dependent crates' test binaries take the real lease, not the
+/// per-process test lease) and the test may skip. Any other initialization
+/// error, or an unavailable GPU when Metal tests are required, is a failure.
 pub fn metal_context_or_skip() -> Option<MetalContext> {
     match MetalContext::new() {
         Ok(ctx) => Some(ctx),
-        Err(MetalError::EmptyLibrary | MetalError::NoDevice) => {
-            assert!(!metal_tests_required(), "Metal is required but unavailable");
+        Err(error @ (MetalError::EmptyLibrary | MetalError::NoDevice)) => {
+            assert!(
+                !metal_tests_required(),
+                "Metal is required but unavailable: {error}"
+            );
+            eprintln!("skipping: {error}");
+            None
+        }
+        Err(error @ MetalError::ProcessLease(_)) => {
+            assert!(
+                !metal_tests_required(),
+                "Metal is required but leased: {error}"
+            );
+            eprintln!("skipping: {error}");
             None
         }
         Err(error) => panic!("Metal context: {error}"),

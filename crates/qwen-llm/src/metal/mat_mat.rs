@@ -5140,9 +5140,8 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = std::env::var("QWEN_Q8_AMORT_MODEL").unwrap_or_else(|_| {
-            crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.path().into()
-        });
+        let path = std::env::var("QWEN_Q8_AMORT_MODEL")
+            .unwrap_or_else(|_| crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.path().into());
         if !std::path::Path::new(&path).exists() {
             eprintln!("[q8-amort] skipped - GGUF missing: {path}");
             return;

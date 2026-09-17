@@ -91,11 +91,12 @@ impl MuseGlimmerConfig {
     /// The tokenizer must agree with the model on vocabulary size, BOS and
     /// EOS; every lane that opens a Muse tokenizer checks this before use.
     pub fn validate_tokenizer(&self, tokenizer: &impl Tokenize) -> Result<(), MuseGlimmerError> {
-        let mismatch = |field, tokenizer: String, model: String| MuseGlimmerError::TokenizerContract {
-            field,
-            tokenizer,
-            model,
-        };
+        let mismatch =
+            |field, tokenizer: String, model: String| MuseGlimmerError::TokenizerContract {
+                field,
+                tokenizer,
+                model,
+            };
         if tokenizer.n_vocab() != self.vocab_size {
             return Err(mismatch(
                 "vocabulary",
@@ -553,7 +554,10 @@ pub enum MuseGlimmerError {
         model: String,
     },
     #[error("Muse Glimmer release stop tokens must be EOS/EOT {expected:?}, got {actual:?}")]
-    StopTokens { expected: Vec<i32>, actual: Vec<i32> },
+    StopTokens {
+        expected: Vec<i32>,
+        actual: Vec<i32>,
+    },
     #[error("unexpected Muse Glimmer tensor set: {0:?}")]
     UnexpectedTensors(Vec<String>),
     #[error(transparent)]
@@ -1062,9 +1066,8 @@ mod tests {
     #[test]
     #[ignore = "requires the pinned local Unsloth Muse Glimmer Q8_0 GGUF"]
     fn binds_pinned_q8_target() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let gguf = GgufFile::open(path).expect("open Muse Q8 target");
         let model = MuseGlimmerModel::from_gguf(&gguf).expect("bind Muse Q8 target");
         assert_eq!(

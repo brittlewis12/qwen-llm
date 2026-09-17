@@ -3368,23 +3368,13 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
 #[test]
 #[ignore]
 fn metal_35b_a3b_packed_moe_tail_profile() {
-    run_packed_moe_tail_profile(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        8,
-        4,
-    );
+    run_packed_moe_tail_profile(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 8, 4);
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_packed_moe_tail_profile() {
-    run_packed_moe_tail_profile(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b",
-        8,
-        3,
-    );
+    run_packed_moe_tail_profile(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b", 8, 3);
 }
 
 fn run_packed_moe_tail_ab_profile(
@@ -4458,12 +4448,7 @@ fn run_live_packed_moe_tail_phase_profile(
 #[test]
 #[ignore]
 fn metal_35b_a3b_live_packed_moe_tail_phase_profile() {
-    run_live_packed_moe_tail_phase_profile(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        320,
-        3,
-    );
+    run_live_packed_moe_tail_phase_profile(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 320, 3);
 }
 
 #[test]
@@ -5405,111 +5390,67 @@ fn run_moe_route_logits_e8p32_oracle(model_path: &str, label: &str, chunk_p: usi
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_128() {
-    run_moe_route_bucket_fused_oracle(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-128",
-        128,
-    );
+    run_moe_route_bucket_fused_oracle(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-128", 128);
 }
 
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_320() {
-    run_moe_route_bucket_fused_oracle(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-320",
-        320,
-    );
+    run_moe_route_bucket_fused_oracle(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-320", 320);
 }
 
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_512() {
-    run_moe_route_bucket_fused_oracle(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        512,
-    );
+    run_moe_route_bucket_fused_oracle(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 512);
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_route_bucket_fused_oracle_512() {
-    run_moe_route_bucket_fused_oracle(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b",
-        512,
-    );
+    run_moe_route_bucket_fused_oracle(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b", 512);
 }
 
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_128() {
-    run_moe_route_logits_e8p32_oracle(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-128",
-        128,
-    );
+    run_moe_route_logits_e8p32_oracle(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-128", 128);
 }
 
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_320() {
-    run_moe_route_logits_e8p32_oracle(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-320",
-        320,
-    );
+    run_moe_route_logits_e8p32_oracle(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-320", 320);
 }
 
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_512() {
-    run_moe_route_logits_e8p32_oracle(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-512",
-        512,
-    );
+    run_moe_route_logits_e8p32_oracle(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-512", 512);
 }
 
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_1024() {
-    run_moe_route_logits_e8p32_oracle(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-1024",
-        1024,
-    );
+    run_moe_route_logits_e8p32_oracle(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-1024", 1024);
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_320() {
-    run_moe_route_logits_e8p32_oracle(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b-320",
-        320,
-    );
+    run_moe_route_logits_e8p32_oracle(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b-320", 320);
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_512() {
-    run_moe_route_logits_e8p32_oracle(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b-512",
-        512,
-    );
+    run_moe_route_logits_e8p32_oracle(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b-512", 512);
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_1024() {
-    run_moe_route_logits_e8p32_oracle(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b-1024",
-        1024,
-    );
+    run_moe_route_logits_e8p32_oracle(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b-1024", 1024);
 }
 
 fn run_gpu_compacted_grouped_down_profile(
@@ -5864,12 +5805,7 @@ fn metal_122b_a10b_gpu_compacted_grouped_down_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_gpu_compacted_grouped_down_profile() {
-    run_gpu_compacted_grouped_down_profile(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        320,
-        2,
-    );
+    run_gpu_compacted_grouped_down_profile(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 320, 2);
 }
 
 fn run_grouped_q5_down_vs_matmat_oracle(
@@ -7521,12 +7457,7 @@ fn metal_122b_a10b_grouped_swiglu_down_backend_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_down_backend_profile() {
-    run_grouped_swiglu_down_backend_profile(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        320,
-        2,
-    );
+    run_grouped_swiglu_down_backend_profile(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 320, 2);
 }
 
 #[test]
@@ -8590,12 +8521,7 @@ fn run_grouped_moe_overlap_falsifier(model_path: &str, label: &str, chunk_p: usi
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_overlap_falsifier_512() {
-    run_grouped_moe_overlap_falsifier(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-512",
-        512,
-        3,
-    );
+    run_grouped_moe_overlap_falsifier(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-512", 512, 3);
 }
 
 #[test]
@@ -8612,11 +8538,7 @@ fn metal_122b_a10b_grouped_overlap_falsifier_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_zero_fill_coverage_oracle_512() {
-    run_grouped_zero_fill_coverage_oracle(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-512",
-        512,
-    );
+    run_grouped_zero_fill_coverage_oracle(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-512", 512);
 }
 
 #[test]
@@ -8879,34 +8801,19 @@ fn run_grouped_q4_n32_proof(model_path: &str, label: &str, chunk_p: usize, n_run
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_q4_n32_proof_512() {
-    run_grouped_q4_n32_proof(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        512,
-        2,
-    );
+    run_grouped_q4_n32_proof(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 512, 2);
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_q4_n32_proof_512() {
-    run_grouped_q4_n32_proof(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b",
-        512,
-        2,
-    );
+    run_grouped_q4_n32_proof(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b", 512, 2);
 }
 
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_q4_n32_proof_1024() {
-    run_grouped_q4_n32_proof(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b-1024",
-        1024,
-        2,
-    );
+    run_grouped_q4_n32_proof(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b-1024", 1024, 2);
 }
 
 #[test]
@@ -9222,13 +9129,7 @@ fn run_grouped_q4_hot_n32_proof(
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_q4_hot_n32_proof_512() {
-    run_grouped_q4_hot_n32_proof(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        512,
-        32,
-        2,
-    );
+    run_grouped_q4_hot_n32_proof(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 512, 32, 2);
 }
 
 #[test]
@@ -9799,23 +9700,13 @@ fn run_grouped_routed_down_accum_proof(
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_routed_down_accum_proof_512() {
-    run_grouped_routed_down_accum_proof(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        512,
-        2,
-    );
+    run_grouped_routed_down_accum_proof(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 512, 2);
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_routed_down_accum_proof_512() {
-    run_grouped_routed_down_accum_proof(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b",
-        512,
-        2,
-    );
+    run_grouped_routed_down_accum_proof(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b", 512, 2);
 }
 
 fn run_fused_routed_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_runs: usize) {
@@ -10092,23 +9983,13 @@ fn run_fused_routed_tail_profile(model_path: &str, label: &str, chunk_p: usize, 
 #[test]
 #[ignore]
 fn metal_122b_a10b_fused_routed_tail_profile() {
-    run_fused_routed_tail_profile(
-        crate::test_fixtures::A10B_Q4_K_XL.path(),
-        "122b",
-        320,
-        2,
-    );
+    run_fused_routed_tail_profile(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b", 320, 2);
 }
 
 #[test]
 #[ignore]
 fn metal_35b_a3b_fused_routed_tail_profile() {
-    run_fused_routed_tail_profile(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
-        "a3b",
-        320,
-        2,
-    );
+    run_fused_routed_tail_profile(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 320, 2);
 }
 
 fn run_grouped_routed_down_experiment_profile(
@@ -14814,7 +14695,11 @@ mod prompt_lookup_layout_gate {
     #[test]
     fn qualified_q4km_layout_passes() {
         let blocks = (0..64).map(|i| PromptLookupBlockLayout {
-            down: if i % 2 == 0 { GgmlType::Q4_K } else { GgmlType::Q6_K },
+            down: if i % 2 == 0 {
+                GgmlType::Q4_K
+            } else {
+                GgmlType::Q6_K
+            },
             ..q4km_block()
         });
         assert_eq!(
@@ -14842,7 +14727,10 @@ mod prompt_lookup_layout_gate {
         let mut blocks = vec![q4km_block(); 64];
         blocks[17].gate = GgmlType::Q8_0;
         let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks).unwrap_err();
-        assert!(err.contains("block 17 has gate/up/down=Q8_0/Q4_K/Q6_K, moe=false"), "{err}");
+        assert!(
+            err.contains("block 17 has gate/up/down=Q8_0/Q4_K/Q6_K, moe=false"),
+            "{err}"
+        );
     }
 
     #[test]

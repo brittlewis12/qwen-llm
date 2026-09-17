@@ -668,7 +668,9 @@ fn price_shared_buffer(
 ) -> Result<u64, MuseGlimmerResidencyError> {
     ctx.price_shared_buffer_upper(logical_bytes)
         .map(|priced| priced.priced_upper_bytes)
-        .map_err(|error| MuseGlimmerResidencyError::Invalid(format!("planned Metal buffer {name:?} {error}")))
+        .map_err(|error| {
+            MuseGlimmerResidencyError::Invalid(format!("planned Metal buffer {name:?} {error}"))
+        })
 }
 
 fn build_weight_memory_plan(
@@ -1086,9 +1088,8 @@ mod tests {
     #[test]
     #[ignore = "requires the pinned local Unsloth Muse Glimmer Q8_0 GGUF and Metal"]
     fn plans_pinned_q8_target_without_realizing_weights() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
-            crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into()
-        });
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
+            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
         let gguf = GgufFile::open(path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let plan = MuseGlimmerMetalWeightPlan::for_authenticated_release(&ctx, &gguf)

@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-17 - Muse Qualified Generation Math Becomes Default
+
+- Source d4bb5703 closes run/serve/library selection gap: Q8/unified M4 Max defaults
+  to existing matrix/tiled-online prefill and split decode. Strict0 rollback,
+  unset/1 permits qualification; unsupported lanes fall back. No new kernel/flag.
+- Lens/fit and exact-labelled reference benchmark use explicit reference loading;
+  diagnostics report effective options. Numerical, not sampled/bitwise equivalence.
+- CPU resolver128 cases and3 backend regressions PASS; all-target check and release
+  build warning-free. Frozen production-lease native attempt blocked before Metal
+  by existing server PID92618; no process stopped or gate bypassed. New native/CLI
+  default-delivery checks remain pending; no new performance result claimed.
+- Rechart delivered-path priorities: generated32K FFN64.96%, attention12.43%;
+  late32K packed attention49.91%, FFN38.43%;8K packed FFN57.0%. Do not optimize the
+  now-rolled-back incumbent or label logical payload bandwidth a hardware roofline.
+- cx review closes analysis isolation, effective telemetry and stale docs; failed
+  lease and precise qualification scope: `docs/bench/2026-09-17-muse-defaults/RESULT.md`.
+
 ## 2026-09-16 - Existing Strict Packed Router Gains Exact N1024 Coverage
 
 - Source-led policy gap, not a new kernel: default strict E8P32 router set expands

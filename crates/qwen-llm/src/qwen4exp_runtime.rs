@@ -743,6 +743,20 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             last_prefill_timing: None,
         })
     }
+
+    /// Take back a runner's workspace, reset to position zero, so a later
+    /// `create_runner` serves the next request on the same allocation.
+    pub fn restore_workspace(
+        &mut self,
+        mut workspace: Qwen4ExpTextSessionMetalWorkspace,
+    ) -> Result<(), Qwen4ExpRuntimeError> {
+        if self.workspace.is_some() {
+            return invalid("loaded model already holds a session workspace");
+        }
+        workspace.reset()?;
+        self.workspace = Some(workspace);
+        Ok(())
+    }
 }
 
 pub struct Qwen4ExpTextRunner<'ctx, 'model, 'gguf> {
@@ -1093,6 +1107,12 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         self.last_token_timing = None;
         self.last_prefill_timing = None;
         Ok(())
+    }
+
+    /// Release the weight binding and hand the workspace back (see
+    /// `Qwen4ExpLoadedModel::restore_workspace`).
+    pub fn into_workspace(self) -> Qwen4ExpTextSessionMetalWorkspace {
+        self.workspace
     }
 
     fn validate_token_id(&self, token_id: u32) -> Result<(), Qwen4ExpRuntimeError> {

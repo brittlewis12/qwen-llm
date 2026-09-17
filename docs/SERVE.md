@@ -115,8 +115,9 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # accepted for dense targets only (an MoE target fails startup rather than
 # silently running serially)
 # DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
-# Muse Glimmer requires both --max-context-tokens and --max-tokens; admitted
-# capacity may extend through its declared 131,072-token context.
+# Muse Glimmer and Qwen3.8-Flash-Next require both --max-context-tokens and
+# --max-tokens (resident session capacity is fixed at load); admitted capacity
+# may extend through the model's declared context.
 ```
 
 The listener rejects every resolved non-loopback address and is bound before
@@ -194,13 +195,16 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   `Retry-After: 1`. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
-- **Qwen3.5/3.6-family (including validated Qwen3.8 identities), DeepSeek V4,
-  and Muse Glimmer.** DS4 runs its own session and
-  snapshot stack (`serve/backend_ds4.rs`) with a startup-fixed forward
-  budget, a serve-owned byte-bounded snapshot LRU (DS4 has no engine-side RAM
-  prefix cache), and no tool support — tool definitions fail closed there.
-  `--snapshot-cache-mib` configures the Qwen and DS4 cache implementations and
-  defaults to 4096 MiB. Muse does not claim snapshot reuse yet.
+- **Every recognised family: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
+  V4, and Muse Glimmer.** DS4 runs its own session and snapshot stack
+  (`serve/backend_ds4.rs`) with a startup-fixed forward budget and a
+  serve-owned byte-bounded snapshot LRU (DS4 has no engine-side RAM prefix
+  cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
+  one text-session workspace sized at load and hands it back reset after
+  every request: the Qwen3.8 contract (effort levels, thinking, tools), no
+  prefix reuse, no snapshots. `--snapshot-cache-mib` configures the Qwen and
+  DS4 cache implementations and defaults to 4096 MiB. Muse does not claim
+  snapshot reuse yet.
 - **Stdout is never written.** All diagnostics via the existing stderr
   tracing surface; per-request `qwen_diag` stats line retained and
   extended with `matched_tokens` and `restore_ms` (the S2/S3 gates are

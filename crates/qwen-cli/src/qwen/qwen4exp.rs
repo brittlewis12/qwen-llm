@@ -12,6 +12,22 @@ pub(crate) const QWEN4EXP_FULL_SHARD_PREFETCH_ENV: &str = "QWEN4EXP_FULL_SHARD_P
 pub(crate) const QWEN4EXP_HC_UP_MIX_ENV: &str = "QWEN4EXP_HC_UP_MIX";
 pub(crate) const QWEN4EXP_GUARDED_TOPK_ENV: &str = "QWEN4EXP_GUARDED_TOPK";
 
+/// `QWEN4EXP_GUARDED_TOPK` / `QWEN4EXP_HC_UP_MIX` rollbacks, shared by the
+/// run and serve lanes.
+pub(crate) fn qwen4exp_decode_options_from_env()
+-> Result<qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions> {
+    Ok(qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions {
+        guarded_topk: parse_qwen4exp_decode_flag(
+            std::env::var_os(QWEN4EXP_GUARDED_TOPK_ENV).as_deref(),
+            QWEN4EXP_GUARDED_TOPK_ENV,
+        )?,
+        hc_up_mix: parse_qwen4exp_decode_flag(
+            std::env::var_os(QWEN4EXP_HC_UP_MIX_ENV).as_deref(),
+            QWEN4EXP_HC_UP_MIX_ENV,
+        )?,
+    })
+}
+
 pub(crate) fn parse_qwen4exp_decode_flag(
     value: Option<&std::ffi::OsStr>,
     name: &str,
@@ -489,16 +505,7 @@ pub(crate) fn run_qwen4exp_single_turn(
         .stop_token_ids()
         .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
     validate_qwen4exp_stop_tokens(&stop_tokens, vocab_size)?;
-    let decode_options = qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions {
-        guarded_topk: parse_qwen4exp_decode_flag(
-            std::env::var_os(QWEN4EXP_GUARDED_TOPK_ENV).as_deref(),
-            QWEN4EXP_GUARDED_TOPK_ENV,
-        )?,
-        hc_up_mix: parse_qwen4exp_decode_flag(
-            std::env::var_os(QWEN4EXP_HC_UP_MIX_ENV).as_deref(),
-            QWEN4EXP_HC_UP_MIX_ENV,
-        )?,
-    };
+    let decode_options = qwen4exp_decode_options_from_env()?;
     let layer_profile_enabled = qwen_llm::env_flag::read_default_off(QWEN4EXP_LAYER_PROFILE_ENV);
     let packed_profile_enabled =
         qwen_llm::env_flag::read_default_off(QWEN4EXP_PACKED_PREFILL_PROFILE_ENV);

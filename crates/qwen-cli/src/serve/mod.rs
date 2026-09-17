@@ -16,6 +16,7 @@
 pub(crate) mod backend;
 pub(crate) mod backend_ds4;
 pub(crate) mod backend_muse;
+pub(crate) mod backend_qwen4exp;
 pub(crate) mod events;
 pub(crate) mod http;
 pub(crate) mod outcome;
@@ -28,7 +29,7 @@ pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalMemorySignals;
 use qwen_llm::model_family::ModelFamily;
@@ -92,35 +93,30 @@ fn snapshot_cache_bytes(mib: u64) -> Result<u64> {
 }
 
 fn supports_serve_family(family: Option<ModelFamily>) -> bool {
-    matches!(
-        family,
-        Some(
-            ModelFamily::Qwen35
-                | ModelFamily::Qwen35Moe
-                | ModelFamily::DeepSeek4
-                | ModelFamily::MuseGlimmer
-        )
-    )
+    family.is_some()
 }
 
-fn muse_serve_limits(
+/// Limits for a family whose resident session capacity is fixed at load
+/// (Muse Glimmer, Flash-Next): both ceilings must be explicit.
+fn fixed_session_limits(
+    family: &str,
     model_context: usize,
     max_context_tokens: Option<usize>,
     max_tokens: Option<usize>,
 ) -> Result<(usize, usize)> {
-    let context_limit = max_context_tokens.context(
-        "Muse Glimmer serve requires --max-context-tokens because its resident session capacity is fixed at startup",
-    )?;
+    let context_limit = max_context_tokens.with_context(|| {
+        format!("{family} serve requires --max-context-tokens because its resident session capacity is fixed at startup")
+    })?;
     ensure!(
         context_limit <= model_context,
-        "Muse Glimmer --max-context-tokens {context_limit} exceeds model context {model_context}",
+        "{family} --max-context-tokens {context_limit} exceeds model context {model_context}",
     );
-    let default_max_tokens = max_tokens.context(
-        "Muse Glimmer serve requires explicit --max-tokens; the generic 65536-token default exceeds its reference session capacity",
-    )?;
+    let default_max_tokens = max_tokens.with_context(|| {
+        format!("{family} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity")
+    })?;
     ensure!(
         default_max_tokens <= context_limit,
-        "Muse Glimmer --max-tokens {default_max_tokens} exceeds --max-context-tokens {context_limit}"
+        "{family} --max-tokens {default_max_tokens} exceeds --max-context-tokens {context_limit}"
     );
     Ok((context_limit, default_max_tokens))
 }
@@ -135,7 +131,8 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     let muse_glimmer = family == Some(ModelFamily::MuseGlimmer);
     ensure!(
         supports_serve_family(family),
-        "qwen serve supports Qwen3.5/3.6-family, DeepSeek V4, and Muse Glimmer models (docs/SERVE.md)"
+        "qwen serve supports Qwen3.5/3.6/3.8, Flash-Next, DeepSeek V4, and Muse Glimmer models (docs/SERVE.md); architecture {:?} is not recognised",
+        gguf.architecture()
     );
     // Drafter admission is a header-level decision: refuse unsupported
     // family/shape combinations and bind the drafter's metadata before the
@@ -171,7 +168,8 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         let math_options = backend_muse::read_math_options()?;
         let config = qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(&gguf)
             .context("bind Muse Glimmer serve contract")?;
-        let (context_limit, default_max_tokens) = muse_serve_limits(
+        let (context_limit, default_max_tokens) = fixed_session_limits(
+            "Muse Glimmer",
             config.context_length as usize,
             invocation.max_context_tokens,
             invocation.max_tokens,
@@ -217,6 +215,39 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} snapshot_cache_bytes={}", context_limit, snapshot_cache_bytes);
         crate::shutdown::checkpoint()?;
         return accept_loop(listener, &model_id, 0.0, &mut backend, &mut trace);
+    }
+
+    if family == Some(ModelFamily::Qwen4Exp) {
+        if let Some(failure) =
+            crate::qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, &gguf)
+        {
+            bail!(
+                "Qwen3.8-Flash-Next serve does not support the declared {}",
+                failure.as_str()
+            );
+        }
+        let config = qwen_llm::qwen4exp::Qwen4ExpConfig::from_gguf(&gguf)
+            .context("bind Qwen3.8-Flash-Next serve geometry")?;
+        let (context_limit, default_max_tokens) = fixed_session_limits(
+            "Qwen3.8-Flash-Next",
+            config.context_length as usize,
+            invocation.max_context_tokens,
+            invocation.max_tokens,
+        )?;
+        crate::shutdown::checkpoint()?;
+        let ctx = qwen_llm::metal::MetalContext::new().context("initialize Metal context")?;
+        let load_t0 = Instant::now();
+        let mut backend = backend_qwen4exp::FlashNextBackend::new(
+            ctx,
+            Box::leak(Box::new(gguf)),
+            model_id.clone(),
+            default_max_tokens,
+            context_limit,
+        )?;
+        let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+        tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} snapshot_cache_bytes=0");
+        crate::shutdown::checkpoint()?;
+        return accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace);
     }
     // The same release identity `qwen run` resolves; serve must not render
     // a Qwen3.8 model with the generic contract.
@@ -465,28 +496,33 @@ mod tests {
     }
 
     #[test]
-    fn serve_family_gate_rejects_flash_next_until_it_has_a_backend() {
-        assert!(supports_serve_family(Some(ModelFamily::Qwen35)));
-        assert!(supports_serve_family(Some(ModelFamily::Qwen35Moe)));
-        assert!(supports_serve_family(Some(ModelFamily::DeepSeek4)));
-        assert!(!supports_serve_family(Some(ModelFamily::Qwen4Exp)));
+    fn serve_family_gate_admits_every_recognised_family() {
+        for family in [
+            ModelFamily::Qwen35,
+            ModelFamily::Qwen35Moe,
+            ModelFamily::Qwen4Exp,
+            ModelFamily::DeepSeek4,
+            ModelFamily::MuseGlimmer,
+        ] {
+            assert!(supports_serve_family(Some(family)), "{family:?}");
+        }
         assert!(!supports_serve_family(None));
     }
 
     #[test]
     fn muse_limits_require_explicit_bounded_capacity_and_output_default() {
         assert_eq!(
-            muse_serve_limits(131_072, Some(7_168), Some(2_048)).unwrap(),
+            fixed_session_limits("Muse Glimmer", 131_072, Some(7_168), Some(2_048)).unwrap(),
             (7168, 2048)
         );
         assert_eq!(
-            muse_serve_limits(131_072, Some(131_072), Some(16_384)).unwrap(),
+            fixed_session_limits("Muse Glimmer", 131_072, Some(131_072), Some(16_384)).unwrap(),
             (131_072, 16_384)
         );
-        assert!(muse_serve_limits(131_072, None, Some(2_048)).is_err());
-        assert!(muse_serve_limits(131_072, Some(7_168), None).is_err());
-        assert!(muse_serve_limits(131_072, Some(131_073), Some(2_048)).is_err());
-        assert!(muse_serve_limits(131_072, Some(1_024), Some(2_048)).is_err());
+        assert!(fixed_session_limits("Muse Glimmer", 131_072, None, Some(2_048)).is_err());
+        assert!(fixed_session_limits("Muse Glimmer", 131_072, Some(7_168), None).is_err());
+        assert!(fixed_session_limits("Muse Glimmer", 131_072, Some(131_073), Some(2_048)).is_err());
+        assert!(fixed_session_limits("Muse Glimmer", 131_072, Some(1_024), Some(2_048)).is_err());
     }
 
     #[test]

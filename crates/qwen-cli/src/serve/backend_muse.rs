@@ -181,7 +181,7 @@ impl GenerationBackend for MuseGlimmerBackend {
             )
             .into());
         }
-        let required = required_forwards(prompt_ids.len(), max_tokens, self.capacity)?;
+        let required = required_forwards("Muse", prompt_ids.len(), max_tokens, self.capacity)?;
         let stop_tokens = [self.eos_token_id, self.eot_token_id];
         let tokenizer = &self.tokenizer;
         let vocab_size = self.vocab_size;
@@ -304,7 +304,9 @@ fn reusable_prefix(previous: &[u32], prompt: &[u32], position: usize, enabled: b
         .min(prompt.len().saturating_sub(1))
 }
 
-fn required_forwards(
+/// Forward budget for a fixed-capacity resident session (Muse, Flash-Next).
+pub(super) fn required_forwards(
+    family: &str,
     prompt_tokens: usize,
     max_tokens: usize,
     capacity: usize,
@@ -315,14 +317,14 @@ fn required_forwards(
             "max_output_tokens must be >= 1",
         ));
     }
-    let required = prompt_tokens
-        .checked_add(max_tokens - 1)
-        .ok_or_else(|| ServeError::invalid_request(None, "Muse forward count overflow"))?;
+    let required = prompt_tokens.checked_add(max_tokens - 1).ok_or_else(|| {
+        ServeError::invalid_request(None, format!("{family} forward count overflow"))
+    })?;
     if required > capacity {
         return Err(ServeError::invalid_request(
             Some("max_output_tokens"),
             format!(
-                "request needs {required} Muse forwards, beyond this server's capacity {capacity} (raise --max-context-tokens at startup)"
+                "request needs {required} {family} forwards, beyond this server's capacity {capacity} (raise --max-context-tokens at startup)"
             ),
         ));
     }
@@ -362,10 +364,10 @@ mod tests {
 
     #[test]
     fn forward_admission_counts_only_required_transitions() {
-        assert_eq!(required_forwards(10, 1, 10).unwrap(), 10);
-        assert_eq!(required_forwards(10, 3, 12).unwrap(), 12);
-        assert!(required_forwards(10, 0, 10).is_err());
-        assert!(required_forwards(10, 3, 11).is_err());
+        assert_eq!(required_forwards("Muse", 10, 1, 10).unwrap(), 10);
+        assert_eq!(required_forwards("Muse", 10, 3, 12).unwrap(), 12);
+        assert!(required_forwards("Muse", 10, 0, 10).is_err());
+        assert!(required_forwards("Muse", 10, 3, 11).is_err());
     }
 
     #[test]

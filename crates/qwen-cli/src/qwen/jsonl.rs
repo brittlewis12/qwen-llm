@@ -4,7 +4,7 @@ use super::*;
 
 /// One batch row. Exactly one input form: raw `prompt` / `prompt_file`
 /// (tokenized as given), or templated `user` (+ optional `system`) rendered
-/// through the model's pinned released template — the same renderer as
+/// through the model's released template — the same renderer as
 /// `qwen run --user`. The rendering controls `no_thinking` and
 /// `reasoning_effort` apply to `user` rows only.
 #[derive(Debug, Deserialize)]
@@ -96,7 +96,7 @@ pub(crate) fn resolve_jsonl_request_input(
     };
     // The family's input contract decides (the same rule as `run --user`):
     // plain chat renders on any ordinary Qwen; reasoning controls bind
-    // against the template inside `render` and refuse when unpinned.
+    // against the release inside `render` and refuse when unidentified.
     protocol
         .input_capability()
         .user

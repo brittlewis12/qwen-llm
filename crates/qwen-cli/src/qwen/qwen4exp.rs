@@ -29,58 +29,45 @@ pub(crate) const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Qwen4ExpPromptCapabilityFailure {
     Architecture,
-    TokenizerModel,
-    Pretokenizer,
-    ChatTemplate,
+    Tokenizer(prompt_template::QwenTokenizerMismatch),
 }
 
 impl Qwen4ExpPromptCapabilityFailure {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Architecture => "general.architecture",
-            Self::TokenizerModel => "tokenizer.ggml.model",
-            Self::Pretokenizer => "tokenizer.ggml.pre",
-            Self::ChatTemplate => "tokenizer.chat_template",
+            Self::Tokenizer(mismatch) => mismatch.header_key(),
         }
     }
 }
 
+/// Flash-Next renders the Qwen3.8 contract whenever the architecture is
+/// `qwen4exp` and the tokenizer is the Qwen3.x release tokenizer.
 pub(crate) fn qwen4exp_prompt_capability_failure(
     family: ModelFamily,
     gguf: &GgufFile,
 ) -> Option<Qwen4ExpPromptCapabilityFailure> {
-    classify_qwen4exp_prompt_capability(
-        family,
-        gguf.get_str("tokenizer.ggml.model"),
-        gguf.get_str("tokenizer.ggml.pre"),
-        gguf.get_str("tokenizer.chat_template")
-            .is_some_and(qwen4exp_chat_template_matches),
-    )
+    if family != ModelFamily::Qwen4Exp {
+        return Some(Qwen4ExpPromptCapabilityFailure::Architecture);
+    }
+    match prompt_template::QwenHeaderFacts::from_gguf("qwen4exp", gguf) {
+        Ok(facts) => classify_qwen4exp_prompt_capability(family, &facts),
+        Err(_) => Some(Qwen4ExpPromptCapabilityFailure::Tokenizer(
+            prompt_template::QwenTokenizerMismatch::TokenCount,
+        )),
+    }
 }
 
 pub(crate) fn classify_qwen4exp_prompt_capability(
     family: ModelFamily,
-    tokenizer_model: Option<&str>,
-    tokenizer_pre: Option<&str>,
-    supported_chat_template: bool,
+    facts: &prompt_template::QwenHeaderFacts<'_>,
 ) -> Option<Qwen4ExpPromptCapabilityFailure> {
     if family != ModelFamily::Qwen4Exp {
         return Some(Qwen4ExpPromptCapabilityFailure::Architecture);
     }
-    if tokenizer_model != Some("gpt2") {
-        return Some(Qwen4ExpPromptCapabilityFailure::TokenizerModel);
-    }
-    if tokenizer_pre != Some("qwen35") {
-        return Some(Qwen4ExpPromptCapabilityFailure::Pretokenizer);
-    }
-    if !supported_chat_template {
-        return Some(Qwen4ExpPromptCapabilityFailure::ChatTemplate);
-    }
-    None
-}
-
-pub(crate) fn qwen4exp_chat_template_matches(template: &str) -> bool {
-    messages::qwen4exp_chat_template_matches(template)
+    prompt_template::qwen_tokenizer_gate(facts)
+        .err()
+        .map(Qwen4ExpPromptCapabilityFailure::Tokenizer)
 }
 
 pub(crate) fn validate_qwen4exp_generation_mode(

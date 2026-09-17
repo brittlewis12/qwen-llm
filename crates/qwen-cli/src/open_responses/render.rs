@@ -28,7 +28,7 @@ use super::tool_parse::{ArgumentStyle, ParsedCall, python_json, render_calls_for
 
 impl QwenTemplate {
     /// Argument stringification of the released template. Tools bind only on
-    /// pinned templates (`prompt_template::qwen_tools_support`), so the
+    /// identified releases (`prompt_template::qwen_tools_support`), so the
     /// generic arm is unreachable through a bound request; it takes the
     /// majority released rule to keep the renderer total.
     pub(crate) fn argument_style(self) -> ArgumentStyle {

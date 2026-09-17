@@ -923,185 +923,48 @@ fn qwen4exp_profile_logit_replay_compares_float_bits() {
 }
 
 #[test]
-fn qwen4exp_prompt_capability_is_scoped_to_the_declared_protocol() {
+fn qwen4exp_prompt_capability_is_the_shared_tokenizer_gate() {
+    use crate::prompt_template::{QwenHeaderFacts, QwenTokenizerMismatch};
+    let facts = |model, pre, count| QwenHeaderFacts {
+        architecture: "qwen4exp",
+        tokenizer_model: model,
+        tokenizer_pre: pre,
+        token_count: count,
+        names: [Some("Qwen3.8 Flash Next"), None, None, None, None],
+    };
+    let released = facts(Some("gpt2"), Some("qwen35"), Some(248_320));
     assert_eq!(
-        classify_qwen4exp_prompt_capability(
-            ModelFamily::Qwen4Exp,
-            Some("gpt2"),
-            Some("qwen35"),
-            true,
-        ),
+        classify_qwen4exp_prompt_capability(ModelFamily::Qwen4Exp, &released),
         None
     );
-    for (protocol, expected) in [
+    assert_eq!(
+        classify_qwen4exp_prompt_capability(ModelFamily::Qwen35, &released),
+        Some(Qwen4ExpPromptCapabilityFailure::Architecture)
+    );
+    for (facts, mismatch, key) in [
         (
-            (ModelFamily::Qwen35, Some("gpt2"), Some("qwen35"), true),
-            Qwen4ExpPromptCapabilityFailure::Architecture,
+            facts(Some("other"), Some("qwen35"), Some(248_320)),
+            QwenTokenizerMismatch::Model,
+            "tokenizer.ggml.model",
         ),
         (
-            (ModelFamily::Qwen4Exp, Some("other"), Some("qwen35"), true),
-            Qwen4ExpPromptCapabilityFailure::TokenizerModel,
+            facts(Some("gpt2"), Some("other"), Some(248_320)),
+            QwenTokenizerMismatch::Pretokenizer,
+            "tokenizer.ggml.pre",
         ),
         (
-            (ModelFamily::Qwen4Exp, Some("gpt2"), Some("other"), true),
-            Qwen4ExpPromptCapabilityFailure::Pretokenizer,
-        ),
-        (
-            (ModelFamily::Qwen4Exp, Some("gpt2"), Some("qwen35"), false),
-            Qwen4ExpPromptCapabilityFailure::ChatTemplate,
+            facts(Some("gpt2"), Some("qwen35"), None),
+            QwenTokenizerMismatch::TokenCount,
+            "tokenizer.ggml.tokens",
         ),
     ] {
+        let failure = classify_qwen4exp_prompt_capability(ModelFamily::Qwen4Exp, &facts);
         assert_eq!(
-            classify_qwen4exp_prompt_capability(protocol.0, protocol.1, protocol.2, protocol.3,),
-            Some(expected)
+            failure,
+            Some(Qwen4ExpPromptCapabilityFailure::Tokenizer(mismatch))
         );
+        assert_eq!(failure.unwrap().as_str(), key);
     }
-    assert!(validated_qwen36_no_thinking_identity(
-        ModelFamily::Qwen35Moe,
-        Some("Qwen3.6 35B A3B"),
-        Some("gpt2"),
-        Some("qwen35"),
-    ));
-    assert!(validated_qwen38_prompt_identity(
-        ModelFamily::Qwen35,
-        Some("Qwen3.8 27B!"),
-        Some("Qwen3.8-27B"),
-        Some("gpt2"),
-        Some("qwen35"),
-        Some(262_144),
-        Some(65),
-        Some(1),
-        Some(5_120),
-        Some(17_408),
-    ));
-    assert!(!validated_qwen38_prompt_identity(
-        ModelFamily::Qwen35,
-        Some("Qwen3.8 27B!"),
-        Some("Qwen3.8-27B"),
-        Some("gpt2"),
-        Some("qwen35"),
-        Some(262_144),
-        Some(64),
-        Some(1),
-        Some(5_120),
-        Some(17_408),
-    ));
-    for identity in [
-        (
-            ModelFamily::Qwen35Moe,
-            Some("Qwen3.8 27B!"),
-            Some("qwen35"),
-            Some(262_144),
-            Some(65),
-            Some(1),
-            Some(5_120),
-            Some(17_408),
-        ),
-        (
-            ModelFamily::Qwen35,
-            Some("Qwen3.7 27B"),
-            Some("qwen35"),
-            Some(262_144),
-            Some(65),
-            Some(1),
-            Some(5_120),
-            Some(17_408),
-        ),
-        (
-            ModelFamily::Qwen35,
-            Some("Qwen3.8 27B!"),
-            Some("other"),
-            Some(262_144),
-            Some(65),
-            Some(1),
-            Some(5_120),
-            Some(17_408),
-        ),
-        (
-            ModelFamily::Qwen35,
-            Some("Qwen3.8 27B!"),
-            Some("qwen35"),
-            Some(131_072),
-            Some(65),
-            Some(1),
-            Some(5_120),
-            Some(17_408),
-        ),
-        (
-            ModelFamily::Qwen35,
-            Some("Qwen3.8 27B!"),
-            Some("qwen35"),
-            Some(262_144),
-            Some(65),
-            Some(0),
-            Some(5_120),
-            Some(17_408),
-        ),
-        (
-            ModelFamily::Qwen35,
-            Some("Qwen3.8 27B!"),
-            Some("qwen35"),
-            Some(262_144),
-            Some(65),
-            Some(1),
-            Some(4_096),
-            Some(17_408),
-        ),
-    ] {
-        assert!(!validated_qwen38_prompt_identity(
-            identity.0,
-            identity.1,
-            None,
-            Some("gpt2"),
-            identity.2,
-            identity.3,
-            identity.4,
-            identity.5,
-            identity.6,
-            identity.7,
-        ));
-    }
-    for identity in [
-        (
-            ModelFamily::Qwen35,
-            Some("Qwen3.6 35B A3B"),
-            Some("gpt2"),
-            Some("qwen35"),
-        ),
-        (
-            ModelFamily::Qwen35Moe,
-            Some("Qwen3.5 35B A3B"),
-            Some("gpt2"),
-            Some("qwen35"),
-        ),
-        (
-            ModelFamily::Qwen35Moe,
-            Some("Qwen3.6 35B A3B"),
-            Some("gpt2"),
-            Some("other"),
-        ),
-    ] {
-        assert!(!validated_qwen36_no_thinking_identity(
-            identity.0, identity.1, identity.2, identity.3,
-        ));
-    }
-}
-
-#[test]
-#[ignore = "set QWEN4EXP_TOKENIZER_GGUF to the pinned Flash-Next release"]
-fn released_qwen4exp_chat_template_matches_supported_protocol() {
-    let path = std::env::var_os("QWEN4EXP_TOKENIZER_GGUF")
-        .expect("QWEN4EXP_TOKENIZER_GGUF must point to the first Q3 shard");
-    let gguf = GgufFile::open(path).expect("open released Flash-Next GGUF");
-    assert_eq!(gguf.architecture().as_deref(), Some("qwen4exp"));
-    let template = gguf
-        .get_str("tokenizer.chat_template")
-        .expect("released Flash-Next GGUF must declare a chat template");
-    assert!(qwen4exp_chat_template_matches(template));
-
-    let mut changed = template.to_owned();
-    changed.push(' ');
-    assert!(!qwen4exp_chat_template_matches(&changed));
 }
 
 #[test]
@@ -1282,7 +1145,7 @@ fn input_forms_bind_through_one_family_table() {
     assert_eq!(generic.user, Support::Supported);
     assert_eq!(generic.messages, Support::Supported);
     let refusal = generic.tools.require().unwrap_err();
-    assert_eq!(refusal.code, "tools_require_pinned_template");
+    assert_eq!(refusal.code, "tools_require_known_release");
     assert_eq!(
         qwen_tools_support(QwenTemplate::Generic)
             .require()
@@ -1313,7 +1176,7 @@ fn input_forms_bind_through_one_family_table() {
     let json = serde_json::to_value(&generic).unwrap();
     assert_eq!(json["user"], serde_json::json!({"status": "supported"}));
     assert_eq!(json["tools"]["status"], "unsupported");
-    assert_eq!(json["tools"]["code"], "tools_require_pinned_template");
+    assert_eq!(json["tools"]["code"], "tools_require_known_release");
 }
 
 #[test]
@@ -5389,8 +5252,7 @@ mod jsonl_templated_rows {
             resolve_jsonl_request_input(&row(r#"{"user":"hi","no_thinking":true}"#), 3, &generic)
                 .unwrap_err();
         assert!(
-            format!("{err:#}")
-                .contains("no-thinking requires a model whose chat template is pinned"),
+            format!("{err:#}").contains("no-thinking requires an identified Qwen release"),
             "{err:#}"
         );
     }

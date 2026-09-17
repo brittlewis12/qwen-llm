@@ -795,7 +795,7 @@ pub(crate) fn serve_template_for_protocol(protocol: QwenPromptTemplate) -> QwenT
         QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next => QwenTemplate::Qwen38,
         QwenPromptTemplate::Qwen35 => QwenTemplate::Qwen35,
         QwenPromptTemplate::Qwen36 => QwenTemplate::Qwen36,
-        QwenPromptTemplate::UnverifiedChatMl => QwenTemplate::Generic,
+        QwenPromptTemplate::UnknownChatMl => QwenTemplate::Generic,
     }
 }
 
@@ -881,7 +881,7 @@ pub(crate) fn prepare_qwen_model_input(
     let protocol = if spec.user.is_some() || spec.messages.is_some() {
         detect_qwen_message_protocol(family, gguf)?
     } else {
-        QwenPromptTemplate::UnverifiedChatMl
+        QwenPromptTemplate::UnknownChatMl
     };
     prepare_qwen_input(spec, protocol, tokenizer)
 }
@@ -943,7 +943,7 @@ fn prepare_qwen_open_responses_input(
     validate_open_responses_execution_controls(&request)?;
     let protocol = detect_qwen_message_protocol(family, gguf)?;
     let template = serve_template_for_protocol(protocol);
-    let no_thinking_supported = protocol != QwenPromptTemplate::UnverifiedChatMl;
+    let no_thinking_supported = protocol != QwenPromptTemplate::UnknownChatMl;
     let mut request = bind_qwen_request(&request, template, no_thinking_supported)
         .map_err(open_responses_error)?;
     if protocol == QwenPromptTemplate::Qwen35 {
@@ -1225,7 +1225,7 @@ fn resolve_qwen_message_mode(
     requested: Option<LensMessageMode>,
 ) -> Result<ResolvedMessageMode> {
     match protocol {
-        QwenPromptTemplate::UnverifiedChatMl => match requested {
+        QwenPromptTemplate::UnknownChatMl => match requested {
             None | Some(LensMessageMode::Auto) => {
                 Ok(ResolvedMessageMode::Qwen36(QwenGenerationMode::Auto))
             }
@@ -1740,7 +1740,7 @@ mod tests {
         );
 
         let (generic, renderer, mode) =
-            render_qwen_structured_messages(&messages, QwenPromptTemplate::UnverifiedChatMl, None)
+            render_qwen_structured_messages(&messages, QwenPromptTemplate::UnknownChatMl, None)
                 .unwrap();
         assert_eq!(renderer, "qwen_chatml_messages_v1");
         assert_eq!(mode.artifact_name(), "auto");
@@ -1881,7 +1881,7 @@ mod tests {
     fn message_modes_fail_closed_by_protocol() {
         assert!(
             resolve_qwen_message_mode(
-                QwenPromptTemplate::UnverifiedChatMl,
+                QwenPromptTemplate::UnknownChatMl,
                 Some(LensMessageMode::NoThinking)
             )
             .is_err()

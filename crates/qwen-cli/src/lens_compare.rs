@@ -1849,10 +1849,13 @@ impl RunDocument {
                 let renderer_mode_valid =
                     match (self.runtime_kind.as_str(), rendering.renderer.as_str()) {
                         ("ordinary_qwen", "qwen_chatml_messages_v1") => mode == "auto",
-                        ("ordinary_qwen", "qwen3.6_messages_v1") => {
+                        ("ordinary_qwen", "qwen3.5_messages_v1" | "qwen3.6_messages_v1") => {
                             matches!(mode, "auto" | "thinking" | "no_thinking")
                         }
-                        ("ordinary_qwen" | "flash_next", "qwen3.8_messages_v1") => matches!(
+                        (
+                            "ordinary_qwen" | "flash_next",
+                            "qwen3.8_messages_v1" | "qwen4next_messages_v1",
+                        ) => matches!(
                             mode,
                             "thinking_low" | "thinking_medium" | "thinking_xhigh" | "no_thinking"
                         ),

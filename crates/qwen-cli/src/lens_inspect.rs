@@ -1261,6 +1261,7 @@ fn validate_trace_input_rendering(document: &TraceDocument, rendering: &Renderin
         .as_ref()
         .and_then(|model| model.architecture.as_deref());
     let ordinary_qwen = matches!(architecture, Some("qwen35" | "qwen35moe"));
+    let flash_next = architecture == Some("qwen4exp");
     let muse = architecture == Some("muse-glimmer");
     let valid = match source {
         "prompt" => {
@@ -1283,11 +1284,13 @@ fn validate_trace_input_rendering(document: &TraceDocument, rendering: &Renderin
                     "qwen_chatml_messages_v1" if ordinary_qwen => {
                         rendering.generation_mode.as_deref() == Some("auto")
                     }
-                    "qwen3.6_messages_v1" if ordinary_qwen => rendering
+                    "qwen3.5_messages_v1" | "qwen3.6_messages_v1" if ordinary_qwen => rendering
                         .generation_mode
                         .as_deref()
                         .is_some_and(|mode| matches!(mode, "auto" | "thinking" | "no_thinking")),
-                    "qwen3.8_messages_v1" if ordinary_qwen => {
+                    "qwen3.8_messages_v1" | "qwen4next_messages_v1"
+                        if ordinary_qwen || flash_next =>
+                    {
                         rendering.generation_mode.as_deref().is_some_and(|mode| {
                             matches!(
                                 mode,

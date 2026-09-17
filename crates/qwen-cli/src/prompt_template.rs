@@ -10,47 +10,14 @@ use qwen_llm::muse_glimmer::{
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 
-// Exact tokenizer.chat_template metadata identities. These hash only the
-// small template string, never model weights. Qwen3.5 admits the two variants
-// observed across its released dense and MoE GGUFs. Qwen3.6 accepts the
-// canonical 27B template and the alternate packaged with the 35B A3B GGUF;
-// both Qwen3.6 variants implement the same renderer thinking transition.
-const QWEN35_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0x7f, 0x0e, 0x52, 0x90, 0x32, 0xc2, 0x51, 0x83, 0xbc, 0xd6, 0x6c, 0x7f, 0x23, 0x8d, 0xa2, 0xd3,
-    0x77, 0xf4, 0x3b, 0xe7, 0x54, 0xa9, 0x4e, 0x27, 0x25, 0xa5, 0x8c, 0x4e, 0x16, 0xd2, 0xed, 0x67,
-];
-const QWEN35_ALTERNATE_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0xe6, 0x0d, 0xf4, 0x14, 0x81, 0xb6, 0xad, 0x20, 0x57, 0x1c, 0xda, 0x7e, 0x2e, 0x12, 0x90, 0xcf,
-    0xee, 0x25, 0x67, 0x0f, 0x1b, 0x50, 0x97, 0x3f, 0x74, 0x57, 0x6c, 0x93, 0x54, 0xc6, 0x63, 0x36,
-];
-const QWEN36_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0xe8, 0x4f, 0x32, 0xa2, 0x3f, 0xdd, 0xa2, 0x76, 0x89, 0xf8, 0x68, 0xaa, 0x4a, 0x1a, 0x56, 0x21,
-    0xf4, 0x11, 0x33, 0xe5, 0x1a, 0x48, 0xd7, 0xf3, 0xef, 0xcb, 0xea, 0x28, 0x39, 0x57, 0x42, 0x59,
-];
-const QWEN36_ALTERNATE_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0x55, 0xd4, 0x93, 0x14, 0x33, 0xfe, 0x50, 0x2b, 0x79, 0x42, 0x26, 0xee, 0x7f, 0x4d, 0x20, 0x6a,
-    0x6b, 0xdd, 0x43, 0x6a, 0xc9, 0xf8, 0x0e, 0xb7, 0xd8, 0xeb, 0xb4, 0xc6, 0x39, 0xf9, 0xea, 0x0c,
-];
-const QWEN38_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0x70, 0x1b, 0xa1, 0x3a, 0x08, 0x5c, 0x0c, 0x1b, 0x5e, 0x05, 0x41, 0x4d, 0xec, 0x1a, 0xa3, 0x06,
-    0x99, 0x04, 0xf9, 0x62, 0xbe, 0xee, 0x36, 0xf0, 0x89, 0x9e, 0x44, 0x17, 0x20, 0xb8, 0x39, 0x74,
-];
-const QWEN4NEXT_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0x12, 0x82, 0x7f, 0x24, 0xb7, 0x42, 0xea, 0x4e, 0x80, 0xcd, 0xc1, 0x2d, 0xbc, 0xf9, 0x62, 0x22,
-    0x27, 0x05, 0x6b, 0x9f, 0x79, 0x72, 0x52, 0xa3, 0x14, 0x92, 0x63, 0xd4, 0xf9, 0xaa, 0xad, 0xce,
-];
-const DEEPSEEK_V4_0731_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0xe6, 0x43, 0xc3, 0x1f, 0xce, 0xc1, 0x7f, 0x34, 0x2f, 0x72, 0x29, 0x6e, 0x02, 0xc4, 0x6d, 0x35,
-    0x84, 0x6b, 0xf4, 0xc7, 0x0f, 0x6a, 0x02, 0x71, 0xf2, 0x3b, 0xad, 0x73, 0xfd, 0x4e, 0xb6, 0x45,
-];
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QwenPromptTemplate {
     Qwen35,
     Qwen36,
     Qwen38,
     Qwen4Next,
-    UnverifiedChatMl,
+    /// No identified release; the legacy ChatML contract.
+    UnknownChatMl,
 }
 
 impl QwenPromptTemplate {
@@ -60,7 +27,16 @@ impl QwenPromptTemplate {
             Self::Qwen36 => "qwen3.6_messages_v1",
             Self::Qwen38 => "qwen3.8_messages_v1",
             Self::Qwen4Next => "qwen4next_messages_v1",
-            Self::UnverifiedChatMl => "qwen_chatml_messages_v1",
+            Self::UnknownChatMl => "qwen_chatml_messages_v1",
+        }
+    }
+
+    pub(crate) fn serve_template(self) -> QwenTemplate {
+        match self {
+            Self::Qwen35 => QwenTemplate::Qwen35,
+            Self::Qwen36 => QwenTemplate::Qwen36,
+            Self::Qwen38 | Self::Qwen4Next => QwenTemplate::Qwen38,
+            Self::UnknownChatMl => QwenTemplate::Generic,
         }
     }
 }
@@ -77,9 +53,9 @@ pub(crate) fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelProm
         .architecture()
         .context("model is missing general.architecture")?;
     match architecture.as_str() {
-        "qwen35" | "qwen35moe" | "qwen4exp" => {
-            resolve_qwen_prompt_template(&architecture, gguf).map(ModelPromptTemplate::Qwen)
-        }
+        "qwen35" | "qwen35moe" | "qwen4exp" => Ok(ModelPromptTemplate::Qwen(
+            identify_qwen_release(&QwenHeaderFacts::from_gguf(&architecture, gguf)?).template,
+        )),
         MUSE_GLIMMER_ARCHITECTURE => {
             let config =
                 MuseGlimmerConfig::from_gguf(gguf).context("bind Muse Glimmer prompt template")?;
@@ -88,7 +64,10 @@ pub(crate) fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelProm
             ))
         }
         "deepseek4" => {
-            let digest = chat_template_digest(gguf)?;
+            let template = gguf
+                .get_str("tokenizer.chat_template")
+                .context("model is missing tokenizer.chat_template")?;
+            let digest: [u8; 32] = Sha256::digest(template.as_bytes()).into();
             ensure!(
                 digest == DEEPSEEK_V4_0731_CHAT_TEMPLATE_SHA256,
                 "DeepSeek V4 structured input requires the released 0731 chat template; found SHA-256 {}",
@@ -100,123 +79,10 @@ pub(crate) fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelProm
     }
 }
 
-/// Serve/run rendering template for a Qwen-family GGUF. Qwen3.8 keeps its
-/// metadata-validated identity gate (`supports_qwen38_prompt_protocol`);
-/// among the rest, only digest-pinned Qwen3.5/3.6 templates render with
-/// released-exact bytes, and anything unpinned keeps the legacy generic
-/// ChatML contract rather than guessing.
-pub(crate) fn serve_qwen_template(
-    family: qwen_llm::model_family::ModelFamily,
-    gguf: &GgufFile,
-) -> Result<crate::open_responses::items::QwenTemplate> {
-    use crate::open_responses::items::QwenTemplate;
-    if crate::messages::supports_qwen38_release_prompt_protocol(family, gguf) {
-        // The metadata identity alone never proved the template bytes; the
-        // digest must be the released Qwen3.8 (or Flash-Next) template.
-        let digest = chat_template_digest(gguf)?;
-        ensure!(
-            matches!(
-                classify_qwen_digest(family.architecture_name(), digest),
-                Some(QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next)
-            ),
-            "model declares a Qwen3.8 identity but its chat template SHA-256 {} is not the released template; use --raw-prompt for exact untemplated input",
-            digest_hex(digest)
-        );
-        return Ok(QwenTemplate::Qwen38);
-    }
-    Ok(
-        match resolve_qwen_prompt_template(family.architecture_name(), gguf)? {
-            QwenPromptTemplate::Qwen35 => QwenTemplate::Qwen35,
-            QwenPromptTemplate::Qwen36 => QwenTemplate::Qwen36,
-            QwenPromptTemplate::Qwen38
-            | QwenPromptTemplate::Qwen4Next
-            | QwenPromptTemplate::UnverifiedChatMl => QwenTemplate::Generic,
-        },
-    )
-}
-
-/// Template for any loaded GGUF: Qwen families resolve by digest; other
-/// families render nothing through the Qwen renderer and get `Generic`.
-pub(crate) fn qwen_template_for_gguf(
-    gguf: &GgufFile,
-) -> Result<crate::open_responses::items::QwenTemplate> {
-    match qwen_llm::model_family::ModelFamily::detect(gguf) {
-        Some(
-            family @ (qwen_llm::model_family::ModelFamily::Qwen35
-            | qwen_llm::model_family::ModelFamily::Qwen35Moe
-            | qwen_llm::model_family::ModelFamily::Qwen4Exp),
-        ) => serve_qwen_template(family, gguf),
-        _ => Ok(crate::open_responses::items::QwenTemplate::Generic),
-    }
-}
-
-fn resolve_qwen_prompt_template(architecture: &str, gguf: &GgufFile) -> Result<QwenPromptTemplate> {
-    let tokenizer_model = gguf.get_str("tokenizer.ggml.model");
-    let tokenizer_pre = gguf.get_str("tokenizer.ggml.pre");
-    if tokenizer_model != Some("gpt2") || tokenizer_pre != Some("qwen35") {
-        ensure!(
-            architecture != "qwen4exp",
-            "Qwen4Next structured input requires tokenizer model/pre gpt2/qwen35"
-        );
-        return Ok(QwenPromptTemplate::UnverifiedChatMl);
-    }
-
-    let digest = chat_template_digest(gguf)?;
-    let resolved = if let Some(template) = classify_qwen_digest(architecture, digest) {
-        template
-    } else {
-        if architecture == "qwen4exp" {
-            bail!(
-                "Qwen4Next structured input requires the released chat template; found SHA-256 {}. Use --prompt/--raw-prompt or --token-ids for exact untemplated input",
-                digest_hex(digest)
-            );
-        }
-        if [
-            gguf.get_str("general.name"),
-            gguf.get_str("general.base_model.0.name"),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|name| name.to_ascii_lowercase().contains("qwen3.8"))
-        {
-            bail!(
-                "model declares Qwen3.8 but has an unrecognized chat template SHA-256 {}. Use --prompt/--raw-prompt or --token-ids for exact untemplated input",
-                digest_hex(digest)
-            );
-        }
-        QwenPromptTemplate::UnverifiedChatMl
-    };
-    Ok(resolved)
-}
-
-fn classify_qwen_digest(architecture: &str, digest: [u8; 32]) -> Option<QwenPromptTemplate> {
-    match (architecture, digest) {
-        (
-            "qwen35" | "qwen35moe",
-            QWEN35_CHAT_TEMPLATE_SHA256 | QWEN35_ALTERNATE_CHAT_TEMPLATE_SHA256,
-        ) => Some(QwenPromptTemplate::Qwen35),
-        (
-            "qwen35" | "qwen35moe",
-            QWEN36_CHAT_TEMPLATE_SHA256 | QWEN36_ALTERNATE_CHAT_TEMPLATE_SHA256,
-        ) => Some(QwenPromptTemplate::Qwen36),
-        // The Unsloth-patched Qwen3.8 template (developer merge, `high` alias,
-        // stricter argument checks) ships in both the dense Qwen3.8 Q8_0
-        // repack and Flash-Next; it renders identically to the canonical
-        // template on the supported subset (qwen38 oracle cases).
-        ("qwen35", QWEN38_CHAT_TEMPLATE_SHA256 | QWEN4NEXT_CHAT_TEMPLATE_SHA256) => {
-            Some(QwenPromptTemplate::Qwen38)
-        }
-        ("qwen4exp", QWEN4NEXT_CHAT_TEMPLATE_SHA256) => Some(QwenPromptTemplate::Qwen4Next),
-        _ => None,
-    }
-}
-
-fn chat_template_digest(gguf: &GgufFile) -> Result<[u8; 32]> {
-    let template = gguf
-        .get_str("tokenizer.chat_template")
-        .context("model is missing tokenizer.chat_template")?;
-    Ok(Sha256::digest(template.as_bytes()).into())
-}
+const DEEPSEEK_V4_0731_CHAT_TEMPLATE_SHA256: [u8; 32] = [
+    0xe6, 0x43, 0xc3, 0x1f, 0xce, 0xc1, 0x7f, 0x34, 0x2f, 0x72, 0x29, 0x6e, 0x02, 0xc4, 0x6d, 0x35,
+    0x84, 0x6b, 0xf4, 0xc7, 0x0f, 0x6a, 0x02, 0x71, 0xf2, 0x3b, 0xad, 0x73, 0xfd, 0x4e, 0xb6, 0x45,
+];
 
 fn digest_hex(digest: [u8; 32]) -> String {
     let mut output = String::with_capacity(64);
@@ -226,65 +92,501 @@ fn digest_hex(digest: [u8; 32]) -> String {
     output
 }
 
+// ---------------------------------------------------------------------------
+// Qwen release identity. The renderer contract follows the release version
+// (3.5 / 3.6 / 3.8); the version is carried only by the header's name
+// fields (Qwen ships identical architectures across releases at 27B and
+// 35B-A3B, and every other header key is either constant or a converter
+// artefact). `tokenizer.chat_template` is never consulted.
+// ---------------------------------------------------------------------------
+
+/// The tokenizer every supported Qwen3.x release ships; a deviation means
+/// the eos/special-token assumptions the renderer relies on do not hold.
+const QWEN3_TOKENIZER_MODEL: &str = "gpt2";
+const QWEN3_TOKENIZER_PRE: &str = "qwen35";
+const QWEN3_TOKEN_COUNT: usize = 248_320;
+
+pub(crate) const QWEN_NAME_FIELDS: [&str; 5] = [
+    "general.name",
+    "general.basename",
+    "general.base_model.0.name",
+    "general.base_model.0.repo_url",
+    "general.license.link",
+];
+
+/// Header facts consulted for release identity, in the order they are
+/// reported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QwenHeaderFacts<'a> {
+    pub(crate) architecture: &'a str,
+    pub(crate) tokenizer_model: Option<&'a str>,
+    pub(crate) tokenizer_pre: Option<&'a str>,
+    pub(crate) token_count: Option<usize>,
+    /// Parallel to `QWEN_NAME_FIELDS`.
+    pub(crate) names: [Option<&'a str>; 5],
+}
+
+impl<'a> QwenHeaderFacts<'a> {
+    pub(crate) fn from_gguf(architecture: &'a str, gguf: &'a GgufFile) -> Result<Self> {
+        Ok(Self {
+            architecture,
+            tokenizer_model: gguf.get_str("tokenizer.ggml.model"),
+            tokenizer_pre: gguf.get_str("tokenizer.ggml.pre"),
+            token_count: gguf
+                .get_array_len("tokenizer.ggml.tokens")
+                .context("read tokenizer.ggml.tokens")?,
+            names: QWEN_NAME_FIELDS.map(|key| gguf.get_str(key)),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum QwenReleaseStatus {
+    Identified {
+        version: &'static str,
+        source: &'static str,
+    },
+    Unknown {
+        reason: String,
+        fields_consulted: Vec<&'static str>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QwenReleaseIdentity {
+    pub(crate) template: QwenPromptTemplate,
+    pub(crate) status: QwenReleaseStatus,
+}
+
+impl QwenReleaseIdentity {
+    pub(crate) fn warning(&self) -> Option<String> {
+        match &self.status {
+            QwenReleaseStatus::Identified { .. } => None,
+            QwenReleaseStatus::Unknown { reason, .. } => Some(format!(
+                "Qwen release not identified ({reason}); rendering the {} contract, which matches no released template; thinking controls and tools are unavailable (`qwen info --json` reports capabilities.template)",
+                self.template.serve_template().label()
+            )),
+        }
+    }
+}
+
+/// A tokenizer that is not the Qwen3.x release tokenizer, by header key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QwenTokenizerMismatch {
+    Model,
+    Pretokenizer,
+    TokenCount,
+}
+
+impl QwenTokenizerMismatch {
+    pub(crate) fn header_key(self) -> &'static str {
+        match self {
+            Self::Model => "tokenizer.ggml.model",
+            Self::Pretokenizer => "tokenizer.ggml.pre",
+            Self::TokenCount => "tokenizer.ggml.tokens",
+        }
+    }
+}
+
+pub(crate) fn qwen_tokenizer_gate(
+    facts: &QwenHeaderFacts<'_>,
+) -> Result<(), QwenTokenizerMismatch> {
+    if facts.tokenizer_model != Some(QWEN3_TOKENIZER_MODEL) {
+        return Err(QwenTokenizerMismatch::Model);
+    }
+    if facts.tokenizer_pre != Some(QWEN3_TOKENIZER_PRE) {
+        return Err(QwenTokenizerMismatch::Pretokenizer);
+    }
+    if facts.token_count != Some(QWEN3_TOKEN_COUNT) {
+        return Err(QwenTokenizerMismatch::TokenCount);
+    }
+    Ok(())
+}
+
+/// `qwen`, optionally one of ` -_`, then `3.` and exactly one of 5/6/8 not
+/// followed by another digit. Case-insensitive.
+fn qwen_versions_in(text: &str) -> Vec<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = lower[at..].find("qwen") {
+        let mut i = at + offset + 4;
+        if matches!(bytes.get(i), Some(b' ' | b'-' | b'_')) {
+            i += 1;
+        }
+        if bytes.get(i..i + 2) == Some(b"3.") {
+            let minor = bytes.get(i + 2).copied();
+            let next_is_digit = bytes.get(i + 3).is_some_and(u8::is_ascii_digit);
+            let version = match (minor, next_is_digit) {
+                (Some(b'5'), false) => Some("qwen3.5"),
+                (Some(b'6'), false) => Some("qwen3.6"),
+                (Some(b'8'), false) => Some("qwen3.8"),
+                _ => None,
+            };
+            if let Some(version) = version
+                && !found.contains(&version)
+            {
+                found.push(version);
+            }
+        }
+        at = at + offset + 4;
+    }
+    found
+}
+
+pub(crate) fn identify_qwen_release(facts: &QwenHeaderFacts<'_>) -> QwenReleaseIdentity {
+    let consulted = || {
+        let mut fields = vec![
+            "general.architecture",
+            "tokenizer.ggml.model",
+            "tokenizer.ggml.pre",
+            "tokenizer.ggml.tokens",
+        ];
+        fields.extend(QWEN_NAME_FIELDS);
+        fields
+    };
+    let unknown = |reason: String| QwenReleaseIdentity {
+        template: QwenPromptTemplate::UnknownChatMl,
+        status: QwenReleaseStatus::Unknown {
+            reason,
+            fields_consulted: consulted(),
+        },
+    };
+    if let Err(mismatch) = qwen_tokenizer_gate(facts) {
+        return unknown(format!(
+            "{} is not the Qwen3.x release tokenizer",
+            mismatch.header_key()
+        ));
+    }
+    // Flash-Next is the only `qwen4exp` product; the architecture is the identity.
+    if facts.architecture == "qwen4exp" {
+        return QwenReleaseIdentity {
+            template: QwenPromptTemplate::Qwen4Next,
+            status: QwenReleaseStatus::Identified {
+                version: "qwen3.8",
+                source: "general.architecture",
+            },
+        };
+    }
+    let mut versions: Vec<(&'static str, &'static str)> = Vec::new();
+    for (field, value) in QWEN_NAME_FIELDS.iter().zip(facts.names) {
+        for version in value.map(qwen_versions_in).unwrap_or_default() {
+            if !versions.iter().any(|(_, seen)| *seen == version) {
+                versions.push((field, version));
+            }
+        }
+    }
+    match versions.as_slice() {
+        [] => unknown("no Qwen release version in any name field".into()),
+        [(source, version)] => QwenReleaseIdentity {
+            template: match *version {
+                "qwen3.5" => QwenPromptTemplate::Qwen35,
+                "qwen3.6" => QwenPromptTemplate::Qwen36,
+                _ => QwenPromptTemplate::Qwen38,
+            },
+            status: QwenReleaseStatus::Identified { version, source },
+        },
+        many => unknown(format!(
+            "conflicting Qwen release versions: {}",
+            many.iter()
+                .map(|(field, version)| format!("{field}={version}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+pub(crate) fn identify_qwen_release_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIdentity> {
+    let architecture = gguf
+        .architecture()
+        .context("model is missing general.architecture")?;
+    Ok(identify_qwen_release(&QwenHeaderFacts::from_gguf(
+        &architecture,
+        gguf,
+    )?))
+}
+
+/// Serve/run rendering template plus identity status for a Qwen-family GGUF.
+pub(crate) fn resolve_serve_qwen_template(
+    _family: qwen_llm::model_family::ModelFamily,
+    gguf: &GgufFile,
+) -> Result<QwenReleaseIdentity> {
+    identify_qwen_release_for_gguf(gguf)
+}
+
+pub(crate) fn serve_qwen_template(
+    family: qwen_llm::model_family::ModelFamily,
+    gguf: &GgufFile,
+) -> Result<QwenTemplate> {
+    Ok(resolve_serve_qwen_template(family, gguf)?
+        .template
+        .serve_template())
+}
+
+/// Template for any loaded GGUF; non-Qwen families get `Generic`.
+pub(crate) fn qwen_template_for_gguf(gguf: &GgufFile) -> Result<QwenTemplate> {
+    match qwen_llm::model_family::ModelFamily::detect(gguf) {
+        Some(
+            family @ (qwen_llm::model_family::ModelFamily::Qwen35
+            | qwen_llm::model_family::ModelFamily::Qwen35Moe
+            | qwen_llm::model_family::ModelFamily::Qwen4Exp),
+        ) => serve_qwen_template(family, gguf),
+        _ => Ok(QwenTemplate::Generic),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn qwen_release_digests_are_architecture_scoped() {
-        assert_eq!(
-            classify_qwen_digest("qwen35", QWEN35_CHAT_TEMPLATE_SHA256),
-            Some(QwenPromptTemplate::Qwen35)
-        );
-        assert_eq!(
-            classify_qwen_digest("qwen35moe", QWEN35_ALTERNATE_CHAT_TEMPLATE_SHA256),
-            Some(QwenPromptTemplate::Qwen35)
-        );
-        for architecture in ["qwen35", "qwen35moe"] {
-            for digest in [
-                QWEN36_CHAT_TEMPLATE_SHA256,
-                QWEN36_ALTERNATE_CHAT_TEMPLATE_SHA256,
-            ] {
-                assert_eq!(
-                    classify_qwen_digest(architecture, digest),
-                    Some(QwenPromptTemplate::Qwen36)
-                );
-            }
+    fn facts<'a>(architecture: &'a str, names: [Option<&'a str>; 5]) -> QwenHeaderFacts<'a> {
+        QwenHeaderFacts {
+            architecture,
+            tokenizer_model: Some("gpt2"),
+            tokenizer_pre: Some("qwen35"),
+            token_count: Some(248_320),
+            names,
         }
+    }
+
+    fn template(architecture: &str, names: [Option<&str>; 5]) -> QwenPromptTemplate {
+        identify_qwen_release(&facts(architecture, names)).template
+    }
+
+    /// Rows from the local header inventory (2026-09-17): same shapes across
+    /// releases, version only in names.
+    #[test]
+    fn release_identity_follows_name_fields_not_shape_or_template() {
+        let released = [
+            (
+                "qwen35",
+                ["Qwen3.5-27B", "Qwen3.5-27B", "Qwen3.5 27B"],
+                QwenPromptTemplate::Qwen35,
+            ),
+            (
+                "qwen35",
+                ["Qwen3.6-27B", "Qwen3.6-27B", "Qwen3.6 27B"],
+                QwenPromptTemplate::Qwen36,
+            ),
+            (
+                "qwen35",
+                ["Qwen3.8-27B", "Qwen3.8-27B", "Qwen3.8 27B"],
+                QwenPromptTemplate::Qwen38,
+            ),
+            (
+                "qwen35moe",
+                ["Qwen3.5-35B-A3B", "Qwen3.5-35B-A3B", "Qwen3.5 35B A3B"],
+                QwenPromptTemplate::Qwen35,
+            ),
+            (
+                "qwen35moe",
+                ["Qwen3.6-35B-A3B", "Qwen3.6-35B-A3B", "Qwen3.6 35B A3B"],
+                QwenPromptTemplate::Qwen36,
+            ),
+            (
+                "qwen35",
+                ["Qwen3.5 0.8B", "Qwen3.5", "Qwen3.5 0.8B Base"],
+                QwenPromptTemplate::Qwen35,
+            ),
+        ];
+        for (architecture, [name, basename, base], expected) in released {
+            assert_eq!(
+                template(
+                    architecture,
+                    [Some(name), Some(basename), Some(base), None, None]
+                ),
+                expected,
+                "{name}"
+            );
+        }
+        // Derivatives and repacks that the digest gate refused or misfiled.
         assert_eq!(
-            classify_qwen_digest("qwen35", QWEN38_CHAT_TEMPLATE_SHA256),
-            Some(QwenPromptTemplate::Qwen38)
+            template(
+                "qwen35",
+                [Some("Qwen3.8 27B Bf16"), Some("Qwen3.8"), None, None, None]
+            ),
+            QwenPromptTemplate::Qwen38,
+            "ridge"
         );
         assert_eq!(
-            classify_qwen_digest("qwen4exp", QWEN4NEXT_CHAT_TEMPLATE_SHA256),
-            Some(QwenPromptTemplate::Qwen4Next)
+            template(
+                "qwen35",
+                [
+                    Some("Qwen3.8 27B Abliterated"),
+                    Some("Qwen3.8"),
+                    None,
+                    None,
+                    None
+                ]
+            ),
+            QwenPromptTemplate::Qwen38,
+            "uncensored"
         );
         assert_eq!(
-            classify_qwen_digest("qwen35moe", QWEN38_CHAT_TEMPLATE_SHA256),
-            None
+            template(
+                "qwen35",
+                [
+                    Some("Qwen3.6 27B"),
+                    Some("Qwen3.6"),
+                    None,
+                    None,
+                    Some("https://huggingface.co/Qwen/Qwen3.6-27B/blob/main/LICENSE")
+                ]
+            ),
+            QwenPromptTemplate::Qwen36,
+            "3.6-27B-MTP shares the 3.8-27B shape"
         );
-        // The Unsloth-patched template ships in the dense Qwen3.8 Q8_0 repack
-        // too and renders identically on the supported subset.
         assert_eq!(
-            classify_qwen_digest("qwen35", QWEN4NEXT_CHAT_TEMPLATE_SHA256),
-            Some(QwenPromptTemplate::Qwen38)
+            template(
+                "qwen4exp",
+                [Some("Qwen3.8 Flash Next"), None, None, None, None]
+            ),
+            QwenPromptTemplate::Qwen4Next
         );
         assert_eq!(
-            classify_qwen_digest("qwen35moe", QWEN4NEXT_CHAT_TEMPLATE_SHA256),
-            None
+            template("qwen4exp", [Some("renamed"), None, None, None, None]),
+            QwenPromptTemplate::Qwen4Next,
+            "qwen4exp architecture implies the release"
         );
     }
 
     #[test]
-    fn tracked_template_oracles_keep_their_pinned_digests() {
+    fn release_identity_is_unknown_on_absence_conflict_or_foreign_tokenizer() {
+        let identity = identify_qwen_release(&facts(
+            "qwen35",
+            [Some("MyModel-27B"), None, None, None, None],
+        ));
+        assert_eq!(identity.template, QwenPromptTemplate::UnknownChatMl);
+        let QwenReleaseStatus::Unknown {
+            reason,
+            fields_consulted,
+        } = &identity.status
+        else {
+            panic!("{:?}", identity.status);
+        };
+        assert!(reason.contains("no Qwen release version"), "{reason}");
+        assert!(fields_consulted.contains(&"general.base_model.0.name"));
+        assert!(identity.warning().unwrap().contains("generic"));
+
+        let conflict = identify_qwen_release(&facts(
+            "qwen35",
+            [Some("Qwen3.6-27B"), None, Some("Qwen3.8 27B"), None, None],
+        ));
+        assert!(
+            matches!(&conflict.status, QwenReleaseStatus::Unknown { reason, .. } if reason.contains("general.name=qwen3.6") && reason.contains("general.base_model.0.name=qwen3.8"))
+        );
+        let two_in_one = identify_qwen_release(&facts(
+            "qwen35",
+            [
+                Some("Qwen3.6 distilled from Qwen3.8"),
+                None,
+                None,
+                None,
+                None,
+            ],
+        ));
+        assert!(matches!(
+            two_in_one.status,
+            QwenReleaseStatus::Unknown { .. }
+        ));
+
+        for (model, pre, count, key) in [
+            (
+                Some("llama"),
+                Some("qwen35"),
+                Some(248_320),
+                "tokenizer.ggml.model",
+            ),
+            (
+                Some("gpt2"),
+                Some("qwen2"),
+                Some(248_320),
+                "tokenizer.ggml.pre",
+            ),
+            (
+                Some("gpt2"),
+                Some("qwen35"),
+                Some(248_400),
+                "tokenizer.ggml.tokens",
+            ),
+        ] {
+            let mut facts = facts("qwen35", [Some("Qwen3.8-27B"), None, None, None, None]);
+            facts.tokenizer_model = model;
+            facts.tokenizer_pre = pre;
+            facts.token_count = count;
+            let identity = identify_qwen_release(&facts);
+            assert_eq!(
+                identity.template,
+                QwenPromptTemplate::UnknownChatMl,
+                "{key}"
+            );
+            assert!(
+                matches!(&identity.status, QwenReleaseStatus::Unknown { reason, .. } if reason.contains(key))
+            );
+        }
+        let mut flash = facts(
+            "qwen4exp",
+            [Some("Qwen3.8 Flash Next"), None, None, None, None],
+        );
+        flash.tokenizer_pre = Some("qwen2");
+        assert_eq!(
+            identify_qwen_release(&flash).template,
+            QwenPromptTemplate::UnknownChatMl
+        );
+    }
+
+    #[test]
+    fn version_scan_boundaries() {
+        assert_eq!(qwen_versions_in("Qwen3.85-9B"), Vec::<&str>::new());
+        assert_eq!(qwen_versions_in("Qwen-3.8"), vec!["qwen3.8"]);
+        assert_eq!(qwen_versions_in("qwen_3.6"), vec!["qwen3.6"]);
+        assert_eq!(qwen_versions_in("Qwen 3.5"), vec!["qwen3.5"]);
+        assert_eq!(qwen_versions_in("Qwen3.7-27B"), Vec::<&str>::new());
+        assert_eq!(
+            qwen_versions_in("https://huggingface.co/Qwen/Qwen3.6-27B"),
+            vec!["qwen3.6"]
+        );
+        assert_eq!(
+            qwen_versions_in("Qwen3.6 distilled from Qwen3.8"),
+            vec!["qwen3.6", "qwen3.8"]
+        );
+        assert_eq!(qwen_versions_in("Qwen3.6 and qwen3.6"), vec!["qwen3.6"]);
+    }
+
+    #[test]
+    fn identified_status_serializes_with_source() {
+        let identity =
+            identify_qwen_release(&facts("qwen35", [None, Some("Qwen3.8"), None, None, None]));
+        assert_eq!(
+            serde_json::to_value(&identity.status).unwrap(),
+            serde_json::json!({"status": "identified", "version": "qwen3.8", "source": "general.basename"})
+        );
+    }
+
+    /// Oracle fixture provenance: the `.jinja` sources the Python reference
+    /// renders are the released templates. Not consulted for identity.
+    #[test]
+    fn tracked_template_oracles_keep_their_released_digests() {
+        const QWEN36_A3B: [u8; 32] = [
+            0x55, 0xd4, 0x93, 0x14, 0x33, 0xfe, 0x50, 0x2b, 0x79, 0x42, 0x26, 0xee, 0x7f, 0x4d,
+            0x20, 0x6a, 0x6b, 0xdd, 0x43, 0x6a, 0xc9, 0xf8, 0x0e, 0xb7, 0xd8, 0xeb, 0xb4, 0xc6,
+            0x39, 0xf9, 0xea, 0x0c,
+        ];
+        const QWEN38_27B: [u8; 32] = [
+            0x70, 0x1b, 0xa1, 0x3a, 0x08, 0x5c, 0x0c, 0x1b, 0x5e, 0x05, 0x41, 0x4d, 0xec, 0x1a,
+            0xa3, 0x06, 0x99, 0x04, 0xf9, 0x62, 0xbe, 0xee, 0x36, 0xf0, 0x89, 0x9e, 0x44, 0x17,
+            0x20, 0xb8, 0x39, 0x74,
+        ];
         for (template, expected) in [
             (
                 include_str!("../tests/fixtures/templates/qwen36_a3b_chat_template.jinja"),
-                QWEN36_ALTERNATE_CHAT_TEMPLATE_SHA256,
+                QWEN36_A3B,
             ),
             (
                 include_str!("../tests/fixtures/templates/qwen38_27b_chat_template.jinja"),
-                QWEN38_CHAT_TEMPLATE_SHA256,
+                QWEN38_27B,
             ),
             (
                 include_str!("../tests/fixtures/templates/ds4_flash_chat_template.jinja"),
@@ -298,31 +600,25 @@ mod tests {
         }
     }
 
+    /// Same-shape releases differ only in name-bearing and converter-artefact
+    /// keys (Qwen3.5-27B vs Qwen3.6-27B; whole-header diff, 2026-09-17).
     #[test]
-    #[ignore = "requires QWEN_PROMPT_GGUF and QWEN_PROMPT_TEMPLATE"]
-    fn local_qwen_metadata_resolves_to_expected_template() {
-        let path = std::env::var("QWEN_PROMPT_GGUF").expect("set QWEN_PROMPT_GGUF");
-        let expected = match std::env::var("QWEN_PROMPT_TEMPLATE")
-            .expect("set QWEN_PROMPT_TEMPLATE")
-            .as_str()
-        {
-            "qwen35" => QwenPromptTemplate::Qwen35,
-            "qwen36" => QwenPromptTemplate::Qwen36,
-            "qwen38" => QwenPromptTemplate::Qwen38,
-            "qwen4next" => QwenPromptTemplate::Qwen4Next,
-            "unverified" => QwenPromptTemplate::UnverifiedChatMl,
-            other => panic!("unknown expected Qwen prompt template {other:?}"),
-        };
-        let gguf = GgufFile::open(path).expect("open Qwen GGUF");
-        let digest = chat_template_digest(&gguf).expect("read chat template digest");
-        assert_eq!(
-            resolve_model_prompt_template(&gguf).unwrap(),
-            ModelPromptTemplate::Qwen(expected),
-            "tokenizer model/pre={:?}/{:?}, chat template SHA-256 {}",
-            gguf.get_str("tokenizer.ggml.model"),
-            gguf.get_str("tokenizer.ggml.pre"),
-            digest_hex(digest),
-        );
+    #[ignore = "requires QWEN_IDENTITY_GGUF_A and QWEN_IDENTITY_GGUF_B"]
+    fn same_shape_releases_differ_only_in_names() {
+        let open = |var: &str| GgufFile::open(std::env::var(var).expect(var)).expect("open GGUF");
+        let (a, b) = (open("QWEN_IDENTITY_GGUF_A"), open("QWEN_IDENTITY_GGUF_B"));
+        let arch = a.architecture().unwrap();
+        assert_eq!(arch, b.architecture().unwrap());
+        for key in ["tokenizer.ggml.tokens", "tokenizer.ggml.merges"] {
+            assert_eq!(
+                a.get_array_len(key).unwrap(),
+                b.get_array_len(key).unwrap(),
+                "{key}"
+            );
+        }
+        let ia = identify_qwen_release_for_gguf(&a).unwrap();
+        let ib = identify_qwen_release_for_gguf(&b).unwrap();
+        assert_ne!(ia.template, ib.template, "{ia:?} vs {ib:?}");
     }
 }
 
@@ -336,10 +632,9 @@ mod tests {
 /// The rendering protocol for ordinary-Qwen `user`(+`system`) requests,
 /// resolved once per model from the GGUF header, so there is exactly one
 /// implementation of the released template bytes across lanes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct QwenUserPromptProtocol {
-    qwen38: bool,
-    template: QwenTemplate,
+    identity: QwenReleaseIdentity,
 }
 
 /// Transport-neutral reasoning controls for one request.
@@ -354,7 +649,22 @@ pub(crate) struct QwenReasoningControls<'a> {
 impl QwenUserPromptProtocol {
     #[cfg(test)]
     pub(crate) fn for_test(qwen38: bool, template: QwenTemplate) -> Self {
-        Self { qwen38, template }
+        let release = match (qwen38, template) {
+            (true, _) => QwenPromptTemplate::Qwen38,
+            (false, QwenTemplate::Qwen35) => QwenPromptTemplate::Qwen35,
+            (false, QwenTemplate::Qwen36) => QwenPromptTemplate::Qwen36,
+            (false, QwenTemplate::Qwen38) => QwenPromptTemplate::Qwen38,
+            (false, QwenTemplate::Generic) => QwenPromptTemplate::UnknownChatMl,
+        };
+        Self {
+            identity: QwenReleaseIdentity {
+                template: release,
+                status: QwenReleaseStatus::Identified {
+                    version: "test",
+                    source: "test",
+                },
+            },
+        }
     }
 
     /// `None` for families that do not render ordinary-Qwen chat.
@@ -363,26 +673,32 @@ impl QwenUserPromptProtocol {
             return Ok(None);
         }
         Ok(Some(Self {
-            qwen38: crate::messages::supports_qwen38_release_prompt_protocol(family, gguf),
-            template: serve_qwen_template(family, gguf)?,
+            identity: identify_qwen_release_for_gguf(gguf)?,
         }))
     }
 
     pub(crate) fn is_qwen38(&self) -> bool {
-        self.qwen38
+        matches!(
+            self.identity.template,
+            QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next
+        )
+    }
+
+    pub(crate) fn status(&self) -> &QwenReleaseStatus {
+        &self.identity.status
+    }
+
+    pub(crate) fn warning(&self) -> Option<String> {
+        self.identity.warning()
     }
 
     pub(crate) fn template(&self) -> QwenTemplate {
-        self.template
+        self.identity.template.serve_template()
     }
 
     /// Stable protocol label for records.
     pub(crate) fn label(&self) -> &'static str {
-        if self.qwen38 {
-            "qwen38"
-        } else {
-            self.template.label()
-        }
+        self.template().label()
     }
 
     /// What this model accepts as reasoning controls: the effort levels (in
@@ -391,7 +707,7 @@ impl QwenUserPromptProtocol {
     /// the same tables `bind` parses with, so the advertisement cannot drift
     /// from the parser.
     pub(crate) fn reasoning_capability(&self) -> ReasoningCapability {
-        if self.qwen38 {
+        if self.is_qwen38() {
             ReasoningCapability {
                 levels: Qwen38GenerationMode::level_names(),
                 fallback: Some("xhigh"),
@@ -399,22 +715,20 @@ impl QwenUserPromptProtocol {
                 thinking: Support::Supported,
             }
         } else {
-            let pinned = self.template.verified();
-            let unsupported = || {
-                Support::Unsupported {
-                code: "template_not_pinned",
-                message: "requires a model whose chat template is pinned (released Qwen3.5/3.6/3.8 templates); this model's template is unrecognized".into(),
-            }
+            let identified = self.template().verified();
+            let unsupported = || Support::Unsupported {
+                code: "release_unknown",
+                message: RELEASE_UNKNOWN_MESSAGE.into(),
             };
             ReasoningCapability {
                 levels: Vec::new(),
                 fallback: None,
-                no_thinking: if pinned {
+                no_thinking: if identified {
                     Support::Supported
                 } else {
                     unsupported()
                 },
-                thinking: if pinned {
+                thinking: if identified {
                     Support::Supported
                 } else {
                     unsupported()
@@ -423,17 +737,14 @@ impl QwenUserPromptProtocol {
         }
     }
 
-    /// What request forms this model renders. Plain chat on an unpinned
-    /// template is the long-frozen bare ChatML contract that `run --user`
-    /// and serve string input have always rendered; the tool block has no
-    /// such contract (the old compact form was serve-invented), so tools
-    /// need a pinned template.
+    /// Plain chat on an unidentified release is the legacy bare ChatML
+    /// contract; the tool block exists only per release.
     pub(crate) fn input_capability(&self) -> InputCapability {
         InputCapability {
             raw: Support::Supported,
             user: Support::Supported,
             messages: Support::Supported,
-            tools: qwen_tools_support(self.template),
+            tools: qwen_tools_support(self.template()),
         }
     }
 
@@ -444,7 +755,7 @@ impl QwenUserPromptProtocol {
         &self,
         controls: QwenReasoningControls<'_>,
     ) -> Result<QwenBoundGeneration, CapabilityError> {
-        if self.qwen38 {
+        if self.is_qwen38() {
             return Ok(QwenBoundGeneration::Qwen38(Qwen38GenerationMode::parse(
                 controls.effort,
                 controls.no_thinking,
@@ -458,10 +769,12 @@ impl QwenUserPromptProtocol {
                 ),
             });
         }
-        if controls.no_thinking && !self.template.verified() {
+        if controls.no_thinking && !self.template().verified() {
             return Err(CapabilityError {
                 code: "no_thinking_unsupported",
-                message: "no-thinking requires a model whose chat template is pinned (released Qwen3.5, Qwen3.6, or Qwen3.8 templates); this model's template is unrecognized, so omit it to use the default generation behavior".into(),
+                message: format!(
+                    "no-thinking {RELEASE_UNKNOWN_MESSAGE}; omit it to use the default generation behavior"
+                ),
             });
         }
         Ok(QwenBoundGeneration::Template(if controls.no_thinking {
@@ -486,7 +799,7 @@ impl QwenUserPromptProtocol {
                 crate::messages::render_qwen_single_turn_prompt_for_template(
                     user,
                     system,
-                    self.template,
+                    self.template(),
                     mode,
                 ),
             ),
@@ -524,17 +837,17 @@ impl Support {
     }
 }
 
-/// Tool definitions and tool-call history render only on a pinned template:
-/// the released tool block is oracle-verified per template, and an
-/// unrecognized template has no released bytes to reproduce. One rule for
-/// `run --messages` and serve, so the two cannot drift.
+pub(crate) const RELEASE_UNKNOWN_MESSAGE: &str = "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown";
+
+/// The tool block is a per-release contract; one rule for `run --messages`
+/// and serve.
 pub(crate) fn qwen_tools_support(template: QwenTemplate) -> Support {
     if template.verified() {
         Support::Supported
     } else {
         Support::Unsupported {
-            code: "tools_require_pinned_template",
-            message: "tools and tool history require a model whose chat template is pinned (released Qwen3.5/3.6/3.8 templates); this model's template is unrecognized".into(),
+            code: "tools_require_known_release",
+            message: format!("tools and tool history {RELEASE_UNKNOWN_MESSAGE}"),
         }
     }
 }

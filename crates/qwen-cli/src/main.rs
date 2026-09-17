@@ -602,6 +602,12 @@ fn prepare_modern_run_prompt(
     // Each family binds the reasoning controls against its own levels; the
     // bound value is what renders, so nothing downstream re-parses strings.
     let qwen_protocol = QwenUserPromptProtocol::resolve(family, gguf)?;
+    if let Some(warning) = qwen_protocol
+        .as_ref()
+        .and_then(|protocol| protocol.warning())
+    {
+        tracing::warn!(target: "qwen_diag", "run: {warning}");
+    }
     let qwen_bound = match qwen_protocol.as_ref() {
         Some(protocol) => Some(protocol.bind(controls)?),
         None => None,
@@ -754,7 +760,7 @@ fn prepare_modern_run_prompt(
 }
 
 /// Which request forms a loaded header renders, per family. Ordinary Qwen
-/// derives it from its protocol (tools need a pinned template); Flash-Next
+/// derives it from its protocol (tools need an identified release); Flash-Next
 /// renders templated forms only with the released protocol; DeepSeek V4 and
 /// Muse Glimmer own complete renderers.
 pub(crate) fn input_capability_for(
@@ -790,60 +796,54 @@ pub(crate) fn input_capability_for(
     }
 }
 
-/// `--no-thinking` is a template transition, so any model whose chat
-/// template digest is pinned supports it by construction (Qwen3.5, 3.6,
-/// 3.8, Flash-Next). Unpinned ChatML has no proven preclosed suffix.
+/// `capabilities.template`: the rendering contract in force and how the
+/// release was identified.
+fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_json::Value {
+    match family {
+        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp) => {
+            match prompt_template::identify_qwen_release_for_gguf(gguf) {
+                Ok(identity) => {
+                    let mut value =
+                        serde_json::to_value(&identity.status).expect("serialize release status");
+                    value["rendered_as"] = serde_json::json!(identity.template.renderer_name());
+                    value
+                }
+                Err(error) => serde_json::json!({
+                    "status": "unresolved",
+                    "message": error.to_string(),
+                }),
+            }
+        }
+        Some(ModelFamily::DeepSeek4) => serde_json::json!({
+            "status": "identified",
+            "version": "deepseek_v4_0731",
+            "source": "general.architecture",
+            "rendered_as": "deepseek_v4_0731",
+        }),
+        Some(ModelFamily::MuseGlimmer) => serde_json::json!({
+            "status": "identified",
+            "version": "muse_glimmer",
+            "source": "general.architecture",
+            "rendered_as": "muse_glimmer",
+        }),
+        None => serde_json::json!({
+            "status": "unresolved",
+            "message": "no recognised architecture",
+        }),
+    }
+}
+
+/// `--no-thinking` is a released template transition; every identified
+/// release has one, the generic contract does not.
+#[cfg(test)]
 pub(crate) fn supports_qwen_no_thinking_prompt(family: ModelFamily, gguf: &GgufFile) -> bool {
     prompt_template::serve_qwen_template(family, gguf)
         .map(|template| template.verified())
         .unwrap_or(false)
-        || supports_qwen38_prompt_protocol(family, gguf)
 }
 
 pub(crate) fn supports_qwen38_prompt_protocol(family: ModelFamily, gguf: &GgufFile) -> bool {
     messages::supports_qwen38_release_prompt_protocol(family, gguf)
-}
-
-#[cfg(test)]
-fn validated_qwen38_prompt_identity(
-    family: ModelFamily,
-    general_name: Option<&str>,
-    base_model_name: Option<&str>,
-    tokenizer_model: Option<&str>,
-    tokenizer_pre: Option<&str>,
-    context_length: Option<u64>,
-    block_count: Option<u64>,
-    nextn_predict_layers: Option<u64>,
-    embedding_length: Option<u64>,
-    feed_forward_length: Option<u64>,
-) -> bool {
-    messages::validated_qwen38_prompt_identity(
-        family,
-        general_name,
-        base_model_name,
-        tokenizer_model,
-        tokenizer_pre,
-        context_length,
-        block_count,
-        nextn_predict_layers,
-        embedding_length,
-        feed_forward_length,
-    )
-}
-
-#[cfg(test)]
-fn validated_qwen36_no_thinking_identity(
-    family: ModelFamily,
-    base_model_name: Option<&str>,
-    tokenizer_model: Option<&str>,
-    tokenizer_pre: Option<&str>,
-) -> bool {
-    messages::validated_qwen36_no_thinking_identity(
-        family,
-        base_model_name,
-        tokenizer_model,
-        tokenizer_pre,
-    )
 }
 
 fn prompt_text(args: &Args) -> Result<(String, PromptSource, bool)> {
@@ -1050,6 +1050,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         "capabilities": {
             "reasoning": reasoning,
             "input": input_capability_for(family, &gguf),
+            "template": template_projection(family, &gguf),
         },
     });
     println!("{}", serde_json::to_string_pretty(&projection)?);

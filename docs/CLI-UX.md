@@ -86,17 +86,19 @@ Contract:
 - `--user -` reads one complete user message from stdin.
 - `--messages -` accepts either a bare message array or a wrapped
   `{ "messages": [...] }` document.
-- Ordinary chat renders through the serve renderer. On digest-pinned Qwen3.6
-  templates the generation suffix is the released `<think>\n` (the model
+- Ordinary chat renders through the serve renderer under the contract of the
+  Qwen release identified from the GGUF's name metadata (see SERVE.md,
+  "Release identity"; the embedded chat template is not consulted). On
+  Qwen3.6 the generation suffix is the released `<think>\n` (the model
   continues inside an open think block; output starts with reasoning text);
-  pinned Qwen3.5 templates default to the released no-thinking suffix.
+  Qwen3.5 defaults to the released no-thinking suffix.
 - `--no-thinking` is a prompt-rendering guarantee, not an output filter, and is
-  rejected with raw input. On any model whose chat template digest is pinned
-  (Qwen3.5, Qwen3.6, Qwen3.8, Flash-Next) it selects the released preclosed
-  thinking suffix; unrecognized templates fail closed. (Until 2026-09-06 this
-  was restricted to an exact Qwen3.6-35B-A3B metadata tuple, the only surface
-  the transition had been tested on.) Qwen3.8 otherwise uses its upstream
-  xhigh transition.
+  rejected with raw input. On any identified release (Qwen3.5, Qwen3.6,
+  Qwen3.8, Flash-Next) it selects the released preclosed thinking suffix; an
+  unidentified release fails closed (`release_unknown`). (Until 2026-09-06
+  this was restricted to an exact Qwen3.6-35B-A3B metadata tuple; until
+  2026-09-17 it required a pinned chat-template digest.) Qwen3.8 otherwise
+  uses its upstream xhigh transition.
   DeepSeek ordinary chat is already non-thinking, so the flag is an idempotent
   guarantee there.
 - `--reasoning-effort` is resolved by model family for structured
@@ -112,7 +114,7 @@ Contract:
   corresponding field; the request seed remains explicit and deterministic.
 - Non-Muse modern messages accept the strict ordinary-chat subset (optional
   leading system or developer, alternating user/assistant turns, a final user
-  turn) and, on pinned Qwen templates (`capabilities.input.tools` in `qwen
+  turn) and, on identified Qwen releases (`capabilities.input.tools` in `qwen
   info --json`; the same rule serve applies), OpenAI-shaped tool
   conversations: a
   wrapper `tools` list, assistant `tool_calls` (each followed by exactly one
@@ -174,7 +176,7 @@ direction subject to these gates:
 - keep modern generation values as optional overlays on canonical defaults;
 - fail closed on unsupported modern message semantics;
 - constrain Qwen no-thinking to a tested metadata tuple (since widened to any
-  pinned template digest); and
+  identified release); and
 - prepare prompt bytes before model residency without introducing a second
   tokenizer path.
 
@@ -275,13 +277,13 @@ remains available and was already discoverable in the baseline study.
 
 2026-09-07 update: `--requests-jsonl` rows now accept a templated single-turn
 form — `user` with optional `system`, `no_thinking`, and `reasoning_effort` —
-rendered by the same pinned-template path as `qwen run --user`. Exactly one of
+rendered by the same release-identified path as `qwen run --user`. Exactly one of
 `prompt`, `prompt_file`, or `user` is required; rendering controls on raw rows
 are rejected; templated rows require an ordinary Qwen model; DeepSeek V4 batch
 rejects them. Output rows echo `input: {kind, template}`. (Until 2026-09-07
 templated rows also required a pinned template; they now follow the same
 family rule as `run --user` — plain chat renders the legacy bare ChatML
-contract on an unpinned template, visible as `template: "generic"`, while
+contract on an unidentified release, visible as `template: "generic"`, while
 `no_thinking`/`reasoning_effort` still refuse there. `qwen info --json`
 advertises the rule under `capabilities.input`.) This resolves the ambiguity
 the earlier review feared by making the input form structural, and it removed

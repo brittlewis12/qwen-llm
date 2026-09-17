@@ -260,7 +260,7 @@ startup. Muse requires an explicit startup default:
   `low`, `medium`, `high`, and `xhigh`, defaulting to `high`.
 - `x_qwen` extension object — `seed`, `top_k`, and `min_p` are generation
   controls for every served family. `no_thinking` renders the released
-  preclosed suffix on any pinned Qwen template (Qwen3.5/3.6/3.8), the same
+  preclosed suffix on any identified Qwen release (Qwen3.5/3.6/3.8), the same
   rule as `qwen run --no-thinking`; `thinking: true` requests the released
   `<think>\n` opener on templates whose default is no-thinking (Qwen3.5) and
   is a no-op where thinking is already the default. DS4 uses
@@ -272,13 +272,13 @@ startup. Muse requires an explicit startup default:
 - `truncation` — only `"disabled"` (default). The engine already fails
   closed on context overflow (S0 F3); serve maps that to the spec error
   instead of a process exit.
-- `tools` — uniquely named function tools are supported on pinned Qwen
-  templates (Qwen3.5/3.6/3.8), DeepSeek V4 (DSML), and Muse Glimmer's ATEM
+- `tools` — uniquely named function tools are supported on identified Qwen
+  releases (Qwen3.5/3.6/3.8), DeepSeek V4 (DSML), and Muse Glimmer's ATEM
   protocol; known definition fields have strict types, and `strict:true` is
   rejected because schema enforcement is unsupported. Hosted tool types fail
   closed. Definitions render into the selected family tool block, byte-pinned
-  to its renderer contract. An unpinned Qwen template refuses tools and
-  replayed tool turns with code `tools_require_pinned_template` — the same
+  to its renderer contract. An unidentified Qwen release refuses tools and
+  replayed tool turns with code `tools_require_known_release` — the same
   family rule as `qwen run --messages`, advertised by `qwen info --json`
   under `capabilities.input.tools`.
   Function names must match `[A-Za-z0-9_.-]{1,64}` (the grammar `qwen run
@@ -419,9 +419,15 @@ because client model-pickers probe it).
   history round-trip) rather than by a JSON fixture case.
 - Tool-continuation golden fixtures are **written before the renderer**
   (review R3), so the renderer is fit to the fixture, never the reverse.
-- Pinned templates: when the loaded Qwen3.5/3.6 GGUF's
-  `tokenizer.chat_template` digest is pinned (`prompt_template.rs`), the
-  renderer follows the released Jinja byte for byte (oracle fixture
+- Release identity: the renderer contract follows the Qwen release
+  (3.5/3.6/3.8) identified from the GGUF's name metadata (`general.name`,
+  `basename`, `base_model.0.name`, `base_model.0.repo_url`, `license.link`)
+  plus the Qwen3.x tokenizer gate (`gpt2`/`qwen35`/248320 tokens);
+  `qwen4exp` architecture implies the Qwen3.8 contract. The GGUF's
+  `tokenizer.chat_template` is never consulted (until 2026-09-17 its digest
+  selected the release and refused unknown digests, which rejected
+  derivatives whose template differed by a no-op). For an identified
+  release the renderer follows the released Jinja byte for byte (oracle fixture
   `tests/fixtures/qwen36_chat_template_oracle_v1.json`): content is trimmed,
   the generation suffix is always `<think>\n` or the preclosed block, and
   preserved reasoning replays as `<think>\n{reasoning}\n</think>\n\n{content}`.
@@ -433,10 +439,13 @@ because client model-pickers probe it).
   item is rejected rather than merged, and the template's
   `last_query_index` rule (reasoning kept only for assistant turns after the
   final user query) is not applied until tool continuation lands. Trimming
-  follows Python `str.strip()`. Unpinned ChatML keeps the legacy generic
-  contract (bare suffix, verbatim content) rather than guessing; an
-  unrecognized Qwen3.8 or Flash-Next template fails startup. `qwen run`,
-  `qwen-lens`, `qwen-bench`, and `qwen-census` render through the same code.
+  follows Python `str.strip()`. An unidentified release (no version token in
+  any name field, conflicting versions, or a foreign tokenizer) keeps the
+  legacy generic ChatML contract (bare suffix, verbatim content) rather than
+  guessing, logs a startup warning, and reports `capabilities.template`
+  `{status: unknown, reason, fields_consulted}` in `qwen info --json`.
+  `qwen run`, `qwen-lens`, `qwen-bench`, and `qwen-census` render through the
+  same code.
 - Tools on pinned templates render the way every released client feeds
   `tool | tojson`: the OpenAI-shaped `{"type": "function", "function": {...}}`
   object with Python's `", "`/`": "` separators (Transformers and llama.cpp
@@ -446,8 +455,8 @@ because client model-pickers probe it).
   Qwen3.5 and Qwen3.8 pass every non-string through `tojson` (`true`/`null`).
   Every rule is pinned by the per-template jinja2 oracle fixtures. The released `last_query_index` rule applies:
   assistant turns after the final user query keep their think block (empty
-  if no reasoning) even under strip. Unpinned ChatML refuses tools
-  (`tools_require_pinned_template`); the compact flat form
+  if no reasoning) even under strip. An unidentified release refuses tools
+  (`tools_require_known_release`); the compact flat form
   `serve_tool_render_fixtures_v1.json` once froze for it was serve-invented
   and is superseded (2026-09-07). Function names on every lane match
   `[A-Za-z0-9_.-]{1,64}` — dotted names are released-protocol shapes

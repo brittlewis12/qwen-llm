@@ -24,7 +24,7 @@ pub(crate) fn bind_qwen_request(
     if request.thinking_requested && !template.verified() {
         return Err(ServeError::invalid_request(
             Some("x_qwen.thinking"),
-            "x_qwen.thinking requires a pinned Qwen template",
+            "x_qwen.thinking requires an identified Qwen release",
         ));
     }
     if request.no_thinking && !no_thinking_supported {

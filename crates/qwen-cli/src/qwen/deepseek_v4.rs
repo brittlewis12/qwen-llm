@@ -367,7 +367,8 @@ pub(crate) fn validate_deepseek_v4_generation_mode(
         unsupported.push("--max-context-tokens");
     }
     if args.messages_preserve_thinking
-        && !DeepSeekV4Reasoning::parse(args.reasoning.as_deref()).is_ok_and(|tier| tier.is_thinking())
+        && !DeepSeekV4Reasoning::parse(args.reasoning.as_deref())
+            .is_ok_and(|tier| tier.is_thinking())
     {
         // Preserved history reasoning is a release thinking-mode contract;
         // accepting the flag in chat mode would silently no-op.

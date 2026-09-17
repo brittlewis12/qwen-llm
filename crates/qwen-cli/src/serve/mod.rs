@@ -217,15 +217,15 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         crate::shutdown::checkpoint()?;
         return accept_loop(listener, &model_id, 0.0, &mut backend, &mut trace);
     }
-    // Resolve the rendering protocol once from the loaded metadata -- the
-    // same gate `qwen run` applies. Without this a Qwen3.8 model renders
-    // with the generic ChatML contract (no effort instruction, no
-    // preclosed history), silently diverging from upstream.
-    let template =
-        crate::prompt_template::serve_qwen_template(family.expect("family checked above"), &gguf)
-            .context("resolve the loaded model's chat template")?;
-    let no_thinking_supported =
-        crate::supports_qwen_no_thinking_prompt(family.expect("family checked above"), &gguf);
+    // The same release identity `qwen run` resolves; serve must not render
+    // a Qwen3.8 model with the generic contract.
+    let identity = crate::prompt_template::identify_qwen_release_for_gguf(&gguf)
+        .context("identify the loaded model's Qwen release")?;
+    if let Some(warning) = identity.warning() {
+        tracing::warn!(target: "qwen_diag", "serve: {warning}");
+    }
+    let template = identity.template.serve_template();
+    let no_thinking_supported = template.verified();
     // Deriving the default ceiling from the model requires readable context
     // metadata; an explicit --max-context-tokens does not.
     let declared_context = match invocation.max_context_tokens {

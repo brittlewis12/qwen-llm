@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -147,104 +147,21 @@ const DEEPSEEK_V4_TOOLS_HEADER: &str = "## Tools\n\nYou have access to a set of 
 const DEEPSEEK_V4_TOOLS_FOOTER: &str = "\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n";
 const QWEN38_REASONING_EFFORT_XHIGH: &str = "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.";
 const QWEN38_REASONING_EFFORT_LOW: &str = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.";
-#[allow(dead_code)]
-const QWEN4EXP_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0x12, 0x82, 0x7f, 0x24, 0xb7, 0x42, 0xea, 0x4e, 0x80, 0xcd, 0xc1, 0x2d, 0xbc, 0xf9, 0x62, 0x22,
-    0x27, 0x05, 0x6b, 0x9f, 0x79, 0x72, 0x52, 0xa3, 0x14, 0x92, 0x63, 0xd4, 0xf9, 0xaa, 0xad, 0xce,
-];
-
-#[allow(dead_code)]
-pub(crate) fn qwen4exp_chat_template_matches(template: &str) -> bool {
-    Sha256::digest(template.as_bytes()).as_slice() == QWEN4EXP_CHAT_TEMPLATE_SHA256
-}
-
-#[allow(dead_code)]
-pub(crate) fn supports_qwen4exp_prompt_protocol(family: ModelFamily, gguf: &GgufFile) -> bool {
-    family == ModelFamily::Qwen4Exp
-        && gguf.get_str("tokenizer.ggml.model") == Some("gpt2")
-        && gguf.get_str("tokenizer.ggml.pre") == Some("qwen35")
-        && gguf
-            .get_str("tokenizer.chat_template")
-            .is_some_and(qwen4exp_chat_template_matches)
-}
-
+/// Whether the model renders the Qwen3.8 contract (Qwen3.8-27B releases and
+/// derivatives, Flash-Next).
 #[allow(dead_code)]
 pub(crate) fn supports_qwen38_release_prompt_protocol(
     family: ModelFamily,
     gguf: &GgufFile,
 ) -> bool {
-    if family == ModelFamily::Qwen4Exp {
-        return supports_qwen4exp_prompt_protocol(family, gguf);
-    }
-    validated_qwen38_prompt_identity(
-        family,
-        gguf.get_str("general.name"),
-        gguf.get_str("general.base_model.0.name"),
-        gguf.get_str("tokenizer.ggml.model"),
-        gguf.get_str("tokenizer.ggml.pre"),
-        gguf.get_u64("qwen35.context_length"),
-        gguf.get_u64("qwen35.block_count"),
-        gguf.get_u64("qwen35.nextn_predict_layers"),
-        gguf.get_u64("qwen35.embedding_length"),
-        gguf.get_u64("qwen35.feed_forward_length"),
-    )
-}
-
-#[allow(dead_code)]
-pub(crate) fn supports_qwen36_no_thinking_prompt_protocol(
-    family: ModelFamily,
-    gguf: &GgufFile,
-) -> bool {
-    validated_qwen36_no_thinking_identity(
-        family,
-        gguf.get_str("general.base_model.0.name"),
-        gguf.get_str("tokenizer.ggml.model"),
-        gguf.get_str("tokenizer.ggml.pre"),
-    )
-}
-
-#[allow(dead_code)]
-pub(crate) fn validated_qwen38_prompt_identity(
-    family: ModelFamily,
-    general_name: Option<&str>,
-    base_model_name: Option<&str>,
-    tokenizer_model: Option<&str>,
-    tokenizer_pre: Option<&str>,
-    context_length: Option<u64>,
-    block_count: Option<u64>,
-    nextn_predict_layers: Option<u64>,
-    embedding_length: Option<u64>,
-    feed_forward_length: Option<u64>,
-) -> bool {
-    let named_qwen38_27b = [general_name, base_model_name]
-        .into_iter()
-        .flatten()
-        .any(|name| {
-            let name = name.to_ascii_lowercase();
-            name.contains("qwen3.8") && name.contains("27b")
-        });
-    family == ModelFamily::Qwen35
-        && named_qwen38_27b
-        && tokenizer_model == Some("gpt2")
-        && tokenizer_pre == Some("qwen35")
-        && context_length == Some(262_144)
-        && block_count == Some(65)
-        && nextn_predict_layers == Some(1)
-        && embedding_length == Some(5_120)
-        && feed_forward_length == Some(17_408)
-}
-
-#[allow(dead_code)]
-pub(crate) fn validated_qwen36_no_thinking_identity(
-    family: ModelFamily,
-    base_model_name: Option<&str>,
-    tokenizer_model: Option<&str>,
-    tokenizer_pre: Option<&str>,
-) -> bool {
-    family == ModelFamily::Qwen35Moe
-        && base_model_name == Some("Qwen3.6 35B A3B")
-        && tokenizer_model == Some("gpt2")
-        && tokenizer_pre == Some("qwen35")
+    matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen4Exp)
+        && crate::prompt_template::identify_qwen_release_for_gguf(gguf).is_ok_and(|identity| {
+            matches!(
+                identity.template,
+                crate::prompt_template::QwenPromptTemplate::Qwen38
+                    | crate::prompt_template::QwenPromptTemplate::Qwen4Next
+            )
+        })
 }
 
 /// Byte-exact "high" effort instruction from the 0731 release contract
@@ -1141,7 +1058,7 @@ pub(crate) fn template_split_think(content: &str) -> (Option<String>, String) {
 
 /// Render ordinary chat messages through the shared Qwen renderer for a
 /// resolved template. `Generic` keeps the legacy unpinned ChatML bytes;
-/// pinned templates follow the released Jinja (see `open_responses::render`).
+/// identified releases follow the released Jinja (see `open_responses::render`).
 /// Accepts the roles the released templates accept: a leading `system` or
 /// `developer`, `user`, `assistant`, and `tool` (consecutive results are
 /// coalesced into one tool-response turn).

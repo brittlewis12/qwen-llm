@@ -1229,7 +1229,8 @@ fn prepare_lane(
     report_prefill_chunk_decision(allocated.decision.as_ref(), request.prompt_ids.len());
     let mut scratch = allocated.scratch;
     let mut sequence = allocated.sequence;
-    let (logits, prefill_ms) = prefill_owned(loaded, &mut sequence, &mut scratch, &request.prompt_ids, 0)?;
+    let (logits, prefill_ms) =
+        prefill_owned(loaded, &mut sequence, &mut scratch, &request.prompt_ids, 0)?;
     drop(scratch);
     Ok((
         PreparedLane {

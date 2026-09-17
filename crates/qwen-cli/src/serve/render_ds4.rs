@@ -222,9 +222,7 @@ mod tests {
             .unwrap();
         let messages = case["messages"].as_array().unwrap();
         let assistant = &messages[2];
-        let mut input = vec![
-            json!({"role": "user", "content": messages[1]["content"]}),
-        ];
+        let mut input = vec![json!({"role": "user", "content": messages[1]["content"]})];
         // The fixture's assistant turn carries reasoning; chat mode drops it,
         // so a reasoning item is a no-op here and is omitted.
         for call in assistant["tool_calls"].as_array().unwrap() {

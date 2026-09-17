@@ -91,20 +91,19 @@ impl ServeError {
 /// Qwen3.8 model with the generic ChatML contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum QwenTemplate {
-    /// ChatML whose `tokenizer.chat_template` digest is not pinned. Keeps the
-    /// legacy bare `<|im_start|>assistant\n` suffix and verbatim content.
+    /// No identified Qwen release. Keeps the legacy bare
+    /// `<|im_start|>assistant\n` suffix and verbatim content.
     #[default]
     Generic,
-    /// Pinned Qwen3.5 template: thinking only when explicitly requested.
+    /// Released Qwen3.5 template: thinking only when explicitly requested.
     Qwen35,
-    /// Pinned Qwen3.6 template: thinking unless explicitly disabled.
+    /// Released Qwen3.6 template: thinking unless explicitly disabled.
     Qwen36,
     Qwen38,
 }
 
 impl QwenTemplate {
-    /// Templates whose exact bytes are pinned by digest and byte-checked
-    /// against the released Jinja oracle.
+    /// Released templates, byte-checked against the Jinja oracle fixtures.
     pub(crate) fn verified(self) -> bool {
         self != Self::Generic
     }

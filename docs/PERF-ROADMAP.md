@@ -166,8 +166,12 @@ Decision rules:
 ## Muse Fresh / Decode Priority - 2026-09-09
 
 The active Muse priority is **fresh prefill and decode**, not further cache work.
-Default original math remains; Q8/M4Max matrix/online and split opt-ins are numerical,
-not bitwise or sampled-exact paths. Benchmark-derived upper cliffs are removed:
+Generation now selects Q8/unified M4 Max matrix/tiled-online and split math by
+default; existing run/serve variables become independent0 rollbacks (unset/1 allows
+qualified execution). Unsupported lanes and explicitly named lens/fit/reference
+benchmarks retain original math. These remain numerical, not bitwise or sampled-exact
+paths. Default-delivery status: `docs/bench/2026-09-17-muse-defaults/RESULT.md`.
+Benchmark-derived upper cliffs are removed:
 model context131072, actual capacity and kernel invariants govern admission. The
 1024-visible-position split minimum remains performance policy. Independent131K
 attention checks and a512-transition32K live horizon pass, without another full
@@ -180,9 +184,11 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    a product after computing up is not avoided work. Price selection, gather and
    weight-layout costs before a kernel proposal. Logical22.029GB/44.2ms equals
    498GB/s payload rate, NOT measured DRAM or a roofline. No sparsity claim yet.
-2. Fresh-prefill structural work remains co-primary. Delivered32K GPU954.503ms
-   attribution is FFN44.91%, attention38.16%,3.38%unassignedinterstage; retain the
-   ordinary1110.958ms observer outlier separately from controlled913.536ms calls.
+2. Fresh-prefill structural work remains co-primary. Refreshed late32K packed
+   GPU1113.485ms attribution is attention49.91%, FFN38.43%;8K is FFN57.0%.
+   These are stage shares, not controlled full-request or cold-load authority.
+   Retain earlier954.503ms attribution and ordinary1110.958ms observer outlier
+   separately from controlled913.536ms calls.
    Larger batches are a credible fallback: same512 FFN rows4x128/2x256/1x512 are
    bitwise identical, but N512gate4.464%/down10.045%savings miss frozen5%bothshape
    budget. GeometryliftHOLD, not a slow-kernel kill or proof128optimal. Weighted
@@ -193,8 +199,8 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    Numerical screens pass, but neither earns model replay or production precision
    changes. Four-row/8SG reuse is another ownership tradeoff, not an automatic win:
    more shared/register residency and a32KiB output spill need explicit handling.
-4. Product reachability is now delivered through separate default-off serving
-   matrix/split switches, with optimized warm/reset/generated-history and actual
+4. Product reachability no longer requires serving math opt-ins; both paths are
+   qualified defaults, with existing optimized warm/reset/generated-history and actual
    dispatch proof. Native1158/17 HTTP first-request observations33.903 ->7.166s,
    optimized SSE retry1.096s, firstmodel(reasoning)delta277ms. These are NOT balanced
    speedup or OS-cold measurements. ATEM/framing, warm/reset outputs, busy503 and

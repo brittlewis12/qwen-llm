@@ -5445,3 +5445,153 @@ mod jsonl_typed_preparation {
         }
     }
 }
+
+/// Characterization of legacy option admission per family lane, pinned
+/// from the 2026-09-17 inventory before the reject-lists were replaced by
+/// admission tables. Each flag is parsed through clap on top of a lane
+/// baseline so `ExplicitCliOptions` is real; the cell records whether the
+/// family validator accepts (`A`) or rejects (`R`) the invocation.
+mod legacy_option_admission {
+    use super::*;
+    use crate::{
+        validate_deepseek_v4_generation_mode, validate_deepseek_v4_requests_mode,
+        validate_muse_glimmer_generation_mode, validate_qwen4exp_generation_mode,
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Outcome {
+        A,
+        R,
+    }
+    use Outcome::{A, R};
+
+    fn parse(argv: &[&str]) -> (Args, ExplicitCliOptions) {
+        let matches = Args::command().try_get_matches_from(argv).unwrap();
+        let explicit = ExplicitCliOptions::from_matches(&matches);
+        (Args::from_arg_matches(&matches).unwrap(), explicit)
+    }
+
+    /// Flags that parse on top of `-m model.gguf --prompt hello` (or the
+    /// batch baseline) and the outcome per validator:
+    /// (flash_next, ds4_single, ds4_batch_file, muse).
+    const SINGLE_TURN: &[(&[&str], [Outcome; 3])] = &[
+        (&[], [A, A, A]),
+        (&["--prompt-lookup"], [R, R, R]),
+        (&["--prefill-chunk", "512"], [R, R, R]),
+        (&["--prefill-chunk", "1024"], [R, R, R]),
+        (&["--prefix-cache-max-mib", "0"], [R, R, R]),
+        (&["--prefix-cache-max-mib", "16384"], [R, R, R]),
+        (&["--cache-prefix-tokens", "4"], [R, R, R]),
+        (&["--cache-prefix-auto-min-tokens", "1024"], [R, R, R]),
+        (&["--request-stats", "s.jsonl"], [R, R, R]),
+        (&["--request-timings", "t.json"], [R, R, R]),
+        (&["--messages-no-generation-prompt"], [R, R, R]),
+        (&["--batch-size", "8"], [R, A, R]),
+        (&["--concurrency", "2"], [R, A, R]),
+        (&["--execution-mode", "auto"], [R, A, R]),
+        (&["--durable-prefix-cache", "/tmp/x"], [R, A, R]),
+        (&["--durable-prefix-cache-max-mib", "32768"], [R, R, R]),
+        (
+            &["--durable-prefix-cache-max-entry-mib", "16384"],
+            [R, R, R],
+        ),
+        (&["--durable-prefix-cache-min-tokens", "1024"], [R, R, R]),
+        (
+            &[
+                "--durable-prefix-cache",
+                "/tmp/x",
+                "--durable-prefix-cache-min-tokens",
+                "1024",
+            ],
+            [R, A, R],
+        ),
+        (
+            &["--sampling-attribution", "--request-timings", "t.json"],
+            [R, R, R],
+        ),
+        (&["--trace-request", "trace.jsonl"], [R, A, R]),
+        (&["--messages-preserve-thinking"], [R, R, R]),
+        (&["--messages-strip-thinking"], [R, A, R]),
+        (&["--reasoning", "low"], [R, A, R]),
+        // DS4 rejects a tier-less --preserve-reasoning at encode time, not here.
+        (&["--preserve-reasoning"], [R, A, R]),
+        (&["--reasoning", "low", "--preserve-reasoning"], [R, A, R]),
+        (&["--deepseek-v4-snapshot", "/tmp/s"], [R, A, R]),
+        (&["--deepseek-v4-multigroup-selector", "off"], [R, A, R]),
+        (&["--max-context-tokens", "4096"], [A, R, A]),
+        (&["--request-stats-jsonl", "r.jsonl"], [A, A, A]),
+        (&["--no-special-tokens"], [A, A, A]),
+        (&["--temp", "0.7"], [A, A, A]),
+    ];
+
+    #[test]
+    fn single_turn_lanes_admit_the_inventory() {
+        for (flags, expected) in SINGLE_TURN {
+            let messages_only = flags.iter().any(|flag| {
+                matches!(
+                    *flag,
+                    "--messages-preserve-thinking"
+                        | "--messages-strip-thinking"
+                        | "--messages-no-generation-prompt"
+                        | "--reasoning"
+                        | "--preserve-reasoning"
+                )
+            });
+            let mut argv = vec!["qwen", "-m", "model.gguf"];
+            if messages_only {
+                argv.extend(["--messages", "m.json"]);
+            } else {
+                argv.extend(["--prompt", "hello"]);
+            }
+            argv.extend(flags.iter().copied());
+            let (args, explicit) = parse(&argv);
+            let outcomes = [
+                validate_qwen4exp_generation_mode(&args, explicit).is_ok(),
+                validate_deepseek_v4_generation_mode(&args, explicit).is_ok(),
+                validate_muse_glimmer_generation_mode(&args, explicit, &cli::Invocation::Legacy)
+                    .is_ok(),
+            ]
+            .map(|ok| if ok { A } else { R });
+            assert_eq!(&outcomes, expected, "{flags:?}");
+        }
+    }
+
+    const DS4_BATCH: &[(&[&str], Outcome)] = &[
+        (&[], A),
+        (&["--prompt-lookup"], R),
+        (&["--prefill-chunk", "1024"], R),
+        (&["--prefix-cache-max-mib", "16384"], R),
+        (&["--cache-prefix-tokens", "4"], R),
+        (&["--cache-prefix-auto-min-tokens", "1024"], R),
+        (&["--request-stats", "s.jsonl"], R),
+        (&["--model-prefetch", "off"], R),
+        (&["--on-request-error", "stop"], A),
+        (&["--on-request-error", "continue"], R),
+        (&["--durable-prefix-cache", "/tmp/x"], R),
+        (&["--durable-prefix-cache-max-mib", "32768"], R),
+        (&["--durable-prefix-cache-max-entry-mib", "16384"], R),
+        (&["--durable-prefix-cache-min-tokens", "1024"], R),
+        (&["--request-stats-jsonl", "r.jsonl"], R),
+        (&["--max-context-tokens", "4096"], R),
+        (&["--trace-request", "trace.jsonl"], A),
+        (&["--concurrency", "2"], A),
+        (&["--execution-mode", "auto"], A),
+        (&["--temp", "0.7"], A),
+    ];
+
+    #[test]
+    fn ds4_batch_lane_admits_the_inventory() {
+        let requests =
+            std::env::temp_dir().join(format!("qwen-admission-{}.jsonl", std::process::id()));
+        std::fs::write(&requests, "{\"prompt\":\"hi\"}\n").unwrap();
+        let requests_arg = requests.to_str().unwrap();
+        for (flags, expected) in DS4_BATCH {
+            let mut argv = vec!["qwen", "-m", "model.gguf", "--requests-jsonl", requests_arg];
+            argv.extend(flags.iter().copied());
+            let (args, explicit) = parse(&argv);
+            let ok = validate_deepseek_v4_requests_mode(&args, explicit).is_ok();
+            assert_eq!(if ok { A } else { R }, *expected, "{flags:?}");
+        }
+        std::fs::remove_file(&requests).unwrap();
+    }
+}

@@ -68,29 +68,37 @@ Raw model input remains explicit:
 ./target/release/qwen run -m MODEL --raw-prompt '<exact model input>'
 ```
 
-Muse Q8_0 on unified Apple M4 Max has an opt-in decode path:
-`QWEN_MUSE_SPLIT_DECODE=1 ./target/release/qwen run ...`. It uses partitioned
+Muse Q8_0 on unified Apple M4 Max automatically uses optimized generation math
+in the CLI, serving, and library runtime. Decode uses partitioned
 attention when a layer sees at least 1024 KV positions, throughout the admitted
 model context. Shorter visible ranges keep the existing path. The session admits
 an additional 528 KiB scratch buffer.
 Prefill, sampling policy, reasoning, and stop handling are unchanged. This is
 tolerance-qualified arithmetic, not bitwise or seed-for-seed sampled equivalence;
-omit the variable or set it to `0` for the original math. This CLI opt-in does not
-enable split decode in serving or lens workflows.
+set `QWEN_MUSE_SPLIT_DECODE=0` to roll back CLI decode to original math.
 
-`QWEN_MUSE_MATRIX_PREFILL=1` opts Muse Q8_0 on the same device into matrix-based
+The same qualified lane defaults to matrix-based
 packed prefill with tiled F32 attention for full 128-token chunks and row-parallel
 online attention for smaller packed remainders, throughout the admitted model
 context (131072 tokens for the released profile). There are no benchmark-length
 cutoffs; context/capacity, geometry and buffer validation remain enforced. It adds
-no session buffers and composes with the split-decode opt-in. The tiled kernel
+no session buffers and composes with split decode. The tiled kernel
 reuses KV across query heads/rows. The smallest chunk loses the shape screen;
 remainders conservatively keep online attention. The measured 32K late-chunk wall saving
 is 17.95%, not a complete fresh-prompt speedup claim.
 Logs report `packed_matrix_online`
 instead of `packed_exact`. Scalar-tail kernels are unchanged, but consume the
 numerically changed matrix-prefilled KV; this is not bitwise or sampled-output
-equivalence. Both options remain off by default.
+equivalence. `QWEN_MUSE_MATRIX_PREFILL=0` rolls back CLI prefill.
+
+Serving has independent rollback variables `QWEN_SERVE_MUSE_SPLIT_DECODE=0` and
+`QWEN_SERVE_MUSE_MATRIX_PREFILL=0`. Unset or `1` permits qualified math, not force-on
+for unsupported hardware; other values fail. BF16 and other devices retain original
+math. Logs report effective selection. Lens/fit tools and the reference
+`muse-request` benchmark explicitly retain original math to preserve their contracts.
+Model-context invariants have independent attention checks through131072 tokens;
+whole-model numerical evidence reaches32K plus512 teacher-forced transitions, not
+whole-model131K equivalence. See `docs/bench/2026-09-17-muse-defaults/PROTOCOL.md`.
 
 Qwen3.8 execution is text-only; image/projector execution is unavailable.
 Qwen3.8 Flash-Next accepts only the exact released architecture contract and a
@@ -135,10 +143,10 @@ Serving is single-flight: concurrent connections receive `503` with
 `Retry-After: 1`. Qwen and DeepSeek use bounded in-memory snapshot caches; Muse
 can retain one consumed-token history with `QWEN_MUSE_PREFIX_REUSE=1`.
 Cross-restart durable warmth is not wired.
-Muse Q8_0 on Apple M4 Max has separate, default-off serving math switches:
-`QWEN_SERVE_MUSE_MATRIX_PREFILL=1` enables matrix/tiled prefill, and
-`QWEN_SERVE_MUSE_SPLIT_DECODE=1` enables split-position decode with admitted
-528 KiB scratch. Unset/`0` disables each; invalid values fail startup. The CLI
+Muse Q8_0 on unified Apple M4 Max defaults to matrix/tiled prefill and
+split-position decode with admitted528 KiB scratch. Separate rollback controls
+`QWEN_SERVE_MUSE_MATRIX_PREFILL=0` and `QWEN_SERVE_MUSE_SPLIT_DECODE=0` disable each.
+Unset/`1` permits qualified execution; invalid values fail startup. The CLI
 math switches do not implicitly affect serving. Reuse matches tokens exactly,
 but optimized arithmetic is tolerance-qualified, not bitwise or sampled-exact.
 The exact protocol and capability matrix live in [`docs/SERVE.md`](docs/SERVE.md).

@@ -77,7 +77,7 @@ pub(crate) fn fit_tokens(mut args: FitTokensArgs, gguf: GgufFile) -> Result<()> 
 
     crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse lens fitting")?;
-    let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, args.max_tokens)
+    let mut loaded = MuseGlimmerLoadedModel::load_reference(&context, &gguf, args.max_tokens)
         .context("load Muse Glimmer lens model")?;
     let covectors = loaded
         .selected_token_lens_covectors(&context, &args.token_ids)

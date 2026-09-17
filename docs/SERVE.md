@@ -382,7 +382,7 @@ because client model-pickers probe it).
   enablement remains held after an unpaired first-request outlier under substantial
   global compression. No first-request guarantee or sampled-distribution claim.
   Evidence: `docs/bench/2026-09-07-fresh-serving-http/RESULT.md`.
-  Muse defaults to fresh exact packed prefill in superchunks of up to128 tokens
+  Muse defaults to fresh packed prefill in superchunks of up to128 tokens
   with a16-token packing quantum, followed by a scalar remainder. Set
   `QWEN_MUSE_PREFIX_REUSE=1` to reuse the exact consumed-token prefix of the last
    completed backend generation in its resident session, without snapshot copies. It always
@@ -394,10 +394,12 @@ because client model-pickers probe it).
   fail-stop. This is one serial resident history, not durable or cross-process
   caching; it does not accelerate fresh prompts or per-token decode. Evidence:
    `docs/bench/2026-09-08-muse-live-prefix/RESULT.md`.
-   Separate default-off `QWEN_SERVE_MUSE_MATRIX_PREFILL=1` and
-   `QWEN_SERVE_MUSE_SPLIT_DECODE=1` enable delivered optimized math for Muse Q8_0
-   on Apple M4 Max. Each accepts only unset/`0`/`1`, is resolved once at startup,
-   and keeps the existing model-context/capacity and device admission checks.
+   Muse Q8_0 on unified Apple M4 Max defaults to optimized matrix prefill and
+   split decode. `QWEN_SERVE_MUSE_MATRIX_PREFILL=0` and
+   `QWEN_SERVE_MUSE_SPLIT_DECODE=0` independently roll back to original math.
+   Each accepts only unset/`0`/`1`, is resolved once at startup, and keeps the
+   existing model-context/capacity and device admission checks. Unset or `1`
+   permits only qualified execution; BF16 and other devices retain original math.
    Matrix prefill uses tiled full128 chunks and online packed remainders; scalar
    tails remain. Split decode admits528 KiB scratch and requires1024 visible KV
    positions. CLI-only math variables remain independent. Native ATEM, sampling,

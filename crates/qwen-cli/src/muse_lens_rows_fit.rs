@@ -142,7 +142,7 @@ pub(crate) fn fit_rows(mut args: FitRowsArgs, gguf: GgufFile) -> Result<()> {
 
     crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse row fitting")?;
-    let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, args.max_tokens)
+    let mut loaded = MuseGlimmerLoadedModel::load_reference(&context, &gguf, args.max_tokens)
         .context("load Muse Glimmer row-fitting model")?;
     let mut runner = loaded
         .create_runner(&context)

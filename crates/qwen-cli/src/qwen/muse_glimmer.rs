@@ -170,16 +170,23 @@ pub(crate) fn run_muse_glimmer_single_turn(
             !prefill_packed_tokens.is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS),
         )
         + prefill_scalar_tail_commands;
-    let read_math_opt_in = |name: &str| -> Result<bool> {
-        match std::env::var(name) {
-            Err(std::env::VarError::NotPresent) => Ok(false),
-            Ok(value) if value == "0" => Ok(false),
-            Ok(value) if value == "1" => Ok(true),
-            _ => bail!("{name} must be 0 or 1"),
-        }
+    let options = qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions {
+        split_decode: read_math_flag("QWEN_MUSE_SPLIT_DECODE")?,
+        matrix_prefill: read_math_flag("QWEN_MUSE_MATRIX_PREFILL")?,
     };
-    let split_decode = read_math_opt_in("QWEN_MUSE_SPLIT_DECODE")?;
-    let matrix_prefill = read_math_opt_in("QWEN_MUSE_MATRIX_PREFILL")?;
+    eprintln!(
+        "muse_glimmer: loading {} for text generation",
+        model_path.display()
+    );
+    let load_t0 = Instant::now();
+    let ctx = MetalContext::new().context("initialize Metal for Muse Glimmer")?;
+    let mut loaded = MuseGlimmerLoadedModel::load_with_options(&ctx, gguf, capacity, options)
+        .context("load admitted Muse Glimmer weights and text session")?;
+    let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    let qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions {
+        split_decode,
+        matrix_prefill,
+    } = loaded.math_options();
     let optimized_packed_tokens = if matrix_prefill {
         prefill_packed_tokens
     } else {
@@ -198,7 +205,7 @@ pub(crate) fn run_muse_glimmer_single_turn(
     };
 
     eprintln!(
-        "muse_glimmer: loading {} for text generation; prompt_source={:?} prompt_tokens={} max_generated_tokens={} forward_capacity={} prefill_mode={} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={}",
+        "muse_glimmer: loaded {} for text generation; prompt_source={:?} prompt_tokens={} max_generated_tokens={} forward_capacity={} prefill_mode={} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={}",
         model_path.display(),
         prepared.source,
         prompt_tokens.len(),
@@ -209,18 +216,6 @@ pub(crate) fn run_muse_glimmer_single_turn(
         prefill_packed_tokens,
         prefill_scalar_tail_commands,
     );
-    let load_t0 = Instant::now();
-    let ctx = MetalContext::new().context("initialize Metal for Muse Glimmer")?;
-    let mut loaded = MuseGlimmerLoadedModel::load_with_options(
-        &ctx,
-        gguf,
-        capacity,
-        qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions {
-            split_decode,
-            matrix_prefill,
-        },
-    )
-    .context("load admitted Muse Glimmer weights and text session")?;
     eprintln!(
         "muse_glimmer: split_decode={} split_min_visible_positions=1024 model_context={} matrix_prefill={} optimized_packed_tokens={} packed_attention={} tiled_packed_tokens={}",
         split_decode,
@@ -238,7 +233,6 @@ pub(crate) fn run_muse_glimmer_single_turn(
             0
         }
     );
-    let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let admission = loaded.admission();
     eprintln!(
         "muse_glimmer: resident on {} in {:.1} ms; aggregate_required={:?} weight_required={:?} weight_observed={} session_required={:?} session_observed={}",
@@ -351,4 +345,21 @@ pub(crate) fn run_muse_glimmer_single_turn(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn read_math_flag(name: &str) -> Result<bool> {
+    let value = std::env::var(name);
+    match value {
+        Ok(value) => parse_math_flag(name, Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_math_flag(name, None),
+        Err(error) => Err(error).with_context(|| format!("read {name}")),
+    }
+}
+
+pub(crate) fn parse_math_flag(name: &str, value: Option<&str>) -> Result<bool> {
+    match value {
+        None | Some("1") => Ok(true),
+        Some("0") => Ok(false),
+        Some(value) => bail!("{name} must be 0 or 1, got {value:?}"),
+    }
 }

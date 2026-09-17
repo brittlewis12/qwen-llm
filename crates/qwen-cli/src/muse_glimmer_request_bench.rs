@@ -614,7 +614,7 @@ pub fn run(args: MuseRequestArgs) -> Result<()> {
         eprintln!("[muse-request] device: {}", ctx.describe());
     }
     let load_started = Instant::now();
-    let mut loaded = MuseGlimmerLoadedModel::load(&ctx, &gguf, capacity)
+    let mut loaded = MuseGlimmerLoadedModel::load_reference(&ctx, &gguf, capacity)
         .context("load resident Muse benchmark model")?;
     let resident_model_load_ns = elapsed_ns(load_started);
     let artifact_profile = loaded.artifact_profile();

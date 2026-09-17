@@ -189,6 +189,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             math_options,
         )?;
         let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+        let math_options = backend.math_options();
         tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0 matrix_prefill={} split_decode={}", context_limit, default_max_tokens, math_options.matrix_prefill, math_options.split_decode);
         crate::shutdown::checkpoint()?;
         return accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace);

@@ -144,7 +144,7 @@ pub(super) fn read(args: ReadFullArgs) -> Result<()> {
             bound.config.vocab_size as usize,
         )?;
         let context = MetalContext::new()?;
-        let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, position + 1)?;
+        let mut loaded = MuseGlimmerLoadedModel::load_reference(&context, &gguf, position + 1)?;
         let mut runner = loaded.create_runner(&context)?;
         for &token in &tokens[..position] {
             crate::shutdown::checkpoint()?;

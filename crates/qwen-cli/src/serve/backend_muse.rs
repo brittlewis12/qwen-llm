@@ -22,23 +22,10 @@ mod prefix_pilot;
 pub(crate) const MATRIX_PREFILL_ENV: &str = "QWEN_SERVE_MUSE_MATRIX_PREFILL";
 pub(crate) const SPLIT_DECODE_ENV: &str = "QWEN_SERVE_MUSE_SPLIT_DECODE";
 
-fn parse_math_flag(name: &str, value: Option<&str>) -> anyhow::Result<bool> {
-    match value {
-        None | Some("0") => Ok(false),
-        Some("1") => Ok(true),
-        Some(value) => anyhow::bail!("{name} must be 0 or 1, got {value:?}"),
-    }
-}
-
 pub(crate) fn read_math_options() -> anyhow::Result<MuseGlimmerRuntimeOptions> {
-    let read = |name| match std::env::var(name) {
-        Ok(value) => parse_math_flag(name, Some(&value)),
-        Err(std::env::VarError::NotPresent) => parse_math_flag(name, None),
-        Err(error) => Err(error).with_context(|| format!("read {name}")),
-    };
     Ok(MuseGlimmerRuntimeOptions {
-        matrix_prefill: read(MATRIX_PREFILL_ENV)?,
-        split_decode: read(SPLIT_DECODE_ENV)?,
+        matrix_prefill: crate::muse_glimmer::read_math_flag(MATRIX_PREFILL_ENV)?,
+        split_decode: crate::muse_glimmer::read_math_flag(SPLIT_DECODE_ENV)?,
     })
 }
 
@@ -76,7 +63,7 @@ impl MuseGlimmerBackend {
             model_id,
             default_max_tokens,
             capacity,
-            MuseGlimmerRuntimeOptions::default(),
+            MuseGlimmerRuntimeOptions::REFERENCE,
         )
     }
 
@@ -105,6 +92,7 @@ impl MuseGlimmerBackend {
         let profile = config.chat_template_profile;
         let loaded = MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, capacity, math_options)
             .context("load resident Muse Glimmer serve model")?;
+        let math_options = loaded.math_options();
         Ok(Self {
             ctx,
             _gguf: gguf,
@@ -121,6 +109,10 @@ impl MuseGlimmerBackend {
             prefix_reuse: std::env::var("QWEN_MUSE_PREFIX_REUSE").is_ok_and(|value| value == "1"),
             math_options,
         })
+    }
+
+    pub(crate) fn math_options(&self) -> MuseGlimmerRuntimeOptions {
+        self.math_options
     }
 
     fn encode(&self, prompt: &str) -> Result<Vec<u32>, ServeError> {
@@ -340,13 +332,19 @@ fn required_forwards(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::muse_glimmer::parse_math_flag;
 
     #[test]
     fn serve_math_switches_are_strict_and_separate_from_run() {
         assert_eq!(MATRIX_PREFILL_ENV, "QWEN_SERVE_MUSE_MATRIX_PREFILL");
         assert_eq!(SPLIT_DECODE_ENV, "QWEN_SERVE_MUSE_SPLIT_DECODE");
-        for name in [MATRIX_PREFILL_ENV, SPLIT_DECODE_ENV] {
-            assert!(!parse_math_flag(name, None).unwrap());
+        for name in [
+            MATRIX_PREFILL_ENV,
+            SPLIT_DECODE_ENV,
+            "QWEN_MUSE_MATRIX_PREFILL",
+            "QWEN_MUSE_SPLIT_DECODE",
+        ] {
+            assert!(parse_math_flag(name, None).unwrap());
             assert!(!parse_math_flag(name, Some("0")).unwrap());
             assert!(parse_math_flag(name, Some("1")).unwrap());
             for invalid in ["", "true", "yes", " 1", "2"] {
@@ -359,7 +357,7 @@ mod tests {
             }
         }
         let defaults = MuseGlimmerRuntimeOptions::default();
-        assert!(!defaults.matrix_prefill && !defaults.split_decode);
+        assert!(defaults.matrix_prefill && defaults.split_decode);
     }
 
     #[test]

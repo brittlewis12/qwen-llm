@@ -595,7 +595,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
 
     crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse full readout")?;
-    let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, prefix.len())
+    let mut loaded = MuseGlimmerLoadedModel::load_reference(&context, &gguf, prefix.len())
         .context("load Muse model for full readout")?;
     let model_config = loaded.config().clone();
     let mut runner = loaded
@@ -1011,7 +1011,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse full trace")?;
     let model_load_started = Instant::now();
-    let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, token_ids.len())
+    let mut loaded = MuseGlimmerLoadedModel::load_reference(&context, &gguf, token_ids.len())
         .context("load Muse model for full trace")?;
     let model_load_wall_ms = model_load_started.elapsed().as_secs_f64() * 1e3;
     let model_config = loaded.config().clone();

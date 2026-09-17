@@ -146,7 +146,7 @@ pub(crate) fn run(
         .unwrap_or_default();
     crate::shutdown::checkpoint()?;
     let context = MetalContext::new().context("initialize Metal for Muse Lens run")?;
-    let mut loaded = MuseGlimmerLoadedModel::load(&context, &gguf, forward_count)
+    let mut loaded = MuseGlimmerLoadedModel::load_reference(&context, &gguf, forward_count)
         .context("load Muse Lens runner model")?;
     let mut lenses = HashMap::new();
     let mut published_lenses = Vec::new();
@@ -1457,7 +1457,7 @@ mod tests {
         let prompt = [config.bos_token_id, config.eos_token_id];
 
         let context = MetalContext::new()?;
-        let mut model = MuseGlimmerLoadedModel::load(&context, &gguf, prompt.len())?;
+        let mut model = MuseGlimmerLoadedModel::load_reference(&context, &gguf, prompt.len())?;
         let covectors = model.selected_token_lens_covectors(&context, &[selected_id])?;
         let mut runner = model.create_runner(&context)?;
         let captures = runner.capture_fresh_lens_prompt_blocks(&prompt, &[50, 51])?;
@@ -1512,7 +1512,7 @@ mod tests {
         drop(context);
 
         let context = MetalContext::new()?;
-        let mut model = MuseGlimmerLoadedModel::load(&context, &gguf, 1)?;
+        let mut model = MuseGlimmerLoadedModel::load_reference(&context, &gguf, 1)?;
         let mut runner = model.create_runner(&context)?;
         let live = runner.forward_token_capture_post_blocks(config.bos_token_id, &source_layers)?;
         let plan: LensPlan = serde_json::from_value(json!({

@@ -47,14 +47,39 @@ pub struct MuseGlimmerRuntimeAdmission {
     pub session: MetalMemoryAdmission,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MuseGlimmerRuntimeOptions {
-    /// Tolerance-qualified H128 attention for ordinary generated tokens at
+    /// Allow tolerance-qualified H128 attention for ordinary generated tokens at
     /// visible KV ranges >=1024 on the Q8 M4 Max lane, through admitted model context.
     pub split_decode: bool,
-    /// Q8 matrix prefill with tiled N128 attention and online packed remainders; scalar kernels unchanged.
+    /// Allow Q8 matrix prefill with tiled N128 attention and online packed remainders; scalar kernels unchanged.
     /// Restricted to Q8/M4 Max and the admitted model context, not a benchmark length.
     pub matrix_prefill: bool,
+}
+
+impl Default for MuseGlimmerRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            split_decode: true,
+            matrix_prefill: true,
+        }
+    }
+}
+
+impl MuseGlimmerRuntimeOptions {
+    pub const REFERENCE: Self = Self {
+        split_decode: false,
+        matrix_prefill: false,
+    };
+
+    fn resolve(self, profile: MuseGlimmerArtifactProfile, device: &str, unified: bool) -> Self {
+        if profile == MuseGlimmerArtifactProfile::UnslothQ8_0 && device == "Apple M4 Max" && unified
+        {
+            self
+        } else {
+            Self::REFERENCE
+        }
+    }
 }
 
 pub struct MuseGlimmerLoadedModel {
@@ -64,7 +89,7 @@ pub struct MuseGlimmerLoadedModel {
     admission: MuseGlimmerRuntimeAdmission,
     observed_weight_bytes: u64,
     device_registry_id: u64,
-    matrix_prefill: bool,
+    math_options: MuseGlimmerRuntimeOptions,
 }
 
 impl MuseGlimmerLoadedModel {
@@ -76,6 +101,15 @@ impl MuseGlimmerLoadedModel {
         Self::load_with_options(ctx, gguf, capacity, MuseGlimmerRuntimeOptions::default())
     }
 
+    /// Preserve the original arithmetic for analysis artifacts and reference benchmarks.
+    pub fn load_reference(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        capacity: usize,
+    ) -> Result<Self, MuseGlimmerRuntimeError> {
+        Self::load_with_options(ctx, gguf, capacity, MuseGlimmerRuntimeOptions::REFERENCE)
+    }
+
     pub fn load_with_options(
         ctx: &MetalContext,
         gguf: &GgufFile,
@@ -83,15 +117,11 @@ impl MuseGlimmerLoadedModel {
         options: MuseGlimmerRuntimeOptions,
     ) -> Result<Self, MuseGlimmerRuntimeError> {
         let weight_plan = MuseGlimmerMetalWeightPlan::for_release(ctx, gguf)?;
-        if (options.split_decode || options.matrix_prefill)
-            && (weight_plan.artifact_profile() != MuseGlimmerArtifactProfile::UnslothQ8_0
-                || ctx.device.name().to_string() != "Apple M4 Max"
-                || !ctx.device.hasUnifiedMemory())
-        {
-            return invalid(
-                "optimized math is qualified only for Muse Q8_0 on unified Apple M4 Max",
-            );
-        }
+        let options = options.resolve(
+            weight_plan.artifact_profile(),
+            &ctx.device.name().to_string(),
+            ctx.device.hasUnifiedMemory(),
+        );
         let geometry = MuseGlimmerTextGeometry::from_config(weight_plan.config(), capacity)?;
         let session_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry_with_split_decode(
             ctx,
@@ -152,12 +182,17 @@ impl MuseGlimmerLoadedModel {
             },
             observed_weight_bytes,
             device_registry_id: ctx.device.registryID(),
-            matrix_prefill: options.matrix_prefill,
+            math_options: options,
         })
     }
 
     pub fn config(&self) -> &MuseGlimmerConfig {
         self.weights.config()
+    }
+
+    /// Effective selection after artifact/device qualification, not just permission.
+    pub fn math_options(&self) -> MuseGlimmerRuntimeOptions {
+        self.math_options
     }
 
     pub fn artifact_profile(&self) -> MuseGlimmerArtifactProfile {
@@ -229,11 +264,14 @@ impl MuseGlimmerLoadedModel {
         let Self {
             weights,
             session,
-            matrix_prefill,
+            math_options,
             ..
         } = self;
-        let forward =
-            MuseGlimmerTextForward::new_with_tiled_prefill(ctx, weights, *matrix_prefill)?;
+        let forward = MuseGlimmerTextForward::new_with_tiled_prefill(
+            ctx,
+            weights,
+            math_options.matrix_prefill,
+        )?;
         Ok(MuseGlimmerTextRunner { forward, session })
     }
 }
@@ -612,6 +650,167 @@ mod tests {
     use super::*;
     use crate::gguf::GgufFile;
     use crate::muse_glimmer::MuseGlimmerConfig;
+
+    #[test]
+    fn muse_math_defaults_resolve_only_qualified_lanes_and_preserve_rollbacks() {
+        let defaults = MuseGlimmerRuntimeOptions::default();
+        assert!(defaults.split_decode && defaults.matrix_prefill);
+        for profile in [
+            MuseGlimmerArtifactProfile::UnslothQ8_0,
+            MuseGlimmerArtifactProfile::UnslothBf16,
+        ] {
+            for device in ["Apple M4 Max", "Apple M4 Pro", "Apple M5 Max", "Other"] {
+                for unified in [false, true] {
+                    for split_decode in [false, true] {
+                        for matrix_prefill in [false, true] {
+                            let requested = MuseGlimmerRuntimeOptions {
+                                split_decode,
+                                matrix_prefill,
+                            };
+                            let expected = if profile == MuseGlimmerArtifactProfile::UnslothQ8_0
+                                && device == "Apple M4 Max"
+                                && unified
+                            {
+                                requested
+                            } else {
+                                MuseGlimmerRuntimeOptions::REFERENCE
+                            };
+                            assert_eq!(requested.resolve(profile, device, unified), expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "serial Metal, production lease, Muse default/explicit and reference/rollback delivery"]
+    fn muse_math_default_delivery() {
+        use crate::tokenizer::LlamaCppTokenizer;
+        let _lease = crate::metal::acquire_metal_benchmark_lease()
+            .expect("production GPU lease and wired-memory gate required");
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+        let gguf = GgufFile::open(path).unwrap();
+        let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
+        ))
+        .unwrap();
+        let request = crate::muse_glimmer_request::MuseGlimmerRequest::single_turn(
+            "begin",
+            Some(
+                fixture["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+        );
+        let rendered = request.render(config.chat_template_profile, None).unwrap();
+        let tokens: Vec<u32> = tokenizer
+            .encode(&rendered, false)
+            .unwrap()
+            .into_iter()
+            .map(|id| u32::try_from(id).unwrap())
+            .collect();
+        assert_eq!(tokens.len(), 6229);
+        let ctx = MetalContext::new().unwrap();
+        let enabled = MuseGlimmerRuntimeOptions {
+            split_decode: true,
+            matrix_prefill: true,
+        };
+        let mut expected = None;
+        for lane in ["explicit", "default", "reference", "rollback"] {
+            let optimized = matches!(lane, "explicit" | "default");
+            let prompt = if optimized {
+                &tokens[..]
+            } else {
+                &tokens[..31]
+            };
+            let capacity = prompt.len() + 16;
+            let mut model = match lane {
+                "default" => MuseGlimmerLoadedModel::load(&ctx, &gguf, capacity),
+                "reference" => MuseGlimmerLoadedModel::load_reference(&ctx, &gguf, capacity),
+                _ => MuseGlimmerLoadedModel::load_with_options(
+                    &ctx,
+                    &gguf,
+                    capacity,
+                    if optimized {
+                        enabled
+                    } else {
+                        MuseGlimmerRuntimeOptions::REFERENCE
+                    },
+                ),
+            }
+            .unwrap();
+            assert_eq!(
+                model.math_options(),
+                if optimized {
+                    enabled
+                } else {
+                    MuseGlimmerRuntimeOptions::REFERENCE
+                }
+            );
+            assert_eq!(
+                model
+                    .session
+                    .memory_plan()
+                    .allocations()
+                    .iter()
+                    .any(|allocation| allocation.name == "split_decode_partials"),
+                optimized
+            );
+            let plan = model.session.memory_plan().clone();
+            let mut runner = model.create_runner(&ctx).unwrap();
+            crate::metal::dispatch_census_begin();
+            let mut logits = runner
+                .prefill_with_command_checkpoint(prompt, || Ok(()))
+                .unwrap();
+            let mut rows = Vec::new();
+            let mut ids = Vec::new();
+            for step in 0..=16 {
+                assert!(logits.iter().all(|v| v.is_finite()));
+                let token = logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|(ai, a), (bi, b)| a.total_cmp(b).then_with(|| bi.cmp(ai)))
+                    .unwrap()
+                    .0 as u32;
+                rows.push(logits.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+                ids.push(token);
+                if step < 16 {
+                    logits = runner.forward_token(token).unwrap();
+                }
+            }
+            assert_eq!(runner.next_position(), capacity);
+            assert!(runner.forward_token(ids[16]).is_err());
+            assert_eq!(runner.next_position(), capacity);
+            let census = crate::metal::dispatch_census_take();
+            let kernels: Vec<_> = census.iter().map(|row| row.kernel.clone()).collect();
+            assert_eq!(
+                kernels
+                    .iter()
+                    .any(|k| k == "kernel_muse_prefill_tiled_f32_h128"),
+                optimized
+            );
+            assert_eq!(
+                kernels
+                    .iter()
+                    .any(|k| k == "kernel_muse_split_attention_h128"),
+                optimized
+            );
+            let result = (rows, ids, kernels, plan);
+            if matches!(lane, "explicit" | "reference") {
+                expected = Some(result);
+            } else {
+                assert_eq!(result, expected.take().unwrap(), "{lane} delivery differs");
+            }
+            eprintln!(
+                "MUSE_DEFAULT_DELIVERY lane={lane} prompt={} transitions=16 passed=true",
+                prompt.len()
+            );
+        }
+    }
 
     #[test]
     #[ignore = "serial Metal, delivered optimized Muse prefill option short-shape composition"]

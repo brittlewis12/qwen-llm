@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-17 - Muse Delivery Finds Materialized Attention Alignment Bug
+
+- Default-delivery attempt02 acquires production lease/real wired gate, then
+  SIGABRT under Metal API validation:6225 scalar-tail positions request24900 bytes,
+  not16-byte aligned. No lane completes; actual FAIL, not numerical/timing evidence.
+- Source e8768272 rounds each materialized F16 attention allocation with checked
+  arithmetic; failing score buffer becomes24912. Packed admission includes rounded
+  sizes; logical positions, shaders and arithmetic are unchanged. CPU exhaustive
+  position/group/overflow test and all-target CLI check PASS; GPU rerun deferred.
+- User's shared server is in use. Exact oldPID/listener/lock checks and a narrow
+  executable filter missed a Flash-Next launch/readiness shell. No processes were
+  stopped/restarted, but starting the packet in that window was an operational
+  mistake. Do not run more GPU work based on apparent idle gaps; coordinate first.
+- No default-delivery PASS. Preserve both attempts and cx source review:
+  `docs/bench/2026-09-17-muse-defaults/RESULT.md`.
+
 ## 2026-09-17 - Muse Qualified Generation Math Becomes Default
 
 - Source d4bb5703 closes run/serve/library selection gap: Q8/unified M4 Max defaults

@@ -1,4 +1,4 @@
-# Muse qualified defaults: source delivered, GPU check blocked
+# Muse qualified defaults: source delivered, GPU validation incomplete
 
 Source `d4bb5703` makes already-qualified optimized generation math automatic for
 Muse Q8_0 on unified Apple M4 Max. No shader, numerical gate, context limit, extra
@@ -11,7 +11,7 @@ use load_reference(), preserving their arithmetic/artifact contracts. Ordinary
 library load() follows generation defaults. Historical reference backend tests
 retain their original arithmetic rather than silently changing the baseline.
 
-## Validation
+## Initial validation at default integration
 
 - CPU128-case artifact/device/unified/independent-rollback resolver PASS.
 - Three focused backend CPU tests PASS, including strict shared run/serve parsing.
@@ -30,6 +30,45 @@ retain their original arithmetic rather than silently changing the baseline.
 
 Raw logs: `target/profiles/2026-09-17-muse-defaults-{cpu,cli-cpu-02,check,build,
 cpu-rebased,cli-cpu-rebased,check-rebased,delivery-01}.log` in the optimization worktree.
+
+## Attempt02 FAIL and source-only alignment repair
+
+After the old Muse PID exited, its exact process/listener checks and live lock-holder
+check were empty. A narrow direct-executable process filter also found none. The
+same frozen test acquired the production lease and passed the real wired gate,
+then aborted with Metal API validation enabled:
+
+`length(24900) must be a multiple of 16 bytes` (SIGABRT).
+
+This is a real validation FAIL, not a pass, timing result or numerical comparison.
+No lane completed. The unchanged scalar-prefill tail at6225 positions delegates to
+shared materialized F16 attention, which requested6225*4 bytes without aligning
+each dynamic threadgroup allocation. This affects original scalar math as well as
+the scalar tail of optimized prefill; it is not new split-attention arithmetic.
+
+User correction exposed a Flash-Next server launch/readiness shell via the requested
+`ps aux | rg qwen`. The narrow direct-process filter missed that activity. Absence
+of an old PID/listener/live lock holder was insufficient operational coordination
+after the user said the server was in use. No server process was stopped/restarted,
+but the attempted GPU packet should not have been launched in that window. All
+further GPU work is deferred; do not infer permission from an apparently idle lock.
+
+Source `e8768272` shares checked16-byte rounding across scalar F16 attention and
+Muse materialized packed attention. The failing24900-byte score allocation becomes
+24912; packed admission prices the aligned sizes. Kernel arguments, logical visible
+positions, loops, shaders and7168-position materialized limit do not change. This
+is an API-contract repair, not a performance optimization or gate relaxation.
+
+CPU test PASS over all positions0..7168 and SIMDgroup counts1..32, including explicit
+6225/7168 boundaries and multiplication/alignment overflow. All-target CLI check
+PASS without warnings. cx source review found no blocker; its reply accidentally
+called the native failure attempt01, but the preserved failure is **attempt02**.
+No GPU repair rerun or CLI replay has happened, so default-delivery remains open.
+
+Raw: `target/profiles/2026-09-17-muse-defaults-delivery-02.log`,
+`2026-09-17-muse-alignment-cpu.log`, `2026-09-17-muse-alignment-check.log`.
+Main release binary was rebuilt at73d38909 before this repair; subsequent repair
+delivery must not be confused with a running server adopting a rebuilt executable.
 
 ## Evidence and leverage
 

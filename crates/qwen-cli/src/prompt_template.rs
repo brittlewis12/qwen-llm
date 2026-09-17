@@ -1,14 +1,12 @@
 use crate::messages::{CapabilityError, Qwen38GenerationMode, QwenGenerationMode};
 use crate::open_responses::items::QwenTemplate;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::muse_glimmer::{
     ARCHITECTURE_NAME as MUSE_GLIMMER_ARCHITECTURE, MuseGlimmerChatTemplateProfile,
     MuseGlimmerConfig,
 };
-use sha2::{Digest, Sha256};
-use std::fmt::Write;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QwenPromptTemplate {
@@ -63,33 +61,11 @@ pub(crate) fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelProm
                 config.chat_template_profile,
             ))
         }
-        "deepseek4" => {
-            let template = gguf
-                .get_str("tokenizer.chat_template")
-                .context("model is missing tokenizer.chat_template")?;
-            let digest: [u8; 32] = Sha256::digest(template.as_bytes()).into();
-            ensure!(
-                digest == DEEPSEEK_V4_0731_CHAT_TEMPLATE_SHA256,
-                "DeepSeek V4 structured input requires the released 0731 chat template; found SHA-256 {}",
-                digest_hex(digest)
-            );
-            Ok(ModelPromptTemplate::DeepSeekV4_0731)
-        }
+        // The renderer is pinned to the vLLM/SGLang 0731 encoders, not to
+        // any GGUF template; repacks embed three different templates.
+        "deepseek4" => Ok(ModelPromptTemplate::DeepSeekV4_0731),
         other => bail!("unsupported prompt-template architecture {other:?}"),
     }
-}
-
-const DEEPSEEK_V4_0731_CHAT_TEMPLATE_SHA256: [u8; 32] = [
-    0xe6, 0x43, 0xc3, 0x1f, 0xce, 0xc1, 0x7f, 0x34, 0x2f, 0x72, 0x29, 0x6e, 0x02, 0xc4, 0x6d, 0x35,
-    0x84, 0x6b, 0xf4, 0xc7, 0x0f, 0x6a, 0x02, 0x71, 0xf2, 0x3b, 0xad, 0x73, 0xfd, 0x4e, 0xb6, 0x45,
-];
-
-fn digest_hex(digest: [u8; 32]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        write!(&mut output, "{byte:02x}").expect("write digest to String");
-    }
-    output
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +316,7 @@ pub(crate) fn qwen_template_for_gguf(gguf: &GgufFile) -> Result<QwenTemplate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn facts<'a>(architecture: &'a str, names: [Option<&'a str>; 5]) -> QwenHeaderFacts<'a> {
         QwenHeaderFacts {
@@ -565,10 +542,16 @@ mod tests {
         );
     }
 
-    /// Oracle fixture provenance: the `.jinja` sources the Python reference
-    /// renders are the released templates. Not consulted for identity.
+    /// Oracle fixture provenance. Not consulted for identity. The DS4 file
+    /// is Unsloth's patched 0731 template (the one in the local UD repack);
+    /// the DS4 renderer itself is pinned to the vLLM/SGLang encoders.
     #[test]
     fn tracked_template_oracles_keep_their_released_digests() {
+        const DS4_FLASH_0731_UNSLOTH: [u8; 32] = [
+            0xe6, 0x43, 0xc3, 0x1f, 0xce, 0xc1, 0x7f, 0x34, 0x2f, 0x72, 0x29, 0x6e, 0x02, 0xc4,
+            0x6d, 0x35, 0x84, 0x6b, 0xf4, 0xc7, 0x0f, 0x6a, 0x02, 0x71, 0xf2, 0x3b, 0xad, 0x73,
+            0xfd, 0x4e, 0xb6, 0x45,
+        ];
         const QWEN36_A3B: [u8; 32] = [
             0x55, 0xd4, 0x93, 0x14, 0x33, 0xfe, 0x50, 0x2b, 0x79, 0x42, 0x26, 0xee, 0x7f, 0x4d,
             0x20, 0x6a, 0x6b, 0xdd, 0x43, 0x6a, 0xc9, 0xf8, 0x0e, 0xb7, 0xd8, 0xeb, 0xb4, 0xc6,
@@ -590,7 +573,7 @@ mod tests {
             ),
             (
                 include_str!("../tests/fixtures/templates/ds4_flash_chat_template.jinja"),
-                DEEPSEEK_V4_0731_CHAT_TEMPLATE_SHA256,
+                DS4_FLASH_0731_UNSLOTH,
             ),
         ] {
             assert_eq!(

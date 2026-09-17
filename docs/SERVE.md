@@ -423,10 +423,16 @@ because client model-pickers probe it).
   (3.5/3.6/3.8) identified from the GGUF's name metadata (`general.name`,
   `basename`, `base_model.0.name`, `base_model.0.repo_url`, `license.link`)
   plus the Qwen3.x tokenizer gate (`gpt2`/`qwen35`/248320 tokens);
-  `qwen4exp` architecture implies the Qwen3.8 contract. The GGUF's
-  `tokenizer.chat_template` is never consulted (until 2026-09-17 its digest
-  selected the release and refused unknown digests, which rejected
-  derivatives whose template differed by a no-op). For an identified
+  `qwen4exp` architecture implies the Qwen3.8 contract; `deepseek4` implies
+  the V4-Flash-0731 encoder contract. The GGUF's `tokenizer.chat_template`
+  is never consulted: per supported release there is one correct contract
+  — the full-capability one (tools, thinking, effort where the release has
+  them) — and embedded-template variance across repacks reflects
+  simplification, not intent (local DS4 repacks embed three different
+  templates: Unsloth-patched 0731, upstream 0731, and the pre-0731
+  original). Until 2026-09-17 the digest selected the release and refused
+  unknown digests, which rejected derivatives whose template differed by a
+  no-op. For an identified
   release the renderer follows the released Jinja byte for byte (oracle fixture
   `tests/fixtures/qwen36_chat_template_oracle_v1.json`): content is trimmed,
   the generation suffix is always `<think>\n` or the preclosed block, and

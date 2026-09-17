@@ -216,8 +216,8 @@ pub fn encode_attn_decode_f16kv_f32(
 
     let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
-    let scores_bytes = n_pos * std::mem::size_of::<f32>();
-    let shred_bytes = (n_simdgroups * std::mem::size_of::<f32>()).max(32);
+    let (scores_bytes, shred_bytes) =
+        materialized_attention_scratch_bytes("attn_decode_f16kv", n_pos, n_simdgroups)?;
     if scores_bytes > 28 * 1024 {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_f16kv",
@@ -241,6 +241,25 @@ pub fn encode_attn_decode_f16kv_f32(
         },
     );
     Ok(())
+}
+
+pub(crate) fn materialized_attention_scratch_bytes(
+    kernel: &'static str,
+    positions: usize,
+    simdgroups: usize,
+) -> Result<(usize, usize), MetalError> {
+    let aligned = |elements: usize| {
+        elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|bytes| bytes.checked_add(15))
+            .map(|bytes| bytes & !15)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel,
+                detail: "aligned attention threadgroup byte count overflow".into(),
+            })
+    };
+    // Metal requires each dynamic allocation, not just their sum, to be 16-byte aligned.
+    Ok((aligned(positions)?, aligned(simdgroups)?.max(32)))
 }
 
 /// Compute v4-friendly NWG (split-K partition count) for a given context length.
@@ -3507,6 +3526,34 @@ pub(crate) fn with_tiled_vt_pilot<T>(enabled: bool, f: impl FnOnce() -> T) -> (T
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn materialized_attention_scratch_is_aligned_without_changing_visible_positions() {
+        for positions in 0..=7168 {
+            for simdgroups in 1..=32 {
+                let (scores, reduction) =
+                    materialized_attention_scratch_bytes("test", positions, simdgroups).unwrap();
+                assert_eq!(scores % 16, 0);
+                assert_eq!(reduction % 16, 0);
+                assert!(scores >= positions * 4 && scores < positions * 4 + 16);
+                assert!(scores <= 28 * 1024);
+                assert!(reduction >= (simdgroups * 4).max(32));
+                assert!(reduction < (simdgroups * 4).max(32) + 16);
+            }
+        }
+        assert_eq!(
+            materialized_attention_scratch_bytes("test", 6225, 32).unwrap(),
+            (24912, 128)
+        );
+        assert_eq!(
+            materialized_attention_scratch_bytes("test", 7168, 32).unwrap(),
+            (28672, 128)
+        );
+        for overflow in [usize::MAX, usize::MAX / 4] {
+            assert!(materialized_attention_scratch_bytes("test", overflow, 32).is_err());
+            assert!(materialized_attention_scratch_bytes("test", 1, overflow).is_err());
+        }
+    }
     use crate::metal::test_support::*;
 
     #[test]

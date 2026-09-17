@@ -2,6 +2,7 @@
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, encode_attn_decode_f16kv_f32,
+    materialized_attention_scratch_bytes,
 };
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
@@ -811,13 +812,8 @@ pub(crate) fn encode_muse_glimmer_attn_prefill_with_tiling(
         );
     }
     let simdgroups = threads / 32;
-    let scores_bytes = maximum_visible
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| MetalError::BadShape {
-            kernel: KERNEL,
-            detail: "score scratch byte count overflow".into(),
-        })?;
-    let reduction_bytes = (simdgroups * std::mem::size_of::<f32>()).max(32);
+    let (scores_bytes, reduction_bytes) =
+        materialized_attention_scratch_bytes(KERNEL, maximum_visible, simdgroups)?;
     let dynamic_memory =
         scores_bytes
             .checked_add(reduction_bytes)

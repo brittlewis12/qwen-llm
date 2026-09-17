@@ -1,5 +1,7 @@
 //! `qwen` — interactive CLI for the qwen-llm engine.
 
+#[path = "qwen/admission.rs"]
+mod admission;
 #[path = "qwen/args.rs"]
 mod args;
 mod cli;
@@ -318,11 +320,36 @@ fn run() -> Result<()> {
         return run_qwen4exp_single_turn(&model_path, &gguf, &args, explicit_options);
     }
 
+    let supplied = admission::supplied(&args, explicit_options);
     if has_single_turn_input(&args) {
+        let lane = &admission::ORDINARY_QWEN_SINGLE_TURN;
+        let mut unsupported = lane.unsupported(&supplied);
+        // Single-turn reads the prefix-capture length and durable tuning
+        // only inside the durable store; without it they would no-op.
+        if args.durable_prefix_cache.is_none() {
+            use admission::LegacyOption as O;
+            unsupported.extend(supplied.iter().filter_map(|option| match option {
+                O::CachePrefixTokens => {
+                    Some("--cache-prefix-tokens (requires --durable-prefix-cache)")
+                }
+                O::DurablePrefixCacheMaxMib => {
+                    Some("--durable-prefix-cache-max-mib (requires --durable-prefix-cache)")
+                }
+                O::DurablePrefixCacheMaxEntryMib => {
+                    Some("--durable-prefix-cache-max-entry-mib (requires --durable-prefix-cache)")
+                }
+                O::DurablePrefixCacheMinTokens => {
+                    Some("--durable-prefix-cache-min-tokens (requires --durable-prefix-cache)")
+                }
+                _ => None,
+            }));
+        }
+        lane.refuse(&unsupported)?;
         return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
     }
 
     if let Some(path) = args.requests_jsonl.as_ref() {
+        admission::ORDINARY_QWEN_BATCH.admit(&supplied)?;
         return run_requests_jsonl(&model_path, path, gguf, &args, explicit_options);
     }
 

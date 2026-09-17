@@ -104,13 +104,7 @@ pub(crate) fn validate_muse_glimmer_generation_mode(
     explicit: ExplicitCliOptions,
     invocation: &cli::Invocation,
 ) -> Result<()> {
-    let mut unsupported = serial_lane_unsupported_options(args, explicit);
-    ensure_no_deepseek_v4_only_options(args, explicit, &mut unsupported)?;
-    ensure!(
-        unsupported.is_empty(),
-        "Muse Glimmer currently supports request-shaped serial text generation only; unsupported options: {}",
-        unsupported.join(", ")
-    );
+    admission::MUSE_GLIMMER_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
     ensure!(
         matches!(invocation, cli::Invocation::Run(_)) || has_single_turn_input(args),
         "Muse Glimmer generation requires --prompt, --prompt-file, or `qwen run --user|--messages|--raw-prompt`"

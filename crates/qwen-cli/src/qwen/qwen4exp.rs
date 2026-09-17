@@ -74,13 +74,7 @@ pub(crate) fn validate_qwen4exp_generation_mode(
     args: &Args,
     explicit: ExplicitCliOptions,
 ) -> Result<()> {
-    let mut unsupported = serial_lane_unsupported_options(args, explicit);
-    ensure_no_deepseek_v4_only_options(args, explicit, &mut unsupported)?;
-    ensure!(
-        unsupported.is_empty(),
-        "Qwen3.8-Flash-Next currently supports request-shaped serial single-turn generation only; unsupported options: {}",
-        unsupported.join(", ")
-    );
+    admission::FLASH_NEXT_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
     ensure!(
         has_single_turn_input(args),
         "Qwen3.8-Flash-Next generation requires --prompt, --prompt-file, --messages, or `qwen run --user`"

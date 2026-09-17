@@ -3262,6 +3262,10 @@ mod tests {
         }
     }
 
+    fn test_explicit() -> ExplicitCliOptions {
+        Args::parse_with_explicit(["qwen", "--model", "model.gguf"]).1
+    }
+
     fn test_args(path: &Path) -> Args {
         let mut args = Args::try_parse_from([
             "qwen",
@@ -3776,7 +3780,7 @@ mod tests {
         let file = TestFile::new();
         let args = test_args(&file.0);
         assert_eq!(args.concurrency, Some(2));
-        validate_cli(&args, ExplicitCliOptions::default()).unwrap();
+        validate_cli(&args, test_explicit()).unwrap();
         validate_model_family_with_modes(
             args.concurrency,
             0.0,
@@ -3834,12 +3838,12 @@ mod tests {
 
         let mut invalid = test_args(&file.0);
         invalid.concurrency = Some(3);
-        let error = validate_cli(&invalid, ExplicitCliOptions::default()).unwrap_err();
+        let error = validate_cli(&invalid, test_explicit()).unwrap_err();
         assert!(error.to_string().contains("currently requires 2"));
 
         invalid = test_args(&file.0);
         invalid.temperature = 0.7;
-        validate_cli(&invalid, ExplicitCliOptions::default()).unwrap();
+        validate_cli(&invalid, test_explicit()).unwrap();
         let error = validate_model_family_with_modes(
             invalid.concurrency,
             invalid.temperature,
@@ -3852,12 +3856,12 @@ mod tests {
 
         invalid = test_args(&file.0);
         invalid.prompt_lookup = true;
-        let error = validate_cli(&invalid, ExplicitCliOptions::default()).unwrap_err();
+        let error = validate_cli(&invalid, test_explicit()).unwrap_err();
         assert!(error.to_string().contains("prompt-lookup"));
 
         invalid = test_args(&file.0);
         invalid.requests_jsonl = Some(PathBuf::from("-"));
-        let error = validate_cli(&invalid, ExplicitCliOptions::default()).unwrap_err();
+        let error = validate_cli(&invalid, test_explicit()).unwrap_err();
         assert!(error.to_string().contains("regular JSONL file"));
     }
 }

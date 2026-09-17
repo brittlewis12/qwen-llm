@@ -982,39 +982,30 @@ fn qwen4exp_stop_validation_honors_valid_producer_vectors() {
 
 #[test]
 fn qwen4exp_serial_mode_rejects_inert_advanced_options() {
-    let make_args =
-        || Args::try_parse_from(["qwen", "--model", "model.gguf", "--prompt", "hello"]).unwrap();
-    validate_qwen4exp_generation_mode(&make_args(), ExplicitCliOptions::default()).unwrap();
+    let baseline = ["qwen", "--model", "model.gguf", "--prompt", "hello"];
+    let (args, explicit) = Args::parse_with_explicit(baseline);
+    validate_qwen4exp_generation_mode(&args, explicit).unwrap();
 
-    for explicit in [
-        ExplicitCliOptions {
-            durable_prefix_cache_max_mib: true,
-            ..ExplicitCliOptions::default()
-        },
-        ExplicitCliOptions {
-            durable_prefix_cache_max_entry_mib: true,
-            ..ExplicitCliOptions::default()
-        },
-        ExplicitCliOptions {
-            durable_prefix_cache_min_tokens: true,
-            ..ExplicitCliOptions::default()
-        },
-        ExplicitCliOptions {
-            deepseek_v4_multigroup_selector: true,
-            ..ExplicitCliOptions::default()
-        },
+    // Explicit defaults are still supplied options.
+    for (flag, value) in [
+        ("--durable-prefix-cache-max-mib", "32768"),
+        ("--durable-prefix-cache-max-entry-mib", "16384"),
+        ("--durable-prefix-cache-min-tokens", "1024"),
+        ("--deepseek-v4-multigroup-selector", "auto"),
+        ("--requests-jsonl", "requests.jsonl"),
+        ("--concurrency", "2"),
     ] {
-        assert!(validate_qwen4exp_generation_mode(&make_args(), explicit).is_err());
+        // `--requests-jsonl` conflicts with `--prompt` at parse time.
+        let head = if flag == "--requests-jsonl" {
+            &baseline[..3]
+        } else {
+            &baseline[..]
+        };
+        let argv = head.iter().copied().chain([flag, value]);
+        let (args, explicit) = Args::parse_with_explicit(argv);
+        let error = validate_qwen4exp_generation_mode(&args, explicit).unwrap_err();
+        assert!(error.to_string().contains(flag), "{flag}: {error}");
     }
-
-    let mut requests = make_args();
-    requests.requests_jsonl = Some(PathBuf::from("requests.jsonl"));
-    assert!(validate_qwen4exp_generation_mode(&requests, ExplicitCliOptions::default()).is_err());
-    let mut concurrency = make_args();
-    concurrency.concurrency = Some(2);
-    assert!(
-        validate_qwen4exp_generation_mode(&concurrency, ExplicitCliOptions::default()).is_err()
-    );
 }
 
 #[test]
@@ -1218,17 +1209,16 @@ fn deepseek_v4_multigroup_selector_cli_contract_is_explicit_and_bounded() {
         .contains("requires a DeepSeek V4 model")
     );
 
-    let jsonl = Args::try_parse_from([
+    let (jsonl, jsonl_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
         "--requests-jsonl",
         "requests.jsonl",
         "--deepseek-v4-multigroup-selector=qualified-experimental",
-    ])
-    .unwrap();
+    ]);
     validate_deepseek_v4_multigroup_selector_scope(&jsonl).unwrap();
-    validate_deepseek_v4_requests_mode(&jsonl, ExplicitCliOptions::default()).unwrap();
+    validate_deepseek_v4_requests_mode(&jsonl, jsonl_explicit).unwrap();
 
     let no_request = Args::try_parse_from([
         "qwen",
@@ -1468,7 +1458,7 @@ fn deepseek_v4_snapshot_identity_cache_requires_private_owned_directories() {
 
 #[test]
 fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
-    let raw = Args::try_parse_from([
+    let (raw, raw_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
@@ -1479,11 +1469,10 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         "--trace-request",
         "trace.txt",
         "--no-special-tokens",
-    ])
-    .unwrap();
-    validate_deepseek_v4_generation_mode(&raw, ExplicitCliOptions::default()).unwrap();
+    ]);
+    validate_deepseek_v4_generation_mode(&raw, raw_explicit).unwrap();
 
-    let snapshot = Args::try_parse_from([
+    let (snapshot, snapshot_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
@@ -1491,11 +1480,10 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         "hello",
         "--deepseek-v4-snapshot",
         "prefix.ds4c",
-    ])
-    .unwrap();
-    validate_deepseek_v4_generation_mode(&snapshot, ExplicitCliOptions::default()).unwrap();
+    ]);
+    validate_deepseek_v4_generation_mode(&snapshot, snapshot_explicit).unwrap();
 
-    let unsupported = Args::try_parse_from([
+    let (unsupported, unsupported_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
@@ -1510,9 +1498,8 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         "4",
         "--request-stats",
         "stats.jsonl",
-    ])
-    .unwrap();
-    let error = validate_deepseek_v4_generation_mode(&unsupported, ExplicitCliOptions::default())
+    ]);
+    let error = validate_deepseek_v4_generation_mode(&unsupported, unsupported_explicit)
         .unwrap_err()
         .to_string();
     for option in [
@@ -1525,48 +1512,46 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         assert!(error.contains(option), "missing {option:?} from {error:?}");
     }
 
-    let messages = Args::try_parse_from([
+    let (messages, messages_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
         "--messages",
         "messages.json",
-    ])
-    .unwrap();
-    validate_deepseek_v4_generation_mode(&messages, ExplicitCliOptions::default()).unwrap();
+    ]);
+    validate_deepseek_v4_generation_mode(&messages, messages_explicit).unwrap();
 
-    let messages_with_qwen_policy = Args::try_parse_from([
-        "qwen",
-        "--model",
-        "model.gguf",
-        "--messages",
-        "messages.json",
-        "--messages-preserve-thinking",
-        "--messages-no-generation-prompt",
-    ])
-    .unwrap();
+    let (messages_with_qwen_policy, messages_with_qwen_policy_explicit) =
+        Args::parse_with_explicit([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--messages-preserve-thinking",
+            "--messages-no-generation-prompt",
+        ]);
     let error = validate_deepseek_v4_generation_mode(
         &messages_with_qwen_policy,
-        ExplicitCliOptions::default(),
+        messages_with_qwen_policy_explicit,
     )
     .unwrap_err()
     .to_string();
     assert!(error.contains("--messages-preserve-thinking"));
     assert!(error.contains("--messages-no-generation-prompt"));
 
-    let messages_with_strip = Args::try_parse_from([
+    let (messages_with_strip, messages_with_strip_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
         "--messages",
         "messages.json",
         "--messages-strip-thinking",
-    ])
-    .unwrap();
-    validate_deepseek_v4_generation_mode(&messages_with_strip, ExplicitCliOptions::default())
+    ]);
+    validate_deepseek_v4_generation_mode(&messages_with_strip, messages_with_strip_explicit)
         .unwrap();
 
-    let preserve_with_tier = Args::try_parse_from([
+    let (preserve_with_tier, preserve_with_tier_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
@@ -1575,10 +1560,8 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         "--messages-preserve-thinking",
         "--reasoning",
         "low",
-    ])
-    .unwrap();
-    validate_deepseek_v4_generation_mode(&preserve_with_tier, ExplicitCliOptions::default())
-        .unwrap();
+    ]);
+    validate_deepseek_v4_generation_mode(&preserve_with_tier, preserve_with_tier_explicit).unwrap();
 
     assert!(
         Args::try_parse_from([
@@ -1594,7 +1577,7 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         "strip-thinking must conflict with preserve-reasoning at the parser"
     );
 
-    let durable = Args::try_parse_from([
+    let (durable, durable_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
@@ -1609,29 +1592,18 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         "4096",
         "--durable-prefix-cache-max-entry-mib",
         "4096",
-    ])
-    .unwrap();
-    validate_deepseek_v4_generation_mode(
-        &durable,
-        ExplicitCliOptions {
-            durable_prefix_cache_min_tokens: true,
-            durable_prefix_cache_max_mib: true,
-            durable_prefix_cache_max_entry_mib: true,
-            ..ExplicitCliOptions::default()
-        },
-    )
-    .unwrap();
+    ]);
+    validate_deepseek_v4_generation_mode(&durable, durable_explicit).unwrap();
 
-    let jsonl = Args::try_parse_from([
+    let (jsonl, jsonl_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
         "--requests-jsonl",
         "requests.jsonl",
-    ])
-    .unwrap();
+    ]);
     assert!(
-        validate_deepseek_v4_generation_mode(&jsonl, ExplicitCliOptions::default())
+        validate_deepseek_v4_generation_mode(&jsonl, jsonl_explicit)
             .unwrap_err()
             .to_string()
             .contains("--requests-jsonl")
@@ -1640,7 +1612,7 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
     // Requests mode: file mode derives its budget and rejects the stdin
     // override; stdin mode requires it; shared unsupported flags still
     // fail closed; the snapshot flag stays parser-excluded.
-    let file_mode_with_budget = Args::try_parse_from([
+    let (file_mode_with_budget, file_mode_with_budget_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
@@ -1648,23 +1620,22 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         "requests.jsonl",
         "--max-context-tokens",
         "4096",
-    ])
-    .unwrap();
+    ]);
     assert!(
-        validate_deepseek_v4_requests_mode(&file_mode_with_budget, ExplicitCliOptions::default(),)
+        validate_deepseek_v4_requests_mode(&file_mode_with_budget, file_mode_with_budget_explicit)
             .unwrap_err()
             .to_string()
             .contains("remove --max-context-tokens")
     );
-    let stdin_without_budget =
-        Args::try_parse_from(["qwen", "--model", "model.gguf", "--requests-jsonl", "-"]).unwrap();
+    let (stdin_without_budget, stdin_without_budget_explicit) =
+        Args::parse_with_explicit(["qwen", "--model", "model.gguf", "--requests-jsonl", "-"]);
     assert!(
-        validate_deepseek_v4_requests_mode(&stdin_without_budget, ExplicitCliOptions::default(),)
+        validate_deepseek_v4_requests_mode(&stdin_without_budget, stdin_without_budget_explicit)
             .unwrap_err()
             .to_string()
             .contains("supply --max-context-tokens")
     );
-    let stdin_with_budget = Args::try_parse_from([
+    let (stdin_with_budget, stdin_with_budget_explicit) = Args::parse_with_explicit([
         "qwen",
         "--model",
         "model.gguf",
@@ -1672,9 +1643,8 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         "-",
         "--max-context-tokens",
         "4096",
-    ])
-    .unwrap();
-    validate_deepseek_v4_requests_mode(&stdin_with_budget, ExplicitCliOptions::default()).unwrap();
+    ]);
+    validate_deepseek_v4_requests_mode(&stdin_with_budget, stdin_with_budget_explicit).unwrap();
     assert_eq!(
         deepseek_v4_forward_budget_for_context_limit(4_096).unwrap(),
         4_095
@@ -1700,20 +1670,20 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
             .to_string()
             .contains("overflow")
     );
-    let requests_with_durable_cache = Args::try_parse_from([
-        "qwen",
-        "--model",
-        "model.gguf",
-        "--requests-jsonl",
-        "requests.jsonl",
-        "--durable-prefix-cache",
-        "/tmp/cache",
-    ])
-    .unwrap();
+    let (requests_with_durable_cache, requests_with_durable_cache_explicit) =
+        Args::parse_with_explicit([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--durable-prefix-cache",
+            "/tmp/cache",
+        ]);
     assert!(
         validate_deepseek_v4_requests_mode(
             &requests_with_durable_cache,
-            ExplicitCliOptions::default(),
+            requests_with_durable_cache_explicit
         )
         .unwrap_err()
         .to_string()
@@ -5486,9 +5456,11 @@ mod legacy_option_admission {
         (&["--request-stats", "s.jsonl"], [R, R, R]),
         (&["--request-timings", "t.json"], [R, R, R]),
         (&["--messages-no-generation-prompt"], [R, R, R]),
-        (&["--batch-size", "8"], [R, A, R]),
-        (&["--concurrency", "2"], [R, A, R]),
-        (&["--execution-mode", "auto"], [R, A, R]),
+        // Closed 2026-09-17: DS4 single-turn passed these through its
+        // validator and relied on later family gates in `main`.
+        (&["--batch-size", "8"], [R, R, R]),
+        (&["--concurrency", "2"], [R, R, R]),
+        (&["--execution-mode", "auto"], [R, R, R]),
         (&["--durable-prefix-cache", "/tmp/x"], [R, A, R]),
         (&["--durable-prefix-cache-max-mib", "32768"], [R, R, R]),
         (

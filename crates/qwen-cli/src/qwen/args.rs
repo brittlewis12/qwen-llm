@@ -305,7 +305,10 @@ pub(crate) struct Args {
     pub(crate) trace_request: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Which defaulted options were given on the command line. Constructible
+/// only from clap matches so admission cannot be handed a value that
+/// hides a supplied option.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ExplicitCliOptions {
     pub(crate) temperature: bool,
     pub(crate) top_k: bool,
@@ -339,5 +342,29 @@ impl ExplicitCliOptions {
             durable_prefix_cache_min_tokens: command_line("durable_prefix_cache_min_tokens"),
             deepseek_v4_multigroup_selector: command_line("deepseek_v4_multigroup_selector"),
         }
+    }
+}
+
+#[cfg(test)]
+impl Args {
+    /// Parse as `main` does: `Args` plus the explicit-option record from the
+    /// top-level or `run` subcommand matches.
+    pub(crate) fn parse_with_explicit<I, T>(argv: I) -> (Self, ExplicitCliOptions)
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = Self::command()
+            .try_get_matches_from(argv)
+            .expect("test invocation parses");
+        let explicit = matches.subcommand().map_or_else(
+            || ExplicitCliOptions::from_matches(&matches),
+            |(_, matches)| ExplicitCliOptions::from_matches(matches),
+        );
+        (
+            Self::from_arg_matches(&matches).expect("test invocation binds"),
+            explicit,
+        )
     }
 }

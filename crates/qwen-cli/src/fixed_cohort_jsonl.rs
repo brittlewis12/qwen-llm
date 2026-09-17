@@ -3525,6 +3525,10 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    fn test_explicit() -> ExplicitCliOptions {
+        Args::parse_with_explicit(["qwen", "--model", "model.gguf"]).1
+    }
+
     fn test_args() -> Args {
         Args::try_parse_from([
             "qwen",
@@ -3583,7 +3587,7 @@ mod tests {
     #[test]
     fn cli_contract_is_explicit_and_family_scoped() {
         let args = test_args();
-        validate_cli(&args, ExplicitCliOptions::default()).unwrap();
+        validate_cli(&args, test_explicit()).unwrap();
         validate_model_family(args.batch_size, Some(ModelFamily::Qwen35)).unwrap();
         assert!(validate_model_family(args.batch_size, Some(ModelFamily::Qwen35Moe)).is_err());
         assert!(validate_model_family(args.batch_size, Some(ModelFamily::Qwen4Exp)).is_err());
@@ -3594,7 +3598,7 @@ mod tests {
         assert!(validate_model_family(Some(16), Some(ModelFamily::DeepSeek4)).is_err());
         let mut moe_args = test_args();
         moe_args.batch_size = Some(MOE_BATCH16_WIDTH);
-        validate_cli(&moe_args, ExplicitCliOptions::default()).unwrap();
+        validate_cli(&moe_args, test_explicit()).unwrap();
         assert_eq!(
             parse_greedy_gpu_argmax_mode(Some(OsStr::new("0"))),
             GreedyGpuArgmaxMode::ExplicitRollback
@@ -3620,26 +3624,28 @@ mod tests {
 
         let mut invalid = test_args();
         invalid.batch_size = Some(4);
-        assert!(validate_cli(&invalid, ExplicitCliOptions::default()).is_err());
+        assert!(validate_cli(&invalid, test_explicit()).is_err());
         invalid = test_args();
         invalid.requests_jsonl = Some(PathBuf::from("-"));
-        assert!(validate_cli(&invalid, ExplicitCliOptions::default()).is_err());
+        assert!(validate_cli(&invalid, test_explicit()).is_err());
         invalid = test_args();
         invalid.temperature = 0.7;
-        assert!(validate_cli(&invalid, ExplicitCliOptions::default()).is_err());
+        assert!(validate_cli(&invalid, test_explicit()).is_err());
         invalid = test_args();
         invalid.info = true;
-        assert!(validate_cli(&invalid, ExplicitCliOptions::default()).is_err());
-        assert!(
-            validate_cli(
-                &test_args(),
-                ExplicitCliOptions {
-                    prefix_cache_max_mib: true,
-                    ..ExplicitCliOptions::default()
-                }
-            )
-            .is_err()
-        );
+        assert!(validate_cli(&invalid, test_explicit()).is_err());
+        let (explicit_cache, explicit) = Args::parse_with_explicit([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--batch-size",
+            "8",
+            "--prefix-cache-max-mib",
+            "16384",
+        ]);
+        assert!(validate_cli(&explicit_cache, explicit).is_err());
     }
 
     #[test]

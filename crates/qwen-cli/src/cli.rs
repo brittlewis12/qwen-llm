@@ -530,9 +530,11 @@ mod tests {
             ])
             .unwrap();
         let (_, run_matches) = matches.subcommand().expect("run subcommand matches");
+        let explicit = super::super::ExplicitCliOptions::from_matches(run_matches);
         assert_eq!(
-            super::super::ExplicitCliOptions::from_matches(run_matches),
-            super::super::ExplicitCliOptions::default()
+            explicit,
+            super::super::Args::parse_with_explicit(["qwen", "-m", "model.gguf", "--prompt", "x"])
+                .1
         );
     }
 

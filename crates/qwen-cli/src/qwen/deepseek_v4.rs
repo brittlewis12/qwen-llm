@@ -246,150 +246,41 @@ pub(crate) fn validate_deepseek_v4_reasoning_scope(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Options unsupported for every DeepSeek V4 execution mode. Mode-specific
-/// options (`--requests-jsonl`, `--max-context-tokens`) are validated by the
-/// single-turn and requests-mode validators respectively.
-/// Legacy research options no family outside ordinary Qwen implements.
-pub(crate) fn shared_unsupported_options(
-    args: &Args,
-    explicit: ExplicitCliOptions,
-) -> Vec<&'static str> {
-    let mut unsupported = Vec::new();
-    if args.prompt_lookup {
-        unsupported.push("--prompt-lookup");
-    }
-    if explicit.prefill_chunk || args.prefill_chunk != PrefillChunkArg::Fixed(1024) {
-        unsupported.push("--prefill-chunk");
-    }
-    if explicit.prefix_cache_max_mib || args.prefix_cache_max_mib != 16 * 1024 {
-        unsupported.push("--prefix-cache-max-mib");
-    }
-    if args.cache_prefix_tokens.is_some() {
-        unsupported.push("--cache-prefix-tokens");
-    }
-    if explicit.cache_prefix_auto_min_tokens || args.cache_prefix_auto_min_tokens != 1024 {
-        unsupported.push("--cache-prefix-auto-min-tokens");
-    }
-    if args.request_stats.is_some() {
-        unsupported.push("--request-stats");
-    }
-    if args.request_timings.is_some() {
-        unsupported.push("--request-timings");
-    }
-    if args.model_prefetch.is_some() {
-        unsupported.push("--model-prefetch");
-    }
-    if args.request_timing_warm_followup {
-        unsupported.push("--request-timing-warm-followup");
-    }
-    if args.messages_no_generation_prompt {
-        unsupported.push("--messages-no-generation-prompt");
-    }
-    unsupported
-}
-
-/// Options a request-shaped serial single-turn lane (Muse Glimmer,
-/// Flash-Next) does not implement, on top of `shared_unsupported_options`.
-/// `--drafter` is settled earlier by `drafter_policy` for every family.
-pub(crate) fn serial_lane_unsupported_options(
-    args: &Args,
-    explicit: ExplicitCliOptions,
-) -> Vec<&'static str> {
-    let mut unsupported = shared_unsupported_options(args, explicit);
-    if args.requests_jsonl.is_some() {
-        unsupported.push("--requests-jsonl");
-    }
-    if args.batch_size.is_some() {
-        unsupported.push("--batch-size");
-    }
-    if args.concurrency.is_some() {
-        unsupported.push("--concurrency");
-    }
-    if args.execution_mode.is_some() {
-        unsupported.push("--execution-mode");
-    }
-    if args.durable_prefix_cache.is_some() {
-        unsupported.push("--durable-prefix-cache");
-    }
-    if explicit.durable_prefix_cache_max_mib {
-        unsupported.push("--durable-prefix-cache-max-mib");
-    }
-    if explicit.durable_prefix_cache_max_entry_mib {
-        unsupported.push("--durable-prefix-cache-max-entry-mib");
-    }
-    if explicit.durable_prefix_cache_min_tokens {
-        unsupported.push("--durable-prefix-cache-min-tokens");
-    }
-    if args.sampling_attribution {
-        unsupported.push("--sampling-attribution");
-    }
-    if args.sampled_structural {
-        unsupported.push("--sampled-structural");
-    }
-    if args.trace_request.is_some() {
-        unsupported.push("--trace-request");
-    }
-    if args.messages_preserve_thinking || args.messages_strip_thinking {
-        unsupported.push("legacy message thinking controls");
-    }
-    unsupported
-}
-
-/// DeepSeek V4-only controls must not be silently accepted elsewhere.
-pub(crate) fn ensure_no_deepseek_v4_only_options(
-    args: &Args,
-    explicit: ExplicitCliOptions,
-    unsupported: &mut Vec<&'static str>,
-) -> Result<()> {
-    if args.reasoning.is_some() || args.preserve_reasoning {
-        unsupported.push("DeepSeek V4 reasoning controls");
-    }
-    if args.deepseek_v4_snapshot.is_some() {
-        unsupported.push("--deepseek-v4-snapshot");
-    }
-    ensure!(
-        !explicit.deepseek_v4_multigroup_selector
-            && args.deepseek_v4_multigroup_selector == DeepSeekV4MultigroupSelectorArg::Auto,
-        "--deepseek-v4-multigroup-selector applies only to DeepSeek V4"
-    );
-    Ok(())
-}
-
 pub(crate) fn validate_deepseek_v4_generation_mode(
     args: &Args,
     explicit: ExplicitCliOptions,
 ) -> Result<()> {
-    let mut unsupported = shared_unsupported_options(args, explicit);
-    if args.requests_jsonl.is_some() {
-        unsupported.push("--requests-jsonl");
-    }
-    if args.max_context_tokens.is_some() {
-        unsupported.push("--max-context-tokens");
-    }
+    let lane = &admission::DEEPSEEK_V4_SINGLE_TURN;
+    let mut unbound = lane.unsupported(&admission::supplied(args, explicit));
     if args.messages_preserve_thinking
         && !DeepSeekV4Reasoning::parse(args.reasoning.as_deref())
             .is_ok_and(|tier| tier.is_thinking())
     {
         // Preserved history reasoning is a release thinking-mode contract;
         // accepting the flag in chat mode would silently no-op.
-        unsupported.push("--messages-preserve-thinking (requires --reasoning low, high, or max)");
+        unbound.push("--messages-preserve-thinking (requires --reasoning low, high, or max)");
     }
     if args.durable_prefix_cache.is_none() {
-        if explicit.durable_prefix_cache_max_mib {
-            unsupported.push("--durable-prefix-cache-max-mib");
-        }
-        if explicit.durable_prefix_cache_max_entry_mib {
-            unsupported.push("--durable-prefix-cache-max-entry-mib");
-        }
-        if explicit.durable_prefix_cache_min_tokens {
-            unsupported.push("--durable-prefix-cache-min-tokens");
+        for (set, flag) in [
+            (
+                explicit.durable_prefix_cache_max_mib,
+                "--durable-prefix-cache-max-mib",
+            ),
+            (
+                explicit.durable_prefix_cache_max_entry_mib,
+                "--durable-prefix-cache-max-entry-mib",
+            ),
+            (
+                explicit.durable_prefix_cache_min_tokens,
+                "--durable-prefix-cache-min-tokens",
+            ),
+        ] {
+            if set {
+                unbound.push(flag);
+            }
         }
     }
-    ensure!(
-        unsupported.is_empty(),
-        "DeepSeek V4 currently supports bounded raw or ordinary-message single-turn generation only; unsupported options: {}",
-        unsupported.join(", ")
-    );
+    lane.refuse(&unbound)?;
     ensure!(
         has_single_turn_input(args),
         "DeepSeek V4 generation requires --prompt, --prompt-file, --messages, or `qwen run --user`"
@@ -401,47 +292,7 @@ pub(crate) fn validate_deepseek_v4_requests_mode(
     args: &Args,
     explicit: ExplicitCliOptions,
 ) -> Result<()> {
-    let mut unsupported = shared_unsupported_options(args, explicit);
-    if args.on_request_error != RequestErrorPolicy::Stop {
-        // DS4 keeps its own preparer and the stop policy; accepting
-        // `continue` silently would be a policy the lane does not honour.
-        unsupported.push("--on-request-error continue");
-    }
-    if args.durable_prefix_cache.is_some() {
-        unsupported.push("--durable-prefix-cache");
-    }
-    if explicit.durable_prefix_cache_max_mib || args.durable_prefix_cache_max_mib != 32 * 1024 {
-        unsupported.push("--durable-prefix-cache-max-mib");
-    }
-    if explicit.durable_prefix_cache_max_entry_mib
-        || args.durable_prefix_cache_max_entry_mib != 16 * 1024
-    {
-        unsupported.push("--durable-prefix-cache-max-entry-mib");
-    }
-    if explicit.durable_prefix_cache_min_tokens || args.durable_prefix_cache_min_tokens != 1024 {
-        unsupported.push("--durable-prefix-cache-min-tokens");
-    }
-    if args.messages_preserve_thinking {
-        unsupported.push("--messages-preserve-thinking");
-    }
-    if args.messages_strip_thinking {
-        unsupported.push("--messages-strip-thinking");
-    }
-    if args.deepseek_v4_snapshot.is_some() {
-        // Also excluded at the parser level; kept as a defensive invariant.
-        unsupported.push("--deepseek-v4-snapshot");
-    }
-    // --request-stats-jsonl is DS4-single-turn-only today. Reject on DS4 batch
-    // rather than silently no-oping (which would break the mandatory/fail-closed
-    // policy the flag advertises).
-    if args.request_stats_jsonl.is_some() {
-        unsupported.push("--request-stats-jsonl");
-    }
-    ensure!(
-        unsupported.is_empty(),
-        "DeepSeek V4 --requests-jsonl supports raw prompt requests only; unsupported options: {}",
-        unsupported.join(", ")
-    );
+    admission::DEEPSEEK_V4_BATCH.admit(&admission::supplied(args, explicit))?;
     let stdin = deepseek_v4_requests_reads_stdin(args)?;
     if stdin {
         ensure!(

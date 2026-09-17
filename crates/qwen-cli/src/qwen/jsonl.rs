@@ -178,13 +178,6 @@ pub(crate) fn run_requests_jsonl(
 ) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
-    // --request-stats-jsonl is DS4-single-turn-only today; reject on Qwen
-    // batch rather than silently no-oping.
-    ensure!(
-        args.request_stats_jsonl.is_none(),
-        "--request-stats-jsonl is not yet implemented on Qwen --requests-jsonl. \
-         Use --request-stats for legacy per-request stats output."
-    );
     cli_sampling_config(args)?;
     let policy = args.on_request_error;
     let accelerated_lane = args.batch_size.is_some()

@@ -42,6 +42,19 @@ F32 containers, not an implemented GPU cache layout. Tiny hard limits prohibit
 full-model CPU deployment or dequantization. Model-checkpoint parity and Metal
 qualification remain separate outstanding gates.
 
+Fourth packet: CPU-only contracts for a candidate short-context F16 bridge.
+Canonical cache arena ranges, serial append visibility, four corresponding
+grouped-norm/gamma views, and full NEOX Q32/KV8/H128 parameters have six passing
+host tests. The 7168-position bound comes from the existing candidate kernel's
+28 KiB score scratch constraint; it is not a qualified K2 execution limit.
+Declared model context, allocated request capacity, and absolute positions remain
+distinct. No new kernels or Metal wrappers are installed by this packet.
+
+Next integration must validate actual tensor dtype, physical range, writability,
+allocation identity/aliasing, and cache state before consuming these logical
+plans. An append plan can become stale and is never proof of a resident prefix.
+Actual weight/scratch/allocator admission remains separate from logical KV bytes.
+
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server
 coordination restrictions are unchanged. The download completed with verified

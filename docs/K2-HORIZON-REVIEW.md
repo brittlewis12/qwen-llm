@@ -159,3 +159,20 @@ cache-overflow test checks rollback after earlier staged rows/layers succeeded.
 Seven targeted CPU tests pass. This packet supplies synthetic equation evidence,
 not checkpoint parity, an executable GGUF path, GPU ABI qualification, actual
 F16 cache memory savings, or runtime admission.
+
+## Packet 4 design and pre-commit review
+
+The reviewer endorsed a host-only bridge using existing primitives rather than
+adding a grouped kernel prematurely: four direct-gamma RMS slices, fixed full
+NEOX, and canonical F16 cache spans for the generic short-attention candidate.
+The implementation review returned **proceed; no blocker**. Six CPU-only tests
+pass, including exact scratch-formula comparison to the existing helper; no
+Metal device or GPU execution is involved.
+
+Nonblocking integration requirements remain explicit: caller-supplied committed
+prefixes do not establish residency or freshness; raw logical ranges do not
+validate physical dtype/aliasing/base allocation; arithmetic bounded by fixed
+7B geometry and capacity must be revisited before any geometry generalization.
+The source ceiling of 7168 is deliberately not described as a numerically
+qualified backend limit. Structural theta admission remains positive, while the
+candidate paired-RoPE wrapper requires theta greater than one.

@@ -277,6 +277,29 @@ qwen-lens read-full -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
   --identity-cache /path/to/private/identity-cache --top-k 5
 ```
 
+Twelfth packet: a typed raw linear-readout seam prepares external asset reuse.
+`K2LinearF16` privately owns exactly 32 MiB of finite, unchanged little-endian F16
+coefficients in row-major `[target,source]` orientation. `readout_linear_f16`
+performs one existing F16/F32 matvec, returns its 4096-wide F32 residual, and uses
+the exact same final grouped norm/head executor as plain readout. No transpose,
+bias, normalization, fitting, or artifact-authentication claim is implicit.
+
+One additional per-call owned GPU matrix copy is independently priced/admitted
+against current residency (existing session scratch/output is reused), checked,
+and retained through synchronous completion. Both transformed residual and final
+logits must be finite. Source freshness and zero-advance/poison rules match plain
+readout; KV is never accessed. Ordinary readout allocates neither a matrix nor an
+extra returned residual vector. Forty-three regular K2 tests pass, nine opt-in
+tests remain ignored in the CPU run, and CLI binaries typecheck.
+
+The leased/API-validated Q8 probe passes identity-matrix bitwise capture/readout
+equality, a sparse nonsymmetric matrix with exact independent scalar expectations
+and transpose negative control, exact cache/prefix isolation, ordinary continuation,
+retryable invalid host rows, and deliberate finite-input matvec overflow poisoning.
+The prior capture/plain-readout GPU regression also passes unchanged after the
+shared executor refactor. This is a raw mathematical seam; external digest/site/
+checkpoint/transfer policy still belongs to the pending VerifiedTransport adapter.
+
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server
 coordination restrictions are unchanged. The download completed with verified

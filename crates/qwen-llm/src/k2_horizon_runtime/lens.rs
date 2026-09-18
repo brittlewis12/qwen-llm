@@ -36,35 +36,58 @@ impl K2Session<'_, '_> {
     /// finite F32 residual. Does not read/write KV or advance the committed prefix.
     /// A submitted failure poisons the session; host rejection is retryable.
     pub fn readout(&mut self, residual: &[f32]) -> Result<Vec<f32>> {
+        Ok(self.readout_impl(residual, None)?.logits)
+    }
+
+    pub(super) fn readout_impl(
+        &mut self,
+        residual: &[f32],
+        matrix: Option<&K2LinearF16>,
+    ) -> Result<K2LinearReadout> {
         validate_residual(residual)?;
         self.model.plan.revalidate_source()?;
         let mut transaction = self.ledger.begin_readout()?;
+        let ctx = self.model.ctx;
+        let matrix = matrix.map(|matrix| matrix.upload(ctx)).transpose()?;
+        self.model.plan.revalidate_source()?;
+        let input = if matrix.is_some() {
+            &self.buffers.norm
+        } else {
+            &self.buffers.residual
+        };
         // Owned, checked shared F32[4096]; prior commands completed synchronously.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 residual.as_ptr(),
-                self.buffers
-                    .residual
-                    .buffer
-                    .contents()
-                    .as_ptr()
-                    .cast::<f32>(),
+                input.buffer.contents().as_ptr().cast::<f32>(),
                 WIDTH,
             );
         }
-        let ctx = self.model.ctx;
         let command = ctx
             .queue
             .commandBuffer()
             .ok_or_else(|| invalid("cannot create readout command"))?;
         let encoder = KernelEncoder::begin(&command);
-        let encoded = encode_readout(
-            ctx,
-            &encoder,
-            &self.model.weights,
-            &self.request,
-            &self.buffers,
-        );
+        let encoded = (|| -> Result<()> {
+            if let Some(matrix) = &matrix {
+                crate::metal::encode_mat_vec_f16_f32(
+                    ctx,
+                    &encoder,
+                    matrix,
+                    input,
+                    &self.buffers.residual,
+                    WIDTH,
+                    WIDTH,
+                )?;
+            }
+            encode_readout(
+                ctx,
+                &encoder,
+                &self.model.weights,
+                &self.request,
+                &self.buffers,
+            )
+        })();
         encoder.end();
         encoded?;
         transaction.submitting()?;
@@ -76,15 +99,22 @@ impl K2Session<'_, '_> {
                 command.error()
             )));
         }
+        let transformed = read_f32(&self.buffers.residual);
+        validate_residual(transformed)?;
         let logits = read_f32(&self.buffers.logits);
         if logits.iter().any(|value| !value.is_finite()) {
             return Err(invalid("nonfinite readout logits"));
         }
         self.model.plan.revalidate_source()?;
+        let residual = if matrix.is_some() {
+            transformed.to_vec()
+        } else {
+            Vec::new()
+        };
         let logits = logits.to_vec();
         transaction.checked()?;
         transaction.commit()?;
-        Ok(logits)
+        Ok(K2LinearReadout { residual, logits })
     }
 }
 

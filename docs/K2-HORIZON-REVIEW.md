@@ -387,3 +387,21 @@ verified K2-only digest changes and the CLI checker assertions. Its suggested
 rerun ergonomics change is intentionally not overwrite behavior: the checker
 requires a new evidence directory, now explicit in its help, preserving prior
 results and immutable bundle publication.
+
+## Packet 12 typed raw linear readout
+
+The design reviewer rejected an untyped public byte-slice seam in favor of one
+validated owned `K2LinearF16`: exact 4096x4096 finite F16, row-major target/source,
+no orientation toggle, unchanged bytes, no asset trust policy. Implemented that
+type and one shared zero-advance readout executor, reusing existing session scratch
+and the exact final norm/head. The matrix is copied into checked/admitted private
+GPU storage; source freshness and both residual/logit finite checks gate commit.
+
+Implementation review found **no concrete source blocker**, conditional on the
+prior capture/plain-readout GPU regression. Both the new linear probe and that
+regression now pass under production leases/API validation. Evidence covers exact
+identity, nonsymmetric orientation, cache/prefix/continuation isolation, retryable
+host errors, and numerical overflow poisoning. Forty-three regular K2 CPU tests
+pass and CLI binaries typecheck. The type remains non-Clone; the upload destination
+is privately writable, not caller-owned storage. No imported-asset binding or CLI
+transport capability is claimed by this packet.

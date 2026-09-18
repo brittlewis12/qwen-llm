@@ -28,6 +28,7 @@ mod intervention;
 mod lens;
 mod residency;
 mod state;
+mod transport;
 use intervention::InterventionArena;
 pub use intervention::{K2Intervention, K2InterventionKind};
 use lens::CaptureArena;
@@ -35,6 +36,7 @@ pub use lens::K2CapturedForward;
 pub use residency::K2RuntimePlan;
 use residency::ResidentWeights;
 use state::Ledger;
+pub use transport::{K2LinearF16, K2LinearReadout};
 
 const RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 type Result<T> = std::result::Result<T, K2RuntimeError>;

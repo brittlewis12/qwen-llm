@@ -16,7 +16,7 @@ gate records under `docs/bench/`, the successful real OpenCode session
 Private, single-box engine serving local clients over loopback.
 
 K2 Horizon dense 7B has a separate, bounded raw-string `/v1/responses` subset:
-see [K2-HORIZON-SERVE.md](K2-HORIZON-SERVE.md). It does not inherit this document's
+see [K2 Horizon Raw Profile](#k2-horizon-raw-profile). It does not inherit the
 Qwen/DeepSeek chat, reasoning, tools, snapshots, or long-context capabilities.
 
 Operating goals, in order:
@@ -122,6 +122,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # Muse Glimmer and Qwen3.8-Flash-Next require both --max-context-tokens and
 # --max-tokens (resident session capacity is fixed at load); admitted capacity
 # may extend through the model's declared context.
+# K2 requires explicit --max-context-tokens (1..=32), --max-tokens, and
+# --snapshot-cache-mib 0; only raw string input is supported.
 ```
 
 The listener rejects every resolved non-loopback address and is bound before
@@ -199,8 +201,8 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   `Retry-After: 1`. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
-- **Every recognised family: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
-  V4, and Muse Glimmer.** DS4 runs its own session and snapshot stack
+- **Implemented families: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
+  V4, Muse Glimmer, and bounded raw K2 Horizon.** DS4 runs its own session and snapshot stack
   (`serve/backend_ds4.rs`) with a startup-fixed forward budget and a
   serve-owned byte-bounded snapshot LRU (DS4 has no engine-side RAM prefix
   cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
@@ -209,6 +211,8 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   prefix reuse, no snapshots. `--snapshot-cache-mib` configures the Qwen and
   DS4 cache implementations and defaults to 4096 MiB. Muse does not claim
   snapshot reuse yet.
+  K2 uses fresh per-request sessions, requires a zero snapshot budget, and has
+  no prefix reuse, drafter, chat, reasoning partition, or tool protocol.
 - **Stdout is never written.** All diagnostics via the existing stderr
   tracing surface; per-request `qwen_diag` stats line retained and
   extended with `matched_tokens` and `restore_ms` (the S2/S3 gates are
@@ -226,7 +230,81 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   filesystem cannot hold process exit; queued trace events may be lost in that
   case.
 
+## K2 Horizon Raw Profile
+
+K2 dense 7B supports completion-style raw text on `POST /v1/responses`, not a
+new `/v1/completions` endpoint. Choose an unused loopback address:
+
+```sh
+qwen serve -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --addr 127.0.0.1:8795 --max-context-tokens 32 --max-tokens 8 \
+  --snapshot-cache-mib 0
+```
+
+Both limits must be explicit. Capacity is 1..=32 and must fit the checkpoint's
+declared context; the default output limit is 1..=capacity. Nonzero snapshot
+budgets and drafters fail startup. K2 config, runtime storage plan, native
+tokenizer, and EOS metadata are checked before listener binding or Metal setup.
+The normal production lease and memory gate apply; listener binding still
+precedes weight loading so busy addresses fail cheaply.
+
+```json
+{
+  "model": "K2-Horizon-7B-Q8_0",
+  "input": "The capital of France is",
+  "max_output_tokens": 8,
+  "stream": false
+}
+```
+
+The model ID is the filename stem, as returned by `GET /v1/models`. Input must be
+a nonempty string. The family parser retains it explicitly and applies no chat
+template; native tokenizer NFC normalization and special-token recognition still
+apply. Native BOS insertion defaults on. For already serialized input, use
+`"x_k2":{"add_special_tokens":false}`; there is no authored-token deduplication.
+For example, that option with input
+`"<|ifm|begin_of_text|>The capital of France is"` matches the plain example's IDs.
+
+Accepted fields are `model`, `input`, `stream`, `max_output_tokens`, `temperature`,
+`top_p`, `store`, `truncation`, `x_qwen`, and `x_k2` only:
+
+- Omitted `max_output_tokens` uses the explicit startup default. The full
+  `prompt_tokens + max_output_tokens - 1` budget must fit capacity; no truncation.
+- Sampling defaults are temperature 0, top-p 1, top-k 0, min-p 0, seed 0.
+  `x_qwen` accepts only `seed`, `top_k`, `min_p`, and `stats`.
+- `x_k2` accepts only boolean `add_special_tokens`; other families reject that
+  extension. If supplied, `store` must be false and `truncation` must be `"disabled"`.
+- Message/item arrays, token-ID arrays, instructions, tools, reasoning/history,
+  previous-response controls, and unknown fields fail, including null-valued
+  unsupported fields. Accepted fields cannot be null either. The whitelist uses
+  the existing parsed JSON representation; it adds no duplicate-key guarantee.
+
+EOS 1 is the only stopping token: sampled/countable, but never emitted or forwarded.
+The final non-EOS budget token is emitted without an extra forward. JSON and SSE
+both emit literal protocol text: think/tool/IFM marker strings are not stripped,
+partitioned, or executed. Incremental UTF-8 assembly preserves split characters;
+invalid bytes or a final incomplete sequence use replacement characters. This is
+not a byte-preserving binary HTTP format. Budget exhaustion uses the ordinary
+incomplete-response terminal semantics, not an EOS success.
+
+The model remains resident, but each request owns fresh KV and a fresh sampler.
+There are no snapshots, resets, prefix reuse, or hidden conversation history.
+Synchronous per-token prefill appends provide real cancellation boundaries; abort
+drops the entire session, so the next request cannot inherit partial KV. The
+borrowing backend stays on the accept-loop thread without self-referential/leaked
+model storage. `x_qwen.stats` is opt-in with cached/matched tokens always zero;
+the response echo has no tools/reasoning and disables parallel tool calls.
+
+Validation covers CPU wire/UTF-8/EOS controls and actual-Q8 borrowed-backend
+JSON/SSE, BOS, abort isolation, and budget checks on ephemeral loopback sockets.
+This is not sustained-service, full-context, chat/tool, or cross-checkpoint
+numerical qualification. Test reproduction is in
+[`scripts/reference/k2/README.md`](../scripts/reference/k2/README.md); development
+evidence remains in `K2-HORIZON-PLAN.md` and `K2-HORIZON-REVIEW.md`.
+
 ## Wire subset (Open Responses)
+
+This section describes the Qwen/DeepSeek/Muse chat profiles, not K2's raw profile.
 
 The parser, Qwen capability binding, and prompt renderer are one shared pure
 module. `qwen-lens --open-responses FILE|-` uses that same path for offline

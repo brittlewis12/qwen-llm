@@ -508,3 +508,15 @@ started. No claim of sustained-service, chat/tool, snapshot, or long-context sup
 Closure verdict: **no remaining concrete commit blocker; commit-ready**. The
 reviewer confirmed the family boundary, listener/lease ordering, explicit raw/BOS
 policy, completed JSON/SSE and abort checks, and correctly limited documentation.
+
+## Packet 16 serving documentation consolidation
+
+The user questioned the separate K2 serving manual. The raw family contract still
+needs an explicit boundary from Qwen/DeepSeek/Muse chat, but not a separate manual.
+It now lives in `SERVE.md#k2-horizon-raw-profile`, with test reproduction in the
+reference README and development evidence here/in the plan. The old generic wire
+section anchor is preserved; that section explicitly excludes the K2 raw profile.
+
+Read-only adversarial verdict: **no documentation commit blocker**. Contract,
+limitations, lifetime rules, BOS controls, evidence scope, and reproduction were
+retained; stale links were removed. No runtime behavior changed.

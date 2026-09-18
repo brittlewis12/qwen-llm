@@ -104,3 +104,23 @@ with guard/readback overhead, not GPU-command timings or llama-bench pp/tg resul
 The checker records its explicit dirty-build override, tests warmup/repeat identity,
 raw-run fingerprint parity, BOS/literal input, zero-transition rates, timing/prefix
 counts, and pre-Metal errors. Each child owns its normal production lease.
+
+## Raw serving correctness
+
+The canonical user contract lives in `docs/SERVE.md#k2-horizon-raw-profile`, not a
+separate serving manual. This opt-in probe uses direct borrowed-backend calls and
+ephemeral loopback JSON/SSE connections, without starting a long-running server:
+
+```sh
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  cargo test -p qwen-cli --bin qwen \
+  serve::backend_k2::tests::gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+It checks raw-run parity, native BOS controls, optional stats, budget refusal, and
+fresh-request behavior after prefill/generation aborts. The CLI test links the
+library without `cfg(test)`, so its `MetalContext::new` already takes the production
+lease and real wired-memory gate. Do not acquire a second/outer lease. This differs
+from the isolated-context behavior of the library's own unit tests. Evidence is
+short-context final-Q8 correctness, not sustained-service or performance evidence.

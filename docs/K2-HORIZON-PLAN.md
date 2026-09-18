@@ -400,7 +400,8 @@ listener/Metal creation. No existing service was touched or long-running server
 process started. CPU regressions pass: 29 HTTP tests, 24 shared parser tests,
 13 family renderer tests, nine startup/acceptor tests, ten CLI tests, seven output-
 partition tests, two K2 backend host tests, and five K2 capability/run tests (some
-filters overlap). See `docs/K2-HORIZON-SERVE.md` for scope and reproduction.
+filters overlap). See `docs/SERVE.md#k2-horizon-raw-profile` for the canonical
+contract and `scripts/reference/k2/README.md` for test reproduction.
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server

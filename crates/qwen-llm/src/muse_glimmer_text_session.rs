@@ -927,6 +927,8 @@ pub struct MuseGlimmerTextForward<'ctx, 'model> {
     packed_online_max_end: usize,
     #[cfg(test)]
     packed_numerical_capture: Option<tests::PackedNumericalCapture>,
+    #[cfg(test)]
+    ffn_census_capture: Option<tests::MuseFfnCapture>,
 }
 
 pub struct MuseGlimmerPreparedF16Transport {
@@ -1126,6 +1128,8 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             packed_online_max_end: context_length,
             #[cfg(test)]
             packed_numerical_capture: None,
+            #[cfg(test)]
+            ffn_census_capture: None,
         })
     }
 
@@ -2762,6 +2766,10 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 &session.normed,
                 self.weights.config.rms_epsilon,
             )?;
+            #[cfg(test)]
+            if let Some(capture) = &self.ffn_census_capture {
+                capture.copy(self.ctx, encoder, position, layer_index, 0, &session.normed)?;
+            }
             encode_mat_vec_dispatch(
                 self.ctx,
                 encoder,
@@ -2780,6 +2788,25 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 geometry.hidden_size,
                 geometry.feed_forward_size,
             )?;
+            #[cfg(test)]
+            if let Some(capture) = &self.ffn_census_capture {
+                capture.copy(
+                    self.ctx,
+                    encoder,
+                    position,
+                    layer_index,
+                    1,
+                    &session.feed_forward_gate,
+                )?;
+                capture.copy(
+                    self.ctx,
+                    encoder,
+                    position,
+                    layer_index,
+                    2,
+                    &session.feed_forward_up,
+                )?;
+            }
             encode_silu_mul_f32(
                 self.ctx,
                 encoder,
@@ -2787,6 +2814,17 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
                 &session.feed_forward_up,
                 &session.feed_forward_gate,
             )?;
+            #[cfg(test)]
+            if let Some(capture) = &self.ffn_census_capture {
+                capture.copy(
+                    self.ctx,
+                    encoder,
+                    position,
+                    layer_index,
+                    3,
+                    &session.feed_forward_gate,
+                )?;
+            }
             encode_mat_vec_dispatch(
                 self.ctx,
                 encoder,
@@ -5113,6 +5151,7 @@ mod tests {
     include!("muse_tiled_long_transfer.rs");
     include!("muse_prefill_batch_screen.rs");
     include!("muse_optimized_reuse_tests.rs");
+    include!("muse_ffn_packet.rs");
 
     #[test]
     fn split_decode_selection_uses_visible_work() {

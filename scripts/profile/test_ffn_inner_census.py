@@ -205,6 +205,12 @@ class SwigluCensusTests(unittest.TestCase):
                 self.assertEqual(report["schema_version"], version)
                 self.assertEqual(report["block_size"], 256 if version == 1 else 32)
                 self.assertEqual("swiglu" in report, version == 2)
+                if version == 2:
+                    halves = report["swiglu_sample_halves"]
+                    self.assertEqual(halves["first"]["sample_end_exclusive"], 1)
+                    self.assertEqual(halves["second"]["sample_start"], 1)
+                    self.assertEqual(halves["first"]["denominator"]["vectors"], 2)
+                    self.assertEqual(halves["second"]["denominator"]["vectors"], 2)
             for key in (
                 "source_commit",
                 "model_content_identity",

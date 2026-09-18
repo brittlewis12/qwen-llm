@@ -403,6 +403,25 @@ def main() -> None:
             )
             for index, layer in enumerate(layers)
         }
+        report["swiglu_sample_halves"] = {}
+        if shape[0] >= 2:
+            for name, start, end in (
+                ("first", 0, shape[0] // 2),
+                ("second", shape[0] // 2, shape[0]),
+            ):
+                cohort = analyze_swiglu(
+                    gate[start:end].reshape(-1, shape[2]),
+                    up[start:end].reshape(-1, shape[2]),
+                    values[start:end].reshape(-1, shape[2]),
+                    args.thresholds,
+                )
+                report["swiglu_sample_halves"][name] = {
+                    "sample_start": start,
+                    "sample_end_exclusive": end,
+                    "denominator": cohort["denominator"],
+                    "zero_energy_vectors": cohort["zero_energy_vectors"],
+                    "post_product_oracle": cohort["post_product_oracle"],
+                }
 
     print("metric\tvalue")
     if "0" in aggregate["scalar_cdf_abs_le"]:

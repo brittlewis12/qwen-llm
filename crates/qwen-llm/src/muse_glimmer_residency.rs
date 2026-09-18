@@ -385,6 +385,15 @@ impl MuseGlimmerMetalWeightPlan {
         self.contents_authenticated
     }
 
+    #[cfg(test)]
+    pub(crate) fn authenticated_shard_sha256s(&self) -> Vec<String> {
+        assert!(self.contents_authenticated);
+        self.authenticated_shards
+            .iter()
+            .map(|shard| hex_digest(shard.sha256))
+            .collect()
+    }
+
     pub fn admit(
         self,
         signals: MetalMemorySignals,

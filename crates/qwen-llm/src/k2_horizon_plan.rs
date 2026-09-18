@@ -179,6 +179,10 @@ pub struct TokenPlan<'a> {
 }
 
 impl TokenPlan<'_> {
+    pub fn arena_bytes(&self) -> u64 {
+        self.request.arena_bytes()
+    }
+
     pub fn absolute_position(&self) -> u32 {
         self.request.start_position + self.cache_index
     }

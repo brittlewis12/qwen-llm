@@ -55,6 +55,22 @@ allocation identity/aliasing, and cache state before consuming these logical
 plans. An append plan can become stale and is never proof of a resident prefix.
 Actual weight/scratch/allocator admission remains separate from logical KV bytes.
 
+Fifth packet: unqualified primitive wiring to existing Metal kernels (no new
+shader). Serial-only wrappers validate exact physical F32/F16 shapes, byte
+extent, element alignment, write access, and same-allocation range overlap,
+then encode grouped norm, full RoPE, cache store, and causal short attention.
+Three CPU descriptor tests pass. Two ignored synthetic GPU probes compile but
+have NOT run: grouped norm/full RoPE at position 37, and F16 store/attention over
+all 32 query heads with poisoned future rows and zero/nonzero arena offsets.
+Those probes are not yet numerical evidence, and their tolerances are provisional
+test thresholds, not calibrated whole-model contracts.
+
+Before stacking full forward/lens execution on this bridge, obtain a separately
+authorized synthetic GPU window. The future session owner must enforce model and
+prefix identity, cross-command ordering, finite values, and transactional state
+commit. On any encoding error, discard the entire command buffer; these primitive
+wrappers cannot roll back already encoded work if a caller submits it anyway.
+
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server
 coordination restrictions are unchanged. The download completed with verified

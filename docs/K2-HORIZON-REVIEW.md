@@ -176,3 +176,20 @@ validate physical dtype/aliasing/base allocation; arithmetic bounded by fixed
 The source ceiling of 7168 is deliberately not described as a numerically
 qualified backend limit. Structural theta admission remains positive, while the
 candidate paired-RoPE wrapper requires theta greater than one.
+
+## Packet 5 pre-commit review
+
+Primitive wiring review returned **no blocker for this unqualified wiring
+packet**. Three host-only descriptor tests pass; both explicitly ignored GPU
+probes compile but remain unexecuted. No GPU device is created by the host tests.
+One compile-only issue (missing ObjC queue trait import in the ignored test) was
+fixed before the successful build.
+
+Nonblocking feedback: partial encoding requires whole-command-buffer discard;
+serial encoders do not prove dependencies across commands or session identity;
+unqualified public helpers must not be mistaken for model support. The ignored
+attention probe now covers zero/nonzero arena base offsets and outer guards.
+Source inspection confirms the selected norm/RoPE/store/attention variants use
+scalar float/half loads, matching the current element-alignment checks; future
+vectorized kernels must revalidate alignment. Numerical thresholds and descriptor
+behavior on a live device remain a separately authorized validation gate.

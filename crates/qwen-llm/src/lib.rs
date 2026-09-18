@@ -43,6 +43,7 @@ pub mod env_flag;
 pub mod forward;
 pub mod gguf;
 pub mod k2_horizon;
+pub mod k2_horizon_metal;
 pub mod k2_horizon_plan;
 pub mod k2_horizon_reference;
 pub mod loader;

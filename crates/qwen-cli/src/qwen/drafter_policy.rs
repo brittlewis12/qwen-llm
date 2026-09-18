@@ -92,6 +92,7 @@ impl fmt::Display for DrafterUnsupported {
                 let family_label = match family {
                     ModelFamily::DeepSeek4 => "DeepSeek V4",
                     ModelFamily::MuseGlimmer => "Muse Glimmer",
+                    ModelFamily::K2Horizon => "K2 Horizon",
                     ModelFamily::Qwen4Exp => "Qwen3.8-Flash-Next",
                     ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => "this Qwen",
                 };
@@ -136,7 +137,10 @@ pub(crate) fn resolve_drafter(
             Lane::Serve => DrafterDecision::Unsupported(DrafterUnsupported::ServeMoeTarget),
         },
         Some(
-            family @ (ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer | ModelFamily::Qwen4Exp),
+            family @ (ModelFamily::DeepSeek4
+            | ModelFamily::MuseGlimmer
+            | ModelFamily::Qwen4Exp
+            | ModelFamily::K2Horizon),
         ) => DrafterDecision::Unsupported(DrafterUnsupported::FamilyNoSpeculation { family, lane }),
         None => DrafterDecision::Unsupported(DrafterUnsupported::UnknownFamily),
     }
@@ -213,6 +217,7 @@ mod tests {
             Some(ModelFamily::Qwen4Exp),
             Some(ModelFamily::DeepSeek4),
             Some(ModelFamily::MuseGlimmer),
+            Some(ModelFamily::K2Horizon),
         ] {
             for lane in [Lane::CliSingleTurn, Lane::Serve] {
                 assert_eq!(
@@ -251,6 +256,7 @@ mod tests {
             ModelFamily::DeepSeek4,
             ModelFamily::MuseGlimmer,
             ModelFamily::Qwen4Exp,
+            ModelFamily::K2Horizon,
         ] {
             for lane in [Lane::CliSingleTurn, Lane::Serve] {
                 let decision = resolve_drafter(Some(family), lane, true);

@@ -268,3 +268,32 @@ fixed to use the pinned API's `load_mode = LLAMA_LOAD_MODE_MMAP`.
 Closure verdict: **no remaining commit blocker**. The reviewer confirmed source
 cleanliness, bound wrapper identity, runtime-record checks, lease lifetime,
 provenance, and the unchanged scoped regression gates. Ready to commit.
+
+## Packet 8 raw CLI design
+
+The design review required strict family-local early dispatch, no Qwen stats or
+template inheritance, explicit 32-forward budgeting, and a clear BOS owner.
+Implemented native special insertion without heuristic deduplication; a modern
+raw-only `--no-special-tokens` option provides the explicit serialized-input path.
+Explicit token-budget presence is tracked through clap rather than inferred from
+its default value. An existing normalization test was updated to compare like
+explicit budgets instead of assuming token presence was untracked.
+
+Registration exposed a real integration hazard: the serving gate admitted every
+recognized family via `is_some()`. It now lists only implemented backends and
+tests K2 refusal. New enum arms reject K2 speculation, concurrency, template
+fallback, and unimplemented fitting/lens paths rather than defaulting to Qwen.
+Five K2 host tests and eighteen related normalization/drafter/serve regressions
+pass, all CLI binaries typecheck, and the actual raw Q8 generation smoke passes
+under the production lease with Metal API validation. No shared server operation.
+
+Pre-commit review found remaining family arms in the queue-overlap diagnostic;
+those now reject K2 before Metal creation and have exhaustive unsupported arms.
+The generic stop reader could accept additional EOT IDs, so K2 now validates its
+resolved stop set as exactly EOS 1. A host test rejects extra/invalid sets. The
+explicit-BOS/no-special-tokens CLI rerun matches both input count and generated
+token fingerprint of the automatic-BOS run, without changing tokenizer behavior.
+
+Closure verdict: **no remaining commit blocker** for the scoped research raw-run
+lane. The reviewer confirmed the diagnostic guards, exact EOS policy, early
+dispatch, BOS ownership, budgeting, stats identity, and unimplemented-lane gates.

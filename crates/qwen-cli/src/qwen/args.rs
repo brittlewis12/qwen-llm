@@ -6,7 +6,7 @@ use super::*;
 #[command(
     name = "qwen",
     version,
-    about = "Fast local Qwen, DeepSeek, and Muse inference on Apple Silicon",
+    about = "Fast local Qwen, DeepSeek, Muse, and K2 inference on Apple Silicon",
     args_conflicts_with_subcommands = true,
     after_help = "Examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --system 'Be concise' --user 'Explain this'\n  qwen run -m MODEL --user -\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n  qwen run -m Qwen3.6-35B-A3B.gguf --user 'Explain this' --no-thinking\n\n--no-thinking controls model prompt rendering; it does not hide CLI diagnostics.\nCLI diagnostic suppression is not currently available.\nFor resident JSONL batching and expanded legacy/research help, run:\n  qwen --help\nLegacy flags shown there are flat and cannot be combined with qwen run.",
     after_long_help = "Modern examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n\nLegacy/research examples (flat; do not combine with qwen run):\n  qwen -m MODEL --prompt '<raw model input>'\n  qwen -m MODEL --requests-jsonl requests.jsonl\n\n--no-thinking controls model prompt rendering; it does not hide CLI diagnostics.\nCLI diagnostic suppression is not currently available."
@@ -18,7 +18,7 @@ pub(crate) struct Args {
     #[arg(skip)]
     pub(crate) prepared_prompt: Option<PreparedPrompt>,
 
-    /// Path to a Qwen, DeepSeek V4, or Muse Glimmer GGUF file.
+    /// Path to a Qwen, DeepSeek V4, Muse Glimmer, or K2 Horizon GGUF file.
     #[arg(short = 'm', long)]
     pub(crate) model: Option<std::path::PathBuf>,
 
@@ -310,6 +310,7 @@ pub(crate) struct Args {
 /// hides a supplied option.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ExplicitCliOptions {
+    pub(crate) tokens: bool,
     pub(crate) temperature: bool,
     pub(crate) top_k: bool,
     pub(crate) top_p: bool,
@@ -330,6 +331,7 @@ impl ExplicitCliOptions {
                 && matches.value_source(id) == Some(ValueSource::CommandLine)
         };
         Self {
+            tokens: command_line("tokens"),
             temperature: command_line("temperature"),
             top_k: command_line("top_k"),
             top_p: command_line("top_p"),

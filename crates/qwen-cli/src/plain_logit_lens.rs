@@ -114,6 +114,10 @@ pub(super) fn read(args: ReadFullArgs) -> Result<()> {
         "invalid top-k or max-tokens"
     );
     let gguf = GgufFile::open(&args.model)?;
+    ensure!(
+        ModelFamily::detect(&gguf) != Some(ModelFamily::K2Horizon),
+        "K2 Horizon forward-only lens integration is not implemented yet"
+    );
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(&args.identity_cache))?;
     let family = ModelFamily::detect(&gguf);

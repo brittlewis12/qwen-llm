@@ -2,7 +2,8 @@
 
 Status: profile/binder, native tokenizer, CPU reference, checked Metal primitives,
 and a serial dense runtime implemented. Pinned Q8 short-context checkpoint
-correctness passes; no application dispatch or long-context qualification yet.
+correctness passes; bounded raw CLI dispatch is implemented. Long-context,
+bench, forward-only lens, and serving integration remain outstanding.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -143,6 +144,41 @@ See `scripts/reference/k2/README.md` for reproduction. Successful proof artifact
 oracle binary hashes, original logs, full reference rows, and metrics). This is
 GGUF-oracle agreement for the measured final Q8 corpus, not HF/BF16 fidelity,
 all-checkpoint/all-position/long-context qualification, or a benchmark result.
+
+Eighth packet: K2 family registration and bounded `qwen run --raw-prompt` plus
+legacy `--prompt`/`--prompt-file` execution. Dispatch is immediately after header
+family detection, before any Qwen template/drafter/ordinary-runtime path. The
+initial research CLI caps the forward budget at 32, requires an explicit `-n`,
+and rejects excessive prompt/output/capacity requests rather than truncating.
+The source-kernel ceiling 7168 and model context 524288 are not CLI promises.
+Compatible 7B checkpoint metadata is structurally admitted without a compiled
+final-weight whitelist; evidence diagnostics remain scoped to the final Q8/M4 Max.
+
+Native tokenizer special insertion is used unchanged: enabled means one automatic
+BOS per encoding call, even when the authored text contains a literal BOS token.
+Use modern `--raw-prompt ... --no-special-tokens` (or its existing legacy form)
+for already serialized special-token input. No ID-based deduplication, template,
+reasoning partition, or tool parser is guessed. Emission preserves native token
+piece bytes except stopping tokens (suppressed by the shared generator) and the
+existing CLI final newline. Optional request stats identify `k2_horizon`/raw,
+never Qwen/ChatML. Info lists raw-only input and explicit unsupported lanes.
+
+Five K2 host tests, ten CLI normalization tests, seven drafter-policy tests, and
+the serving gate regression pass; every CLI binary typechecks. Serve now uses an
+implemented-family allowlist instead of accepting any registered architecture.
+K2 local fitting and ordinary logit-lens fallback are explicitly rejected before
+GPU setup. Bounded native CLI smoke input `The capital of France is` generated
+` Paris. The capital of Germany is Berlin` (8 tokens, 7 transitions) with API
+validation and the production lease. The smoke stats record is in
+`target/profiles/k2-cli-smoke.jsonl`; timings are observations, not benchmark gates.
+An explicit serialized BOS plus `--no-special-tokens` produced the same six input
+tokens and output fingerprint (`target/profiles/k2-cli-explicit-bos.jsonl`). Raw
+stops are restricted to EOS 1; extra producer EOT stops fail before GPU setup.
+
+```sh
+qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --raw-prompt 'The capital of France is' -n 8
+```
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server

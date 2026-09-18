@@ -286,7 +286,12 @@ pub(crate) fn run_requests_jsonl(
                 fixed_cohort_jsonl::plan_summary::<MOE_BATCH16_WIDTH>(requests, args)?,
             ),
             (
-                Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer)
+                Some(
+                    ModelFamily::Qwen4Exp
+                    | ModelFamily::DeepSeek4
+                    | ModelFamily::MuseGlimmer
+                    | ModelFamily::K2Horizon,
+                )
                 | None,
                 false,
             ) => (
@@ -372,7 +377,12 @@ pub(crate) fn run_requests_jsonl(
             fixed_cohort_economics_rejected: match model_family {
                 Some(ModelFamily::Qwen35) => dense_summary.economics_rejected_cohorts > 0,
                 Some(ModelFamily::Qwen35Moe) => moe_summary.economics_rejected_cohorts > 0,
-                Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer)
+                Some(
+                    ModelFamily::Qwen4Exp
+                    | ModelFamily::DeepSeek4
+                    | ModelFamily::MuseGlimmer
+                    | ModelFamily::K2Horizon,
+                )
                 | None => false,
             },
             concurrency2_memory_admitted,
@@ -390,7 +400,10 @@ pub(crate) fn run_requests_jsonl(
                     Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_policy,
                     Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_policy,
                     Some(
-                        ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer,
+                        ModelFamily::Qwen4Exp
+                        | ModelFamily::DeepSeek4
+                        | ModelFamily::MuseGlimmer
+                        | ModelFamily::K2Horizon,
                     )
                     | None => None,
                 },
@@ -398,7 +411,10 @@ pub(crate) fn run_requests_jsonl(
                     Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_plan_decision,
                     Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_plan_decision,
                     Some(
-                        ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer,
+                        ModelFamily::Qwen4Exp
+                        | ModelFamily::DeepSeek4
+                        | ModelFamily::MuseGlimmer
+                        | ModelFamily::K2Horizon,
                     )
                     | None => None,
                 },
@@ -408,7 +424,8 @@ pub(crate) fn run_requests_jsonl(
                         ModelFamily::Qwen35Moe
                         | ModelFamily::Qwen4Exp
                         | ModelFamily::DeepSeek4
-                        | ModelFamily::MuseGlimmer,
+                        | ModelFamily::MuseGlimmer
+                        | ModelFamily::K2Horizon,
                     )
                     | None => None,
                 },
@@ -418,7 +435,8 @@ pub(crate) fn run_requests_jsonl(
                         ModelFamily::Qwen35Moe
                         | ModelFamily::Qwen4Exp
                         | ModelFamily::DeepSeek4
-                        | ModelFamily::MuseGlimmer,
+                        | ModelFamily::MuseGlimmer
+                        | ModelFamily::K2Horizon,
                     )
                     | None => None,
                 },
@@ -428,7 +446,8 @@ pub(crate) fn run_requests_jsonl(
                         ModelFamily::Qwen35Moe
                         | ModelFamily::Qwen4Exp
                         | ModelFamily::DeepSeek4
-                        | ModelFamily::MuseGlimmer,
+                        | ModelFamily::MuseGlimmer
+                        | ModelFamily::K2Horizon,
                     )
                     | None => None,
                 },

@@ -175,6 +175,7 @@ impl ExecutionSelectionRecord {
                 Some(ModelFamily::Qwen4Exp) => "qwen4exp",
                 Some(ModelFamily::DeepSeek4) => "deepseek4",
                 Some(ModelFamily::MuseGlimmer) => "muse-glimmer",
+                Some(ModelFamily::K2Horizon) => "k2-horizon",
                 None => "unknown",
             },
             selected_mode: selection.selected.as_str(),
@@ -364,9 +365,13 @@ pub(super) fn select_qwen(input: QwenSelectionInput) -> ExecutionSelection {
                 )
             }
         }
-        Some(ModelFamily::Qwen4Exp | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer) | None => {
-            serial("unsupported_family", "not_evaluated", input.moe_plan)
-        }
+        Some(
+            ModelFamily::Qwen4Exp
+            | ModelFamily::DeepSeek4
+            | ModelFamily::MuseGlimmer
+            | ModelFamily::K2Horizon,
+        )
+        | None => serial("unsupported_family", "not_evaluated", input.moe_plan),
     }
 }
 

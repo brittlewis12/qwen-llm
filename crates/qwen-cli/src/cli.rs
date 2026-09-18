@@ -212,7 +212,10 @@ pub(crate) struct RunArgs {
 
 #[derive(Debug, Default, ClapArgs)]
 struct GenerationOverrides {
-    /// Maximum number of tokens to generate (default: 64).
+    /// Do not insert tokenizer BOS for raw input; retain any explicitly supplied special tokens.
+    #[arg(long, requires = "raw_prompt")]
+    no_special_tokens: bool,
+    /// Maximum generated tokens (default: 64; K2 requires an explicit budget fitting 32 forwards).
     #[arg(short = 'n', long = "max-tokens", visible_alias = "tokens")]
     tokens: Option<usize>,
 
@@ -236,7 +239,7 @@ struct GenerationOverrides {
     #[arg(long)]
     seed: Option<u64>,
 
-    /// Override Qwen or Muse sequence capacity; Muse cannot exceed model context.
+    /// Override family-specific sequence capacity (K2's initial raw lane: at most 32).
     #[arg(long)]
     max_context_tokens: Option<usize>,
 
@@ -285,6 +288,9 @@ impl RunInvocation {
 
 impl GenerationOverrides {
     fn apply(&self, args: &mut Args) {
+        if self.no_special_tokens {
+            args.no_special_tokens = true;
+        }
         if let Some(value) = self.tokens {
             args.tokens = value;
         }
@@ -533,8 +539,16 @@ mod tests {
         let explicit = super::super::ExplicitCliOptions::from_matches(run_matches);
         assert_eq!(
             explicit,
-            super::super::Args::parse_with_explicit(["qwen", "-m", "model.gguf", "--prompt", "x"])
-                .1
+            super::super::Args::parse_with_explicit([
+                "qwen",
+                "-m",
+                "model.gguf",
+                "--prompt",
+                "x",
+                "-n",
+                "512"
+            ])
+            .1
         );
     }
 

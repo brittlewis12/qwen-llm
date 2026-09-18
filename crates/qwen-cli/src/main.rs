@@ -22,6 +22,8 @@ mod execution_selector;
 mod fixed_cohort_jsonl;
 #[path = "qwen/jsonl.rs"]
 mod jsonl;
+#[path = "qwen/k2_horizon.rs"]
+mod k2_horizon;
 mod messages;
 mod model_request;
 #[path = "qwen/muse_glimmer.rs"]
@@ -256,6 +258,9 @@ fn run() -> Result<()> {
     let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
     let model_family = ModelFamily::detect(&gguf);
+    if model_family == Some(ModelFamily::K2Horizon) {
+        return k2_horizon::run_raw(&gguf, &args, explicit_options, invocation);
+    }
     // Drafter admission is a header-level decision; settle it (and bind the
     // drafter's metadata) before any family lane allocates on the GPU.
     let drafter = drafter_policy::PreparedDrafter::prepare(
@@ -695,6 +700,7 @@ fn prepare_modern_run_prompt(
                     deepseek_v4_options,
                 )
                 .context("render DeepSeek V4 0731 user request")?,
+                ModelFamily::K2Horizon => bail!("K2 Horizon currently supports raw input only"),
                 ModelFamily::MuseGlimmer => {
                     bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
                 }
@@ -767,6 +773,7 @@ fn prepare_modern_run_prompt(
                     deepseek_v4_options,
                 )
                 .context("render strict DeepSeek V4 0731 messages")?,
+                ModelFamily::K2Horizon => bail!("K2 Horizon currently supports raw input only"),
                 ModelFamily::MuseGlimmer => {
                     bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
                 }
@@ -816,6 +823,15 @@ pub(crate) fn input_capability_for(
             }
         }
         Some(ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer) => InputCapability::all_supported(),
+        Some(ModelFamily::K2Horizon) => {
+            match qwen_llm::k2_horizon::K2HorizonConfig::from_gguf(gguf) {
+                Ok(_) => InputCapability::raw_only(
+                    "k2_raw_only",
+                    "K2 Horizon currently accepts untemplated raw text only".into(),
+                ),
+                Err(error) => InputCapability::none("k2_profile_unsupported", error.to_string()),
+            }
+        }
         None => InputCapability::none(
             "unknown_family",
             "templated input requires a recognised architecture".into(),
@@ -852,6 +868,10 @@ fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_js
             "version": "muse_glimmer",
             "source": "general.architecture",
             "rendered_as": "muse_glimmer",
+        }),
+        Some(ModelFamily::K2Horizon) => serde_json::json!({
+            "status": "unsupported", "rendered_as": null,
+            "message": "K2 Horizon raw input has no template renderer",
         }),
         None => serde_json::json!({
             "status": "unresolved",
@@ -1058,13 +1078,16 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             },
         })?,
         Some(ModelFamily::MuseGlimmer) => serde_json::to_value(muse_glimmer_reasoning_capability())?,
+        Some(ModelFamily::K2Horizon) => serde_json::json!({
+            "status": "unsupported", "code": "k2_raw_only", "message": "K2 Horizon reasoning controls are not implemented",
+        }),
         None => serde_json::json!({
             "status": "unsupported",
             "code": "unknown_family",
             "message": "reasoning controls require a recognised architecture",
         }),
     };
-    let projection = serde_json::json!({
+    let mut projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),
         "architecture": gguf.architecture(),
@@ -1080,6 +1103,9 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "template": template_projection(family, &gguf),
         },
     });
+    if family == Some(ModelFamily::K2Horizon) {
+        projection["capabilities"]["execution"] = k2_horizon::execution_capabilities();
+    }
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())
 }

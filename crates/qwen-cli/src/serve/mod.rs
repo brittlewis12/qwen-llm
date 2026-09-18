@@ -93,7 +93,16 @@ fn snapshot_cache_bytes(mib: u64) -> Result<u64> {
 }
 
 fn supports_serve_family(family: Option<ModelFamily>) -> bool {
-    family.is_some()
+    matches!(
+        family,
+        Some(
+            ModelFamily::Qwen35
+                | ModelFamily::Qwen35Moe
+                | ModelFamily::Qwen4Exp
+                | ModelFamily::DeepSeek4
+                | ModelFamily::MuseGlimmer
+        )
+    )
 }
 
 /// Limits for a family whose resident session capacity is fixed at load
@@ -131,7 +140,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     let muse_glimmer = family == Some(ModelFamily::MuseGlimmer);
     ensure!(
         supports_serve_family(family),
-        "qwen serve supports Qwen3.5/3.6/3.8, Flash-Next, DeepSeek V4, and Muse Glimmer models (docs/SERVE.md); architecture {:?} is not recognised",
+        "qwen serve supports Qwen3.5/3.6/3.8, Flash-Next, DeepSeek V4, and Muse Glimmer models (docs/SERVE.md); architecture {:?} is not supported for serving",
         gguf.architecture()
     );
     // Drafter admission is a header-level decision: refuse unsupported
@@ -496,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_family_gate_admits_every_recognised_family() {
+    fn serve_family_gate_only_admits_implemented_backends() {
         for family in [
             ModelFamily::Qwen35,
             ModelFamily::Qwen35Moe,
@@ -507,6 +516,7 @@ mod tests {
             assert!(supports_serve_family(Some(family)), "{family:?}");
         }
         assert!(!supports_serve_family(None));
+        assert!(!supports_serve_family(Some(ModelFamily::K2Horizon)));
     }
 
     #[test]

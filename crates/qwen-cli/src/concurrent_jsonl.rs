@@ -521,6 +521,7 @@ fn validate_model_family_with_modes(
         Some(ModelFamily::MuseGlimmer) => {
             bail!("--concurrency is not supported for Muse Glimmer")
         }
+        Some(ModelFamily::K2Horizon) => bail!("--concurrency is not supported for K2 Horizon"),
         None => bail!("--concurrency requires a supported Qwen or DeepSeek V4 model"),
     }
 }

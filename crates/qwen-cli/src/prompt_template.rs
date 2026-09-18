@@ -296,6 +296,9 @@ pub(crate) fn serve_qwen_template(
     family: qwen_llm::model_family::ModelFamily,
     gguf: &GgufFile,
 ) -> Result<QwenTemplate> {
+    if family == ModelFamily::K2Horizon {
+        bail!("K2 Horizon has no Qwen prompt or output protocol");
+    }
     Ok(resolve_serve_qwen_template(family, gguf)?
         .template
         .serve_template())
@@ -309,6 +312,7 @@ pub(crate) fn qwen_template_for_gguf(gguf: &GgufFile) -> Result<QwenTemplate> {
             | qwen_llm::model_family::ModelFamily::Qwen35Moe
             | qwen_llm::model_family::ModelFamily::Qwen4Exp),
         ) => serve_qwen_template(family, gguf),
+        Some(ModelFamily::K2Horizon) => bail!("K2 Horizon has no Qwen prompt or output protocol"),
         _ => Ok(QwenTemplate::Generic),
     }
 }

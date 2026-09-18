@@ -612,6 +612,10 @@ fn run() -> Result<()> {
 fn fit_rows(args: FitRowsArgs) -> Result<()> {
     let gguf = qwen_llm::gguf::GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
+    ensure!(
+        gguf.architecture().as_deref() != Some(qwen_llm::k2_horizon::ARCHITECTURE_NAME),
+        "K2 Horizon is forward-only; local lens fitting is not supported"
+    );
     if muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
         return muse_lens_rows_fit::fit_rows(args, gguf);
     }
@@ -941,6 +945,10 @@ fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
 fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
     let gguf = qwen_llm::gguf::GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
+    ensure!(
+        gguf.architecture().as_deref() != Some(qwen_llm::k2_horizon::ARCHITECTURE_NAME),
+        "K2 Horizon is forward-only; local lens fitting is not supported"
+    );
     if muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
         return muse_lens_fit::fit_tokens(args, gguf);
     }

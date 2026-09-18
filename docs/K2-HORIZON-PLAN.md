@@ -3,8 +3,8 @@
 Status: profile/binder, native tokenizer, CPU reference, checked Metal primitives,
 and a serial dense runtime implemented. Pinned Q8 short-context checkpoint
 correctness passes; bounded raw CLI dispatch and library forward-only lens
-captures/readouts/interventions are implemented. Long-context, bench, imported
-lens assets, lens CLI, and serving integration remain outstanding.
+captures/readouts/interventions plus a plain-lens CLI are implemented. Long-context,
+bench, imported lens assets, CLI interventions, and serving remain outstanding.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -236,6 +236,47 @@ staged token commands, and the poisoned session refuses append/readout. This is
 numerical-failure evidence, not device-fault injection or per-operation finiteness
 instrumentation. Adversarial review found no concrete commit blocker.
 
+Eleventh packet: `qwen-lens read-full --logit-lens` now has a K2 native adapter,
+not a Qwen-runtime fallback. CPU config/tensor/tokenizer/input/site/budget checks
+precede content identity and Metal. The executed prefix is capped at 32 tokens;
+`--position` explicitly selects its end, while the complete validated input and
+separate input/executed counts remain recorded. Default sites cover all 36 blocks;
+requested output order is preserved independently of sorted runtime capture order.
+Final-block readout is checked bitwise against ordinary logits when selected.
+
+Existing ranked JSON and immutable full-vocabulary bundle output are reused.
+Metadata names native tokenizer implementation/normalization/BOS policy, the
+existing lightweight tokenizer metadata ID, actual declared context/theta/head
+dtype, F16 KV, serial topology, selected capacity, content-cache policy/outcome,
+and the limited qualification scope. No transport authentication is implied.
+The native tokenizer consumes tokenizer.* metadata (all included by the existing
+metadata hash) plus architecture, which is separately recorded; source/build
+identity records the implementation. No second tokenizer identity scheme.
+
+K2 plain observations reject the irrelevant transfer-override flag. Central CLI
+dispatch rejects unsupported K2 model-bearing lens modes before asset inspection,
+identity hashing, or Metal: fitted readout, trace, run/cohort, sweep, comparison,
+and local fitting. Static imports have no model selector and retain their exact
+pinned Qwen/Muse-only source contracts. Capability info explicitly advertises only
+the partial plain-lens command, not imported assets or CLI interventions.
+
+Eight plain-lens host tests and five K2 run/capability tests pass; CLI binaries
+typecheck. Adversarial review caught an initial change to existing families'
+input digests: count fields are now K2-only, with an exact non-K2 metadata/digest
+regression. The leased/API-validated CLI checks pass default all-site readout,
+automatic vs explicit serialized BOS, literal IDs with an unexecuted recorded
+suffix, requested layer order, native vectors, full-vocabulary bundle rows, and
+pre-GPU rejection. Reproduce with `scripts/reference/k2/check_plain_lens_cli.py`;
+artifacts are in `target/profiles/k2-plain-lens-cli-check`. Content ID for this
+artifact is `719ae3a7c9386c25db2c33b50be15d715f883aa5a762495d5a65776660179e99`.
+This is native plain observation, not a fitted-transport artifact or quality claim.
+
+```sh
+qwen-lens read-full -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --logit-lens --prompt 'The capital of France is' --layers 35,0,17 \
+  --identity-cache /path/to/private/identity-cache --top-k 5
+```
+
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server
 coordination restrictions are unchanged. The download completed with verified
@@ -408,12 +449,14 @@ content digest. Record target artifact, weight/cache precision, positional and
 tokenizer profile, and serial/packed topology. Intentional cross-checkpoint or
 BF16-to-quantized transfer needs explicit recorded policy, not silent acceptance.
 
-Define a bounded forward-only asset reader whose schema does not require a
-local fit job or a Qwen3.6 release. Existing `full_lens.rs` contains fixed Qwen
-geometry, and `lens_run/lenses.rs` consumes completed fit-token artifacts. Reuse
-their safe I/O/validation techniques where appropriate, not those admission
-contracts. Validate sizes, finite values, digest, matrix orientation, and
-supported sites on the host before allocating/uploading selected matrices.
+Reuse `linear_transport::VerifiedTransport`, the existing strict data-only reader
+with dynamic geometry, duplicate-key rejection, digests, orientation, finite
+values, and exact-binding/explicit-transfer policy. Add a bounded K2 family adapter
+rather than inventing another schema or accepting a local-fit artifact contract.
+The legacy parts of `full_lens.rs` still contain fixed Qwen geometry, and
+`lens_run/lenses.rs` consumes completed fit-token artifacts; those are not K2
+admission contracts. Validate supported sites/target geometry before allocating
+or uploading selected matrices. Keep raw observation JSON distinct from assets.
 
 Acceptance: no-op controls, selected-site capture identity, final-readout checks,
 intervention ordering, imported synthetic matrix orientation, invalid-asset

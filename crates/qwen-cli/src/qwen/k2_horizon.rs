@@ -12,7 +12,10 @@ pub(crate) fn execution_capabilities() -> serde_json::Value {
         "run": {"status": "supported", "scope": "research_raw_single_turn", "requires_profile": "dense_7b",
             "max_forward_tokens": CLI_FORWARD_CEILING, "native_tokenizer": true, "kv_storage": "f16"},
         "serve": {"status": "unsupported"}, "bench": {"status": "unsupported"},
-        "lens": {"status": "unsupported"}, "local_fitting": {"status": "unsupported"},
+        "lens": {"status": "partial", "command": "qwen-lens read-full --logit-lens",
+            "scope": "research_raw_plain_readout", "max_forward_tokens": CLI_FORWARD_CEILING,
+            "imported_assets": false, "cli_interventions": false},
+        "local_fitting": {"status": "unsupported"},
     })
 }
 
@@ -258,9 +261,16 @@ mod tests {
     fn k2_capabilities_do_not_advertise_other_lanes_or_fitting() {
         let capabilities = execution_capabilities();
         assert_eq!(capabilities["run"]["max_forward_tokens"], 32);
-        for lane in ["serve", "bench", "lens", "local_fitting"] {
+        for lane in ["serve", "bench", "local_fitting"] {
             assert_eq!(capabilities[lane]["status"], "unsupported");
         }
+        assert_eq!(capabilities["lens"]["status"], "partial");
+        assert_eq!(
+            capabilities["lens"]["command"],
+            "qwen-lens read-full --logit-lens"
+        );
+        assert_eq!(capabilities["lens"]["imported_assets"], false);
+        assert_eq!(capabilities["lens"]["cli_interventions"], false);
         assert_eq!(ModelFamily::K2Horizon.record_label(), "k2_horizon");
     }
 

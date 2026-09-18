@@ -591,7 +591,9 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<()> {
     shutdown::install()?;
     tracing_init::install_default_subscriber();
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    validate_k2_command(&command)?;
+    match command {
         Command::Compare(args) => lens_compare::run(args),
         Command::Inspect(args) => lens_inspect::run(args),
         Command::InspectSweep(args) => lens_compare::inspect_sweep(args),
@@ -607,6 +609,28 @@ fn run() -> Result<()> {
         Command::VerifyFull(args) => linear_transport::verify_full(args),
         Command::TraceFull(args) => trace_full(args),
     }
+}
+
+fn validate_k2_command(command: &Command) -> Result<()> {
+    let path = match command {
+        Command::ReadFull(args) if !args.logit_lens => Some(&args.model),
+        Command::TraceFull(args) => Some(&args.model),
+        Command::LensRun(args) => Some(&args.model),
+        Command::CoefficientSweep(args) => Some(&args.model),
+        Command::CompareTransfer(args) => Some(&args.model),
+        Command::FitRows(args) => Some(&args.model),
+        Command::FitTokens(args) => Some(&args.model),
+        _ => None,
+    };
+    if let Some(path) = path {
+        let gguf = qwen_llm::gguf::GgufFile::open(path)?;
+        ensure!(
+            qwen_llm::model_family::ModelFamily::detect(&gguf)
+                != Some(qwen_llm::model_family::ModelFamily::K2Horizon),
+            "K2 Horizon supports only read-full --logit-lens here; local fitting, imported transports, trace, run, and sweep are not implemented"
+        );
+    }
+    Ok(())
 }
 
 fn fit_rows(args: FitRowsArgs) -> Result<()> {

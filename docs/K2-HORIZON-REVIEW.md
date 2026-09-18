@@ -350,3 +350,40 @@ retryable host rejection, and intentional finite-input GPU overflow poisoning.
 Forty-two regular K2 tests pass and CLI binaries typecheck. No claim of actual
 device-fault injection or intermediate per-operation nonfinite detection; no
 imports, checkpoint transfer identity, fitting, or CLI intervention support yet.
+
+## Packet 11 native plain-lens CLI
+
+The design review endorsed a native adapter for existing plain-lens JSON/bundle
+infrastructure, not a separate output format. It required early unsupported-mode
+gates, rejecting the meaningless transfer override, explicit complete-input versus
+executed-prefix counts, requested versus runtime site order, and reuse of the
+existing tokenizer metadata identity with architecture/implementation named.
+Source review confirmed all tokenizer.* inputs, including paired-separator keys,
+are covered by that lightweight identity; it is not cryptographic authentication.
+
+Pre-commit review found a real cross-family compatibility defect: adding count
+fields to every input object changes the existing `input_blake3` contract without
+versioning. Counts now apply only to the new K2 output, and a regression verifies
+exact unchanged Qwen/Muse input metadata and digests. Central family dispatch now
+uses `ModelFamily::detect`; explicit requested/runtime site orders are recorded.
+A capabilities test was updated from the previous all-lens-unsupported expectation
+to the precise partial plain-lens lane.
+
+Eight plain-lens host tests and five K2 run/capability tests pass. Actual Q8 CLI
+smokes pass under production leases/API validation, including default 36-site
+output, serialized-BOS/no-special-token equality, literal IDs and preserved suffix,
+unsorted requested output order, raw vectors, binary bundle row/top-1 agreement,
+and pre-Metal rejection of fitted mode, transfer override, and excessive position.
+The opt-in uv script records commands, stdout/stderr, and bundle evidence; it uses
+serial children holding their own production leases, never a conflicting outer
+lease. No additional model download or shared-server operation.
+
+Research found `linear_transport::VerifiedTransport` already supplies the strict
+data-only dynamic-geometry reader needed next. The reviewer agreed to reuse it
+instead of inventing a parallel asset schema; native observations remain separate.
+
+Closure verdict: **commit ready; no remaining correctness blocker**. The reviewer
+verified K2-only digest changes and the CLI checker assertions. Its suggested
+rerun ergonomics change is intentionally not overwrite behavior: the checker
+requires a new evidence directory, now explicit in its help, preserving prior
+results and immutable bundle publication.

@@ -8,7 +8,7 @@ pub(super) const MAX_TRANSFER_COMPARISON_TOKENS: usize = 32;
 pub(crate) struct CompareTransferArgs {
     /// Dense Qwen3.8 GGUF model whose own output norm and LM head define readouts.
     #[arg(short = 'm', long)]
-    pub(super) model: PathBuf,
+    pub(crate) model: PathBuf,
 
     /// Directory produced by `qwen-lens import-full`.
     #[arg(long)]

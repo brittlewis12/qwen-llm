@@ -13,8 +13,9 @@ pub(crate) fn execution_capabilities() -> serde_json::Value {
             "max_forward_tokens": CLI_FORWARD_CEILING, "native_tokenizer": true, "kv_storage": "f16"},
         "serve": {"status": "unsupported"}, "bench": {"status": "unsupported"},
         "lens": {"status": "partial", "command": "qwen-lens read-full --logit-lens",
-            "scope": "research_raw_plain_readout", "max_forward_tokens": CLI_FORWARD_CEILING,
-            "imported_assets": false, "cli_interventions": false},
+            "transport_command": "qwen-lens read-full --full-lens",
+            "scope": "research_raw_plain_or_data_only_linear_readout", "max_forward_tokens": CLI_FORWARD_CEILING,
+            "imported_assets": "llm.lens.linear_transport_v1_target_layer_35", "cli_interventions": false},
         "local_fitting": {"status": "unsupported"},
     })
 }
@@ -269,7 +270,10 @@ mod tests {
             capabilities["lens"]["command"],
             "qwen-lens read-full --logit-lens"
         );
-        assert_eq!(capabilities["lens"]["imported_assets"], false);
+        assert_eq!(
+            capabilities["lens"]["imported_assets"],
+            "llm.lens.linear_transport_v1_target_layer_35"
+        );
         assert_eq!(capabilities["lens"]["cli_interventions"], false);
         assert_eq!(ModelFamily::K2Horizon.record_label(), "k2_horizon");
     }

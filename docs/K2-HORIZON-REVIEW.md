@@ -405,3 +405,39 @@ host errors, and numerical overflow poisoning. Forty-three regular K2 CPU tests
 pass and CLI binaries typecheck. The type remains non-Clone; the upload destination
 is privately writable, not caller-owned storage. No imported-asset binding or CLI
 transport capability is claimed by this packet.
+
+## Packet 13 imported data-only readout CLI
+
+The design review required removing the former fitted-readout rejection while
+retaining all other K2 unsupported-mode gates, early K2 dispatch with no fallback,
+pre-payload profile checks, mandatory exact binding even with overrides, and
+algorithm-correct digest provenance. Source rereading confirmed the shared reader
+already computes payload BLAKE3 separately from its SHA256 integrity fields; both
+are recorded without changing or relabelling an algorithm.
+
+The optional expected-profile API preserves existing reader behavior and checks
+K2 geometry/target before payload access. Imported execution reuses the same K2
+prepared input/capture path, rehashes one selected matrix at a time, and delegates
+to the typed linear readout. Actual retained checkpoint bytes are hashed before
+Metal. Unbound transfer requires an explicit recorded override; exact mismatch
+cannot be bypassed. Producer claims and verification observations remain distinct.
+
+Pre-commit source verdict: **no concrete commit blocker**, conditional on the
+synthetic CLI checker. An initial 300-second debug-host run timed out after its
+first successful cases; process inspection found no surviving children. Without
+changing numerical gates or GPU code, the rerun optimized only host BLAKE3/SHA256
+dependencies and completed all cases. Identity asset full-logit bytes match plain
+readout; explicit transfer, source ordering, nonsymmetric equations, non-overridable
+binding errors, wrong target, and payload digest rejection pass. The shared plain
+CLI regression subsequently passes all its cases too. Existing CPU mutation tests
+exercise selected rehashing; the expected-profile test deletes the payload and
+still observes the earlier profile error. Nine plain-lens tests, ten transport-
+filter tests, five K2 run/capability tests, and all CLI binary checks pass.
+
+No real fitted asset, local fitting, CLI intervention plan, or research-quality
+transport qualification is included. Asset verification means data integrity and
+the recorded binding/transfer policy, not validation of producer scientific claims.
+
+Closure verdict: **commit ready; no concrete blocker remains**. The reviewer
+confirmed both completed checker results, host-only optimization scope, timeout
+transparency, and the absence of fitting/checkpoint-quality/serving claims.

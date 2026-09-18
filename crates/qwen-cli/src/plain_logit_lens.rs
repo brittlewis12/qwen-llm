@@ -9,6 +9,7 @@ use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenizer};
 use serde_json::{Value, json};
 
 mod k2;
+pub(crate) use k2::read_transport as read_k2_transport;
 
 fn layers(requested: &[u32], count: u32) -> Result<Vec<u32>> {
     ensure!(
@@ -125,7 +126,7 @@ pub(super) fn read(args: ReadFullArgs) -> Result<()> {
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(&args.identity_cache))?;
     let (tokens, position, model, results, bundle) = if let Some(prepared) = k2 {
-        prepared.execute(&args, &gguf, &content)?
+        prepared.execute(&args, &gguf, &content, None)?
     } else if family == Some(ModelFamily::MuseGlimmer) {
         use qwen_llm::metal::MetalContext;
         use qwen_llm::muse_glimmer::MuseGlimmerModel;

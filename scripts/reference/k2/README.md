@@ -57,3 +57,33 @@ Q8/F16 corpus, not bitwise, full-context, arbitrary-checkpoint, or HF parity cla
 The 42-row corpus includes the initial screen, so it is not a statistical holdout.
 Text inputs use native token IDs: independent text tokenization is established
 by the earlier HF fixture suite, not by this token-ID-only oracle.
+
+## Native lens CLI checks
+
+The opt-in uv scripts run native CLI children serially. Unlike the standalone
+llama.cpp wrapper, each CLI child acquires its own production lease and real
+memory gate; do not wrap these scripts in an outer lease. Both scripts force
+Metal API validation, retain stdout/stderr/commands, and require new evidence
+directories. A busy lease is a failure, never permission to stop another owner.
+
+```sh
+cargo --config 'profile.dev.package.blake3.opt-level=3' \
+  --config 'profile.dev.package.sha2.opt-level=3' build -p qwen-cli --bin qwen-lens
+uv run scripts/reference/k2/check_plain_lens_cli.py \
+  --binary target/debug/qwen-lens --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --output target/profiles/k2-plain-lens-new-run
+uv run scripts/reference/k2/check_imported_lens_cli.py \
+  --binary target/debug/qwen-lens --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --output target/profiles/k2-imported-lens-new-run
+```
+
+Host digest optimization avoids long debug hashing of the full retained checkpoint
+on each imported request; it does not change Metal kernels. The plain check uses
+the final tokenizer text fixture, all 36 sites, serialized BOS, literal IDs with
+an explicitly unexecuted suffix, requested site order, vectors and binary bundles.
+The imported check creates only synthetic identity/nonsymmetric F16 matrices under
+the existing data-only schema; this is neither checkpoint conversion nor fitting.
+It compares complete identity-transport logits bitwise, checks orientation,
+exact binding versus explicit unvalidated transfer, and pre-Metal refusals. Assets
+target final post-block layer 35 and are hashed/bound before native execution.
+No claim of fit quality, cross-checkpoint scientific equivalence, or long context.

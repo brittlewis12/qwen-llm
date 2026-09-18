@@ -1,10 +1,13 @@
-//! Plain observations only. No Qwen runtime, fitted assets, or chat rendering.
+//! Native plain/data-only readout. No Qwen runtime, local fitting, or chat rendering.
 use super::*;
 use qwen_llm::checkpoint_identity::CheckpointContentReport;
 use qwen_llm::k2_horizon::{K2HorizonConfig, K2HorizonModel};
 use qwen_llm::k2_horizon_runtime::K2LoadedModel;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::tokenizer::NativeTokenizer;
+
+mod imported;
+pub(crate) use imported::read as read_transport;
 
 const MAX_FORWARDS: usize = 32;
 
@@ -23,8 +26,17 @@ fn preflight(
     config: &K2HorizonConfig,
     encoded: Option<Vec<i32>>,
 ) -> Result<(Vec<i32>, usize, Vec<u32>, Vec<u32>)> {
+    preflight_mode(args, config, encoded, true)
+}
+
+fn preflight_mode(
+    args: &ReadFullArgs,
+    config: &K2HorizonConfig,
+    encoded: Option<Vec<i32>>,
+    plain: bool,
+) -> Result<(Vec<i32>, usize, Vec<u32>, Vec<u32>)> {
     ensure!(
-        !args.allow_unvalidated_transfer,
+        !plain || !args.allow_unvalidated_transfer,
         "K2 plain observations do not accept --allow-unvalidated-transfer"
     );
     let (tokens, position) = input(
@@ -35,7 +47,7 @@ fn preflight(
     )?;
     ensure!(
         position < MAX_FORWARDS,
-        "K2 plain lens is bounded to 32 executed tokens; selected position must be below 32"
+        "K2 lens readout is bounded to 32 executed tokens; selected position must be below 32"
     );
     let layers = layers(&args.layers, config.layer_count)?;
     capture_budget(layers.len(), config.hidden_size as usize)?;
@@ -53,8 +65,12 @@ fn preflight(
 
 impl Prepared {
     pub(super) fn new(args: &ReadFullArgs, gguf: &GgufFile) -> Result<Self> {
+        Self::new_mode(args, gguf, true)
+    }
+
+    fn new_mode(args: &ReadFullArgs, gguf: &GgufFile, plain: bool) -> Result<Self> {
         ensure!(
-            !args.allow_unvalidated_transfer,
+            !plain || !args.allow_unvalidated_transfer,
             "K2 plain observations do not accept --allow-unvalidated-transfer"
         );
         let bound = K2HorizonModel::from_gguf(gguf)?;
@@ -64,7 +80,11 @@ impl Prepared {
             .as_ref()
             .map(|p| tokenizer.encode(p, !args.no_special_tokens))
             .transpose()?;
-        let (tokens, position, layers, capture_layers) = preflight(args, &bound.config, encoded)?;
+        let (tokens, position, layers, capture_layers) = if plain {
+            preflight(args, &bound.config, encoded)?
+        } else {
+            preflight_mode(args, &bound.config, encoded, false)?
+        };
         Ok(Self {
             config: bound.config.clone(),
             tokenizer,
@@ -81,6 +101,7 @@ impl Prepared {
         args: &ReadFullArgs,
         gguf: &GgufFile,
         content: &CheckpointContentReport,
+        mut transport: Option<&mut crate::linear_transport::VerifiedTransport>,
     ) -> Result<(Vec<i32>, usize, Value, Vec<Value>, Option<Bundle>)> {
         crate::shutdown::checkpoint()?;
         let context = MetalContext::new()?;
@@ -111,9 +132,20 @@ impl Prepared {
                 .binary_search(&layer)
                 .ok()
                 .context("missing K2 capture site")?;
-            let residual = &capture.residuals[index * 4096..(index + 1) * 4096];
-            let logits = session.readout(residual)?;
-            if layer + 1 == self.config.layer_count {
+            let source_residual = &capture.residuals[index * 4096..(index + 1) * 4096];
+            let (residual, logits) = if let Some(data) = transport.as_mut() {
+                let matrix = qwen_llm::k2_horizon_runtime::K2LinearF16::from_target_source_le(
+                    data.read_matrix(layer)?,
+                )?;
+                let readout = session.readout_linear_f16(&matrix, source_residual)?;
+                (std::borrow::Cow::Owned(readout.residual), readout.logits)
+            } else {
+                (
+                    std::borrow::Cow::Borrowed(source_residual),
+                    session.readout(source_residual)?,
+                )
+            };
+            if transport.is_none() && layer + 1 == self.config.layer_count {
                 ensure!(
                     logits
                         .iter()
@@ -125,15 +157,21 @@ impl Prepared {
             if let Some(bundle) = &mut bundle {
                 bundle.row(slot, &logits)?;
             }
-            results.push(row(
+            let mut result = row(
                 args,
                 layer,
                 self.position,
                 self.tokens[self.position],
-                residual,
+                &residual,
                 &logits,
                 |id| Ok(self.tokenizer.try_decode_piece_bytes_exact(id)?.to_vec()),
-            )?);
+            )?;
+            if transport.is_some() && args.include_vector {
+                result["transported_vector"]["operation"] = json!("post_block_linear");
+                result["transported_vector"]["hidden_coordinate"] =
+                    json!("target_final_post_block_residual");
+            }
+            results.push(result);
         }
         // The lightweight metadata hash includes all tokenizer.* keys (including
         // pair-SEP settings); architecture and the native implementation are named
@@ -249,20 +287,29 @@ mod tests {
     }
 
     #[test]
-    fn k2_unsupported_readout_gate_precedes_asset_or_identity_access() {
+    fn k2_unsupported_trace_gate_precedes_asset_or_identity_access() {
         let fixture = crate::linear_transport::tests::fixture("gate-only", 2, 123);
         let path = fixture.0.join("model.gguf");
         crate::full_lens::write_cpu_gguf(&path, "k2-horizon", 2, "unused", false);
-        let mut args = args();
-        args.model = path;
-        args.identity_cache = fixture.0.join("must-not-exist");
-        args.full_lens = Some(fixture.0.join("missing-asset"));
-        args.logit_lens = false;
-        let error = crate::validate_k2_command(&crate::Command::ReadFull(args)).unwrap_err();
+        let command = crate::Cli::try_parse_from([
+            "qwen-lens",
+            "trace-full",
+            "--model",
+            path.to_str().unwrap(),
+            "--token-ids",
+            "0",
+            "--full-lens",
+            fixture.0.join("missing-asset").to_str().unwrap(),
+            "--identity-cache",
+            fixture.0.join("must-not-exist").to_str().unwrap(),
+        ])
+        .unwrap()
+        .command;
+        let error = crate::validate_k2_command(&command).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("K2 Horizon supports only read-full --logit-lens")
+                .contains("K2 Horizon supports only read-full here")
         );
         assert!(!fixture.0.join("must-not-exist").exists());
     }

@@ -613,7 +613,6 @@ fn run() -> Result<()> {
 
 fn validate_k2_command(command: &Command) -> Result<()> {
     let path = match command {
-        Command::ReadFull(args) if !args.logit_lens => Some(&args.model),
         Command::TraceFull(args) => Some(&args.model),
         Command::LensRun(args) => Some(&args.model),
         Command::CoefficientSweep(args) => Some(&args.model),
@@ -627,7 +626,7 @@ fn validate_k2_command(command: &Command) -> Result<()> {
         ensure!(
             qwen_llm::model_family::ModelFamily::detect(&gguf)
                 != Some(qwen_llm::model_family::ModelFamily::K2Horizon),
-            "K2 Horizon supports only read-full --logit-lens here; local fitting, imported transports, trace, run, and sweep are not implemented"
+            "K2 Horizon supports only read-full here; local fitting, trace, run, and sweep are not implemented"
         );
     }
     Ok(())
@@ -659,6 +658,13 @@ fn read_full(args: ReadFullArgs) -> Result<()> {
     if args.logit_lens {
         return plain_logit_lens::read(args);
     }
+    let gguf = qwen_llm::gguf::GgufFile::open(&args.model)?;
+    if qwen_llm::model_family::ModelFamily::detect(&gguf)
+        == Some(qwen_llm::model_family::ModelFamily::K2Horizon)
+    {
+        return plain_logit_lens::read_k2_transport(args, gguf);
+    }
+    drop(gguf);
     if muse_full_lens::is_artifact_for_model(
         args.full_lens
             .as_deref()

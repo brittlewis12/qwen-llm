@@ -137,9 +137,9 @@ def main():
         "selected position must be below 32",
     )
     run(
-        "reject-fitted",
+        "reject-missing-asset",
         ["--token-ids", "0", "--full-lens", str(output / "missing-asset")],
-        "supports only read-full --logit-lens",
+        "open K2 data-only linear transport",
     )
     print(
         json.dumps(

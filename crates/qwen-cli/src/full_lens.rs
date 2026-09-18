@@ -82,7 +82,7 @@ const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Args)]
 pub(crate) struct ReadFullArgs {
-    /// Qwen dense/MoE, Muse Glimmer, or dense K2 GGUF (K2: plain logit lens only).
+    /// Qwen dense/MoE, Muse Glimmer, or dense K2 GGUF (K2: native/data-only readout).
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 

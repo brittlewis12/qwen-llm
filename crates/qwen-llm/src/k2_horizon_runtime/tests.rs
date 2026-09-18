@@ -129,6 +129,55 @@ fn premature_commit_cannot_expose_staged_rows() {
 }
 
 #[test]
+fn readout_transaction_completes_once_without_advancing_even_at_capacity() {
+    let mut ledger = Ledger::default();
+    let mut append = ledger.begin(&[0], 10, 1).unwrap();
+    append.submitting().unwrap();
+    append.checked().unwrap();
+    append.commit().unwrap();
+    let mut readout = ledger.begin_readout().unwrap();
+    assert_eq!(readout.old_prefix(), 1);
+    assert!(readout.checked().is_err());
+    readout.submitting().unwrap();
+    assert!(readout.submitting().is_err());
+    readout.checked().unwrap();
+    assert!(readout.checked().is_err());
+    assert!(readout.submitting().is_err());
+    readout.commit().unwrap();
+    assert_eq!(ledger.prefix(), 1);
+    assert!(!ledger.is_poisoned());
+    assert!(ledger.begin(&[], 10, 1).is_err());
+    assert!(ledger.begin(&[0], 10, 1).is_err());
+}
+
+#[test]
+fn readout_abandonment_after_submission_poisons_without_advancing() {
+    for completed in [false, true] {
+        let mut ledger = Ledger::default();
+        drop(ledger.begin_readout().unwrap());
+        assert!(ledger.begin_readout().unwrap().commit().is_err());
+        assert!(!ledger.is_poisoned());
+        {
+            let mut readout = ledger.begin_readout().unwrap();
+            readout.submitting().unwrap();
+            if completed {
+                readout.checked().unwrap();
+            }
+        }
+        assert_eq!(ledger.prefix(), 0);
+        assert!(ledger.is_poisoned());
+        assert!(matches!(
+            ledger.begin_readout(),
+            Err(K2RuntimeError::Poisoned)
+        ));
+        assert!(matches!(
+            ledger.begin(&[0], 10, 1),
+            Err(K2RuntimeError::Poisoned)
+        ));
+    }
+}
+
+#[test]
 fn cpu_inspected_session_allocations_require_shared_zero_offset_bounds() {
     assert!(validate_cpu_layout(true, 0, 16, 16).is_ok());
     assert!(validate_cpu_layout(true, 0, 16, 32).is_ok());
@@ -200,4 +249,121 @@ fn gpu_checkpoint_forward_and_split_prefill_smoke() {
     split.append(&[19]).unwrap();
     assert!(split.append(&[20]).is_err());
     assert_eq!(split.committed_len(), 4);
+}
+
+#[test]
+#[ignore = "full checkpoint GPU lens correctness; requires production lease and K2_GGUF"]
+fn gpu_checkpoint_captures_and_readout_preserve_continuation() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+    let source = GgufFile::open(std::env::var("K2_GGUF").expect("K2_GGUF")).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
+    let layers = (0..36).collect::<Vec<_>>();
+    let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let cache_bits = |session: &K2Session<'_, '_>| unsafe {
+        // Private checked shared F16 arena; no command is in flight here.
+        std::slice::from_raw_parts(
+            session
+                .buffers
+                .cache
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u16>(),
+            session.buffers.cache.n_elements() as usize,
+        )
+        .to_vec()
+    };
+
+    let mut session = model.create_session(37).unwrap();
+    let empty_cache = cache_bits(&session);
+    assert!(
+        session
+            .readout(&vec![0.0; 4096])
+            .unwrap()
+            .iter()
+            .all(|&v| v == 0.0)
+    );
+    assert_eq!(session.committed_len(), 0);
+    assert_eq!(cache_bits(&session), empty_cache);
+    let captured = session.append_with_captures(&[0, 42, 17], &layers).unwrap();
+    assert_eq!(captured.absolute_position, 39);
+    assert_eq!(captured.post_block_layers, layers);
+    assert_eq!(captured.residuals.len(), 36 * 4096);
+    assert!(captured.residuals.iter().all(|v| v.is_finite()));
+    assert_ne!(
+        &captured.residuals[..4096],
+        &captured.residuals[35 * 4096..]
+    );
+    assert_eq!(
+        &captured.residuals[35 * 4096..],
+        read_f32(&session.buffers.residual)
+    );
+    let cache = cache_bits(&session);
+    let final_readout = session.readout(&captured.residuals[35 * 4096..]).unwrap();
+    assert_eq!(bits(&final_readout), bits(&captured.logits));
+    assert_eq!(session.committed_len(), 3);
+    assert_eq!(cache_bits(&session), cache);
+    assert!(
+        session
+            .readout(&vec![0.0; 4096])
+            .unwrap()
+            .iter()
+            .all(|&v| v == 0.0)
+    );
+    for sites in [vec![], vec![0, 0], vec![35, 0], vec![36]] {
+        assert!(session.append_with_captures(&[19], &sites).is_err());
+    }
+    assert!(session.append_with_captures(&[250624], &[35]).is_err());
+    for row in [
+        vec![],
+        vec![0.0; 4095],
+        vec![0.0; 4097],
+        vec![f32::NAN; 4096],
+    ] {
+        assert!(session.readout(&row).is_err());
+    }
+    assert_eq!(session.committed_len(), 3);
+    assert!(!session.is_poisoned());
+    assert_eq!(cache_bits(&session), cache);
+    let continuation = session.append_with_captures(&[19], &[0, 17, 35]).unwrap();
+    assert_eq!(continuation.absolute_position, 40);
+    let full_cache = cache_bits(&session);
+    assert_eq!(
+        bits(
+            &session
+                .readout(&continuation.residuals[2 * 4096..])
+                .unwrap()
+        ),
+        bits(&continuation.logits)
+    );
+    assert_eq!(session.committed_len(), 4);
+    assert_eq!(cache_bits(&session), full_cache);
+    drop(session);
+
+    let mut split = model.create_session(37).unwrap();
+    split.append(&[0, 42]).unwrap();
+    let split_captured = split.append_with_captures(&[17], &layers).unwrap();
+    assert_eq!(split_captured.absolute_position, captured.absolute_position);
+    assert_eq!(bits(&split_captured.residuals), bits(&captured.residuals));
+    assert_eq!(bits(&split_captured.logits), bits(&captured.logits));
+    let all_continuation = split.append_with_captures(&[19], &layers).unwrap();
+    for (row, layer) in [0, 17, 35].into_iter().enumerate() {
+        assert_eq!(
+            bits(&continuation.residuals[row * 4096..(row + 1) * 4096]),
+            bits(&all_continuation.residuals[layer * 4096..(layer + 1) * 4096]),
+        );
+    }
+    drop(split);
+
+    let mut plain = model.create_session(37).unwrap();
+    assert_eq!(
+        bits(&plain.append(&[0, 42, 17]).unwrap()),
+        bits(&captured.logits)
+    );
+    assert_eq!(
+        bits(&plain.append(&[19]).unwrap()),
+        bits(&continuation.logits)
+    );
+    assert_eq!(cache_bits(&plain), full_cache);
 }

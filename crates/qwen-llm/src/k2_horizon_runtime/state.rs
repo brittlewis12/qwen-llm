@@ -17,7 +17,7 @@ impl Ledger {
         self.poisoned = true;
     }
 
-    pub fn begin(&mut self, tokens: &[u32], vocab: u32, capacity: u32) -> Result<Append<'_>> {
+    pub fn begin(&mut self, tokens: &[u32], vocab: u32, capacity: u32) -> Result<Transaction<'_>> {
         if self.poisoned {
             return Err(K2RuntimeError::Poisoned);
         }
@@ -34,35 +34,67 @@ impl Ledger {
         if tokens.iter().any(|&id| id >= vocab || id > i32::MAX as u32) {
             return Err(invalid("token ID outside vocabulary/I32"));
         }
-        Ok(Append {
+        Ok(self.transaction(Operation::Append(count)))
+    }
+
+    pub fn begin_readout(&mut self) -> Result<Transaction<'_>> {
+        if self.poisoned {
+            return Err(K2RuntimeError::Poisoned);
+        }
+        Ok(self.transaction(Operation::Readout))
+    }
+
+    fn transaction(&mut self, operation: Operation) -> Transaction<'_> {
+        Transaction {
             ledger: self,
-            count,
+            operation,
             checked: 0,
             inflight: false,
             submitted: false,
             committed: false,
-        })
+        }
+    }
+}
+
+enum Operation {
+    Append(u32),
+    Readout,
+}
+
+impl Operation {
+    fn commands(&self) -> u32 {
+        match self {
+            Self::Append(count) => *count,
+            Self::Readout => 1,
+        }
+    }
+
+    fn advance(&self) -> u32 {
+        match self {
+            Self::Append(count) => *count,
+            Self::Readout => 0,
+        }
     }
 }
 
 /// Drop is conservative: any abandoned transaction that submitted work poisons
 /// the session, even if earlier token commands completed successfully.
-pub(super) struct Append<'a> {
+pub(super) struct Transaction<'a> {
     ledger: &'a mut Ledger,
-    count: u32,
+    operation: Operation,
     checked: u32,
     inflight: bool,
     submitted: bool,
     committed: bool,
 }
 
-impl Append<'_> {
+impl Transaction<'_> {
     pub fn old_prefix(&self) -> u32 {
         self.ledger.prefix
     }
 
     pub fn submitting(&mut self) -> Result<()> {
-        if self.inflight || self.checked == self.count {
+        if self.inflight || self.checked == self.operation.commands() {
             return Err(invalid("invalid command submission transition"));
         }
         self.submitted = true;
@@ -80,16 +112,16 @@ impl Append<'_> {
     }
 
     pub fn commit(mut self) -> Result<()> {
-        if self.inflight || self.checked != self.count {
-            return Err(invalid("incomplete append cannot commit"));
+        if self.inflight || self.checked != self.operation.commands() {
+            return Err(invalid("incomplete transaction cannot commit"));
         }
-        self.ledger.prefix += self.count;
+        self.ledger.prefix += self.operation.advance();
         self.committed = true;
         Ok(())
     }
 }
 
-impl Drop for Append<'_> {
+impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if self.submitted && !self.committed {
             self.ledger.poison();

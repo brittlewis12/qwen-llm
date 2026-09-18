@@ -102,7 +102,7 @@ fn stage_positions_are_preserved_without_names_or_chat() {
         assert_eq!(K2HorizonConfig::from_metadata(&metadata).unwrap(), expected);
         assert_eq!(
             crate::model_family::ModelFamily::from_architecture_name(ARCHITECTURE_NAME),
-            None
+            Some(crate::model_family::ModelFamily::K2Horizon)
         );
     }
 }

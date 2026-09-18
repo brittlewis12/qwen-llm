@@ -297,3 +297,32 @@ token fingerprint of the automatic-BOS run, without changing tokenizer behavior.
 Closure verdict: **no remaining commit blocker** for the scoped research raw-run
 lane. The reviewer confirmed the diagnostic guards, exact EOS policy, early
 dispatch, BOS ownership, budgeting, stats identity, and unimplemented-lane gates.
+
+## Packet 9 forward-only capture/readout core
+
+The design jam endorsed reusing the block graph and final readout, with explicit
+post-FFN site labels, final-position-only captures, finite checks before commit,
+optional priced storage, and a distinct one-command/zero-advance transaction.
+The public capture API rejects empty sites; ordinary append uses the private
+no-capture path. The arena is per-call rather than retained lazily, avoiding
+stale/unselected rows entirely. No caller-owned GPU storage is accepted.
+
+Implementation review found no immediate blocker. Two hardening suggestions were
+applied: explicit allocated-byte equality and another source freshness check
+after capture allocation. GPU testing now passes under the production lease and
+API validation, including all/sparse sites, zero/final readout, exact cache bytes,
+split-prefill and plain continuation bitwise equivalence. The independent 42-row
+checkpoint oracle rerun has unchanged metrics. Forty-one regular K2 CPU tests
+pass; CLI binaries typecheck. A stale packet-8 family registration assertion was
+fixed when the broader suite exposed it.
+
+The reviewer also suggested actual post-submit fault/source-mutation injection.
+No source file mutation or artificial Metal fault was performed on the shared
+checkpoint. Host ledger tests cover abandoned submitted work before/after checks
+and zero advance; this is not evidence of live device-fault recovery. Empty-site
+public captures are intentionally invalid, not an alternate ordinary-append API.
+
+Closure verdict: **no remaining concrete commit blocker; commit ready**. The
+reviewer verified the byte/freshness hardening, zero-advance transaction, explicit
+empty-site policy, and scoped evidence. Imported assets, interventions, fitting,
+CLI wiring, and broader qualification remain outside this packet.

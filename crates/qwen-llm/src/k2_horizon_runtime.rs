@@ -1,4 +1,4 @@
-//! Unqualified serial dense K2 forward path. Not registered with run/serve.
+//! Research serial dense K2 forward path, shared by raw run and forward-only lens.
 //!
 //! Weights remain native and read-only; sessions borrow the exact loaded model
 //! and context. One token command is in flight at a time. A whole append commits
@@ -24,8 +24,11 @@ use objc2_metal::{
 };
 use std::cell::Cell;
 
+mod lens;
 mod residency;
 mod state;
+use lens::CaptureArena;
+pub use lens::K2CapturedForward;
 pub use residency::K2RuntimePlan;
 use residency::ResidentWeights;
 use state::Ledger;
@@ -168,6 +171,10 @@ impl K2Session<'_, '_> {
     /// Validates ALL IDs before I32 upload. Successful earlier token commands
     /// remain staged until the entire append completes; errors expose no prefix.
     pub fn append(&mut self, tokens: &[u32]) -> Result<Vec<f32>> {
+        Ok(self.append_impl(tokens, &[])?.logits)
+    }
+
+    fn append_impl(&mut self, tokens: &[u32], layers: &[u32]) -> Result<K2CapturedForward> {
         if let Err(error) = self.model.plan.revalidate_source() {
             self.ledger.poison();
             return Err(error);
@@ -184,6 +191,8 @@ impl K2Session<'_, '_> {
             tokens.len() as u32,
         )?;
         let ctx = self.model.ctx;
+        let captures = CaptureArena::allocate(ctx, layers)?;
+        self.model.plan.revalidate_source()?;
         for (index, &id) in tokens.iter().enumerate() {
             let token = absolute.token(index as u32)?;
             let last = index + 1 == tokens.len();
@@ -201,6 +210,7 @@ impl K2Session<'_, '_> {
                 &token,
                 &self.buffers,
                 last,
+                captures.as_ref().filter(|_| last),
             );
             encoder.end();
             encoded?;
@@ -218,8 +228,19 @@ impl K2Session<'_, '_> {
         }
         self.model.plan.revalidate_source()?;
         let logits = read_f32(&self.buffers.logits).to_vec();
+        let residuals = captures
+            .as_ref()
+            .map(CaptureArena::read)
+            .transpose()?
+            .unwrap_or_default();
+        let result = K2CapturedForward {
+            absolute_position: self.request.start_position() + prefix + tokens.len() as u32 - 1,
+            post_block_layers: layers.to_vec(),
+            residuals,
+            logits,
+        };
         transaction.commit()?;
-        Ok(logits)
+        Ok(result)
     }
 }
 
@@ -231,6 +252,7 @@ fn encode_token(
     token: &TokenPlan<'_>,
     b: &SessionBuffers,
     logits: bool,
+    captures: Option<&CaptureArena>,
 ) -> Result<()> {
     encode_get_rows_f32(ctx, enc, &weights.embedding, &b.id, &b.residual, 1, 4096)?;
     for (index, layer) in weights.layers.iter().enumerate() {
@@ -279,18 +301,32 @@ fn encode_token(
         encode_silu_mul_f32(ctx, enc, &b.gate, &b.up, &b.gated)?;
         encode_mat_vec_dispatch(ctx, enc, &layer.down, &b.gated, &b.projection, 12288, 4096)?;
         encode_add_inplace_f32(ctx, enc, &b.residual, &b.projection)?;
+        if let Some(captures) = captures {
+            captures.encode(ctx, enc, index as u32, &b.residual)?;
+        }
     }
     if logits {
-        encode_grouped_norm(
-            ctx,
-            enc,
-            request,
-            &b.residual,
-            &weights.output_norm,
-            &b.norm,
-        )?;
-        encode_mat_vec_dispatch(ctx, enc, &weights.output, &b.norm, &b.logits, 4096, 250624)?;
+        encode_readout(ctx, enc, weights, request, b)?;
     }
+    Ok(())
+}
+
+fn encode_readout(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weights: &ResidentWeights,
+    request: &K2ShortContextPlan,
+    b: &SessionBuffers,
+) -> Result<()> {
+    encode_grouped_norm(
+        ctx,
+        enc,
+        request,
+        &b.residual,
+        &weights.output_norm,
+        &b.norm,
+    )?;
+    encode_mat_vec_dispatch(ctx, enc, &weights.output, &b.norm, &b.logits, 4096, 250624)?;
     Ok(())
 }
 

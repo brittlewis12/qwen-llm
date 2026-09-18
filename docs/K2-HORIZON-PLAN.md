@@ -2,8 +2,9 @@
 
 Status: profile/binder, native tokenizer, CPU reference, checked Metal primitives,
 and a serial dense runtime implemented. Pinned Q8 short-context checkpoint
-correctness passes; bounded raw CLI dispatch is implemented. Long-context,
-bench, forward-only lens, and serving integration remain outstanding.
+correctness passes; bounded raw CLI dispatch and library forward-only lens
+captures/readouts are implemented. Long-context, bench, imported lens assets,
+interventions, lens CLI, and serving integration remain outstanding.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -179,6 +180,33 @@ stops are restricted to EOS 1; extra producer EOT stops fail before GPU setup.
 qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
   --raw-prompt 'The capital of France is' -n 8
 ```
+
+Ninth packet: library `append_with_captures` returns explicit absolute position,
+sorted unique zero-based post-block sites, flattened raw F32 residual rows, and
+ordinary final logits. Sites are after each block's full FFN residual add and
+before the following norm; only the final appended position is captured. The
+same block graph serves plain/captured appends. A per-call optional shared arena
+is separately priced/admitted, checked, and dropped; at most 589824 logical bytes
+for all 36 sites. Ordinary appends allocate no capture arena. All selected rows
+must be finite before any staged prefix becomes visible.
+
+`readout` validates one finite 4096-wide residual and reuses the exact final
+grouped norm/untied head implementation. Its explicit transaction submits one
+command but advances zero positions; it neither reads nor writes KV. Host input
+rejection is retryable; abandoned submitted work poisons the session. No imported
+asset identity or transfer claim is attached to these raw caller-owned vectors.
+
+Forty-one regular K2 CPU tests pass, with seven opt-in tests left ignored in that
+run. The broader suite exposed one stale pre-registration family assertion from
+packet 8, now corrected. All CLI binaries typecheck. A production-leased, API-
+validated actual-Q8 probe passes at base 37: all-layer and sparse captures,
+last-position/split equivalence, final-capture readout bitwise equality, zero
+readout, exact KV byte preservation, invalid inputs, full-capacity readout, and
+plain-session continuation equivalence. The 42-row independent oracle rerun also
+passes unchanged thresholds and metrics; artifacts are in
+`target/profiles/k2-oracle-27191-1789758614013773000`. This does not independently
+qualify intermediate residual values or inject real GPU/source-mutation faults;
+post-submit poisoning is covered by the shared host transaction tests.
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server

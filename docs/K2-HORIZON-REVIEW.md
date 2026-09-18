@@ -193,3 +193,25 @@ Source inspection confirms the selected norm/RoPE/store/attention variants use
 scalar float/half loads, matching the current element-alignment checks; future
 vectorized kernels must revalidate alignment. Numerical thresholds and descriptor
 behavior on a live device remain a separately authorized validation gate.
+
+## Authorized synthetic GPU follow-up
+
+After the user explicitly selected the two synthetic probes, inspection found
+that unit-test contexts isolate their leases and bypass the wired-memory gate.
+Both probes now explicitly retain `acquire_metal_benchmark_lease()` from before
+context creation until all GPU resources drop. No foreign process was stopped.
+
+Executed serially, with Metal API validation enabled:
+
+```sh
+MTL_DEBUG_LAYER=1 cargo test -p qwen-llm --lib \
+  k2_horizon_metal::tests::gpu_grouped_norm_and_full_neox_match_scalar_formulas \
+  -- --ignored --exact --nocapture --test-threads=1
+MTL_DEBUG_LAYER=1 cargo test -p qwen-llm --lib \
+  k2_horizon_metal::tests::gpu_f16_store_and_gqa4_attention_exclude_poisoned_future_rows \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+Both pass (0.10 s and 0.07 s harness elapsed); no validation errors. This is
+primitive wiring evidence at the tested inputs only, not full-model numerical
+qualification or a performance claim. Broader GPU work remains unauthorized.

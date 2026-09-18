@@ -152,6 +152,7 @@ fn read(tensor: &MetalTensor) -> Vec<f32> {
 #[test]
 #[ignore = "GPU execution requires a separately authorized synthetic validation window"]
 fn gpu_grouped_norm_and_full_neox_match_scalar_formulas() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
     let plan = request(1, 37);
     let append = plan.append(0, 37, 1).unwrap();
@@ -212,6 +213,7 @@ fn gpu_grouped_norm_and_full_neox_match_scalar_formulas() {
 #[test]
 #[ignore = "GPU execution requires a separately authorized synthetic validation window"]
 fn gpu_f16_store_and_gqa4_attention_exclude_poisoned_future_rows() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
     let plan = request(5, 37);
     let append = plan.append(0, 37, 3).unwrap();

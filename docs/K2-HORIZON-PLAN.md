@@ -71,6 +71,20 @@ prefix identity, cross-command ordering, finite values, and transactional state
 commit. On any encoding error, discard the entire command buffer; these primitive
 wrappers cannot roll back already encoded work if a caller submits it anyway.
 
+Scoped follow-up: the user explicitly authorized only the two synthetic GPU
+probes. Both passed on 2026-09-18 with `MTL_DEBUG_LAYER=1`, serial test execution,
+the production-exclusive lease, and the real wired-memory safety gate. Before
+execution, both tests were corrected to acquire that production lease explicitly:
+ordinary unit-test contexts otherwise use isolated locks and skip the wired gate.
+The first probe passed in 0.10 s; the second in 0.07 s (test harness elapsed times,
+not performance measurements). No model weights were loaded, no servers were
+changed, and no full-model execution was authorized or attempted.
+
+This establishes only the tested primitive wiring: grouped norm/full RoPE at
+position 37, and three-row GQA4 F16 cache attention at layer 35 with both arena
+offsets and poisoned future rows. It does not qualify all theta/positions, 7168
+context, packed prefill, full forward, imported lens assets, or checkpoint parity.
+
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server
 coordination restrictions are unchanged. The download completed with verified
@@ -102,9 +116,10 @@ and 73 F32 norms, 9,562,505,216 payload bytes; no weights are executed.
 - Improve KV representation without silently dropping context positions. Keep
   an F16 scientific control and identify any approximate cache execution.
 - Autonomous implementation, reviewed local commits, and the one Q8 download
-  are authorized by the subsequent implementation request. GPU execution,
-  shared-server changes, additional checkpoint downloads, and pushes are not.
-  Gate live validation under the existing coordination rules.
+  are authorized by the subsequent implementation request. A later explicit
+  approval authorized the two synthetic GPU probes only; both are complete.
+  Other GPU execution, shared-server changes, additional checkpoint downloads,
+  and pushes remain unauthorized. Coordinate any broader live-validation window.
 
 ## Architectural boundary
 

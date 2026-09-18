@@ -41,6 +41,7 @@ mod host_validity;
 #[path = "bench/identity.rs"]
 mod identity;
 mod integrated_grammar_row;
+mod k2_request_bench;
 mod lm_head_screening_oracle;
 mod messages;
 #[allow(dead_code)]
@@ -616,6 +617,7 @@ fn run() -> Result<()> {
         Cmd::VocabAudit(a) => run_vocab_audit(a),
         Cmd::Decode(a) => run_decode(a),
         Cmd::MuseRequest(a) => muse_glimmer_request_bench::run(a),
+        Cmd::K2Request(a) => k2_request_bench::run(a),
         Cmd::Pp(a) => run_pp(a),
         #[cfg(feature = "dsv4-diagnostics")]
         Cmd::Dsv4Prefill(a) => {

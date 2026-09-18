@@ -57,6 +57,8 @@ pub(crate) enum Cmd {
     /// Benchmark one resident Muse Glimmer ATEM request without claiming
     /// llama-bench pp/tg comparability.
     MuseRequest(muse_glimmer_request_bench::MuseRequestArgs),
+    /// Bounded native K2 raw request wall timings (not llama-bench pp/tg).
+    K2Request(k2_request_bench::K2RequestArgs),
     /// Prompt-only prefill benchmark aligned with llama-bench pp semantics.
     Pp(PpArgs),
     /// Profile native DeepSeek V4 packed prefill with production policy.

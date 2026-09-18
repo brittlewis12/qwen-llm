@@ -87,3 +87,20 @@ It compares complete identity-transport logits bitwise, checks orientation,
 exact binding versus explicit unvalidated transfer, and pre-Metal refusals. Assets
 target final post-block layer 35 and are hashed/bound before native execution.
 No claim of fit quality, cross-checkpoint scientific equivalence, or long context.
+
+## Request benchmark accounting
+
+```sh
+cargo build -p qwen-cli --bin qwen-bench
+uv run scripts/reference/k2/check_request_bench.py \
+  --binary target/debug/qwen-bench --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --output target/profiles/k2-request-bench-new-run
+```
+
+This is an API-validated correctness smoke of the benchmark's accounting, not a
+speed measurement. The dedicated `k2-request` lane uses raw native input, greedy
+sampling, exact EOS 1, and at most 32 forwards. It reports host-wall request phases
+with guard/readback overhead, not GPU-command timings or llama-bench pp/tg results.
+The checker records its explicit dirty-build override, tests warmup/repeat identity,
+raw-run fingerprint parity, BOS/literal input, zero-transition rates, timing/prefix
+counts, and pre-Metal errors. Each child owns its normal production lease.

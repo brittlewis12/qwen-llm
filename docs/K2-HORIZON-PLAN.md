@@ -4,7 +4,8 @@ Status: profile/binder, native tokenizer, CPU reference, checked Metal primitive
 and a serial dense runtime implemented. Pinned Q8 short-context checkpoint
 correctness passes; bounded raw CLI dispatch and library forward-only lens
 captures/readouts/interventions plus plain/imported lens readout CLI are implemented.
-Long-context, bench, CLI interventions, and serving remain outstanding.
+Bounded request benchmarking is implemented. Long-context, CLI interventions,
+and serving remain outstanding.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -340,6 +341,39 @@ and passed. Artifacts: `target/profiles/k2-imported-lens-cli-check-optimized-hos
 The full plain CLI regression also passes after the shared executor change:
 `target/profiles/k2-plain-lens-after-import`. Reproduction is documented alongside
 the oracle in `scripts/reference/k2/README.md`.
+
+Fourteenth packet: `qwen-bench k2-request` is a dedicated raw/native lane, not an
+ordinary-Qwen adapter or a llama-bench pp/tg equivalent. It requires exactly one
+raw prompt or literal token list and an explicit sampled-token limit, with exact
+`prompt + sampled - 1` capacity admission capped at 32. All IDs, dense profile,
+native tokenizer, exact EOS 1 policy, and runtime storage planning are checked
+before Metal. The model stays loaded; every warmup/timed repetition creates fresh
+KV and a fresh native greedy sampler. Repetitions are bounded to 1..10.
+
+The versioned JSON reports setup separately from session allocation, prefill,
+sampler setup, generation, transition append, request, and direct first-sample-ready
+host-wall durations. Guards, waits, finite/source checks, and logits readback remain
+inside append timing. EOS is sampled but not emitted or forwarded; the last
+budget token is emitted but not forwarded. Transition rates use actual transition
+calls and their wall duration, with null for zero calls/time. Exact output mismatch
+across warmup/timed runs suppresses aggregate rates without discarding samples.
+
+Metadata records build policy/identity, device, environment/instrumentation, power,
+actual head dtype/shape, head geometry, context/theta, capacity, tokenizer ID, and
+source stamps (not content authentication). Logical KV/payload, planned buffers,
+and observed Metal allocation deltas are distinct. No checkpoint whitelist or
+intermediate-checkpoint qualification is inferred. Kernel-only, steady-state,
+llama-bench-comparability, and performance-claim flags all remain false.
+
+Six host accounting/admission tests and five K2 capability/run tests pass, and
+CLI binaries typecheck. The leased/API-validated smoke verifies warmup/repeat
+identity, the existing raw-run output fingerprint, explicit BOS/no-special parity,
+literal IDs, zero-transition null rate, timing/prefix accounting, and pre-Metal
+family/budget/ID refusal. Artifacts: `target/profiles/k2-request-bench-check-v2`.
+The first checker attempt compared two differently domain-separated SHA256
+contracts; output text/IDs were unchanged. The checker now reconstructs the exact
+request-stats domain/count layout while independently checking raw i32le hashes.
+These are instrumentation/accounting observations, not reported speed results.
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server

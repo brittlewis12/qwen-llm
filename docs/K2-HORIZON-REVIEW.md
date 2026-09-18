@@ -441,3 +441,34 @@ the recorded binding/transfer policy, not validation of producer scientific clai
 Closure verdict: **commit ready; no concrete blocker remains**. The reviewer
 confirmed both completed checker results, host-only optimization scope, timeout
 transparency, and the absence of fitting/checkpoint-quality/serving claims.
+
+## Packet 14 bounded request benchmark
+
+The design review endorsed a dedicated `k2-request` command and small accounting
+loop, with exact `P+T-1` capacity, native raw input, EOS-only policy, fresh sessions,
+and no reuse of Qwen/Muse model or rendering assumptions. Separate clocks and
+actual transition counts prevent the first sampled token being counted as a
+decode forward. Zero-transition rates are null; inconsistent outcomes suppress
+aggregate rates, not evidence. Bench build-identity policy remains unchanged.
+
+Pre-commit review requested removal of a hard-coded final-Q8 qualification label
+and explicit head dtype/geometry/capacity metadata. Those fixes are implemented:
+the runtime scope is unqualified short-context guarded request-wall measurement,
+with actual checkpoint geometry/precision recorded independently. No kernel-only,
+llama-bench, steady-state, or performance claim is made even after warmup.
+
+Six host tests pass (including mock EOS/budget/cancellation accounting) and the
+five K2 run/capability tests pass. An explicit clap conflict fixed a `requires`
+interaction that otherwise admitted no-special-token flags with literal IDs.
+The actual-Q8 instrumented checker passes warmup/timed token equality, raw-run
+fingerprint, serialized BOS, literal IDs, zero-forward null rates, exact committed
+prefix/phase accounting, and invalid request/family rejection before Metal.
+
+The first checker attempt used the raw i32le digest as if it were the request-
+stats fingerprint. Inspection established the latter's domain/count prefix; the
+checker now computes both correctly. No runtime outputs, algorithm, or numerical
+threshold changed. Successful evidence is `target/profiles/k2-request-bench-check-v2`.
+
+Closure verdict: **no remaining concrete commit blocker; commit-ready**. The
+reviewer confirmed the corrected qualification scope, head/capacity metadata,
+completed leased checker, and hash-contract distinction.

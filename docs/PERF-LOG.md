@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-17 - Prepare Muse Native FFN Packet Without GPU Execution
+
+- Source77bce02a adds onlycfg(test) capture hooks and an ignored fixed fusion screen.
+  All52 layers/eight teacher-forced transitions, full-row/activeKV/prefix observer
+  identity, finite poisoned streams and admitted observer/screen memory are gates.
+- Existing pinned model loader authenticates its shard; saved prefix is a checked
+  historical common state, not fresh-history proof. Cargo-relative paths, host
+  ranges/overflow, collision-safe artifacts and effective lcpp baseline are explicit.
+- Sixcells use64 fixed repeats/warmAB/oneABBA; >=10%GPU mean/bothpairs,<=5%GPU+wall
+  controls,no wall regression, fullproducts/guards/inputs checked. Passing earns
+  native qualification only. First/second token-half CPU census reports now exist.
+- Rust CPU contract test and11Python regressions PASS; ignored packet compiles,
+  all-target check/fmt clean. cx review addressed real safety issues and rejected
+  false Path type objection. No GPU/server/binary activity or new performance claim.
+- Pending default/alignment gate and coordinated GPU window still come first.
+  `docs/bench/2026-09-17-muse-ffn/RESULT.md` records compile-only status and raw logs.
+
 ## 2026-09-17 - Source-First Muse FFN Reuse And Census Separation
 
 - No GPU/server work. Source77289eb9 extends the existing CPU FFN census to complete

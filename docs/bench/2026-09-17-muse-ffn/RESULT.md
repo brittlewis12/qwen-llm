@@ -69,3 +69,51 @@ only an all-layer native qualification, not production promotion. A separate
 fixedblock/down-only sparsity census needs>=30%down blocks removable at1e-3 inner
 energy (10%all-FFN serialized payload), including both token halves, merely to earn
 further cost/output-error study. See `PROTOCOL.md`; neither experiment ran here.
+
+## Native packet prepared, not executed
+
+Source `77bce02a` implements the ignored test
+`muse_glimmer_text_session::tests::muse_ffn_capture_and_fusion_screen` and its
+test-only forward capture hooks. No production branch, shader, session buffer,
+selector, or execution switch changes. All resource/capture fields disappear from
+non-test compilation; the existing fused primitive is called only by the screen.
+
+The packet restores the pinned32640-row state, extends128 rows once, and captures
+eight teacher-forced generated transitions across all52 layers. It is prepared to
+compare ordinary/observed full logits and activeKV bitwise at every step with
+immutable prefix, then export finite poisoned gate/up/product streams plus normalized
+input sidecar. Model authentication uses the existing pinned full-shard loader;
+prefix provenance is explicitly fixed historical replay, not authenticated fresh
+history. Scorer output now includes first/second sample-half oracle distributions.
+
+Six fixed primitive cells (layers0/25/51, samples0/7) compare both baseline and fused
+outputs against captured deployed products. Preflight checks actual lcpp/fused
+kernel names. Timing has fixed64 repetitions, warmAB then oneABBA percell, separate
+measured output buffers, post-bracket exact/guard/input-immutability checks, explicit
+all-cell HOLD or advance-to-native verdict. No arbitrary repeat choice or retiming.
+
+Validation performed without GPU:
+
+- Rust CPU contract test PASS0.00s; ignored native packet compiles. Checks include
+  416-slot layer/sample boundaries, invalid/overflow positions, checked host byte ranges,
+ 110755840-byte observer accounting, bothpair/control/wall gates and invalid timing.
+- All-target CLI check PASS without warnings; cargo fmt and diff checks PASS.
+- Eleven Python scorer tests PASS0.155s, including schema1/schema2 CLI and new
+  sample-half denominator assertions. These are synthetic fixtures, not Muse data.
+- Initial compile/CPU packet also passed. Final raw logs are
+  `target/profiles/2026-09-17-muse-ffn-packet-{cpu-02,check-02,python-01}.log`.
+
+cx Luna `01a0b201-e0d8-7cf3-8b4c-3c89993d3b94` reviewed design and implementation.
+Checked write bounds, poison offsets, pre-Metal artifact collision handling and
+loader-backed shard identity were strengthened. We also fixed Cargo package-CWD
+versus worktree artifact resolution. The review's Path comparison objection was
+incorrect: fixture.path() returns&str, confirmed by source and successful compile.
+Its initial requirement for native candidate replay belongs to later all-model
+qualification, not this isolated screen. Different source commits alone do not
+invalidate a hash-pinned common-state experiment; the prefix scope is explicit.
+Final review finds no remaining serious compile-only blocker.
+
+**No native packet ran, no capture was produced, and no fusion speedup or numerical
+equivalence is established.** First coordinate GPU access, close the existing Muse
+default/alignment delivery gate, then execute this frozen packet once. No server
+process or production executable was touched by this preparation.

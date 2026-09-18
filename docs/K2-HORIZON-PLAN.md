@@ -1,6 +1,7 @@
 # K2 Horizon implementation plan
 
-Status: profile/binder and native tokenizer implemented; no K2 execution implemented.
+Status: profile/binder, native tokenizer, and tiny CPU equation reference implemented;
+no full-model K2 execution or runtime dispatch implemented.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -10,7 +11,7 @@ First packet: explicit library-only 7B config and descriptor binding, stage-awar
 context/theta, exact tensor inventory/storage checks, and logical F16/Q8 cache
 sizing. Eight model-free CPU tests pass; the explicit CPU/header-only test also
 binds the downloaded Q8 artifact. Family dispatch and all execution lanes remain
-unchanged. Scalar forward math and tokenizer conformance are the next packets.
+unchanged. Subsequent packets supply scalar math and tokenizer conformance.
 Pre-commit adversarial review found no blockers (see review record).
 
 Second packet: native K2 tokenization with NFC after added-token partitioning,
@@ -23,6 +24,23 @@ the real Q8 header passes the posttraining corpus. Five regular K2 tests include
 also pass. No FFI dependency change. Tokenizer fixture generation downloads
 metadata only and does not convert model checkpoints. Authored span mapping,
 runtime profile identity, and application-lane integration remain later work.
+
+Third packet: bounded synthetic CPU forward reference and independently generated
+NumPy 2.2.6 batch-causal fixtures. Two layers exercise residual width different
+from query width, four-group direct-gamma RMS, full split-half RoPE, contiguous
+GQA, sequential residual SwiGLU, and untied grouped-norm readout. Three theta/base
+pairs each cover F32/F16 cache semantics, every prefill/continuation split, and
+single-token appends. Every attention read uses rounded stored K/V, including the
+current token. Sessions borrow immutable weights and commit only after all
+tokens/layers/readouts succeed. Seven CPU tests cover equation agreement,
+validation, rollback on nonfinite readout/cache overflow, and fixture sensitivity
+to seven independently corrupted equations (not Rust mutation testing).
+
+The oracle uses F32 activations with F64 reduction/rotation/softmax intermediates;
+it is not a CUDA BF16 or Metal numerical ABI. F16 values are round-tripped through
+F32 containers, not an implemented GPU cache layout. Tiny hard limits prohibit
+full-model CPU deployment or dequantization. Model-checkpoint parity and Metal
+qualification remain separate outstanding gates.
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server
@@ -54,9 +72,10 @@ and 73 F32 norms, 9,562,505,216 payload bytes; no weights are executed.
   metadata/provenance without implementing a converter or acquiring the fleet.
 - Improve KV representation without silently dropping context positions. Keep
   an F16 scientific control and identify any approximate cache execution.
-- No GPU execution, shared-server changes, full checkpoint downloads, commits,
-  or pushes are authorized by this planning/review step. Prepare model-free
-  work and gate later live validation under the existing coordination rules.
+- Autonomous implementation, reviewed local commits, and the one Q8 download
+  are authorized by the subsequent implementation request. GPU execution,
+  shared-server changes, additional checkpoint downloads, and pushes are not.
+  Gate live validation under the existing coordination rules.
 
 ## Architectural boundary
 

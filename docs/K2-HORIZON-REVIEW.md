@@ -139,3 +139,23 @@ real Q8 tokenizer), and three existing Qwen/JoyAI splitter regressions pass.
 Expected IDs come from pinned `tokenizers==0.22.2` with independently hashed HF
 tokenizer artifacts, not from the new Rust encoder. No model forward or GPU
 execution is involved. Lens span/identity integration is not claimed.
+
+## Packet 3 design and pre-commit review
+
+The same session recommended a composed tiny CPU reference over isolated math
+helpers. The design review required an explicit prefill/continuation contract,
+rounded cache reads, all-or-nothing commits, and pinned readout conventions.
+The implementation review returned **proceed; no commit blocker** after reading
+the Rust reference/tests, independent NumPy generator, and generated fixtures.
+No GPU, model loads, or server operations occurred during review or validation.
+
+The review confirmed output-major matrices, split-half RoPE, contiguous GQA,
+causal masking/current-token inclusion, and full-append rollback. Two nonblocking
+notes were addressed: documentation calls corrupted NumPy equations fixture
+distinguishability controls rather than Rust mutation tests; tests explicitly
+assert all six expected positional/storage cases. An additional end-to-end F16
+cache-overflow test checks rollback after earlier staged rows/layers succeeded.
+
+Seven targeted CPU tests pass. This packet supplies synthetic equation evidence,
+not checkpoint parity, an executable GGUF path, GPU ABI qualification, actual
+F16 cache memory savings, or runtime admission.

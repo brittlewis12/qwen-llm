@@ -194,6 +194,10 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    as down-only1/3 and gate masks as unproven up+down2/3; no runtime selector added.
    First coordinate GPU access and close pending Muse default/alignment delivery.
    Source ledger and future frozen gates: `docs/bench/2026-09-17-muse-ffn/PROTOCOL.md`.
+   Test-only native acquisition/six-cell fusion packet is now implemented and
+   compile/CPU checked (77bce02a), but UNRUN. No new GPU artifact, numerical result,
+   speedup or production selector exists. Scorer reports token halves explicitly.
+   Do not add more candidates before resolving delivery and this bounded screen.
 2. Fresh-prefill structural work remains co-primary. Refreshed late32K packed
    GPU1113.485ms attribution is attention49.91%, FFN38.43%;8K is FFN57.0%.
    These are stage shares, not controlled full-request or cold-load authority.

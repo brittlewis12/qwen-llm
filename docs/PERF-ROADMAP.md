@@ -184,6 +184,16 @@ slow-prefix reference. This is not full-model131K numerical equivalence.
    a product after computing up is not avoided work. Price selection, gather and
    weight-layout costs before a kernel proposal. Logical22.029GB/44.2ms equals
    498GB/s payload rate, NOT measured DRAM or a roofline. No sparsity claim yet.
+   Source refresh separates an independent existing fused-Q8 gate/up/SwiGLU screen:
+   no weight deletion,104 fewer dispatches,319488 intermediate bytes/layer removed;
+   NR0=2 reuse also avoids265814016 source-issued x-load bytes/layer (only26624
+   unique bytes, cache/DRAM service unknown). Scratch256->512B and register pressure
+   make performance unproven. Screen this reuse candidate independently of sparsity,
+   not after a successful sparse-mask result. Existing CPU census now supports
+   complete-layer gate/up/inner Q8block32 diagnostics, pricing post-product masks
+   as down-only1/3 and gate masks as unproven up+down2/3; no runtime selector added.
+   First coordinate GPU access and close pending Muse default/alignment delivery.
+   Source ledger and future frozen gates: `docs/bench/2026-09-17-muse-ffn/PROTOCOL.md`.
 2. Fresh-prefill structural work remains co-primary. Refreshed late32K packed
    GPU1113.485ms attribution is attention49.91%, FFN38.43%;8K is FFN57.0%.
    These are stage shares, not controlled full-request or cold-load authority.

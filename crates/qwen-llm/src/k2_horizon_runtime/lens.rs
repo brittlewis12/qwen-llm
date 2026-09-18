@@ -4,13 +4,14 @@
 use super::*;
 use crate::metal::encode_copy_offset_f32;
 
-const WIDTH: usize = 4096;
-const LAYERS: u32 = 36;
+pub(super) const WIDTH: usize = 4096;
+pub(super) const LAYERS: u32 = 36;
 
 /// Final appended token, at selected zero-based post-block sites: after the full
 /// FFN residual addition, before any following normalization. Rows are flattened
 /// `[site][4096]` F32, in `post_block_layers` order. These are raw residuals, not
-/// normalized states. `logits` is the ordinary final grouped-norm/untied-head output.
+/// normalized states. When interventions are requested, each row is captured after
+/// all operations at that site. `logits` uses the final grouped norm/untied head.
 #[derive(Debug)]
 pub struct K2CapturedForward {
     pub absolute_position: u32,
@@ -28,7 +29,7 @@ impl K2Session<'_, '_> {
         post_block_layers: &[u32],
     ) -> Result<K2CapturedForward> {
         capture_bytes(post_block_layers)?;
-        self.append_impl(tokens, post_block_layers)
+        self.append_impl(tokens, post_block_layers, &[])
     }
 
     /// Apply this model's final grouped norm and untied head to one arbitrary
@@ -87,14 +88,14 @@ impl K2Session<'_, '_> {
     }
 }
 
-fn validate_residual(residual: &[f32]) -> Result<()> {
+pub(super) fn validate_residual(residual: &[f32]) -> Result<()> {
     if residual.len() != WIDTH || residual.iter().any(|value| !value.is_finite()) {
         return Err(invalid("readout requires exactly 4096 finite F32 values"));
     }
     Ok(())
 }
 
-fn capture_bytes(layers: &[u32]) -> Result<u64> {
+pub(super) fn capture_bytes(layers: &[u32]) -> Result<u64> {
     if layers.is_empty()
         || layers.len() > LAYERS as usize
         || layers.iter().any(|&layer| layer >= LAYERS)
@@ -117,27 +118,8 @@ impl CaptureArena {
         if layers.is_empty() {
             return Ok(None);
         }
-        let bytes = capture_bytes(layers)?;
-        let price = price_buffers(ctx, &[bytes])?;
-        let _transaction = ctx.begin_allocation_transaction();
-        admit(ctx, price)?;
-        let before = ctx.current_allocated_size();
-        let shape = vec![WIDTH as u64, layers.len() as u64];
-        let tensor = MetalTensor::zeros_dtype(ctx, shape.clone(), GgmlType::F32)?;
-        if tensor.dtype != GgmlType::F32
-            || tensor.shape != shape
-            || tensor.n_bytes() != bytes
-            || !tensor.is_writable()
-        {
-            return Err(invalid("capture allocation descriptor drift"));
-        }
-        validate_cpu_layout(
-            tensor.buffer.storageMode() == MTLStorageMode::Shared,
-            tensor.offset,
-            bytes,
-            tensor.buffer.length() as u64,
-        )?;
-        reconcile(ctx, before, price)?;
+        capture_bytes(layers)?;
+        let tensor = allocate_rows(ctx, layers.len())?;
         Ok(Some(Self {
             layers: layers.to_vec(),
             tensor,
@@ -167,6 +149,34 @@ impl CaptureArena {
         }
         Ok(rows.to_vec())
     }
+}
+
+pub(super) fn allocate_rows(ctx: &MetalContext, rows: usize) -> Result<MetalTensor> {
+    if rows == 0 || rows > 128 {
+        return Err(invalid("forward hook arena requires 1..=128 rows"));
+    }
+    let bytes = rows as u64 * WIDTH as u64 * 4;
+    let price = price_buffers(ctx, &[bytes])?;
+    let _transaction = ctx.begin_allocation_transaction();
+    admit(ctx, price)?;
+    let before = ctx.current_allocated_size();
+    let shape = vec![WIDTH as u64, rows as u64];
+    let tensor = MetalTensor::zeros_dtype(ctx, shape.clone(), GgmlType::F32)?;
+    if tensor.dtype != GgmlType::F32
+        || tensor.shape != shape
+        || tensor.n_bytes() != bytes
+        || !tensor.is_writable()
+    {
+        return Err(invalid("forward hook allocation descriptor drift"));
+    }
+    validate_cpu_layout(
+        tensor.buffer.storageMode() == MTLStorageMode::Shared,
+        tensor.offset,
+        bytes,
+        tensor.buffer.length() as u64,
+    )?;
+    reconcile(ctx, before, price)?;
+    Ok(tensor)
 }
 
 #[cfg(test)]

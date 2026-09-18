@@ -326,3 +326,27 @@ Closure verdict: **no remaining concrete commit blocker; commit ready**. The
 reviewer verified the byte/freshness hardening, zero-advance transaction, explicit
 empty-site policy, and scoped evidence. Imported assets, interventions, fitting,
 CLI wiring, and broader qualification remain outside this packet.
+
+## Packet 10 ordered forward interventions
+
+Design feedback emphasized exact kernel signs/formulas, final-token-only scope,
+current-layer KV already being committed to the staged arena, stable same-site
+order, and private priced host-to-GPU vectors rather than public Metal buffers.
+All four existing operations are reused without normalization or a second graph.
+Nondecreasing layer order is validated, never silently sorted. Capture occurs
+after all same-site operations. Empty operations allocate no vector arena.
+
+The implementation review found **no concrete blocker; commit-ready within
+scope**. It verified vector bounds/lifetimes/row separation, command ordering,
+no-op behavior, and conservative transaction semantics. Diagnostic wording in
+the shared checked allocator was clarified to cover all forward hooks. A suggested
+extra host descriptor-row pairing test is nonblocking; the live SourceToTarget
+equation check exercises actual source/target arena translation.
+
+The leased/API-validated Q8 intervention probe passes all four independent scalar
+equations, noncommuting same-site order, capture timing, no-op equality, final-site
+KV/continuation identity, early-site causal KV changes, split reproducibility,
+retryable host rejection, and intentional finite-input GPU overflow poisoning.
+Forty-two regular K2 tests pass and CLI binaries typecheck. No claim of actual
+device-fault injection or intermediate per-operation nonfinite detection; no
+imports, checkpoint transfer identity, fitting, or CLI intervention support yet.

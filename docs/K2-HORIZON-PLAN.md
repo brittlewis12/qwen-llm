@@ -3,8 +3,8 @@
 Status: profile/binder, native tokenizer, CPU reference, checked Metal primitives,
 and a serial dense runtime implemented. Pinned Q8 short-context checkpoint
 correctness passes; bounded raw CLI dispatch and library forward-only lens
-captures/readouts are implemented. Long-context, bench, imported lens assets,
-interventions, lens CLI, and serving integration remain outstanding.
+captures/readouts/interventions are implemented. Long-context, bench, imported
+lens assets, lens CLI, and serving integration remain outstanding.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -207,6 +207,34 @@ passes unchanged thresholds and metrics; artifacts are in
 `target/profiles/k2-oracle-27191-1789758614013773000`. This does not independently
 qualify intermediate residual values or inject real GPU/source-mutation faults;
 post-submit poisoning is covered by the shared host transaction tests.
+
+Tenth packet: host-slice forward interventions reuse the existing four Metal
+operations, with no new shader or alternate graph. Exact formulas (no implicit
+vector normalization) are documented on `K2InterventionKind`: fixed addition,
+residual-L2-relative addition, subtractive projection, and source-to-target.
+At most 64 operations/128 vectors use one per-call independently admitted checked
+F32 arena (at most 2 MiB logical bytes). All vector lengths/finiteness, coefficients,
+layer bounds, and nondecreasing layer order are validated before allocation or
+submission. Same-site caller order is preserved; zero coefficients are rejected,
+and an empty operation list is the exact no-op control.
+
+Only the final appended token is modified, after post-FFN residual addition and
+before capture/next block. The site's own K/V is already stored, so only later
+layers' current-token cache rows can change. Final-block interventions change
+logits but cannot change KV or later continuation. Earlier tokens are never
+rewritten. Ordinary append/capture/readout APIs remain unchanged. These raw vector
+operations carry no asset provenance/transfer authorization or fitting interface.
+
+Forty-two regular K2 CPU tests pass (eight opt-in tests ignored); all CLI binaries
+typecheck. The production-leased/API-validated Q8 probe passes all four formulas
+against separate F64 scalar expressions (2e-5 mixed absolute/relative threshold),
+same-site order reversal, post-intervention captures, no-op bitwise equality,
+final-layer KV/continuation identity, and early-layer strictly later-layer/current-
+token KV changes with split-continuation reproducibility. Finite huge inputs
+deliberately overflow on GPU: the append fails, prefix remains zero despite prior
+staged token commands, and the poisoned session refuses append/readout. This is
+numerical-failure evidence, not device-fault injection or per-operation finiteness
+instrumentation. Adversarial review found no concrete commit blocker.
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server

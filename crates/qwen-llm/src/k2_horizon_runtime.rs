@@ -24,9 +24,12 @@ use objc2_metal::{
 };
 use std::cell::Cell;
 
+mod intervention;
 mod lens;
 mod residency;
 mod state;
+use intervention::InterventionArena;
+pub use intervention::{K2Intervention, K2InterventionKind};
 use lens::CaptureArena;
 pub use lens::K2CapturedForward;
 pub use residency::K2RuntimePlan;
@@ -171,10 +174,15 @@ impl K2Session<'_, '_> {
     /// Validates ALL IDs before I32 upload. Successful earlier token commands
     /// remain staged until the entire append completes; errors expose no prefix.
     pub fn append(&mut self, tokens: &[u32]) -> Result<Vec<f32>> {
-        Ok(self.append_impl(tokens, &[])?.logits)
+        Ok(self.append_impl(tokens, &[], &[])?.logits)
     }
 
-    fn append_impl(&mut self, tokens: &[u32], layers: &[u32]) -> Result<K2CapturedForward> {
+    fn append_impl(
+        &mut self,
+        tokens: &[u32],
+        layers: &[u32],
+        interventions: &[K2Intervention<'_>],
+    ) -> Result<K2CapturedForward> {
         if let Err(error) = self.model.plan.revalidate_source() {
             self.ledger.poison();
             return Err(error);
@@ -192,6 +200,7 @@ impl K2Session<'_, '_> {
         )?;
         let ctx = self.model.ctx;
         let captures = CaptureArena::allocate(ctx, layers)?;
+        let interventions = InterventionArena::allocate(ctx, interventions)?;
         self.model.plan.revalidate_source()?;
         for (index, &id) in tokens.iter().enumerate() {
             let token = absolute.token(index as u32)?;
@@ -211,6 +220,7 @@ impl K2Session<'_, '_> {
                 &self.buffers,
                 last,
                 captures.as_ref().filter(|_| last),
+                interventions.as_ref().filter(|_| last),
             );
             encoder.end();
             encoded?;
@@ -253,6 +263,7 @@ fn encode_token(
     b: &SessionBuffers,
     logits: bool,
     captures: Option<&CaptureArena>,
+    interventions: Option<&InterventionArena>,
 ) -> Result<()> {
     encode_get_rows_f32(ctx, enc, &weights.embedding, &b.id, &b.residual, 1, 4096)?;
     for (index, layer) in weights.layers.iter().enumerate() {
@@ -301,6 +312,9 @@ fn encode_token(
         encode_silu_mul_f32(ctx, enc, &b.gate, &b.up, &b.gated)?;
         encode_mat_vec_dispatch(ctx, enc, &layer.down, &b.gated, &b.projection, 12288, 4096)?;
         encode_add_inplace_f32(ctx, enc, &b.residual, &b.projection)?;
+        if let Some(interventions) = interventions {
+            interventions.encode(ctx, enc, index as u32, &b.residual)?;
+        }
         if let Some(captures) = captures {
             captures.encode(ctx, enc, index as u32, &b.residual)?;
         }

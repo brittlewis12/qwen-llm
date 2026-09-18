@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-17 - Source-First Muse FFN Reuse And Census Separation
+
+- No GPU/server work. Source77289eb9 extends the existing CPU FFN census to complete
+  Q8block32 gate/up/inner streams;11 tests PASS. No production switch/kernel/observer.
+- Existing fused Q8 gate/up/SwiGLU becomes an independent reuse candidate:104 fewer
+  dispatches/token, no weight deletion,319488 intermediate bytes/layer avoided.
+  ActualNR0=2 loop also removes265814016 source-issued x-load bytes/layer, versus
+ 26624 unique x bytes; cached service unknown. Neither is a DRAM/time projection.
+- Fixedblock structural hypotheses retain gate cost; product oracle is down-only
+ 1/3, gate-mask up+down2/3 remains unproven. Smallgate/largeup and scatteredzero
+  counterexamples prevent false deletion claims. No Muse activation census ran.
+- cx challenges improved layer coverage/provenance/zero-denominator semantics;
+  corrected reviewer's3F intermediary and once-per-vector x accounting. Pending
+  default/alignment delivery plus coordinated GPU access precede future screens.
+  Evidence/protocol: `docs/bench/2026-09-17-muse-ffn/RESULT.md`.
+
 ## 2026-09-17 - Muse Delivery Finds Materialized Attention Alignment Bug
 
 - Default-delivery attempt02 acquires production lease/real wired gate, then

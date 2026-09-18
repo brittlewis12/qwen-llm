@@ -42,6 +42,7 @@ pub mod dense_batch8;
 pub mod env_flag;
 pub mod forward;
 pub mod gguf;
+pub mod k2_horizon;
 pub mod loader;
 pub mod metal;
 pub mod metal_dflash;

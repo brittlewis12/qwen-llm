@@ -123,6 +123,9 @@ impl QwenTemplate {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ServeRequest {
     pub(crate) model: String,
+    /// Present only after the K2 family parser admits raw string input.
+    pub(crate) k2_raw_input: Option<String>,
+    pub(crate) k2_add_special_tokens: Option<bool>,
     pub(crate) instructions: Option<String>,
     pub(crate) model_request: ModelRequest,
     /// Exact executable set. Empty means no calls are executable; narrowing
@@ -163,6 +166,8 @@ impl Default for ServeRequest {
     fn default() -> Self {
         Self {
             model: String::new(),
+            k2_raw_input: None,
+            k2_add_special_tokens: None,
             instructions: None,
             model_request: ModelRequest::default(),
             allowed_tools: Vec::new(),
@@ -222,9 +227,12 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "parallel_tool_calls",
     "user",
     "x_qwen",
+    "x_k2",
 ];
 
 const UNSUPPORTED_TOP_LEVEL: &[&str] = &[
+    // Only the K2 family parser consumes this extension before common parsing.
+    "x_k2",
     "background",
     "conversation",
     "frequency_penalty",

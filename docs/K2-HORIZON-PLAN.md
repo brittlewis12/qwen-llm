@@ -4,8 +4,8 @@ Status: profile/binder, native tokenizer, CPU reference, checked Metal primitive
 and a serial dense runtime implemented. Pinned Q8 short-context checkpoint
 correctness passes; bounded raw CLI dispatch and library forward-only lens
 captures/readouts/interventions plus plain/imported lens readout CLI are implemented.
-Bounded request benchmarking is implemented. Long-context, CLI interventions,
-and serving remain outstanding.
+Bounded request benchmarking and raw-string serving are implemented. Long-context,
+CLI interventions, and checkpoint-specific chat/tool serving remain outstanding.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -374,6 +374,33 @@ The first checker attempt compared two differently domain-separated SHA256
 contracts; output text/IDs were unchanged. The checker now reconstructs the exact
 request-stats domain/count layout while independently checking raw i32le hashes.
 These are instrumentation/accounting observations, not reported speed results.
+
+Fifteenth packet: a family-owned raw `/v1/responses` serving subset overrides
+request parsing, prompt rendering, and output protocol. Input must be a string;
+raw origin is retained explicitly, and unsupported fields/controls fail rather
+than falling through to Qwen. Native BOS defaults on, with explicit
+`x_k2.add_special_tokens:false` for serialized input. Other families reject that
+namespace. Raw output uses UTF-8 assembly only: no reasoning/tool/marker parser.
+JSON and SSE share the same literal output semantics.
+
+Startup requires explicit capacity <=32 and output default, zero snapshot budget,
+and no drafter. K2 CPU checks precede address binding; binding precedes GPU load
+to preserve fail-cheap behavior for busy ports. Stack-owned context/GGUF/model
+outlive a borrowing backend on the accept-loop thread: no leaks, self-references,
+or forced Send. Fresh per-request sessions enforce P+T-1 budgeting, exact EOS 1,
+real per-token prefill cancellation boundaries, and unconditional session discard
+on abort. The next request cannot inherit partial KV. No snapshot/history reuse.
+
+The actual-Q8 production-leased/API-validated backend test passes direct calls
+and ephemeral loopback JSON/SSE requests, raw-run byte parity, automatic versus
+serialized BOS, optional stats, budget rejection, and fresh-request equivalence
+after abort before prefill, mid-prefill, first emission, and later generation.
+A separate actual-header CPU test rejects limits/cache/drafter options before
+listener/Metal creation. No existing service was touched or long-running server
+process started. CPU regressions pass: 29 HTTP tests, 24 shared parser tests,
+13 family renderer tests, nine startup/acceptor tests, ten CLI tests, seven output-
+partition tests, two K2 backend host tests, and five K2 capability/run tests (some
+filters overlap). See `docs/K2-HORIZON-SERVE.md` for scope and reproduction.
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server

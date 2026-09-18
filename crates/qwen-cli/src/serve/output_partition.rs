@@ -46,6 +46,8 @@ impl GenerationEnd {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OutputProtocol {
+    /// Literal completion text: UTF-8 assembly only, no control-marker parsing.
+    RawText,
     /// `<think>`-partitioned text with an optional tool block; the Qwen
     /// families and DeepSeek V4 share this shape and differ in grammar.
     Qwen {
@@ -61,6 +63,7 @@ pub(crate) enum OutputProtocol {
 }
 
 pub(crate) enum OutputPartition {
+    Raw(Utf8Assembler),
     Qwen(QwenOutputPartition),
     Muse(MuseAtemPartition),
 }
@@ -68,6 +71,7 @@ pub(crate) enum OutputPartition {
 impl OutputPartition {
     pub(crate) fn new(protocol: OutputProtocol) -> Self {
         match protocol {
+            OutputProtocol::RawText => Self::Raw(Utf8Assembler::new()),
             OutputProtocol::Qwen {
                 preopened_reasoning,
                 parse_tools,
@@ -91,6 +95,12 @@ impl OutputPartition {
 
     pub(crate) fn push(&mut self, bytes: &[u8], events: &mut Vec<PartitionEvent>) {
         match self {
+            Self::Raw(utf8) => {
+                let text = utf8.push(bytes);
+                if !text.is_empty() {
+                    events.push(PartitionEvent::Visible(text));
+                }
+            }
             Self::Qwen(partition) => partition.push(bytes, events),
             Self::Muse(partition) => partition.push(bytes, events),
         }
@@ -102,6 +112,13 @@ impl OutputPartition {
         events: &mut Vec<PartitionEvent>,
     ) -> Result<(), ServeError> {
         match self {
+            Self::Raw(mut utf8) => {
+                let text = utf8.finish();
+                if !text.is_empty() {
+                    events.push(PartitionEvent::Visible(text));
+                }
+                Ok(())
+            }
             Self::Qwen(partition) => {
                 partition.finish(events);
                 Ok(())
@@ -112,6 +129,12 @@ impl OutputPartition {
 
     pub(crate) fn abort(self, events: &mut Vec<PartitionEvent>) {
         match self {
+            Self::Raw(mut utf8) => {
+                let text = utf8.finish();
+                if !text.is_empty() {
+                    events.push(PartitionEvent::Visible(text));
+                }
+            }
             Self::Qwen(partition) => partition.abort(events),
             Self::Muse(partition) => partition.abort(events),
         }
@@ -126,6 +149,57 @@ pub(crate) struct QwenOutputPartition {
     pending_visible: String,
     tool_buffer: String,
     in_tool_span: bool,
+}
+
+#[cfg(test)]
+mod raw_tests {
+    use super::*;
+
+    fn visible(events: Vec<PartitionEvent>) -> String {
+        events
+            .into_iter()
+            .map(|event| match event {
+                PartitionEvent::Visible(text) => text,
+                other => panic!("raw text emitted non-visible event {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn raw_preserves_every_marker_and_utf8_across_all_chunk_sizes() {
+        let text = "<think>literal</think><tool_call>{\"name\":\"x\"}</tool_call><|ifm|end_of_text|>\u{2192}\u{1f389}<thi";
+        for chunk in 1..=text.len() {
+            for end in [GenerationEnd::StopToken(1), GenerationEnd::TokenLimit] {
+                let mut partition = OutputPartition::new(OutputProtocol::RawText);
+                let mut events = Vec::new();
+                for bytes in text.as_bytes().chunks(chunk) {
+                    partition.push(bytes, &mut events);
+                }
+                partition.finish(end, &mut events).unwrap();
+                assert_eq!(visible(events), text);
+            }
+        }
+    }
+
+    #[test]
+    fn raw_invalid_and_dangling_utf8_flush_once_on_finish_or_abort() {
+        let bytes = [b'x', 0xff, b'<', 0xf0, 0x9f];
+        for abort in [false, true] {
+            let mut partition = OutputPartition::new(OutputProtocol::RawText);
+            let mut events = Vec::new();
+            for byte in bytes {
+                partition.push(&[byte], &mut events);
+            }
+            if abort {
+                partition.abort(&mut events);
+            } else {
+                partition
+                    .finish(GenerationEnd::TokenLimit, &mut events)
+                    .unwrap();
+            }
+            assert_eq!(visible(events), String::from_utf8_lossy(&bytes));
+        }
+    }
 }
 
 impl QwenOutputPartition {

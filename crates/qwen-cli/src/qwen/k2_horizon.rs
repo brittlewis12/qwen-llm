@@ -11,7 +11,9 @@ pub(crate) fn execution_capabilities() -> serde_json::Value {
     serde_json::json!({
         "run": {"status": "supported", "scope": "research_raw_single_turn", "requires_profile": "dense_7b",
             "max_forward_tokens": CLI_FORWARD_CEILING, "native_tokenizer": true, "kv_storage": "f16"},
-        "serve": {"status": "unsupported"},
+        "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_only",
+            "max_forward_tokens": CLI_FORWARD_CEILING, "snapshot_cache": false, "tools": false,
+            "chat": false, "special_token_control": "x_k2.add_special_tokens"},
         "bench": {"status": "partial", "command": "qwen-bench k2-request",
             "scope": "guarded_raw_greedy_request_wall", "max_forward_tokens": CLI_FORWARD_CEILING,
             "llama_bench_comparable": false},
@@ -265,9 +267,11 @@ mod tests {
     fn k2_capabilities_do_not_advertise_other_lanes_or_fitting() {
         let capabilities = execution_capabilities();
         assert_eq!(capabilities["run"]["max_forward_tokens"], 32);
-        for lane in ["serve", "local_fitting"] {
-            assert_eq!(capabilities[lane]["status"], "unsupported");
-        }
+        assert_eq!(capabilities["local_fitting"]["status"], "unsupported");
+        assert_eq!(capabilities["serve"]["status"], "partial");
+        assert_eq!(capabilities["serve"]["input"], "raw_string_only");
+        assert_eq!(capabilities["serve"]["snapshot_cache"], false);
+        assert_eq!(capabilities["serve"]["tools"], false);
         assert_eq!(capabilities["bench"]["status"], "partial");
         assert_eq!(capabilities["bench"]["command"], "qwen-bench k2-request");
         assert_eq!(capabilities["bench"]["llama_bench_comparable"], false);

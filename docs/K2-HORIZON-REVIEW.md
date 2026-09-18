@@ -472,3 +472,39 @@ threshold changed. Successful evidence is `target/profiles/k2-request-bench-chec
 Closure verdict: **no remaining concrete commit blocker; commit-ready**. The
 reviewer confirmed the corrected qualification scope, head/capacity metadata,
 completed leased checker, and hash-contract distinction.
+
+## Packet 15 raw serving
+
+The design review favored a family-owned parse hook over global raw-input modes.
+K2 now retains explicit raw input and BOS policy, rejects unsupported field presence
+including nulls, normalizes accepted sampling controls, and owns both prompt and
+output protocols. A RawText partition uses only incremental UTF-8 assembly, never
+Qwen/Muse marker grammar. Non-K2 default parsing remains unchanged except explicit
+rejection of the K2-only extension namespace.
+
+Two design suggestions were deliberately refined: the request output limit may
+use the explicitly configured startup default, and listener binding stays after
+K2 CPU admission but before weight loading to fail cheaply on busy addresses.
+Prefill uses genuine per-token appends/ticks, not fictional cancellation points
+around a single multi-token call. Existing HTTP JSON duplicate-key behavior is
+documented; strict field whitelisting is not claimed to change that decoder.
+
+Source review found **no concrete blocker before GPU validation**. Borrowed model
+lifetimes remain on the accept-loop thread with no unsafe self-reference/leak or
+Send bound. Exact capacity and EOS contracts precede session allocation, and every
+abort discards fresh per-request KV. The actual-Q8 test now passes production-lease/
+API-validated direct backend and ephemeral loopback JSON/SSE checks, raw-run parity,
+serialized/automatic BOS, optional stats, and next-request identity after aborts
+before prefill, during prefill, and at early/later generation boundaries. The CLI
+test links a non-test library, so its context takes the production lease itself;
+no conflicting outer lease was taken.
+
+Shared HTTP/parser/rendering/startup/CLI regressions pass. Additional tests cover
+raw marker/UTF-8 chunking, EOS-first/late delegation to the canonical generator,
+explicit startup limits, and actual-header refusal before socket/Metal creation.
+No shared server was restarted/stopped, and no separate long-running server was
+started. No claim of sustained-service, chat/tool, snapshot, or long-context support.
+
+Closure verdict: **no remaining concrete commit blocker; commit-ready**. The
+reviewer confirmed the family boundary, listener/lease ordering, explicit raw/BOS
+policy, completed JSON/SSE and abort checks, and correctly limited documentation.

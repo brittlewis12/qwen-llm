@@ -15,6 +15,10 @@ gate records under `docs/bench/`, the successful real OpenCode session
 
 Private, single-box engine serving local clients over loopback.
 
+K2 Horizon dense 7B has a separate, bounded raw-string `/v1/responses` subset:
+see [K2-HORIZON-SERVE.md](K2-HORIZON-SERVE.md). It does not inherit this document's
+Qwen/DeepSeek chat, reasoning, tools, snapshots, or long-context capabilities.
+
 Operating goals, in order:
 
 1. **Foundations that hold** — durable continuity across restarts,

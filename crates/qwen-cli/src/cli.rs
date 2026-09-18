@@ -36,7 +36,7 @@ pub(crate) struct InfoArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct ServeArgs {
-    /// Path to a supported Qwen, DeepSeek V4, or Muse Glimmer GGUF file.
+    /// Supported Qwen, DeepSeek V4, Muse Glimmer, or dense K2 GGUF (K2: raw only).
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -44,15 +44,15 @@ pub(crate) struct ServeArgs {
     #[arg(long, default_value = "127.0.0.1:8737")]
     addr: String,
 
-    /// Default max_output_tokens when a request omits it; required for Muse.
+    /// Default max_output_tokens; required for fixed-capacity families including K2.
     #[arg(long = "max-tokens", value_parser = parse_positive_usize)]
     max_tokens: Option<usize>,
 
-    /// Fixed sequence capacity; required for DS4 and Muse, request-shaped for Qwen.
+    /// Fixed capacity for DS4/Muse/K2; K2 requires 1..=32, Qwen is request-shaped.
     #[arg(long, value_parser = parse_positive_usize)]
     max_context_tokens: Option<usize>,
 
-    /// Qwen/DS4 RAM snapshot-cache budget in MiB; Muse currently reports no cache.
+    /// Qwen/DS4 RAM snapshot-cache MiB; K2 requires explicit 0 (no snapshots).
     #[arg(long, default_value_t = crate::serve::DEFAULT_SNAPSHOT_CACHE_MIB)]
     snapshot_cache_mib: u64,
 

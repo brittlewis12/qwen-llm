@@ -497,4 +497,6 @@ fn reconcile(ctx: &MetalContext, before: u64, price: u64) -> Result<()> {
 }
 
 #[cfg(test)]
+mod oracle_tests;
+#[cfg(test)]
 mod tests;

@@ -1,8 +1,8 @@
 # K2 Horizon implementation plan
 
 Status: profile/binder, native tokenizer, CPU reference, checked Metal primitives,
-and an unqualified serial dense runtime implemented. No application dispatch or
-full-checkpoint execution evidence yet.
+and a serial dense runtime implemented. Pinned Q8 short-context checkpoint
+correctness passes; no application dispatch or long-context qualification yet.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -120,6 +120,30 @@ parity or all-position numerical qualification. Full-model GPU execution still
 requires a separate explicit window. CLI, serving, lens, packed execution,
 snapshots, fitting, and Q8 KV are not enabled by this runtime packet.
 
+Seventh packet: the user directed continued GPU correctness work using the normal
+lease, without per-test permission questions. The full native Q8 smoke test passes
+with Metal API validation. A separate IFM-fork oracle (pinned source, wrapper and
+CMake digests) compares all 250624 logits across 42 teacher-forced rows: four raw
+IDs at base 0, six native-tokenized text IDs at base 37, and 32 code-prefix IDs at
+base 128. All top-1 IDs match. Worst absolute error is 0.002706051, worst per-row
+RMSE 0.000682239, and minimum cosine 0.99999995573 on Apple M4 Max.
+
+The full corpus passes bounds of max error <0.005, RMSE <0.001, cosine >0.9999999,
+and identical top-1. These were tightened after a ten-row exploratory screen and
+before the 42-row extension; the corpus is not a holdout. Both sides use F16 KV;
+the reference has flash disabled, singleton decode, and no RoPE scaling. Its
+requested context 32 is internally padded to 256 slots, while native capacity is
+32 and visible history never exceeds 32. Actual backend/cache/position settings
+are machine-checked from pinned-source logs. Parent tests retain the production
+lease through serial reference children and native execution, with the real
+wired-memory gate and API validation. No server operation or new weight download.
+
+See `scripts/reference/k2/README.md` for reproduction. Successful proof artifacts:
+`target/profiles/k2-oracle-6983-1789756399639506000` (manifest with whole Q8 and
+oracle binary hashes, original logs, full reference rows, and metrics). This is
+GGUF-oracle agreement for the measured final Q8 corpus, not HF/BF16 fidelity,
+all-checkpoint/all-position/long-context qualification, or a benchmark result.
+
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server
 coordination restrictions are unchanged. The download completed with verified
@@ -150,11 +174,12 @@ and 73 F32 norms, 9,562,505,216 payload bytes; no weights are executed.
   metadata/provenance without implementing a converter or acquiring the fleet.
 - Improve KV representation without silently dropping context positions. Keep
   an F16 scientific control and identify any approximate cache execution.
-- Autonomous implementation, reviewed local commits, and the one Q8 download
-  are authorized by the subsequent implementation request. A later explicit
-  approval authorized the two synthetic GPU probes only; both are complete.
-  Other GPU execution, shared-server changes, additional checkpoint downloads,
-  and pushes remain unauthorized. Coordinate any broader live-validation window.
+- Autonomous implementation, reviewed local commits, the Q8 download, and GPU
+  correctness validation under the production lease/real memory gate are now
+  authorized. The user's latest direction supersedes the earlier per-probe gate:
+  continue using the lease as intended, without routine permission questions.
+  Do not stop/restart other owners' processes or servers, acquire additional
+  model checkpoints, or push branches without authorization.
 
 ## Architectural boundary
 

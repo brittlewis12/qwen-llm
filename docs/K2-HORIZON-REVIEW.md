@@ -240,3 +240,31 @@ ignored and unexecuted; the prior two-probe authorization does not cover it.
 Closure review: **no remaining commit blocker**. The reviewer confirmed both
 fixes, the single-session permit lifetime, conservative ledger transitions, and
 the explicit qualification/identity/accounting limitations. Packet is commit-ready.
+
+## Packet 7 independent checkpoint oracle
+
+The user superseded the earlier synthetic-only permission boundary with explicit
+direction to continue using the lease as intended and not ask per-test questions.
+The full-model smoke test passes. An independent IFM-fork comparison passes 42
+full-vocabulary rows, including a 32-token continuation, with all top-1 IDs equal
+and max error 0.002706051. Detailed scope and reproduction are in the plan and
+`scripts/reference/k2/README.md`; there is no HF or general-context claim.
+
+Initial review requested three fail-closed evidence fixes: include untracked
+files in source cleanliness, bind executable identity to the wrapper/CMake source
+digests, and machine-check actual runtime backend/cache/context log records. All
+three are implemented. The final provenance-complete 42-row rerun passes with
+unchanged numerical thresholds and the pinned full-artifact SHA256.
+
+Two harness-only attempts are retained transparently: a debug-build whole-file
+SHA256 preparation exceeded the 300-second tool timeout (no surviving test
+process remained); hashing now uses the native system SHA256 tool. A subsequent
+attempt rejected a non-UTF-8 byte in the reference vocabulary log dump before
+native execution. Original log bytes are now preserved while ASCII runtime
+markers are parsed via lossy text decoding. No numerical gate was loosened.
+The reference harness initially used a removed `use_mmap` field; compilation was
+fixed to use the pinned API's `load_mode = LLAMA_LOAD_MODE_MMAP`.
+
+Closure verdict: **no remaining commit blocker**. The reviewer confirmed source
+cleanliness, bound wrapper identity, runtime-record checks, lease lifetime,
+provenance, and the unchanged scoped regression gates. Ready to commit.

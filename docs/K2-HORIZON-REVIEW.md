@@ -123,3 +123,19 @@ backed-range path; split tensor error categories if callers need structured
 classification; do not describe this packet as completing M0's scalar math.
 The existing GGUF reader already rejects out-of-file and overlapping payloads,
 and the new public binder rechecks bound ranges with `try_slice`.
+
+## Packet 2 pre-commit review
+
+Native tokenizer and independent HF fixture generation were reviewed in the
+same session. Initial and closure verdicts: **commit-ready**, no blockers.
+Follow-ups were addressed before commit: strict paired-separator metadata,
+cumulative normalized-input byte accounting, and explicit metadata-only download
+documentation. The HF single-sequence postprocessor inserts BOS but no trailing
+EOS; the GGUF paired SEP flag must not change that behavior.
+
+Validation: five regular K2 tests (including 256 Unicode fuzz cases), two
+explicit ignored CPU-only conformance tests (both stage vocabularies and the
+real Q8 tokenizer), and three existing Qwen/JoyAI splitter regressions pass.
+Expected IDs come from pinned `tokenizers==0.22.2` with independently hashed HF
+tokenizer artifacts, not from the new Rust encoder. No model forward or GPU
+execution is involved. Lens span/identity integration is not claimed.

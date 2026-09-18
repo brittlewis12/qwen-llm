@@ -1,6 +1,6 @@
 # K2 Horizon implementation plan
 
-Status: profile/binder foundation implemented; no K2 execution implemented.
+Status: profile/binder and native tokenizer implemented; no K2 execution implemented.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -12,6 +12,17 @@ sizing. Eight model-free CPU tests pass; the explicit CPU/header-only test also
 binds the downloaded Q8 artifact. Family dispatch and all execution lanes remain
 unchanged. Scalar forward math and tokenizer conformance are the next packets.
 Pre-commit adversarial review found no blockers (see review record).
+
+Second packet: native K2 tokenization with NFC after added-token partitioning,
+dedicated Unicode splitting, cumulative normalized-input bounds, and explicit
+single-sequence BOS/pair-separator policy. Independent HF fixtures cover 35
+inputs each for pinned pretraining and posttraining tokenizer revisions; both
+vocabulary-only test containers pass all token-ID/BOS/decode comparisons, and
+the real Q8 header passes the posttraining corpus. Five regular K2 tests include
+256 Unicode splitter property cases; three existing Qwen/JoyAI splitter tests
+also pass. No FFI dependency change. Tokenizer fixture generation downloads
+metadata only and does not convert model checkpoints. Authored span mapping,
+runtime profile identity, and application-lane integration remain later work.
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server

@@ -55,6 +55,7 @@ serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order
 sha2 = "0.10"
 blake3 = { version = "1", features = ["rayon"] }
 unicode-general-category = "=1.1.0"
+unicode-normalization = "=0.1.25"
 rustc-hash = "2"
 
 # dequant codec for tooling / re-pack-on-load (see docs/PLAN.md weight-format role table)

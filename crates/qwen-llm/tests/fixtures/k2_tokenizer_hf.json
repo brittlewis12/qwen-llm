@@ -1,0 +1,2346 @@
+{
+  "generator": "tokenizers==0.22.2",
+  "profiles": [
+    {
+      "profile": "pretrain",
+      "repository": "IFM/K2-Horizon-7B",
+      "revision": "04fb6c8d11cd7d52d8ea81cbc0e286459079b6a5",
+      "tokenizer_sha256": "030b626c1d36427eb9620b9e263c391e442957338261c86cd9d7b94b325f1d8c",
+      "tokenizer_config_sha256": "2481b319071cc584e32c57a7e49deef00753a62b4cba52861d663a00f9673c3e",
+      "normalizer": {
+        "type": "NFC"
+      },
+      "pre_tokenizer": {
+        "type": "Sequence",
+        "pretokenizers": [
+          {
+            "type": "Split",
+            "pattern": {
+              "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?(?:\\p{L}|\\p{M}|\\u200C|\\u200D)+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+            },
+            "behavior": "Isolated",
+            "invert": false
+          },
+          {
+            "type": "ByteLevel",
+            "add_prefix_space": false,
+            "trim_offsets": true,
+            "use_regex": false
+          }
+        ]
+      },
+      "post_processor": {
+        "type": "Sequence",
+        "processors": [
+          {
+            "type": "TemplateProcessing",
+            "single": [
+              {
+                "SpecialToken": {
+                  "id": "<|begin_of_text|>",
+                  "type_id": 0
+                }
+              },
+              {
+                "Sequence": {
+                  "id": "A",
+                  "type_id": 0
+                }
+              }
+            ],
+            "pair": [
+              {
+                "SpecialToken": {
+                  "id": "<|begin_of_text|>",
+                  "type_id": 0
+                }
+              },
+              {
+                "Sequence": {
+                  "id": "A",
+                  "type_id": 0
+                }
+              },
+              {
+                "SpecialToken": {
+                  "id": "<|endoftext|>",
+                  "type_id": 0
+                }
+              },
+              {
+                "Sequence": {
+                  "id": "B",
+                  "type_id": 1
+                }
+              }
+            ],
+            "special_tokens": {
+              "<|begin_of_text|>": {
+                "id": "<|begin_of_text|>",
+                "ids": [
+                  0
+                ],
+                "tokens": [
+                  "<|begin_of_text|>"
+                ]
+              },
+              "<|endoftext|>": {
+                "id": "<|endoftext|>",
+                "ids": [
+                  1
+                ],
+                "tokens": [
+                  "<|endoftext|>"
+                ]
+              }
+            }
+          },
+          {
+            "type": "ByteLevel",
+            "add_prefix_space": false,
+            "trim_offsets": false,
+            "use_regex": false
+          }
+        ]
+      },
+      "decoder": {
+        "type": "ByteLevel",
+        "add_prefix_space": true,
+        "trim_offsets": true,
+        "use_regex": true
+      },
+      "model_options": {
+        "type": "BPE",
+        "dropout": null,
+        "unk_token": null,
+        "continuing_subword_prefix": "",
+        "end_of_word_suffix": "",
+        "fuse_unk": false,
+        "byte_fallback": false,
+        "ignore_merges": false
+      },
+      "special_config": {
+        "add_bos_token": null,
+        "add_eos_token": null,
+        "bos_token": "<|begin_of_text|>",
+        "eos_token": "<|endoftext|>",
+        "sep_token": null,
+        "add_sep_token": null
+      },
+      "added_token_flags": [
+        "{\"lstrip\": false, \"normalized\": false, \"rstrip\": false, \"single_word\": false, \"special\": true}"
+      ],
+      "non_special_added_tokens": [],
+      "cases": [
+        {
+          "text": "",
+          "normalized": "",
+          "pieces": [],
+          "ids": [],
+          "ids_with_special": [
+            0
+          ],
+          "decoded": ""
+        },
+        {
+          "text": "Hello, world!",
+          "normalized": "Hello, world!",
+          "pieces": [
+            "Hello",
+            ",",
+            " world",
+            "!"
+          ],
+          "ids": [
+            16822,
+            13,
+            2223,
+            2
+          ],
+          "ids_with_special": [
+            0,
+            16822,
+            13,
+            2223,
+            2
+          ],
+          "decoded": "Hello, world!"
+        },
+        {
+          "text": "The capital of France is",
+          "normalized": "The capital of France is",
+          "pieces": [
+            "The",
+            " capital",
+            " of",
+            " France",
+            " is"
+          ],
+          "ids": [
+            864,
+            7169,
+            331,
+            8465,
+            395
+          ],
+          "ids_with_special": [
+            0,
+            864,
+            7169,
+            331,
+            8465,
+            395
+          ],
+          "decoded": "The capital of France is"
+        },
+        {
+          "text": "1234567890 1234 12",
+          "normalized": "1234567890 1234 12",
+          "pieces": [
+            "123",
+            "456",
+            "789",
+            "0",
+            " ",
+            "123",
+            "4",
+            " ",
+            "12"
+          ],
+          "ids": [
+            4018,
+            9278,
+            12155,
+            17,
+            222,
+            4018,
+            21,
+            222,
+            574
+          ],
+          "ids_with_special": [
+            0,
+            4018,
+            9278,
+            12155,
+            17,
+            222,
+            4018,
+            21,
+            222,
+            574
+          ],
+          "decoded": "1234567890 1234 12"
+        },
+        {
+          "text": "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
+          "normalized": "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
+          "pieces": [
+            "def",
+            " fib",
+            "(n",
+            "):\n",
+            "   ",
+            " return",
+            " n",
+            " if",
+            " n",
+            " <",
+            " ",
+            "2",
+            " else",
+            " fib",
+            "(n",
+            "-",
+            "1",
+            ")",
+            " +",
+            " fib",
+            "(n",
+            "-",
+            "2",
+            ")\n"
+          ],
+          "ids": [
+            1559,
+            15364,
+            3282,
+            1025,
+            315,
+            1026,
+            329,
+            768,
+            329,
+            874,
+            222,
+            19,
+            2186,
+            15364,
+            3282,
+            14,
+            18,
+            10,
+            994,
+            15364,
+            3282,
+            14,
+            19,
+            441
+          ],
+          "ids_with_special": [
+            0,
+            1559,
+            15364,
+            3282,
+            1025,
+            315,
+            1026,
+            329,
+            768,
+            329,
+            874,
+            222,
+            19,
+            2186,
+            15364,
+            3282,
+            14,
+            18,
+            10,
+            994,
+            15364,
+            3282,
+            14,
+            19,
+            441
+          ],
+          "decoded": "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n"
+        },
+        {
+          "text": "\t  leading \r\n\n trailing  ",
+          "normalized": "\t  leading \r\n\n trailing  ",
+          "pieces": [
+            "\t ",
+            " leading",
+            " \r\n\n",
+            " trailing",
+            "  "
+          ],
+          "ids": [
+            32486,
+            6790,
+            222,
+            203,
+            503,
+            75867,
+            258
+          ],
+          "ids_with_special": [
+            0,
+            32486,
+            6790,
+            222,
+            203,
+            503,
+            75867,
+            258
+          ],
+          "decoded": "\t  leading \r\n\n trailing  "
+        },
+        {
+          "text": "a\u00a0b\u2028c\u0085d",
+          "normalized": "a\u00a0b\u2028c\u0085d",
+          "pieces": [
+            "a",
+            "\u00a0b",
+            "\u2028c",
+            "\u0085d"
+          ],
+          "ids": [
+            66,
+            3382,
+            67,
+            453,
+            103,
+            68,
+            78718,
+            69
+          ],
+          "ids_with_special": [
+            0,
+            66,
+            3382,
+            67,
+            453,
+            103,
+            68,
+            78718,
+            69
+          ],
+          "decoded": "a\u00a0b\u2028c\u0085d"
+        },
+        {
+          "text": "\u0000a\u0000",
+          "normalized": "\u0000a\u0000",
+          "pieces": [
+            "\u0000a",
+            "\u0000"
+          ],
+          "ids": [
+            98315,
+            190
+          ],
+          "ids_with_special": [
+            0,
+            98315,
+            190
+          ],
+          "decoded": "\u0000a\u0000"
+        },
+        {
+          "text": "caf\u00e9",
+          "normalized": "caf\u00e9",
+          "pieces": [
+            "caf\u00e9"
+          ],
+          "ids": [
+            89083,
+            497
+          ],
+          "ids_with_special": [
+            0,
+            89083,
+            497
+          ],
+          "decoded": "caf\u00e9"
+        },
+        {
+          "text": "cafe\u0301",
+          "normalized": "caf\u00e9",
+          "pieces": [
+            "caf\u00e9"
+          ],
+          "ids": [
+            89083,
+            497
+          ],
+          "ids_with_special": [
+            0,
+            89083,
+            497
+          ],
+          "decoded": "caf\u00e9"
+        },
+        {
+          "text": "A\u030a\u0323",
+          "normalized": "\u1ea0\u030a",
+          "pieces": [
+            "\u1ea0\u030a"
+          ],
+          "ids": [
+            6980,
+            256,
+            138,
+            234
+          ],
+          "ids_with_special": [
+            0,
+            6980,
+            256,
+            138,
+            234
+          ],
+          "decoded": "\u1ea0\u030a"
+        },
+        {
+          "text": "\u212b",
+          "normalized": "\u00c5",
+          "pieces": [
+            "\u00c5"
+          ],
+          "ids": [
+            65678
+          ],
+          "ids_with_special": [
+            0,
+            65678
+          ],
+          "decoded": "\u00c5"
+        },
+        {
+          "text": "\ufb01",
+          "normalized": "\ufb01",
+          "pieces": [
+            "\ufb01"
+          ],
+          "ids": [
+            243065
+          ],
+          "ids_with_special": [
+            0,
+            243065
+          ],
+          "decoded": "\ufb01"
+        },
+        {
+          "text": "\u1100\u1161\u11a8",
+          "normalized": "\uac01",
+          "pieces": [
+            "\uac01"
+          ],
+          "ids": [
+            122026
+          ],
+          "ids_with_special": [
+            0,
+            122026
+          ],
+          "decoded": "\uac01"
+        },
+        {
+          "text": "\u0301\u0308!a",
+          "normalized": "\u0301\u0308!a",
+          "pieces": [
+            "\u0301\u0308",
+            "!a"
+          ],
+          "ids": [
+            53986,
+            203716,
+            2,
+            66
+          ],
+          "ids_with_special": [
+            0,
+            53986,
+            203716,
+            2,
+            66
+          ],
+          "decoded": "\u0301\u0308!a"
+        },
+        {
+          "text": "!\u0301! abc",
+          "normalized": "!\u0301! abc",
+          "pieces": [
+            "!\u0301",
+            "!",
+            " abc"
+          ],
+          "ids": [
+            2,
+            53986,
+            2,
+            71461
+          ],
+          "ids_with_special": [
+            0,
+            2,
+            53986,
+            2,
+            71461
+          ],
+          "decoded": "!\u0301! abc"
+        },
+        {
+          "text": "a\u200cb\u200dc",
+          "normalized": "a\u200cb\u200dc",
+          "pieces": [
+            "a\u200cb\u200dc"
+          ],
+          "ids": [
+            66,
+            37387,
+            67,
+            16727,
+            68
+          ],
+          "ids_with_special": [
+            0,
+            66,
+            37387,
+            67,
+            16727,
+            68
+          ],
+          "decoded": "a\u200cb\u200dc"
+        },
+        {
+          "text": " \u200d!",
+          "normalized": " \u200d!",
+          "pieces": [
+            " \u200d",
+            "!"
+          ],
+          "ids": [
+            802,
+            237,
+            2
+          ],
+          "ids_with_special": [
+            0,
+            802,
+            237,
+            2
+          ],
+          "decoded": " \u200d!"
+        },
+        {
+          "text": "x\ud83d\udc69\u200d\ud83d\udcbby",
+          "normalized": "x\ud83d\udc69\u200d\ud83d\udcbby",
+          "pieces": [
+            "x",
+            "\ud83d\udc69\u200d",
+            "\ud83d\udcbby"
+          ],
+          "ids": [
+            89,
+            43020,
+            104,
+            16727,
+            34239,
+            121,
+            90
+          ],
+          "ids_with_special": [
+            0,
+            89,
+            43020,
+            104,
+            16727,
+            34239,
+            121,
+            90
+          ],
+          "decoded": "x\ud83d\udc69\u200d\ud83d\udcbby"
+        },
+        {
+          "text": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645",
+          "normalized": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645",
+          "pieces": [
+            "\u0645\u0631\u062d\u0628\u0627",
+            " \u0628\u0627\u0644\u0639\u0627\u0644\u0645"
+          ],
+          "ids": [
+            78871,
+            74698
+          ],
+          "ids_with_special": [
+            0,
+            78871,
+            74698
+          ],
+          "decoded": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645"
+        },
+        {
+          "text": "\u0915\u093f\u0924\u093e\u092c",
+          "normalized": "\u0915\u093f\u0924\u093e\u092c",
+          "pieces": [
+            "\u0915\u093f\u0924\u093e\u092c"
+          ],
+          "ids": [
+            696,
+            149901
+          ],
+          "ids_with_special": [
+            0,
+            696,
+            149901
+          ],
+          "decoded": "\u0915\u093f\u0924\u093e\u092c"
+        },
+        {
+          "text": "\u4f60\u597d\u4e16\u754c\u65e5\u672c\u8a9e",
+          "normalized": "\u4f60\u597d\u4e16\u754c\u65e5\u672c\u8a9e",
+          "pieces": [
+            "\u4f60\u597d\u4e16\u754c\u65e5\u672c\u8a9e"
+          ],
+          "ids": [
+            205148,
+            19921,
+            88126
+          ],
+          "ids_with_special": [
+            0,
+            205148,
+            19921,
+            88126
+          ],
+          "decoded": "\u4f60\u597d\u4e16\u754c\u65e5\u672c\u8a9e"
+        },
+        {
+          "text": "\u0661\u0662\u0663\u0664\u00b2\u2163",
+          "normalized": "\u0661\u0662\u0663\u0664\u00b2\u2163",
+          "pieces": [
+            "\u0661\u0662\u0663",
+            "\u0664\u00b2\u2163"
+          ],
+          "ids": [
+            107665,
+            130659,
+            154750,
+            201004,
+            31700,
+            72520,
+            98
+          ],
+          "ids_with_special": [
+            0,
+            107665,
+            130659,
+            154750,
+            201004,
+            31700,
+            72520,
+            98
+          ],
+          "decoded": "\u0661\u0662\u0663\u0664\u00b2\u2163"
+        },
+        {
+          "text": "I'm I'M we'd WE'VE it'll",
+          "normalized": "I'm I'M we'd WE'VE it'll",
+          "pieces": [
+            "I",
+            "'m",
+            " I",
+            "'M",
+            " we",
+            "'d",
+            " WE",
+            "'VE",
+            " it",
+            "'ll"
+          ],
+          "ids": [
+            42,
+            3037,
+            373,
+            34108,
+            627,
+            4880,
+            30202,
+            8,
+            7357,
+            501,
+            2807
+          ],
+          "ids_with_special": [
+            0,
+            42,
+            3037,
+            373,
+            34108,
+            627,
+            4880,
+            30202,
+            8,
+            7357,
+            501,
+            2807
+          ],
+          "decoded": "I'm I'M we'd WE'VE it'll"
+        },
+        {
+          "text": "'\u017f 'S 'RE 'VE 'LL",
+          "normalized": "'\u017f 'S 'RE 'VE 'LL",
+          "pieces": [
+            "'\u017f",
+            " '",
+            "S",
+            " '",
+            "RE",
+            " '",
+            "VE",
+            " '",
+            "LL"
+          ],
+          "ids": [
+            8,
+            131,
+            125,
+            456,
+            52,
+            456,
+            1498,
+            456,
+            7357,
+            456,
+            932
+          ],
+          "ids_with_special": [
+            0,
+            8,
+            131,
+            125,
+            456,
+            52,
+            456,
+            1498,
+            456,
+            7357,
+            456,
+            932
+          ],
+          "decoded": "'\u017f 'S 'RE 'VE 'LL"
+        },
+        {
+          "text": "'\u212a 'I\u0307 'D",
+          "normalized": "'K '\u0130 'D",
+          "pieces": [
+            "'K",
+            " '",
+            "\u0130",
+            " '",
+            "D"
+          ],
+          "ids": [
+            140911,
+            456,
+            3575,
+            456,
+            37
+          ],
+          "ids_with_special": [
+            0,
+            140911,
+            456,
+            3575,
+            456,
+            37
+          ],
+          "decoded": "'K '\u0130 'D"
+        },
+        {
+          "text": "\\n \\\" {} [] -- !!!\n\n",
+          "normalized": "\\n \\\" {} [] -- !!!\n\n",
+          "pieces": [
+            "\\n",
+            " \\\"",
+            " {}",
+            " []",
+            " --",
+            " !!!\n\n"
+          ],
+          "ids": [
+            1218,
+            2787,
+            8973,
+            18582,
+            2029,
+            66450,
+            503
+          ],
+          "ids_with_special": [
+            0,
+            1218,
+            2787,
+            8973,
+            18582,
+            2029,
+            66450,
+            503
+          ],
+          "decoded": "\\n \\\" {} [] -- !!!\n\n"
+        },
+        {
+          "text": "<|begin_of_text|>a<|endoftext|>",
+          "normalized": "<|begin_of_text|>a<|endoftext|>",
+          "pieces": [
+            "<|",
+            "begin",
+            "_of",
+            "_text",
+            "|>",
+            "a",
+            "<|",
+            "endoftext",
+            "|>"
+          ],
+          "ids": [
+            0,
+            66,
+            1
+          ],
+          "ids_with_special": [
+            0,
+            0,
+            66,
+            1
+          ],
+          "decoded": "<|begin_of_text|>a<|endoftext|>"
+        },
+        {
+          "text": "<|ifm|begin_of_text|>a<|ifm|endoftext|>",
+          "normalized": "<|ifm|begin_of_text|>a<|ifm|endoftext|>",
+          "pieces": [
+            "<|",
+            "ifm",
+            "|begin",
+            "_of",
+            "_text",
+            "|>",
+            "a",
+            "<|",
+            "ifm",
+            "|endoftext",
+            "|>"
+          ],
+          "ids": [
+            119305,
+            414,
+            78,
+            93,
+            5523,
+            4771,
+            9619,
+            70911,
+            66,
+            119305,
+            414,
+            78,
+            93,
+            493,
+            1623,
+            1564,
+            70911
+          ],
+          "ids_with_special": [
+            0,
+            119305,
+            414,
+            78,
+            93,
+            5523,
+            4771,
+            9619,
+            70911,
+            66,
+            119305,
+            414,
+            78,
+            93,
+            493,
+            1623,
+            1564,
+            70911
+          ],
+          "decoded": "<|ifm|begin_of_text|>a<|ifm|endoftext|>"
+        },
+        {
+          "text": "<|ifm|im_start|>user\nHi<|ifm|im_end|>",
+          "normalized": "<|ifm|im_start|>user\nHi<|ifm|im_end|>",
+          "pieces": [
+            "<|",
+            "ifm",
+            "|im",
+            "_start",
+            "|>",
+            "user",
+            "\n",
+            "Hi",
+            "<|",
+            "ifm",
+            "|im",
+            "_end",
+            "|>"
+          ],
+          "ids": [
+            119305,
+            414,
+            78,
+            93,
+            350,
+            10124,
+            70911,
+            2672,
+            200,
+            12262,
+            119305,
+            414,
+            78,
+            93,
+            350,
+            11000,
+            70911
+          ],
+          "ids_with_special": [
+            0,
+            119305,
+            414,
+            78,
+            93,
+            350,
+            10124,
+            70911,
+            2672,
+            200,
+            12262,
+            119305,
+            414,
+            78,
+            93,
+            350,
+            11000,
+            70911
+          ],
+          "decoded": "<|ifm|im_start|>user\nHi<|ifm|im_end|>"
+        },
+        {
+          "text": "<ifm|tool_calls><ifm|tool_call>f</ifm|tool_call></ifm|tool_calls>",
+          "normalized": "<ifm|tool_calls><ifm|tool_call>f</ifm|tool_call></ifm|tool_calls>",
+          "pieces": [
+            "<ifm",
+            "|tool",
+            "_calls",
+            "><",
+            "ifm",
+            "|tool",
+            "_call",
+            ">f",
+            "</",
+            "ifm",
+            "|tool",
+            "_call",
+            "></",
+            "ifm",
+            "|tool",
+            "_calls",
+            ">"
+          ],
+          "ids": [
+            29,
+            414,
+            78,
+            93,
+            36582,
+            99901,
+            2159,
+            414,
+            78,
+            93,
+            36582,
+            31069,
+            199739,
+            977,
+            414,
+            78,
+            93,
+            36582,
+            31069,
+            3214,
+            414,
+            78,
+            93,
+            36582,
+            99901,
+            31
+          ],
+          "ids_with_special": [
+            0,
+            29,
+            414,
+            78,
+            93,
+            36582,
+            99901,
+            2159,
+            414,
+            78,
+            93,
+            36582,
+            31069,
+            199739,
+            977,
+            414,
+            78,
+            93,
+            36582,
+            31069,
+            3214,
+            414,
+            78,
+            93,
+            36582,
+            99901,
+            31
+          ],
+          "decoded": "<ifm|tool_calls><ifm|tool_call>f</ifm|tool_call></ifm|tool_calls>"
+        },
+        {
+          "text": "<|fim_prefix|>before<|fim_suffix|>after<|fim_middle|>",
+          "normalized": "<|fim_prefix|>before<|fim_suffix|>after<|fim_middle|>",
+          "pieces": [
+            "<|",
+            "fim",
+            "_prefix",
+            "|>",
+            "before",
+            "<|",
+            "fim",
+            "_suffix",
+            "|>",
+            "after",
+            "<|",
+            "fim",
+            "_middle",
+            "|>"
+          ],
+          "ids": [
+            250000,
+            30667,
+            250002,
+            25499,
+            250001
+          ],
+          "ids_with_special": [
+            0,
+            250000,
+            30667,
+            250002,
+            25499,
+            250001
+          ],
+          "decoded": "<|fim_prefix|>before<|fim_suffix|>after<|fim_middle|>"
+        },
+        {
+          "text": "reserved_special_token_think_start e\u0301 reserved_special_token_think_end",
+          "normalized": "reserved_special_token_think_start \u00e9 reserved_special_token_think_end",
+          "pieces": [
+            "reserved",
+            "_special",
+            "_token",
+            "_think",
+            "_start",
+            " \u00e9",
+            " reserved",
+            "_special",
+            "_token",
+            "_think",
+            "_end"
+          ],
+          "ids": [
+            250029,
+            1662,
+            222,
+            250030
+          ],
+          "ids_with_special": [
+            0,
+            250029,
+            1662,
+            222,
+            250030
+          ],
+          "decoded": "reserved_special_token_think_start \u00e9 reserved_special_token_think_end"
+        },
+        {
+          "text": "e\u0301<|ifm|endoftext|>a\u030a",
+          "normalized": "\u00e9<|ifm|endoftext|>\u00e5",
+          "pieces": [
+            "\u00e9",
+            "<|",
+            "ifm",
+            "|endoftext",
+            "|>",
+            "\u00e5"
+          ],
+          "ids": [
+            497,
+            119305,
+            414,
+            78,
+            93,
+            493,
+            1623,
+            1564,
+            70911,
+            12383
+          ],
+          "ids_with_special": [
+            0,
+            497,
+            119305,
+            414,
+            78,
+            93,
+            493,
+            1623,
+            1564,
+            70911,
+            12383
+          ],
+          "decoded": "\u00e9<|ifm|endoftext|>\u00e5"
+        },
+        {
+          "text": "<|endoftext|><|endoftext|>",
+          "normalized": "<|endoftext|><|endoftext|>",
+          "pieces": [
+            "<|",
+            "endoftext",
+            "|><|",
+            "endoftext",
+            "|>"
+          ],
+          "ids": [
+            1,
+            1
+          ],
+          "ids_with_special": [
+            0,
+            1,
+            1
+          ],
+          "decoded": "<|endoftext|><|endoftext|>"
+        }
+      ]
+    },
+    {
+      "profile": "posttrained",
+      "repository": "IFM/K2-Horizon-7B",
+      "revision": "2c9659a84c4eea6f9f60462221fe762c8c84d75c",
+      "tokenizer_sha256": "838d767b7c9925ff257feb20eaa4299a8e3cc35bb3d805589c373f51d2cc3cb6",
+      "tokenizer_config_sha256": "068cfdcf2bcef44fd77f935a9fb41b4d45af547fd41b95079817bd40b24fe518",
+      "normalizer": {
+        "type": "NFC"
+      },
+      "pre_tokenizer": {
+        "type": "Sequence",
+        "pretokenizers": [
+          {
+            "type": "Split",
+            "pattern": {
+              "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?(?:\\p{L}|\\p{M}|\\u200C|\\u200D)+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+            },
+            "behavior": "Isolated",
+            "invert": false
+          },
+          {
+            "type": "ByteLevel",
+            "add_prefix_space": false,
+            "trim_offsets": true,
+            "use_regex": false
+          }
+        ]
+      },
+      "post_processor": {
+        "type": "TemplateProcessing",
+        "single": [
+          {
+            "SpecialToken": {
+              "id": "<|ifm|begin_of_text|>",
+              "type_id": 0
+            }
+          },
+          {
+            "Sequence": {
+              "id": "A",
+              "type_id": 0
+            }
+          }
+        ],
+        "pair": [
+          {
+            "SpecialToken": {
+              "id": "<|ifm|begin_of_text|>",
+              "type_id": 0
+            }
+          },
+          {
+            "Sequence": {
+              "id": "A",
+              "type_id": 0
+            }
+          },
+          {
+            "SpecialToken": {
+              "id": "<|ifm|endoftext|>",
+              "type_id": 0
+            }
+          },
+          {
+            "Sequence": {
+              "id": "B",
+              "type_id": 0
+            }
+          }
+        ],
+        "special_tokens": {
+          "<|ifm|begin_of_text|>": {
+            "id": "<|ifm|begin_of_text|>",
+            "ids": [
+              0
+            ],
+            "tokens": [
+              "<|ifm|begin_of_text|>"
+            ]
+          },
+          "<|ifm|endoftext|>": {
+            "id": "<|ifm|endoftext|>",
+            "ids": [
+              1
+            ],
+            "tokens": [
+              "<|ifm|endoftext|>"
+            ]
+          }
+        }
+      },
+      "decoder": {
+        "type": "ByteLevel",
+        "add_prefix_space": true,
+        "trim_offsets": true,
+        "use_regex": true
+      },
+      "model_options": {
+        "type": "BPE",
+        "dropout": null,
+        "unk_token": null,
+        "continuing_subword_prefix": "",
+        "end_of_word_suffix": "",
+        "fuse_unk": false,
+        "byte_fallback": false,
+        "ignore_merges": false
+      },
+      "special_config": {
+        "add_bos_token": null,
+        "add_eos_token": null,
+        "bos_token": "<|ifm|begin_of_text|>",
+        "eos_token": "<|ifm|endoftext|>",
+        "sep_token": null,
+        "add_sep_token": null
+      },
+      "added_token_flags": [
+        "{\"lstrip\": false, \"normalized\": false, \"rstrip\": false, \"single_word\": false, \"special\": false}",
+        "{\"lstrip\": false, \"normalized\": false, \"rstrip\": false, \"single_word\": false, \"special\": true}"
+      ],
+      "non_special_added_tokens": [
+        "<ifm|think>",
+        "</ifm|think>",
+        "<ifm|tools>",
+        "</ifm|tools>",
+        "<ifm|tool_call>",
+        "</ifm|tool_call>",
+        "<tool_response>",
+        "</tool_response>",
+        "<ifm|think_fast>",
+        "</ifm|think_fast>",
+        "<ifm|think_faster>",
+        "</ifm|think_faster>",
+        "<ifm|tool_calls>",
+        "</ifm|tool_calls>",
+        "<ifm|arg_key>",
+        "</ifm|arg_key>",
+        "<ifm|arg_type>",
+        "</ifm|arg_type>",
+        "<ifm|arg_value>",
+        "</ifm|arg_value>"
+      ],
+      "cases": [
+        {
+          "text": "",
+          "normalized": "",
+          "pieces": [],
+          "ids": [],
+          "ids_with_special": [
+            0
+          ],
+          "decoded": ""
+        },
+        {
+          "text": "Hello, world!",
+          "normalized": "Hello, world!",
+          "pieces": [
+            "Hello",
+            ",",
+            " world",
+            "!"
+          ],
+          "ids": [
+            16822,
+            13,
+            2223,
+            2
+          ],
+          "ids_with_special": [
+            0,
+            16822,
+            13,
+            2223,
+            2
+          ],
+          "decoded": "Hello, world!"
+        },
+        {
+          "text": "The capital of France is",
+          "normalized": "The capital of France is",
+          "pieces": [
+            "The",
+            " capital",
+            " of",
+            " France",
+            " is"
+          ],
+          "ids": [
+            864,
+            7169,
+            331,
+            8465,
+            395
+          ],
+          "ids_with_special": [
+            0,
+            864,
+            7169,
+            331,
+            8465,
+            395
+          ],
+          "decoded": "The capital of France is"
+        },
+        {
+          "text": "1234567890 1234 12",
+          "normalized": "1234567890 1234 12",
+          "pieces": [
+            "123",
+            "456",
+            "789",
+            "0",
+            " ",
+            "123",
+            "4",
+            " ",
+            "12"
+          ],
+          "ids": [
+            4018,
+            9278,
+            12155,
+            17,
+            222,
+            4018,
+            21,
+            222,
+            574
+          ],
+          "ids_with_special": [
+            0,
+            4018,
+            9278,
+            12155,
+            17,
+            222,
+            4018,
+            21,
+            222,
+            574
+          ],
+          "decoded": "1234567890 1234 12"
+        },
+        {
+          "text": "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
+          "normalized": "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
+          "pieces": [
+            "def",
+            " fib",
+            "(n",
+            "):\n",
+            "   ",
+            " return",
+            " n",
+            " if",
+            " n",
+            " <",
+            " ",
+            "2",
+            " else",
+            " fib",
+            "(n",
+            "-",
+            "1",
+            ")",
+            " +",
+            " fib",
+            "(n",
+            "-",
+            "2",
+            ")\n"
+          ],
+          "ids": [
+            1559,
+            15364,
+            3282,
+            1025,
+            315,
+            1026,
+            329,
+            768,
+            329,
+            874,
+            222,
+            19,
+            2186,
+            15364,
+            3282,
+            14,
+            18,
+            10,
+            994,
+            15364,
+            3282,
+            14,
+            19,
+            441
+          ],
+          "ids_with_special": [
+            0,
+            1559,
+            15364,
+            3282,
+            1025,
+            315,
+            1026,
+            329,
+            768,
+            329,
+            874,
+            222,
+            19,
+            2186,
+            15364,
+            3282,
+            14,
+            18,
+            10,
+            994,
+            15364,
+            3282,
+            14,
+            19,
+            441
+          ],
+          "decoded": "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n"
+        },
+        {
+          "text": "\t  leading \r\n\n trailing  ",
+          "normalized": "\t  leading \r\n\n trailing  ",
+          "pieces": [
+            "\t ",
+            " leading",
+            " \r\n\n",
+            " trailing",
+            "  "
+          ],
+          "ids": [
+            32486,
+            6790,
+            222,
+            203,
+            503,
+            75867,
+            258
+          ],
+          "ids_with_special": [
+            0,
+            32486,
+            6790,
+            222,
+            203,
+            503,
+            75867,
+            258
+          ],
+          "decoded": "\t  leading \r\n\n trailing  "
+        },
+        {
+          "text": "a\u00a0b\u2028c\u0085d",
+          "normalized": "a\u00a0b\u2028c\u0085d",
+          "pieces": [
+            "a",
+            "\u00a0b",
+            "\u2028c",
+            "\u0085d"
+          ],
+          "ids": [
+            66,
+            3382,
+            67,
+            453,
+            103,
+            68,
+            78718,
+            69
+          ],
+          "ids_with_special": [
+            0,
+            66,
+            3382,
+            67,
+            453,
+            103,
+            68,
+            78718,
+            69
+          ],
+          "decoded": "a\u00a0b\u2028c\u0085d"
+        },
+        {
+          "text": "\u0000a\u0000",
+          "normalized": "\u0000a\u0000",
+          "pieces": [
+            "\u0000a",
+            "\u0000"
+          ],
+          "ids": [
+            98315,
+            190
+          ],
+          "ids_with_special": [
+            0,
+            98315,
+            190
+          ],
+          "decoded": "\u0000a\u0000"
+        },
+        {
+          "text": "caf\u00e9",
+          "normalized": "caf\u00e9",
+          "pieces": [
+            "caf\u00e9"
+          ],
+          "ids": [
+            89083,
+            497
+          ],
+          "ids_with_special": [
+            0,
+            89083,
+            497
+          ],
+          "decoded": "caf\u00e9"
+        },
+        {
+          "text": "cafe\u0301",
+          "normalized": "caf\u00e9",
+          "pieces": [
+            "caf\u00e9"
+          ],
+          "ids": [
+            89083,
+            497
+          ],
+          "ids_with_special": [
+            0,
+            89083,
+            497
+          ],
+          "decoded": "caf\u00e9"
+        },
+        {
+          "text": "A\u030a\u0323",
+          "normalized": "\u1ea0\u030a",
+          "pieces": [
+            "\u1ea0\u030a"
+          ],
+          "ids": [
+            6980,
+            256,
+            138,
+            234
+          ],
+          "ids_with_special": [
+            0,
+            6980,
+            256,
+            138,
+            234
+          ],
+          "decoded": "\u1ea0\u030a"
+        },
+        {
+          "text": "\u212b",
+          "normalized": "\u00c5",
+          "pieces": [
+            "\u00c5"
+          ],
+          "ids": [
+            65678
+          ],
+          "ids_with_special": [
+            0,
+            65678
+          ],
+          "decoded": "\u00c5"
+        },
+        {
+          "text": "\ufb01",
+          "normalized": "\ufb01",
+          "pieces": [
+            "\ufb01"
+          ],
+          "ids": [
+            243065
+          ],
+          "ids_with_special": [
+            0,
+            243065
+          ],
+          "decoded": "\ufb01"
+        },
+        {
+          "text": "\u1100\u1161\u11a8",
+          "normalized": "\uac01",
+          "pieces": [
+            "\uac01"
+          ],
+          "ids": [
+            122026
+          ],
+          "ids_with_special": [
+            0,
+            122026
+          ],
+          "decoded": "\uac01"
+        },
+        {
+          "text": "\u0301\u0308!a",
+          "normalized": "\u0301\u0308!a",
+          "pieces": [
+            "\u0301\u0308",
+            "!a"
+          ],
+          "ids": [
+            53986,
+            203716,
+            2,
+            66
+          ],
+          "ids_with_special": [
+            0,
+            53986,
+            203716,
+            2,
+            66
+          ],
+          "decoded": "\u0301\u0308!a"
+        },
+        {
+          "text": "!\u0301! abc",
+          "normalized": "!\u0301! abc",
+          "pieces": [
+            "!\u0301",
+            "!",
+            " abc"
+          ],
+          "ids": [
+            2,
+            53986,
+            2,
+            71461
+          ],
+          "ids_with_special": [
+            0,
+            2,
+            53986,
+            2,
+            71461
+          ],
+          "decoded": "!\u0301! abc"
+        },
+        {
+          "text": "a\u200cb\u200dc",
+          "normalized": "a\u200cb\u200dc",
+          "pieces": [
+            "a\u200cb\u200dc"
+          ],
+          "ids": [
+            66,
+            37387,
+            67,
+            16727,
+            68
+          ],
+          "ids_with_special": [
+            0,
+            66,
+            37387,
+            67,
+            16727,
+            68
+          ],
+          "decoded": "a\u200cb\u200dc"
+        },
+        {
+          "text": " \u200d!",
+          "normalized": " \u200d!",
+          "pieces": [
+            " \u200d",
+            "!"
+          ],
+          "ids": [
+            802,
+            237,
+            2
+          ],
+          "ids_with_special": [
+            0,
+            802,
+            237,
+            2
+          ],
+          "decoded": " \u200d!"
+        },
+        {
+          "text": "x\ud83d\udc69\u200d\ud83d\udcbby",
+          "normalized": "x\ud83d\udc69\u200d\ud83d\udcbby",
+          "pieces": [
+            "x",
+            "\ud83d\udc69\u200d",
+            "\ud83d\udcbby"
+          ],
+          "ids": [
+            89,
+            43020,
+            104,
+            16727,
+            34239,
+            121,
+            90
+          ],
+          "ids_with_special": [
+            0,
+            89,
+            43020,
+            104,
+            16727,
+            34239,
+            121,
+            90
+          ],
+          "decoded": "x\ud83d\udc69\u200d\ud83d\udcbby"
+        },
+        {
+          "text": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645",
+          "normalized": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645",
+          "pieces": [
+            "\u0645\u0631\u062d\u0628\u0627",
+            " \u0628\u0627\u0644\u0639\u0627\u0644\u0645"
+          ],
+          "ids": [
+            78871,
+            74698
+          ],
+          "ids_with_special": [
+            0,
+            78871,
+            74698
+          ],
+          "decoded": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645"
+        },
+        {
+          "text": "\u0915\u093f\u0924\u093e\u092c",
+          "normalized": "\u0915\u093f\u0924\u093e\u092c",
+          "pieces": [
+            "\u0915\u093f\u0924\u093e\u092c"
+          ],
+          "ids": [
+            696,
+            149901
+          ],
+          "ids_with_special": [
+            0,
+            696,
+            149901
+          ],
+          "decoded": "\u0915\u093f\u0924\u093e\u092c"
+        },
+        {
+          "text": "\u4f60\u597d\u4e16\u754c\u65e5\u672c\u8a9e",
+          "normalized": "\u4f60\u597d\u4e16\u754c\u65e5\u672c\u8a9e",
+          "pieces": [
+            "\u4f60\u597d\u4e16\u754c\u65e5\u672c\u8a9e"
+          ],
+          "ids": [
+            205148,
+            19921,
+            88126
+          ],
+          "ids_with_special": [
+            0,
+            205148,
+            19921,
+            88126
+          ],
+          "decoded": "\u4f60\u597d\u4e16\u754c\u65e5\u672c\u8a9e"
+        },
+        {
+          "text": "\u0661\u0662\u0663\u0664\u00b2\u2163",
+          "normalized": "\u0661\u0662\u0663\u0664\u00b2\u2163",
+          "pieces": [
+            "\u0661\u0662\u0663",
+            "\u0664\u00b2\u2163"
+          ],
+          "ids": [
+            107665,
+            130659,
+            154750,
+            201004,
+            31700,
+            72520,
+            98
+          ],
+          "ids_with_special": [
+            0,
+            107665,
+            130659,
+            154750,
+            201004,
+            31700,
+            72520,
+            98
+          ],
+          "decoded": "\u0661\u0662\u0663\u0664\u00b2\u2163"
+        },
+        {
+          "text": "I'm I'M we'd WE'VE it'll",
+          "normalized": "I'm I'M we'd WE'VE it'll",
+          "pieces": [
+            "I",
+            "'m",
+            " I",
+            "'M",
+            " we",
+            "'d",
+            " WE",
+            "'VE",
+            " it",
+            "'ll"
+          ],
+          "ids": [
+            42,
+            3037,
+            373,
+            34108,
+            627,
+            4880,
+            30202,
+            8,
+            7357,
+            501,
+            2807
+          ],
+          "ids_with_special": [
+            0,
+            42,
+            3037,
+            373,
+            34108,
+            627,
+            4880,
+            30202,
+            8,
+            7357,
+            501,
+            2807
+          ],
+          "decoded": "I'm I'M we'd WE'VE it'll"
+        },
+        {
+          "text": "'\u017f 'S 'RE 'VE 'LL",
+          "normalized": "'\u017f 'S 'RE 'VE 'LL",
+          "pieces": [
+            "'\u017f",
+            " '",
+            "S",
+            " '",
+            "RE",
+            " '",
+            "VE",
+            " '",
+            "LL"
+          ],
+          "ids": [
+            8,
+            131,
+            125,
+            456,
+            52,
+            456,
+            1498,
+            456,
+            7357,
+            456,
+            932
+          ],
+          "ids_with_special": [
+            0,
+            8,
+            131,
+            125,
+            456,
+            52,
+            456,
+            1498,
+            456,
+            7357,
+            456,
+            932
+          ],
+          "decoded": "'\u017f 'S 'RE 'VE 'LL"
+        },
+        {
+          "text": "'\u212a 'I\u0307 'D",
+          "normalized": "'K '\u0130 'D",
+          "pieces": [
+            "'K",
+            " '",
+            "\u0130",
+            " '",
+            "D"
+          ],
+          "ids": [
+            140911,
+            456,
+            3575,
+            456,
+            37
+          ],
+          "ids_with_special": [
+            0,
+            140911,
+            456,
+            3575,
+            456,
+            37
+          ],
+          "decoded": "'K '\u0130 'D"
+        },
+        {
+          "text": "\\n \\\" {} [] -- !!!\n\n",
+          "normalized": "\\n \\\" {} [] -- !!!\n\n",
+          "pieces": [
+            "\\n",
+            " \\\"",
+            " {}",
+            " []",
+            " --",
+            " !!!\n\n"
+          ],
+          "ids": [
+            1218,
+            2787,
+            8973,
+            18582,
+            2029,
+            66450,
+            503
+          ],
+          "ids_with_special": [
+            0,
+            1218,
+            2787,
+            8973,
+            18582,
+            2029,
+            66450,
+            503
+          ],
+          "decoded": "\\n \\\" {} [] -- !!!\n\n"
+        },
+        {
+          "text": "<|begin_of_text|>a<|endoftext|>",
+          "normalized": "<|begin_of_text|>a<|endoftext|>",
+          "pieces": [
+            "<|",
+            "begin",
+            "_of",
+            "_text",
+            "|>",
+            "a",
+            "<|",
+            "endoftext",
+            "|>"
+          ],
+          "ids": [
+            119305,
+            5523,
+            4771,
+            9619,
+            70911,
+            66,
+            119305,
+            493,
+            1623,
+            1564,
+            70911
+          ],
+          "ids_with_special": [
+            0,
+            119305,
+            5523,
+            4771,
+            9619,
+            70911,
+            66,
+            119305,
+            493,
+            1623,
+            1564,
+            70911
+          ],
+          "decoded": "<|begin_of_text|>a<|endoftext|>"
+        },
+        {
+          "text": "<|ifm|begin_of_text|>a<|ifm|endoftext|>",
+          "normalized": "<|ifm|begin_of_text|>a<|ifm|endoftext|>",
+          "pieces": [
+            "<|",
+            "ifm",
+            "|begin",
+            "_of",
+            "_text",
+            "|>",
+            "a",
+            "<|",
+            "ifm",
+            "|endoftext",
+            "|>"
+          ],
+          "ids": [
+            0,
+            66,
+            1
+          ],
+          "ids_with_special": [
+            0,
+            0,
+            66,
+            1
+          ],
+          "decoded": "<|ifm|begin_of_text|>a<|ifm|endoftext|>"
+        },
+        {
+          "text": "<|ifm|im_start|>user\nHi<|ifm|im_end|>",
+          "normalized": "<|ifm|im_start|>user\nHi<|ifm|im_end|>",
+          "pieces": [
+            "<|",
+            "ifm",
+            "|im",
+            "_start",
+            "|>",
+            "user",
+            "\n",
+            "Hi",
+            "<|",
+            "ifm",
+            "|im",
+            "_end",
+            "|>"
+          ],
+          "ids": [
+            250018,
+            2672,
+            200,
+            12262,
+            250019
+          ],
+          "ids_with_special": [
+            0,
+            250018,
+            2672,
+            200,
+            12262,
+            250019
+          ],
+          "decoded": "<|ifm|im_start|>user\nHi<|ifm|im_end|>"
+        },
+        {
+          "text": "<ifm|tool_calls><ifm|tool_call>f</ifm|tool_call></ifm|tool_calls>",
+          "normalized": "<ifm|tool_calls><ifm|tool_call>f</ifm|tool_call></ifm|tool_calls>",
+          "pieces": [
+            "<ifm",
+            "|tool",
+            "_calls",
+            "><",
+            "ifm",
+            "|tool",
+            "_call",
+            ">f",
+            "</",
+            "ifm",
+            "|tool",
+            "_call",
+            "></",
+            "ifm",
+            "|tool",
+            "_calls",
+            ">"
+          ],
+          "ids": [
+            250054,
+            250043,
+            71,
+            250044,
+            250055
+          ],
+          "ids_with_special": [
+            0,
+            250054,
+            250043,
+            71,
+            250044,
+            250055
+          ],
+          "decoded": "<ifm|tool_calls><ifm|tool_call>f</ifm|tool_call></ifm|tool_calls>"
+        },
+        {
+          "text": "<|fim_prefix|>before<|fim_suffix|>after<|fim_middle|>",
+          "normalized": "<|fim_prefix|>before<|fim_suffix|>after<|fim_middle|>",
+          "pieces": [
+            "<|",
+            "fim",
+            "_prefix",
+            "|>",
+            "before",
+            "<|",
+            "fim",
+            "_suffix",
+            "|>",
+            "after",
+            "<|",
+            "fim",
+            "_middle",
+            "|>"
+          ],
+          "ids": [
+            250000,
+            30667,
+            250002,
+            25499,
+            250001
+          ],
+          "ids_with_special": [
+            0,
+            250000,
+            30667,
+            250002,
+            25499,
+            250001
+          ],
+          "decoded": "<|fim_prefix|>before<|fim_suffix|>after<|fim_middle|>"
+        },
+        {
+          "text": "reserved_special_token_think_start e\u0301 reserved_special_token_think_end",
+          "normalized": "reserved_special_token_think_start \u00e9 reserved_special_token_think_end",
+          "pieces": [
+            "reserved",
+            "_special",
+            "_token",
+            "_think",
+            "_start",
+            " \u00e9",
+            " reserved",
+            "_special",
+            "_token",
+            "_think",
+            "_end"
+          ],
+          "ids": [
+            132292,
+            139518,
+            18941,
+            14273,
+            1014,
+            10124,
+            1662,
+            13893,
+            139518,
+            18941,
+            14273,
+            1014,
+            11000
+          ],
+          "ids_with_special": [
+            0,
+            132292,
+            139518,
+            18941,
+            14273,
+            1014,
+            10124,
+            1662,
+            13893,
+            139518,
+            18941,
+            14273,
+            1014,
+            11000
+          ],
+          "decoded": "reserved_special_token_think_start \u00e9 reserved_special_token_think_end"
+        },
+        {
+          "text": "e\u0301<|ifm|endoftext|>a\u030a",
+          "normalized": "\u00e9<|ifm|endoftext|>\u00e5",
+          "pieces": [
+            "\u00e9",
+            "<|",
+            "ifm",
+            "|endoftext",
+            "|>",
+            "\u00e5"
+          ],
+          "ids": [
+            497,
+            1,
+            12383
+          ],
+          "ids_with_special": [
+            0,
+            497,
+            1,
+            12383
+          ],
+          "decoded": "\u00e9<|ifm|endoftext|>\u00e5"
+        },
+        {
+          "text": "<|endoftext|><|endoftext|>",
+          "normalized": "<|endoftext|><|endoftext|>",
+          "pieces": [
+            "<|",
+            "endoftext",
+            "|><|",
+            "endoftext",
+            "|>"
+          ],
+          "ids": [
+            119305,
+            493,
+            1623,
+            1564,
+            93,
+            2159,
+            93,
+            493,
+            1623,
+            1564,
+            70911
+          ],
+          "ids_with_special": [
+            0,
+            119305,
+            493,
+            1623,
+            1564,
+            93,
+            2159,
+            93,
+            493,
+            1623,
+            1564,
+            70911
+          ],
+          "decoded": "<|endoftext|><|endoftext|>"
+        }
+      ]
+    }
+  ]
+}

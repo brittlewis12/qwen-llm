@@ -1,5 +1,8 @@
 #include "llama.h"
+#include "ggml-backend.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -25,6 +28,31 @@ static void write_u32(std::ostream & out, uint32_t value) {
     out.write(bytes, 4);
 }
 
+struct layer_capture {
+    bool active = false;
+    bool invalid = false;
+    std::array<bool, 36> seen{};
+    std::array<std::array<float, 4096>, 36> rows{};
+};
+
+static bool capture_layer(ggml_tensor * tensor, bool ask, void * user_data) {
+    auto & capture = *static_cast<layer_capture *>(user_data);
+    if (!capture.active) return ask ? false : true;
+    int layer = -1;
+    for (int i = 0; i < 36; ++i) {
+        if (std::string(tensor->name) == "l_out-" + std::to_string(i)) layer = i;
+    }
+    if (ask) return layer >= 0;
+    if (layer < 0 || capture.seen[layer] || tensor->type != GGML_TYPE_F32 ||
+        !ggml_is_contiguous(tensor) || tensor->ne[0] != 4096 || ggml_nelements(tensor) != 4096) {
+        capture.invalid = true;
+        return false;
+    }
+    ggml_backend_tensor_get(tensor, capture.rows[layer].data(), 0, 4096 * sizeof(float));
+    capture.seen[layer] = true;
+    return true;
+}
+
 int main(int argc, char ** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--identity") {
@@ -32,7 +60,9 @@ int main(int argc, char ** argv) {
                       << K2_WRAPPER_SHA256 << " cmake=" << K2_CMAKE_SHA256 << '\n';
             return 0;
         }
-        if (argc < 5 || argc > 36) throw std::runtime_error("usage: oracle MODEL OUTPUT BASE ID... (1..32 IDs)");
+        const bool capture_last = argc > 1 && std::string(argv[1]) == "--capture-last";
+        if (capture_last) { --argc; ++argv; }
+        if (argc < 5 || argc > 260) throw std::runtime_error("usage: oracle [--capture-last] MODEL OUTPUT BASE ID... (1..256 IDs)");
         const uint32_t base = number(argv[3]);
         const uint32_t count = argc - 4;
         if (base > 524288 - count) throw std::runtime_error("absolute positions exceed K2 ceiling");
@@ -52,7 +82,7 @@ int main(int argc, char ** argv) {
         const auto vocab = llama_vocab_n_tokens(llama_model_get_vocab(model.get()));
         if (vocab != 250624) throw std::runtime_error("unexpected vocabulary");
         auto cp = llama_context_default_params();
-        cp.n_ctx = 32;
+        cp.n_ctx = std::max(32u, count);
         cp.n_batch = 1;
         cp.n_ubatch = 1;
         cp.n_seq_max = 1;
@@ -66,6 +96,11 @@ int main(int argc, char ** argv) {
         cp.offload_kqv = true;
         cp.op_offload = true;
         cp.no_perf = true;
+        auto capture = std::make_unique<layer_capture>();
+        if (capture_last) {
+            cp.cb_eval = capture_layer;
+            cp.cb_eval_user_data = capture.get();
+        }
         std::unique_ptr<llama_context, decltype(&llama_free)> context(
             llama_init_from_model(model.get(), cp), llama_free);
         if (!context) throw std::runtime_error("context creation failed");
@@ -83,6 +118,7 @@ int main(int argc, char ** argv) {
         batch.seq_id[0][0] = 0;
         batch.logits[0] = true;
         for (uint32_t i = 0; i < count; ++i) {
+            capture->active = capture_last && i + 1 == count;
             batch.token[0] = tokens[i];
             batch.pos[0] = base + i;
             if (llama_decode(context.get(), batch) != 0) throw std::runtime_error("decode failed");
@@ -99,6 +135,24 @@ int main(int argc, char ** argv) {
         }
         llama_batch_free(batch);
         output.close();
+        if (capture_last) {
+            if (capture->invalid || !std::all_of(capture->seen.begin(), capture->seen.end(), [](bool v) { return v; })) {
+                throw std::runtime_error("missing or invalid layer captures");
+            }
+            std::ofstream layers(std::string(argv[2]) + ".layers", std::ios::binary | std::ios::trunc);
+            layers.exceptions(std::ios::badbit | std::ios::failbit);
+            layers.write("K2LAY001", 8);
+            for (uint32_t value : {36u, 4096u, base + count - 1, static_cast<uint32_t>(tokens.back())}) write_u32(layers, value);
+            for (const auto & row : capture->rows) {
+                for (float value : row) {
+                    if (!std::isfinite(value)) throw std::runtime_error("nonfinite layer capture");
+                    uint32_t bits;
+                    std::memcpy(&bits, &value, sizeof(bits));
+                    write_u32(layers, bits);
+                }
+            }
+            layers.close();
+        }
         context.reset();
         model.reset();
         llama_backend_free();

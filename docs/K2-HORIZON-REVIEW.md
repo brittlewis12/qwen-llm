@@ -520,3 +520,42 @@ section anchor is preserved; that section explicitly excludes the K2 raw profile
 Read-only adversarial verdict: **no documentation commit blocker**. Contract,
 limitations, lifetime rules, BOS controls, evidence scope, and reproduction were
 retained; stale links were removed. No runtime behavior changed.
+
+## Packet 17 longer-context qualification diagnostics
+
+The 256-token extension intentionally retains the 42-row regression bounds. It
+streams full-vocabulary oracle rows, retains 12 native split checkpoints, checks
+whole/split/singleton equality and capacity+1 refusal, and records all failures.
+CPU protocol tests cover coordinates, exact extents, finite values, trailing data,
+and unread rows. Production lease, real wired gate, pinned Q8 identity, serial
+reference children, and Metal API validation remain mandatory for executed probes.
+
+Results, not a promotion:
+
+- `target/profiles/k2-oracle-256-79492-1789774227874737000`: **234/768 rows fail**
+  existing numeric bounds. All 768 top-1 IDs agree; all native append partitions
+  agree bitwise. Maximum logit errors: ledger 0.03625, code 0.08722, Unicode 0.13724.
+- `target/profiles/k2-layer-diagnostic-80387-1789775028263169000`: traced IFM logits
+  equal untraced logits bitwise. First-block residual errors are already nonzero
+  (about 7.6e-6, 1.14e-5, 1.24e-4); they grow through later blocks. This does not
+  isolate attention, RoPE, normalization, projections, or F16 rounding as a cause.
+- `target/profiles/k2-oracle-256-81900-1789775133807348000`: temporary reciprocal-
+  power RoPE algebra fails 185/768 rows and worsens worst-case ledger/code error.
+  The experiment was reverted; no production shader change is retained.
+- `target/profiles/k2-oracle-256-83475-1789775397971942000`: identical ledger IDs at
+  bases 0/37/8191 fail 252/768 rows, with all top-1 IDs equal and native split controls
+  bitwise. First max-error failures occur at lengths 60/60/58, respectively. Earlier
+  cross-corpus onset differences cannot be attributed solely to absolute position.
+- `target/profiles/k2-oracle-83411-1789775337538090000`: the original 42-row test
+  passes after reverting the arithmetic experiment and rebuilding the wrapper.
+
+Adversarial review found no harness-safety blocker and requested capture hashes;
+the diagnostic now records those separately alongside its full binary identity.
+One earlier review claim about a zero-byte EOF read was rejected: Rust `[0u8]`
+contains one byte. Its explicit `[0u8; 1]` spelling changes no behavior.
+
+The next discriminating experiment is same-input attention replay against the IFM
+intermediates and an independent F64 computation, not more blind algebra changes.
+No public cap promotion or tolerance change: run/bench/lens/serve remain at 32.
+High-position probes are not long-history evidence. Diagnostic infrastructure
+passing is explicitly not successful 256-token qualification.

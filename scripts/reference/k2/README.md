@@ -39,8 +39,8 @@ prompt at base 37, and the first 32 tokens of a code fixture at base 128.
 
 Both backends retain F16 K/V. The oracle disables flash attention and RoPE scaling,
 reads theta from the model, and uses singleton decoding. Its requested capacity
-32 is rounded internally to 256 cache slots; only 1..32 rows are ever visible.
-Native capacity is 32. Model geometry/context and request/cache capacity remain
+32 is rounded internally to 256 cache slots; only 1..32 rows are visible in the
+original test. Its native capacity is 32. Model geometry/context and request/cache capacity remain
 separate. The oracle requests all layers on Metal; retained logs establish actual
 offload and device behavior, rather than treating the request as evidence. Exact
 normalized log markers are machine-checked for M4 Max, all 37 offloaded layers,
@@ -57,6 +57,41 @@ Q8/F16 corpus, not bitwise, full-context, arbitrary-checkpoint, or HF parity cla
 The 42-row corpus includes the initial screen, so it is not a statistical holdout.
 Text inputs use native token IDs: independent text tokenization is established
 by the earlier HF fixture suite, not by this token-ID-only oracle.
+
+## Extended qualification and diagnostics
+
+The wrapper accepts up to 256 teacher-forced IDs. With the same environment and
+test flags above, the following exact tests exercise additional evidence:
+
+- `k2_horizon_runtime::oracle_tests::gpu_256_token_corpora_match_independent_ifm_fork_and_native_splits`:
+  256-token text/code/Unicode prefixes at bases 0/37/8191, unchanged strict gates,
+  singleton/split/whole-append bitwise controls, and capacity+1 rejection.
+- `k2_horizon_runtime::oracle_tests::gpu_identical_tokens_at_three_bases_diagnostic`:
+  identical ledger IDs at those three bases, to separate content from position.
+  Records out-of-gate rows without claiming qualification.
+- `k2_horizon_runtime::oracle_tests::gpu_first_divergence_layer_diagnostic`:
+  all 36 post-block residuals at the first failing corpus rows (lengths 60/34/27).
+  Reference `--capture-last` writes a coordinate-bound `.layers` sidecar; the test
+  requires ordinary and traced reference logits to agree bitwise at every step.
+  This test validates tracing infrastructure, not model parity.
+
+The extended reader streams one reference row and retains only 12 native split
+checkpoints. Each 256-token experiment writes about 735 MiB of reference logits;
+inspect available disk space before running repeated experiments. An absolute
+base of 8191 is **not** 8K retained history. New manifests include the compiled
+native metallib hash; the callback wrapper remains outside the IFM checkout.
+
+Read-only analysis (no GPU or model load):
+
+```sh
+uv run scripts/reference/k2/inspect_oracle_metrics.py target/profiles/k2-oracle-256-RUN
+```
+
+Current result: the original 42-row regression passes, but the 256-token extension
+fails 234/768 rows under the unchanged bounds despite all top-1 IDs agreeing.
+The public application limit remains **32**, not 256. See the development review
+for controlled experiments and unresolved numerical questions; no relaxed gate,
+production arithmetic change, or longer-context qualification is included.
 
 ## Native lens CLI checks
 

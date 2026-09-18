@@ -1,7 +1,8 @@
 # K2 Horizon implementation plan
 
-Status: profile/binder, native tokenizer, and tiny CPU equation reference implemented;
-no full-model K2 execution or runtime dispatch implemented.
+Status: profile/binder, native tokenizer, CPU reference, checked Metal primitives,
+and an unqualified serial dense runtime implemented. No application dispatch or
+full-checkpoint execution evidence yet.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 
@@ -84,6 +85,40 @@ This establishes only the tested primitive wiring: grouped norm/full RoPE at
 position 37, and three-row GQA4 F16 cache attention at layer 35 with both arena
 offsets and poisoned future rows. It does not qualify all theta/positions, 7168
 context, packed prefill, full forward, imported lens assets, or checkpoint parity.
+
+Sixth packet: family-local native retained-weight loading and synchronous dense
+forward/session implementation, exposed only as `load_unqualified`. CPU inspection
+of the downloaded Q8 validates its actual retained-window/session plan. Eleven
+regular CPU tests cover dtype roles, physical planning, source-stamp freshness,
+memory geometry, CPU-access bounds, single-session ownership, and transactional
+state transitions. The additional actual-GGUF CPU planning test passes.
+
+Embedding gather admission is narrower than matvec admission: Q5_K matrices are
+structurally supported but Q5_K embeddings are explicitly rejected. Native
+retained GGUF windows remain read-only with owned backing lifetimes; only a final
+partial page can use a byte-preserving copy fallback. No full dequantization.
+Model/session lifetimes bind the exact context and immutable model. Source stamps
+are rechecked around loading, session creation, and appends; they are freshness
+checks, not cryptographic checkpoint identity or protection against hostile file
+mutation. Only one live session per loaded model is allowed initially.
+
+Allocation admission prices retained physical windows/fallbacks plus request KV
+and scratch, with a 256 MiB reserve; each session has independent admission and
+upper-bound allocation-delta reconciliation (not an exact residency proof).
+One reusable logits row avoids an unpriced prompt-length-by-vocabulary slab.
+Every token command finishes before scratch reuse. Each newly written F16 K/V
+row and final residual is checked for finite values; final-token logits are also
+checked. Entire appends publish their logical prefix once. Any abandoned append
+that submitted work poisons its session, even if earlier token commands passed;
+unsubmitted host/encoding failures remain retryable. This is more conservative
+than the tiny CPU oracle's clone-and-rollback cache implementation.
+
+The ignored full-checkpoint smoke probe compiles but has NOT run. It covers
+native loading, finite logits, single-session ownership, serial/split prefill,
+continuation, and rejection without prefix advance; it would not establish HF
+parity or all-position numerical qualification. Full-model GPU execution still
+requires a separate explicit window. CLI, serving, lens, packed execution,
+snapshots, fitting, and Q8 KV are not enabled by this runtime packet.
 
 The user subsequently authorized autonomous implementation, local commit
 checkpoints after review, and one background GGUF download. GPU/shared-server

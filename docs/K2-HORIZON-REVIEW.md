@@ -215,3 +215,28 @@ MTL_DEBUG_LAYER=1 cargo test -p qwen-llm --lib \
 Both pass (0.10 s and 0.07 s harness elapsed); no validation errors. This is
 primitive wiring evidence at the tested inputs only, not full-model numerical
 qualification or a performance claim. Broader GPU work remains unauthorized.
+
+## Packet 6 design and pre-commit review
+
+The design jam identified two important boundaries: matrix dtype support is not
+embedding gather support, and finite checks require concrete synchronous command
+ownership/readback. Both are explicit in the family-local runtime. It borrows the
+exact model/context, owns native read-only backings, uses one reusable logits row,
+and poisons abandoned submitted appends via a CPU-tested RAII ledger.
+
+Initial implementation verdict: **revise**. Two findings were fixed before
+commit: source stamps are now rechecked after session allocation, and every
+session buffer is explicitly validated as bounded, writable, zero-offset shared
+storage before any CPU upload/readback can occur. Additional host tests exercise
+those bounds. A single-session permit makes the queue policy explicit and is
+released only when the session drops; loaded models cannot be shared across
+threads through a Sync interface. Allocation reconciliation is documented as an
+upper-bound check, not exact physical residency evidence.
+
+Validation: eleven regular CPU tests and the explicit actual-Q8 header/residency
+planning test pass. The full-checkpoint GPU smoke test compiles but remains
+ignored and unexecuted; the prior two-probe authorization does not cover it.
+
+Closure review: **no remaining commit blocker**. The reviewer confirmed both
+fixes, the single-session permit lifetime, conservative ledger transitions, and
+the explicit qualification/identity/accounting limitations. Packet is commit-ready.

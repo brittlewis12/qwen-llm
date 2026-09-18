@@ -77,6 +77,9 @@ impl K2ShortContextPlan {
     pub fn capacity(&self) -> u32 {
         self.capacity
     }
+    pub fn start_position(&self) -> u32 {
+        self.start_position
+    }
     pub fn arena_bytes(&self) -> u64 {
         self.arena_bytes
     }

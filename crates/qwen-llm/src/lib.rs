@@ -46,6 +46,7 @@ pub mod k2_horizon;
 pub mod k2_horizon_metal;
 pub mod k2_horizon_plan;
 pub mod k2_horizon_reference;
+pub mod k2_horizon_runtime;
 pub mod loader;
 pub mod metal;
 pub mod metal_dflash;

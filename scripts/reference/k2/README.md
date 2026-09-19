@@ -75,6 +75,15 @@ test flags above, the following exact tests exercise additional evidence:
   requires ordinary and traced reference logits to agree bitwise at every step.
   This test validates tracing infrastructure, not model parity.
 
+The layer diagnostic also captures post-RoPE Q, all visible post-RoPE K/projected
+V rows, and the last attention output at layers 0 and 20. A bounded `.attention`
+sidecar binds geometry, layer, full token IDs, base, and exact finite payload.
+It replays the native attention kernel on these IFM inputs after F16 K/V rounding,
+compares both outputs with independent F64 reductions (F32 graph scale, final
+output rounded to F32), and reports actual native-cache differences separately.
+Capture hashes and ordinary/traced equality are recorded in `captures.json`.
+These six sampled operations do not establish full-model or long-history parity.
+
 The extended reader streams one reference row and retains only 12 native split
 checkpoints. Each 256-token experiment writes about 735 MiB of reference logits;
 inspect available disk space before running repeated experiments. An absolute

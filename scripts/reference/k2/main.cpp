@@ -33,10 +33,50 @@ struct layer_capture {
     bool invalid = false;
     std::array<bool, 36> seen{};
     std::array<std::array<float, 4096>, 36> rows{};
+    uint32_t step = 0;
+    struct attention_probe {
+        uint32_t layer;
+        std::array<float, 4096> query{}, output{};
+        std::vector<float> keys, values;
+        std::vector<bool> keys_seen, values_seen;
+        bool query_seen = false, output_seen = false;
+        attention_probe(uint32_t layer, uint32_t count) : layer(layer), keys(count * 1024), values(count * 1024),
+            keys_seen(count, false), values_seen(count, false) {}
+    };
+    std::vector<attention_probe> attention;
 };
 
 static bool capture_layer(ggml_tensor * tensor, bool ask, void * user_data) {
     auto & capture = *static_cast<layer_capture *>(user_data);
+    for (auto & probe : capture.attention) {
+        const std::string suffix = "-" + std::to_string(probe.layer);
+        const std::string name(tensor->name);
+        const bool query = capture.active && name == "Qcur" + suffix;
+        const bool output = capture.active && name == "kqv" + suffix;
+        const bool key = name == "Kcur" + suffix;
+        const bool value = name == "Vcur" + suffix;
+        if (!query && !output && !key && !value) continue;
+        if (ask) return true;
+        const size_t size = query || output ? 4096 : 1024;
+        const std::array<int64_t, 4> shape = output ? std::array<int64_t, 4>{128, 1, 32, 1} :
+            query ? std::array<int64_t, 4>{128, 32, 1, 1} : std::array<int64_t, 4>{128, 8, 1, 1};
+        const bool seen = query ? probe.query_seen : output ? probe.output_seen :
+            key ? probe.keys_seen[capture.step] : probe.values_seen[capture.step];
+        if (seen || tensor->type != GGML_TYPE_F32 || !ggml_is_contiguous(tensor) ||
+            ggml_nelements(tensor) != static_cast<int64_t>(size) ||
+            !std::equal(shape.begin(), shape.end(), tensor->ne)) {
+            capture.invalid = true;
+            return false;
+        }
+        float * data = query ? probe.query.data() : output ? probe.output.data() :
+            key ? probe.keys.data() + capture.step * 1024 : probe.values.data() + capture.step * 1024;
+        ggml_backend_tensor_get(tensor, data, 0, size * sizeof(float));
+        if (query) probe.query_seen = true;
+        if (output) probe.output_seen = true;
+        if (key) probe.keys_seen[capture.step] = true;
+        if (value) probe.values_seen[capture.step] = true;
+        return true;
+    }
     if (!capture.active) return ask ? false : true;
     int layer = -1;
     for (int i = 0; i < 36; ++i) {
@@ -98,6 +138,8 @@ int main(int argc, char ** argv) {
         cp.no_perf = true;
         auto capture = std::make_unique<layer_capture>();
         if (capture_last) {
+            capture->attention.emplace_back(0, count);
+            capture->attention.emplace_back(20, count);
             cp.cb_eval = capture_layer;
             cp.cb_eval_user_data = capture.get();
         }
@@ -119,6 +161,7 @@ int main(int argc, char ** argv) {
         batch.logits[0] = true;
         for (uint32_t i = 0; i < count; ++i) {
             capture->active = capture_last && i + 1 == count;
+            capture->step = i;
             batch.token[0] = tokens[i];
             batch.pos[0] = base + i;
             if (llama_decode(context.get(), batch) != 0) throw std::runtime_error("decode failed");
@@ -152,6 +195,32 @@ int main(int argc, char ** argv) {
                 }
             }
             layers.close();
+            std::ofstream attention(std::string(argv[2]) + ".attention", std::ios::binary | std::ios::trunc);
+            attention.exceptions(std::ios::badbit | std::ios::failbit);
+            attention.write("K2ATN001", 8);
+            for (uint32_t value : {base, count, 2u, 128u, 32u, 8u}) write_u32(attention, value);
+            for (auto token : tokens) write_u32(attention, token);
+            for (const auto & probe : capture->attention) {
+                if (!probe.query_seen || !probe.output_seen ||
+                    !std::all_of(probe.keys_seen.begin(), probe.keys_seen.end(), [](bool v) { return v; }) ||
+                    !std::all_of(probe.values_seen.begin(), probe.values_seen.end(), [](bool v) { return v; })) {
+                    throw std::runtime_error("missing attention probe tensors");
+                }
+                write_u32(attention, probe.layer);
+                const auto write_values = [&](const auto & values) {
+                    for (float value : values) {
+                        if (!std::isfinite(value)) throw std::runtime_error("nonfinite attention probe");
+                        uint32_t bits;
+                        std::memcpy(&bits, &value, sizeof(bits));
+                        write_u32(attention, bits);
+                    }
+                };
+                write_values(probe.query);
+                write_values(probe.keys);
+                write_values(probe.values);
+                write_values(probe.output);
+            }
+            attention.close();
         }
         context.reset();
         model.reset();

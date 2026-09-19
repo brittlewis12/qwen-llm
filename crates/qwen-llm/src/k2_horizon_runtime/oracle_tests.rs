@@ -7,6 +7,8 @@ use std::io::{BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod attention_probe;
+
 fn reference_identity() -> String {
     let wrapper = Sha256::digest(include_bytes!("../../../../scripts/reference/k2/main.cpp"));
     let cmake = Sha256::digest(include_bytes!(
@@ -643,6 +645,7 @@ fn gpu_first_divergence_layer_diagnostic() {
     eprintln!("layer diagnostic artifacts: {}", directory.display());
     let mut references = Vec::new();
     let mut capture_evidence = Vec::new();
+    let mut attention_probes = Vec::new();
     for (_, base, tokens) in &cases {
         let ordinary = run_oracle(&binary, &path, &ordinary_dir, *base, tokens);
         let captured = run_oracle_mode(&binary, &path, &captured_dir, *base, tokens, true);
@@ -670,9 +673,16 @@ fn gpu_first_divergence_layer_diagnostic() {
         a.finish();
         b.finish();
         let layers_path = captured.with_extension("f32.layers");
+        let attention_path = captured.with_extension("f32.attention");
         capture_evidence.push(json!({"base":base,"visible_length":tokens.len(),
             "path":layers_path,"sha256":file_sha256(&layers_path),
+            "attention_path":attention_path,"attention_sha256":file_sha256(&attention_path),
             "ordinary_and_captured_logits_bitwise_equal":true}));
+        attention_probes.push(attention_probe::decode(
+            &fs::read(attention_path).unwrap(),
+            *base,
+            tokens,
+        ));
         references.push(decode_layers(
             &fs::read(layers_path).unwrap(),
             *base + tokens.len() as u32 - 1,
@@ -686,12 +696,32 @@ fn gpu_first_divergence_layer_diagnostic() {
     .unwrap();
     assert_eq!(source.revalidate_retained_shard_stamps().unwrap(), stamps);
     let ctx = MetalContext::new().unwrap();
+    let mut attention_reports = Vec::new();
+    for ((name, base, _), probes) in cases.iter().zip(&attention_probes) {
+        for probe in probes {
+            let report = attention_probe::replay(&ctx, probe);
+            eprintln!("{name} base={base} attention replay: {report}");
+            attention_reports.push(json!({"corpus":name,"base":base,"replay":report}));
+        }
+    }
+    fs::write(directory.join("attention-metrics.json"), serde_json::to_vec_pretty(&json!({
+        "qualification":false,"reference":"F64 reductions with F32 scale, output rounded to F32",
+        "cache":"captured IFM post-RoPE K and projected V rounded to F16", "cases":attention_reports
+    })).unwrap()).unwrap();
     let model = K2LoadedModel::load_unqualified(&ctx, &source, 256).unwrap();
     let layers = (0..36).collect::<Vec<_>>();
     let mut reports = Vec::new();
-    for ((name, base, tokens), reference) in cases.iter().zip(references) {
+    let mut cache_reports = Vec::new();
+    for (((name, base, tokens), reference), probes) in
+        cases.iter().zip(references).zip(&attention_probes)
+    {
         let mut session = model.create_session(*base).unwrap();
         let actual = session.append_with_captures(tokens, &layers).unwrap();
+        for probe in probes {
+            let report = attention_probe::compare_cache(&session, probe);
+            eprintln!("{name} base={base} cache comparison: {report}");
+            cache_reports.push(json!({"corpus":name,"base":base,"cache":report}));
+        }
         assert_eq!(actual.residuals.len(), 36 * 4096);
         for (layer, (a, b)) in actual
             .residuals
@@ -704,6 +734,11 @@ fn gpu_first_divergence_layer_diagnostic() {
             reports.push(json!({"corpus":name,"base":base,"visible_length":tokens.len(),"layer":layer,"metrics":metrics}));
         }
     }
+    fs::write(
+        directory.join("cache-metrics.json"),
+        serde_json::to_vec_pretty(&json!({"qualification":false,"cases":cache_reports})).unwrap(),
+    )
+    .unwrap();
     fs::write(
         directory.join("metrics.json"),
         serde_json::to_vec_pretty(&json!({"qualification":false,"cases":reports})).unwrap(),

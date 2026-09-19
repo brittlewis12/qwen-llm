@@ -559,3 +559,37 @@ intermediates and an independent F64 computation, not more blind algebra changes
 No public cap promotion or tolerance change: run/bench/lens/serve remain at 32.
 High-position probes are not long-history evidence. Diagnostic infrastructure
 passing is explicitly not successful 256-token qualification.
+
+## Packet 18 same-input attention replay
+
+The reference callback now captures layers 0 and 20's last post-RoPE query,
+every visible post-RoPE key/projected value row, and last pre-output-projection
+attention output. The independent replay deliberately bypasses native projections
+and RoPE: both the native kernel and an F64 host calculation receive the same IFM
+query and F16-rounded captured K/V. Captures bind exact shapes, extents, tokens,
+positions, layer order, finite values, and SHA256. Native replay prices/reconciles
+all buffers, validates CPU layout, and completes synchronously under the parent
+production lease before host reads. Two CPU tests cover parser corruption and
+independent softmax stability/GQA mapping.
+
+Evidence `target/profiles/k2-layer-diagnostic-84458-1789776080546622000`:
+
+- All ordinary/reference-traced logits still agree bitwise for the three prefixes.
+- Across six operations, max native-vs-F64 error is 4.18e-6, IFM-vs-F64 7.75e-7,
+  and native-vs-IFM 4.89e-6. F64 uses the graph's F32 scale and rounds final output
+  to F32; these are sampled arithmetic diagnostics, not full-model tolerances.
+- Layer 0 cached K/V bit differences are 17/14 of 61440 ledger elements, 28/6 of
+  34816 code elements, and 971/5 of 27648 Unicode elements. Layer 20 differs in
+  thousands of elements. Small incoming numerical differences and F16 rounding
+  are consistent with amplification, but a unique root cause is not established.
+
+Adversarial review endorsed that narrow conclusion and requested explicit full
+tensor shapes, now enforced (Q `[128,32,1,1]`, K/V `[128,8,1,1]`, IFM kqv
+`[128,1,32,1]`). Its offset concern was already covered: `validate_cpu_layout`
+rejects every nonzero offset before the unsafe read. The comment now makes this
+precondition explicit. No production kernel, public cap, or numeric gate changes.
+
+Closure verdict: **no remaining concrete checkpoint blocker; commit-ready**.
+The exact-shape callback diagnostic and original 42-row regression both pass with
+the final rebuilt wrapper; all six CPU oracle tests pass. No claim is made that
+these checks resolve the failed 256-token qualification.

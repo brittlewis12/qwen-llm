@@ -2,6 +2,7 @@ use super::*;
 
 mod online;
 mod ranking;
+mod retained;
 mod runner;
 mod v2;
 

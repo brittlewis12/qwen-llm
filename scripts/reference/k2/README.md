@@ -152,6 +152,30 @@ capture sites, four online singleton/split/whole controls, capacity+1 refusals, 
 run passes with no top-1 disagreement or indeterminate allowance. This is not
 independent-oracle qualification, a backend-default change, or performance evidence.
 
+The next gate reuses the original independent v2 reference, without executing its
+binary or producing another multi-GiB logit dump. The loader pins the original
+manifest/references SHA256 in source before replay, validates every payload hash
+and full coordinate/token/finite-row protocol, and rechecks trace noninterference.
+Original logs have exact mode/device marker checks, not digest authentication.
+
+```sh
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
+K2_RETAINED_V2="$PWD/target/profiles/k2-holdout-v2-12878-1789830419367474000" \
+K2_HOST_BUILD_NOTE="temporary qwen-llm test-package opt-level=1; Metal unchanged" \
+cargo --config 'profile.test.package.qwen-llm.opt-level=1' test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::holdout::retained::gpu_online_against_retained_independent_v2_reference \
+  -- --ignored --exact --nocapture --test-threads=1
+uv run scripts/reference/k2/inspect_holdout.py target/profiles/k2-online-retained-v2-RUN
+```
+
+`K2_LLAMA_ORACLE` is hashed only. This replay is a regression on previously observed
+fixtures against an independent implementation, not a new statistical holdout. It
+passes all 4096 rows, 16 sites, 12 partition controls, and 64 exact predictors with
+zero top-1 differences or indeterminate allowances. Public dispatch remains
+materialized; default/surface promotion is a separate checkpoint. New evidence is
+small metric/manifest output; the original reference directory must remain intact.
+
 ## Cache/backend precision control
 
 `--f32-kv` is a reference-only diagnostic, mutually exclusive with `--capture-last`.

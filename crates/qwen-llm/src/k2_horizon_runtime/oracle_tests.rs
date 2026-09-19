@@ -371,6 +371,13 @@ fn error_metrics(actual: &[f32], expected: &[f32]) -> serde_json::Value {
 }
 
 #[test]
+fn oracle_error_metrics_match_known_scalar_errors() {
+    let metrics = error_metrics(&[1., 2.], &[4., 6.]);
+    assert_eq!(metrics["max_abs"], 4.);
+    assert!((metrics["rmse"].as_f64().unwrap() - 12.5_f64.sqrt()).abs() < 1e-12);
+}
+
+#[test]
 fn oracle_binary_protocol_binds_coordinates_and_exact_rows() {
     let mut bytes = b"K2REF001".to_vec();
     for word in [2, 1, 37, 16, 37, 19, 1_f32.to_bits(), (-2_f32).to_bits()] {

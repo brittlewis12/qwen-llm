@@ -873,3 +873,46 @@ scope**; the new native-comparison module is included in the checkpoint. The ful
 K2-filtered CPU suite passes 58 tests (19 opt-in GPU/artifact tests remain ignored
 in that command). Retained independent-reference replay must validate provenance,
 mode, hashes, coordinates, and capture noninterference before any promotion.
+
+## Packet 27 online replay against retained independent reference
+
+The unchanged holdout evaluator is factored from reference generation so it can
+consume existing outputs. Fresh v1/v2 tests still explicitly select materialized
+attention. A separate opt-in test selects online attention after validating the
+first successful v2 reference directory, without executing a reference child.
+The first adversarial review required source-pinned root digests rather than only
+self-described hashes. Before online execution, the retained metadata was pinned:
+
+- Manifest SHA256: `191387561440961677bbd64fad302627a1f5dc428fafe79eeec3294f53d1e3af`.
+- References SHA256: `bbc0e26e0d18e0058cf4b6fef797f45cbb00555916ce582c572860099588b8ee`.
+
+The loader also checks complete frozen policy/input equality, model/tokenizer
+binding, reference source/wrapper/CMake identity and binary digest, F16 cache and
+256-cell mode, M4 Max offload markers, every logit/capture/token payload digest,
+and full finite coordinate/token/dimension/EOF protocols before native Metal setup.
+All four capture traces are rechecked bitwise against ordinary reference logits;
+greedy sidecars must match the supplied prefix and exact argmax continuation.
+Original log bytes were not digest-bound by their producer: their mode/device
+markers are validated, not represented as authenticated logs. Root digests bind
+retained local evidence, not a remote cryptographic attestation.
+
+Pre-execution closure found no remaining blocker. First replay passes in
+`target/profiles/k2-online-retained-v2-23569-1789834548394017000`: 4096 rows, 16 sites,
+12 bitwise partition controls, and 64 exact trajectory predictors. There are zero
+failed records, top-1 mismatches, or indeterminate allowances. Maximum raw error
+is 0.068885, RMSE 0.010222, centered RMSE 0.008722, KL 1.390e-6, and TV 0.00075459;
+minimum logit cosine is 0.99999427. Maximum capture relative L2 is 0.0008490 and
+minimum capture cosine 0.99999963. Capacity+1 remains retryable.
+
+Eighteen CPU oracle tests pass, including a known-scalar RMSE check. No numerical
+gate or arithmetic changed. The instrumented 433-second run uses the production
+lease, real wired-memory gate, and API validation; it is not speed evidence. Only
+small manifests/metrics are newly written, not another multi-GiB reference corpus.
+The original materialized result and native-to-native comparison remain separate
+evidence. This is independent-reference regression on seen fixtures, not a new
+holdout. Application default/capacity remain materialized/256 pending separate
+promotion and surface checks; historical strict/v1 failures are untouched.
+
+Final read-only adversarial verdict: **commit-ready; no concrete blocker**. The
+next default-only promotion needs the strict short regression plus forward/lens/
+intervention and run/bench/JSON/SSE boundary checks; no new numerical policy.

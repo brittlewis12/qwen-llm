@@ -68,7 +68,7 @@ pub(super) fn exact_trajectory_predictor(p: &serde_json::Value, visible: usize) 
     visible >= p["continuation"]["prefix_length"].as_u64().unwrap() as usize
 }
 
-fn generated_ids(bytes: &[u8], base: u32, prefix: &[u32]) -> Vec<u32> {
+pub(super) fn generated_ids(bytes: &[u8], base: u32, prefix: &[u32]) -> Vec<u32> {
     assert_eq!(prefix.len(), 241);
     assert_eq!(bytes.len(), 16 + 256 * 4);
     assert_eq!(&bytes[..8], b"K2TOK001");
@@ -85,10 +85,10 @@ pub(super) fn bitwise_equal(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
 }
 
-struct ReferenceCase {
-    logits: PathBuf,
-    captures: Option<Vec<Vec<f32>>>,
-    greedy: Option<(PathBuf, Vec<u32>)>,
+pub(super) struct ReferenceCase {
+    pub(super) logits: PathBuf,
+    pub(super) captures: Option<Vec<Vec<f32>>>,
+    pub(super) greedy: Option<(PathBuf, Vec<u32>)>,
 }
 
 fn prepare(
@@ -248,8 +248,33 @@ pub(super) fn run(
     eprintln!("frozen holdout artifacts: {}", directory.display());
     let files = prepare(&binary, &path, &directory, &cases);
     assert_eq!(source.revalidate_retained_shard_stamps().unwrap(), stamps);
+    evaluate(
+        p,
+        policy_hash,
+        &source,
+        &cases,
+        files,
+        &directory,
+        AttentionBackend::Materialized,
+        classify,
+    );
+}
+
+pub(super) fn evaluate(
+    p: serde_json::Value,
+    policy_hash: &str,
+    source: &GgufFile,
+    cases: &[(String, u32, Vec<u32>, bool)],
+    files: Vec<ReferenceCase>,
+    directory: &Path,
+    attention: AttentionBackend,
+    classify: fn(&serde_json::Value, &serde_json::Value, bool) -> Vec<&'static str>,
+) {
+    assert_eq!(cases.len(), files.len());
+    let stamps = source.revalidate_retained_shard_stamps().unwrap();
     let ctx = MetalContext::new().unwrap();
-    let model = K2LoadedModel::load_unqualified(&ctx, &source, 256).unwrap();
+    let model =
+        K2LoadedModel::load_with_attention_unqualified(&ctx, source, 256, attention).unwrap();
     let boundaries = p["boundaries"]
         .as_array()
         .unwrap()
@@ -385,6 +410,7 @@ pub(super) fn run(
     let failures = save(&directory, &reports, &capture_reports);
     fs::write(directory.join("summary.json"),serde_json::to_vec_pretty(&json!({
         "policy_sha256":policy_hash,"candidate_envelope_passed":failures.is_empty(),"public_cap_promoted":false,
+        "native_attention":format!("{attention:?}"),
         "rows":reports.len(),"capture_sites":capture_reports.len(),"failed_records":failures.len(),"bitwise_partition_controls":12,
         "exact_top1_mismatch_records":reports.iter().filter(|r|r["exact_top1_mismatch"]==true).count(),
         "accepted_ranking_indeterminate_records":reports.iter().filter(|r|r["accepted_ranking_indeterminate"]==true).count(),

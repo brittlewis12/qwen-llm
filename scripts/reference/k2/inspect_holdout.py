@@ -5,6 +5,7 @@
 """Read-only summary and reference-score inspection of frozen K2 holdout evidence."""
 
 import argparse
+import hashlib
 import heapq
 import json
 import math
@@ -74,6 +75,17 @@ def main():
     args = parser.parse_args()
     summary = read_json(args.directory / "summary.json")
     manifest = read_json(args.directory / "manifest.json")
+    reference_directory = args.directory
+    if "retained_directory" in manifest:
+        reference_directory = Path(manifest["retained_directory"])
+        for name, key in [
+            ("manifest.json", "retained_manifest_sha256"),
+            ("references.json", "retained_references_sha256"),
+        ]:
+            with (reference_directory / name).open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != manifest[key]:
+                raise ValueError("retained reference metadata digest changed")
     expected_policy = {
         "k2.guarded-context-holdout.v1": "65a517ad27cab60a7a38989ce8cf3499902940fb94f82c26d83dcca86f5f6889",
         "k2.guarded-context-holdout.v2": "44bd53a7dcf72ae6afb8e1f9921bf461df3f5cf9cc14c0c7705f46188418a1fe",
@@ -99,12 +111,13 @@ def main():
     if summary["candidate_envelope_passed"] != (not failures):
         raise ValueError("recorded verdict contradicts failures")
     disagreements = [
-        reference_disagreement(args.directory, row)
+        reference_disagreement(reference_directory, row)
         for row in rows
         if row["metrics"]["logits"]["actual_top1"]
         != row["metrics"]["logits"]["reference_top1"]
     ]
     result = {
+        "experiment_claim": manifest.get("claim", "frozen_holdout_execution"),
         "recorded_verdict": summary,
         "max_abs": max(r["metrics"]["logits"]["max_abs"] for r in rows),
         "max_rmse": max(r["metrics"]["logits"]["rmse"] for r in rows),

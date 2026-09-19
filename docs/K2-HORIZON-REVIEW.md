@@ -916,3 +916,42 @@ promotion and surface checks; historical strict/v1 failures are untouched.
 Final read-only adversarial verdict: **commit-ready; no concrete blocker**. The
 next default-only promotion needs the strict short regression plus forward/lens/
 intervention and run/bench/JSON/SSE boundary checks; no new numerical policy.
+
+## Packet 28 guarded online default
+
+The K2 default now selects the already tested register-only online encoder.
+Materialized attention remains an explicit test-only control in the native-paired
+comparison, original frozen v1/v2 evaluators, and cache-precision diagnostic. No
+shader, cache format, capacity, allocator admission, transaction, physical-view,
+or legacy-family dispatch changes accompany promotion. The compiled metallib hash
+remains `0f449fd916a7181dfbe46aabbf9e218025a40a581f21df20ce085a2608bb4462`.
+The source-plan ceiling remains 7168 and the application guard remains 256.
+
+Following adversarial promotion-gate review, actual default-path checks pass:
+
+- Strict original 42-row oracle: `target/profiles/k2-oracle-24817-1789835255834896000`;
+  all top-1 IDs match, maximum error 0.002500, RMSE 0.0006220, minimum cosine
+  0.999999963. Its manifest explicitly records the online default.
+- Native forward/split-prefill, captures and readout continuation, ordered
+  interventions with causal KV preservation, and imported transport orientation,
+  identity, isolation, and poison probes pass under the new default.
+- CLI boundary evidence: `target/profiles/k2-online-default-256-surfaces-v1`;
+  run/bench/plain+imported lens execute 256, reject 257, preserve exact binding and
+  explicit transfer, and agree on output bytes/fingerprints/full identity logits.
+- The same directory's serving result records direct/JSON/SSE boundary parity,
+  startup-default output behavior, 257 refusal before session allocation, and fresh
+  state after late prefill abort. The short BOS/abort serving regression also passes.
+- Legacy CLI checkers pass in `target/profiles/k2-online-default-{bench,plain,imported}-v1`.
+  CPU checks pass 61 K2 library, 12 run/serve, 6 benchmark, and 5 lens tests; CLI
+  binaries build and unsupported-mode guards remain intact.
+
+All GPU execution is serial under the production lease/real wired gate with API
+validation. Ephemeral loopback probes do not alter shared servers. Qualification
+remains pinned final Q8_0 weights/F16 KV on M4 Max, not every compatible checkpoint.
+Online attention removes context-sized score scratch but does **not** reduce the
+144 KiB/token stored F16 KV. Packed prefill, compact KV, longer-context qualification,
+remaining lens CLI operations, and checkpoint-specific chat/tools remain separate.
+
+Final read-only adversarial verdict: **commit-ready; no concrete blocker**. Default
+versus historical-control separation and actual default-path surface evidence
+support the stated scope. No repeated primitive or IFM qualification run is needed.

@@ -8,7 +8,7 @@
 use crate::gguf::{GgufError, GgufFile};
 use crate::k2_horizon::{K2HorizonConfig, K2HorizonError};
 use crate::k2_horizon_metal::{
-    encode_full_rope, encode_grouped_norm, encode_short_attention, encode_store_kv,
+    encode_full_rope, encode_grouped_norm, encode_online_attention, encode_store_kv,
 };
 use crate::k2_horizon_plan::{K2ShortContextPlan, PlanError, TokenPlan};
 use crate::metal::{
@@ -68,10 +68,12 @@ fn invalid(message: impl Into<String>) -> K2RuntimeError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AttentionBackend {
-    Materialized,
     #[cfg(test)]
-    OnlineExperimental,
+    Materialized,
+    Online,
 }
+
+const DEFAULT_ATTENTION_BACKEND: AttentionBackend = AttentionBackend::Online;
 
 /// Borrowing the source prevents descriptor mutation in safe Rust. File stamps
 /// are rechecked, but are NOT a cryptographic checkpoint identity or file lock.
@@ -91,7 +93,7 @@ impl<'a> K2LoadedModel<'a> {
         source: &'a GgufFile,
         capacity: u32,
     ) -> Result<Self> {
-        Self::load_with_attention_unqualified(ctx, source, capacity, AttentionBackend::Materialized)
+        Self::load_with_attention_unqualified(ctx, source, capacity, DEFAULT_ATTENTION_BACKEND)
     }
 
     fn load_with_attention_unqualified(
@@ -306,11 +308,9 @@ fn encode_token(
         encode_full_rope(ctx, enc, token, &b.query, &b.key)?;
         encode_store_kv(ctx, enc, token, index as u32, &b.cache, &b.key, &b.value)?;
         let encode_attention = match attention {
-            AttentionBackend::Materialized => encode_short_attention,
             #[cfg(test)]
-            AttentionBackend::OnlineExperimental => {
-                crate::k2_horizon_metal::encode_online_attention
-            }
+            AttentionBackend::Materialized => crate::k2_horizon_metal::encode_short_attention,
+            AttentionBackend::Online => encode_online_attention,
         };
         encode_attention(
             ctx,

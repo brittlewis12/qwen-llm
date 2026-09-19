@@ -19,6 +19,18 @@ fn config() -> K2HorizonConfig {
 }
 
 #[test]
+fn application_default_is_online_without_capacity_or_cache_layout_change() {
+    assert_eq!(DEFAULT_ATTENTION_BACKEND, AttentionBackend::Online);
+    assert_eq!(GUARDED_APPLICATION_FORWARD_CEILING, 256);
+    let plan = SessionMemoryPlan::new(&config(), 256).unwrap();
+    assert_eq!(plan.cache_bytes, 147456 * 256);
+    assert_eq!(
+        plan.buffer_bytes().iter().sum::<u64>(),
+        147456 * 256 + 1_240_068
+    );
+}
+
+#[test]
 fn session_memory_is_capacity_shaped_with_one_logits_row() {
     for capacity in [1, 17, 7168] {
         let plan = SessionMemoryPlan::new(&config(), capacity).unwrap();
@@ -232,6 +244,7 @@ fn gpu_checkpoint_forward_and_split_prefill_smoke() {
     let source = GgufFile::open(path).unwrap();
     let ctx = MetalContext::new().unwrap();
     let model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
+    assert_eq!(model.attention, AttentionBackend::Online);
     let mut full = model.create_session(0).unwrap();
     let expected = full.append(&[0, 42, 17]).unwrap();
     assert_eq!(expected.len(), 250624);

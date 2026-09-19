@@ -204,7 +204,7 @@ fn gpu_online_against_retained_independent_v2_reference() {
         &cases,
         files,
         &directory,
-        AttentionBackend::OnlineExperimental,
+        AttentionBackend::Online,
         v2::row_failures,
     );
 }

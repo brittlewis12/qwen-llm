@@ -16,9 +16,10 @@ tests through 257 positions and a test-only full-model integration comparison:
 2048 rows, 16 capture sites, and 64 exact trajectory predictors agree with the
 native materialized control within the unchanged v2 gates, with zero top-1
 mismatches. Online replay against the digest-pinned independent v2 reference also
-passes all 4096 rows with exact top-1 agreement. Application dispatch remains
-materialized pending a separate default/surface promotion. F16 KV storage is unchanged; compact KV is next
-after bounded-attention promotion and packed prefill. See review packets 17-27
+passes all 4096 rows with exact top-1 agreement. Application dispatch now uses
+bounded-scratch online attention after separate strict-short and surface checks.
+F16 KV storage is unchanged; packed prefill and then compact KV remain next on the
+critical path. See review packets 17-28
 for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied

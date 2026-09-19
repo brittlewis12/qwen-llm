@@ -271,7 +271,7 @@ fn online_alignment(query: u64, key: u64, value: u64, output: u64) -> Result<()>
     Ok(())
 }
 
-/// Experimental register-only H128/GQA4 attention; not selected by the runtime.
+/// Register-only H128/GQA4 attention selected by the guarded K2 runtime.
 /// Retains the plan's visibility/extent ceiling without allocating score scratch.
 pub fn encode_online_attention(
     ctx: &MetalContext,

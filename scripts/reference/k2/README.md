@@ -103,11 +103,12 @@ v2 experiment and surface checks later support a guarded **256**-forward budget;
 the old failures and strict bounds remain intact. No production arithmetic change
 or full-context qualification is implied.
 
-## Bounded-scratch attention candidate
+## Bounded-scratch attention
 
 The separate K2 H128/GQA4 online primitive retains all F16 K/V and uses constant-
 size working state instead of materializing one score per visible position. It
-is not selected by the runtime and does not change KV bytes/token or public caps.
+is now selected by the guarded runtime after independent-reference and surface
+checks. It does not change KV bytes/token or public caps.
 The typed plan retains its existing 7168-position source ceiling; that ceiling
 is not numerical qualification. Synthetic coverage currently reaches 257:
 
@@ -130,8 +131,9 @@ but fails 215/768 extended rows under unchanged gates. It was reverted, not
 promoted. New manifests also record native runtime/primitive source SHA256 values
 to distinguish host-only dispatch experiments sharing the same metallib.
 
-A later native-only integration regression has an immutable, **test-only** backend
-selector. Public loading still explicitly selects materialized attention. It uses
+A later native-only integration regression introduced an immutable, test-only
+backend selector. After default promotion, materialized attention remains an
+explicit test-only control and public loading selects online attention. The test uses
 the four previously seen v2 corpora at their selected bases, not a new holdout, and
 applies the unchanged v2 gates prospectively to online versus materialized results:
 
@@ -150,7 +152,8 @@ native, with SHA256/token/coordinate/policy bindings. The test checks 2048 rows,
 capture sites, four online singleton/split/whole controls, capacity+1 refusals, and
 64 exact predictors on materialized-derived EOS-inclusive trajectories. Its first
 run passes with no top-1 disagreement or indeterminate allowance. This is not
-independent-oracle qualification, a backend-default change, or performance evidence.
+independent-oracle qualification or performance evidence; default promotion uses
+the separate gates described below.
 
 The next gate reuses the original independent v2 reference, without executing its
 binary or producing another multi-GiB logit dump. The loader pins the original
@@ -172,9 +175,16 @@ uv run scripts/reference/k2/inspect_holdout.py target/profiles/k2-online-retaine
 `K2_LLAMA_ORACLE` is hashed only. This replay is a regression on previously observed
 fixtures against an independent implementation, not a new statistical holdout. It
 passes all 4096 rows, 16 sites, 12 partition controls, and 64 exact predictors with
-zero top-1 differences or indeterminate allowances. Public dispatch remains
-materialized; default/surface promotion is a separate checkpoint. New evidence is
+zero top-1 differences or indeterminate allowances. Default/surface promotion is
+a separate checkpoint, not automatic on replay success. New evidence is
 small metric/manifest output; the original reference directory must remain intact.
+
+The guarded online default subsequently passes the original strict 42-row oracle,
+native forward/capture/readout/intervention/transport checks, and all run/bench/
+plain+imported lens/JSON+SSE boundary checks. Fresh v1/v2 holdout execution and the
+cache-precision diagnostic explicitly retain their historical materialized control.
+Other model families, shaders, the 256 application guard, and F16 KV allocation are
+unchanged. These are correctness gates, not speed or long-context claims.
 
 ## Cache/backend precision control
 

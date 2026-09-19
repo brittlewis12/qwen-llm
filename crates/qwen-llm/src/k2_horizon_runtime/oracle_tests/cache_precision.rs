@@ -118,7 +118,13 @@ fn gpu_f16_native_and_ifm_against_f32_cache_control() {
         .collect::<Vec<_>>();
     assert_eq!(source.revalidate_retained_shard_stamps().unwrap(), stamps);
     let ctx = MetalContext::new().unwrap();
-    let model = K2LoadedModel::load_unqualified(&ctx, &source, 256).unwrap();
+    let model = K2LoadedModel::load_with_attention_unqualified(
+        &ctx,
+        &source,
+        256,
+        AttentionBackend::Materialized,
+    )
+    .unwrap();
     let mut reports = Vec::new();
     for ((name, base, tokens), (f16, f32)) in cases.iter().zip(outputs) {
         let mut f16 = OracleRows::with_cache(

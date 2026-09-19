@@ -202,7 +202,13 @@ fn gpu_online_runtime_matches_materialized_256_controls() {
     );
     let ctx = MetalContext::new().unwrap();
     let control = {
-        let model = K2LoadedModel::load_unqualified(&ctx, &source, 256).unwrap();
+        let model = K2LoadedModel::load_with_attention_unqualified(
+            &ctx,
+            &source,
+            256,
+            AttentionBackend::Materialized,
+        )
+        .unwrap();
         controls(&model, &cases, &sites, &directory)
     };
     assert_eq!(source.revalidate_retained_shard_stamps().unwrap(), stamps);
@@ -211,10 +217,10 @@ fn gpu_online_runtime_matches_materialized_256_controls() {
         &ctx,
         &source,
         256,
-        AttentionBackend::OnlineExperimental,
+        AttentionBackend::Online,
     )
     .unwrap();
-    assert_eq!(model.attention, AttentionBackend::OnlineExperimental);
+    assert_eq!(model.attention, AttentionBackend::Online);
     let mut reports = Vec::new();
     let mut captures = Vec::new();
     let mut partitions = 0;

@@ -303,7 +303,9 @@ JSON/SSE, BOS, abort isolation, and 256/257 boundary checks on ephemeral sockets
 The shared guarded application limit is distinct from the kernel's source bound.
 Numerical evidence covers the pinned final Q8_0-weight checkpoint with F16 KV on
 M4 Max, including the frozen v2 holdout; it does not qualify F16 weights or every
-compatible intermediate checkpoint. Materialized serial attention remains active.
+compatible intermediate checkpoint. Serial online attention retains the full
+history without a context-sized score buffer. Stored F16 KV is unchanged; packed
+prefill and compact KV are not enabled by this attention change.
 This is not sustained-service, full-context, chat/tool, or cross-checkpoint
 numerical qualification. Test reproduction is in
 [`scripts/reference/k2/README.md`](../scripts/reference/k2/README.md); development

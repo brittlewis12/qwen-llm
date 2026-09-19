@@ -120,7 +120,7 @@ pub(crate) struct ReadFullArgs {
     #[arg(long)]
     pub(crate) no_special_tokens: bool,
 
-    /// Input position to inspect; defaults to the final prompt token (K2: below 32).
+    /// Input position to inspect; defaults to the final prompt token (K2: below 256).
     #[arg(long)]
     pub(crate) position: Option<usize>,
 

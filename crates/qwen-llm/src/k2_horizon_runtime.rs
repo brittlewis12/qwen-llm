@@ -39,6 +39,9 @@ use state::Ledger;
 pub use transport::{K2LinearF16, K2LinearReadout};
 
 const RESERVE_BYTES: u64 = 256 * 1024 * 1024;
+/// Shared application budget, not the kernel ceiling or an artifact whitelist.
+/// Numerical evidence is scoped to the pinned final Q8_0 weights with F16 KV.
+pub const GUARDED_APPLICATION_FORWARD_CEILING: usize = 256;
 type Result<T> = std::result::Result<T, K2RuntimeError>;
 
 #[derive(Debug, thiserror::Error)]

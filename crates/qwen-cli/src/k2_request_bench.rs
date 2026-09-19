@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::Instant;
 
-const MAX_FORWARDS: usize = 32;
+use qwen_llm::k2_horizon_runtime::GUARDED_APPLICATION_FORWARD_CEILING as MAX_FORWARDS;
 
 #[derive(Parser, Debug)]
 #[command(group(ArgGroup::new("input").required(true).multiple(false).args(["raw_prompt", "token_ids"])))]
@@ -30,10 +30,10 @@ pub struct K2RequestArgs {
     token_ids: Option<Vec<i32>>,
     #[arg(long, requires = "raw_prompt", conflicts_with = "token_ids")]
     no_special_tokens: bool,
-    /// Maximum sampled tokens, including EOS. Explicit; prompt+tokens-1 <= 32.
+    /// Maximum sampled tokens, including EOS. Explicit; prompt+tokens-1 <= 256.
     #[arg(long)]
     tokens: usize,
-    /// Fresh session capacity; defaults to prompt+tokens-1, at most 32.
+    /// Fresh session capacity; defaults to prompt+tokens-1, at most 256.
     #[arg(long)]
     capacity: Option<usize>,
     /// Timed repetitions; each creates fresh KV and a fresh greedy sampler.
@@ -49,7 +49,7 @@ pub struct K2RequestArgs {
 fn budget(prompt: usize, sampled: usize, capacity: Option<usize>, context: u32) -> Result<usize> {
     ensure!(
         prompt > 0 && (1..=MAX_FORWARDS).contains(&sampled),
-        "K2 requires nonempty input and --tokens in 1..=32"
+        "K2 requires nonempty input and --tokens in 1..={MAX_FORWARDS}"
     );
     let required = prompt
         .checked_add(sampled - 1)
@@ -57,7 +57,7 @@ fn budget(prompt: usize, sampled: usize, capacity: Option<usize>, context: u32) 
     let capacity = capacity.unwrap_or(required);
     ensure!(
         required <= capacity && capacity <= MAX_FORWARDS && capacity <= context as usize,
-        "K2 requires {required} forwards; capacity {capacity} must fit both 32 and checkpoint context {context}"
+        "K2 requires {required} forwards; capacity {capacity} must fit both {MAX_FORWARDS} and checkpoint context {context}"
     );
     Ok(capacity)
 }
@@ -272,7 +272,7 @@ pub fn run(args: K2RequestArgs) -> Result<()> {
     ensure!((1..=10).contains(&args.runs), "--runs must be in 1..=10");
     ensure!(
         (1..=MAX_FORWARDS).contains(&args.tokens),
-        "--tokens must be in 1..=32"
+        "--tokens must be in 1..={MAX_FORWARDS}"
     );
     let started = Instant::now();
     let gguf = GgufFile::open(&args.model)?;

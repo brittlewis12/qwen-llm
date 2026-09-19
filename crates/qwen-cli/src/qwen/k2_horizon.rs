@@ -5,7 +5,7 @@ use qwen_llm::k2_horizon::K2HorizonConfig;
 use qwen_llm::k2_horizon_runtime::K2LoadedModel;
 use qwen_llm::tokenizer::NativeTokenizer;
 
-pub(crate) const CLI_FORWARD_CEILING: usize = 32;
+pub(crate) use qwen_llm::k2_horizon_runtime::GUARDED_APPLICATION_FORWARD_CEILING as CLI_FORWARD_CEILING;
 
 pub(crate) fn execution_capabilities() -> serde_json::Value {
     serde_json::json!({
@@ -69,7 +69,7 @@ fn capacity(
 ) -> Result<usize> {
     ensure!(
         explicit.tokens,
-        "K2 Horizon's initial raw lane is bounded to 32 forwards; set an explicit smaller --max-tokens (-n) budget instead of the generic default 64"
+        "K2 Horizon's guarded raw lane requires an explicit --max-tokens (-n) budget; prompt plus sampled tokens minus one must fit {CLI_FORWARD_CEILING} forwards"
     );
     let required = required_forwards(
         "K2 Horizon",
@@ -80,7 +80,7 @@ fn capacity(
     let capacity = args.max_context_tokens.unwrap_or(required);
     ensure!(
         capacity >= required && capacity <= CLI_FORWARD_CEILING && capacity <= declared as usize,
-        "K2 Horizon requires {required} forwards; requested capacity {capacity} must fit both the initial 32-forward lane and checkpoint context {declared}"
+        "K2 Horizon requires {required} forwards; requested capacity {capacity} must fit both the guarded {CLI_FORWARD_CEILING}-forward lane and checkpoint context {declared}"
     );
     Ok(capacity)
 }
@@ -123,7 +123,7 @@ pub(crate) fn run_raw(
     let mut sampler = Sampler::new(sampling)?;
     shutdown::checkpoint()?;
     eprintln!(
-        "k2_horizon: serial raw research lane; native tokenizer; F16 KV; capacity={capacity}; checkpoint_context={}; numerical evidence covers final Q8/M4 Max short contexts only",
+        "k2_horizon: serial raw research lane; native tokenizer; F16 KV; capacity={capacity}; checkpoint_context={}; guarded numerical evidence covers the pinned final Q8_0 weights/F16 KV on M4 Max, not every compatible checkpoint",
         config.context_length
     );
     let load_t0 = Instant::now();
@@ -238,7 +238,8 @@ mod tests {
         ]);
         assert_eq!(prepare_raw(invocation, &args, explicit).unwrap().0, "raw");
         assert_eq!(capacity(&args, explicit, 25, 8192).unwrap(), 32);
-        assert!(capacity(&args, explicit, 26, 8192).is_err());
+        assert_eq!(capacity(&args, explicit, 249, 8192).unwrap(), 256);
+        assert!(capacity(&args, explicit, 250, 8192).is_err());
         assert!(capacity(&args, explicit, 0, 8192).is_err());
         assert!(capacity(&args, explicit, 25, 31).is_err());
     }
@@ -266,7 +267,9 @@ mod tests {
     #[test]
     fn k2_capabilities_do_not_advertise_other_lanes_or_fitting() {
         let capabilities = execution_capabilities();
-        assert_eq!(capabilities["run"]["max_forward_tokens"], 32);
+        for lane in ["run", "serve", "bench", "lens"] {
+            assert_eq!(capabilities[lane]["max_forward_tokens"], 256);
+        }
         assert_eq!(capabilities["local_fitting"]["status"], "unsupported");
         assert_eq!(capabilities["serve"]["status"], "partial");
         assert_eq!(capabilities["serve"]["input"], "raw_string_only");

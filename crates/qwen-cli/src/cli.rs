@@ -48,7 +48,7 @@ pub(crate) struct ServeArgs {
     #[arg(long = "max-tokens", value_parser = parse_positive_usize)]
     max_tokens: Option<usize>,
 
-    /// Fixed capacity for DS4/Muse/K2; K2 requires 1..=32, Qwen is request-shaped.
+    /// Fixed capacity for DS4/Muse/K2; K2 requires 1..=256, Qwen is request-shaped.
     #[arg(long, value_parser = parse_positive_usize)]
     max_context_tokens: Option<usize>,
 
@@ -215,7 +215,7 @@ struct GenerationOverrides {
     /// Do not insert tokenizer BOS for raw input; retain any explicitly supplied special tokens.
     #[arg(long, requires = "raw_prompt")]
     no_special_tokens: bool,
-    /// Maximum generated tokens (default: 64; K2 requires an explicit budget fitting 32 forwards).
+    /// Maximum generated tokens (default: 64; K2 requires an explicit budget fitting 256 forwards).
     #[arg(short = 'n', long = "max-tokens", visible_alias = "tokens")]
     tokens: Option<usize>,
 
@@ -239,7 +239,7 @@ struct GenerationOverrides {
     #[arg(long)]
     seed: Option<u64>,
 
-    /// Override family-specific sequence capacity (K2's initial raw lane: at most 32).
+    /// Override family-specific sequence capacity (K2's guarded raw lane: at most 256).
     #[arg(long)]
     max_context_tokens: Option<usize>,
 

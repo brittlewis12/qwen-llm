@@ -6,17 +6,22 @@ correctness passes; bounded raw CLI dispatch and library forward-only lens
 captures/readouts/interventions plus plain/imported lens readout CLI are implemented.
 Bounded request benchmarking and raw-string serving are implemented. Long-context,
 CLI interventions, and checkpoint-specific chat/tool serving remain outstanding.
-The 256-token oracle extension fails unchanged numerical bounds despite matching
-all top-1 IDs; public surfaces remain capped at 32. Layer/cache/identical-input
-attention diagnostics now isolate the investigation. A separate bounded-scratch
+The old 256-token oracle extension still fails its original strict bounds; that
+history is preserved. A separately frozen v2 holdout passes all 4096 row checks
+with exact top-1 agreement, and run/bench/plain+imported lens/serve now share a
+guarded 256-forward application ceiling after boundary checks. Evidence is scoped
+to the pinned final Q8_0-weight checkpoint with F16 KV on M4 Max, not all artifacts.
+A separate bounded-scratch
 H128/GQA4 online-attention candidate passes primitive tests through 257 positions,
 but is not selected by the runtime. F16 KV storage is unchanged; compact KV is next
-after numerical qualification. See review packets 17-19 for evidence and limits.
+after bounded-attention integration and packed prefill. See review packets 17-25
+for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied
 teacher-forced top-1 choices. All numerical/capture and generated-tail checks pass;
-this is not v1 approval. A new versioned ranking-indeterminacy policy and unseen
-fixtures are the next experiment, not retroactive tolerance changes (packets 20-22).
+this is not v1 approval. V2 uses a separately reviewed ranking-indeterminacy policy
+and fresh fixtures, not retroactive tolerance changes; its passing run required
+zero indeterminate allowances.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 

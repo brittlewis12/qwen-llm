@@ -96,11 +96,12 @@ Read-only analysis (no GPU or model load):
 uv run scripts/reference/k2/inspect_oracle_metrics.py target/profiles/k2-oracle-256-RUN
 ```
 
-Current result: the original 42-row regression passes, but the 256-token extension
+Historical strict result: the original 42-row regression passes, but the 256-token extension
 fails 234/768 rows under the unchanged bounds despite all top-1 IDs agreeing.
-The public application limit remains **32**, not 256. See the development review
-for controlled experiments and unresolved numerical questions; no relaxed gate,
-production arithmetic change, or longer-context qualification is included.
+That failed extension did not promote the application limit. The separately frozen
+v2 experiment and surface checks later support a guarded **256**-forward budget;
+the old failures and strict bounds remain intact. No production arithmetic change
+or full-context qualification is implied.
 
 ## Bounded-scratch attention candidate
 
@@ -178,7 +179,8 @@ debug-host run. The first v1 result is **failed**, with two distinct teacher-for
 top-1 disagreements (one duplicated in a supplied trajectory prefix). Numerical,
 capture, split/whole, and all generated-tail checks passed. The analyzer reports
 reference-side ranking gaps without guessing unretained native logits. Neither
-fixtures nor gates may be retuned after observing this result. Public cap stays 32.
+fixtures nor gates may be retuned after observing this result. V1 did not promote
+the public cap; the later v2/surface evidence is separately recorded.
 
 V2 is separately frozen in `HOLDOUT-POLICY-V2.md` / `holdout-256-v2.json`, not a
 reinterpretation of v1. It records reciprocal live ranking witnesses and keeps
@@ -199,6 +201,37 @@ uv run scripts/reference/k2/inspect_holdout.py target/profiles/k2-holdout-v2-RUN
 The host-only optimization is optional and does not alter Metal kernels. The
 manifest binds the native test binary as well as source/kernel identities. Passing
 the holdout does not itself promote public limits; surface checks remain separate.
+
+## Guarded application boundary checks
+
+After the independent holdout, this separate check exercises the shared 256-forward
+guard through run, request bench, and plain/imported lens. Rebuild after any tracked
+source changes: `--allow-dirty` does not bypass benchmark binary/source identity.
+
+```sh
+cargo --config 'profile.dev.package.blake3.opt-level=3' \
+  --config 'profile.dev.package.sha2.opt-level=3' build -p qwen-cli \
+  --bin qwen --bin qwen-bench --bin qwen-lens
+uv run scripts/reference/k2/check_guarded_capacity.py \
+  --qwen target/debug/qwen --bench target/debug/qwen-bench \
+  --lens target/debug/qwen-lens --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --output target/profiles/k2-guarded-256-new-run
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  K2_BOUNDARY_EVIDENCE="$PWD/target/profiles/k2-guarded-256-new-run" \
+  cargo test -p qwen-cli --bin qwen \
+  serve::backend_k2::tests::gpu_guarded_256_json_sse_match_run_bench_and_reject_257 \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+The first command chain checks 256-token prefill and a generation transition that
+reaches 256, output fingerprints, full-logit identity transport, strict asset
+binding, explicit transfer, and pre-Metal 257 refusals. The serving follow-up reads
+its benchmark evidence, checks direct/JSON/SSE parity and explicit startup defaults,
+and verifies fresh state after a late prefill abort. Nonstream overbudget requests
+return HTTP 400; SSE sends `response.failed` after HTTP 200 with no generated text.
+Every GPU child/probe owns its production lease and real wired-memory gate with API
+validation; do not acquire an outer lease. Evidence is pinned final Q8_0 weights
+with F16 KV on M4 Max, not a speed, other-checkpoint, or long-context qualification.
 
 ## Native lens CLI checks
 
@@ -241,7 +274,7 @@ uv run scripts/reference/k2/check_request_bench.py \
 
 This is an API-validated correctness smoke of the benchmark's accounting, not a
 speed measurement. The dedicated `k2-request` lane uses raw native input, greedy
-sampling, exact EOS 1, and at most 32 forwards. It reports host-wall request phases
+sampling, exact EOS 1, and at most 256 forwards. It reports host-wall request phases
 with guard/readback overhead, not GPU-command timings or llama-bench pp/tg results.
 The checker records its explicit dirty-build override, tests warmup/repeat identity,
 raw-run fingerprint parity, BOS/literal input, zero-transition rates, timing/prefix

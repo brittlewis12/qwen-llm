@@ -5,6 +5,7 @@ use super::output_partition::OutputProtocol;
 use super::render_k2;
 use anyhow::{Context, Result, ensure};
 use qwen_llm::gguf::GgufFile;
+use qwen_llm::k2_horizon_runtime::GUARDED_APPLICATION_FORWARD_CEILING as MAX_FORWARDS;
 use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2RuntimePlan};
 use qwen_llm::metal::host_page_size_bytes;
 use qwen_llm::sampling::Sampler;
@@ -28,11 +29,13 @@ fn limits(
         snapshots == 0,
         "K2 serve requires --snapshot-cache-mib 0; snapshots are unsupported"
     );
-    let capacity = capacity.context("K2 serve requires explicit --max-context-tokens in 1..=32")?;
+    let capacity = capacity.with_context(|| {
+        format!("K2 serve requires explicit --max-context-tokens in 1..={MAX_FORWARDS}")
+    })?;
     let maximum = maximum.context("K2 serve requires explicit --max-tokens")?;
     ensure!(
-        capacity > 0 && capacity <= 32 && capacity <= context as usize,
-        "K2 serve capacity must fit 1..=32 and declared context"
+        capacity > 0 && capacity <= MAX_FORWARDS && capacity <= context as usize,
+        "K2 serve capacity must fit 1..={MAX_FORWARDS} and declared context"
     );
     ensure!(
         maximum > 0 && maximum <= capacity,

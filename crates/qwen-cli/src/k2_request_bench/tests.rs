@@ -55,12 +55,17 @@ fn budgets_ids_and_stops_reject_before_runtime() {
     assert_eq!(budget(6, 8, None, 524288).unwrap(), 13);
     assert_eq!(budget(32, 1, None, 32).unwrap(), 32);
     assert_eq!(budget(1, 32, Some(32), 32).unwrap(), 32);
+    assert_eq!(budget(256, 1, None, 8192).unwrap(), 256);
+    assert_eq!(budget(1, 256, Some(256), 8192).unwrap(), 256);
     for (prompt, tokens, capacity, context) in [
         (0, 1, None, 32),
         (1, 0, None, 32),
         (1, 33, None, 32),
         (32, 2, None, 32),
-        (1, 1, Some(33), 524288),
+        (1, 1, Some(257), 524288),
+        (257, 1, None, 524288),
+        (256, 2, None, 524288),
+        (1, 257, None, 524288),
         (3, 2, Some(3), 32),
         (3, 2, None, 3),
         (usize::MAX, 2, None, 32),

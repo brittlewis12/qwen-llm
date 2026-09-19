@@ -792,3 +792,41 @@ guarded surface-promotion checks**. Scope is the pinned final Q8-weight artifact
 with F16 KV, not F16 weights or all intermediate checkpoints. Public capacity is
 still 32 here. V1 remains failed. Run/bench/plain+imported lens/JSON+SSE exact-boundary
 checks and a central application-budget constant are required before promotion.
+
+## Packet 25 guarded application ceiling
+
+Run, request bench, plain/imported lens, and raw serving share the application
+constant `GUARDED_APPLICATION_FORWARD_CEILING = 256`. Explicit generation budgets,
+startup output defaults, and snapshot budget zero remain required. The source-plan
+limit 7168 and declared model context remain separate. No kernel, runtime math,
+KV layout, chat/tool policy, or checkpoint whitelist changes accompany promotion.
+
+Pre-execution adversarial source review found no blocker. Boundary evidence lives
+in `target/profiles/k2-guarded-256-surfaces-v1`: run/bench agree on bytes and token
+fingerprints for 256 prompt tokens plus one sample and 255 prompt tokens plus two
+samples. Plain and exactly bound identity-transport lens execute position 255 with
+bitwise full-logit agreement. Both reject position 256 before Metal. Wrong exact
+binding rejects even with override; unbound assets require explicit transfer.
+Run/bench reject 257-forward or capacity requests and run requires explicit `-n`.
+
+The companion ignored serving probe passes direct/JSON/SSE parity against those
+benchmark rows, startup-default behavior, rejection before session allocation,
+and fresh state after an abort at prefill tick 250. Its first execution exposed a
+test assumption, not a production defect: streamed errors occur after HTTP 200,
+as `response.failed`, whereas nonstream errors return HTTP 400. The assertion now
+checks that established contract and absence of output text; transport behavior
+was not changed. The original short serving/BOS/abort probe and actual-header
+startup-refusal probe also pass. All GPU checks use API validation and the normal
+production lease/real wired-memory gate; no foreign process or server is touched.
+
+CPU surface tests pass (12 run/serve, 6 benchmark, 5 lens). A legacy regression
+checker initially refused a stale benchmark build/source identity after a test
+edit, before Metal. That guard is retained; rebuilds, not overrides, resolve it.
+After rebuilding, all three legacy CLI checkers pass: request accounting,
+all-36-site plain lens, and imported identity/nonsymmetric transport. Evidence is
+in `target/profiles/k2-{bench,plain,imported}-after-256-v2`. No guard was bypassed.
+Final read-only adversarial verdict: **commit-ready; no correctness or evidence
+blocker**. The boundary-check script is included with its reproduction docs.
+Scope remains the pinned final Q8_0-weight artifact with F16 KV on M4 Max. Failed
+strict-extension/v1 history is retained. This is not F16-weight, all-checkpoint,
+full-context, packed-prefill, compact-KV, or performance qualification.

@@ -9,7 +9,7 @@ use qwen_llm::tokenizer::NativeTokenizer;
 mod imported;
 pub(crate) use imported::read as read_transport;
 
-const MAX_FORWARDS: usize = 32;
+use qwen_llm::k2_horizon_runtime::GUARDED_APPLICATION_FORWARD_CEILING as MAX_FORWARDS;
 
 pub(super) struct Prepared {
     config: K2HorizonConfig,
@@ -47,7 +47,7 @@ fn preflight_mode(
     )?;
     ensure!(
         position < MAX_FORWARDS,
-        "K2 lens readout is bounded to 32 executed tokens; selected position must be below 32"
+        "K2 lens readout is bounded to {MAX_FORWARDS} executed tokens; selected position must be below {MAX_FORWARDS}"
     );
     let layers = layers(&args.layers, config.layer_count)?;
     capture_budget(layers.len(), config.hidden_size as usize)?;
@@ -243,10 +243,16 @@ mod tests {
     #[test]
     fn k2_plain_preflight_bounds_executed_prefix_without_discarding_input() {
         let mut args = args();
-        args.token_ids = vec![0; 32];
-        assert_eq!(preflight(&args, &config(), None).unwrap().1, 31);
+        args.max_tokens = 512;
+        args.token_ids = vec![0; 256];
+        assert_eq!(preflight(&args, &config(), None).unwrap().1, 255);
+        assert_eq!(
+            preflight_mode(&args, &config(), None, false).unwrap().1,
+            255
+        );
         args.token_ids.push(42);
         assert!(preflight(&args, &config(), None).is_err());
+        assert!(preflight_mode(&args, &config(), None, false).is_err());
         args.position = Some(5);
         let (tokens, position, _, _) = preflight(&args, &config(), None).unwrap();
         assert_eq!(
@@ -257,10 +263,10 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(position, 5);
-        args.max_tokens = 32;
-        assert!(preflight(&args, &config(), None).is_err());
         args.max_tokens = 256;
-        args.token_ids[32] = 250624;
+        assert!(preflight(&args, &config(), None).is_err());
+        args.max_tokens = 512;
+        args.token_ids[256] = 250624;
         assert!(preflight(&args, &config(), None).is_err());
     }
 

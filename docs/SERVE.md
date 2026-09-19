@@ -122,7 +122,7 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # Muse Glimmer and Qwen3.8-Flash-Next require both --max-context-tokens and
 # --max-tokens (resident session capacity is fixed at load); admitted capacity
 # may extend through the model's declared context.
-# K2 requires explicit --max-context-tokens (1..=32), --max-tokens, and
+# K2 requires explicit --max-context-tokens (1..=256), --max-tokens, and
 # --snapshot-cache-mib 0; only raw string input is supported.
 ```
 
@@ -237,11 +237,11 @@ new `/v1/completions` endpoint. Choose an unused loopback address:
 
 ```sh
 qwen serve -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
-  --addr 127.0.0.1:8795 --max-context-tokens 32 --max-tokens 8 \
+  --addr 127.0.0.1:8795 --max-context-tokens 256 --max-tokens 8 \
   --snapshot-cache-mib 0
 ```
 
-Both limits must be explicit. Capacity is 1..=32 and must fit the checkpoint's
+Both limits must be explicit. Capacity is 1..=256 and must fit the checkpoint's
 declared context; the default output limit is 1..=capacity. Nonzero snapshot
 budgets and drafters fail startup. K2 config, runtime storage plan, native
 tokenizer, and EOS metadata are checked before listener binding or Metal setup.
@@ -286,6 +286,9 @@ partitioned, or executed. Incremental UTF-8 assembly preserves split characters;
 invalid bytes or a final incomplete sequence use replacement characters. This is
 not a byte-preserving binary HTTP format. Budget exhaustion uses the ordinary
 incomplete-response terminal semantics, not an EOS success.
+An over-budget nonstream request returns HTTP 400. If SSE headers have already
+been sent before backend tokenization, the same refusal is a `response.failed`
+event after HTTP 200, with no generated text or request-session allocation.
 
 The model remains resident, but each request owns fresh KV and a fresh sampler.
 There are no snapshots, resets, prefix reuse, or hidden conversation history.
@@ -296,7 +299,11 @@ model storage. `x_qwen.stats` is opt-in with cached/matched tokens always zero;
 the response echo has no tools/reasoning and disables parallel tool calls.
 
 Validation covers CPU wire/UTF-8/EOS controls and actual-Q8 borrowed-backend
-JSON/SSE, BOS, abort isolation, and budget checks on ephemeral loopback sockets.
+JSON/SSE, BOS, abort isolation, and 256/257 boundary checks on ephemeral sockets.
+The shared guarded application limit is distinct from the kernel's source bound.
+Numerical evidence covers the pinned final Q8_0-weight checkpoint with F16 KV on
+M4 Max, including the frozen v2 holdout; it does not qualify F16 weights or every
+compatible intermediate checkpoint. Materialized serial attention remains active.
 This is not sustained-service, full-context, chat/tool, or cross-checkpoint
 numerical qualification. Test reproduction is in
 [`scripts/reference/k2/README.md`](../scripts/reference/k2/README.md); development

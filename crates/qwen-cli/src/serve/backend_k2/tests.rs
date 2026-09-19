@@ -6,11 +6,15 @@ use std::io;
 #[test]
 fn startup_limits_require_explicit_short_capacity_no_cache_or_drafter() {
     assert_eq!(limits(8192, Some(32), Some(8), 0, false).unwrap(), (32, 8));
+    assert_eq!(
+        limits(8192, Some(256), Some(256), 0, false).unwrap(),
+        (256, 256)
+    );
     for (context, capacity, maximum, snapshots, drafter) in [
         (8192, None, Some(8), 0, false),
         (8192, Some(32), None, 0, false),
         (8192, Some(0), Some(1), 0, false),
-        (8192, Some(33), Some(1), 0, false),
+        (8192, Some(257), Some(1), 0, false),
         (8192, Some(32), Some(0), 0, false),
         (8192, Some(32), Some(33), 0, false),
         (1, Some(2), Some(1), 0, false),
@@ -34,7 +38,7 @@ struct Sink {
 fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
     for (capacity, maximum, snapshots, drafter, expected) in [
-        (Some(33), Some(8), 0, None, "capacity must fit"),
+        (Some(257), Some(8), 0, None, "capacity must fit"),
         (None, Some(8), 0, None, "explicit --max-context-tokens"),
         (Some(32), None, 0, None, "explicit --max-tokens"),
         (Some(32), Some(8), 1, None, "--snapshot-cache-mib 0"),
@@ -135,7 +139,7 @@ fn wire_request(backend: &mut K2Backend<'_, '_>, body: serde_json::Value) -> Str
     let client = std::thread::spawn(move || {
         let mut stream = TcpStream::connect(address).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
+            .set_read_timeout(Some(Duration::from_secs(120)))
             .unwrap();
         stream
             .set_write_timeout(Some(Duration::from_secs(30)))
@@ -285,4 +289,164 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
     ));
     assert_eq!(sink.ticks, 0);
     drop(model.create_session(0).unwrap());
+}
+
+#[test]
+#[ignore = "K2_GGUF and K2_BOUNDARY_EVIDENCE; production CLI lease/gate; ephemeral JSON/SSE boundary correctness"]
+fn gpu_guarded_256_json_sse_match_run_bench_and_reject_257() {
+    let path = std::env::var("K2_GGUF").expect("K2_GGUF");
+    let evidence = std::path::PathBuf::from(
+        std::env::var("K2_BOUNDARY_EVIDENCE").expect("K2_BOUNDARY_EVIDENCE"),
+    );
+    let source = GgufFile::open(&path).unwrap();
+    let invocation = crate::cli::ServeInvocation {
+        model: path.into(),
+        addr: "127.0.0.1:0".into(),
+        max_tokens: Some(1),
+        max_context_tokens: Some(256),
+        snapshot_cache_mib: 0,
+        drafter: None,
+        trace_sse: None,
+    };
+    let prepared = Prepared::new(&source, &invocation).unwrap();
+    let mut cases = Vec::new();
+    for (name, words, sampled, count) in [("256", 255, 1, 256), ("transition", 254, 2, 255)] {
+        let reference: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(evidence.join(format!("bench-{name}.stdout"))).unwrap(),
+        )
+        .unwrap();
+        let text = vec!["a"; words].join(" ");
+        let ids = prepared.tokenizer.encode(&text, true).unwrap();
+        assert_eq!(ids.len(), count);
+        assert_eq!(json!(ids), reference["request"]["prompt_token_ids"]);
+        assert_eq!(reference["request"]["capacity"], 256);
+        assert_eq!(reference["samples"][0]["committed_positions"], 256);
+        let hex = reference["samples"][0]["outcome"]["emitted_bytes_hex"]
+            .as_str()
+            .unwrap();
+        assert!(hex.is_ascii() && hex.len() % 2 == 0);
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        cases.push((text, sampled, count, bytes));
+    }
+    // This binary links the production library: its context owns the lease.
+    let ctx = MetalContext::new().unwrap();
+    let model = K2LoadedModel::load_unqualified(&ctx, &source, 256).unwrap();
+    let mut backend = K2Backend::new(&model, prepared, "k2-boundary".into());
+    for (text, sampled, count, expected) in &cases {
+        let (req, prompt) = request(
+            &backend,
+            json!({"model":"k2-boundary","input":text,"max_output_tokens":sampled}),
+        );
+        let mut sink = Sink::default();
+        let outcome = backend.generate(&req, &prompt, &mut sink).unwrap();
+        assert_eq!(&sink.bytes, expected);
+        assert_eq!(outcome.usage.input_tokens, *count);
+        assert_eq!(outcome.usage.output_tokens, *sampled);
+        assert_eq!(outcome.usage.cached_tokens, 0);
+        for stream in [false, true] {
+            let mut body =
+                json!({"model":"k2-boundary","input":text,"stream":stream,"x_qwen":{"stats":true}});
+            // Exercise the explicit startup default at the 256-token boundary.
+            if *sampled != 1 {
+                body["max_output_tokens"] = json!(sampled);
+            }
+            let response = wire_request(&mut backend, body);
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            let body = response.split_once("\r\n\r\n").unwrap().1;
+            let envelope = if stream {
+                let block = body
+                    .split("\n\n")
+                    .find(|b| {
+                        b.starts_with("event: response.incomplete\n")
+                            || b.starts_with("event: response.completed\n")
+                    })
+                    .unwrap();
+                let data = block
+                    .lines()
+                    .find_map(|l| l.strip_prefix("data: "))
+                    .unwrap();
+                serde_json::from_str::<serde_json::Value>(data).unwrap()["response"].clone()
+            } else {
+                serde_json::from_str::<serde_json::Value>(body).unwrap()
+            };
+            assert_eq!(
+                envelope["output"][0]["content"][0]["text"],
+                String::from_utf8(expected.clone()).unwrap()
+            );
+            assert_eq!(envelope["usage"]["input_tokens"], json!(count));
+            assert_eq!(envelope["usage"]["output_tokens"], json!(sampled));
+            assert_eq!(envelope["x_qwen"]["matched_tokens"], 0);
+            drop(model.create_session(0).unwrap());
+        }
+    }
+    let text = &cases[0].0;
+    let (oversized, prompt) = request(
+        &backend,
+        json!({"model":"k2-boundary","input":text,"max_output_tokens":2}),
+    );
+    let mut sink = Sink::default();
+    assert!(matches!(
+        backend.generate(&oversized, &prompt, &mut sink),
+        Err(BackendFailure::Serve(_))
+    ));
+    assert_eq!(sink.ticks, 0);
+    for stream in [false, true] {
+        let response = wire_request(
+            &mut backend,
+            json!({"model":"k2-boundary","input":text,"max_output_tokens":2,"stream":stream}),
+        );
+        if stream {
+            // The shared transport starts SSE before backend tokenization, so
+            // a pre-session budget error is a failure event after HTTP 200.
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            let body = response.split_once("\r\n\r\n").unwrap().1;
+            let block = body
+                .split("\n\n")
+                .find(|b| b.starts_with("event: response.failed\n"))
+                .unwrap();
+            let data = block
+                .lines()
+                .find_map(|l| l.strip_prefix("data: "))
+                .unwrap();
+            let failed: serde_json::Value = serde_json::from_str(data).unwrap();
+            assert_eq!(failed["response"]["error"]["type"], "invalid_request");
+            assert_eq!(failed["response"]["error"]["param"], "max_output_tokens");
+            assert!(
+                failed["response"]["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("257 K2 forwards")
+            );
+            assert_eq!(failed["response"]["output"], json!([]));
+            assert!(!body.contains("event: response.output_text.delta"));
+        } else {
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        }
+    }
+    let (req, prompt) = request(&backend, json!({"model":"k2-boundary","input":text}));
+    let mut aborted = Sink {
+        abort_tick: Some(250),
+        ..Sink::default()
+    };
+    assert!(matches!(
+        backend.generate(&req, &prompt, &mut aborted),
+        Err(BackendFailure::Aborted(_))
+    ));
+    let mut fresh = Sink::default();
+    assert_eq!(
+        backend
+            .generate(&req, &prompt, &mut fresh)
+            .unwrap()
+            .usage
+            .cached_tokens,
+        0
+    );
+    assert_eq!(fresh.bytes, cases[0].3);
+    std::fs::write(evidence.join("serve-256-result.json"),serde_json::to_vec_pretty(&json!({
+        "status":"passed","capacity":256,"json_sse_run_bench_parity":true,"default_output_boundary":true,
+        "reject_257_before_session":true,"fresh_after_late_prefill_abort":true,"performance_claim":false,
+    })).unwrap()).unwrap();
 }

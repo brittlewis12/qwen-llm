@@ -151,6 +151,16 @@ fn load(
 #[test]
 #[ignore = "GPU online replay of retained v2 IFM outputs; production lease; no reference child or new logit dumps"]
 fn gpu_online_against_retained_independent_v2_reference() {
+    replay(PrefillMode::Serial);
+}
+
+#[test]
+#[ignore = "GPU packed split/whole replay against retained IFM v2 controls; production lease; no reference generation"]
+fn gpu_packed_against_retained_independent_v2_reference() {
+    replay(PrefillMode::BatchQ8);
+}
+
+fn replay(prefill: PrefillMode) {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     assert!(crate::metal::mat_vec_q8_0_lcpp_enabled());
@@ -178,12 +188,14 @@ fn gpu_online_against_retained_independent_v2_reference() {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/profiles")
         .join(format!(
-            "k2-online-retained-v2-{}-{stamp}",
+            "k2-{prefill:?}-retained-v2-{}-{stamp}",
             std::process::id()
         ));
     fs::create_dir(&directory).unwrap();
     fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&json!({
-        "claim":"online_backend_regression_against_retained_independent_reference_not_new_holdout",
+        "claim":"native_regression_against_retained_independent_reference_not_new_holdout",
+        "native_prefill":format!("{prefill:?}"),
+        "row_topology":"teacher-forced/trajectory rows are singleton; split/whole controls use selected prefill mode",
         "policy":p,"policy_sha256":v2::SHA256,"fixture_freeze_commit":"300c8dcb",
         "retained_directory":root,"retained_manifest_sha256":manifest_hash,
         "retained_references_sha256":references_hash,"reference":reference_identity().trim(),
@@ -204,7 +216,7 @@ fn gpu_online_against_retained_independent_v2_reference() {
         &cases,
         files,
         &directory,
-        AttentionBackend::Online,
+        (AttentionBackend::Online, prefill),
         v2::row_failures,
     );
 }

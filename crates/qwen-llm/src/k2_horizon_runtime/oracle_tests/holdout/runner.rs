@@ -255,7 +255,7 @@ pub(super) fn run(
         &cases,
         files,
         &directory,
-        AttentionBackend::Materialized,
+        (AttentionBackend::Materialized, PrefillMode::Serial),
         classify,
     );
 }
@@ -267,14 +267,16 @@ pub(super) fn evaluate(
     cases: &[(String, u32, Vec<u32>, bool)],
     files: Vec<ReferenceCase>,
     directory: &Path,
-    attention: AttentionBackend,
+    execution: (AttentionBackend, PrefillMode),
     classify: fn(&serde_json::Value, &serde_json::Value, bool) -> Vec<&'static str>,
 ) {
     assert_eq!(cases.len(), files.len());
+    let (attention, prefill) = execution;
     let stamps = source.revalidate_retained_shard_stamps().unwrap();
     let ctx = MetalContext::new().unwrap();
-    let model =
+    let mut model =
         K2LoadedModel::load_with_attention_unqualified(&ctx, source, 256, attention).unwrap();
+    model.prefill = prefill;
     let boundaries = p["boundaries"]
         .as_array()
         .unwrap()
@@ -411,6 +413,8 @@ pub(super) fn evaluate(
     fs::write(directory.join("summary.json"),serde_json::to_vec_pretty(&json!({
         "policy_sha256":policy_hash,"candidate_envelope_passed":failures.is_empty(),"public_cap_promoted":false,
         "native_attention":format!("{attention:?}"),
+        "native_prefill":format!("{prefill:?}"),
+        "partition_checkpoint_rows":cases.len() * (boundaries.len() + 1),
         "rows":reports.len(),"capture_sites":capture_reports.len(),"failed_records":failures.len(),"bitwise_partition_controls":12,
         "exact_top1_mismatch_records":reports.iter().filter(|r|r["exact_top1_mismatch"]==true).count(),
         "accepted_ranking_indeterminate_records":reports.iter().filter(|r|r["accepted_ranking_indeterminate"]==true).count(),

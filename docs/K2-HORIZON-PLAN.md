@@ -19,10 +19,11 @@ mismatches. Online replay against the digest-pinned independent v2 reference als
 passes all 4096 rows with exact top-1 agreement. Application dispatch now uses
 bounded-scratch online attention after separate strict-short and surface checks.
 An experimental 32-row Q8 packed path now shares the same block graph and passes
-88 bitwise logit/capture/full-cache checkpoints, but application prefill remains
-serial pending independent-reference and surface checks. F16 KV storage is
+88 bitwise logit/capture/full-cache checkpoints. Retained independent replay also
+passes all singleton baseline gates and 192 packed/serial partition checkpoints;
+application prefill remains serial pending surface promotion. F16 KV storage is
 unchanged; packed promotion and then compact KV remain on the critical path.
-See review packets 17-29
+See review packets 17-30
 for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied

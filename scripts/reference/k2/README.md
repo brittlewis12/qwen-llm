@@ -218,6 +218,16 @@ separately priced/admitted before submission, with no replicated KV or logits sl
 The extra SHA optimization only accelerates host cache digests. Application prefill
 and serving cancellation remain serial; these tests make no speed or KV-savings claim.
 
+With the same `K2_GGUF`, `K2_LLAMA_ORACLE` (hash only), `K2_RETAINED_V2`, and lease
+environment as the retained replay above, run
+`k2_horizon_runtime::oracle_tests::holdout::retained::gpu_packed_against_retained_independent_v2_reference`
+to select packed mode for split/whole controls. The first replay passes 192 endpoint
+comparisons across twelve partition controls, using 72 multi-token appends plus
+singleton boundaries. Its 4096 independent-reference rows, 16 capture sites, and
+64 exact trajectory predictors remain singleton baseline checks, not 4096 packed
+outputs. No oracle child or new large reference dump is produced. Fresh historical
+v1/v2 tests remain explicitly materialized/serial; the online-only replay stays serial.
+
 ## Cache/backend precision control
 
 `--f32-kv` is a reference-only diagnostic, mutually exclusive with `--capture-last`.

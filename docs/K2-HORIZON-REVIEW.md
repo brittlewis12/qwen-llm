@@ -1001,3 +1001,31 @@ and test-only pending independent-reference and application-surface promotion.
 Final read-only adversarial verdict: **commit-ready; no code or evidence blocker**.
 The new packed implementation and test modules are included. Explicit packed
 retained-reference replay is the next gate; fresh historical evaluators stay serial.
+
+## Packet 30 packed replay with retained independent controls
+
+The shared evaluator now takes an explicit attention/prefill pair. Fresh v1/v2
+remain `(Materialized, Serial)` and the existing online replay remains
+`(Online, Serial)`. Only the new opt-in test selects `(Online, BatchQ8)` for its
+split/whole controls. The pinned root digests, payload/header/token/finite checks,
+reference identity and trace-noninterference validation are unchanged.
+
+Pre-execution adversarial review approved this narrow reuse and its explicit
+topology labeling. First replay passes in
+`target/profiles/k2-BatchQ8-retained-v2-37737-1789853432693300000`: 192 endpoint
+comparisons in twelve bitwise partition controls, covering 72 multi-token appends
+plus singleton boundaries. All 4096 independent-reference baseline rows, 16 sites,
+and 64 exact trajectory predictors pass with zero top-1 differences or ranking
+allowances. Those rows are singleton execution, not 4096 packed outputs; packed
+endpoints match the qualified baseline bitwise. Packet 29 independently supplies
+full-cache, packed-capture, intervention, and fail-stop checks.
+
+The original independent baseline metrics remain exactly unchanged. Eighteen CPU
+oracle tests pass. The production lease, real wired gate, and API validation cover
+the 336-second instrumented run, not a speed measurement. No reference executable
+is run and no multi-GiB outputs are regenerated. Public prefill remains serial;
+automatic Q8/lcpp selection and application records/checks remain a separate gate.
+
+Final read-only adversarial verdict: **commit-ready; no concrete blocker**. Automatic
+selection must require all 252 block projections plus lcpp compatibility, record
+the selected topology, and retain explicit serial historical/serving behavior.

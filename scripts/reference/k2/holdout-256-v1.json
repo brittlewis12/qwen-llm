@@ -1,0 +1,60 @@
+{
+  "schema": "k2.guarded-context-holdout.v1",
+  "scope": "candidate empirical research envelope; not independently derived tolerances or public-cap approval",
+  "selection_provenance": "New synthetic sources authored by the coding assistant after calibration, selected for coverage without holdout forward feedback; not a random sample or independently audited dataset.",
+  "model_sha256": "5a98a289aba5c8c99ef05c9261287f19e8f586fd679bab45b632eb86b47809bf",
+  "tokenizer_metadata_id": "51ebd8140ea2abd9",
+  "token_digest_encoding": "SHA256 of 256 native token IDs as concatenated i32 little-endian, no domain prefix",
+  "capacity": 256,
+  "bases": [0, 37, 8191],
+  "boundaries": [1, 31, 32, 33, 63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256],
+  "logits": {
+    "top1_equal": true,
+    "max_abs_exclusive": 0.5,
+    "rmse_exclusive": 0.05,
+    "cosine_exclusive_min": 0.9995
+  },
+  "distribution": {
+    "kl_reference_to_actual_exclusive": 0.0001,
+    "total_variation_exclusive": 0.002,
+    "centered_rmse_exclusive": 0.03
+  },
+  "captures": {
+    "layers": [0, 11, 23, 35],
+    "cosine_exclusive_min": 0.99999,
+    "relative_l2_exclusive": 0.005
+  },
+  "continuation": {
+    "prefix_length": 241,
+    "argmax_transitions": 15,
+    "tie_break": "highest token ID",
+    "eos_policy": "fixed mathematical argmax trajectory including EOS if produced; serving EOS-stop semantics are tested separately",
+    "bases_by_corpus": [0, 37, 8191, 0]
+  },
+  "corpora": [
+    {
+      "name": "field_notes",
+      "native_token_count": 349,
+      "prefix_sha256_i32le": "363260723b203abb5dd5b6a6f1f99fdb88cbccbebafbd6b73fb3d2a35c55d997",
+      "text": "At sunrise the coastal observatory reported a falling barometer, but the inland station recorded almost no change. Mara checked the instruments before comparing the observations: the coastal sensor had been calibrated on Tuesday, whereas the inland unit still used its winter correction. Neither reading alone established that a storm was approaching. She wrote three possibilities in the notebook, leaving room beside each for evidence that might rule it out.\nThe harbor master offered a different explanation. A maintenance crew had opened the door beneath the coastal sensor during the night, exposing the room to a strong draft. The temperature log showed a short dip at 03:17, followed by a gradual recovery. A second pressure gauge, kept in a sealed cabinet, recorded a smaller fall. These facts supported an instrument effect, though they did not exclude a real weather change occurring at the same time.\nFor the afternoon comparison, the team moved a portable reference between the two sites. Travel took forty minutes, so the readings could not be treated as simultaneous. Ivo proposed interpolating between observations; Mara objected that interpolation would hide a brief front passage. They agreed to retain the original timestamps, plot the raw measurements, and label every estimated point. The published chart would include both the corrected series and the uncorrected readings.\nA visitor asked which instrument was right. The answer depended on the question: absolute pressure required calibration, changes over time required a stable sensor, and forecasting required information neither device supplied. An uncertainty interval was not a confession that the experiment had failed. It described the range of conclusions supported by the measurements. Before leaving, Mara taped a note to the cabinet asking the next shift to inspect the seal, record the reference temperature, and explain any adjustment in the log rather than silently replacing a value."
+    },
+    {
+      "name": "transaction_code",
+      "native_token_count": 440,
+      "prefix_sha256_i32le": "049c3723753404c5db9bc6acca57daba5c1041e3862601881e9d3617a39f46fd",
+      "text": "// A bounded transactional index: validation must precede mutation.\nuse std::collections::BTreeMap;\n\n#[derive(Debug, PartialEq)]\nenum Failure { Duplicate(u64), Missing(u64), Capacity, Overflow }\n\nstruct Index { entries: BTreeMap<u64, i64>, revision: u64, limit: usize }\n\nimpl Index {\n    fn insert_batch(&mut self, incoming: &[(u64, i64)]) -> Result<u64, Failure> {\n        let next = self.revision.checked_add(1).ok_or(Failure::Overflow)?;\n        let total = self.entries.len().checked_add(incoming.len()).ok_or(Failure::Capacity)?;\n        if total > self.limit { return Err(Failure::Capacity); }\n        let mut staged = BTreeMap::new();\n        for &(key, value) in incoming {\n            if self.entries.contains_key(&key) || staged.insert(key, value).is_some() {\n                return Err(Failure::Duplicate(key));\n            }\n        }\n        self.entries.extend(staged);\n        self.revision = next;\n        Ok(next)\n    }\n\n    fn remove(&mut self, key: u64) -> Result<i64, Failure> {\n        let next = self.revision.checked_add(1).ok_or(Failure::Overflow)?;\n        let value = self.entries.remove(&key).ok_or(Failure::Missing(key))?;\n        self.revision = next;\n        Ok(value)\n    }\n}\n\n// Consider the empty batch, a duplicate inside incoming, and a saturated revision.\n// The caller must distinguish rejected transactions from successfully empty ones.\nfn scenario() {\n    let mut index = Index { entries: BTreeMap::new(), revision: 7, limit: 3 };\n    assert_eq!(index.insert_batch(&[(11, -4), (29, 18)]), Ok(8));\n    assert_eq!(index.insert_batch(&[(31, 6), (37, 9)]), Err(Failure::Capacity));\n    assert_eq!(index.remove(11), Ok(-4));\n    assert_eq!(index.entries.get(&29), Some(&18));\n}\n"
+    },
+    {
+      "name": "multilingual_editor",
+      "native_token_count": 349,
+      "prefix_sha256_i32le": "f47add4c9ba79107cb6edb4d8303aa87be5811a2f2317e98a1e82d3e19532383",
+      "text": "Editor notes: cafe\u0301 and caf\u00e9 should normalize alike, but quoted spelling and authored offsets are different records. Fran\u00e7ois wrote: \u00abLa carte indique le nord, pas la destination.\u00bb In Madrid, Luc\u00eda replied: \u00abTodav\u00eda faltan dos p\u00e1ginas; no traduzcas los nombres propios.\u00bb\n\u65e5\u672c\u8a9e: \u96e8\u304c\u6b62\u3093\u3067\u304b\u3089\u3001\u56f3\u66f8\u9928\u3078\u884c\u304d\u307e\u3059\u3002 \u4e2d\u6587: \u8fd9\u4efd\u62a5\u544a\u5305\u542b\u4e09\u4e2a\u5047\u8bbe\uff0c\u4f46\u6ca1\u6709\u786e\u5b9a\u7684\u7ed3\u8bba\u3002\n\u0627\u0644\u0639\u0631\u0628\u064a\u0629: \u0647\u0630\u0647 \u0645\u0644\u0627\u062d\u0638\u0629 \u0642\u0635\u064a\u0631\u0629 \u0639\u0646 \u0627\u0644\u0648\u0642\u062a \u0648\u0627\u0644\u0645\u0643\u0627\u0646. \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac: \u0397 \u03b1\u03c0\u03ac\u03bd\u03c4\u03b7\u03c3\u03b7 \u03b5\u03be\u03b1\u03c1\u03c4\u03ac\u03c4\u03b1\u03b9 \u03b1\u03c0\u03cc \u03c4\u03bf \u03c0\u03bb\u03b1\u03af\u03c3\u03b9\u03bf.\nA bilingual glossary links 'bank' to a financial institution in one paragraph and a river edge in another. Preserve that ambiguity instead of replacing both occurrences mechanically. The reference numbers 007, 19.25, -3, and 1e6 have different formatting contracts. A tab between columns is not equivalent to four spaces when byte spans are being reported.\nThe manuscript contains an unfinished quotation, an em dash in a source sentence, and the literal sequence <tool_call> inside a description of a parser. None of those marks authorizes a tool invocation. The translator should keep stage directions separate from dialogue and should not invent the speaker of an unsigned note. A footnote explains that the original date was written as 04/05/06; the edition records the ambiguity rather than choosing a regional interpretation without evidence.\nWhen reviewing the final proof, compare the normalized text used for tokenization with the authored text used for citations. Keep a mapping between them, record skipped control characters explicitly, and never label a token index as a byte offset. If a quotation crosses a paragraph boundary, include both paragraphs in the source reference even when the displayed excerpt is shorter."
+    },
+    {
+      "name": "ambiguous_dispatch",
+      "native_token_count": 371,
+      "prefix_sha256_i32le": "e273c042b1e0208e39b9765a312cbb8fa1e4756fd683bbe03583ba1fdf5ce2fe",
+      "text": "The courier handed the archivist a sealed envelope because she had requested the original receipt. Who had requested it? The sentence permits more than one reading unless the surrounding conversation identifies the requester. Do not add a name merely to make the answer sound decisive.\nOn the desk were a brass key, a folded map, and a blue notebook. The map was older than the notebook but newer than the key. Yesterday, Noor moved the notebook into the lower drawer; this morning, Ellis returned the map to the desk without opening that drawer. A witness then said that 'it was missing.' That statement does not establish which object the witness meant.\nThere are four possible routes to the depot. The eastern road is shorter in distance but includes a ferry that runs every forty minutes. The northern road is longer and usually faster, except during the school pickup interval. The western bridge is closed to heavy vehicles, and the southern tunnel requires a reservation. The van is light enough for the bridge, but no departure time has been supplied. Choosing the fastest route therefore requires another fact, not an invented travel estimate.\nThe dispatcher wrote an incomplete message: 'If the package arrives before the inspection, leave it with the ...' Possible completions depend on local procedure. A guard, a clerk, and the receiving team all have different responsibilities. The security policy forbids leaving parcels unattended, yet it does not say that every parcel must be opened. An assistant should distinguish the missing operational detail from the clearly stated constraint.\nFor the audit, report what is known, what follows conditionally, and what remains unresolved. A plausible story is not evidence. If two records disagree about the delivery date, cite both records, identify their timestamps, and avoid silently treating the newer entry as a correction. The final report may be brief, but its certainty should not exceed the information supplied."
+    }
+  ]
+}

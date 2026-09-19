@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 
 mod attention_probe;
 mod cache_precision;
+mod holdout;
 mod probability;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

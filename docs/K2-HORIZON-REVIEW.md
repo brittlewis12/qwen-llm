@@ -678,3 +678,28 @@ pass with the rebuilt wrapper; nine CPU oracle tests pass. Historical extended
 failure and the public 32-token cap remain unchanged. A proposed wider acceptance
 envelope is a post-hoc engineering hypothesis that still requires frozen,
 nonrepeating holdout fixtures and separately recorded continuation/lens evidence.
+
+## Packet 21 candidate holdout freeze (before target execution)
+
+`scripts/reference/k2/HOLDOUT-POLICY.md` defines a candidate empirical guarded-256
+experiment, not independently derived tolerances or automatic promotion. Four new
+assistant-authored synthetic sources cover prose, code, multilingual editing, and
+ambiguous instructions. Selection occurred after calibration but without target
+forward feedback; this is not a randomly sampled or independently audited corpus.
+The first 256 native IDs are tested at bases 0/37/8191. Per-row probability/raw
+gates, 15 split boundaries, four residual sites, and four 241+15 argmax trajectories
+are fixed before execution. EOS is data in those mathematical trajectories;
+serving's EOS-stop contract remains separately tested.
+
+Freeze review required stronger tokenizer/artifact binding and exact semantic
+policy assertions. The preflight now hashes the actual single GGUF shard between
+stamp checks, verifies tokenizer metadata identity, exact full token counts
+(349/440/349/371), and SHA256 of each 256-ID prefix. CPU tests assert every gate
+object, continuation setting, site list, and boundary, plus the entire policy hash.
+Only CPU hashing/tokenization has run at this checkpoint; no holdout forward pass.
+
+Frozen JSON SHA256: `65a517ad27cab60a7a38989ce8cf3499902940fb94f82c26d83dcca86f5f6889`.
+Closure verdict: **freeze commit ready; no remaining blocker**. Failed fixtures
+must not be replaced and thresholds must not be tuned after observing results.
+Original strict 42-row regression, historical extended failures, and public cap 32
+remain unchanged. Holdout execution and any surface promotion are separate reviews.

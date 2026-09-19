@@ -180,6 +180,26 @@ capture, split/whole, and all generated-tail checks passed. The analyzer reports
 reference-side ranking gaps without guessing unretained native logits. Neither
 fixtures nor gates may be retuned after observing this result. Public cap stays 32.
 
+V2 is separately frozen in `HOLDOUT-POLICY-V2.md` / `holdout-256-v2.json`, not a
+reinterpretation of v1. It records reciprocal live ranking witnesses and keeps
+all trajectory predictor lengths 241-256 exact. The first run passes all 4096
+rows and 16 sites without using any indeterminate-ranking allowance. Scope is
+the pinned Q8-weight checkpoint with F16 KV, not F16-weight qualification.
+
+```sh
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+K2_HOST_BUILD_NOTE="temporary qwen-llm test-package opt-level=1; Metal unchanged" \
+K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
+cargo --config 'profile.test.package.qwen-llm.opt-level=1' test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::holdout::v2::gpu_frozen_guarded_256_v2_holdout \
+  -- --ignored --exact --nocapture --test-threads=1
+uv run scripts/reference/k2/inspect_holdout.py target/profiles/k2-holdout-v2-RUN
+```
+
+The host-only optimization is optional and does not alter Metal kernels. The
+manifest binds the native test binary as well as source/kernel identities. Passing
+the holdout does not itself promote public limits; surface checks remain separate.
+
 ## Native lens CLI checks
 
 The opt-in uv scripts run native CLI children serially. Unlike the standalone

@@ -11,10 +11,11 @@ pub(super) fn argmax(values: &[f32]) -> u32 {
 }
 
 fn row_metrics(actual: &[f32], reference: &[f32]) -> serde_json::Value {
+    let witness = ranking::witness(actual, reference);
     let mut logits = error_metrics(actual, reference);
-    logits["actual_top1"] = json!(argmax(actual));
-    logits["reference_top1"] = json!(argmax(reference));
-    json!({"logits":logits,"distribution":probability::metrics(actual,reference)})
+    logits["actual_top1"] = witness["actual_top1"].clone();
+    logits["reference_top1"] = witness["reference_top1"].clone();
+    json!({"logits":logits,"distribution":probability::metrics(actual,reference),"ranking":witness})
 }
 
 fn row_failures(p: &serde_json::Value, metrics: &serde_json::Value) -> Vec<&'static str> {
@@ -197,9 +198,20 @@ fn save(
 #[test]
 #[ignore = "GPU frozen guarded-256 candidate envelope; production lease; about 5 GiB evidence; no automatic promotion"]
 fn gpu_frozen_guarded_256_holdout() {
+    run(policy(), POLICY_SHA256, "v1", "990bb56d", |p, m, _| {
+        row_failures(p, m)
+    });
+}
+
+pub(super) fn run(
+    p: serde_json::Value,
+    policy_hash: &str,
+    version: &str,
+    freeze_commit: &str,
+    classify: fn(&serde_json::Value, &serde_json::Value, bool) -> Vec<&'static str>,
+) {
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     assert!(crate::metal::mat_vec_q8_0_lcpp_enabled());
-    let p = policy();
     let path = PathBuf::from(std::env::var("K2_GGUF").expect("K2_GGUF"));
     let binary = PathBuf::from(std::env::var("K2_LLAMA_ORACLE").expect("K2_LLAMA_ORACLE"));
     let identity = Command::new(&binary).arg("--identity").output().unwrap();
@@ -209,7 +221,7 @@ fn gpu_frozen_guarded_256_holdout() {
         reference_identity()
     );
     let source = GgufFile::open(&path).unwrap();
-    let cases = inputs(&source);
+    let cases = inputs_for(&source, &p);
     let stamps = source.revalidate_retained_shard_stamps().unwrap();
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -217,10 +229,15 @@ fn gpu_frozen_guarded_256_holdout() {
         .as_nanos();
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/profiles")
-        .join(format!("k2-holdout-v1-{}-{stamp}", std::process::id()));
+        .join(format!(
+            "k2-holdout-{version}-{}-{stamp}",
+            std::process::id()
+        ));
     fs::create_dir(&directory).unwrap();
     fs::write(directory.join("manifest.json"),serde_json::to_vec_pretty(&json!({
-        "policy":p,"policy_sha256":POLICY_SHA256,"fixture_freeze_commit":"990bb56d",
+        "policy":p,"policy_sha256":policy_hash,"fixture_freeze_commit":freeze_commit,
+        "native_test_binary_sha256":file_sha256(&std::env::current_exe().unwrap()),
+        "host_build_note":std::env::var("K2_HOST_BUILD_NOTE").ok(),
         "model":path,"inputs":cases,"native_capacity":256,"native_cache":"F16","native_attention":"materialized",
         "native_q8_matvec":"lcpp","native_metallib_sha256":native_kernel_identity(),"native_sources":native_source_identity(),
         "reference":reference_identity().trim(),"reference_binary_sha256":file_sha256(&binary),
@@ -293,10 +310,12 @@ fn gpu_frozen_guarded_256_holdout() {
                 session.append(&[token]).unwrap()
             };
             let metrics = row_metrics(&actual, &expected);
-            let failed = row_failures(&p, &metrics);
+            let failed = classify(&p, &metrics, false);
+            let mismatch = metrics["logits"]["actual_top1"] != metrics["logits"]["reference_top1"];
             reports.push(
                 json!({"corpus":name,"base":base,"lane":"teacher_forced","visible_length":index+1,
-                "token":token,"metrics":metrics,"failed_gates":failed}),
+                "token":token,"metrics":metrics,"failed_gates":failed,"trajectory_exact_required":false,
+                "exact_top1_mismatch":mismatch,"accepted_ranking_indeterminate":mismatch && failed.is_empty()}),
             );
             if boundaries.contains(&(index + 1)) {
                 checkpoints.push(actual);
@@ -344,9 +363,13 @@ fn gpu_frozen_guarded_256_holdout() {
                 previous = Some(argmax(&expected));
                 let actual = session.append(&[token]).unwrap();
                 let metrics = row_metrics(&actual, &expected);
-                let failed = row_failures(&p, &metrics);
+                let exact = exact_trajectory_predictor(&p, index + 1);
+                let failed = classify(&p, &metrics, exact);
+                let mismatch =
+                    metrics["logits"]["actual_top1"] != metrics["logits"]["reference_top1"];
                 reports.push(json!({"corpus":name,"base":base,"lane":"reference_argmax_trajectory","visible_length":index+1,
-                    "token":token,"metrics":metrics,"failed_gates":failed}));
+                    "token":token,"metrics":metrics,"failed_gates":failed,"trajectory_exact_required":exact,
+                    "exact_top1_mismatch":mismatch,"accepted_ranking_indeterminate":mismatch && failed.is_empty()}));
             }
             rows.finish();
         }
@@ -361,8 +384,11 @@ fn gpu_frozen_guarded_256_holdout() {
     assert_eq!(source.revalidate_retained_shard_stamps().unwrap(), stamps);
     let failures = save(&directory, &reports, &capture_reports);
     fs::write(directory.join("summary.json"),serde_json::to_vec_pretty(&json!({
-        "policy_sha256":POLICY_SHA256,"candidate_envelope_passed":failures.is_empty(),"public_cap_promoted":false,
+        "policy_sha256":policy_hash,"candidate_envelope_passed":failures.is_empty(),"public_cap_promoted":false,
         "rows":reports.len(),"capture_sites":capture_reports.len(),"failed_records":failures.len(),"bitwise_partition_controls":12,
+        "exact_top1_mismatch_records":reports.iter().filter(|r|r["exact_top1_mismatch"]==true).count(),
+        "accepted_ranking_indeterminate_records":reports.iter().filter(|r|r["accepted_ranking_indeterminate"]==true).count(),
+        "exact_trajectory_predictor_rows":reports.iter().filter(|r|r["trajectory_exact_required"]==true).count(),
     })).unwrap()).unwrap();
     assert!(
         failures.is_empty(),

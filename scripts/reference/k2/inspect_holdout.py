@@ -48,7 +48,7 @@ def reference_disagreement(directory, row):
     if top[0] != expected or not 0 <= actual < vocab:
         raise ValueError("top-1 evidence mismatch")
     denominator = sum(math.exp(v - logits[expected]) for v in logits)
-    return {
+    result = {
         "corpus": row["corpus"],
         "base": row["base"],
         "lane": row["lane"],
@@ -62,6 +62,10 @@ def reference_disagreement(directory, row):
         )
         / denominator,
     }
+    if "ranking" in row["metrics"]:
+        result["recorded_live_ranking_witness"] = row["metrics"]["ranking"]
+        result["accepted_ranking_indeterminate"] = row["accepted_ranking_indeterminate"]
+    return result
 
 
 def main():
@@ -70,12 +74,15 @@ def main():
     args = parser.parse_args()
     summary = read_json(args.directory / "summary.json")
     manifest = read_json(args.directory / "manifest.json")
-    expected_policy = "65a517ad27cab60a7a38989ce8cf3499902940fb94f82c26d83dcca86f5f6889"
+    expected_policy = {
+        "k2.guarded-context-holdout.v1": "65a517ad27cab60a7a38989ce8cf3499902940fb94f82c26d83dcca86f5f6889",
+        "k2.guarded-context-holdout.v2": "44bd53a7dcf72ae6afb8e1f9921bf461df3f5cf9cc14c0c7705f46188418a1fe",
+    }[manifest["policy"]["schema"]]
     if (
         manifest["policy_sha256"] != expected_policy
         or summary["policy_sha256"] != expected_policy
     ):
-        raise ValueError("not the frozen v1 policy")
+        raise ValueError("not the declared frozen policy")
     if summary["public_cap_promoted"] is not False:
         raise ValueError("holdout results cannot promote public capacity")
     evidence = read_json(args.directory / "metrics.json")
@@ -94,7 +101,8 @@ def main():
     disagreements = [
         reference_disagreement(args.directory, row)
         for row in rows
-        if "top1" in row["failed_gates"]
+        if row["metrics"]["logits"]["actual_top1"]
+        != row["metrics"]["logits"]["reference_top1"]
     ]
     result = {
         "recorded_verdict": summary,

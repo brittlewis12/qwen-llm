@@ -7,6 +7,12 @@ fn policy() -> serde_json::Value {
     bound_policy(BYTES, SHA256)
 }
 
+#[test]
+#[ignore = "GPU frozen v2 reciprocal-ranking holdout; production lease; about 5 GiB evidence; no automatic promotion"]
+fn gpu_frozen_guarded_256_v2_holdout() {
+    super::runner::run(policy(), SHA256, "v2", "300c8dcb", row_failures);
+}
+
 fn row_failures(
     p: &serde_json::Value,
     metrics: &serde_json::Value,

@@ -764,3 +764,31 @@ runner must record every accepted indeterminate witness and enforce exactness on
 all 16 trajectory predictor rows. Temporary Cargo package-level test opt-level 1
 is used only to shorten host metric work; no Cargo configuration or Metal kernel
 changes are introduced. Execution and public-cap decisions remain separate.
+
+## Packet 24 first v2 execution (passed, before surface promotion)
+
+The shared runner takes an explicit frozen policy/hash/commit and classifier. V1
+still uses its exact-ID classifier. V2 records reciprocal live-vector witnesses,
+exact mismatch/accepted-indeterminate flags, and trajectory exactness on every row.
+Predictor lengths 241-256, including the terminal row, use the exact requirement.
+Pre-execution adversarial review confirmed the wiring before any v2 target forward.
+
+First-run evidence: `target/profiles/k2-holdout-v2-12878-1789830419367474000`.
+All 4096 rows, 16 residual sites, 12 bitwise partition controls, and 64 exact
+trajectory predictor checks pass. There are **zero top-1 mismatches and zero
+indeterminate allowances used**. Maximum raw error is 0.09023, RMSE 0.01234,
+centered RMSE 0.008886, KL 1.47e-6, and TV 0.00078526. Minimum logit cosine is
+0.99999031. Capture relative L2 is at most 0.002564, with cosine above 0.99999699.
+
+The original strict 42-row GPU regression and fifteen CPU oracle tests also pass.
+The native metallib SHA256 and runtime/primitive source hashes match v1 exactly.
+Temporary package-level host opt-level 1 is recorded along with the native test
+binary hash; it changes no Metal code or persistent Cargo configuration. Execution
+used the production lease, real wired gate, and API validation. Free disk was
+23 GiB before the approximately 5 GiB run. Elapsed 552 seconds is not speed evidence.
+
+Post-result adversarial verdict: **sound checkpoint; sufficient to begin separate
+guarded surface-promotion checks**. Scope is the pinned final Q8-weight artifact
+with F16 KV, not F16 weights or all intermediate checkpoints. Public capacity is
+still 32 here. V1 remains failed. Run/bench/plain+imported lens/JSON+SSE exact-boundary
+checks and a central application-budget constant are required before promotion.

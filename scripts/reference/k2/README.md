@@ -188,7 +188,7 @@ unchanged. These are correctness gates, not speed or long-context claims.
 
 ## Exact-arithmetic packed Q8 baseline
 
-The test-only packed prefill mode schedules up to 32 rows layer-major through the
+The packed prefill mode schedules up to 32 rows layer-major through the
 same block graph as singleton execution. It reuses the token-axis Q8 GEMV kernel's
 singleton `lcpp` arithmetic, not a half-staged GEMM or Qwen routing heuristic.
 Grouped norm, RoPE, F16 store and causal online attention remain rowwise; only the
@@ -215,8 +215,14 @@ a new holdout. It passes 88 bitwise checkpoints including the full poisoned-futu
 cache, readout isolation, ordered interventions, continuation and an actual late
 nonfinite failure. Temporary scratch is 237572 bytes/row (7602304 bytes at 32),
 separately priced/admitted before submission, with no replicated KV or logits slab.
-The extra SHA optimization only accelerates host cache digests. Application prefill
-and serving cancellation remain serial; these tests make no speed or KV-savings claim.
+The extra SHA optimization only accelerates host cache digests. These tests make no
+speed or KV-savings claim. After the separate default gate, run/bench/lens select
+packed mode only for all 252 Q8 block projections with lcpp enabled, otherwise
+serial execution. Singleton decode and serving's per-token cancellation stay serial.
+Lens shutdown checks occur between chunks (up to 32 positions), not every token.
+Run stats (`diagnostics.k2_horizon.prefill`), bench (`method.prefill_execution`), and
+lens (`deployed_model.prefill`) report mode, actual maximum chunk size, command count,
+and logical temporary activation bytes separately from persistent session storage.
 
 With the same `K2_GGUF`, `K2_LLAMA_ORACLE` (hash only), `K2_RETAINED_V2`, and lease
 environment as the retained replay above, run

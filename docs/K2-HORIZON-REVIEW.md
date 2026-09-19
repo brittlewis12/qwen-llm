@@ -1029,3 +1029,55 @@ automatic Q8/lcpp selection and application records/checks remain a separate gat
 Final read-only adversarial verdict: **commit-ready; no concrete blocker**. Automatic
 selection must require all 252 block projections plus lcpp compatibility, record
 the selected topology, and retain explicit serial historical/serving behavior.
+
+## Packet 31 automatic guarded packed prefill and surface records
+
+Public loading resolves packed mode only when all 252 block projections are Q8_0
+and the compatible lcpp singleton kernel is enabled. Other admitted projection
+formats and disabled lcpp select serial execution; malformed checkpoint inventories
+still fail binding rather than gaining a fallback. The private control loader
+still selects serial prefill, preserving historical evaluator arithmetic. CPU
+negative controls cover each eligibility condition. No new environment switch,
+shader, KV representation, context guard, or other-family execution change.
+
+Run, bench, and plain/imported lens record typed prefill facts: mode, actual maximum
+chunk, physical commands, and logical temporary activation bytes. Bench adds
+`method.prefill_execution` without changing the existing `method.prefill` string
+type. K2's optional run diagnostics are omitted from DeepSeek records; its only
+source change sets that optional field to `None`, and shared envelope tests pass.
+Lens processes bounded chunks and checks shutdown between them, so its cancellation
+granularity is now at most 32 positions. Serving retains actual per-token appends
+and cancellation boundaries, not synthetic ticks around a packed call.
+
+Default-path native validation exposed an existing private-state invariant: the
+session residual scratch must retain the final forward row. Packed output/captures
+were correct but that persistent scratch remained unchanged. Rather than weakening
+the old test, the final packed command now mirrors its last residual into the
+persistent buffer with the existing checked F32 copy encoder. Scratch lives through
+completion, and encoding/command/finite failures retain the same transaction rules.
+Targeted adversarial review approved this ordered state-mirroring fix. The original
+test then passes unchanged, as do forward/split, all four intervention formulas,
+ordered operations/causal KV, imported transport, isolation, and poison probes.
+
+Final surface evidence: `target/profiles/k2-packed-default-256-surfaces-v2` passes
+256-token prefill and a transition reaching 256, output/fingerprint parity,
+plain/imported full-logit identity, strict binding/explicit transfer, and 257
+refusals. Records report 32-row chunks, eight commands, and 7602304 temporary bytes.
+Actual two-token bench/lens runs with lcpp disabled report serial/one-row chunks,
+two commands, and zero packed scratch; these are fallback checks, not numerical
+qualification of the alternative matvec. JSON/SSE serving matches the packed
+run/bench results while preserving startup defaults, late-abort freshness and
+pre-session overbudget refusal. Short serving/BOS/abort and CPU startup refusals
+also pass. All three legacy CLI scripts pass in
+`target/profiles/k2-packed-default-{bench,plain,imported}-v2`.
+
+CPU checks pass 66 library, 13 run/serve, six benchmark, five lens, and 18 shared
+request-stats tests. GPU checks use the production lease, real wired gate and API
+validation, with no shared server or foreign process operations. This promotes a
+guarded Q8/F16-KV/M4 Max packed baseline, not half-staged GEMM, faster throughput,
+long-context qualification, or lower KV bytes/token. Stored KV remains 144 KiB/token;
+compact KV is the next storage milestone.
+
+Final read-only adversarial verdict: **commit-ready; no concrete blocker**. The
+selection, retained-state fix, additive records, fallback, and actual application
+checks support promotion without repeating independent qualification.

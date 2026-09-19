@@ -1496,6 +1496,7 @@ pub(crate) fn build_deepseek_v4_single_turn_stats_record<'a>(
         },
         measured,
         Some(RequestStatsDiagnostics {
+            k2_horizon: None,
             deepseek_v4: Some(RequestStatsDeepSeekV4Diagnostics {
                 schema_version: 1,
                 prefill_mode,

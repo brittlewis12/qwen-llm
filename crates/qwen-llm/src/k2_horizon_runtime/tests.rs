@@ -245,6 +245,8 @@ fn gpu_checkpoint_forward_and_split_prefill_smoke() {
     let ctx = MetalContext::new().unwrap();
     let model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
     assert_eq!(model.attention, AttentionBackend::Online);
+    assert_eq!(model.prefill, PrefillMode::BatchQ8);
+    assert_eq!(model.prefill_info(3).chunk_tokens, 3);
     let mut full = model.create_session(0).unwrap();
     let expected = full.append(&[0, 42, 17]).unwrap();
     assert_eq!(expected.len(), 250624);

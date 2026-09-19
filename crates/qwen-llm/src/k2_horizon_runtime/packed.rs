@@ -5,37 +5,83 @@ use crate::k2_horizon_plan::PACKED_CHUNK_TOKENS;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PrefillMode {
     Serial,
-    #[cfg(test)]
     BatchQ8,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct K2PrefillInfo {
+    pub mode: &'static str,
+    pub chunk_tokens: usize,
+    pub commands: usize,
+    /// Logical additional activation storage, excluding page pricing and reserve.
+    pub temporary_activation_bytes: u64,
+}
+
+fn eligible(types: impl Iterator<Item = GgmlType>, lcpp: bool) -> bool {
+    let (count, all_q8) = types.fold((0, true), |(count, q8), dtype| {
+        (count + 1, q8 && dtype == GgmlType::Q8_0)
+    });
+    lcpp && count == 36 * 7 && all_q8
+}
+
 impl PrefillMode {
+    pub(super) fn for_weights(weights: &ResidentWeights) -> Self {
+        let types = weights.layers.iter().flat_map(|w| {
+            [
+                &w.query,
+                &w.key,
+                &w.value,
+                &w.attention_output,
+                &w.gate,
+                &w.up,
+                &w.down,
+            ]
+            .map(|t| t.dtype)
+        });
+        if eligible(types, crate::metal::mat_vec_q8_0_lcpp_enabled()) {
+            Self::BatchQ8
+        } else {
+            Self::Serial
+        }
+    }
+
+    pub(super) fn info(self, tokens: usize) -> K2PrefillInfo {
+        let chunk_tokens = tokens.min(if self == Self::BatchQ8 {
+            PACKED_CHUNK_TOKENS
+        } else {
+            1
+        });
+        K2PrefillInfo {
+            mode: if chunk_tokens > 1 {
+                "q8_lcpp_token_batch"
+            } else {
+                "serial_single_token"
+            },
+            chunk_tokens,
+            commands: if tokens == 0 {
+                0
+            } else {
+                tokens.div_ceil(chunk_tokens)
+            },
+            temporary_activation_bytes: if chunk_tokens > 1 {
+                237572 * chunk_tokens as u64
+            } else {
+                0
+            },
+        }
+    }
+
     pub(super) fn chunk(self, weights: &ResidentWeights, tokens: usize) -> Result<usize> {
         match self {
             Self::Serial => {
                 let _ = (weights, tokens);
                 Ok(1)
             }
-            #[cfg(test)]
             Self::BatchQ8 => {
                 if tokens <= 1 {
                     return Ok(1);
                 }
-                if !crate::metal::mat_vec_q8_0_lcpp_enabled()
-                    || !weights.layers.iter().all(|w| {
-                        [
-                            &w.query,
-                            &w.key,
-                            &w.value,
-                            &w.attention_output,
-                            &w.gate,
-                            &w.up,
-                            &w.down,
-                        ]
-                        .iter()
-                        .all(|t| t.dtype == GgmlType::Q8_0)
-                    })
-                {
+                if Self::for_weights(weights) != Self::BatchQ8 {
                     return Err(invalid(
                         "packed K2 requires Q8_0 block projections and lcpp matvec",
                     ));

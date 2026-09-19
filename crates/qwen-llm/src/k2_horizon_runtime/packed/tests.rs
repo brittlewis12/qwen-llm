@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn automatic_selection_requires_complete_q8_projection_inventory_and_lcpp() {
+    assert!(eligible(std::iter::repeat_n(GgmlType::Q8_0, 252), true));
+    assert!(!eligible(std::iter::repeat_n(GgmlType::Q8_0, 252), false));
+    for count in [0, 1, 251, 253] {
+        assert!(!eligible(std::iter::repeat_n(GgmlType::Q8_0, count), true));
+    }
+    for dtype in [
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::BF16,
+        GgmlType::Q4_K,
+        GgmlType::Q5_K,
+        GgmlType::Q6_K,
+    ] {
+        assert!(!eligible(
+            std::iter::repeat_n(GgmlType::Q8_0, 251).chain([dtype]),
+            true
+        ));
+    }
+    for tokens in [0usize, 1, 2, 31, 32, 33, 256] {
+        let serial = PrefillMode::Serial.info(tokens);
+        assert_eq!(serial.mode, "serial_single_token");
+        assert_eq!(serial.commands, tokens);
+        assert_eq!(serial.temporary_activation_bytes, 0);
+        let packed = PrefillMode::BatchQ8.info(tokens);
+        assert_eq!(packed.chunk_tokens, tokens.min(32));
+        assert_eq!(packed.commands, tokens.div_ceil(32));
+        assert_eq!(
+            packed.temporary_activation_bytes,
+            if tokens > 1 {
+                237572 * tokens.min(32) as u64
+            } else {
+                0
+            }
+        );
+    }
+}
+
+#[test]
 fn scratch_is_bounded_and_excludes_persistent_cache_and_head() {
     for rows in [2, 3, 31, 32] {
         let specs = scratch_specs(rows).unwrap();

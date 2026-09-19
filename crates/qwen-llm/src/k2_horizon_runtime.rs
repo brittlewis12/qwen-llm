@@ -1,10 +1,10 @@
-//! Research serial dense K2 forward path, shared by raw run and forward-only lens.
+//! Research dense K2 forward path, shared by raw run and forward-only lens.
 //!
 //! Weights remain native and read-only; sessions borrow the exact loaded model
 //! and context. One synchronous command is in flight at a time. A whole append commits
 //! once; any failure after submission poisons the session rather than exposing
-//! partial state. A test-only packed Q8 path shares the block graph; application
-//! prefill remains serial. No snapshots, fitting, eviction, or speed claims.
+//! partial state. Eligible Q8/lcpp prefill uses bounded packed chunks through the
+//! same block graph. No snapshots, fitting, eviction, or speed claims.
 
 use crate::gguf::{GgufError, GgufFile};
 use crate::k2_horizon::{K2HorizonConfig, K2HorizonError};
@@ -35,6 +35,7 @@ use intervention::InterventionArena;
 pub use intervention::{K2Intervention, K2InterventionKind};
 use lens::CaptureArena;
 pub use lens::K2CapturedForward;
+pub use packed::K2PrefillInfo;
 use packed::{PackedScratch, PrefillMode};
 pub use residency::K2RuntimePlan;
 use residency::ResidentWeights;
@@ -97,7 +98,14 @@ impl<'a> K2LoadedModel<'a> {
         source: &'a GgufFile,
         capacity: u32,
     ) -> Result<Self> {
-        Self::load_with_attention_unqualified(ctx, source, capacity, DEFAULT_ATTENTION_BACKEND)
+        let mut model = Self::load_with_attention_unqualified(
+            ctx,
+            source,
+            capacity,
+            DEFAULT_ATTENTION_BACKEND,
+        )?;
+        model.prefill = PrefillMode::for_weights(&model.weights);
+        Ok(model)
     }
 
     fn load_with_attention_unqualified(
@@ -136,6 +144,11 @@ impl<'a> K2LoadedModel<'a> {
 
     pub fn config(&self) -> &K2HorizonConfig {
         self.plan.config()
+    }
+
+    /// Planned topology for one append, not the model's declared context capacity.
+    pub fn prefill_info(&self, tokens: usize) -> K2PrefillInfo {
+        self.prefill.info(tokens)
     }
 
     /// Each session receives separate KV/scratch and fresh admission. The capacity
@@ -200,8 +213,8 @@ impl K2Session<'_, '_> {
         self.ledger.is_poisoned()
     }
 
-    /// Serial prefill/continuation, returning only the final token's logits.
-    /// Validates ALL IDs before I32 upload. Successful earlier token commands
+    /// Bounded prefill/continuation, returning only the final token's logits.
+    /// Validates ALL IDs before I32 upload. Successful earlier commands
     /// remain staged until the entire append completes; errors expose no prefix.
     pub fn append(&mut self, tokens: &[u32]) -> Result<Vec<f32>> {
         Ok(self.append_impl(tokens, &[], &[])?.logits)
@@ -277,7 +290,22 @@ impl K2Session<'_, '_> {
                 last,
                 captures.as_ref().filter(|_| last),
                 interventions.as_ref().filter(|_| last),
-            );
+            )
+            .and_then(|()| {
+                // Preserve the session's final-residual scratch after temporary
+                // packed activations are dropped, as on the singleton path.
+                if last && packed.is_some() {
+                    crate::metal::encode_copy_offset_f32(
+                        ctx,
+                        &encoder,
+                        &buffers.residual,
+                        (plans.len() - 1) * 4096,
+                        &self.buffers.residual,
+                        4096,
+                    )?;
+                }
+                Ok(())
+            });
             encoder.end();
             encoded?;
             transaction.submitting()?;

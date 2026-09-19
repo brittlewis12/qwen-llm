@@ -30,10 +30,22 @@ def main():
         "QWEN_CHECKPOINT_MODEL_IDENTITY": "hashed",
     }
 
-    def run(name, command, failure=None):
+    def run(name, command, failure=None, env_overrides=None):
         command = list(map(str, command))
-        result = subprocess.run(command, env=env, capture_output=True, timeout=300)
+        child_env = {**env, **(env_overrides or {})}
+        result = subprocess.run(
+            command, env=child_env, capture_output=True, timeout=300
+        )
         (output / f"{name}.command.json").write_text(json.dumps(command, indent=2))
+        (output / f"{name}.environment.json").write_text(
+            json.dumps(
+                {
+                    "MTL_DEBUG_LAYER": child_env["MTL_DEBUG_LAYER"],
+                    "QWEN_MATVEC_Q8_0_LCPP": child_env.get("QWEN_MATVEC_Q8_0_LCPP"),
+                },
+                indent=2,
+            )
+        )
         (output / f"{name}.stdout").write_bytes(result.stdout)
         (output / f"{name}.stderr").write_bytes(result.stderr)
         if failure is not None:
@@ -91,6 +103,12 @@ def main():
         assert sample["prompt_forwards"] == count
         assert sample["outcome"]["transition_forwards"] == sampled - 1
         assert doc["qualification"]["performance_claim"] is False
+        assert doc["method"]["prefill_execution"] == {
+            "mode": "q8_lcpp_token_batch",
+            "chunk_tokens": 32,
+            "commands": 8,
+            "temporary_activation_bytes": 7602304,
+        }
         ids = sample["outcome"]["sampled_token_ids"]
         assert len(ids) == sampled
         emitted = bytes.fromhex(sample["outcome"]["emitted_bytes_hex"])
@@ -111,6 +129,10 @@ def main():
         )
         assert result.stdout == emitted + b"\n"
         stats = json.loads(stats_path.read_text())
+        assert (
+            stats["diagnostics"]["k2_horizon"]["prefill"]
+            == doc["method"]["prefill_execution"]
+        )
         assert stats["usage"] == {"input_tokens": count, "output_tokens": sampled}
         fingerprint = hashlib.sha256(
             b"qwen-generated-token-ids-v1\0"
@@ -135,6 +157,30 @@ def main():
         run(f"reject-bench-{name}", bbase + ["--token-ids", "0"] + options, "256")
     run("reject-bench-prompt", bbase + ["--raw-prompt", prompt, "--tokens", "2"], "257")
 
+    fallback = json.loads(
+        run(
+            "serial-fallback-bench",
+            bbase + ["--token-ids", "0,42", "--tokens", "1"],
+            env_overrides={"QWEN_MATVEC_Q8_0_LCPP": "0"},
+        ).stdout
+    )
+    assert fallback["method"]["prefill_execution"] == {
+        "mode": "serial_single_token",
+        "chunk_tokens": 1,
+        "commands": 2,
+        "temporary_activation_bytes": 0,
+    }
+    fallback_lens = json.loads(
+        run(
+            "serial-fallback-lens",
+            lbase + ["--token-ids", "0,42", "--position", "1", "--logit-lens"],
+            env_overrides={"QWEN_MATVEC_Q8_0_LCPP": "0"},
+        ).stdout
+    )
+    assert (
+        fallback_lens["deployed_model"]["prefill"]
+        == fallback["method"]["prefill_execution"]
+    )
     ids = reference["request"]["prompt_token_ids"]
     assert len(ids) == 256 and ids[0] == 0
     tokens = ",".join(map(str, ids))
@@ -149,6 +195,10 @@ def main():
     )
     assert plain["input"]["executed_token_count"] == 256
     assert plain["deployed_model"]["executed_capacity"] == 256
+    assert (
+        plain["deployed_model"]["prefill"] == reference["method"]["prefill_execution"]
+    )
+    assert plain["deployed_model"]["execution_topology"] == "q8_lcpp_token_batch"
     assert (
         plain["results"][0]["top_k"][0]["token_id"]
         == reference["samples"][0]["outcome"]["sampled_token_ids"][0]
@@ -212,6 +262,7 @@ def main():
     )
     assert imported["transfer"]["status"] == "exact_deployment_binding_matched"
     assert imported["deployed_model"]["executed_capacity"] == 256
+    assert imported["deployed_model"]["prefill"] == plain["deployed_model"]["prefill"]
     assert (output / "plain-bundle/logits.f32le").read_bytes() == (
         output / "imported-bundle/logits.f32le"
     ).read_bytes()

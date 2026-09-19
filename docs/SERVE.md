@@ -304,8 +304,9 @@ The shared guarded application limit is distinct from the kernel's source bound.
 Numerical evidence covers the pinned final Q8_0-weight checkpoint with F16 KV on
 M4 Max, including the frozen v2 holdout; it does not qualify F16 weights or every
 compatible intermediate checkpoint. Serial online attention retains the full
-history without a context-sized score buffer. Stored F16 KV is unchanged; packed
-prefill and compact KV are not enabled by this attention change.
+history without a context-sized score buffer. Serving deliberately keeps singleton
+appends for per-token cancellation, even when local run/bench/lens use eligible
+32-row Q8 packed prefill. Stored F16 KV is unchanged; compact KV is not enabled.
 This is not sustained-service, full-context, chat/tool, or cross-checkpoint
 numerical qualification. Test reproduction is in
 [`scripts/reference/k2/README.md`](../scripts/reference/k2/README.md); development

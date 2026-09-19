@@ -1424,6 +1424,13 @@ pub(crate) struct RequestStatsBuild {
 pub(crate) struct RequestStatsDiagnostics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) deepseek_v4: Option<RequestStatsDeepSeekV4Diagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) k2_horizon: Option<RequestStatsK2Diagnostics>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RequestStatsK2Diagnostics {
+    pub(crate) prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo,
 }
 
 #[derive(Debug, Serialize)]

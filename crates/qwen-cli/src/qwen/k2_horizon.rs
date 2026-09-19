@@ -123,12 +123,17 @@ pub(crate) fn run_raw(
     let mut sampler = Sampler::new(sampling)?;
     shutdown::checkpoint()?;
     eprintln!(
-        "k2_horizon: serial raw research lane; native tokenizer; F16 KV; capacity={capacity}; checkpoint_context={}; guarded numerical evidence covers the pinned final Q8_0 weights/F16 KV on M4 Max, not every compatible checkpoint",
+        "k2_horizon: guarded raw research lane; native tokenizer; F16 KV; capacity={capacity}; checkpoint_context={}; guarded numerical evidence covers the pinned final Q8_0 weights/F16 KV on M4 Max, not every compatible checkpoint",
         config.context_length
     );
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for K2")?;
     let model = K2LoadedModel::load_unqualified(&ctx, gguf, capacity as u32)?;
+    let prefill = model.prefill_info(tokens.len());
+    eprintln!(
+        "k2_horizon: prefill={} chunk_tokens={} commands={} temporary_activation_bytes={}",
+        prefill.mode, prefill.chunk_tokens, prefill.commands, prefill.temporary_activation_bytes
+    );
     let mut session = model.create_session(0)?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let prefill_t0 = Instant::now();
@@ -188,7 +193,10 @@ pub(crate) fn run_raw(
             ModelFamily::K2Horizon.record_label(),
             request_stats_input(source, None),
             &measured,
-            None,
+            Some(RequestStatsDiagnostics {
+                deepseek_v4: None,
+                k2_horizon: Some(RequestStatsK2Diagnostics { prefill }),
+            }),
         )?;
     }
     Ok(())
@@ -203,6 +211,25 @@ mod tests {
         let invocation = cli::normalize(&mut args);
         invocation.apply_option_overrides(&mut args);
         (args, explicit, invocation)
+    }
+
+    #[test]
+    fn k2_stats_record_selected_prefill_without_other_family_diagnostics() {
+        let diagnostics = RequestStatsDiagnostics {
+            deepseek_v4: None,
+            k2_horizon: Some(RequestStatsK2Diagnostics {
+                prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo {
+                    mode: "q8_lcpp_token_batch",
+                    chunk_tokens: 32,
+                    commands: 2,
+                    temporary_activation_bytes: 7602304,
+                },
+            }),
+        };
+        let record = serde_json::to_value(diagnostics).unwrap();
+        assert!(record.get("deepseek_v4").is_none());
+        assert_eq!(record["k2_horizon"]["prefill"]["commands"], 2);
+        assert_eq!(record["k2_horizon"]["prefill"]["chunk_tokens"], 32);
     }
 
     #[test]

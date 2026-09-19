@@ -1,7 +1,7 @@
 # K2 Horizon implementation plan
 
 Status: profile/binder, native tokenizer, CPU reference, checked Metal primitives,
-and a serial dense runtime implemented. Pinned Q8 short-context checkpoint
+and a bounded dense runtime implemented. Pinned Q8 short-context checkpoint
 correctness passes; bounded raw CLI dispatch and library forward-only lens
 captures/readouts/interventions plus plain/imported lens readout CLI are implemented.
 Bounded request benchmarking and raw-string serving are implemented. Long-context,
@@ -18,12 +18,14 @@ native materialized control within the unchanged v2 gates, with zero top-1
 mismatches. Online replay against the digest-pinned independent v2 reference also
 passes all 4096 rows with exact top-1 agreement. Application dispatch now uses
 bounded-scratch online attention after separate strict-short and surface checks.
-An experimental 32-row Q8 packed path now shares the same block graph and passes
+A 32-row Q8 packed path shares the same block graph and passes
 88 bitwise logit/capture/full-cache checkpoints. Retained independent replay also
 passes all singleton baseline gates and 192 packed/serial partition checkpoints;
-application prefill remains serial pending surface promotion. F16 KV storage is
-unchanged; packed promotion and then compact KV remain on the critical path.
-See review packets 17-30
+guarded run/bench/lens now select it when all 252 block projections are Q8 and
+lcpp is enabled, with explicit topology records and serial fallback otherwise.
+Serving remains per-token for cancellation. F16 KV storage is unchanged; compact
+KV and longer-context qualification remain on the critical path.
+See review packets 17-31
 for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied

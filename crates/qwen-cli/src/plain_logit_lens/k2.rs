@@ -106,14 +106,23 @@ impl Prepared {
         crate::shutdown::checkpoint()?;
         let context = MetalContext::new()?;
         let model = K2LoadedModel::load_unqualified(&context, gguf, (self.position + 1) as u32)?;
+        let prefill = model.prefill_info(self.position + 1);
         let mut session = model.create_session(0)?;
-        for &token in &self.tokens[..self.position] {
+        let executed = self.tokens[..=self.position]
+            .iter()
+            .map(|&id| id as u32)
+            .collect::<Vec<_>>();
+        let mut chunks = executed.chunks(prefill.chunk_tokens).peekable();
+        let mut capture = None;
+        while let Some(tokens) = chunks.next() {
             crate::shutdown::checkpoint()?;
-            session.append(&[token as u32])?;
+            if chunks.peek().is_none() {
+                capture = Some(session.append_with_captures(tokens, &self.capture_layers)?);
+            } else {
+                session.append(tokens)?;
+            }
         }
-        crate::shutdown::checkpoint()?;
-        let capture = session
-            .append_with_captures(&[self.tokens[self.position] as u32], &self.capture_layers)?;
+        let capture = capture.context("K2 executed prefix has no final capture")?;
         ensure!(
             capture.absolute_position as usize == self.position
                 && capture.post_block_layers == self.capture_layers,
@@ -183,7 +192,7 @@ impl Prepared {
             "checkpoint_context_length": self.config.context_length, "rope_theta": self.config.rope_theta,
             "executed_capacity": self.position + 1, "start_position": 0,
             "requested_layer_order": self.layers, "runtime_capture_layer_order": self.capture_layers,
-            "kv_storage": "f16", "execution_topology": "serial_single_token",
+            "kv_storage": "f16", "execution_topology": prefill.mode, "prefill": prefill,
             "qualification_scope": "final_q8_m4max_short_context_only",
             "tokenizer_metadata_id": format!("{:016x}", qwen_llm::runtime::tokenizer_metadata_identity(gguf)),
             "tokenizer": {"implementation": "native_k2_horizon", "metadata_model": gguf.get_str("tokenizer.ggml.model"),

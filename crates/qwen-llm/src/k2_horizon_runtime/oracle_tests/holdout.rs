@@ -1,22 +1,32 @@
 use super::*;
 
+mod ranking;
 mod runner;
+mod v2;
 
 const POLICY_BYTES: &[u8] =
     include_bytes!("../../../../../scripts/reference/k2/holdout-256-v1.json");
 const POLICY_SHA256: &str = "65a517ad27cab60a7a38989ce8cf3499902940fb94f82c26d83dcca86f5f6889";
 
 fn policy() -> serde_json::Value {
+    bound_policy(POLICY_BYTES, POLICY_SHA256)
+}
+
+fn bound_policy(bytes: &[u8], expected_hash: &str) -> serde_json::Value {
     assert_eq!(
-        format!("{:x}", Sha256::digest(POLICY_BYTES)),
-        POLICY_SHA256,
+        format!("{:x}", Sha256::digest(bytes)),
+        expected_hash,
         "frozen holdout changed; do not retune an executed holdout"
     );
-    serde_json::from_slice(POLICY_BYTES).unwrap()
+    serde_json::from_slice(bytes).unwrap()
 }
 
 fn inputs(source: &GgufFile) -> Vec<(String, u32, Vec<u32>, bool)> {
     let policy = policy();
+    inputs_for(source, &policy)
+}
+
+fn inputs_for(source: &GgufFile, policy: &serde_json::Value) -> Vec<(String, u32, Vec<u32>, bool)> {
     assert_eq!(source.shards.len(), 1, "frozen artifact is a single GGUF");
     let stamps = source.revalidate_retained_shard_stamps().unwrap();
     assert_eq!(

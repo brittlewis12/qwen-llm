@@ -742,3 +742,25 @@ harness failure. No threshold, fixture, runtime, or public-cap change follows.
 A possible v2 ranking-indeterminate rule needs new frozen fixtures, explicit
 two-sided regret evidence, and unchanged exact generated-tail requirements. It
 cannot reinterpret v1 as passed. Public capacity remains 32.
+
+## Packet 23 v2 ranking-indeterminate freeze
+
+V2 keeps all v1 numerical/capture controls but explicitly bounds two-sided logit
+regret below 0.001 on non-generative rows. This is a within-distribution probability
+ratio bound, not an absolute probability-error bound. Generated predictor lengths
+241-256 remain exact, including the terminal prediction. The original strict
+42-row test and failed v1 evidence remain unchanged.
+
+Four fresh synthetic sources and their artifact/tokenizer/count/token-ID bindings
+are frozen at JSON SHA256
+`44bd53a7dcf72ae6afb8e1f9921bf461df3f5cf9cc14c0c7705f46188418a1fe`.
+Counts are 352/451/375/384 before taking the fixed 256-ID prefixes. CPU tests bind
+the complete policy and check reciprocal witnesses, strict decimal/F32 boundaries,
+signed-zero/highest-ID ties, and invalid/contradictory data. The actual artifact
+hash/tokenizer preflight passes; no v2 target forward has run at this checkpoint.
+
+Read-only adversarial verdict: **freeze-ready; no concrete blocker**. The future
+runner must record every accepted indeterminate witness and enforce exactness on
+all 16 trajectory predictor rows. Temporary Cargo package-level test opt-level 1
+is used only to shorten host metric work; no Cargo configuration or Metal kernel
+changes are introduced. Execution and public-cap decisions remain separate.

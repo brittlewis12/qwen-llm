@@ -1,6 +1,6 @@
 use super::*;
 
-fn argmax(values: &[f32]) -> u32 {
+pub(super) fn argmax(values: &[f32]) -> u32 {
     assert!(!values.is_empty() && values.iter().all(|v| v.is_finite()));
     values
         .iter()
@@ -22,6 +22,15 @@ fn row_failures(p: &serde_json::Value, metrics: &serde_json::Value) -> Vec<&'sta
     if metrics["logits"]["actual_top1"] != metrics["logits"]["reference_top1"] {
         failed.push("top1");
     }
+    failed.extend(numerical_failures(p, metrics));
+    failed
+}
+
+pub(super) fn numerical_failures(
+    p: &serde_json::Value,
+    metrics: &serde_json::Value,
+) -> Vec<&'static str> {
+    let mut failed = Vec::new();
     for (section, key, limit) in [
         ("logits", "max_abs", "max_abs_exclusive"),
         ("logits", "rmse", "rmse_exclusive"),
@@ -51,6 +60,11 @@ fn row_failures(p: &serde_json::Value, metrics: &serde_json::Value) -> Vec<&'sta
         failed.push("cosine");
     }
     failed
+}
+
+pub(super) fn exact_trajectory_predictor(p: &serde_json::Value, visible: usize) -> bool {
+    assert!((1..=p["capacity"].as_u64().unwrap() as usize).contains(&visible));
+    visible >= p["continuation"]["prefix_length"].as_u64().unwrap() as usize
 }
 
 fn generated_ids(bytes: &[u8], base: u32, prefix: &[u32]) -> Vec<u32> {

@@ -11,10 +11,13 @@ history is preserved. A separately frozen v2 holdout passes all 4096 row checks
 with exact top-1 agreement, and run/bench/plain+imported lens/serve now share a
 guarded 256-forward application ceiling after boundary checks. Evidence is scoped
 to the pinned final Q8_0-weight checkpoint with F16 KV on M4 Max, not all artifacts.
-A separate bounded-scratch
-H128/GQA4 online-attention candidate passes primitive tests through 257 positions,
-but is not selected by the runtime. F16 KV storage is unchanged; compact KV is next
-after bounded-attention integration and packed prefill. See review packets 17-25
+A separate bounded-scratch H128/GQA4 online-attention candidate passes primitive
+tests through 257 positions and a test-only full-model integration comparison:
+2048 rows, 16 capture sites, and 64 exact trajectory predictors agree with the
+native materialized control within the unchanged v2 gates, with zero top-1
+mismatches. Application dispatch remains materialized; independent-oracle replay
+is required before online promotion. F16 KV storage is unchanged; compact KV is next
+after bounded-attention promotion and packed prefill. See review packets 17-26
 for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied

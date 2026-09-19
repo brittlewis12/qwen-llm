@@ -66,12 +66,20 @@ fn invalid(message: impl Into<String>) -> K2RuntimeError {
     K2RuntimeError::Invalid(message.into())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttentionBackend {
+    Materialized,
+    #[cfg(test)]
+    OnlineExperimental,
+}
+
 /// Borrowing the source prevents descriptor mutation in safe Rust. File stamps
 /// are rechecked, but are NOT a cryptographic checkpoint identity or file lock.
 pub struct K2LoadedModel<'a> {
     ctx: &'a MetalContext,
     plan: K2RuntimePlan<'a>,
     weights: ResidentWeights,
+    attention: AttentionBackend,
     session_active: Cell<bool>,
 }
 
@@ -82,6 +90,15 @@ impl<'a> K2LoadedModel<'a> {
         ctx: &'a MetalContext,
         source: &'a GgufFile,
         capacity: u32,
+    ) -> Result<Self> {
+        Self::load_with_attention_unqualified(ctx, source, capacity, AttentionBackend::Materialized)
+    }
+
+    fn load_with_attention_unqualified(
+        ctx: &'a MetalContext,
+        source: &'a GgufFile,
+        capacity: u32,
+        attention: AttentionBackend,
     ) -> Result<Self> {
         let plan = K2RuntimePlan::inspect(
             source,
@@ -105,6 +122,7 @@ impl<'a> K2LoadedModel<'a> {
             ctx,
             plan,
             weights,
+            attention,
             session_active: Cell::new(false),
         })
     }
@@ -220,6 +238,7 @@ impl K2Session<'_, '_> {
                 ctx,
                 &encoder,
                 &self.model.weights,
+                self.model.attention,
                 &self.request,
                 &token,
                 &self.buffers,
@@ -263,6 +282,7 @@ fn encode_token(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     weights: &ResidentWeights,
+    attention: AttentionBackend,
     request: &K2ShortContextPlan,
     token: &TokenPlan<'_>,
     b: &SessionBuffers,
@@ -285,7 +305,14 @@ fn encode_token(
         encode_mat_vec_dispatch(ctx, enc, &layer.value, &b.norm, &b.value, 4096, 1024)?;
         encode_full_rope(ctx, enc, token, &b.query, &b.key)?;
         encode_store_kv(ctx, enc, token, index as u32, &b.cache, &b.key, &b.value)?;
-        encode_short_attention(
+        let encode_attention = match attention {
+            AttentionBackend::Materialized => encode_short_attention,
+            #[cfg(test)]
+            AttentionBackend::OnlineExperimental => {
+                crate::k2_horizon_metal::encode_online_attention
+            }
+        };
+        encode_attention(
             ctx,
             enc,
             token,

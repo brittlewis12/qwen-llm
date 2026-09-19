@@ -1,9 +1,9 @@
 use super::*;
 
 const BYTES: &[u8] = include_bytes!("../../../../../../scripts/reference/k2/holdout-256-v2.json");
-const SHA256: &str = "44bd53a7dcf72ae6afb8e1f9921bf461df3f5cf9cc14c0c7705f46188418a1fe";
+pub(super) const SHA256: &str = "44bd53a7dcf72ae6afb8e1f9921bf461df3f5cf9cc14c0c7705f46188418a1fe";
 
-fn policy() -> serde_json::Value {
+pub(super) fn policy() -> serde_json::Value {
     bound_policy(BYTES, SHA256)
 }
 
@@ -13,7 +13,7 @@ fn gpu_frozen_guarded_256_v2_holdout() {
     super::runner::run(policy(), SHA256, "v2", "300c8dcb", row_failures);
 }
 
-fn row_failures(
+pub(super) fn row_failures(
     p: &serde_json::Value,
     metrics: &serde_json::Value,
     exact: bool,

@@ -830,3 +830,46 @@ blocker**. The boundary-check script is included with its reproduction docs.
 Scope remains the pinned final Q8_0-weight artifact with F16 KV on M4 Max. Failed
 strict-extension/v1 history is retained. This is not F16-weight, all-checkpoint,
 full-context, packed-prefill, compact-KV, or performance qualification.
+
+## Packet 26 experimental online runtime integration
+
+An immutable private backend field selects attention at the existing dense token
+graph call site. Public loading explicitly selects materialized attention; the
+online enum variant exists only under `cfg(test)`. No application flag, environment
+switch, public-cap change, shader change, or cache-layout change is introduced.
+Both encoders retain the existing physical-view/alias/causal checks and the same
+session admission, transaction, source-stamp, and finite-value checks.
+
+The adversarial design jam rejected duplicating already passing primitive tests
+or rerunning multi-GiB IFM jobs. Instead, a native-only integration harness reuses
+the four previously seen v2 fixtures at bases 0/37/8191/0, pinned artifact/tokenizer
+checks, unchanged numerical/ranking gates, live ranking witnesses, and checked row
+reader. Materialized controls run first and are retained with token/coordinate/
+dtype/extent bindings and SHA256 provenance. The model and all sessions are dropped
+before loading the online candidate. This is native-backend regression evidence,
+not another holdout or independent-oracle qualification.
+
+Pre-execution adversarial review found no blocker. The first execution passes:
+`target/profiles/k2-online-integration-22255-1789833678489281000` records all 2048
+rows, 16 residual sites, four bitwise singleton/split/whole controls, and 64 exact
+trajectory predictor rows. There are zero failed records, zero top-1 mismatches,
+and zero indeterminate allowances. Trajectories are materialized-derived, fixed
+241+15 mathematical argmax sequences including EOS; terminal predictions remain
+exact. Both backends reject appending position 257 at capacity 256 without prefix
+advance or poisoning. Materialized and online weight/session lifetimes do not
+overlap. API validation and the production lease/real wired gate are active.
+
+The existing poisoned-future/guard synthetic primitive probe also passes again
+through 257 positions, with maximum F64 error below 1.75e-6. Thirty-three CPU
+runtime tests pass and the production CLI typechecks. The 267-second instrumented
+native integration run is not a speed measurement. Disk was checked at 16 GiB
+before writing approximately 2 GiB of native controls. Historical strict/v1
+failures and v2 independent results are untouched. Independent-reference replay
+with the online backend remains the next promotion gate, ahead of packed prefill
+and compact KV.
+
+Final read-only adversarial verdict: **commit-ready on correctness and evidence
+scope**; the new native-comparison module is included in the checkpoint. The full
+K2-filtered CPU suite passes 58 tests (19 opt-in GPU/artifact tests remain ignored
+in that command). Retained independent-reference replay must validate provenance,
+mode, hashes, coordinates, and capture noninterference before any promotion.

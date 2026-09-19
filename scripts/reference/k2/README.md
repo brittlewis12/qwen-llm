@@ -130,6 +130,28 @@ but fails 215/768 extended rows under unchanged gates. It was reverted, not
 promoted. New manifests also record native runtime/primitive source SHA256 values
 to distinguish host-only dispatch experiments sharing the same metallib.
 
+A later native-only integration regression has an immutable, **test-only** backend
+selector. Public loading still explicitly selects materialized attention. It uses
+the four previously seen v2 corpora at their selected bases, not a new holdout, and
+applies the unchanged v2 gates prospectively to online versus materialized results:
+
+```sh
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+K2_HOST_BUILD_NOTE="temporary qwen-llm test-package opt-level=1; Metal unchanged" \
+cargo --config 'profile.test.package.qwen-llm.opt-level=1' test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::holdout::online::gpu_online_runtime_matches_materialized_256_controls \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+Allow about 2 GiB for retained native controls. The production lease and real wired
+gate cover both serial model lifetimes; the materialized model is dropped before
+online loading. Baselines reuse the checked row protocol but are explicitly labeled
+native, with SHA256/token/coordinate/policy bindings. The test checks 2048 rows, 16
+capture sites, four online singleton/split/whole controls, capacity+1 refusals, and
+64 exact predictors on materialized-derived EOS-inclusive trajectories. Its first
+run passes with no top-1 disagreement or indeterminate allowance. This is not
+independent-oracle qualification, a backend-default change, or performance evidence.
+
 ## Cache/backend precision control
 
 `--f32-kv` is a reference-only diagnostic, mutually exclusive with `--capture-last`.

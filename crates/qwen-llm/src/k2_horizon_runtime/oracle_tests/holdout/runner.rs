@@ -10,7 +10,7 @@ pub(super) fn argmax(values: &[f32]) -> u32 {
         .0 as u32
 }
 
-fn row_metrics(actual: &[f32], reference: &[f32]) -> serde_json::Value {
+pub(super) fn row_metrics(actual: &[f32], reference: &[f32]) -> serde_json::Value {
     let witness = ranking::witness(actual, reference);
     let mut logits = error_metrics(actual, reference);
     logits["actual_top1"] = witness["actual_top1"].clone();
@@ -81,7 +81,7 @@ fn generated_ids(bytes: &[u8], base: u32, prefix: &[u32]) -> Vec<u32> {
     ids
 }
 
-fn bitwise_equal(a: &[f32], b: &[f32]) -> bool {
+pub(super) fn bitwise_equal(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
 }
 

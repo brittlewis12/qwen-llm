@@ -955,3 +955,49 @@ remaining lens CLI operations, and checkpoint-specific chat/tools remain separat
 Final read-only adversarial verdict: **commit-ready; no concrete blocker**. Default
 versus historical-control separation and actual default-path surface evidence
 support the stated scope. No repeated primitive or IFM qualification run is needed.
+
+## Packet 29 shared exact-arithmetic packed baseline
+
+The design jam chose existing token-axis Q8 `lcpp` GEMV rather than half-staged
+GEMM. A single `encode_tokens` graph now serves singleton and test-only layer-major
+chunks up to 32. The K2 wrapper checks projection geometry, Q8 byte extent, dtype,
+alignment, activation access and aliasing. Checked row views serve grouped norm,
+absolute RoPE, store-then-attention causal ordering, captures and interventions.
+Only the last appended row receives interventions/captures/head evaluation.
+
+Eleven temporary activation buffers are admitted/reconciled once before the first
+submission and reused for the append: 237572 logical bytes/row, at most 7602304
+bytes, excluding the existing shared KV arena and one logits row. The ledger now
+counts physical commands independently from token advancement. All IDs are checked
+before upload; every newly stored KV row and final residual row is checked after
+each chunk. The final prefix publishes once. Unsubmitted failure is retryable;
+any abandoned submitted work poisons without partial publication. This preserves
+the original boundary-finiteness contract, not per-intermediate instrumentation.
+
+Pre-execution adversarial review found no blocker. The initial synthetic probe
+failed before dispatch because its Q8 test fixture incorrectly used the scalar
+element-view API. Changing that fixture to the existing block-aligned byte-view
+API fixed it; no runtime arithmetic or tolerance changed. All four K2 projection
+shapes then pass bitwise at 1/2/31/32 rows with offsets, guards, future NaNs, and
+immutable inputs/weights. The refactored singleton graph also passes the strict
+42-row oracle: `target/profiles/k2-oracle-36755-1789852781269082000`.
+
+Full-model evidence: `target/profiles/k2-packed-q8-37041-1789852837298819000`.
+All 88 checkpoints across four seen v2 corpora, bases 0/37/8191/0, and three append
+partitions pass bitwise for logits, captures, and complete KV bytes including
+poisoned future rows. Readout preserves prefix/cache. Ordered last-token operations
+and subsequent multi-token continuation match serial execution exactly. Invalid
+IDs in a later chunk and 257 tokens at capacity 256 reject without cache mutation;
+an actual nonfinite final intervention after three submitted chunks poisons while
+leaving committed length zero, and a fresh session remains usable.
+
+Sixty-five K2 CPU tests pass; the production CLI typechecks. All GPU execution uses
+API validation and the production lease/real wired gate. Test-package host opt-level
+1 and SHA2 opt-level 3 accelerate host checks only. The 137-second instrumented run
+is not speed evidence. No shader, public capacity, KV layout, or other family changes.
+Public prefill and serving cancellation remain serial; packed selection is private
+and test-only pending independent-reference and application-surface promotion.
+
+Final read-only adversarial verdict: **commit-ready; no code or evidence blocker**.
+The new packed implementation and test modules are included. Explicit packed
+retained-reference replay is the next gate; fresh historical evaluators stay serial.

@@ -18,8 +18,11 @@ native materialized control within the unchanged v2 gates, with zero top-1
 mismatches. Online replay against the digest-pinned independent v2 reference also
 passes all 4096 rows with exact top-1 agreement. Application dispatch now uses
 bounded-scratch online attention after separate strict-short and surface checks.
-F16 KV storage is unchanged; packed prefill and then compact KV remain next on the
-critical path. See review packets 17-28
+An experimental 32-row Q8 packed path now shares the same block graph and passes
+88 bitwise logit/capture/full-cache checkpoints, but application prefill remains
+serial pending independent-reference and surface checks. F16 KV storage is
+unchanged; packed promotion and then compact KV remain on the critical path.
+See review packets 17-29
 for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied

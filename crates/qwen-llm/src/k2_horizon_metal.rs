@@ -59,9 +59,13 @@ impl View<'_> {
             return Err(invalid("wrong shape, dtype, or write access"));
         }
         let size = match dtype {
-            GgmlType::F32 => 4,
+            GgmlType::F32 | GgmlType::I32 => 4,
             GgmlType::F16 => 2,
-            _ => return Err(invalid("only F32 activations and F16 cache are supported")),
+            _ => {
+                return Err(invalid(
+                    "only I32 IDs, F32 activations and F16 cache are supported",
+                ));
+            }
         };
         let elements = shape
             .iter()
@@ -99,6 +103,93 @@ fn serial(enc: &KernelEncoder) -> Result<()> {
         return Err(invalid("K2 bridge requires an ordered serial encoder"));
     }
     Ok(())
+}
+
+pub(crate) fn checked_slice(
+    tensor: &MetalTensor,
+    offset: u64,
+    shape: Vec<u64>,
+    dtype: GgmlType,
+) -> Result<MetalTensor> {
+    View::from(tensor).check(&tensor.shape, dtype, true)?;
+    let elements = shape
+        .iter()
+        .try_fold(1u64, |a, b| a.checked_mul(*b))
+        .ok_or_else(|| invalid("slice shape overflow"))?;
+    if elements == 0
+        || offset
+            .checked_add(elements)
+            .is_none_or(|end| end > tensor.n_elements())
+    {
+        return Err(invalid("slice outside owned activation"));
+    }
+    let view = tensor.view_subrange(offset, shape.clone());
+    View::from(&view).check(&shape, dtype, true)?;
+    Ok(view)
+}
+
+fn batch_projection_views(
+    weight: View<'_>,
+    x: View<'_>,
+    y: View<'_>,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+) -> Result<()> {
+    if !(1..=crate::k2_horizon_plan::PACKED_CHUNK_TOKENS).contains(&rows)
+        || !matches!(
+            (n_in, n_out),
+            (4096, 4096) | (4096, 1024) | (4096, 12288) | (12288, 4096)
+        )
+        || weight.dtype != GgmlType::Q8_0
+        || weight.shape != [n_in as u64, n_out as u64]
+        || !weight.offset.is_multiple_of(2)
+    {
+        return Err(invalid("unsupported K2 batched projection contract"));
+    }
+    let end = weight
+        .offset
+        .checked_add((n_in * n_out / 32 * 34) as u64)
+        .filter(|&end| end <= weight.buffer_bytes)
+        .ok_or_else(|| invalid("Q8 projection weight outside buffer"))?;
+    let w = CheckedView {
+        allocation: weight.allocation,
+        bytes: weight.offset..end,
+    };
+    let x = x.check(&[n_in as u64, rows as u64], GgmlType::F32, false)?;
+    let y = y.check(&[n_out as u64, rows as u64], GgmlType::F32, true)?;
+    disjoint(&w, &x)?;
+    disjoint(&w, &y)?;
+    disjoint(&x, &y)
+}
+
+/// Token-axis Q8 GEMV, preserving singleton lcpp arithmetic, not half-staged GEMM.
+pub(crate) fn encode_q8_projection_batch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+) -> Result<()> {
+    serial(enc)?;
+    batch_projection_views(
+        View::from(weight),
+        View::from(x),
+        View::from(y),
+        n_in,
+        n_out,
+        rows,
+    )?;
+    if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
+        return Err(invalid("K2 packed Q8 requires singleton lcpp arithmetic"));
+    }
+    enc.note_read(weight);
+    enc.note_read(x);
+    enc.note_write(y);
+    crate::metal::encode_mat_vec_q8_0_batch_f32(ctx, enc, weight, x, y, n_in, n_out, rows)
 }
 
 /// Four zero-copy slices, with gamma indexed in full hidden coordinates.

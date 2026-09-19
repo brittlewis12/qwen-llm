@@ -10,6 +10,7 @@ use std::ops::Range;
 
 /// `metal::encode_attn_decode_f16kv_f32` limits score scratch to 28 KiB.
 pub const MATERIALIZED_POSITION_CEILING: u32 = 7168;
+pub(crate) const PACKED_CHUNK_TOKENS: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {

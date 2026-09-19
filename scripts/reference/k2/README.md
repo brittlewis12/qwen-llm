@@ -186,6 +186,38 @@ cache-precision diagnostic explicitly retain their historical materialized contr
 Other model families, shaders, the 256 application guard, and F16 KV allocation are
 unchanged. These are correctness gates, not speed or long-context claims.
 
+## Exact-arithmetic packed Q8 baseline
+
+The test-only packed prefill mode schedules up to 32 rows layer-major through the
+same block graph as singleton execution. It reuses the token-axis Q8 GEMV kernel's
+singleton `lcpp` arithmetic, not a half-staged GEMM or Qwen routing heuristic.
+Grouped norm, RoPE, F16 store and causal online attention remain rowwise; only the
+final appended row receives captures/interventions/readout. All IDs are validated
+before upload, all new KV and final residual rows are checked after each command,
+and the whole append publishes its prefix once. Submitted failure poisons it.
+
+```sh
+MTL_DEBUG_LAYER=1 cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
+  test -p qwen-llm --lib \
+  k2_horizon_metal::tests::gpu_q8_batch_projection_matches_singleton_bits_and_guards \
+  -- --ignored --exact --nocapture --test-threads=1
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
+  --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::holdout::packed::gpu_packed_q8_matches_serial_captures_cache_partitions_and_interventions \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+Both probes acquire the production lease and real wired gate. The synthetic test
+checks all four projection shapes at 1/2/31/32 rows, offsets/guards and immutable
+inputs/weights. The full-model test reuses pinned, previously seen v2 inputs, not
+a new holdout. It passes 88 bitwise checkpoints including the full poisoned-future
+cache, readout isolation, ordered interventions, continuation and an actual late
+nonfinite failure. Temporary scratch is 237572 bytes/row (7602304 bytes at 32),
+separately priced/admitted before submission, with no replicated KV or logits slab.
+The extra SHA optimization only accelerates host cache digests. Application prefill
+and serving cancellation remain serial; these tests make no speed or KV-savings claim.
+
 ## Cache/backend precision control
 
 `--f32-kv` is a reference-only diagnostic, mutually exclusive with `--capture-last`.

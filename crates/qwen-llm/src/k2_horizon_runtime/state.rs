@@ -18,8 +18,21 @@ impl Ledger {
     }
 
     pub fn begin(&mut self, tokens: &[u32], vocab: u32, capacity: u32) -> Result<Transaction<'_>> {
+        self.begin_chunked(tokens, vocab, capacity, 1)
+    }
+
+    pub fn begin_chunked(
+        &mut self,
+        tokens: &[u32],
+        vocab: u32,
+        capacity: u32,
+        chunk: usize,
+    ) -> Result<Transaction<'_>> {
         if self.poisoned {
             return Err(K2RuntimeError::Poisoned);
+        }
+        if !(1..=crate::k2_horizon_plan::PACKED_CHUNK_TOKENS).contains(&chunk) {
+            return Err(invalid("invalid physical chunk size"));
         }
         let count =
             u32::try_from(tokens.len()).map_err(|_| invalid("append length exceeds u32"))?;
@@ -34,7 +47,10 @@ impl Ledger {
         if tokens.iter().any(|&id| id >= vocab || id > i32::MAX as u32) {
             return Err(invalid("token ID outside vocabulary/I32"));
         }
-        Ok(self.transaction(Operation::Append(count)))
+        Ok(self.transaction(Operation::Append {
+            tokens: count,
+            commands: count.div_ceil(chunk as u32),
+        }))
     }
 
     pub fn begin_readout(&mut self) -> Result<Transaction<'_>> {
@@ -57,21 +73,21 @@ impl Ledger {
 }
 
 enum Operation {
-    Append(u32),
+    Append { tokens: u32, commands: u32 },
     Readout,
 }
 
 impl Operation {
     fn commands(&self) -> u32 {
         match self {
-            Self::Append(count) => *count,
+            Self::Append { commands, .. } => *commands,
             Self::Readout => 1,
         }
     }
 
     fn advance(&self) -> u32 {
         match self {
-            Self::Append(count) => *count,
+            Self::Append { tokens, .. } => *tokens,
             Self::Readout => 0,
         }
     }

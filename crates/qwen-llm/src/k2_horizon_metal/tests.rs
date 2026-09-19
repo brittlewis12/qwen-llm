@@ -109,6 +109,57 @@ fn host_cache_descriptor_is_f16_only_and_preserves_nonzero_arena_offset() {
 }
 
 #[test]
+fn host_batch_projection_checks_native_extent_shapes_and_aliases() {
+    let w = || View {
+        allocation: 1,
+        buffer_bytes: 4096 * 1024 / 32 * 34,
+        offset: 0,
+        shape: &[4096, 1024],
+        dtype: GgmlType::Q8_0,
+        writable: false,
+    };
+    let x = || View {
+        allocation: 2,
+        buffer_bytes: 4096 * 2 * 4,
+        offset: 0,
+        shape: &[4096, 2],
+        dtype: GgmlType::F32,
+        writable: true,
+    };
+    let y = || View {
+        allocation: 3,
+        buffer_bytes: 1024 * 2 * 4,
+        offset: 0,
+        shape: &[1024, 2],
+        dtype: GgmlType::F32,
+        writable: true,
+    };
+    assert!(batch_projection_views(w(), x(), y(), 4096, 1024, 2).is_ok());
+    for count in [0, 1, 3, 33, usize::MAX] {
+        assert!(batch_projection_views(w(), x(), y(), 4096, 1024, count).is_err());
+    }
+    for mode in 0..4 {
+        let mut bad = w();
+        match mode {
+            0 => bad.dtype = GgmlType::F16,
+            1 => bad.offset = 1,
+            2 => bad.buffer_bytes -= 1,
+            _ => bad.shape = &[1024, 4096],
+        }
+        assert!(batch_projection_views(bad, x(), y(), 4096, 1024, 2).is_err());
+    }
+    let mut alias = y();
+    alias.allocation = 2;
+    assert!(batch_projection_views(w(), x(), alias, 4096, 1024, 2).is_err());
+    let mut alias = x();
+    alias.allocation = 1;
+    assert!(batch_projection_views(w(), alias, y(), 4096, 1024, 2).is_err());
+    let mut read_only = y();
+    read_only.writable = false;
+    assert!(batch_projection_views(w(), x(), read_only, 4096, 1024, 2).is_err());
+}
+
+#[test]
 fn host_online_vector_alignment_is_stricter_than_scalar_alignment() {
     assert!(online_alignment(0, 8, 16, 32).is_ok());
     assert!(online_alignment(16, 24, 32, 48).is_ok());
@@ -257,6 +308,151 @@ fn tensor(ctx: &MetalContext, values: &[f32], shape: &[u64]) -> MetalTensor {
         GgmlType::F32,
     )
     .unwrap()
+}
+
+#[test]
+#[ignore = "GPU Q8 token-axis arithmetic/guard probe; production lease and real wired gate"]
+fn gpu_q8_batch_projection_matches_singleton_bits_and_guards() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+    assert!(crate::metal::mat_vec_q8_0_lcpp_enabled());
+    let ctx = MetalContext::new().unwrap();
+    for (n_in, n_out) in [
+        (4096usize, 4096usize),
+        (4096, 1024),
+        (4096, 12288),
+        (12288, 4096),
+    ] {
+        let weight_bytes = (n_in * n_out / 32 + 2) * 34;
+        let input_bytes = (32 * n_in + 16) * 4;
+        let output_bytes = (32 * n_out + 16) * 4;
+        let _transaction = ctx.begin_allocation_transaction();
+        let price = [weight_bytes, input_bytes, output_bytes, output_bytes]
+            .iter()
+            .map(|&b| {
+                ctx.price_shared_buffer_upper(b as u64)
+                    .unwrap()
+                    .priced_upper_bytes
+            })
+            .sum::<u64>();
+        let admission = crate::metal::evaluate_metal_memory_admission(
+            price,
+            256 * 1024 * 1024,
+            ctx.memory_signals(),
+            true,
+        );
+        assert!(admission.admitted, "{}", admission.reason.as_str());
+        let before = ctx.current_allocated_size();
+        let mut weights = vec![0xffu8; weight_bytes];
+        for (block, bytes) in weights[34..weight_bytes - 34]
+            .chunks_exact_mut(34)
+            .enumerate()
+        {
+            bytes[..2].copy_from_slice(&half::f16::from_f32(0.015625).to_le_bytes());
+            for (i, byte) in bytes[2..].iter_mut().enumerate() {
+                *byte = (((block * 13 + i * 17) % 255) as i16 - 127) as i8 as u8;
+            }
+        }
+        let wb = MetalTensor::from_bytes(
+            &ctx,
+            &weights,
+            vec![(n_in * n_out + 64) as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap();
+        let weight = wb.view_bytes(34, vec![n_in as u64, n_out as u64]);
+        let x = tensor(
+            &ctx,
+            &vec![-77.; input_bytes / 4],
+            &[(input_bytes / 4) as u64],
+        );
+        let a = tensor(
+            &ctx,
+            &vec![-77.; output_bytes / 4],
+            &[(output_bytes / 4) as u64],
+        );
+        let b = tensor(
+            &ctx,
+            &vec![-77.; output_bytes / 4],
+            &[(output_bytes / 4) as u64],
+        );
+        assert!(ctx.current_allocated_size().saturating_sub(before) <= price);
+        for count in [1usize, 2, 31, 32] {
+            let mut input = vec![-77.; input_bytes / 4];
+            input[8..8 + 32 * n_in].fill(f32::NAN);
+            for (i, v) in input[8..8 + count * n_in].iter_mut().enumerate() {
+                *v = ((i * 11 + i / n_in * 7) % 239) as f32 * 0.00390625 - 0.4;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    input.as_ptr(),
+                    x.buffer.contents().as_ptr().cast::<f32>(),
+                    input.len(),
+                );
+                for out in [&a, &b] {
+                    std::slice::from_raw_parts_mut(
+                        out.buffer.contents().as_ptr().cast::<f32>(),
+                        output_bytes / 4,
+                    )
+                    .fill(-77.);
+                }
+            }
+            let xv = checked_slice(&x, 8, vec![n_in as u64, count as u64], GgmlType::F32).unwrap();
+            let av = checked_slice(&a, 8, vec![n_out as u64, count as u64], GgmlType::F32).unwrap();
+            let bv = checked_slice(&b, 8, vec![n_out as u64, count as u64], GgmlType::F32).unwrap();
+            assert!(checked_slice(&a, (output_bytes / 4) as u64, vec![1], GgmlType::F32).is_err());
+            assert!(checked_slice(&a, u64::MAX, vec![2], GgmlType::F32).is_err());
+            execute(&ctx, |enc| {
+                encode_q8_projection_batch(&ctx, enc, &weight, &xv, &av, n_in, n_out, count)?;
+                for row in 0..count {
+                    crate::metal::encode_mat_vec_q8_0_f32(
+                        &ctx,
+                        enc,
+                        &weight,
+                        &checked_slice(&xv, (row * n_in) as u64, vec![n_in as u64], GgmlType::F32)?,
+                        &checked_slice(
+                            &bv,
+                            (row * n_out) as u64,
+                            vec![n_out as u64],
+                            GgmlType::F32,
+                        )?,
+                        n_in,
+                        n_out,
+                    )?;
+                }
+                Ok(())
+            });
+            let actual = read(&av);
+            let expected = read(&bv);
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| a.is_finite() && a.to_bits() == b.to_bits()),
+                "shape={n_in}x{n_out} rows={count}"
+            );
+            for out in [&a, &b] {
+                let values = read(out);
+                assert!(
+                    values[..8]
+                        .iter()
+                        .chain(&values[8 + count * n_out..])
+                        .all(|&v| v == -77.)
+                );
+            }
+            assert!(
+                read(&x)
+                    .iter()
+                    .zip(&input)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+            let weight_after = unsafe {
+                std::slice::from_raw_parts(wb.buffer.contents().as_ptr().cast::<u8>(), weight_bytes)
+            };
+            assert_eq!(weight_after, weights);
+            eprintln!("K2 Q8 batch {n_in}x{n_out} rows={count}: bitwise and guards pass");
+        }
+    }
 }
 
 fn execute(ctx: &MetalContext, f: impl FnOnce(&KernelEncoder) -> Result<()>) {

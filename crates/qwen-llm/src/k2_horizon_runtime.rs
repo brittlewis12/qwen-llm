@@ -1,9 +1,10 @@
 //! Research serial dense K2 forward path, shared by raw run and forward-only lens.
 //!
 //! Weights remain native and read-only; sessions borrow the exact loaded model
-//! and context. One token command is in flight at a time. A whole append commits
+//! and context. One synchronous command is in flight at a time. A whole append commits
 //! once; any failure after submission poisons the session rather than exposing
-//! partial state. No snapshots, fitting, eviction, or packed-prefill claims.
+//! partial state. A test-only packed Q8 path shares the block graph; application
+//! prefill remains serial. No snapshots, fitting, eviction, or speed claims.
 
 use crate::gguf::{GgufError, GgufFile};
 use crate::k2_horizon::{K2HorizonConfig, K2HorizonError};
@@ -26,6 +27,7 @@ use std::cell::Cell;
 
 mod intervention;
 mod lens;
+mod packed;
 mod residency;
 mod state;
 mod transport;
@@ -33,6 +35,7 @@ use intervention::InterventionArena;
 pub use intervention::{K2Intervention, K2InterventionKind};
 use lens::CaptureArena;
 pub use lens::K2CapturedForward;
+use packed::{PackedScratch, PrefillMode};
 pub use residency::K2RuntimePlan;
 use residency::ResidentWeights;
 use state::Ledger;
@@ -82,6 +85,7 @@ pub struct K2LoadedModel<'a> {
     plan: K2RuntimePlan<'a>,
     weights: ResidentWeights,
     attention: AttentionBackend,
+    prefill: PrefillMode,
     session_active: Cell<bool>,
 }
 
@@ -125,6 +129,7 @@ impl<'a> K2LoadedModel<'a> {
             plan,
             weights,
             attention,
+            prefill: PrefillMode::Serial,
             session_active: Cell::new(false),
         })
     }
@@ -212,11 +217,24 @@ impl K2Session<'_, '_> {
             self.ledger.poison();
             return Err(error);
         }
-        let mut transaction = self.ledger.begin(
-            tokens,
-            self.model.config().vocab_size,
-            self.request.capacity(),
-        )?;
+        let chunk = self
+            .model
+            .prefill
+            .chunk(&self.model.weights, tokens.len())?;
+        let mut transaction = if chunk == 1 {
+            self.ledger.begin(
+                tokens,
+                self.model.config().vocab_size,
+                self.request.capacity(),
+            )?
+        } else {
+            self.ledger.begin_chunked(
+                tokens,
+                self.model.config().vocab_size,
+                self.request.capacity(),
+                chunk,
+            )?
+        };
         let prefix = transaction.old_prefix();
         let absolute = self.request.append(
             prefix,
@@ -226,24 +244,36 @@ impl K2Session<'_, '_> {
         let ctx = self.model.ctx;
         let captures = CaptureArena::allocate(ctx, layers)?;
         let interventions = InterventionArena::allocate(ctx, interventions)?;
+        let packed = if chunk > 1 {
+            Some(PackedScratch::allocate(ctx, &self.buffers, chunk)?)
+        } else {
+            None
+        };
         self.model.plan.revalidate_source()?;
-        for (index, &id) in tokens.iter().enumerate() {
-            let token = absolute.token(index as u32)?;
-            let last = index + 1 == tokens.len();
-            self.buffers.upload_id(id);
+        for start in (0..tokens.len()).step_by(chunk) {
+            let end = (start + chunk).min(tokens.len());
+            let plans = (start..end)
+                .map(|index| absolute.token(index as u32))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let last = end == tokens.len();
+            let buffers = packed
+                .as_ref()
+                .map_or(&self.buffers, |packed| &packed.buffers)
+                .rows(0, end - start)?;
+            buffers.upload_ids(&tokens[start..end])?;
             let command = ctx
                 .queue
                 .commandBuffer()
                 .ok_or_else(|| invalid("cannot create command buffer"))?;
             let encoder = KernelEncoder::begin(&command);
-            let encoded = encode_token(
+            let encoded = encode_tokens(
                 ctx,
                 &encoder,
                 &self.model.weights,
                 self.model.attention,
                 &self.request,
-                &token,
-                &self.buffers,
+                &plans,
+                &buffers,
                 last,
                 captures.as_ref().filter(|_| last),
                 interventions.as_ref().filter(|_| last),
@@ -259,7 +289,11 @@ impl K2Session<'_, '_> {
                     command.error()
                 )));
             }
-            self.buffers.check_completed(&token, last)?;
+            for (index, token) in plans.iter().enumerate() {
+                buffers
+                    .rows(index, 1)?
+                    .check_completed(token, last && index + 1 == plans.len())?;
+            }
             transaction.checked()?;
         }
         self.model.plan.revalidate_source()?;
@@ -280,50 +314,108 @@ impl K2Session<'_, '_> {
     }
 }
 
-fn encode_token(
+fn encode_tokens(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     weights: &ResidentWeights,
     attention: AttentionBackend,
     request: &K2ShortContextPlan,
-    token: &TokenPlan<'_>,
+    tokens: &[TokenPlan<'_>],
     b: &SessionBuffers,
     logits: bool,
     captures: Option<&CaptureArena>,
     interventions: Option<&InterventionArena>,
 ) -> Result<()> {
-    encode_get_rows_f32(ctx, enc, &weights.embedding, &b.id, &b.residual, 1, 4096)?;
+    let rows = (0..tokens.len())
+        .map(|i| b.rows(i, 1))
+        .collect::<Result<Vec<_>>>()?;
+    let final_row = rows
+        .last()
+        .ok_or_else(|| invalid("empty execution chunk"))?;
+    let project = |weight: &MetalTensor,
+                   x: &MetalTensor,
+                   y: &MetalTensor,
+                   n_in: usize,
+                   n_out: usize|
+     -> Result<()> {
+        if tokens.len() == 1 {
+            encode_mat_vec_dispatch(ctx, enc, weight, x, y, n_in, n_out)?;
+        } else {
+            let x = crate::k2_horizon_metal::checked_slice(
+                x,
+                0,
+                vec![n_in as u64, tokens.len() as u64],
+                GgmlType::F32,
+            )?;
+            let y = crate::k2_horizon_metal::checked_slice(
+                y,
+                0,
+                vec![n_out as u64, tokens.len() as u64],
+                GgmlType::F32,
+            )?;
+            crate::k2_horizon_metal::encode_q8_projection_batch(
+                ctx,
+                enc,
+                weight,
+                &x,
+                &y,
+                n_in,
+                n_out,
+                tokens.len(),
+            )?;
+        }
+        Ok(())
+    };
+    encode_get_rows_f32(
+        ctx,
+        enc,
+        &weights.embedding,
+        &b.id,
+        &b.residual,
+        tokens.len(),
+        4096,
+    )?;
     for (index, layer) in weights.layers.iter().enumerate() {
-        encode_grouped_norm(
-            ctx,
-            enc,
-            request,
-            &b.residual,
-            &layer.attention_norm,
-            &b.norm,
-        )?;
-        encode_mat_vec_dispatch(ctx, enc, &layer.query, &b.norm, &b.query, 4096, 4096)?;
-        encode_mat_vec_dispatch(ctx, enc, &layer.key, &b.norm, &b.key, 4096, 1024)?;
-        encode_mat_vec_dispatch(ctx, enc, &layer.value, &b.norm, &b.value, 4096, 1024)?;
-        encode_full_rope(ctx, enc, token, &b.query, &b.key)?;
-        encode_store_kv(ctx, enc, token, index as u32, &b.cache, &b.key, &b.value)?;
+        for row in &rows {
+            encode_grouped_norm(
+                ctx,
+                enc,
+                request,
+                &row.residual,
+                &layer.attention_norm,
+                &row.norm,
+            )?;
+        }
+        project(&layer.query, &b.norm, &b.query, 4096, 4096)?;
+        project(&layer.key, &b.norm, &b.key, 4096, 1024)?;
+        project(&layer.value, &b.norm, &b.value, 4096, 1024)?;
         let encode_attention = match attention {
             #[cfg(test)]
             AttentionBackend::Materialized => crate::k2_horizon_metal::encode_short_attention,
             AttentionBackend::Online => encode_online_attention,
         };
-        encode_attention(
-            ctx,
-            enc,
-            token,
-            index as u32,
-            &b.cache,
-            &b.query,
-            &b.attention,
-        )?;
-        encode_mat_vec_dispatch(
-            ctx,
-            enc,
+        for (token, row) in tokens.iter().zip(&rows) {
+            encode_full_rope(ctx, enc, token, &row.query, &row.key)?;
+            encode_store_kv(
+                ctx,
+                enc,
+                token,
+                index as u32,
+                &b.cache,
+                &row.key,
+                &row.value,
+            )?;
+            encode_attention(
+                ctx,
+                enc,
+                token,
+                index as u32,
+                &b.cache,
+                &row.query,
+                &row.attention,
+            )?;
+        }
+        project(
             &layer.attention_output,
             &b.attention,
             &b.projection,
@@ -331,28 +423,30 @@ fn encode_token(
             4096,
         )?;
         encode_add_inplace_f32(ctx, enc, &b.residual, &b.projection)?;
-        encode_grouped_norm(
-            ctx,
-            enc,
-            request,
-            &b.residual,
-            &layer.feed_forward_norm,
-            &b.norm,
-        )?;
-        encode_mat_vec_dispatch(ctx, enc, &layer.gate, &b.norm, &b.gate, 4096, 12288)?;
-        encode_mat_vec_dispatch(ctx, enc, &layer.up, &b.norm, &b.up, 4096, 12288)?;
+        for row in &rows {
+            encode_grouped_norm(
+                ctx,
+                enc,
+                request,
+                &row.residual,
+                &layer.feed_forward_norm,
+                &row.norm,
+            )?;
+        }
+        project(&layer.gate, &b.norm, &b.gate, 4096, 12288)?;
+        project(&layer.up, &b.norm, &b.up, 4096, 12288)?;
         encode_silu_mul_f32(ctx, enc, &b.gate, &b.up, &b.gated)?;
-        encode_mat_vec_dispatch(ctx, enc, &layer.down, &b.gated, &b.projection, 12288, 4096)?;
+        project(&layer.down, &b.gated, &b.projection, 12288, 4096)?;
         encode_add_inplace_f32(ctx, enc, &b.residual, &b.projection)?;
         if let Some(interventions) = interventions {
-            interventions.encode(ctx, enc, index as u32, &b.residual)?;
+            interventions.encode(ctx, enc, index as u32, &final_row.residual)?;
         }
         if let Some(captures) = captures {
-            captures.encode(ctx, enc, index as u32, &b.residual)?;
+            captures.encode(ctx, enc, index as u32, &final_row.residual)?;
         }
     }
     if logits {
-        encode_readout(ctx, enc, weights, request, b)?;
+        encode_readout(ctx, enc, weights, request, final_row)?;
     }
     Ok(())
 }
@@ -435,7 +529,7 @@ struct SessionBuffers {
 
 impl SessionBuffers {
     fn new(ctx: &MetalContext, plan: &SessionMemoryPlan) -> Result<Self> {
-        let mut tensors = plan
+        let tensors = plan
             .specs()
             .into_iter()
             .map(|(dtype, shape)| -> Result<MetalTensor> {
@@ -451,6 +545,10 @@ impl SessionBuffers {
                 )?;
                 Ok(tensor)
             });
+        Self::from_tensors(tensors)
+    }
+
+    fn from_tensors(mut tensors: impl Iterator<Item = Result<MetalTensor>>) -> Result<Self> {
         Ok(Self {
             id: tensors.next().unwrap()?,
             residual: tensors.next().unwrap()?,
@@ -466,19 +564,6 @@ impl SessionBuffers {
             logits: tensors.next().unwrap()?,
             cache: tensors.next().unwrap()?,
         })
-    }
-
-    fn upload_id(&self, token: u32) {
-        // All IDs are checked before entry; this private owned I32[1] buffer is
-        // reused only after the prior synchronous command has finished.
-        unsafe {
-            self.id
-                .buffer
-                .contents()
-                .as_ptr()
-                .cast::<i32>()
-                .write(token as i32);
-        }
     }
 
     fn check_completed(&self, token: &TokenPlan<'_>, logits: bool) -> Result<()> {
@@ -519,8 +604,8 @@ impl SessionBuffers {
 }
 
 fn read_f32(tensor: &MetalTensor) -> &[f32] {
-    // Private owned F32 tensors, after command completion. Construction checks
-    // shared storage, zero offset, writability, exact shape, and physical extent.
+    // Private owned F32 storage or checked row views, after command completion.
+    // Allocation checks shared storage; view checks preserve shape/extent/access.
     unsafe {
         std::slice::from_raw_parts(
             tensor

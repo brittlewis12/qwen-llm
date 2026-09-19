@@ -23,6 +23,13 @@ fn native_kernel_identity() -> String {
     format!("{:x}", Sha256::digest(crate::KERNELS_METALLIB))
 }
 
+fn native_source_identity() -> serde_json::Value {
+    json!({
+        "runtime_sha256":format!("{:x}", Sha256::digest(include_bytes!("../k2_horizon_runtime.rs"))),
+        "primitives_sha256":format!("{:x}", Sha256::digest(include_bytes!("../k2_horizon_metal.rs"))),
+    })
+}
+
 fn file_sha256(path: &Path) -> String {
     // Debug-build Rust hashing of a 9.57 GB artifact is prohibitively slow.
     let output = Command::new("/usr/bin/shasum")
@@ -367,6 +374,7 @@ fn gpu_checkpoint_logits_match_independent_ifm_fork() {
             "requested_reference_capacity": 32, "reference_allocated_capacity": 256,
             "native_capacity": 32, "cache": "F16", "native_q8_matvec": "lcpp",
             "native_metallib_sha256": native_kernel_identity(),
+            "native_sources": native_source_identity(),
             "metal_api_validation": std::env::var("MTL_DEBUG_LAYER").ok(),
         }))
         .unwrap(),
@@ -493,6 +501,7 @@ fn extended_oracle_comparison(position_control: bool) {
         "requested_reference_capacity":256, "reference_allocated_capacity":256, "cache":"F16",
         "native_q8_matvec":"lcpp", "prefix_boundaries":PREFIX_BOUNDARIES,
         "native_metallib_sha256":native_kernel_identity(),
+        "native_sources":native_source_identity(),
         "thresholds":{"max_abs_exclusive":0.005,"rmse_exclusive":0.001,"cosine_exclusive_min":0.9999999,"top1_equal":true},
         "metal_api_validation":std::env::var("MTL_DEBUG_LAYER").ok(),
     })).unwrap()).unwrap();
@@ -640,6 +649,7 @@ fn gpu_first_divergence_layer_diagnostic() {
         "model":path, "model_sha256":model_sha256, "inputs":cases, "native_capacity":256,
         "cache":"F16", "native_q8_matvec":"lcpp", "capture":"last-token post-FFN residual, all 36 layers",
         "native_metallib_sha256":native_kernel_identity(),
+        "native_sources":native_source_identity(),
         "metal_api_validation":std::env::var("MTL_DEBUG_LAYER").ok(),
     })).unwrap()).unwrap();
     eprintln!("layer diagnostic artifacts: {}", directory.display());

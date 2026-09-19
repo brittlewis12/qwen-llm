@@ -124,6 +124,11 @@ on captured IFM inputs and records separate `online_vs_*` metrics. No claim of
 whole-model parity, speed improvement, or compact KV storage follows from these
 primitive checks.
 
+A temporary full-model online-dispatch experiment passes the original 42 rows
+but fails 215/768 extended rows under unchanged gates. It was reverted, not
+promoted. New manifests also record native runtime/primitive source SHA256 values
+to distinguish host-only dispatch experiments sharing the same metallib.
+
 ## Native lens CLI checks
 
 The opt-in uv scripts run native CLI children serially. Unlike the standalone

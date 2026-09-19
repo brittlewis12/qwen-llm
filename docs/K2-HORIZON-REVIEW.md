@@ -628,3 +628,18 @@ No speed, packed-prefill, Q8 KV, whole-model parity, or long-context claim is ma
 Adversarial source verdict: **no concrete blocker; safe to commit as an unqualified
 K2 primitive**. The reviewer confirmed recurrence, visibility, alignment, alias
 checks, scratch accounting, unchanged runtime/Muse paths, and scoped evidence.
+
+### Whole-model online experiment (not promoted)
+
+A subsequent temporary import substitution routed the unchanged serial graph
+through the candidate. New manifests bind native runtime/primitive source hashes
+as well as metallib hashes so host-only dispatch experiments are distinguishable.
+The original 42-row oracle passes, but
+`target/profiles/k2-oracle-256-89612-1789777299496754000` fails **215/768 rows** under
+the unchanged extended gates. All top-1 IDs and native append-partition controls
+still agree. Max errors are 0.03633/0.09371/0.12305 for ledger/code/Unicode.
+Mixed gains versus the materialized control do not justify promoting the candidate.
+The temporary dispatch change was reverted exactly; only the evidence-hash additions
+remain. Resolving whole-model numerical qualification still precedes public-cap
+promotion. This also confirms that better sampled primitive accuracy alone does
+not resolve the closed-loop F16-cache/model divergence.

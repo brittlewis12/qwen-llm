@@ -1,5 +1,7 @@
 use super::*;
 
+mod runner;
+
 const POLICY_BYTES: &[u8] =
     include_bytes!("../../../../../scripts/reference/k2/holdout-256-v1.json");
 const POLICY_SHA256: &str = "65a517ad27cab60a7a38989ce8cf3499902940fb94f82c26d83dcca86f5f6889";

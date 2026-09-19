@@ -18,6 +18,14 @@ enum ReferenceCache {
     F32,
 }
 
+#[derive(Clone, Copy)]
+enum ReferenceRun {
+    F16,
+    F32,
+    Capture,
+    Greedy15,
+}
+
 impl ReferenceCache {
     fn bits(self) -> u32 {
         match self {
@@ -43,7 +51,7 @@ fn reference_identity() -> String {
         "../../../../scripts/reference/k2/CMakeLists.txt"
     ));
     format!(
-        "42adf019f76013dac873b5b43950d54d5ab27216 default=F16-KV diagnostic=F32-KV serial flash=off wrapper={wrapper:x} cmake={cmake:x}\n"
+        "42adf019f76013dac873b5b43950d54d5ab27216 default=F16-KV diagnostic=F32-KV greedy=15 serial flash=off wrapper={wrapper:x} cmake={cmake:x}\n"
     )
 }
 
@@ -231,7 +239,33 @@ fn run_oracle_cache(
     cache: ReferenceCache,
 ) -> PathBuf {
     assert!(!capture_last || cache == ReferenceCache::F16);
+    let mode = if capture_last {
+        ReferenceRun::Capture
+    } else {
+        match cache {
+            ReferenceCache::F16 => ReferenceRun::F16,
+            ReferenceCache::F32 => ReferenceRun::F32,
+        }
+    };
+    run_oracle_command(binary, model, directory, base, tokens, mode)
+}
+
+fn run_oracle_command(
+    binary: &Path,
+    model: &Path,
+    directory: &Path,
+    base: u32,
+    tokens: &[u32],
+    mode: ReferenceRun,
+) -> PathBuf {
     assert!(!tokens.is_empty() && tokens.len() <= 256);
+    let (flag, cache, count) = match mode {
+        ReferenceRun::F16 => (None, ReferenceCache::F16, tokens.len()),
+        ReferenceRun::F32 => (Some("--f32-kv"), ReferenceCache::F32, tokens.len()),
+        ReferenceRun::Capture => (Some("--capture-last"), ReferenceCache::F16, tokens.len()),
+        ReferenceRun::Greedy15 => (Some("--greedy-15"), ReferenceCache::F16, tokens.len() + 15),
+    };
+    assert!(count <= 256);
     let output = directory.join(format!("reference-{base}.f32"));
     let log = directory.join(format!("reference-{base}.log"));
     let log = OpenOptions::new()
@@ -240,11 +274,8 @@ fn run_oracle_cache(
         .open(log)
         .unwrap();
     let mut command = Command::new(binary);
-    if capture_last {
-        command.arg("--capture-last");
-    }
-    if cache == ReferenceCache::F32 {
-        command.arg("--f32-kv");
+    if let Some(flag) = flag {
+        command.arg(flag);
     }
     let status = command
         .arg(model)
@@ -266,7 +297,7 @@ fn run_oracle_cache(
         ),
         cache,
     );
-    let expected = 24 + tokens.len() * (8 + 250624 * 4);
+    let expected = 24 + count * (8 + 250624 * 4);
     assert_eq!(fs::metadata(&output).unwrap().len(), expected as u64);
     output
 }

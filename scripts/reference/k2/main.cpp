@@ -96,18 +96,21 @@ static bool capture_layer(ggml_tensor * tensor, bool ask, void * user_data) {
 int main(int argc, char ** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--identity") {
-            std::cout << K2_REFERENCE_REVISION << " default=F16-KV diagnostic=F32-KV serial flash=off wrapper="
+            std::cout << K2_REFERENCE_REVISION << " default=F16-KV diagnostic=F32-KV greedy=15 serial flash=off wrapper="
                       << K2_WRAPPER_SHA256 << " cmake=" << K2_CMAKE_SHA256 << '\n';
             return 0;
         }
         const bool capture_last = argc > 1 && std::string(argv[1]) == "--capture-last";
         const bool f32_cache = argc > 1 && std::string(argv[1]) == "--f32-kv";
-        if (capture_last || f32_cache) { --argc; ++argv; }
+        const bool greedy = argc > 1 && std::string(argv[1]) == "--greedy-15";
+        if (capture_last || f32_cache || greedy) { --argc; ++argv; }
         if (argc < 5 || argc > 260 || std::string(argv[1]).rfind("--", 0) == 0) {
-            throw std::runtime_error("usage: oracle [--capture-last | --f32-kv] MODEL OUTPUT BASE ID... (1..256 IDs)");
+            throw std::runtime_error("usage: oracle [--capture-last | --f32-kv | --greedy-15] MODEL OUTPUT BASE ID... (1..256 total rows)");
         }
         const uint32_t base = number(argv[3]);
-        const uint32_t count = argc - 4;
+        const uint32_t supplied = argc - 4;
+        const uint32_t count = supplied + (greedy ? 15 : 0);
+        if (count > 256) throw std::runtime_error("total rows exceed 256");
         if (base > 524288 - count) throw std::runtime_error("absolute positions exceed K2 ceiling");
         std::vector<llama_token> tokens;
         for (int i = 4; i < argc; ++i) {
@@ -178,9 +181,25 @@ int main(int argc, char ** argv) {
                 std::memcpy(&bits, &logits[j], sizeof(bits));
                 write_u32(output, bits);
             }
+            if (greedy && i + 1 >= supplied && i + 1 < count) {
+                llama_token best = 0;
+                for (llama_token j = 1; j < vocab; ++j) {
+                    if (logits[j] >= logits[best]) best = j;
+                }
+                tokens.push_back(best);
+            }
         }
         llama_batch_free(batch);
         output.close();
+        if (greedy) {
+            std::ofstream ids(std::string(argv[2]) + ".tokens", std::ios::binary | std::ios::trunc);
+            ids.exceptions(std::ios::badbit | std::ios::failbit);
+            ids.write("K2TOK001", 8);
+            write_u32(ids, base);
+            write_u32(ids, count);
+            for (auto token : tokens) write_u32(ids, token);
+            ids.close();
+        }
         if (capture_last) {
             if (capture->invalid || !std::all_of(capture->seen.begin(), capture->seen.end(), [](bool v) { return v; })) {
                 throw std::runtime_error("missing or invalid layer captures");

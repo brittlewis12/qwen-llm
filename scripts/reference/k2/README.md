@@ -155,6 +155,31 @@ not silently clamped. The analyzer rejects incomplete/mismatched corpus rows.
 These metrics characterize sensitivity; no acceptance thresholds or public caps
 change based on this diagnostic alone.
 
+## Frozen guarded-context holdout
+
+`HOLDOUT-POLICY.md` and hash-bound `holdout-256-v1.json` were reviewed and committed
+before target execution. This is a synthetic engineering holdout, not a random
+scientific benchmark. It binds checkpoint/tokenizer/token IDs, per-row gates,
+capture sites, append boundaries, and reference argmax trajectories. The fixed
+`--greedy-15` reference mode is mutually exclusive with other modes and never
+exceeds 256 rows. Its EOS-inclusive trajectory is not a serving stop-policy test.
+
+```sh
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
+cargo test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::holdout::runner::gpu_frozen_guarded_256_holdout \
+  -- --ignored --exact --nocapture --test-threads=1
+uv run scripts/reference/k2/inspect_holdout.py target/profiles/k2-holdout-v1-RUN
+```
+
+Allow roughly 5 GiB of disk evidence and more than ten minutes for the instrumented
+debug-host run. The first v1 result is **failed**, with two distinct teacher-forced
+top-1 disagreements (one duplicated in a supplied trajectory prefix). Numerical,
+capture, split/whole, and all generated-tail checks passed. The analyzer reports
+reference-side ranking gaps without guessing unretained native logits. Neither
+fixtures nor gates may be retuned after observing this result. Public cap stays 32.
+
 ## Native lens CLI checks
 
 The opt-in uv scripts run native CLI children serially. Unlike the standalone

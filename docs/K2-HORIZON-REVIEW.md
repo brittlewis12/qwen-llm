@@ -703,3 +703,42 @@ Closure verdict: **freeze commit ready; no remaining blocker**. Failed fixtures
 must not be replaced and thresholds must not be tuned after observing results.
 Original strict 42-row regression, historical extended failures, and public cap 32
 remain unchanged. Holdout execution and any surface promotion are separate reviews.
+
+## Packet 22 first frozen holdout execution (failed)
+
+The reviewed runner executes the unchanged v1 freeze at `990bb56d`. The reference
+wrapper adds an exclusive `--greedy-15` mode with at most 256 total rows and a
+coordinate/prefix-bound token sidecar. Highest-ID ties and EOS-inclusive fixed
+mathematical trajectories match the frozen policy; native per-row top-1 agreement
+is required. Twelve ordinary, four traced, and four trajectory reference children
+finish before native residency. All capture-enabled reference logits are checked
+bitwise against ordinary execution. The pre-execution review found no blocker.
+
+Evidence: `target/profiles/k2-holdout-v1-96305-1789786294833100000`.
+The first execution **fails v1**: three failing records among 4096 row checks and
+16 capture-site checks. They are two distinct top-1 disagreements, with one also
+appearing in a trajectory's supplied prefix. All numerical/capture gates pass;
+all twelve singleton/split/whole controls are bitwise; all 60 generated trajectory
+steps agree exactly. Capacity+1 remains retryable. API validation and production
+lease/wired-memory gate were active; disk was checked at 30 GiB before about 5 GiB
+of reference evidence. Elapsed test time was 730 seconds, not a performance result.
+
+- `field_notes`, base 8191, length 223: native selects reference's second-ranked
+  ID; the reference logit gap is 0.000043869 and probability gap 0.000018228.
+- `multilingual_editor`, base 8191, length 174: reference second-ranked choice,
+  logit gap 0.000116349 and probability gap 0.000001890. The duplicated record is
+  before the generated tail, not a second free-generation divergence.
+- Overall maximum KL is 1.768e-6, TV 0.00076142, raw error 0.10353, RMSE 0.02044,
+  centered RMSE 0.01437; minimum logit cosine is 0.99998707.
+- Captured residual relative L2 is at most 0.00023726; minimum cosine 0.999999977.
+
+The read-only analyzer verifies the retained reference row before reporting these
+gaps; native maximum/candidate logits were not retained, so it cannot establish
+the reciprocal native-side ranking margin. The original strict 42-row regression
+passes with the new wrapper, and twelve CPU oracle tests pass.
+
+Adversarial post-result review confirms this is a genuine policy failure, not a
+harness failure. No threshold, fixture, runtime, or public-cap change follows.
+A possible v2 ranking-indeterminate rule needs new frozen fixtures, explicit
+two-sided regret evidence, and unchanged exact generated-tail requirements. It
+cannot reinterpret v1 as passed. Public capacity remains 32.

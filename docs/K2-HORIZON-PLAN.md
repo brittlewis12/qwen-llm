@@ -12,6 +12,11 @@ attention diagnostics now isolate the investigation. A separate bounded-scratch
 H128/GQA4 online-attention candidate passes primitive tests through 257 positions,
 but is not selected by the runtime. F16 KV storage is unchanged; compact KV is next
 after numerical qualification. See review packets 17-19 for evidence and limits.
+Cache/backend controls and a separately frozen guarded-256 holdout now show small
+probability/residual drift, but the v1 holdout fails on two distinct near-tied
+teacher-forced top-1 choices. All numerical/capture and generated-tail checks pass;
+this is not v1 approval. A new versioned ranking-indeterminacy policy and unseen
+fixtures are the next experiment, not retroactive tolerance changes (packets 20-22).
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 

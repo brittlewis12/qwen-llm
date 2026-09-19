@@ -643,3 +643,38 @@ The temporary dispatch change was reverted exactly; only the evidence-hash addit
 remain. Resolving whole-model numerical qualification still precedes public-cap
 promotion. This also confirms that better sampled primitive accuracy alone does
 not resolve the closed-loop F16-cache/model divergence.
+
+## Packet 20 cache/backend precision control
+
+The external IFM wrapper adds an explicitly diagnostic `--f32-kv` mode, mutually
+exclusive with capture mode. Default execution remains F16/flash-off. Its identity
+advertises both modes; K2REF001 cache bits and exact runtime logs independently
+bind actual F16/F32 K/V, 256 allocated cells, and 36/72 MiB respectively. Mode
+mismatches fail closed. No native cache, dispatch, or public capability changes.
+
+The three-way diagnostic streams two reference rows plus one native row, retaining
+no full logit sequence in memory. All reference children complete serially before
+native model/context creation under the production lease and real wired gate.
+Disk was checked (33 GiB free) before writing roughly 1.5 GiB of evidence.
+Stable F64 log-softmax metrics report KL(reference || actual), half-L1 total
+variation, centered RMSE, and mean logit shift alongside raw error metrics.
+Tests cover cache-mode binding, runtime-log drift, distribution shift invariance,
+KL direction, hand-computed probabilities, sharp logits, and nonfinite rejection.
+
+Evidence: `target/profiles/k2-cache-precision-92281-1789784511128729000`.
+All three pairings retain exact top-1 agreement on every one of 768 teacher-forced
+rows. Native-F16 versus IFM-F16 max total variation is 0.00039643 and max KL is
+6.84e-6. IFM-F16 versus IFM-F32 reaches 0.00158392 and 1.131e-5 respectively;
+its worst raw-logit difference is 0.44402, larger than native/IFM F16's 0.13725.
+Native/IFM F32 probability differences are comparable to the reference's own
+cache-mode sensitivity. This does not establish a unique rounding cause: changing
+cache dtype also changes backend kernels/reductions, and neither mode has full-
+precision weights or serves as an HF ground truth.
+
+Read-only review found no implementation/safety blocker. It endorsed probability
+impact as an additional diagnostic, not justification to quietly relax old gates.
+The original 42-row strict regression and callback-neutrality/replay diagnostics
+pass with the rebuilt wrapper; nine CPU oracle tests pass. Historical extended
+failure and the public 32-token cap remain unchanged. A proposed wider acceptance
+envelope is a post-hoc engineering hypothesis that still requires frozen,
+nonrepeating holdout fixtures and separately recorded continuation/lens evidence.

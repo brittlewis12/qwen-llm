@@ -96,13 +96,16 @@ static bool capture_layer(ggml_tensor * tensor, bool ask, void * user_data) {
 int main(int argc, char ** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--identity") {
-            std::cout << K2_REFERENCE_REVISION << " F16-KV serial flash=off wrapper="
+            std::cout << K2_REFERENCE_REVISION << " default=F16-KV diagnostic=F32-KV serial flash=off wrapper="
                       << K2_WRAPPER_SHA256 << " cmake=" << K2_CMAKE_SHA256 << '\n';
             return 0;
         }
         const bool capture_last = argc > 1 && std::string(argv[1]) == "--capture-last";
-        if (capture_last) { --argc; ++argv; }
-        if (argc < 5 || argc > 260) throw std::runtime_error("usage: oracle [--capture-last] MODEL OUTPUT BASE ID... (1..256 IDs)");
+        const bool f32_cache = argc > 1 && std::string(argv[1]) == "--f32-kv";
+        if (capture_last || f32_cache) { --argc; ++argv; }
+        if (argc < 5 || argc > 260 || std::string(argv[1]).rfind("--", 0) == 0) {
+            throw std::runtime_error("usage: oracle [--capture-last | --f32-kv] MODEL OUTPUT BASE ID... (1..256 IDs)");
+        }
         const uint32_t base = number(argv[3]);
         const uint32_t count = argc - 4;
         if (base > 524288 - count) throw std::runtime_error("absolute positions exceed K2 ceiling");
@@ -128,8 +131,8 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.n_threads = 4;
         cp.n_threads_batch = 4;
-        cp.type_k = GGML_TYPE_F16;
-        cp.type_v = GGML_TYPE_F16;
+        cp.type_k = f32_cache ? GGML_TYPE_F32 : GGML_TYPE_F16;
+        cp.type_v = cp.type_k;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
         cp.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_NONE;
         cp.rope_freq_scale = 1.0f;
@@ -153,7 +156,7 @@ int main(int argc, char ** argv) {
         write_u32(output, vocab);
         write_u32(output, count);
         write_u32(output, base);
-        write_u32(output, 16);
+        write_u32(output, f32_cache ? 32 : 16);
         auto batch = llama_batch_init(1, 0, 1);
         batch.n_tokens = 1;
         batch.n_seq_id[0] = 1;

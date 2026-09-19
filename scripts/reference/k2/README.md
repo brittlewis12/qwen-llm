@@ -129,6 +129,32 @@ but fails 215/768 extended rows under unchanged gates. It was reverted, not
 promoted. New manifests also record native runtime/primitive source SHA256 values
 to distinguish host-only dispatch experiments sharing the same metallib.
 
+## Cache/backend precision control
+
+`--f32-kv` is a reference-only diagnostic, mutually exclusive with `--capture-last`.
+Default reference and native execution remain F16. The binary header and exact
+runtime markers must agree on actual cache precision; F32 reference logs must show
+72 MiB of F32 K/V in 256 cells. This is not a full-precision-weight/HF oracle, and
+cache dtype may also change backend kernels/reduction topology.
+
+```sh
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
+cargo test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::cache_precision::gpu_f16_native_and_ifm_against_f32_cache_control \
+  -- --ignored --exact --nocapture --test-threads=1
+uv run scripts/reference/k2/inspect_cache_precision.py target/profiles/k2-cache-precision-RUN
+```
+
+Check free disk space first: two reference modes across three 256-token corpora
+write about 1.5 GiB. Children are serial under the parent's production lease and
+finish before native GPU residency. Probability metrics use F64 stable log-softmax:
+KL(reference || actual), TV = half the L1 probability distance, and RMSE after
+centering logit differences. Tiny negative KL from floating-point summation is
+not silently clamped. The analyzer rejects incomplete/mismatched corpus rows.
+These metrics characterize sensitivity; no acceptance thresholds or public caps
+change based on this diagnostic alone.
+
 ## Native lens CLI checks
 
 The opt-in uv scripts run native CLI children serially. Unlike the standalone

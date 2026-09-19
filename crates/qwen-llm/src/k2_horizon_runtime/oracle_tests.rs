@@ -8,6 +8,33 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod attention_probe;
+mod cache_precision;
+mod probability;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferenceCache {
+    F16,
+    F32,
+}
+
+impl ReferenceCache {
+    fn bits(self) -> u32 {
+        match self {
+            Self::F16 => 16,
+            Self::F32 => 32,
+        }
+    }
+    fn cache_log(self) -> &'static str {
+        match self {
+            Self::F16 => {
+                "llama_kv_cache: size = 36.00 MiB ( 256 cells, 36 layers, 1/1 seqs), K (f16): 18.00 MiB, V (f16): 18.00 MiB"
+            }
+            Self::F32 => {
+                "llama_kv_cache: size = 72.00 MiB ( 256 cells, 36 layers, 1/1 seqs), K (f32): 36.00 MiB, V (f32): 36.00 MiB"
+            }
+        }
+    }
+}
 
 fn reference_identity() -> String {
     let wrapper = Sha256::digest(include_bytes!("../../../../scripts/reference/k2/main.cpp"));
@@ -15,7 +42,7 @@ fn reference_identity() -> String {
         "../../../../scripts/reference/k2/CMakeLists.txt"
     ));
     format!(
-        "42adf019f76013dac873b5b43950d54d5ab27216 F16-KV serial flash=off wrapper={wrapper:x} cmake={cmake:x}\n"
+        "42adf019f76013dac873b5b43950d54d5ab27216 default=F16-KV diagnostic=F32-KV serial flash=off wrapper={wrapper:x} cmake={cmake:x}\n"
     )
 }
 
@@ -46,6 +73,10 @@ fn file_sha256(path: &Path) -> String {
 }
 
 fn validate_reference_log(log: &str) {
+    validate_reference_log_cache(log, ReferenceCache::F16);
+}
+
+fn validate_reference_log_cache(log: &str, cache: ReferenceCache) {
     let log = log
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -58,7 +89,7 @@ fn validate_reference_log(log: &str) {
         "llama_context: flash_attn = disabled",
         "llama_context: freq_base = 10000000.0",
         "llama_context: freq_scale = 1",
-        "llama_kv_cache: size = 36.00 MiB ( 256 cells, 36 layers, 1/1 seqs), K (f16): 18.00 MiB, V (f16): 18.00 MiB",
+        cache.cache_log(),
         "ggml_metal_device_init: GPU name: MTL0 (Apple M4 Max)",
     ] {
         assert!(
@@ -91,7 +122,17 @@ struct OracleRows<'a, R> {
 }
 
 impl<'a, R: Read> OracleRows<'a, R> {
-    fn new(mut reader: R, base: u32, tokens: &'a [u32], vocab: usize) -> Self {
+    fn new(reader: R, base: u32, tokens: &'a [u32], vocab: usize) -> Self {
+        Self::with_cache(reader, base, tokens, vocab, ReferenceCache::F16)
+    }
+
+    fn with_cache(
+        mut reader: R,
+        base: u32,
+        tokens: &'a [u32],
+        vocab: usize,
+        cache: ReferenceCache,
+    ) -> Self {
         assert!((1..=256).contains(&tokens.len()));
         assert!((1..=250624).contains(&vocab));
         assert!(base.checked_add(tokens.len() as u32 - 1).is_some());
@@ -104,7 +145,7 @@ impl<'a, R: Read> OracleRows<'a, R> {
         assert_eq!(word(8) as usize, vocab);
         assert_eq!(word(12) as usize, tokens.len());
         assert_eq!(word(16), base);
-        assert_eq!(word(20), 16);
+        assert_eq!(word(20), cache.bits());
         Self {
             reader,
             tokens,
@@ -168,6 +209,27 @@ fn run_oracle_mode(
     tokens: &[u32],
     capture_last: bool,
 ) -> PathBuf {
+    run_oracle_cache(
+        binary,
+        model,
+        directory,
+        base,
+        tokens,
+        capture_last,
+        ReferenceCache::F16,
+    )
+}
+
+fn run_oracle_cache(
+    binary: &Path,
+    model: &Path,
+    directory: &Path,
+    base: u32,
+    tokens: &[u32],
+    capture_last: bool,
+    cache: ReferenceCache,
+) -> PathBuf {
+    assert!(!capture_last || cache == ReferenceCache::F16);
     assert!(!tokens.is_empty() && tokens.len() <= 256);
     let output = directory.join(format!("reference-{base}.f32"));
     let log = directory.join(format!("reference-{base}.log"));
@@ -179,6 +241,9 @@ fn run_oracle_mode(
     let mut command = Command::new(binary);
     if capture_last {
         command.arg("--capture-last");
+    }
+    if cache == ReferenceCache::F32 {
+        command.arg("--f32-kv");
     }
     let status = command
         .arg(model)
@@ -194,9 +259,12 @@ fn run_oracle_mode(
         "oracle failed; inspect {}",
         directory.display()
     );
-    validate_reference_log(&String::from_utf8_lossy(
-        &fs::read(directory.join(format!("reference-{base}.log"))).unwrap(),
-    ));
+    validate_reference_log_cache(
+        &String::from_utf8_lossy(
+            &fs::read(directory.join(format!("reference-{base}.log"))).unwrap(),
+        ),
+        cache,
+    );
     let expected = 24 + tokens.len() * (8 + 250624 * 4);
     assert_eq!(fs::metadata(&output).unwrap().len(), expected as u64);
     output
@@ -311,6 +379,29 @@ fn oracle_runtime_log_rejects_mode_and_backend_drift() {
         log.push_str(&format!("llama_kv_cache: layer {layer}: dev = MTL0\n"));
     }
     validate_reference_log(&log);
+    let f32_log = log.replace(
+        ReferenceCache::F16.cache_log(),
+        ReferenceCache::F32.cache_log(),
+    );
+    validate_reference_log_cache(&f32_log, ReferenceCache::F32);
+    assert!(std::panic::catch_unwind(|| validate_reference_log(&f32_log)).is_err());
+    assert!(
+        std::panic::catch_unwind(|| validate_reference_log_cache(&log, ReferenceCache::F32))
+            .is_err()
+    );
+    for (from, to) in [
+        ("K (f32)", "K (f16)"),
+        ("V (f32)", "V (f16)"),
+        ("72.00 MiB", "36.00 MiB"),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| validate_reference_log_cache(
+                &f32_log.replace(from, to),
+                ReferenceCache::F32
+            ))
+            .is_err()
+        );
+    }
     for (from, to) in [
         ("freq_scale = 1", "freq_scale = 10"),
         ("37/37", "36/37"),

@@ -3,7 +3,8 @@
 //! Serial encoders only. Callers must discard the command buffer on encoding
 //! failure, and must not commit session state until successful execution/readout.
 //! These wrappers validate physical views, not cached-prefix identity/freshness,
-//! value finiteness, or a complete forward graph. GPU qualification is pending.
+//! value finiteness, or a complete forward graph. Primitive checks do not qualify
+//! a checkpoint or promote a runtime dispatch path.
 
 use crate::k2_horizon_plan::{FullNeoxRope, K2ShortContextPlan, TokenPlan};
 use crate::metal::{
@@ -12,7 +13,7 @@ use crate::metal::{
 };
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
-use objc2_metal::MTLBuffer;
+use objc2_metal::{MTLBuffer, MTLComputePipelineState, MTLSize};
 use std::ops::Range;
 
 const KERNEL: &str = "k2_primitive_bridge";
@@ -215,6 +216,29 @@ pub fn encode_short_attention(
     query: &MetalTensor,
     out: &MetalTensor,
 ) -> Result<()> {
+    let (k, v) = attention_views(enc, token, layer, arena, query, out)?;
+    encode_attn_decode_f16kv_f32(
+        ctx,
+        enc,
+        query,
+        &k,
+        &v,
+        out,
+        32,
+        8,
+        128,
+        token.visible_positions() as usize,
+    )
+}
+
+fn attention_views(
+    enc: &KernelEncoder,
+    token: &TokenPlan<'_>,
+    layer: u32,
+    arena: &MetalTensor,
+    query: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<(MetalTensor, MetalTensor)> {
     serial(enc)?;
     let cache = arena_view(arena, token, false)?;
     let q = View::from(query).check(&[128, 32], GgmlType::F32, false)?;
@@ -231,18 +255,78 @@ pub fn encode_short_attention(
     enc.note_read(&k);
     enc.note_read(&v);
     enc.note_write(out);
-    encode_attn_decode_f16kv_f32(
-        ctx,
-        enc,
-        query,
-        &k,
-        &v,
-        out,
-        32,
-        8,
-        128,
-        token.visible_positions() as usize,
-    )
+    Ok((k, v))
+}
+
+fn online_alignment(query: u64, key: u64, value: u64, output: u64) -> Result<()> {
+    if !query.is_multiple_of(16)
+        || !output.is_multiple_of(16)
+        || !key.is_multiple_of(8)
+        || !value.is_multiple_of(8)
+    {
+        return Err(invalid(
+            "online attention requires aligned float4/half4 views",
+        ));
+    }
+    Ok(())
+}
+
+/// Experimental register-only H128/GQA4 attention; not selected by the runtime.
+/// Retains the plan's visibility/extent ceiling without allocating score scratch.
+pub fn encode_online_attention(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token: &TokenPlan<'_>,
+    layer: u32,
+    arena: &MetalTensor,
+    query: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<()> {
+    let (key, value) = attention_views(enc, token, layer, arena, query, out)?;
+    online_alignment(query.offset, key.offset, value.offset, out.offset)?;
+    let pipeline = ctx.pipeline("kernel_k2_attn_online_f16kv_h128")?;
+    if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32 {
+        return Err(invalid("online attention requires a 32-thread SIMDgroup"));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        scale: f32,
+    }
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_q_heads: 32,
+            n_kv_heads: 8,
+            head_dim: 128,
+            n_pos: token.visible_positions(),
+            kv_stride: 1024,
+            scale: 128.0_f32.sqrt().recip(),
+        },
+    );
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, &key);
+    enc.set_tensor(3, &value);
+    enc.set_tensor(4, out);
+    enc.dispatch(
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 #[cfg(test)]

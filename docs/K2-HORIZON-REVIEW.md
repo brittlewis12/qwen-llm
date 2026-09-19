@@ -593,3 +593,38 @@ Closure verdict: **no remaining concrete checkpoint blocker; commit-ready**.
 The exact-shape callback diagnostic and original 42-row regression both pass with
 the final rebuilt wrapper; all six CPU oracle tests pass. No claim is made that
 these checks resolve the failed 256-token qualification.
+
+## Packet 19 bounded-scratch H128/GQA4 attention candidate
+
+Design review favored a separate small K2 online-softmax shader over refactoring
+Muse's proven G16 path. The K2 entry assigns one 32-lane SIMDgroup per query head,
+maps `kv_head = query_head / 4`, widens F16 K/V to F32, and retains fixed-size state
+without a context-sized score buffer. Every visible cached position participates;
+there is no eviction, truncation, or KV-format change. The runtime continues to
+select the existing materialized primitive.
+
+The checked wrapper reuses extracted attention-view validation and additionally
+requires float4/half4 offset alignment. Shape, dtype, serial ordering, aliasing,
+write access, physical extents, and token visibility retain their prior contracts.
+The existing typed plan excludes zero history and bounds extent at its source
+ceiling 7168; a suggested new 256 primitive cap was not adopted. Testing position
+257 is not a public-cap promotion or qualification through 7168.
+
+All four host-view tests and three K2 GPU primitive tests pass. The new synthetic
+probe covers lengths 1/32/33/128/256/257, all 32 heads, nonuniform KV-head values,
+nonzero arena offset, NaN guards/future/other-layer storage, cache bit immutability,
+and flat/sharp-score variants. Predeclared max-error bounds remain 2e-5 against
+both independent F64 and materialized controls; observed maxima are below 1.75e-6
+and 1.67e-6 respectively. Allocations are priced/reconciled; the candidate adds no
+score scratch allocation. Production lease, real wired gate, and API validation
+are used throughout.
+
+`target/profiles/k2-layer-diagnostic-87341-1789776927937272000` replays both kernels
+on the six captured IFM operations. Candidate max error versus F64 and IFM is
+below 1.67e-6. Native full-model execution still uses the old path; the original
+42-row checkpoint regression passes after the shared host-validation extraction.
+No speed, packed-prefill, Q8 KV, whole-model parity, or long-context claim is made.
+
+Adversarial source verdict: **no concrete blocker; safe to commit as an unqualified
+K2 primitive**. The reviewer confirmed recurrence, visibility, alignment, alias
+checks, scratch accounting, unchanged runtime/Muse paths, and scoped evidence.

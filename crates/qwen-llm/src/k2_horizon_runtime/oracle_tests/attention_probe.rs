@@ -89,7 +89,11 @@ fn attention_f64(query: &[f32], keys: &[half::f16], values: &[half::f16]) -> Vec
     output
 }
 
-pub(super) fn replay(ctx: &MetalContext, probe: &Probe) -> serde_json::Value {
+pub(super) fn replay(
+    ctx: &MetalContext,
+    probe: &Probe,
+    config: &K2HorizonConfig,
+) -> serde_json::Value {
     let keys = probe
         .keys
         .iter()
@@ -103,12 +107,13 @@ pub(super) fn replay(ctx: &MetalContext, probe: &Probe) -> serde_json::Value {
     assert!(keys.iter().chain(&values).all(|v| v.is_finite()));
     let expected = attention_f64(&probe.query, &keys, &values);
     let count = keys.len() / 1024;
-    let sizes = [
-        4096 * 4,
-        keys.len() as u64 * 2,
-        values.len() as u64 * 2,
-        4096 * 4,
-    ];
+    let plan = K2ShortContextPlan::new(config.clone(), 0, count as u32).unwrap();
+    let planes = plan.layer_planes(probe.layer).unwrap();
+    let mut arena_values = vec![half::f16::NAN; plan.arena_bytes() as usize / 2];
+    arena_values[planes.key.start as usize / 2..planes.key.end as usize / 2].copy_from_slice(&keys);
+    arena_values[planes.value.start as usize / 2..planes.value.end as usize / 2]
+        .copy_from_slice(&values);
+    let sizes = [4096 * 4, plan.arena_bytes(), 4096 * 4, 4096 * 4];
     let _transaction = ctx.begin_allocation_transaction();
     let price = price_buffers(ctx, &sizes).unwrap();
     admit(ctx, price).unwrap();
@@ -120,44 +125,59 @@ pub(super) fn replay(ctx: &MetalContext, probe: &Probe) -> serde_json::Value {
         GgmlType::F32,
     )
     .unwrap();
-    let key = MetalTensor::from_bytes(
+    let arena = MetalTensor::from_bytes(
         ctx,
-        bytemuck::cast_slice(&keys),
-        vec![128, 8, count as u64],
+        bytemuck::cast_slice(&arena_values),
+        vec![arena_values.len() as u64],
         GgmlType::F16,
     )
     .unwrap();
-    let value = MetalTensor::from_bytes(
-        ctx,
-        bytemuck::cast_slice(&values),
-        vec![128, 8, count as u64],
-        GgmlType::F16,
-    )
-    .unwrap();
+    let key = arena.view_subrange(planes.key.start / 2, vec![128, 8, count as u64]);
+    let value = arena.view_subrange(planes.value.start / 2, vec![128, 8, count as u64]);
     let output = MetalTensor::zeros_f32(ctx, vec![128, 32]).unwrap();
-    validate_cpu_layout(
-        output.buffer.storageMode() == MTLStorageMode::Shared,
-        output.offset,
-        4096 * 4,
-        output.buffer.length() as u64,
-    )
-    .unwrap();
+    let online = MetalTensor::zeros_f32(ctx, vec![128, 32]).unwrap();
+    for tensor in [&output, &online] {
+        validate_cpu_layout(
+            tensor.buffer.storageMode() == MTLStorageMode::Shared,
+            tensor.offset,
+            4096 * 4,
+            tensor.buffer.length() as u64,
+        )
+        .unwrap();
+    }
     reconcile(ctx, before, price).unwrap();
     let command = ctx.queue.commandBuffer().unwrap();
     let encoder = KernelEncoder::begin(&command);
     let result = encode_attn_decode_f16kv_f32(
         ctx, &encoder, &query, &key, &value, &output, 32, 8, 128, count,
-    );
+    )
+    .and_then(|()| {
+        let append = plan.append(0, 0, count as u32).unwrap();
+        let token = append.token(count as u32 - 1).unwrap();
+        crate::k2_horizon_metal::encode_online_attention(
+            ctx,
+            &encoder,
+            &token,
+            probe.layer,
+            &arena,
+            &query,
+            &online,
+        )
+    });
     encoder.end();
     result.unwrap();
     command.commit();
     command.waitUntilCompleted();
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     let actual = read_f32(&output);
+    let candidate = read_f32(&online);
     json!({"layer":probe.layer,"visible_length":count,"identical_reference_inputs":true,
         "native_vs_f64":error_metrics(actual, &expected),
         "ifm_vs_f64":error_metrics(&probe.output, &expected),
-        "native_vs_ifm":error_metrics(actual, &probe.output)})
+        "native_vs_ifm":error_metrics(actual, &probe.output),
+        "online_vs_f64":error_metrics(candidate, &expected),
+        "online_vs_ifm":error_metrics(candidate, &probe.output),
+        "online_vs_materialized":error_metrics(candidate, actual)})
 }
 
 pub(super) fn compare_cache(session: &K2Session<'_, '_>, probe: &Probe) -> serde_json::Value {

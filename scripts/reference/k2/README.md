@@ -102,6 +102,28 @@ The public application limit remains **32**, not 256. See the development review
 for controlled experiments and unresolved numerical questions; no relaxed gate,
 production arithmetic change, or longer-context qualification is included.
 
+## Bounded-scratch attention candidate
+
+The separate K2 H128/GQA4 online primitive retains all F16 K/V and uses constant-
+size working state instead of materializing one score per visible position. It
+is not selected by the runtime and does not change KV bytes/token or public caps.
+The typed plan retains its existing 7168-position source ceiling; that ceiling
+is not numerical qualification. Synthetic coverage currently reaches 257:
+
+```sh
+MTL_DEBUG_LAYER=1 cargo test -p qwen-llm --lib \
+  k2_horizon_metal::tests::gpu_online_attention_matches_f64_and_materialized_with_future_poison \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+The test acquires the production lease/real wired gate, prices its buffers, and
+checks all heads, GQA mapping, nonzero offsets, poisoned future/guard rows, cache
+immutability, flat/sharp scores, and independent F64/materialized controls with
+predeclared 2e-5 absolute limits. The layer diagnostic also replays this candidate
+on captured IFM inputs and records separate `online_vs_*` metrics. No claim of
+whole-model parity, speed improvement, or compact KV storage follows from these
+primitive checks.
+
 ## Native lens CLI checks
 
 The opt-in uv scripts run native CLI children serially. Unlike the standalone

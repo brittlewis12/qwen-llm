@@ -697,9 +697,10 @@ fn gpu_first_divergence_layer_diagnostic() {
     assert_eq!(source.revalidate_retained_shard_stamps().unwrap(), stamps);
     let ctx = MetalContext::new().unwrap();
     let mut attention_reports = Vec::new();
+    let config = K2HorizonConfig::from_gguf(&source).unwrap();
     for ((name, base, _), probes) in cases.iter().zip(&attention_probes) {
         for probe in probes {
-            let report = attention_probe::replay(&ctx, probe);
+            let report = attention_probe::replay(&ctx, probe, &config);
             eprintln!("{name} base={base} attention replay: {report}");
             attention_reports.push(json!({"corpus":name,"base":base,"replay":report}));
         }

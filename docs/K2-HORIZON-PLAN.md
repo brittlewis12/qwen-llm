@@ -6,6 +6,12 @@ correctness passes; bounded raw CLI dispatch and library forward-only lens
 captures/readouts/interventions plus plain/imported lens readout CLI are implemented.
 Bounded request benchmarking and raw-string serving are implemented. Long-context,
 CLI interventions, and checkpoint-specific chat/tool serving remain outstanding.
+The 256-token oracle extension fails unchanged numerical bounds despite matching
+all top-1 IDs; public surfaces remain capped at 32. Layer/cache/identical-input
+attention diagnostics now isolate the investigation. A separate bounded-scratch
+H128/GQA4 online-attention candidate passes primitive tests through 257 positions,
+but is not selected by the runtime. F16 KV storage is unchanged; compact KV is next
+after numerical qualification. See review packets 17-19 for evidence and limits.
 Base: `main` at `4d8716ab`. Worktree: `/Users/tito/code/qwen-llm-k2-horizon`.
 Branch: `feat/k2-horizon`. Decision date: 2026-09-18.
 

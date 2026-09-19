@@ -108,6 +108,147 @@ fn host_cache_descriptor_is_f16_only_and_preserves_nonzero_arena_offset() {
     assert!(v.check(&shape, GgmlType::F16, true).is_err());
 }
 
+#[test]
+fn host_online_vector_alignment_is_stricter_than_scalar_alignment() {
+    assert!(online_alignment(0, 8, 16, 32).is_ok());
+    assert!(online_alignment(16, 24, 32, 48).is_ok());
+    for offsets in [(4, 0, 0, 0), (0, 2, 0, 0), (0, 0, 4, 0), (0, 0, 0, 8)] {
+        assert!(online_alignment(offsets.0, offsets.1, offsets.2, offsets.3).is_err());
+    }
+}
+
+#[test]
+#[ignore = "GPU primitive correctness; production lease and real wired-memory gate"]
+fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let plan = request(260, 37);
+    let prefix = 16u64;
+    let arena_elements = plan.arena_bytes() / 2;
+    let buffer_bytes = (arena_elements + prefix + 16) * 2;
+    let prices = [buffer_bytes, 4096 * 4, 4096 * 4, 4096 * 4].map(|bytes| {
+        ctx.price_shared_buffer_upper(bytes)
+            .unwrap()
+            .priced_upper_bytes
+    });
+    let price = prices.iter().sum::<u64>();
+    for (count, gain) in [
+        (1, 1.),
+        (32, 1.),
+        (33, 1.),
+        (128, 1.),
+        (256, 1.),
+        (257, 1.),
+        (257, 0.),
+        (257, 16.),
+    ] {
+        let q = (0..4096)
+            .map(|i| ((i * 13 % 113) as f32 - 56.) * 0.037 * gain)
+            .collect::<Vec<_>>();
+        let _transaction = ctx.begin_allocation_transaction();
+        let admission = crate::metal::evaluate_metal_memory_admission(
+            price,
+            256 * 1024 * 1024,
+            ctx.memory_signals(),
+            true,
+        );
+        assert!(admission.admitted, "{}", admission.reason.as_str());
+        let mut bytes = vec![half::f16::NAN; (buffer_bytes / 2) as usize];
+        let planes = plan.layer_planes(35).unwrap();
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        for p in 0..count {
+            for i in 0..1024 {
+                let k = half::f16::from_f32((((i * 17 + p * 23) % 127) as f32 - 63.) * 0.041);
+                let v = half::f16::from_f32(
+                    (i / 128) as f32 * 0.31 + ((i * 11 + p * 7) % 37) as f32 * 0.017 - 0.4,
+                );
+                let index = p * 1024 + i;
+                bytes[(prefix + planes.key.start / 2) as usize + index] = k;
+                bytes[(prefix + planes.value.start / 2) as usize + index] = v;
+                keys.push(k.to_f32());
+                values.push(v.to_f32());
+            }
+        }
+        let before = ctx.current_allocated_size();
+        let backing = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&bytes),
+            vec![bytes.len() as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let arena = backing.view_subrange(prefix, vec![arena_elements]);
+        let query = tensor(&ctx, &q, &[128, 32]);
+        let online = MetalTensor::zeros_f32(&ctx, vec![128, 32]).unwrap();
+        let materialized = MetalTensor::zeros_f32(&ctx, vec![128, 32]).unwrap();
+        assert!(ctx.current_allocated_size().saturating_sub(before) <= price);
+        let append = plan.append(0, 37, count as u32).unwrap();
+        let token = append.token(count as u32 - 1).unwrap();
+        execute(&ctx, |encoder| {
+            encode_online_attention(&ctx, encoder, &token, 35, &arena, &query, &online)?;
+            encode_short_attention(&ctx, encoder, &token, 35, &arena, &query, &materialized)
+        });
+        let actual = read(&online);
+        let control = read(&materialized);
+        let mut max_error = 0.0_f64;
+        let mut max_control = 0.0_f64;
+        for head in 0..32 {
+            let base = head / 4 * 128;
+            let scores = (0..count)
+                .map(|p| {
+                    (0..128)
+                        .map(|d| {
+                            f64::from(q[head * 128 + d]) * f64::from(keys[p * 1024 + base + d])
+                        })
+                        .sum::<f64>()
+                        * f64::from(128.0_f32.sqrt().recip())
+                })
+                .collect::<Vec<_>>();
+            let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let numerators = scores
+                .iter()
+                .map(|score| (score - maximum).exp())
+                .collect::<Vec<_>>();
+            let denominator = numerators.iter().sum::<f64>();
+            for d in 0..128 {
+                let expected = numerators
+                    .iter()
+                    .enumerate()
+                    .map(|(p, probability)| probability * f64::from(values[p * 1024 + base + d]))
+                    .sum::<f64>()
+                    / denominator;
+                let index = head * 128 + d;
+                assert!(actual[index].is_finite() && control[index].is_finite());
+                max_error = max_error.max((f64::from(actual[index]) - expected).abs());
+                max_control =
+                    max_control.max((f64::from(actual[index]) - f64::from(control[index])).abs());
+            }
+        }
+        eprintln!(
+            "online positions={count} gain={gain} max_f64={max_error} max_materialized={max_control}"
+        );
+        assert!(max_error < 2e-5, "positions={count} max_f64={max_error}");
+        assert!(
+            max_control < 2e-5,
+            "positions={count} max_materialized={max_control}"
+        );
+        // The candidate must neither alter the visible cache nor touch guards/future rows.
+        let after = unsafe {
+            std::slice::from_raw_parts(
+                backing.buffer.contents().as_ptr().cast::<half::f16>(),
+                bytes.len(),
+            )
+        };
+        assert!(
+            after
+                .iter()
+                .zip(&bytes)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
+}
+
 fn tensor(ctx: &MetalContext, values: &[f32], shape: &[u64]) -> MetalTensor {
     MetalTensor::from_bytes(
         ctx,

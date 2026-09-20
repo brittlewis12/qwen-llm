@@ -291,6 +291,62 @@ the chat-template re-implementation from `scripts/bench/text_capability_eval.py`
 (packet schema v2). Conversation-history rows remain deferred until a named
 consumer migrates.
 
+## K2 Horizon Verified Chat
+
+K2's native raw lane remains available for compatible dense 7B checkpoints. The
+first templated CLI profile is deliberately narrower: the verified final Q8_0
+artifact documented in `K2-HORIZON-PLAN.md`, not filename-based detection or a
+claim that every intermediate checkpoint was trained for chat.
+
+```sh
+qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --user 'Explain why long-context evaluation is difficult.' \
+  --reasoning-effort high -n 32768 --temp 1 --top-p 0.95
+qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" --messages conversation.json -n 1024
+```
+
+`--user` optionally accepts `--system`; stdin forms work as usual. `--messages`
+accepts a bare array or an object containing only `messages`. Content must be
+strings, with at most one leading system turn and a final user turn. Assistant
+history requires an explicit string thinking field, including the empty string:
+
+```json
+[
+  {"role":"user","content":"What is 2 + 2?"},
+  {"role":"assistant","think":"","content":"4."},
+  {"role":"user","content":"And 3 + 3?"}
+]
+```
+
+The pinned IFM field priority is `think`, `think_fast`, `think_faster`,
+`reasoning_content`, then `reasoning`; the first supplied string wins even when
+empty. This adapter rejects null/non-string fields, unknown/duplicate fields,
+tools, developer roles and multimodal content rather than silently dropping them.
+Reasoning effort accepts `high` (default), `medium`, or `low`. IFM publishes no
+non-thinking transition, so `--no-thinking` and effort `none` fail explicitly.
+
+The native tokenizer inserts BOS once; the renderer omits upstream's leading BOS
+and does not deduplicate authored marker-like text. Chat stops on EOS 1 or IFM
+end-of-message 250019, as specified by the pinned upstream generation config.
+Raw completion still stops on EOS 1 only and keeps `--no-special-tokens` semantics.
+No history is stripped or summarized.
+
+This packet emits literal generated text: output begins inside the selected open
+thinking block and may include its closing marker. It does not yet partition
+reasoning from the final answer. HTTP serving, request benchmarks and lens inputs
+remain raw-only; tools are not enabled. Upstream sampling recommendations shown
+above are explicit options, not a change to the existing CLI defaults.
+
+Chat preparation and `qwen info --json` hash retained checkpoint bytes to verify
+the profile. This is read-only CPU work but can be expensive, especially in a debug
+build; no filename, cached identity or downloader declaration substitutes for that
+read. The embedded GGUF template and upstream template have separate digests:
+the native renderer follows upstream byte fixtures, never executes embedded Jinja.
+The upstream generation-config digest is reference provenance, not a GGUF field.
+The conversion's source revision remains a publisher declaration, not proof of
+BF16-to-quantized fidelity. Request stats record the verified profile, selected
+effort, stops, BOS ownership and rendered-input token digest.
+
 ## Validation gate
 
 - Pin modern and legacy parser behavior, conflicts, help, and explicit-default

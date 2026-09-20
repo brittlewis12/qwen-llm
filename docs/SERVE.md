@@ -235,6 +235,10 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
 K2 dense 7B supports completion-style raw text on `POST /v1/responses`, not a
 new `/v1/completions` endpoint. Choose an unused loopback address:
 
+The verified final artifact also supports local `qwen run --user/--messages`
+templating (see `CLI-UX.md#k2-horizon-verified-chat`). That does not enable HTTP
+chat yet: the raw-string server contract and its EOS-only stop set below are unchanged.
+
 ```sh
 qwen serve -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
   --addr 127.0.0.1:8795 --max-context-tokens 256 --max-tokens 8 \

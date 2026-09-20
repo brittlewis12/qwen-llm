@@ -5,8 +5,37 @@ real device/memory admission, not the historical 256-forward or 7168-position
 planner gates. The numerical evidence below remains scoped to its measured lengths;
 removing a product cap does not convert short-context tests into full-context proof.
 The materialized test backend alone retains its 7168-position score-scratch limit.
-F16 remains the application cache. Checkpoint-specific templating is high-priority
-follow-up; raw mode deliberately does not guess a chat/tool contract.
+F16 remains the application cache. Local no-tools chat is bound to the verified
+final artifact and pinned IFM renderer; HTTP remains raw-only. Raw mode deliberately
+does not guess a chat/tool contract for unknown checkpoints.
+
+## No-tools template checks
+
+The CPU oracle downloads only immutable template/tokenizer/generation metadata,
+never weights or remote model code. Jinja renders exact bytes, with output-preserving
+generation blocks; the pinned HF tokenizer supplies IDs. Rust removes only the
+template-owned leading BOS and enables native BOS insertion. Tests deliberately
+include authored marker tokens, Unicode and assistant thinking aliases.
+
+```sh
+uv run scripts/reference/generate_k2_chat_fixtures.py
+K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
+  --config 'profile.test.package.blake3.opt-level=3' test -p qwen-llm --lib \
+  k2_horizon_chat::tests::cpu_k2_chat_artifact_identity_and_native_tokens \
+  -- --ignored --exact --nocapture --test-threads=1
+cargo --config 'profile.dev.package.blake3.opt-level=3' \
+  --config 'profile.dev.package.sha2.opt-level=3' build -p qwen-cli --bin qwen
+uv run scripts/reference/k2/check_chat_cli.py --binary target/debug/qwen \
+  --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" --output target/profiles/k2-chat-new-run
+```
+
+The final script is opt-in GPU execution: serial CLI children take their own
+production leases and wired-memory gates with API validation. It checks all three
+efforts, assistant history, system/Unicode input, user/messages equivalence,
+rendered-input token hashes, identical short outputs versus serialized raw controls,
+profile records, and pre-GPU capability refusals. This does not establish answer
+quality, output reasoning partitioning, tools or HTTP chat. See `docs/CLI-UX.md`.
 
 This standalone test harness links the IFM llama.cpp fork at
 `42adf019f76013dac873b5b43950d54d5ab27216`. It is not a production dependency,

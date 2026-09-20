@@ -6,6 +6,9 @@ correctness passes; bounded raw CLI dispatch and library forward-only lens
 captures/readouts/interventions plus plain/imported lens readout CLI are implemented.
 Bounded request benchmarking and raw-string serving are implemented. Long-context,
 CLI interventions, and checkpoint-specific chat/tool serving remain outstanding.
+Local `qwen run --user/--messages` now supports a pinned no-tools template for the
+verified final Q8 artifact; other compatible checkpoints remain raw-capable.
+Reasoning output partitioning and HTTP chat are the next templating steps.
 The old 256-token oracle extension still fails its original strict bounds; that
 history is preserved. A separately frozen v2 holdout passes all 4096 row checks
 with exact top-1 agreement. Run/bench/plain+imported lens/serve now use checkpoint
@@ -33,7 +36,7 @@ top-1 choices differ. No Q8 promotion or gate relaxation follows. The user's cur
 priority is main integration, followed by checkpoint-appropriate templating (high
 priority, nonblocking for the raw lane) and CLI forward interventions. Cross-family
 dispatch/serve-driver/profile refactors belong to the concurrent maintenance lane.
-Full-context quality qualification remains outstanding. See review packets 17-34
+Full-context quality qualification remains outstanding. See review packets 17-35
 for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied

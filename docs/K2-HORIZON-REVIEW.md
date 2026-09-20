@@ -1270,3 +1270,67 @@ main integration ready**. The final benchmark smoke passes in
 `target/profiles/k2-main-ready-bench-v1`, including warmup/repeat identity, raw-run
 fingerprints, native BOS, literal IDs, phase/prefix accounting and host-only refusal.
 All-target checking remains warning-free.
+
+## Packet 35 verified final-checkpoint no-tools CLI templating
+
+After main integration, the user asked to continue. The templating design jam
+recommended family-local rendering and a separate later output/HTTP packet, with
+raw checkpoints unaffected. Eligibility binds the structural dense profile,
+posttrained tokenizer metadata, embedded-template digest, and verified retained
+checkpoint content `719ae3a7c9386c25db2c33b50be15d715f883aa5a762495d5a65776660179e99`.
+This first chat profile is not a whitelist for raw execution. Compatible earlier
+checkpoints and unregistered repacks still run raw but do not inherit chat claims.
+
+Pinned IFM revision `2c9659a84c4eea6f9f60462221fe762c8c84d75c` supplies the no-tools
+contract. Upstream template SHA256 is
+`a892cd0b0195599f283a8c706787520d9a6747640efb2f4dec4144b0abb62590`; the actual GGUF
+embedded template is separately bound as
+`f6e3cd6dbf0f95016fff531f41f921dee541025733c14580a881cf5a5f9fa750`, not described as
+byte-identical. Native rendering follows the pinned upstream oracle, not embedded
+Jinja. Source revision association is the publisher's conversion declaration,
+not independent quantization fidelity proof. Only metadata was downloaded.
+
+Independent Jinja 3.1.6/HF tokenizers 0.22.2 fixtures contain 21 cases: 17 valid
+renderings and four upstream errors. All valid UTF-8 bytes and native token-ID
+sequences agree, including system/Unicode, every assistant thinking alias, empty
+thinking, priority conflicts and literal protocol markers. Initial source-reading
+and reviewer advice incorrectly omitted the assistant-history newline: Jinja
+actually preserves the newline before its generation block. The first CPU fixture
+test caught this; native rendering was corrected without changing oracle bytes.
+
+The reviewer initially advised retaining EOS-only chat until explicit evidence
+existed. The pinned upstream `generation_config.json` provides that evidence:
+EOS IDs `[1,250019]`, SHA256
+`2da7d47641f4509da4ae47711e31d8b5f0f3f801ee08d87e7e9f07f814bdc4a3`. Native tokenization
+identifies 250019 as `<|ifm|im_end|>`. CPU controls prove either stop is counted but
+not emitted or forwarded. Raw completion and HTTP serving retain EOS 1 only.
+The generation-config hash is reference provenance, not a verified GGUF field.
+
+`qwen run --user`/`--system`/`--messages` bind the profile before input file/stdin
+acquisition and Metal setup. The tokenizer owns automatic BOS; authored specials
+are preserved, not deduplicated. High/medium/low select the released thinking
+opener, default high. There is no guessed non-thinking transition. String-only
+system/user/assistant turns, one leading system and final user are the supported
+subset. Tools/developer/multimodal/unknown or duplicate fields/null thinking are
+rejected rather than silently coerced/dropped. Assistant history requires an
+explicit thinking string and preserves upstream alias priority.
+
+Output is literal generated text, not separated reasoning/final-answer items;
+tools remain unavailable, and HTTP/bench/lens stay raw. Capability projection and
+request stats name this scope, profile, effort, stop set, BOS owner and input token
+digest. `qwen info --json` now performs read-only full retained-byte verification
+when identifying this profile; no identity cache or downloader claim substitutes.
+
+Pre-execution adversarial review found no blocker. The leased/API-validated CLI
+smoke passed in `target/profiles/k2-chat-cli-v1`: all three efforts, assistant
+history, system/Unicode, exact token hashes and byte/fingerprint parity with
+serialized raw controls, plus pre-GPU refusal of unsupported requests. These
+eight-token probes are wiring evidence, not answer-quality or tool qualification.
+No maintenance-lane refactor or shared-server operation was performed.
+
+Final adversarial verdict: **commit-ready, no concrete blocker**. The final
+metadata-inclusive smoke also passes in `target/profiles/k2-chat-cli-v2`. Eighty
+engine and 25 CLI tests pass under K2 filters, plus the opt-in CPU native-token/
+artifact-identity check. All-target checking remains warning-free. The next packet
+is K2-specific incremental reasoning partitioning and reuse of this renderer for
+HTTP chat; tool support remains a separate, unadvertised capability.

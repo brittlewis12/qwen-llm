@@ -1,13 +1,15 @@
-//! Raw-text K2 lane; never falls through to Qwen prompt/output protocols.
+//! Raw and verified no-tools K2 chat; never falls through to Qwen protocols.
 
 use super::*;
 use qwen_llm::k2_horizon::K2HorizonConfig;
+use qwen_llm::k2_horizon_chat as chat;
 use qwen_llm::k2_horizon_runtime::K2LoadedModel;
 use qwen_llm::tokenizer::NativeTokenizer;
 
 pub(crate) fn execution_capabilities() -> serde_json::Value {
     serde_json::json!({
-        "run": {"status": "supported", "scope": "raw_single_turn", "requires_profile": "dense_7b",
+        "run": {"status": "supported", "scope": "raw_or_verified_no_tools_chat", "requires_profile": "dense_7b",
+            "chat_profile": "verified_final_artifact", "output": "literal_generated_text_unpartitioned",
             "capacity_policy": "checkpoint_context_and_device_memory", "native_tokenizer": true, "kv_storage": "f16"},
         "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_only",
             "capacity_policy": "checkpoint_context_and_device_memory", "snapshot_cache": false, "tools": false,
@@ -23,6 +25,79 @@ pub(crate) fn execution_capabilities() -> serde_json::Value {
     })
 }
 
+pub(crate) fn chat_projection(gguf: &GgufFile) -> serde_json::Value {
+    match chat::verify_profile(gguf) {
+        Ok(profile) => serde_json::json!({
+            "input": {"raw":{"status":"supported"},"user":{"status":"supported"},"messages":{"status":"supported"},
+                "tools":{"status":"unsupported","code":"k2_tools_unimplemented","message":"K2 tool rendering and parsing are not enabled"}},
+            "reasoning":{"levels":["high","medium","low"],"fallback":"high",
+                "no_thinking":{"status":"unsupported","code":"k2_no_non_thinking_mode","message":"IFM releases no non-thinking template transition"},
+                "thinking":{"status":"supported"},"scope":"run_input_template_only_not_output_partitioning"},
+            "template":{"status":"identified","rendered_as":chat::RENDERER,"profile":profile,"scope":"run_no_tools_only"}
+        }),
+        Err(error) => serde_json::json!({"template":{"status":"unverified","rendered_as":null,
+            "code":"chat_profile_unverified","message":error.to_string()}}),
+    }
+}
+
+fn render_chat_input(input: cli::AcquiredRunInput, effort: chat::Effort) -> Result<String> {
+    let messages = match input {
+        cli::AcquiredRunInput::User { system, user } => {
+            let mut messages = Vec::new();
+            if let Some(system) = system {
+                messages.push(chat::Message::text("system", system));
+            }
+            messages.push(chat::Message::text("user", user));
+            messages
+        }
+        cli::AcquiredRunInput::Messages { document, .. } => {
+            chat::parse_messages(document.as_bytes())?
+        }
+        cli::AcquiredRunInput::RawPrompt(_) => {
+            bail!("raw input must not pass through the K2 chat renderer")
+        }
+    };
+    Ok(chat::render(&messages, effort)?)
+}
+
+fn prepare_input(
+    gguf: &GgufFile,
+    invocation: cli::Invocation,
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Result<(String, PromptSource, Option<serde_json::Value>)> {
+    if let cli::Invocation::Run(run) = &invocation
+        && !matches!(run.input, cli::RunInput::RawPrompt(_))
+    {
+        admission::K2_RAW_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
+        ensure!(
+            args.drafter.is_none(),
+            "K2 Horizon does not support --drafter"
+        );
+        ensure!(
+            !run.no_thinking,
+            "K2 chat has no released --no-thinking transition"
+        );
+        ensure!(
+            !args.no_special_tokens,
+            "K2 chat requires native BOS insertion"
+        );
+        let effort = chat::Effort::parse(run.reasoning_effort.as_deref())?;
+        // Bind the exact artifact before reading an input file or waiting on stdin.
+        shutdown::checkpoint()?;
+        let profile = chat::verify_profile(gguf)?;
+        let cli::Invocation::Run(run) = invocation else {
+            unreachable!()
+        };
+        let text = render_chat_input(run.acquire_input()?, effort)?;
+        let record = serde_json::json!({"profile":profile,"reasoning_effort":effort,"stops":chat::CHAT_STOPS,
+            "bos_owner":"native_tokenizer","output":"literal_generated_text_unpartitioned"});
+        return Ok((text, PromptSource::Messages, Some(record)));
+    }
+    let (text, source) = prepare_raw(invocation, args, explicit)?;
+    Ok((text, source, None))
+}
+
 fn prepare_raw(
     invocation: cli::Invocation,
     args: &Args,
@@ -35,7 +110,7 @@ fn prepare_raw(
     );
     ensure!(
         args.messages.is_none(),
-        "K2 Horizon currently supports raw input only; messages are not implemented"
+        "legacy K2 input is raw-only; use qwen run --messages for verified chat"
     );
     match invocation {
         cli::Invocation::Run(run) => {
@@ -47,7 +122,7 @@ fn prepare_raw(
             match run.input {
                 cli::RunInput::RawPrompt(text) => Ok((text, PromptSource::Inline)),
                 _ => bail!(
-                    "K2 Horizon currently requires --raw-prompt; user/messages rendering is not implemented"
+                    "K2 raw preparation requires --raw-prompt; chat uses separate verified preparation"
                 ),
             }
         }
@@ -94,7 +169,7 @@ pub(crate) fn run_raw(
     invocation: cli::Invocation,
 ) -> Result<()> {
     let request_t0 = Instant::now();
-    let (text, source) = prepare_raw(invocation, args, explicit)?;
+    let (text, source, mut chat_record) = prepare_input(gguf, invocation, args, explicit)?;
     let sampling = cli_sampling_config(args)?;
     let config = K2HorizonConfig::from_gguf(gguf).context("bind K2 dense 7B profile")?;
     let tokenizer = NativeTokenizer::from_gguf(gguf).context("bind native K2 tokenizer")?;
@@ -102,6 +177,10 @@ pub(crate) fn run_raw(
     // Native single-sequence policy inserts BOS once per encoding call. An
     // already serialized BOS requires explicit --no-special-tokens, not guessing.
     let ids = tokenizer.encode(&text, !args.no_special_tokens)?;
+    if let Some(record) = &mut chat_record {
+        record["prompt_token_ids_sha256_i32le"] =
+            serde_json::json!(qwen_llm::tokenizer::token_ids_sha256_i32le(&ids));
+    }
     let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
     let tokens = ids
         .into_iter()
@@ -109,8 +188,13 @@ pub(crate) fn run_raw(
         .map(|(i, id)| checked_token_id(id, config.vocab_size, &format!("prompt[{i}]")))
         .collect::<Result<Vec<_>>>()?;
     let capacity = capacity(args, explicit, tokens.len(), config.context_length)?;
-    let stops = gguf.stop_token_ids()?;
-    validate_stops(&stops)?;
+    let stops = if chat_record.is_some() {
+        chat::CHAT_STOPS.to_vec()
+    } else {
+        let stops = gguf.stop_token_ids()?;
+        validate_stops(&stops)?;
+        stops
+    };
     for &stop in &stops {
         checked_token_id(stop, config.vocab_size, "stop")?;
     }
@@ -185,11 +269,14 @@ pub(crate) fn run_raw(
             path,
             0,
             ModelFamily::K2Horizon.record_label(),
-            request_stats_input(source, None),
+            request_stats_input(source, chat_record.as_ref().map(|_| chat::RENDERER)),
             &measured,
             Some(RequestStatsDiagnostics {
                 deepseek_v4: None,
-                k2_horizon: Some(RequestStatsK2Diagnostics { prefill }),
+                k2_horizon: Some(RequestStatsK2Diagnostics {
+                    prefill,
+                    chat: chat_record,
+                }),
             }),
         )?;
     }
@@ -208,10 +295,44 @@ mod tests {
     }
 
     #[test]
+    fn k2_chat_cli_sources_match_and_im_end_is_counted_not_emitted() {
+        let direct = render_chat_input(
+            cli::AcquiredRunInput::User {
+                system: Some("precise".into()),
+                user: "2+2".into(),
+            },
+            chat::Effort::High,
+        )
+        .unwrap();
+        let history = render_chat_input(cli::AcquiredRunInput::Messages {
+            document: r#"{"messages":[{"role":"system","content":"precise"},{"role":"user","content":"2+2"}]}"#.into(), source: "test".into()
+        }, chat::Effort::High).unwrap();
+        assert_eq!(direct, history);
+        assert!(!direct.starts_with("<|ifm|begin_of_text|>"));
+        let mut logits = vec![-1.; 250624];
+        logits[250019] = 1.;
+        let mut sampler = Sampler::new(qwen_llm::sampling::SamplingConfig::default()).unwrap();
+        let result = generate_serial(
+            logits,
+            8,
+            &chat::CHAT_STOPS,
+            &mut sampler,
+            |_| panic!("end-of-message emitted"),
+            |_| panic!("end-of-message forwarded"),
+        )
+        .unwrap();
+        assert_eq!(result.tokens, [250019]);
+        assert_eq!(result.transitions, 0);
+        assert!(matches!(result.stop_reason, StopReason::Eos));
+        assert!(validate_stops(&chat::CHAT_STOPS).is_err());
+    }
+
+    #[test]
     fn k2_stats_record_selected_prefill_without_other_family_diagnostics() {
         let diagnostics = RequestStatsDiagnostics {
             deepseek_v4: None,
             k2_horizon: Some(RequestStatsK2Diagnostics {
+                chat: None,
                 prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo {
                     mode: "q8_lcpp_token_batch",
                     chunk_tokens: 32,

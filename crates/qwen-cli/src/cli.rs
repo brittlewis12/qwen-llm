@@ -162,7 +162,7 @@ pub(crate) enum DocumentSource {
         .args(["user", "messages", "raw_prompt"])
 ))]
 pub(crate) struct RunArgs {
-    /// Path to a Qwen, DeepSeek V4, or Muse Glimmer GGUF file.
+    /// Path to a Qwen, DeepSeek V4, Muse Glimmer, or K2 Horizon GGUF file.
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -198,7 +198,8 @@ pub(crate) struct RunArgs {
     /// Reasoning depth, bound against the detected model's own levels (see
     /// `qwen info --json` capabilities.reasoning). Qwen3.8: none/low/medium/xhigh,
     /// default xhigh; DeepSeek V4: none/low/high/max, default none (ordinary
-    /// chat); Muse: low/medium/high/xhigh, default high.
+    /// chat); Muse: low/medium/high/xhigh, default high; verified K2 chat:
+    /// high/medium/low, default high (no non-thinking transition).
     #[arg(
         long,
         value_name = "LEVEL",

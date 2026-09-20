@@ -1431,6 +1431,8 @@ pub(crate) struct RequestStatsDiagnostics {
 #[derive(Debug, Serialize)]
 pub(crate) struct RequestStatsK2Diagnostics {
     pub(crate) prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chat: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

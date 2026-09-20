@@ -826,8 +826,8 @@ pub(crate) fn input_capability_for(
         Some(ModelFamily::K2Horizon) => {
             match qwen_llm::k2_horizon::K2HorizonConfig::from_gguf(gguf) {
                 Ok(_) => InputCapability::raw_only(
-                    "k2_raw_only",
-                    "K2 Horizon currently accepts untemplated raw text only".into(),
+                    "chat_profile_unverified",
+                    "K2 chat requires a verified final-artifact profile; compatible checkpoints retain raw input".into(),
                 ),
                 Err(error) => InputCapability::none("k2_profile_unsupported", error.to_string()),
             }
@@ -1079,7 +1079,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         })?,
         Some(ModelFamily::MuseGlimmer) => serde_json::to_value(muse_glimmer_reasoning_capability())?,
         Some(ModelFamily::K2Horizon) => serde_json::json!({
-            "status": "unsupported", "code": "k2_raw_only", "message": "K2 Horizon reasoning controls are not implemented",
+            "status": "unsupported", "code": "chat_profile_unverified", "message": "K2 chat reasoning requires a verified final-artifact profile",
         }),
         None => serde_json::json!({
             "status": "unsupported",
@@ -1105,6 +1105,12 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
     });
     if family == Some(ModelFamily::K2Horizon) {
         projection["capabilities"]["execution"] = k2_horizon::execution_capabilities();
+        for (key, value) in k2_horizon::chat_projection(&gguf)
+            .as_object()
+            .expect("K2 capability projection")
+        {
+            projection["capabilities"][key] = value.clone();
+        }
     }
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())

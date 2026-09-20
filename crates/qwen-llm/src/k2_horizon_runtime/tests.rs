@@ -22,7 +22,7 @@ fn config() -> K2HorizonConfig {
 fn application_default_is_online_without_capacity_or_cache_layout_change() {
     assert_eq!(DEFAULT_ATTENTION_BACKEND, AttentionBackend::Online);
     assert_eq!(GUARDED_APPLICATION_FORWARD_CEILING, 256);
-    let plan = SessionMemoryPlan::new(&config(), 256).unwrap();
+    let plan = SessionMemoryPlan::new(&config(), 256, K2KvStorage::F16).unwrap();
     assert_eq!(plan.cache_bytes, 147456 * 256);
     assert_eq!(
         plan.buffer_bytes().iter().sum::<u64>(),
@@ -31,9 +31,29 @@ fn application_default_is_online_without_capacity_or_cache_layout_change() {
 }
 
 #[test]
+fn compact_session_replaces_the_arena_without_hidden_float_history() {
+    for capacity in [1, 32, 256, 7168] {
+        let f16 = SessionMemoryPlan::new(&config(), capacity, K2KvStorage::F16).unwrap();
+        let q8 = SessionMemoryPlan::new(&config(), capacity, K2KvStorage::Q8_0).unwrap();
+        assert_eq!(q8.specs().len(), 13);
+        assert_eq!(&q8.specs()[..12], &f16.specs()[..12]);
+        assert_eq!(q8.cache_bytes, 78336 * u64::from(capacity));
+        assert_eq!(q8.specs()[12], (GgmlType::I8, vec![q8.cache_bytes]));
+        assert_eq!(
+            q8.buffer_bytes().iter().sum::<u64>(),
+            q8.cache_bytes + 1_240_068
+        );
+        assert_eq!(
+            f16.cache_bytes - q8.cache_bytes,
+            69120 * u64::from(capacity)
+        );
+    }
+}
+
+#[test]
 fn session_memory_is_capacity_shaped_with_one_logits_row() {
     for capacity in [1, 17, 7168] {
-        let plan = SessionMemoryPlan::new(&config(), capacity).unwrap();
+        let plan = SessionMemoryPlan::new(&config(), capacity, K2KvStorage::F16).unwrap();
         assert_eq!(plan.specs().len(), 13);
         assert_eq!(
             plan.buffer_bytes().iter().sum::<u64>(),
@@ -45,7 +65,7 @@ fn session_memory_is_capacity_shaped_with_one_logits_row() {
             (GgmlType::F16, vec![plan.cache_bytes / 2])
         );
     }
-    assert!(SessionMemoryPlan::new(&config(), 7169).is_err());
+    assert!(SessionMemoryPlan::new(&config(), 7169, K2KvStorage::F16).is_err());
 }
 
 #[test]

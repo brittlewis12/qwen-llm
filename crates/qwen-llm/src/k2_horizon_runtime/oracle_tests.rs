@@ -66,6 +66,9 @@ fn native_source_identity() -> serde_json::Value {
         "default_attention":format!("{DEFAULT_ATTENTION_BACKEND:?}"),
         "packed_sha256":format!("{:x}", Sha256::digest(include_bytes!("packed.rs"))),
         "state_sha256":format!("{:x}", Sha256::digest(include_bytes!("state.rs"))),
+        "compact_cache_sha256":format!("{:x}", Sha256::digest(include_bytes!("../k2_horizon_metal/compact.rs"))),
+        "cache_plan_sha256":format!("{:x}", Sha256::digest(include_bytes!("../k2_horizon_plan.rs"))),
+        "residency_sha256":format!("{:x}", Sha256::digest(include_bytes!("residency.rs"))),
     })
 }
 

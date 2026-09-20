@@ -162,7 +162,7 @@ impl K2HorizonConfig {
     }
 
     /// Logical retained K/V only: no weights, scratch, paging, or snapshots.
-    /// Q8 sizing describes a proposed layout, not executable cache support.
+    /// Sizing is not a guarantee of runtime or checkpoint qualification.
     pub fn kv_storage_bytes(&self, capacity: u64, storage: K2KvStorage) -> Result<u64> {
         self.validate_7b()?;
         if capacity == 0 || capacity > u64::from(self.context_length) {
@@ -188,7 +188,7 @@ pub enum K2KvStorage {
 }
 
 impl K2KvStorage {
-    fn row_bytes(self, elements: u64) -> Result<u64> {
+    pub(crate) fn row_bytes(self, elements: u64) -> Result<u64> {
         let (block, size) = match self {
             Self::F16 => (1, 2),
             Self::Q8_0 => (32, 34),

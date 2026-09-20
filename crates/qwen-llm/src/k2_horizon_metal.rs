@@ -7,6 +7,7 @@
 //! a checkpoint or promote a runtime dispatch path.
 
 use crate::k2_horizon_plan::{FullNeoxRope, K2ShortContextPlan, TokenPlan};
+use crate::k2_horizon::K2KvStorage;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, encode_attn_decode_f16kv_f32,
     encode_rms_norm_mul_f32, encode_rope_neox_pair_f32, encode_scatter_offset_f32_to_f16,
@@ -18,6 +19,8 @@ use std::ops::Range;
 
 const KERNEL: &str = "k2_primitive_bridge";
 type Result<T> = std::result::Result<T, MetalError>;
+
+pub(crate) mod compact;
 
 fn invalid(detail: impl Into<String>) -> MetalError {
     MetalError::BadShape {
@@ -59,6 +62,7 @@ impl View<'_> {
             return Err(invalid("wrong shape, dtype, or write access"));
         }
         let size = match dtype {
+            GgmlType::I8 => 1,
             GgmlType::F32 | GgmlType::I32 => 4,
             GgmlType::F16 => 2,
             _ => {
@@ -256,6 +260,9 @@ pub fn encode_full_rope(
 }
 
 fn arena_view(arena: &MetalTensor, token: &TokenPlan<'_>, write: bool) -> Result<CheckedView> {
+    if token.storage() != K2KvStorage::F16 {
+        return Err(invalid("F16 encoder requires an F16 cache plan"));
+    }
     View::from(arena).check(&[token.arena_bytes() / 2], GgmlType::F16, write)
 }
 

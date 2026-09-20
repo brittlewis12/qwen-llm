@@ -1,4 +1,4 @@
-//! Host-only plans for the initial K2 short-context F16 correctness bridge.
+//! Host-only plans for bounded K2 cache storage and causal visibility.
 //!
 //! These plans allocate no buffers and admit no runtime. The materialized-score
 //! ceiling is a source constraint of the candidate attention kernel, NOT a
@@ -23,7 +23,7 @@ pub enum PlanError {
 type Result<T> = std::result::Result<T, PlanError>;
 
 /// Canonical arena order: [layer, K-or-V, position, KV head, channel].
-/// Each K/V plane is exposed to the candidate kernel as a separate F16 view.
+/// Physical byte ranges are storage-specific; logical positions are not bytes.
 #[derive(Clone, Debug)]
 pub struct K2ShortContextPlan {
     config: K2HorizonConfig,
@@ -33,10 +33,20 @@ pub struct K2ShortContextPlan {
     plane_bytes: u64,
     layer_bytes: u64,
     arena_bytes: u64,
+    storage: K2KvStorage,
 }
 
 impl K2ShortContextPlan {
     pub fn new(config: K2HorizonConfig, start_position: u32, capacity: u32) -> Result<Self> {
+        Self::with_storage(config, start_position, capacity, K2KvStorage::F16)
+    }
+
+    pub(crate) fn with_storage(
+        config: K2HorizonConfig,
+        start_position: u32,
+        capacity: u32,
+        storage: K2KvStorage,
+    ) -> Result<Self> {
         config.validate_7b()?;
         if capacity == 0 || capacity > MATERIALIZED_POSITION_CEILING {
             return Err(PlanError::Invalid(
@@ -57,10 +67,11 @@ impl K2ShortContextPlan {
                 "candidate paired RoPE requires theta > 1",
             ));
         }
-        let row_bytes = u64::from(config.kv_head_count) * u64::from(config.key_head_dim) * 2;
+        let row_bytes =
+            storage.row_bytes(u64::from(config.kv_head_count) * u64::from(config.key_head_dim))?;
         let plane_bytes = row_bytes * u64::from(capacity);
         let layer_bytes = plane_bytes * 2;
-        let arena_bytes = config.kv_storage_bytes(u64::from(capacity), K2KvStorage::F16)?;
+        let arena_bytes = config.kv_storage_bytes(u64::from(capacity), storage)?;
         Ok(Self {
             config,
             capacity,
@@ -69,6 +80,7 @@ impl K2ShortContextPlan {
             plane_bytes,
             layer_bytes,
             arena_bytes,
+            storage,
         })
     }
 
@@ -86,6 +98,10 @@ impl K2ShortContextPlan {
     }
     pub fn row_bytes(&self) -> u64 {
         self.row_bytes
+    }
+
+    pub(crate) fn storage(&self) -> K2KvStorage {
+        self.storage
     }
 
     /// Logical K/V only, with no padding, weights, scratch, or allocator reserve.
@@ -183,6 +199,10 @@ pub struct TokenPlan<'a> {
 }
 
 impl TokenPlan<'_> {
+    pub(crate) fn storage(&self) -> K2KvStorage {
+        self.request.storage()
+    }
+
     pub fn arena_bytes(&self) -> u64 {
         self.request.arena_bytes()
     }

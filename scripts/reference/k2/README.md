@@ -234,6 +234,36 @@ singleton boundaries. Its 4096 independent-reference rows, 16 capture sites, and
 outputs. No oracle child or new large reference dump is produced. Fresh historical
 v1/v2 tests remain explicitly materialized/serial; the online-only replay stays serial.
 
+## Experimental compact cache
+
+`COMPACT-KV-POLICY.md` specifies the K2-only 34-byte block format, invalid/underflow
+rules, and predeclared primitive gates. The storage-aware plan uses raw I8 byte
+arenas for Q8, not weight-tensor views. Byte-addressed attention dequantizes only
+four values per lane into registers; no retained history is evicted or expanded.
+The private runtime actually allocates 78336 bytes/token, versus 147456 for F16.
+Public loading remains F16; compact KV has no CLI/environment selector.
+
+```sh
+MTL_DEBUG_LAYER=1 cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
+  test -p qwen-llm --lib \
+  k2_horizon_metal::compact::tests::gpu_q8_store_bytes_and_inline_attention_match_independent_controls \
+  -- --ignored --exact --nocapture --test-threads=1
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  cargo --config 'profile.test.package.qwen-llm.opt-level=1' test -p qwen-llm --lib \
+  k2_horizon_runtime::compact_tests::gpu_compact_cache_preserves_transactions_causality_and_lens \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+Both probes acquire the production lease and real wired gate. The primitive checks
+exact curated quantizer bytes, bounded general quantization error, all-head F64
+attention through 257 positions, offsets/guards/poisoned future, and immutable
+inputs/cache. Runtime checks cover actual bytes, pre-encoder layout rejection,
+singleton-before-packed execution, exact within-Q8 captures/cache/continuation,
+readout isolation, ordered interventions, capacity refusal, and genuine nonfinite
+input producing a visible sentinel and poisoned unpublished append. These checks
+do not establish full-model quality equivalence or speed. F16 strict regression
+and forward/lens controls remain separate and pass.
+
 ## Cache/backend precision control
 
 `--f32-kv` is a reference-only diagnostic, mutually exclusive with `--capture-last`.

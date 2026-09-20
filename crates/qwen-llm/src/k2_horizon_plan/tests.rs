@@ -19,6 +19,47 @@ fn config() -> K2HorizonConfig {
 }
 
 #[test]
+fn q8_byte_plans_preserve_causal_coordinates_without_f16_reinterpretation() {
+    for capacity in [1, 32, 33, 256, 257, 7168] {
+        let plan =
+            K2ShortContextPlan::with_storage(config(), 8191, capacity, K2KvStorage::Q8_0).unwrap();
+        assert_eq!(plan.storage(), K2KvStorage::Q8_0);
+        assert_eq!(plan.row_bytes(), 1088);
+        assert_eq!(plan.arena_bytes(), 78336 * u64::from(capacity));
+        assert_eq!(plan.arena_bytes() * 32, 147456 * u64::from(capacity) * 17);
+        let append = plan.append(0, 8191, capacity).unwrap();
+        let token = append.token(capacity - 1).unwrap();
+        assert_eq!(token.absolute_position(), 8191 + capacity - 1);
+        assert_eq!(token.visible_positions(), capacity);
+        assert_eq!(token.storage(), K2KvStorage::Q8_0);
+        let mut cursor = 0;
+        for layer in 0..36 {
+            let planes = plan.layer_planes(layer).unwrap();
+            let reads = token.read_ranges(layer).unwrap();
+            let writes = token.write_ranges(layer).unwrap();
+            for (plane, read, write) in [
+                (planes.key, reads.key, writes.key),
+                (planes.value, reads.value, writes.value),
+            ] {
+                assert_eq!(plane.start, cursor);
+                assert_eq!(plane.start % 34, 0);
+                assert_eq!(read, plane);
+                assert_eq!(write.end, plane.end);
+                assert_eq!(write.end - write.start, 1088);
+                cursor = plane.end;
+            }
+        }
+        assert_eq!(cursor, plan.arena_bytes());
+        assert!(plan.append(capacity, 8191 + capacity, 1).is_err());
+    }
+    for capacity in [0, 7169, u32::MAX] {
+        assert!(
+            K2ShortContextPlan::with_storage(config(), 0, capacity, K2KvStorage::Q8_0).is_err()
+        );
+    }
+}
+
+#[test]
 fn request_capacity_is_not_declared_context_or_qualification() {
     let plan = K2ShortContextPlan::new(config(), 131069, 7168).unwrap();
     assert_eq!(plan.declared_context(), 524288);

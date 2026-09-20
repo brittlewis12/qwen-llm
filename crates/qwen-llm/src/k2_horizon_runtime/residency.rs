@@ -26,10 +26,26 @@ impl<'a> K2RuntimePlan<'a> {
         page_size: usize,
         max_buffer_bytes: usize,
     ) -> Result<Self> {
+        Self::inspect_with_storage(
+            source,
+            capacity,
+            page_size,
+            max_buffer_bytes,
+            K2KvStorage::F16,
+        )
+    }
+
+    pub(super) fn inspect_with_storage(
+        source: &'a GgufFile,
+        capacity: u32,
+        page_size: usize,
+        max_buffer_bytes: usize,
+        storage: K2KvStorage,
+    ) -> Result<Self> {
         let stamps = source.revalidate_retained_shard_stamps()?;
         let model = K2HorizonModel::from_gguf(source)?;
         validate_embedding(model.token_embedding.dtype)?;
-        let session = SessionMemoryPlan::new(&model.config, capacity)?;
+        let session = SessionMemoryPlan::new(&model.config, capacity, storage)?;
         if session
             .buffer_bytes()
             .iter()

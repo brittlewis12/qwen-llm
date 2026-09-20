@@ -7,7 +7,7 @@
 //! same block graph. No snapshots, fitting, eviction, or speed claims.
 
 use crate::gguf::{GgufError, GgufFile};
-use crate::k2_horizon::{K2HorizonConfig, K2HorizonError};
+use crate::k2_horizon::{K2HorizonConfig, K2HorizonError, K2KvStorage};
 use crate::k2_horizon_metal::{
     encode_full_rope, encode_grouped_norm, encode_online_attention, encode_store_kv,
 };
@@ -114,11 +114,25 @@ impl<'a> K2LoadedModel<'a> {
         capacity: u32,
         attention: AttentionBackend,
     ) -> Result<Self> {
-        let plan = K2RuntimePlan::inspect(
+        Self::load_with_storage_unqualified(ctx, source, capacity, attention, K2KvStorage::F16)
+    }
+
+    fn load_with_storage_unqualified(
+        ctx: &'a MetalContext,
+        source: &'a GgufFile,
+        capacity: u32,
+        attention: AttentionBackend,
+        storage: K2KvStorage,
+    ) -> Result<Self> {
+        if storage == K2KvStorage::Q8_0 && attention != AttentionBackend::Online {
+            return Err(invalid("compact KV requires the K2 online attention path"));
+        }
+        let plan = K2RuntimePlan::inspect_with_storage(
             source,
             capacity,
             host_page_size_bytes()?,
             ctx.max_buffer_length().min(8 * 1024 * 1024 * 1024),
+            storage,
         )?;
         let weight_price = price_buffers(ctx, &plan.weight_buffer_bytes()?)?;
         let session_price = price_buffers(ctx, &plan.session.buffer_bytes())?;
@@ -160,13 +174,18 @@ impl<'a> K2LoadedModel<'a> {
             ));
         }
         self.plan.revalidate_source()?;
-        let request =
-            K2ShortContextPlan::new(self.config().clone(), start_position, self.plan.capacity())?;
+        let request = K2ShortContextPlan::with_storage(
+            self.config().clone(),
+            start_position,
+            self.plan.capacity(),
+            self.plan.session.storage,
+        )?;
         let price = price_buffers(self.ctx, &self.plan.session.buffer_bytes())?;
         let _transaction = self.ctx.begin_allocation_transaction();
         admit(self.ctx, price)?;
         let before = self.ctx.current_allocated_size();
         let buffers = SessionBuffers::new(self.ctx, &self.plan.session)?;
+        buffers.validate_cache_contract(&request)?;
         reconcile(self.ctx, before, price)?;
         self.plan.revalidate_source()?;
         let permit = SessionPermit::acquire(&self.session_active)?;
@@ -248,6 +267,7 @@ impl K2Session<'_, '_> {
                 chunk,
             )?
         };
+        self.buffers.validate_cache_contract(&self.request)?;
         let prefix = transaction.old_prefix();
         let absolute = self.request.append(
             prefix,
@@ -424,7 +444,15 @@ fn encode_tokens(
         };
         for (token, row) in tokens.iter().zip(&rows) {
             encode_full_rope(ctx, enc, token, &row.query, &row.key)?;
-            encode_store_kv(
+            let store = match token.storage() {
+                K2KvStorage::F16 => encode_store_kv,
+                K2KvStorage::Q8_0 => crate::k2_horizon_metal::compact::encode_store,
+            };
+            let attend = match token.storage() {
+                K2KvStorage::F16 => encode_attention,
+                K2KvStorage::Q8_0 => crate::k2_horizon_metal::compact::encode_attention,
+            };
+            store(
                 ctx,
                 enc,
                 token,
@@ -433,7 +461,7 @@ fn encode_tokens(
                 &row.key,
                 &row.value,
             )?;
-            encode_attention(
+            attend(
                 ctx,
                 enc,
                 token,
@@ -501,13 +529,15 @@ fn encode_readout(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionMemoryPlan {
     cache_bytes: u64,
+    storage: K2KvStorage,
 }
 
 impl SessionMemoryPlan {
-    fn new(config: &K2HorizonConfig, capacity: u32) -> Result<Self> {
-        let request = K2ShortContextPlan::new(config.clone(), 0, capacity)?;
+    fn new(config: &K2HorizonConfig, capacity: u32, storage: K2KvStorage) -> Result<Self> {
+        let request = K2ShortContextPlan::with_storage(config.clone(), 0, capacity, storage)?;
         Ok(Self {
             cache_bytes: request.arena_bytes(),
+            storage,
         })
     }
 
@@ -525,7 +555,10 @@ impl SessionMemoryPlan {
             (GgmlType::F32, vec![12288]),
             (GgmlType::F32, vec![12288]),
             (GgmlType::F32, vec![250624]),
-            (GgmlType::F16, vec![self.cache_bytes / 2]),
+            match self.storage {
+                K2KvStorage::F16 => (GgmlType::F16, vec![self.cache_bytes / 2]),
+                K2KvStorage::Q8_0 => (GgmlType::I8, vec![self.cache_bytes]),
+            },
         ]
     }
 
@@ -533,7 +566,8 @@ impl SessionMemoryPlan {
         self.specs()
             .iter()
             .map(|(dtype, shape)| {
-                shape.iter().product::<u64>() * if *dtype == GgmlType::F16 { 2 } else { 4 }
+                let (block, bytes) = dtype.storage_layout().expect("fixed session dtype");
+                shape.iter().product::<u64>() / block * bytes
             })
             .collect()
     }
@@ -556,6 +590,28 @@ struct SessionBuffers {
 }
 
 impl SessionBuffers {
+    fn validate_cache_contract(&self, request: &K2ShortContextPlan) -> Result<()> {
+        let (dtype, elements) = match request.storage() {
+            K2KvStorage::F16 => (GgmlType::F16, request.arena_bytes() / 2),
+            K2KvStorage::Q8_0 => (GgmlType::I8, request.arena_bytes()),
+        };
+        if self.cache.dtype != dtype
+            || self.cache.shape != [elements]
+            || self.cache.n_bytes() != request.arena_bytes()
+            || !self.cache.is_writable()
+        {
+            return Err(invalid(
+                "cache storage/shape does not match the immutable request plan",
+            ));
+        }
+        validate_cpu_layout(
+            self.cache.buffer.storageMode() == MTLStorageMode::Shared,
+            self.cache.offset,
+            self.cache.n_bytes(),
+            self.cache.buffer.length() as u64,
+        )
+    }
+
     fn new(ctx: &MetalContext, plan: &SessionMemoryPlan) -> Result<Self> {
         let tensors = plan
             .specs()
@@ -608,22 +664,27 @@ impl SessionBuffers {
         {
             return Err(invalid("nonfinite logits"));
         }
-        // The cache arena is privately allocated as shared F16 and every range
+        // The cache arena is privately allocated as shared storage and every range
         // derives from the same validated plan. Only newly written rows are read.
         let cache = unsafe {
             std::slice::from_raw_parts(
-                self.cache.buffer.contents().as_ptr().cast::<half::f16>(),
-                self.cache.n_elements() as usize,
+                self.cache.buffer.contents().as_ptr().cast::<u8>(),
+                self.cache.n_bytes() as usize,
             )
         };
         for layer in 0..36 {
             let ranges = token.write_ranges(layer)?;
             for range in [ranges.key, ranges.value] {
-                if cache[(range.start / 2) as usize..(range.end / 2) as usize]
-                    .iter()
-                    .any(|value| !value.is_finite())
-                {
-                    return Err(invalid(format!("nonfinite stored K/V in layer {layer}")));
+                let row = &cache[range.start as usize..range.end as usize];
+                match token.storage() {
+                    K2KvStorage::F16 => {
+                        if row.chunks_exact(2).any(|bytes| {
+                            !half::f16::from_le_bytes(bytes.try_into().unwrap()).is_finite()
+                        }) {
+                            return Err(invalid(format!("nonfinite stored K/V in layer {layer}")));
+                        }
+                    }
+                    K2KvStorage::Q8_0 => crate::k2_horizon_metal::compact::validate_row(row)?,
                 }
             }
         }
@@ -691,6 +752,8 @@ fn reconcile(ctx: &MetalContext, before: u64, price: u64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod compact_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]

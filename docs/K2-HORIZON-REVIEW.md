@@ -1081,3 +1081,51 @@ compact KV is the next storage milestone.
 Final read-only adversarial verdict: **commit-ready; no concrete blocker**. The
 selection, retained-state fix, additive records, fallback, and actual application
 checks support promotion without repeating independent qualification.
+
+## Packet 32 compact cache layout, kernels and private runtime
+
+The adversarial design jam retained symmetric Q8 as the first storage baseline and
+required byte-safe loads, immutable cache-kind plans and explicit invalid-value
+handling. `COMPACT-KV-POLICY.md` records the rules before GPU execution. Each block
+stores an LE F16 scale and 32 signed bytes without padding. The 1088-byte K or V
+row gives 78336 bytes/token across all layers, 46.875% below F16's 147456, excluding
+allocator overhead, weights, and other scratch. There is no eviction or history
+expansion. The new K2-only shader does not modify any legacy quantizer or attention
+kernel; query/output alignment is distinct from unaligned byte payload access.
+
+The quantizer checks input exponent bits before reductions/casts, uses original
+F32 scale for codes, and stores rounded F16 scale. Invalid input or scale overflow
+writes a NaN-scale/zero-payload sentinel. Scale underflow and signed-zero inputs
+produce canonical zero blocks. An initial CPU test bound incorrectly assumed the
+F32 scale itself could not underflow; its zero-block bound was corrected to original
+maximum magnitude before GPU execution, without changing encoding. Row validation
+rejects nonfinite/negative scales, -128 codes and noncanonical zero payloads.
+
+Typed plans derive all storage-specific byte ranges and preserve existing context
+guards. Private Q8 loading prices and allocates an I8 arena, not a hidden F16 cache.
+Session creation and append preflight check the complete physical cache contract
+before encoder construction. Packed scratch shares the arena through byte views.
+Every newly stored row is checked before publication; submitted failure retains
+the existing poison semantics. Materialized attention cannot select Q8. Public
+loading and all application records remain F16, with no new runtime switch.
+
+Pre-execution reviews approved the primitive and runtime gates. Both pass on M4 Max
+with the production lease, wired-memory gate and API validation. Curated quantizer
+bytes match the independent CPU policy exactly. Bounded general quantization error,
+guards, future/layer exclusion and source/cache immutability pass. Inline attention
+through 257 positions has maximum F64 error 2.312e-6, below the predeclared 2e-5 gate.
+The full-model four-position smoke first executes serial Q8, then verifies packed
+Q8 bitwise captures, complete cache and continuation; it also checks readout and
+ordered interventions, pre-graph mismatch rejection, capacity refusal, a genuine
+NaN-scale sentinel from overflow, prefix-zero poisoning, and fresh-session recovery.
+
+Seventy CPU K2 tests and CLI typechecking pass. The unchanged F16 strict 42-row test
+passes in `target/profiles/k2-oracle-68764-1789921797087492000`, with the same metrics
+as before; existing F16 forward/capture/readout controls also pass. These results
+establish storage/kernel/runtime invariants, not Q8 full-model quality or speed.
+The next step is the separately reported 256-token F16-versus-Q8 diagnostic under
+unchanged v2 metrics, never automatic default promotion or post-result retuning.
+
+Final read-only adversarial review found **no concrete blocker** in storage/runtime
+wiring and approved the bounded follow-up diagnostic. Its F16 control is native,
+not an independent implementation; that distinction remains explicit in reports.

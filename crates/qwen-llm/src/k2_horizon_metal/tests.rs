@@ -300,7 +300,7 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
     }
 }
 
-fn tensor(ctx: &MetalContext, values: &[f32], shape: &[u64]) -> MetalTensor {
+pub(super) fn tensor(ctx: &MetalContext, values: &[f32], shape: &[u64]) -> MetalTensor {
     MetalTensor::from_bytes(
         ctx,
         bytemuck::cast_slice(values),
@@ -455,7 +455,7 @@ fn gpu_q8_batch_projection_matches_singleton_bits_and_guards() {
     }
 }
 
-fn execute(ctx: &MetalContext, f: impl FnOnce(&KernelEncoder) -> Result<()>) {
+pub(super) fn execute(ctx: &MetalContext, f: impl FnOnce(&KernelEncoder) -> Result<()>) {
     let command = ctx.queue.commandBuffer().unwrap();
     let encoder = KernelEncoder::begin(&command);
     let result = f(&encoder);
@@ -469,7 +469,7 @@ fn execute(ctx: &MetalContext, f: impl FnOnce(&KernelEncoder) -> Result<()>) {
     );
 }
 
-fn read(tensor: &MetalTensor) -> Vec<f32> {
+pub(super) fn read(tensor: &MetalTensor) -> Vec<f32> {
     assert_eq!(tensor.dtype, GgmlType::F32);
     unsafe {
         std::slice::from_raw_parts(

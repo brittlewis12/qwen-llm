@@ -96,12 +96,15 @@ fn scratch_specs(rows: usize) -> Result<Vec<(GgmlType, Vec<u64>)>> {
     if !(2..=PACKED_CHUNK_TOKENS).contains(&rows) {
         return Err(invalid("packed scratch rows must fit 2..=32"));
     }
-    Ok(SessionMemoryPlan { cache_bytes: 0 }
-        .specs()
-        .into_iter()
-        .take(11)
-        .map(|(dtype, shape)| (dtype, vec![shape.iter().product::<u64>() * rows as u64]))
-        .collect())
+    Ok(SessionMemoryPlan {
+        cache_bytes: 0,
+        storage: K2KvStorage::F16,
+    }
+    .specs()
+    .into_iter()
+    .take(11)
+    .map(|(dtype, shape)| (dtype, vec![shape.iter().product::<u64>() * rows as u64]))
+    .collect())
 }
 
 pub(super) struct PackedScratch {
@@ -134,7 +137,7 @@ impl PackedScratch {
             tensors.push(tensor);
         }
         tensors.push(base.logits.view_subrange(0, base.logits.shape.clone()));
-        tensors.push(base.cache.view_subrange(0, base.cache.shape.clone()));
+        tensors.push(base.cache.view_bytes(0, base.cache.shape.clone()));
         reconcile(ctx, before, price)?;
         Ok(Self {
             buffers: SessionBuffers::from_tensors(tensors.into_iter().map(Ok))?,
@@ -171,7 +174,7 @@ impl SessionBuffers {
             slice(&self.up, 12288, &[12288], GgmlType::F32),
             slice(&self.gated, 12288, &[12288], GgmlType::F32),
             Ok(self.logits.view_subrange(0, self.logits.shape.clone())),
-            Ok(self.cache.view_subrange(0, self.cache.shape.clone())),
+            Ok(self.cache.view_bytes(0, self.cache.shape.clone())),
         ];
         Self::from_tensors(tensors.into_iter())
     }

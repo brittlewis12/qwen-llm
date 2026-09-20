@@ -42,7 +42,7 @@ impl Effort {
             )),
         }
     }
-    fn tag(self) -> &'static str {
+    pub fn tag(self) -> &'static str {
         match self {
             Self::High => "ifm|think",
             Self::Medium => "ifm|think_fast",
@@ -51,13 +51,19 @@ impl Effort {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatInput {
+    pub messages: Vec<Message>,
+    pub effort: Effort,
+}
+
 fn present_string<'de, D: Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<Option<String>, D::Error> {
     String::deserialize(d).map(Some)
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {
     pub role: String,
@@ -191,15 +197,15 @@ pub fn render(messages: &[Message], effort: Effort) -> Result<String> {
 
 #[derive(Debug, Serialize)]
 pub struct VerifiedChatProfile {
-    pub renderer: &'static str,
-    pub source_revision: &'static str,
-    pub template_sha256: &'static str,
-    pub gguf_template_sha256: &'static str,
-    pub generation_config_sha256: &'static str,
-    pub checkpoint_content_blake3: String,
-    pub tokenizer_metadata_id: String,
-    pub verification: &'static str,
-    pub reference_policy: &'static str,
+    renderer: &'static str,
+    source_revision: &'static str,
+    template_sha256: &'static str,
+    gguf_template_sha256: &'static str,
+    generation_config_sha256: &'static str,
+    checkpoint_content_blake3: String,
+    tokenizer_metadata_id: String,
+    verification: &'static str,
+    reference_policy: &'static str,
 }
 
 /// Chat eligibility is exact artifact provenance, not architecture/name/template

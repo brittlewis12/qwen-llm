@@ -1016,7 +1016,7 @@ mod tests {
         assert_eq!(request.path, "/v1/models");
     }
 
-    fn roundtrip(mut backend: MockBackend, request: &str) -> String {
+    fn roundtrip(mut backend: impl GenerationBackend + Send + 'static, request: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -1097,6 +1097,9 @@ mod tests {
         assert!(body_of(&response).contains("raw input string"));
         assert!(!body_of(&response).contains("must not generate"));
     }
+
+    #[path = "k2_chat_tests.rs"]
+    mod k2_chat;
 
     #[test]
     fn muse_non_stream_partitions_reasoning_visible_and_calls() {

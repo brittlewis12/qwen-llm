@@ -126,6 +126,7 @@ pub(crate) struct ServeRequest {
     /// Present only after the K2 family parser admits raw string input.
     pub(crate) k2_raw_input: Option<String>,
     pub(crate) k2_add_special_tokens: Option<bool>,
+    pub(crate) k2_chat: Option<qwen_llm::k2_horizon_chat::ChatInput>,
     pub(crate) instructions: Option<String>,
     pub(crate) model_request: ModelRequest,
     /// Exact executable set. Empty means no calls are executable; narrowing
@@ -168,6 +169,7 @@ impl Default for ServeRequest {
             model: String::new(),
             k2_raw_input: None,
             k2_add_special_tokens: None,
+            k2_chat: None,
             instructions: None,
             model_request: ModelRequest::default(),
             allowed_tools: Vec::new(),

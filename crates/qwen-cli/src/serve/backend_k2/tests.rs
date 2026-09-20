@@ -4,6 +4,134 @@ use serde_json::json;
 use std::io;
 
 #[test]
+#[ignore = "K2_GGUF leased production Metal chat/JSON/SSE correctness; ephemeral owned loopback only"]
+fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
+    use super::super::partition::PartitionEvent;
+    use qwen_llm::k2_horizon_chat::Effort;
+    let path = std::env::var("K2_GGUF").expect("K2_GGUF");
+    let source = GgufFile::open(&path).unwrap();
+    let invocation = crate::cli::ServeInvocation {
+        model: path.into(),
+        addr: "127.0.0.1:0".into(),
+        max_tokens: Some(8),
+        max_context_tokens: Some(384),
+        snapshot_cache_mib: 0,
+        drafter: None,
+        trace_sse: None,
+    };
+    let prepared = Prepared::new(&source, &invocation).unwrap();
+    assert!(prepared.chat_profile.is_some());
+    // Non-test dependency owns the production lease and wired-memory gate.
+    let ctx = MetalContext::new().unwrap();
+    let model = K2LoadedModel::load(&ctx, &source, 384).unwrap();
+    let mut backend = K2Backend::new(&model, prepared, "k2-chat".into());
+    let mut evidence = Vec::new();
+    for (effort, budget) in [
+        (Effort::High, 8),
+        (Effort::Medium, 8),
+        (Effort::Low, 8),
+        (Effort::Low, 128),
+    ] {
+        let body = json!({"model":"k2-chat","input":[{"role":"user","content":"What is 2+2? Answer briefly."}], "reasoning":{"effort":effort}, "max_output_tokens":budget});
+        let (req, prompt) = request(&backend, body.clone());
+        assert_eq!(
+            backend.output_protocol(&req),
+            OutputProtocol::K2Chat { effort }
+        );
+        let mut sink = Sink::default();
+        let outcome = backend.generate(&req, &prompt, &mut sink).unwrap();
+        if budget == 8 {
+            // Raw deliberately does not stop on im_end. Compare the emitted
+            // prefix only, excluding chat's counted-but-unemitted terminal ID.
+            let raw_budget =
+                outcome.usage.output_tokens - usize::from(!outcome.end.is_token_limit());
+            assert!(raw_budget > 0);
+            let (raw, raw_prompt) = request(
+                &backend,
+                json!({"model":"k2-chat","input":prompt,"max_output_tokens":raw_budget}),
+            );
+            let mut raw_sink = Sink::default();
+            let raw_outcome = backend.generate(&raw, &raw_prompt, &mut raw_sink).unwrap();
+            assert_eq!(raw_sink.bytes, sink.bytes);
+            assert!(raw_outcome.end.is_token_limit());
+            assert_eq!(raw_outcome.usage.output_tokens, raw_budget);
+            assert_eq!(raw_outcome.usage.input_tokens, outcome.usage.input_tokens);
+        }
+        let mut partition = super::super::partition_k2::K2Partition::new(effort);
+        let mut events = Vec::new();
+        partition.push(&sink.bytes, &mut events);
+        partition.finish(outcome.end, &mut events).unwrap();
+        let mut reasoning = String::new();
+        let mut visible = String::new();
+        for event in events {
+            match event {
+                PartitionEvent::Reasoning(text) => reasoning.push_str(&text),
+                PartitionEvent::Visible(text) => visible.push_str(&text),
+                PartitionEvent::ReasoningClosed => {}
+                _ => panic!("unexpected tools"),
+            }
+        }
+        for stream in [false, true] {
+            let mut body = body.clone();
+            body["stream"] = json!(stream);
+            let response = wire_request(&mut backend, body);
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            let body = response.split_once("\r\n\r\n").unwrap().1;
+            let envelope = if stream {
+                let block = body
+                    .split("\n\n")
+                    .find(|b| {
+                        b.starts_with("event: response.incomplete\n")
+                            || b.starts_with("event: response.completed\n")
+                    })
+                    .unwrap();
+                let data = block
+                    .lines()
+                    .find_map(|l| l.strip_prefix("data: "))
+                    .unwrap();
+                serde_json::from_str::<serde_json::Value>(data).unwrap()["response"].clone()
+            } else {
+                serde_json::from_str::<serde_json::Value>(body).unwrap()
+            };
+            assert_eq!(envelope["output"][0]["content"][0]["text"], reasoning);
+            if visible.is_empty() {
+                assert_eq!(envelope["output"].as_array().unwrap().len(), 1);
+            } else {
+                assert_eq!(envelope["output"][1]["content"][0]["text"], visible);
+            }
+            assert_eq!(
+                envelope["usage"]["input_tokens"],
+                outcome.usage.input_tokens
+            );
+            assert_eq!(
+                envelope["usage"]["output_tokens"],
+                outcome.usage.output_tokens
+            );
+            assert_eq!(envelope["reasoning"], json!({"effort":effort}));
+            evidence
+                .push(json!({"effort":effort,"budget":budget,"stream":stream,"response":envelope}));
+            drop(model.create_session(0).unwrap());
+        }
+        let mut aborted = Sink {
+            abort_tick: Some(2),
+            ..Sink::default()
+        };
+        assert!(matches!(
+            backend.generate(&req, &prompt, &mut aborted),
+            Err(BackendFailure::Aborted(_))
+        ));
+        drop(model.create_session(0).unwrap());
+    }
+    if let Ok(path) = std::env::var("K2_CHAT_HTTP_EVIDENCE") {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&json!({"status":"passed","cases":evidence})).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn startup_limits_use_declared_context_and_explicit_residency_no_cache_or_drafter() {
     assert_eq!(limits(8192, Some(32), Some(8), 0, false).unwrap(), (32, 8));
     assert_eq!(

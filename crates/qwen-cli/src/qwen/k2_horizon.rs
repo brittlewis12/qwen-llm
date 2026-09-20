@@ -9,11 +9,11 @@ use qwen_llm::tokenizer::NativeTokenizer;
 pub(crate) fn execution_capabilities() -> serde_json::Value {
     serde_json::json!({
         "run": {"status": "supported", "scope": "raw_or_verified_no_tools_chat", "requires_profile": "dense_7b",
-            "chat_profile": "verified_final_artifact", "output": "literal_generated_text_unpartitioned",
+            "chat_profile": "verified_final_artifact", "output": "raw_literal_or_chat_reasoning_stderr_answer_stdout",
             "capacity_policy": "checkpoint_context_and_device_memory", "native_tokenizer": true, "kv_storage": "f16"},
-        "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_only",
+        "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_or_verified_chat_items",
             "capacity_policy": "checkpoint_context_and_device_memory", "snapshot_cache": false, "tools": false,
-            "chat": false, "special_token_control": "x_k2.add_special_tokens"},
+            "chat": "verified_final_artifact_only", "special_token_control": "x_k2.add_special_tokens_raw_only"},
         "bench": {"status": "partial", "command": "qwen-bench k2-request",
             "scope": "raw_greedy_request_wall", "capacity_policy": "checkpoint_context_and_device_memory",
             "llama_bench_comparable": false},
@@ -32,8 +32,8 @@ pub(crate) fn chat_projection(gguf: &GgufFile) -> serde_json::Value {
                 "tools":{"status":"unsupported","code":"k2_tools_unimplemented","message":"K2 tool rendering and parsing are not enabled"}},
             "reasoning":{"levels":["high","medium","low"],"fallback":"high",
                 "no_thinking":{"status":"unsupported","code":"k2_no_non_thinking_mode","message":"IFM releases no non-thinking template transition"},
-                "thinking":{"status":"supported"},"scope":"run_input_template_only_not_output_partitioning"},
-            "template":{"status":"identified","rendered_as":chat::RENDERER,"profile":profile,"scope":"run_no_tools_only"}
+                "thinking":{"status":"supported"},"scope":"run_and_serve_no_tools"},
+            "template":{"status":"identified","rendered_as":chat::RENDERER,"profile":profile,"scope":"run_and_serve_no_tools"}
         }),
         Err(error) => serde_json::json!({"template":{"status":"unverified","rendered_as":null,
             "code":"chat_profile_unverified","message":error.to_string()}}),
@@ -91,7 +91,7 @@ fn prepare_input(
         };
         let text = render_chat_input(run.acquire_input()?, effort)?;
         let record = serde_json::json!({"profile":profile,"reasoning_effort":effort,"stops":chat::CHAT_STOPS,
-            "bos_owner":"native_tokenizer","output":"literal_generated_text_unpartitioned"});
+            "bos_owner":"native_tokenizer","output":"reasoning_stderr_answer_stdout"});
         return Ok((text, PromptSource::Messages, Some(record)));
     }
     let (text, source) = prepare_raw(invocation, args, explicit)?;
@@ -219,14 +219,30 @@ pub(crate) fn run_raw(
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
+    let mut stderr = std::io::stderr();
+    let mut partition = chat_record
+        .as_ref()
+        .map(|record| {
+            chat::Effort::parse(record["reasoning_effort"].as_str())
+                .map(crate::serve::partition_k2::K2Partition::new)
+        })
+        .transpose()?;
+    let mut visible = false;
     let generation = generate_serial(
         logits,
         args.tokens,
         &stops,
         &mut sampler,
         |token| {
-            stdout.write_all(tokenizer.try_decode_piece_bytes_exact(token)?)?;
-            stdout.flush()?;
+            let bytes = tokenizer.try_decode_piece_bytes_exact(token)?;
+            if let Some(partition) = &mut partition {
+                let mut events = Vec::new();
+                partition.push(bytes, &mut events);
+                write_chat_events(&events, &mut stdout, &mut stderr, &mut visible)?;
+            } else {
+                stdout.write_all(bytes)?;
+                stdout.flush()?;
+            }
             Ok(())
         },
         |token| {
@@ -234,7 +250,27 @@ pub(crate) fn run_raw(
             session.append(&[token]).map_err(anyhow::Error::from)
         },
     )?;
-    if !generation.tokens.is_empty() {
+    if let Some(partition) = partition {
+        let mut events = Vec::new();
+        let reasoning_closed = partition.closed();
+        if let Some(record) = &mut chat_record {
+            record["reasoning_closed"] = serde_json::json!(partition.closed());
+        }
+        let result = partition.finish(
+            crate::serve::outcome::generation_end(&generation).1,
+            &mut events,
+        );
+        write_chat_events(&events, &mut stdout, &mut stderr, &mut visible)?;
+        writeln!(stderr)?;
+        result.map_err(|e| anyhow::anyhow!(e.message))?;
+        if !reasoning_closed {
+            writeln!(
+                stderr,
+                "k2_horizon: incomplete response: token budget exhausted before reasoning closed; no final answer"
+            )?;
+        }
+    }
+    if visible || (chat_record.is_none() && !generation.tokens.is_empty()) {
         writeln!(stdout)?;
         stdout.flush()?;
     }
@@ -280,6 +316,29 @@ pub(crate) fn run_raw(
             }),
         )?;
     }
+    Ok(())
+}
+
+fn write_chat_events(
+    events: &[crate::serve::partition::PartitionEvent],
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    visible: &mut bool,
+) -> Result<()> {
+    use crate::serve::partition::PartitionEvent;
+    for event in events {
+        match event {
+            PartitionEvent::Reasoning(text) => stderr.write_all(text.as_bytes())?,
+            PartitionEvent::Visible(text) => {
+                stdout.write_all(text.as_bytes())?;
+                *visible |= !text.is_empty();
+            }
+            PartitionEvent::ReasoningClosed => {}
+            PartitionEvent::FunctionCall(_) => bail!("K2 no-tools partition produced a tool call"),
+        }
+    }
+    stdout.flush()?;
+    stderr.flush()?;
     Ok(())
 }
 
@@ -421,7 +480,10 @@ mod tests {
         }
         assert_eq!(capabilities["local_fitting"]["status"], "unsupported");
         assert_eq!(capabilities["serve"]["status"], "partial");
-        assert_eq!(capabilities["serve"]["input"], "raw_string_only");
+        assert_eq!(
+            capabilities["serve"]["input"],
+            "raw_string_or_verified_chat_items"
+        );
         assert_eq!(capabilities["serve"]["snapshot_cache"], false);
         assert_eq!(capabilities["serve"]["tools"], false);
         assert_eq!(capabilities["bench"]["status"], "partial");

@@ -5,8 +5,8 @@ real device/memory admission, not the historical 256-forward or 7168-position
 planner gates. The numerical evidence below remains scoped to its measured lengths;
 removing a product cap does not convert short-context tests into full-context proof.
 The materialized test backend alone retains its 7168-position score-scratch limit.
-F16 remains the application cache. Local no-tools chat is bound to the verified
-final artifact and pinned IFM renderer; HTTP remains raw-only. Raw mode deliberately
+F16 remains the application cache. CLI and HTTP no-tools chat are bound to the
+verified final artifact and pinned IFM renderer. Raw mode deliberately
 does not guess a chat/tool contract for unknown checkpoints.
 
 ## No-tools template checks
@@ -33,9 +33,29 @@ uv run scripts/reference/k2/check_chat_cli.py --binary target/debug/qwen \
 The final script is opt-in GPU execution: serial CLI children take their own
 production leases and wired-memory gates with API validation. It checks all three
 efforts, assistant history, system/Unicode input, user/messages equivalence,
-rendered-input token hashes, identical short outputs versus serialized raw controls,
-profile records, and pre-GPU capability refusals. This does not establish answer
-quality, output reasoning partitioning, tools or HTTP chat. See `docs/CLI-UX.md`.
+rendered-input token hashes, unchanged short token fingerprints versus serialized
+raw controls, reasoning stderr/final stdout partitioning, incomplete diagnostics,
+profile records, a completed answer, and pre-GPU capability refusals. This does not
+establish answer quality or tools. See `docs/CLI-UX.md`.
+
+The HTTP check uses the production library lease/memory gate and owned ephemeral
+loopback sockets, never a shared server. Pass an absolute evidence path because
+Cargo tests run from the crate directory:
+
+```sh
+K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
+K2_CHAT_HTTP_EVIDENCE="$PWD/target/profiles/k2-chat-http-new.json" \
+cargo --config 'profile.test.package.blake3.opt-level=3' \
+  --config 'profile.test.package.sha2.opt-level=3' test -p qwen-cli --bin qwen \
+  serve::backend_k2::tests::gpu_verified_k2_chat_http_matches_raw_and_releases_sessions \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+It covers all effort levels, JSON/SSE partition agreement, incomplete reasoning,
+completed answers, stop-aware raw-prefix controls, aborts and session reacquisition.
+Add `--http-evidence target/profiles/k2-chat-http-new.json` to `check_chat_cli.py`
+to compare completed HTTP/CLI text and token counts. These remain wiring checks,
+not sustained-service, full-context or cross-checkpoint qualification.
 
 This standalone test harness links the IFM llama.cpp fork at
 `42adf019f76013dac873b5b43950d54d5ab27216`. It is not a production dependency,

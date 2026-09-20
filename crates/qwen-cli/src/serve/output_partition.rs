@@ -48,6 +48,9 @@ impl GenerationEnd {
 pub(crate) enum OutputProtocol {
     /// Literal completion text: UTF-8 assembly only, no control-marker parsing.
     RawText,
+    K2Chat {
+        effort: qwen_llm::k2_horizon_chat::Effort,
+    },
     /// `<think>`-partitioned text with an optional tool block; the Qwen
     /// families and DeepSeek V4 share this shape and differ in grammar.
     Qwen {
@@ -64,6 +67,7 @@ pub(crate) enum OutputProtocol {
 
 pub(crate) enum OutputPartition {
     Raw(Utf8Assembler),
+    K2(super::partition_k2::K2Partition),
     Qwen(QwenOutputPartition),
     Muse(MuseAtemPartition),
 }
@@ -72,6 +76,9 @@ impl OutputPartition {
     pub(crate) fn new(protocol: OutputProtocol) -> Self {
         match protocol {
             OutputProtocol::RawText => Self::Raw(Utf8Assembler::new()),
+            OutputProtocol::K2Chat { effort } => {
+                Self::K2(super::partition_k2::K2Partition::new(effort))
+            }
             OutputProtocol::Qwen {
                 preopened_reasoning,
                 parse_tools,
@@ -102,6 +109,7 @@ impl OutputPartition {
                 }
             }
             Self::Qwen(partition) => partition.push(bytes, events),
+            Self::K2(partition) => partition.push(bytes, events),
             Self::Muse(partition) => partition.push(bytes, events),
         }
     }
@@ -124,6 +132,7 @@ impl OutputPartition {
                 Ok(())
             }
             Self::Muse(partition) => partition.finish(end, events),
+            Self::K2(partition) => partition.finish(end, events),
         }
     }
 
@@ -137,6 +146,7 @@ impl OutputPartition {
             }
             Self::Qwen(partition) => partition.abort(events),
             Self::Muse(partition) => partition.abort(events),
+            Self::K2(partition) => partition.abort(events),
         }
     }
 }

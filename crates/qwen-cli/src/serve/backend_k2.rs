@@ -14,6 +14,7 @@ pub(super) struct Prepared {
     tokenizer: NativeTokenizer,
     pub capacity: usize,
     default_max: usize,
+    chat_profile: Option<render_k2::ChatCapability>,
 }
 
 fn limits(
@@ -67,6 +68,13 @@ impl Prepared {
             tokenizer,
             capacity,
             default_max,
+            chat_profile: match render_k2::ChatCapability::verify(gguf) {
+                Ok(profile) => Some(profile),
+                Err(error) => {
+                    eprintln!("K2 serve chat unavailable; raw requests remain supported: {error}");
+                    None
+                }
+            },
         })
     }
 }
@@ -96,16 +104,26 @@ impl GenerationBackend for K2Backend<'_, '_> {
         &self.model_id
     }
     fn parse_request(&self, body: &serde_json::Value) -> Result<ServeRequest, ServeError> {
-        render_k2::parse_request(body)
+        render_k2::parse_with_profile(body, self.prepared.chat_profile.as_ref())
     }
     fn normalize_request(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
-        render_k2::normalize(request, self.prepared.default_max, self.prepared.capacity)
+        render_k2::normalize_with_profile(
+            request,
+            self.prepared.default_max,
+            self.prepared.capacity,
+            self.prepared.chat_profile.as_ref(),
+        )
     }
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
-        render_k2::render(request)
+        render_k2::render_with_profile(request, self.prepared.chat_profile.as_ref())
     }
-    fn output_protocol(&self, _: &ServeRequest) -> OutputProtocol {
-        OutputProtocol::RawText
+    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
+        match (&self.prepared.chat_profile, &request.k2_chat) {
+            (Some(_), Some(chat)) => OutputProtocol::K2Chat {
+                effort: chat.effort,
+            },
+            _ => OutputProtocol::RawText,
+        }
     }
 
     fn generate(
@@ -114,6 +132,12 @@ impl GenerationBackend for K2Backend<'_, '_> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        render_k2::render_with_profile(request, self.prepared.chat_profile.as_ref())?;
+        let stops: &[i32] = if request.k2_chat.is_some() {
+            &qwen_llm::k2_horizon_chat::CHAT_STOPS
+        } else {
+            &[1]
+        };
         let maximum = request
             .max_output_tokens
             .unwrap_or(self.prepared.default_max);
@@ -163,7 +187,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
         let generation = crate::generate_serial(
             logits,
             maximum,
-            &[1],
+            stops,
             &mut sampler,
             |token| {
                 let bytes = self

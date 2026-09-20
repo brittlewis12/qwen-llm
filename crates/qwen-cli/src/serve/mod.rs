@@ -23,6 +23,7 @@ pub(crate) mod http;
 pub(crate) mod outcome;
 pub(crate) mod output_partition;
 pub(crate) mod partition;
+pub(crate) mod partition_k2;
 pub(crate) mod partition_muse;
 pub(crate) mod render_ds4;
 pub(crate) mod render_k2;

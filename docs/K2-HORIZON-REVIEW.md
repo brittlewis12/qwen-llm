@@ -1334,3 +1334,62 @@ engine and 25 CLI tests pass under K2 filters, plus the opt-in CPU native-token/
 artifact-identity check. All-target checking remains warning-free. The next packet
 is K2-specific incremental reasoning partitioning and reuse of this renderer for
 HTTP chat; tool support remains a separate, unadvertised capability.
+
+## Packet 36 verified HTTP chat and shared reasoning partition
+
+The family-local HTTP parser now accepts array input only with an owned opaque
+chat capability verified once at startup. String input retains the raw contract.
+Unknown artifacts and verification errors remain raw-only with a diagnostic.
+The strict original-wire allowlist runs before common control parsing; a neutral
+placeholder deliberately avoids Qwen's transcript-specific marker normalization.
+Only no-tools system/user/assistant history is admitted, with explicit preceding
+reasoning (including empty) for assistants. Replayed generic reasoning uses IFM's
+base/high history alias; selected effort applies to the new generation suffix.
+Completed emitted items replay, including empty summary/annotations metadata;
+incomplete history and unsupported metadata reject rather than disappear.
+
+CLI and HTTP share a bounded incremental UTF-8 partitioner. It starts in reasoning,
+optionally removes one matching opener at byte zero, and switches to visible text
+at the first matching effort-specific close. Later/wrong-effort/Qwen/tool strings
+remain literal. Empty reasoning emits an item. Token limits remain incomplete;
+EOS/im_end before close fail; abort discards ambiguous pending bytes without a
+synthetic completion. Chat stops remain `[1,250019]`, raw `[1]`. CLI reasoning goes
+to stderr and answers to stdout; unfinished reasoning emits an explicit mandatory
+diagnostic and `reasoning_closed:false` in optional stats, with normal budget exit.
+
+Source audit: vLLM `k2_horizon_reasoning_parser.py` at
+`1f76efaa2195485b92cb04215aba6fb8f5fe523d` confirms the three effort tags, preopened
+streaming reasoning and optional leading opener. This no-tools subset intentionally
+does not inherit its tool-marker fallback or batch no-close-as-visible behavior.
+No complete vLLM equivalence or duplicate-JSON-key rejection is claimed.
+
+Adversarial review before execution found two issues: public profile fields could
+be forged by an internal caller, and CLI incomplete reasoning lacked a mandatory
+user-visible diagnostic. Both were corrected: profile fields are private, serving
+owns an opaque capability with a test-only mock constructor, and incomplete CLI
+reasoning is explicitly diagnosed. Follow-up review approved the leased smoke.
+
+The first actual test correctly exposed a bad test assumption: low-effort chat
+reached im_end within eight samples, whereas raw deliberately emitted that marker.
+The comparison now uses chat's emitted prefix, excluding its counted terminal ID;
+production stop behavior was not changed. The next run passed behavioral checks
+but failed writing a relative evidence path from Cargo's crate working directory.
+The absolute-path rerun passes and retains
+`target/profiles/k2-chat-http-v3.json`: all three efforts, eight JSON/SSE responses,
+high/medium incomplete reasoning, low-effort completed answers, raw-prefix controls,
+abort isolation and session reacquisition. No foreign server was started/stopped.
+
+`target/profiles/k2-chat-cli-v3` passes all-effort/history/Unicode/input-token oracle
+controls, unchanged short raw token fingerprints, stderr/stdout partitioning,
+incomplete diagnostics, refusal before GPU, and completed CLI/HTTP answer/token
+count parity. Both paths use production-exclusive leases, the real wired-memory
+gate, and Metal API validation. These are wiring and termination checks, not new
+answer-quality, tool, full-context or performance claims. F16 KV remains unchanged.
+
+The obsolete chronological plan is replaced by a concise current-scope/remaining
+work map; this review record retains the historical failures and decisions.
+
+Closure adversarial verdict: **commit-ready, no concrete correctness or merge
+blocker**. Final checks pass: 74 engine tests under `k2_`, 19 qwen K2 tests,
+127 serving CPU regressions, warning-free all-target checking, and clean diff
+whitespace. Ignored GPU/research suites were not silently counted as executed.

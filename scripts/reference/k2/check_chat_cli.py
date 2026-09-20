@@ -18,6 +18,7 @@ def main():
     p.add_argument("--binary", required=True, type=Path)
     p.add_argument("--model", required=True, type=Path)
     p.add_argument("--output", required=True, type=Path)
+    p.add_argument("--http-evidence", type=Path)
     args = p.parse_args()
     binary, model = args.binary.resolve(strict=True), args.model.resolve(strict=True)
     output = args.output.absolute()
@@ -50,7 +51,10 @@ def main():
     info = json.loads(run("info", ["info", "--json", "-m", model], gpu=False).stdout)
     assert info["capabilities"]["template"]["status"] == "identified"
     assert info["capabilities"]["reasoning"]["levels"] == ["high", "medium", "low"]
-    assert info["capabilities"]["execution"]["serve"]["chat"] is False
+    assert (
+        info["capabilities"]["execution"]["serve"]["chat"]
+        == "verified_final_artifact_only"
+    )
     profile = info["capabilities"]["template"]["profile"]
     assert profile["template_sha256"] == fixture["template_sha256"]
     assert profile["generation_config_sha256"] == fixture["generation_config_sha256"]
@@ -104,12 +108,72 @@ def main():
         raw_doc = json.loads(raw_stats.read_bytes())
         # The short corpus must not reach chat's extra stop; otherwise this is not
         # a like-for-like output control and the script must report that fact.
-        assert rendered.stdout == raw.stdout
+        tag = {
+            "high": "ifm|think",
+            "medium": "ifm|think_fast",
+            "low": "ifm|think_faster",
+        }[case["reasoning_effort"]]
+        raw_text = raw.stdout.removesuffix(b"\n").decode("utf-8", errors="replace")
+        raw_text = raw_text.removeprefix(f"<{tag}>")
+        reasoning, closed, visible = raw_text.partition(f"</{tag}>")
+        assert diagnostic["reasoning_closed"] == bool(closed)
+        assert diagnostic["output"] == "reasoning_stderr_answer_stdout"
+        assert rendered.stdout == (visible + "\n" if visible else "").encode()
+        assert reasoning.encode() in rendered.stderr
+        if not closed:
+            assert (
+                b"incomplete response: token budget exhausted before reasoning closed"
+                in rendered.stderr
+            )
         assert document["output_fingerprint"] == raw_doc["output_fingerprint"]
         assert "chat" not in raw_doc["diagnostics"]["k2_horizon"]
         if name == "effort-high":
             user = run("user", base + ["--user", case["messages"][0]["content"]])
             assert user.stdout == rendered.stdout
+    completed_stats = output / "completed.stats.jsonl"
+    completed = run(
+        "completed",
+        [
+            "run",
+            "-m",
+            model,
+            "-n",
+            "128",
+            "--temp",
+            "0",
+            "--user",
+            "What is 2+2? Answer briefly.",
+            "--reasoning-effort",
+            "low",
+            "--request-stats-jsonl",
+            completed_stats,
+        ],
+    )
+    completed_doc = json.loads(completed_stats.read_bytes())
+    assert (
+        completed_doc["diagnostics"]["k2_horizon"]["chat"]["reasoning_closed"] is True
+    )
+    assert completed.stdout.strip() == b"4"
+    assert b"incomplete response" not in completed.stderr
+    if args.http_evidence:
+        evidence = json.loads(args.http_evidence.read_bytes())
+        assert evidence["status"] == "passed"
+        for case in evidence["cases"]:
+            if case["effort"] == "low" and case["budget"] == 128:
+                response = case["response"]
+                assert response["status"] == "completed"
+                assert (
+                    completed.stdout
+                    == (response["output"][1]["content"][0]["text"] + "\n").encode()
+                )
+                assert (
+                    completed_doc["usage"]["input_tokens"]
+                    == response["usage"]["input_tokens"]
+                )
+                assert (
+                    completed_doc["usage"]["output_tokens"]
+                    == response["usage"]["output_tokens"]
+                )
     for name, options, error in [
         ("no-thinking", ["--user", "-", "--no-thinking"], "no released --no-thinking"),
         (
@@ -140,8 +204,8 @@ def main():
         "status": "passed",
         "scope": "verified_final_no_tools_cli_template_and_raw_controls",
         "profile": profile,
-        "http_chat": False,
-        "output_partitioning": False,
+        "http_completed_parity": args.http_evidence is not None,
+        "output_partitioning": True,
         "performance_claim": False,
     }
     (output / "summary.json").write_text(json.dumps(report, indent=2))

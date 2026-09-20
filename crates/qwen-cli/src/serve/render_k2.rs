@@ -1,7 +1,14 @@
-//! Completion-style raw subset of /v1/responses, never a chat template adapter.
+//! Raw completions and artifact-authorized no-tools IFM chat.
 use super::items::{ServeError, ServeRequest};
 use qwen_llm::sampling::SamplingConfig;
 use serde_json::Value;
+
+mod chat;
+#[cfg(test)]
+pub(crate) use chat::tests::mock_profile;
+pub(crate) use chat::{
+    ChatCapability, normalize_with_profile, parse_with_profile, render_with_profile,
+};
 
 fn invalid(param: &'static str, message: impl Into<String>) -> ServeError {
     ServeError::invalid_request(Some(param), message)
@@ -92,6 +99,14 @@ pub(crate) fn normalize(
     capacity: usize,
 ) -> Result<(), ServeError> {
     render(request)?;
+    normalize_controls(request, default_max, capacity)
+}
+
+fn normalize_controls(
+    request: &mut ServeRequest,
+    default_max: usize,
+    capacity: usize,
+) -> Result<(), ServeError> {
     let maximum = *request.max_output_tokens.get_or_insert(default_max);
     if maximum == 0 || maximum > capacity {
         return Err(invalid(

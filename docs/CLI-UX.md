@@ -331,11 +331,15 @@ end-of-message 250019, as specified by the pinned upstream generation config.
 Raw completion still stops on EOS 1 only and keeps `--no-special-tokens` semantics.
 No history is stripped or summarized.
 
-This packet emits literal generated text: output begins inside the selected open
-thinking block and may include its closing marker. It does not yet partition
-reasoning from the final answer. HTTP serving, request benchmarks and lens inputs
-remain raw-only; tools are not enabled. Upstream sampling recommendations shown
-above are explicit options, not a change to the existing CLI defaults.
+Chat sends reasoning to stderr and the final answer to stdout, removing the first
+matching effort-specific closing marker and an optional opener at byte zero.
+Later marker-like text remains literal; tools are never executed. Exhausting the
+budget inside reasoning leaves stdout empty and prints an explicit incomplete
+diagnostic (normal token-budget exit status, not a completed-answer claim).
+EOS before the reasoning close is a protocol error. Raw CLI output is unchanged.
+HTTP chat uses the same partitioner (see `SERVE.md#k2-horizon-verified-chat`).
+Benchmarks and lens inputs remain raw-only. Upstream sampling recommendations
+shown above are explicit options, not a change to the existing CLI defaults.
 
 Chat preparation and `qwen info --json` hash retained checkpoint bytes to verify
 the profile. This is read-only CPU work but can be expensive, especially in a debug
@@ -345,7 +349,7 @@ the native renderer follows upstream byte fixtures, never executes embedded Jinj
 The upstream generation-config digest is reference provenance, not a GGUF field.
 The conversion's source revision remains a publisher declaration, not proof of
 BF16-to-quantized fidelity. Request stats record the verified profile, selected
-effort, stops, BOS ownership and rendered-input token digest.
+effort, stops, BOS ownership, rendered-input token digest and `reasoning_closed`.
 
 ## Validation gate
 

@@ -17,6 +17,7 @@ pub(crate) mod backend;
 pub(crate) mod backend_ds4;
 pub(crate) mod backend_muse;
 pub(crate) mod backend_qwen4exp;
+pub(crate) mod decode_loop;
 pub(crate) mod events;
 pub(crate) mod http;
 pub(crate) mod outcome;

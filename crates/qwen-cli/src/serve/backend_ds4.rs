@@ -21,6 +21,7 @@
 //! reports headless generation to the transport (S3-1).
 
 use super::backend::request_sampler;
+use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
 use super::output_partition::{OutputProtocol, ToolGrammar};
@@ -36,7 +37,6 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::sampling::Sampler;
 use qwen_llm::tokenizer::Tokenizer;
-use std::io;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -200,19 +200,6 @@ impl DeepSeekV4Backend {
             model_content_id,
         })
     }
-
-    fn encode(&self, prompt: &str) -> Result<Vec<u32>, ServeError> {
-        let ids = self
-            .tokenizer
-            .encode(prompt, false)
-            .map_err(|error| ServeError::server_error(format!("tokenize prompt: {error}")))?;
-        ids.into_iter()
-            .map(|token| {
-                crate::checked_token_id(token, self.vocab_size, "prompt")
-                    .map_err(|error| ServeError::server_error(error.to_string()))
-            })
-            .collect()
-    }
 }
 
 fn stop_reason_is_token_limit(generation: &crate::GenerationResult) -> bool {
@@ -259,45 +246,26 @@ impl GenerationBackend for DeepSeekV4Backend {
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
-        if max_tokens == 0 {
-            return Err(ServeError::invalid_request(
-                Some("max_output_tokens"),
-                "max_output_tokens must be >= 1",
-            )
-            .into());
-        }
         // Sampling validation precedes tokenization, admission, residency
         // transfer, session allocation, and all model execution.
         let sampler = request_sampler(request)?;
         let tokenize_t0 = Instant::now();
-        let prompt_ids = self.encode(prompt)?;
+        let prompt_ids = decode_loop::encode_checked(
+            &self.tokenizer,
+            prompt,
+            false,
+            self.vocab_size,
+            "DeepSeek V4",
+        )?;
         let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
-        if prompt_ids.is_empty() {
-            return Err(ServeError::invalid_request(
-                Some("input"),
-                "prompt tokenized to zero tokens",
-            )
-            .into());
-        }
-        // Forward-budget admission (spec truncation:"disabled" semantics).
-        let required = crate::required_forwards(
+        // Forward-budget admission (spec truncation:"disabled" semantics):
+        // the startup budget is at most the promoted capacity.
+        decode_loop::required_forwards(
             "DeepSeek V4",
             prompt_ids.len(),
             max_tokens,
-            Some(crate::DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
-        )
-        .map_err(|error| ServeError::invalid_request(None, error.to_string()))?;
-        if required > self.session_capacity.forward_limit() {
-            return Err(ServeError::invalid_request(
-                Some("max_output_tokens"),
-                format!(
-                    "request needs {required} forwards, beyond this server's budget {} \
-                     (raise --max-context-tokens at startup)",
-                    self.session_capacity.forward_limit(),
-                ),
-            )
-            .into());
-        }
+            self.session_capacity.forward_limit(),
+        )?;
 
         let residency = self.residency.take().ok_or_else(|| {
             // Unreachable unless a prior request poisoned the slot; a server
@@ -456,49 +424,24 @@ impl DeepSeekV4Backend {
                 ServeError::server_error(format!("invalid stop token: {error}"))
             })?;
         }
-        let mut abort: Option<io::Error> = None;
-        let tokenizer = &self.tokenizer;
         let ctx = &self.ctx;
         let vocab_size = self.vocab_size;
-        let generation = {
-            let abort = &mut abort;
-            crate::generate_serial(
+        let generation = decode_loop::decode_serial(
+            decode_loop::DecodeRequest {
+                family: "DeepSeek V4",
                 logits,
                 max_tokens,
-                &stop_tokens,
-                sampler,
-                |token| {
-                    let bytes = tokenizer
-                        .try_decode_piece_bytes_exact(token)
-                        .with_context(|| format!("decode token {token}"))?;
-                    // `tick` after every piece: a buffered tool block emits
-                    // no partition events, so `piece` alone would not
-                    // observe a disconnect until the block closes.
-                    sink.piece(bytes)
-                        .and_then(|()| sink.tick())
-                        .map_err(|error| {
-                            *abort = Some(error);
-                            anyhow::anyhow!("client disconnected during decode")
-                        })
-                },
-                |token| {
-                    let token = crate::checked_token_id(token, vocab_size, "generated")?;
-                    session
-                        .forward_token(ctx, token)
-                        .context("decode DeepSeek V4 token")?;
-                    crate::copy_deepseek_v4_logits(session, vocab_size, "continuing")
-                },
-            )
-        };
-        let generation = match generation {
-            Ok(generation) => generation,
-            Err(error) => {
-                return Err(match abort {
-                    Some(io_error) => BackendFailure::Aborted(io_error),
-                    None => ServeError::server_error(format!("decode: {error:#}")).into(),
-                });
-            }
-        };
+                stop_tokens: &stop_tokens,
+                vocab_size,
+            },
+            sampler,
+            &self.tokenizer,
+            sink,
+            |token| {
+                session.forward_token(ctx, token)?;
+                crate::copy_deepseek_v4_logits(session, vocab_size, "continuing")
+            },
+        )?;
         // Completed-turn capture: the next turn's history extends this exact
         // token prefix (render_ds4 preserves reasoning verbatim for that
         // reason), so cache it under prompt + consumed generated tokens.

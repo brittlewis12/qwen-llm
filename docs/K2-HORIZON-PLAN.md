@@ -25,9 +25,12 @@ guarded run/bench/lens now select it when all 252 block projections are Q8 and
 lcpp is enabled, with explicit topology records and serial fallback otherwise.
 Serving remains per-token for cancellation. Application KV remains F16. A private
 compact Q8 cache now allocates 78336 bytes/token (46.875% less logical KV) with
-byte-safe inline attention and passing primitive/transaction/lens controls; its
-256-token quality diagnostic and any promotion remain separate. Longer-context
-qualification remains outstanding. See review packets 17-32
+byte-safe inline attention and passing primitive/transaction/lens controls. Its
+256-token native-F16 comparison fails unchanged v2 quality gates on 808/1088 rows
+and 8/16 captures; all 64 trajectory predictors agree, but seven teacher-forced
+top-1 choices differ. No Q8 promotion or gate relaxation follows. The next bounded
+product packet is CLI forward interventions on the existing graph, not quantizer
+tuning. Longer-context qualification remains outstanding. See review packets 17-33
 for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied

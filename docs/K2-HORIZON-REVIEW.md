@@ -1129,3 +1129,54 @@ unchanged v2 metrics, never automatic default promotion or post-result retuning.
 Final read-only adversarial review found **no concrete blocker** in storage/runtime
 wiring and approved the bounded follow-up diagnostic. Its F16 control is native,
 not an independent implementation; that distinction remains explicit in reports.
+
+## Packet 33 compact-cache quality diagnostic (failed envelope, no promotion)
+
+Pre-execution adversarial review found no blocker in the bounded native F16/Q8
+comparison. The run completed under the production lease, actual wired-memory
+gate, and Metal API validation on the pinned final Q8-weight checkpoint. Controls
+and candidate use separate model lifetimes; this is a native self-comparison on
+previously seen v2 fixtures, not an independent implementation or new holdout.
+Artifacts: `target/profiles/k2-compact-diagnostic-70232-1789922651144287000`.
+
+The 1088 compared rows comprise four 256-token teacher-forced cases and four
+16-predictor F16-derived mathematical trajectories (visible lengths 241..256,
+EOS-inclusive). Sixteen post-block captures cover layers 0/11/23/35. Frozen v2
+numerical, ranking and capture gates are reused without edits. The test's success
+means hard invariants passed; its summary explicitly says the quality envelope
+**failed**: 808 rows (762 teacher-forced, 46 trajectory) and 8 capture sites fail.
+Seven teacher-forced top-1 choices disagree, all beyond the two-sided regret
+allowance. All 64 trajectory predictors agree exactly, which does not erase their
+46 numerical failures or establish arbitrary free-generation equivalence.
+
+Worst row metrics: absolute error 6.586494, RMSE 1.138811, cosine 0.9633473,
+centered RMSE 0.818272, TV 0.0562574 and reference-to-candidate KL 0.00687541.
+Capture relative L2 reaches 0.0581351 and cosine falls to 0.9985846. Gate failure
+counts overlap: TV 770, KL 461, centered RMSE 64, RMSE 46, top-1 7, absolute error
+13, cosine 12. This is measurable quantization drift, not a quality or speed win.
+
+All within-Q8 serial/split/whole logit, capture and complete-cache bitwise checks
+pass, with poisoned future storage, identity imported readout and capacity refusal.
+The actual logical arena at capacity 256 shrinks from 37748736 to 20054016 bytes;
+Metal's allocator-reported `allocatedSize` matches those values in this run.
+Observed session allocation deltas are separately 38993920 and 21299200 bytes.
+These are storage/allocation observations, not proof of total physical residency.
+
+The read-only inspector checks pinned identities, selected corpus/base coordinates,
+input/control/capture digests, protocol headers/extents, metric coverage, finiteness,
+summary counts and allocation sizes. It reports recorded metrics, not recomputed
+candidate logits. Adversarial review caught missing standalone provenance checks
+for model/tokenizer/compact-policy identity and selected bases; these were added
+with CPU negative controls before checkpoint. The `k2` CPU filter passes 76 tests
+(including incidental name matches); 31 opt-in tests remain ignored.
+
+F16 stays the application default. No quantizer change, tolerance retuning, extra
+checkpoint download, independent-oracle rerun, or public option follows from this
+diagnostic. The design jam recommends closing this failed baseline and next wiring
+bounded CLI forward interventions to the existing graph, advancing M3 without an
+open-ended compression detour. Compact quality and long-context qualification
+remain explicitly unfinished.
+
+Final read-only adversarial closure: **commit-ready; no remaining concrete blocker**.
+The inspector's three CPU tests pass, and the retained evidence passes its read-only
+integrity/count audit while retaining the failed quality verdict.

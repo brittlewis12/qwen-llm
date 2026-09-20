@@ -12,7 +12,7 @@ struct Control {
     captures: Option<Vec<f32>>,
 }
 
-fn write_header(out: &mut impl Write, base: u32, count: u32, vocab: u32) {
+pub(super) fn write_header(out: &mut impl Write, base: u32, count: u32, vocab: u32) {
     // Reuse the checked row protocol; manifest provenance explicitly says native.
     out.write_all(b"K2REF001").unwrap();
     for word in [vocab, count, base, 16] {
@@ -20,7 +20,7 @@ fn write_header(out: &mut impl Write, base: u32, count: u32, vocab: u32) {
     }
 }
 
-fn write_row(out: &mut impl Write, position: u32, token: u32, values: &[f32]) {
+pub(super) fn write_row(out: &mut impl Write, position: u32, token: u32, values: &[f32]) {
     assert!(values.iter().all(|v| v.is_finite()));
     out.write_all(&position.to_le_bytes()).unwrap();
     out.write_all(&token.to_le_bytes()).unwrap();
@@ -119,7 +119,11 @@ fn controls(
     controls
 }
 
-fn capture_metrics(p: &serde_json::Value, actual: &[f32], expected: &[f32]) -> serde_json::Value {
+pub(super) fn capture_metrics(
+    p: &serde_json::Value,
+    actual: &[f32],
+    expected: &[f32],
+) -> serde_json::Value {
     let metrics = error_metrics(actual, expected);
     let relative_l2 = (actual
         .iter()

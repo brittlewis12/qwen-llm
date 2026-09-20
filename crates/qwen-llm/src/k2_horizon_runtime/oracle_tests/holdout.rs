@@ -1,5 +1,6 @@
 use super::*;
 
+mod compact;
 mod online;
 mod packed;
 mod ranking;

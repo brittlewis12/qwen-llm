@@ -397,6 +397,38 @@ exact binding versus explicit unvalidated transfer, and pre-Metal refusals. Asse
 target final post-block layer 35 and are hashed/bound before native execution.
 No claim of fit quality, cross-checkpoint scientific equivalence, or long context.
 
+## Compact-cache diagnostic
+
+The private Q8 cache experiment uses the frozen storage contract in
+`COMPACT-KV-POLICY.md`. Compare it with native F16 online attention (not an
+independent implementation) on four previously seen v2 cases:
+
+```sh
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+K2_HOST_BUILD_NOTE="temporary qwen-llm opt-level=1 and sha2 opt-level=3; Metal unchanged" \
+cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
+  --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::holdout::compact::gpu_compact_cache_256_quality_and_packed_controls_diagnostic \
+  -- --ignored --exact --nocapture --test-threads=1
+uv run scripts/reference/k2/inspect_compact.py target/profiles/k2-compact-diagnostic-RUN
+uv run scripts/reference/k2/test_inspect_compact.py
+```
+
+Allow about 1.1 GiB of evidence disk space. The parent owns the production lease
+and real wired gate. F16/Q8 model lifetimes do not overlap. Reports include actual
+logical arena bytes, Metal allocator-reported `allocatedSize`, and session
+allocation deltas separately; none proves total physical residency. Hard failures
+cover storage/transactions, finiteness, Q8 serial/packed/cache/capture equality,
+and synthetic identity transport. Quality failures are reported, not test panics:
+**read `summary.json`; a successful test is not quality qualification.**
+
+The first diagnostic fails unchanged v2 gates on 808/1088 rows and 8/16 captures.
+Seven teacher-forced top-1 choices differ; 64/64 F16-derived trajectory predictors
+agree, with 46 of those rows still failing numerical gates. Measured KV allocation
+falls 46.875%, but Q8 remains private and F16 stays default. See review packet 33
+for evidence and extrema. The inspector verifies provenance/coverage/counts and
+reports recorded metrics; it does not reconstruct absent candidate logits.
+
 ## Request benchmark accounting
 
 ```sh

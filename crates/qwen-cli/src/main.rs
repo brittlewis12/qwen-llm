@@ -255,7 +255,18 @@ fn run() -> Result<()> {
     validate_request_before_model_open(&args)?;
     let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
-    let model_family = ModelFamily::detect(&gguf);
+    let Some(family) = ModelFamily::detect(&gguf) else {
+        bail!(
+            "qwen does not support model architecture {:?}; recognised families: {}",
+            gguf.architecture(),
+            ModelFamily::ALL
+                .iter()
+                .map(|family| family.architecture_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    };
+    let model_family = Some(family);
     // Drafter admission is a header-level decision; settle it (and bind the
     // drafter's metadata) before any family lane allocates on the GPU.
     let drafter = drafter_policy::PreparedDrafter::prepare(
@@ -277,7 +288,11 @@ fn run() -> Result<()> {
         qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
             .map_err(anyhow::Error::msg)?;
     }
-    if model_family == Some(ModelFamily::MuseGlimmer) {
+    // One exhaustive dispatch; a new family cannot fall into another's lane.
+    // Muse binds its own request shape and skips the Qwen batch and DS4
+    // selector validators; DS4 is the only consumer of its snapshot and
+    // reasoning flags, which the remaining lanes refuse.
+    if family == ModelFamily::MuseGlimmer {
         return run_muse_glimmer_single_turn(
             &model_path,
             &gguf,
@@ -295,65 +310,68 @@ fn run() -> Result<()> {
     if let cli::Invocation::Run(run) = invocation {
         args.prepared_prompt = Some(prepare_modern_run_prompt(run, model_family, &gguf, &args)?);
     }
-    if model_family == Some(ModelFamily::DeepSeek4) {
-        return if args.requests_jsonl.is_some() {
+    if family != ModelFamily::DeepSeek4 {
+        ensure!(
+            args.deepseek_v4_snapshot.is_none(),
+            "--deepseek-v4-snapshot requires a DeepSeek V4 model"
+        );
+        ensure!(
+            args.reasoning.is_none() && !args.preserve_reasoning,
+            "--reasoning and --preserve-reasoning apply to DeepSeek V4 --messages requests only"
+        );
+    }
+    match family {
+        ModelFamily::MuseGlimmer => unreachable!("Muse Glimmer returned above"),
+        ModelFamily::DeepSeek4 if args.requests_jsonl.is_some() => {
             run_deepseek_v4_requests_jsonl(&model_path, gguf, &args, explicit_options)
-        } else {
-            run_deepseek_v4_single_turn(
-                &model_path,
-                gguf,
-                &args,
-                explicit_options,
-                staged_integrity,
-            )
-        };
-    }
-    ensure!(
-        args.deepseek_v4_snapshot.is_none(),
-        "--deepseek-v4-snapshot requires a DeepSeek V4 model"
-    );
-    ensure!(
-        args.reasoning.is_none() && !args.preserve_reasoning,
-        "--reasoning and --preserve-reasoning apply to DeepSeek V4 --messages requests only"
-    );
-    if model_family == Some(ModelFamily::Qwen4Exp) {
-        return run_qwen4exp_single_turn(&model_path, &gguf, &args, explicit_options);
-    }
-
-    let supplied = admission::supplied(&args, explicit_options);
-    if has_single_turn_input(&args) {
-        let lane = &admission::ORDINARY_QWEN_SINGLE_TURN;
-        let mut unsupported = lane.unsupported(&supplied);
-        // Single-turn reads the prefix-capture length and durable tuning
-        // only inside the durable store; without it they would no-op.
-        if args.durable_prefix_cache.is_none() {
-            use admission::LegacyOption as O;
-            unsupported.extend(supplied.iter().filter_map(|option| match option {
-                O::CachePrefixTokens => {
-                    Some("--cache-prefix-tokens (requires --durable-prefix-cache)")
-                }
-                O::DurablePrefixCacheMaxMib => {
-                    Some("--durable-prefix-cache-max-mib (requires --durable-prefix-cache)")
-                }
-                O::DurablePrefixCacheMaxEntryMib => {
-                    Some("--durable-prefix-cache-max-entry-mib (requires --durable-prefix-cache)")
-                }
-                O::DurablePrefixCacheMinTokens => {
-                    Some("--durable-prefix-cache-min-tokens (requires --durable-prefix-cache)")
-                }
-                _ => None,
-            }));
         }
-        lane.refuse(&unsupported)?;
-        return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
+        ModelFamily::DeepSeek4 => run_deepseek_v4_single_turn(
+            &model_path,
+            gguf,
+            &args,
+            explicit_options,
+            staged_integrity,
+        ),
+        ModelFamily::Qwen4Exp => {
+            run_qwen4exp_single_turn(&model_path, &gguf, &args, explicit_options)
+        }
+        ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
+            let supplied = admission::supplied(&args, explicit_options);
+            if has_single_turn_input(&args) {
+                let lane = &admission::ORDINARY_QWEN_SINGLE_TURN;
+                let mut unsupported = lane.unsupported(&supplied);
+                // Single-turn reads the prefix-capture length and durable
+                // tuning only inside the durable store; without it they
+                // would no-op.
+                if args.durable_prefix_cache.is_none() {
+                    use admission::LegacyOption as O;
+                    unsupported.extend(supplied.iter().filter_map(|option| match option {
+                        O::CachePrefixTokens => {
+                            Some("--cache-prefix-tokens (requires --durable-prefix-cache)")
+                        }
+                        O::DurablePrefixCacheMaxMib => {
+                            Some("--durable-prefix-cache-max-mib (requires --durable-prefix-cache)")
+                        }
+                        O::DurablePrefixCacheMaxEntryMib => Some(
+                            "--durable-prefix-cache-max-entry-mib (requires --durable-prefix-cache)",
+                        ),
+                        O::DurablePrefixCacheMinTokens => Some(
+                            "--durable-prefix-cache-min-tokens (requires --durable-prefix-cache)",
+                        ),
+                        _ => None,
+                    }));
+                }
+                lane.refuse(&unsupported)?;
+                return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
+            }
+            let path = args
+                .requests_jsonl
+                .as_ref()
+                .expect("request mode was validated above");
+            admission::ORDINARY_QWEN_BATCH.admit(&supplied)?;
+            run_requests_jsonl(&model_path, path, gguf, &args, explicit_options)
+        }
     }
-
-    if let Some(path) = args.requests_jsonl.as_ref() {
-        admission::ORDINARY_QWEN_BATCH.admit(&supplied)?;
-        return run_requests_jsonl(&model_path, path, gguf, &args, explicit_options);
-    }
-
-    unreachable!("request mode was validated above")
 }
 
 fn validate_qwen_model_prefetch_scope(args: &Args) -> Result<()> {

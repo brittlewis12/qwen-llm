@@ -11,6 +11,8 @@ pub(crate) fn run_single_turn(
 ) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    let family =
+        ModelFamily::detect(&gguf).context("ordinary Qwen lane requires a recognised family")?;
     let sampling = cli_sampling_config(args)?;
     validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
     let durable_store = durable_checkpoint_store(args, staged_integrity)?;
@@ -187,7 +189,7 @@ pub(crate) fn run_single_turn(
         sampling_clock_probe.as_ref(),
         dflash_head.as_ref(),
     )?;
-    append_qwen_single_turn_record(args, 0, &first, runtime_and_model_load_ms)?;
+    append_qwen_single_turn_record(family, args, 0, &first, runtime_and_model_load_ms)?;
     let mut results = vec![first];
 
     if args.request_timing_warm_followup {
@@ -258,7 +260,7 @@ pub(crate) fn run_single_turn(
             warm.generated == results[0].generated && warm_stop == first_stop,
             "warm follow-up generated tokens or stop reason differ from request 0"
         );
-        append_qwen_single_turn_record(args, 1, &warm, runtime_and_model_load_ms)?;
+        append_qwen_single_turn_record(family, args, 1, &warm, runtime_and_model_load_ms)?;
         results.push(warm);
         for result in &mut results {
             let row = result.row.as_mut().expect("paired timing row");
@@ -331,6 +333,7 @@ pub(crate) fn run_single_turn(
 /// Write request `index`'s v1 record as soon as it completes, so a later
 /// follow-up or sidecar failure cannot erase evidence of finished work.
 fn append_qwen_single_turn_record(
+    family: ModelFamily,
     args: &Args,
     index: usize,
     result: &SingleTurnResult,
@@ -374,7 +377,7 @@ fn append_qwen_single_turn_record(
     append_single_turn_stats_record(
         path,
         u32::try_from(index).context("request index exceeds u32")?,
-        ModelFamily::Qwen35.record_label(),
+        family.record_label(),
         request_stats_input(result.prompt_source, template),
         &measured,
         None,

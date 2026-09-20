@@ -1642,7 +1642,7 @@ impl EngineBackend {
         } else {
             0.0
         };
-        tracing::info!(target: "qwen_diag", "serve phases: {phases}");
+        tracing::info!(target: "qwen_diag", "serve phases: family=qwen {phases}");
         tracing::info!(
             target: "qwen_diag",
             "serve stats: version=serve_stats_v1 prompt_tokens={} generated_tokens={} stop_reason={} matched_tokens={} restore_ms={:.1} decode_tps={:.2}",

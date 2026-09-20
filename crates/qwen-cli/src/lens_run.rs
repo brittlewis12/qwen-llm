@@ -353,39 +353,45 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
 
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
-    if crate::muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
+    let family = ModelFamily::detect(&gguf).with_context(|| {
+        format!(
+            "qwen-lens run does not support model architecture {:?}",
+            gguf.architecture()
+        )
+    })?;
+    if family != ModelFamily::Qwen35 && family != ModelFamily::Qwen35Moe {
         ensure!(
             args.open_responses.is_none(),
-            "--open-responses supports ordinary Qwen only; Muse Glimmer is not supported"
-        );
-        return crate::muse_lens_run::run(
-            &args,
-            plan,
-            &plan_path,
-            plan_dir,
-            gguf,
-            output_path.as_deref(),
+            "--open-responses supports ordinary Qwen only; {} is not supported",
+            family.architecture_name()
         );
     }
-    let family = ModelFamily::detect(&gguf).context("model has no supported Qwen architecture")?;
-    if family == ModelFamily::Qwen4Exp {
-        ensure!(
-            args.open_responses.is_none(),
-            "--open-responses supports ordinary Qwen only; Flash-Next is not supported"
-        );
-        return run_qwen4exp(
-            &args,
-            plan,
-            &plan_path,
-            plan_dir,
-            gguf,
-            output_path.as_deref(),
-        );
+    match family {
+        ModelFamily::MuseGlimmer => {
+            return crate::muse_lens_run::run(
+                &args,
+                plan,
+                &plan_path,
+                plan_dir,
+                gguf,
+                output_path.as_deref(),
+            );
+        }
+        ModelFamily::Qwen4Exp => {
+            return run_qwen4exp(
+                &args,
+                plan,
+                &plan_path,
+                plan_dir,
+                gguf,
+                output_path.as_deref(),
+            );
+        }
+        ModelFamily::DeepSeek4 => bail!(
+            "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; DeepSeek V4 has no lens runtime"
+        ),
+        ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {}
     }
-    ensure!(
-        matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
-        "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next"
-    );
     validate_ordinary_plan(&plan)?;
     let full_transports = open_full_transports(&plan, plan_dir)?;
 
